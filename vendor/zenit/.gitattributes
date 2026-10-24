@@ -1,0 +1,2 @@
+# Keep upstream ZLS diagnostic fixtures byte-for-byte: trailing spaces are test input.
+vendor/zls/tests/helper.zig whitespace=-blank-at-eol

@@ -1,0 +1,43 @@
+const ui = @import("ui");
+const W = ui.widgets;
+
+pub const ITEM_COUNT: usize = 100_000;
+const ITEM_HEIGHT: f32 = 32;
+
+/// Styles in styles.yss
+const S = @import("styles.yss");
+
+/// One row. VirtualList gives each row a child scope, when row scrolls out of viewport it's
+/// recycled with row's memo.
+fn Row(index: usize) View {
+    const odd = computed(index % 2 == 1);
+    return (
+        <row style={S.Row.of(.{ .odd = odd })}>
+            <box style={.{ .width = .{ .px = 70 } }}><text style={S.index}>#{index}</text></box>
+            <text style={S.title}>Item {index} — Lorem ipsum dolor sit amet</text>
+        </row>
+    );
+}
+
+fn row(i: usize) @TypeOf(Row(.{ .index = 0 })) {
+    return Row(.{ .index = i });
+}
+
+/// VirtualList's rows is row function passed via .rows(ctx, row) method chain, M0 template lacks
+/// render prop,
+/// here use normal Zig component (takes props, returns element) threaded into template.
+fn ItemList(props: struct { count: usize, item_height: f32 }) @TypeOf(W.VirtualList(.{}).rows({}, row)) {
+    return W.VirtualList(.{ .item_count = props.count, .item_height = props.item_height, .overscan = 5 }).rows({}, row);
+}
+
+pub fn VirtualListPerf() View {
+    const thousands = @as(f32, @floatFromInt(ITEM_COUNT)) / 1000;
+    return (
+        <col style={S.root}>
+            <row style={S.header}>
+                <text style={S.header_text}>{thousands:.0}k items rendered through ui.widgets.VirtualList</text>
+            </row>
+            <ItemList style={S.list} count={ITEM_COUNT} itemHeight={ITEM_HEIGHT} />
+        </col>
+    );
+}

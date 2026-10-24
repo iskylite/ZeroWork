@@ -1,0 +1,8 @@
+const ui = @import("ui");
+const Flag = bool;
+const Width = ?f32;
+
+style aliased($enabled: Flag, $width: Width) {
+  width: $width ?? fit;
+  when $enabled { gap: 3; }
+}

@@ -1,0 +1,43 @@
+//! Alert styles: variant determines accent; background and border are accent toward bg-primary
+//! blend.
+//! View in alert.yix; AlertVariant is public API defined in mod.zig.
+const ui = @import("../../ui.zig");
+
+mixin tone(c) {
+  root { background: mix(c, bg-primary, 0.78); border-color: mix(c, bg-primary, 0.35); }
+  accent { background: c; }
+}
+
+/// root: full alert (with title, content top-aligned, else centered); accent: left accent bar.
+recipe Alert slots(root, accent) {
+  base {
+    root { width: fill; height: fit; direction: row; padding: 12; border-width: 1; corner-radius: 8; }
+    accent { width: 3; height: 24; corner-radius: 2; align-self: stretch; }
+  }
+  variant kind = info {
+    info    { tone(info); }
+    success { tone(success); }
+    warning { tone(warning); }
+    error   { tone(danger); }
+  }
+  flag titled { root { align-items: start; } } else { root { align-items: center; } }
+}
+
+style content { width: fill; height: fit; direction: column; gap: 4; padding: 0 10; }
+style title { color: fg-primary; font-size: md; font-weight: 600; }
+style message { color: fg-secondary; font-size: sm; }
+
+/// Close button: hover floats bg-hover (150ms fade-in)
+style close {
+  width: 20;
+  height: 20;
+  background: transparent;
+  corner-radius: sm;
+  justify: center;
+  align-items: center;
+  cursor: pointer;
+  :hover { background: bg-hover; }
+  transition: background 150ms ease-out;
+}
+style close_label { color: fg-secondary; font-size: 12; }
+style close_icon { width: 12; height: 12; icon-color: fg-secondary; }

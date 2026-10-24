@@ -1,0 +1,36 @@
+name: Code Coverage
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+jobs:
+  coverage:
+    if: github.repository_owner == 'zigtools'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.17.0
+
+      - name: Install kcov
+        run: |
+          wget https://github.com/SimonKagstrom/kcov/releases/download/v42/kcov-amd64.tar.gz
+          sudo tar xf kcov-amd64.tar.gz -C /
+
+      - name: Run Tests with kcov
+        run: |
+          kcov --version
+          zig build test -Dcoverage -Duse-llvm --summary all
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          directory: zig-out/coverage/kcov-merged
+          fail_ci_if_error: true
+          verbose: true

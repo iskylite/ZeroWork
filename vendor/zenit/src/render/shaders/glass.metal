@@ -1,0 +1,1700 @@
+/// Liquid Glass composite: bounded screen-space lensing and dielectric rim light.
+/// Optical controls are artistic approximations, not Apple shader specifications.
+/// Geometry/displacement are in physical pixels; material thickness and distance
+/// enter as logical pixels and are scaled once. All color math is linear RGB.
+
+#include <metal_stdlib>
+using namespace metal;
+
+// glassForeground aberration (see the dispersion loop), the tab lens's inputs; the knobs scale
+// amount and edge by tab_lens_params[0].z.
+constant float TAB_LENS_ABER_AMOUNT = 3.6842;   // aberrationAmount, pt
+constant float TAB_LENS_ABER_EDGE = 14.0;      // -edgeStart, pt (the layer's opacity ramp)
+constant float TAB_LENS_ABER_COS = 0.96593;    // aberrationAngle -15 deg (layer space, y down)
+constant float TAB_LENS_ABER_SIN = -0.25882;
+constant float TAB_LENS_ABER_OVAL = 0.5;       // gradientOvalization
+constant float TAB_LENS_ABER_ASPECT = 1.2;     // the foreground backdrop texture's W / H
+// The aberration amount follows the level linearly from -5 (k 0) to 3.68 (k 1): a fading lens's
+// fringes reverse below k 0.58 (native per-frame glassForeground inputAberrationAmount)
+#define TAB_LENS_ABER_LEVEL(k) ((-5.0 + 8.68 * (k)) / 3.68)
+constant float KNOB_INNER_ASYM = 0.15;
+
+struct GlassUniforms {
+    float2 texel_size;
+    float corner_radius;
+    float glass_intensity; // Overall intensity scale (0-2, default 1.0).
+    float2 rect_size;
+    float scale_factor;
+    float tint_mode;            // 0=transmission absorption, 1=material surface veil
+    float4 glass_tint; // RGBA 0-1, user-defined tint.
+    float4 specular_params;     // x=opacity, y=saturation, z=refraction, w=blur mix
+    float4 optic_params;        // x=warp_gain, y=logical thickness, z=logical gap, w=blur UV remap
+    float4 surface_params;      // x=top surface kind, y=top bezel width, z=spec angle, w=magnification
+    float4 bottom_surface_params;// x=bottom surface kind, y=bottom bezel width
+    float4 lens_params;         // x=field radius, y=field falloff, z=edge field strength, w=scale ratio
+    float4 content_uv; // Glass rectangle in padded capture texture UV sub-region (off_x, off_y, scale_x, scale_y).
+    float4 edge_params; // Blur gradient: x=direction (0off / 1to_bottom / 2to_top / 3to_right / 4to_left), y=press feedback sRGB shift, z=global strength 0-1, w=stop count.
+    float4 edge_stop_pos; // Blur gradient stop positions (0~1 node along gradient axis %, ascending).
+    float4 edge_stop_str; // Blur gradient stop strength (0~1).
+    float4 valid_uv; // Capture true backplate UV sub-rectangle {x0,y0,x1,y1} (pad beyond RT is transparent black).
+    float4 native_params; // Native Liquid Glass lens: x=bevel width, y=bevel height, z=base thickness (logical px), w=edge blur blend; x=0 uses old surface model.
+    float4 native_blur;         // fine sigma, coarse sigma, fine weight, coarse weight
+    float4 coarse_uv;           // glass rectangle in the whole-window coarse backdrop
+    float4 native_blur_profile; // fine/coarse linear and quadratic source aperture
+    float4 native_gamma;        // x/y unused (every texture holds sRGB-encoded values); z = coarse bank present, w = native grid path
+    float4 native_rim;          // body-based rim target offset/luma/chroma, second/first ratio
+    float4 native_chroma;       // fine/coarse color weights, enabled, main grid4/grid8 blend
+    float4 native_chroma_profile; // source-space fine/coarse color aperture
+    float4 native_tint_response; // public family (1 regular, 2 clear), appearance, neutral gain base/slope
+    float4 group_params;        // GlassGroup: x = shape count (0 = single rect), y = merge k0 (physical px), z = merge c (per px of gap)
+    float4 shape_rect[8];       // center.xy, half.xy (physical px, glass-rect-centered)
+    float4 shape_lens[8];       // corner radius, bevel width, bevel height, base thickness (logical px)
+    float4 shape_tint[8];
+    float4 shape_rim[8];
+    float4 shape_resp[8];
+    float4 shape_misc[8];       // rim peak alpha, min dimension (logical px), edge blur mix, tint mode
+    float4 shape_shadow[8];     // drop shadow: alpha, blur (logical px), offset x, y (logical px); drawn in-pass on the union SDF
+    float4 shape_level[8];      // x = materialize level (1 = fully formed); yz = base veil gray/alpha; w = press offset
+    float4 knob_rim_dark;       // slider / toggle knob lens rim: dark accent line colour (sRGB) and alpha
+    float4 knob_rim_light;      // x = bright line lift (sRGB), yz = axis toward the dark side (normal space), w = line width (logical px); w = 0 disables
+    float4 a11y_params;         // accessibility (native_tint_backdrop.swift -reduceTransparency / -increaseContrast): x = mode (0 off, 1 reduce transparency, 2 increase contrast), y = untinted body base (sRGB), z = body slope over backdrop luma, w = backdrop chroma kept
+    float4 corner_radii;        // single glass per-corner radii TL, TR, BR, BL (logical px; x < 0 = uniform corner_radius)
+    float4 arrow_params;        // popover arrow (single glass): x = edge (0 none, 1 bottom, 2 top, 3 left, 4 right), y = offset along the edge, z = extent, w = tip radius (logical px)
+    float4 base_veil;           // partial Glass.tint (tintColor alpha < 1): surface veil of the untinted share (sRGB); a < 0 = none (veil branch uses glass_tint)
+    float4 veil_curve[5];       // single glass veil as a backdrop-luma transfer curve: 17 knots (sRGB, input k/16) in [0..17), [17] = enabled
+    float4 tab_lens_params[6];  // iOS tab-bar selection lens ([2]: knob lens filter inputs {displacement amount A, SDF height H, inner refraction |R|, inner refraction height h}, pt; [3..5]: knob key highlight colour matrix rows {r, g, b, offset}) (single glass): [0].x > 0 marks the material; [0].y variant (0 tab, 1 slider thumb, 2 switch knob, see lens_sample_depth); [0].z aberration scale (1 = the tab lens's, 0 = none); knobs: [1].rgb key rim colour, [1].w fill rim value
+};
+
+struct GlassVertexOutput {
+    float4 position [[position]];
+    float2 uv;
+};
+
+vertex GlassVertexOutput glass_vertex_main(uint vertex_id [[vertex_id]]) {
+    GlassVertexOutput out;
+    float2 pos;
+    pos.x = (vertex_id == 1) ? 3.0 : -1.0;
+    pos.y = (vertex_id == 2) ? 3.0 : -1.0;
+    out.position = float4(pos, 0.0, 1.0);
+    out.uv = float2((pos.x + 1.0) * 0.5, (1.0 - pos.y) * 0.5);
+    return out;
+}
+
+// Rounded rect SDF (signed distance, negative inside).
+float sdf_rr(float2 p, float2 b, float r) {
+    float2 q = abs(p) - b + r;
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+// Glass popover silhouette (native SwiftUI .popover, native_menu_morph.swift):
+// the body is the node rect minus the arrow extent on the arrow side; the arrow
+// is a 90°-apex rounded diamond (sides at 45°, tip radius ap.w) whose side
+// corners are buried 8 logical px inside the body, joined to the body with a
+// circular smooth union of radius 2 logical px. Fitted to the native arrow's
+// per-row width measured from the body edge: RMS 0.155 logical px.
+struct ArrowBody { float2 c; float2 h; float cr; };
+
+ArrowBody arrow_body(float2 half_px, float cr, float4 ap, float s) {
+    ap.yzw *= s;
+    int edge = int(round(ap.x));
+    float2 dir = edge == 1 ? float2(0, 1) : edge == 2 ? float2(0, -1) : edge == 3 ? float2(-1, 0) : float2(1, 0);
+    float2 ax = abs(dir);
+    ArrowBody b;
+    b.h = max(half_px - ax * (ap.z * 0.5), float2(1.0));
+    b.c = -dir * (ap.z * 0.5);
+    b.cr = min(cr, min(b.h.x, b.h.y));
+    return b;
+}
+
+float sdf_popover(float2 p, float2 half_px, float cr, float4 ap, float s) {
+    ArrowBody b = arrow_body(half_px, cr, ap, s);
+    ap.yzw *= s;
+    int edge = int(round(ap.x));
+    float2 dir = edge == 1 ? float2(0, 1) : edge == 2 ? float2(0, -1) : edge == 3 ? float2(-1, 0) : float2(1, 0);
+    float2 ax = abs(dir);
+    float db = sdf_rr(p - b.c, b.h, b.cr);
+    float2 tangent = float2(ax.y, ax.x);
+    float along = dot(b.h, ax), across = dot(b.h, tangent);
+    // Guards for small nodes: the buried back corner stays inside the body
+    // (bury <= half the body along the arrow axis), the side corners stay
+    // inside laterally (offset clamped), and the tip radius stays valid.
+    float bury = min(8.0 * s, along);
+    float rt = min(ap.w, 0.5 * (ap.z + bury));
+    float hs = ap.z + bury + rt * (M_SQRT2_F - 1.0);
+    float off_max = max(across - hs - 2.0 * s, 0.0);
+    float2 dc = b.c + dir * (along - bury) + tangent * clamp(ap.y, -off_max, off_max);
+    float2 q = p - dc;
+    q = float2(q.x + q.y, q.y - q.x) * M_SQRT1_2_F;
+    float da = sdf_rr(q, float2(hs * M_SQRT1_2_F), rt);
+    float k = 2.0 * s;
+    float dmin = min(da, db);
+    float dm = max(k, dmin) - length(max(float2(k) - float2(da, db), 0.0));
+    // Interior: the smooth union must not deepen the field inside the shapes
+    // (that shifts the lens at the arrow root); fade back to the hard union
+    // within 6 logical px of the edge, as group_union does.
+    if (dmin < 0.0) dm = mix(dm, dmin, smoothstep(0.0, -6.0 * s, dmin));
+    return dm;
+}
+
+// Increase Contrast outline: the material rim inverted — the body colour pushed
+// dark with its chroma boosted (gray 248 body -> 13, IC orange (195,82,0) ->
+// (149,0,0), blue (29,109,242) -> (0,16,217)).
+float3 a11y_outline(float3 body) {
+    float Y = dot(body, float3(0.2126, 0.7152, 0.0722));
+    return clamp(13.0 / 255.0 + (body - Y) * 1.6, 0.0, 1.0);
+}
+
+// Per-corner radius by quadrant (p centred, y down): TL, TR, BR, BL.
+float corner_pick(float2 p, float4 r) {
+    return p.x > 0.0 ? (p.y > 0.0 ? r.z : r.y) : (p.y > 0.0 ? r.w : r.x);
+}
+
+// Analytic rounded-rectangle normal. Avoid four SDF evaluations and a
+// fixed pixel finite-difference step that changes the rim on different DPIs.
+float2 sdf_grad(float2 p, float2 b, float r) {
+    float2 q = abs(p) - b + r;
+    float2 outside = max(q, 0.0);
+    float2 side = select(float2(-1.0), float2(1.0), p >= 0.0);
+    if (length_squared(outside) > 1e-8) return normalize(outside) * side;
+    return q.x > q.y ? float2(side.x, 0.0) : float2(0.0, side.y);
+}
+
+// Continuous-curvature ("continuous" cornerCurve) rounded rectangle, as Core Animation's own SDF
+// shader evaluates it (QuartzCore supercircle_sdf, read from the disassembled default.metallib;
+// see scripts/glass_native_model/metallib_dump.py): the corner spans 1.52866 r and blends a
+// fitted superellipse distance with a circular one per axis by k, how far the extended corner
+// overruns that half size (k = saturate((1.52866 r - half) / (0.52866 r)), read off its uniforms
+// on a CARenderer replay: 0 below r = 0.654 half, 1 at a full capsule). Returns {signed distance,
+// outward normal}; p, b, r in the same units.
+float3 sdf_tab_lens(float2 p, float2 b, float r) {
+    float R = max(abs(r), 1e-3);
+    float Rs = R * 1.528665;
+    float2 k = saturate((Rs - b) / (0.528665 * R));
+    float2 a = abs(p);
+    float2 side = select(float2(-1.0), float2(1.0), p >= 0.0);
+    float2 q = a - b + mix(Rs, R, max(k.x, k.y));
+    float2 uu = max(float2(0.0), (a - b + Rs) / Rs);
+    float L = length(uu);
+    float mx = max(uu.x, uu.y);
+    float t = mx == 0.0 ? 0.0 : saturate(min(uu.x, uu.y) / mx);
+    float poly = (((-0.926054 * t + 3.15601) * t - 3.64122) * t + 1.26803) * t + 0.268531;
+    float e = L + 1.0 - 1.0 / (1.0 - t * t * saturate(L) * poly);
+    float f = length(max(float2(0.0), uu * 1.528665 - 0.528665)) * 0.654166 + 0.345834;
+    float sg = uu.y > uu.x ? 1.0 : -1.0;
+    float blend = mix(mix(e, f, k.x), mix(e, f, k.y), saturate(0.5 - sg + sg * t)) - 1.0;
+    float d = min(max(q.x, q.y), 0.0) + Rs * blend;
+    float2 o = max(q, float2(0.0));
+    float2 n = (o.x + o.y > 0.0) ? normalize(o) : (q.x > q.y ? float2(1.0, 0.0) : float2(0.0, 1.0));
+    // a zero component stays +0: 0 x -1 = -0 would flip atan2(n.y, n.x) (the knob highlights'
+    // angle) across the flat edges' midline
+    return float3(d, select(n * side, float2(0.0), n <= 0.0));
+}
+
+// Where a lens pixel samples the backdrop (pt, lens-centred, y down), as Core Animation composes
+// the held _UILiquidLensView (layers replayed with CARenderer; formulas from the disassembled
+// shaders, uniforms read off the draws). kin = {warp amount A, warp SDF height H, inner refraction
+// |R|, its height h}: tab lens {9, 36, 17.5, 7}, knobs LensVariant.knobInputs.
+//  1. glassBackground samples the layers below it moved inward along the contour normal by
+//     |R| k (1 - sqrt((2 - t) t)), t = depth / (h k);
+//  2. there the warp layer (displacementMap A k of a CASDFGlassDisplacementEffect map of height
+//     H, curvature 1, gradient ovalized by `oval`: 0.5 on iOS, 0 on macOS) shows the backdrop moved outward by
+//     A k (1 - sqrt(1 - (1 - u)^2)), u = depth / H; outside the lens it is not there.
+// k: the materialize level (every displacement input scales with it).
+float2 lens_sample_point(float2 P, float2 hb, float r, float k, float4 kin, float oval) {
+    float3 s0 = sdf_tab_lens(P, hb, r);
+    float i0 = -s0.x;
+    float h_in = max(kin.w * k, 1e-3);
+    float t = saturate(i0 / h_in);
+    float inner = i0 > 0.0 ? kin.z * k * (1.0 - saturate(sqrt(saturate((2.0 - t) * t)))) : 0.0;
+    float2 P1 = P - s0.yz * inner;
+    if (kin.x <= 0.0) return P1;
+    float3 s1 = sdf_tab_lens(P1, hb, r);
+    float i1 = -s1.x;
+    if (i1 <= 0.0) return P1;
+    float2 rad = normalize(float2(P1.x, P1.y * hb.x / max(hb.y, 1e-3)) + float2(1e-5, 0.0));
+    float2 n1 = normalize(mix(s1.yz, rad, oval) + float2(1e-5, 0.0));
+    float uu = saturate(i1 / max(kin.y, 1e-3));
+    float m = 1.0 - sqrt(saturate(1.0 - (1.0 - uu) * (1.0 - uu)));
+    return P1 + n1 * (kin.x * k * m);
+}
+
+float3 srgb_to_linear(float3 c) {
+    return select(c / 12.92, pow((c + 0.055) / 1.055, float3(2.4)), c > 0.04045);
+}
+
+float3 linear_to_srgb(float3 c) {
+    c = max(c, 0.0);
+    return select(c * 12.92, 1.055 * pow(c, float3(1.0 / 2.4)) - 0.055, c > 0.0031308);
+}
+
+// RGB -> luminance.
+// iOS tab lens: depth (pt inside the contour, along its normal) of the point each pixel `i` pt
+// inside the contour samples. Measured on the native held lens (iOS 26.5 Simulator) over
+// sinusoidal gratings at 48 and 96 pt, aberration off (ios/GlassProbe override + field2.py);
+// the same at the long edges and at the caps, so it is a field of the distance alone:
+//   0.3-2 pt: the rim samples 19-41 pt deep (glassBackground inner refraction: the bright strip),
+//   2.3-8 pt: back at 4.2 -> 1.95 -> 4.2 pt (the backdrop just past the contour where the lens
+//             overhangs: the dark band; the platter where it does not),
+//   past ~8.2 pt the samples jump deep again (43 pt, back to the pixel's own depth by ~12 pt): where
+//   the lens overhangs the platter its inside still shows the platter (native, held on Home: 210
+//   three pt off the platter's end). The native draws this zone under a near-opaque glass face
+//   (grating contrast 12 / 85); under the lens our backdrop is the bare platter (the plain tabs
+//   are cut out, the accent portal is drawn above the glass), so the deep sample alone matches.
+constant float TAB_LENS_DEPTH[25] = {
+    0.0, 1.03, 19.2, 22.9, 27.3, 32.5, 40.6, 4.15, 3.76, 3.21, 2.70, 2.36, 2.09,
+    2.01, 1.95, 1.95, 2.01, 2.12, 2.33, 2.49, 2.80, 3.14, 3.56, 3.89, 4.23 };
+float tab_lens_sample_depth(float i);
+
+// The lens's displacement source (warpSDF: CASDFGlassDisplacementEffect of height 36, read off
+// the screen from an archived copy of the native layer, ios GlassProbe show_warp): the map value
+// along the inward normal at distance d (pt) from the contour, every 0.5 pt; isotropic (the same
+// at the long edges and the caps) and the same for every lens of that height.
+constant float WARP_MAP_36[73] = { 0.932, 0.835, 0.767, 0.714, 0.673, 0.635, 0.600, 0.569, 0.541, 0.518, 0.490, 0.471, 0.447, 0.427, 0.408, 0.388, 0.371, 0.353, 0.339, 0.322, 0.308, 0.294, 0.280, 0.267, 0.255, 0.243, 0.231, 0.220, 0.208, 0.196, 0.188, 0.176, 0.169, 0.161, 0.151, 0.141, 0.135, 0.125, 0.120, 0.114, 0.104, 0.098, 0.092, 0.086, 0.080, 0.075, 0.069, 0.063, 0.059, 0.055, 0.049, 0.047, 0.041, 0.039, 0.035, 0.031, 0.027, 0.024, 0.024, 0.020, 0.018, 0.016, 0.014, 0.012, 0.012, 0.008, 0.008, 0.008, 0.004, 0.004, 0.000, 0.000, 0.000 };
+float warp_map(float d, float sdf_height) {
+    float x = clamp(d * 36.0 / max(sdf_height, 1.0), 0.0, 35.999) * 2.0;
+    int k0 = int(floor(x));
+    return mix(WARP_MAP_36[k0], WARP_MAP_36[k0 + 1], x - float(k0));
+}
+
+// Knob lens (kp = {displacement amount A, SDF height H, inner refraction |R|, its height h}, the
+// native filter inputs): glassBackground's inner refraction samples the layers below it at depth
+// j = i + 2/3 |R| (1 - i/h)^2 (i < h; the held UISlider, A = 0, measures exactly this), and below
+// it the displacement layer shows the backdrop at j - A warp_map(j), clamped to the lens (the
+// held tab lens with inner refraction ablated measures A x map, A = 9, and the composition
+// reproduces the full field). The control's own track, drawn through the lens's portal under
+// glassBackground, takes the same mapping.
+// ny: the contour normal's y (+1 along the bottom): the inner refraction reaches 15 % deeper
+// along the bottom and 15 % less along the top (portal field of the held UISwitch: top / bottom
+// 8.2 / 11.7 pt at 0.33 pt in, 6.0 / 8.7 at 1 pt; their mean is the symmetric formula).
+float knob_formula_depth(float i, float4 kp, float ny) {
+    float j = i < kp.w ? i + 0.6666667 * kp.z * (1.0 + KNOB_INNER_ASYM * ny) * (1.0 - i / kp.w) * (1.0 - i / kp.w) : i;
+    return max(j - kp.x * warp_map(j, kp.y), 0.0);
+}
+
+// v: 0 tab lens (its measured table), 1 slider thumb, 2 switch knob, 3 macOS knob (the knob
+// formula with kp = their filter inputs); hh = the lens's half height (pt)
+float lens_sample_depth(float i, float v, float hh, float4 kp, float ny) {
+    if (v > 0.5) return knob_formula_depth(i, kp, ny);
+    return tab_lens_sample_depth(i);
+}
+
+// The field at materialize level k (0..1): the native lens scales every displacement input by k
+// on its way in and out (displacement 9k, inner refraction -17.5k over 7k pt; per-frame filter
+// inputs over a tap, ios GlassProbe material trace), so the band narrows as well as weakens:
+// shift(i) = k * (S(i / k) - i / k).
+float tab_lens_shift(float i, float k, float v, float hh, float4 kp, float ny) {
+    float ke = max(k, 1e-3);
+    float ik = i / ke;
+    return k * (lens_sample_depth(ik, v, hh, kp, ny) - ik);
+}
+
+float tab_lens_sample_depth(float i) {
+    if (i <= 0.0) return i;
+    float k = i * 3.0;
+    if (k >= 24.0) {
+        if (i < 8.17) return mix(TAB_LENS_DEPTH[24], 43.0, (i - 8.0) / 0.17);
+        return i < 12.0 ? mix(43.0, 12.0, (i - 8.17) / (12.0 - 8.17)) : i;
+    }
+    int k0 = int(floor(k));
+    return mix(TAB_LENS_DEPTH[k0], TAB_LENS_DEPTH[k0 + 1], k - float(k0));
+}
+
+float luma(float3 c) {
+    return dot(c, float3(0.2126, 0.7152, 0.0722));
+}
+
+// Adjust saturation (sat=1 unchanged, sat>1 boost, sat<1 reduce).
+float3 saturate_color(float3 c, float sat) {
+    float l = luma(c);
+    return clamp(mix(float3(l), c, sat), 0.0, 1.0);
+}
+
+struct SurfaceSample {
+    float height; // Normalized height [0,1]; [0,~0.58] when concave.
+    float slope; // dh/dt; edge slope steep -> 0 approaches infinity (saturate clamped).
+    float center_bias;
+};
+
+constant float kDispersionIOR_R = 1.447;
+constant float kDispersionIOR_G = 1.450;
+constant float kDispersionIOR_B = 1.454;
+
+float circle_height(float t) {
+    float omt = 1.0 - saturate(t);
+    return sqrt(max(1.0 - omt * omt, 0.0));
+}
+
+float circle_deriv(float t) {
+    float omt = 1.0 - saturate(t);
+    float base = max(circle_height(t), 1e-5);
+    return omt / base;
+}
+
+float squircle_height(float t) {
+    float omt = 1.0 - saturate(t);
+    return pow(max(1.0 - omt * omt * omt * omt, 1e-6), 0.25);
+}
+
+float squircle_deriv(float t) {
+    t = saturate(t);
+    float omt = 1.0 - t;
+    float poly = omt * omt * omt * omt;
+    float base = max(1.0 - poly, 1e-6);
+    return (omt * omt * omt) / pow(base, 0.75);
+}
+
+SurfaceSample sample_surface(uint kind, float t) {
+    t = saturate(t);
+
+    if (kind == 0) {
+        return SurfaceSample{ 0.0, 0.0, 0.0 };
+    }
+    if (kind == 1 || kind == 5) {
+        return SurfaceSample{ circle_height(t), circle_deriv(t) * 1.08, 0.18 };
+    }
+    if (kind == 3) {
+        return SurfaceSample{ 1.0 - squircle_height(t), -squircle_deriv(t), -0.42 };
+    }
+    if (kind == 4) {
+        float outer_h = circle_height(t) * 1.06;
+        float inner_h = (1.0 - squircle_height(t)) * 1.18;
+        float blend = smoothstep(0.18, 0.68, t);
+        float bt = saturate((t - 0.18) / 0.50);
+        float blend_deriv = 6.0 * bt * (1.0 - bt) / 0.50;
+        return SurfaceSample{
+            mix(outer_h, inner_h, blend),
+            mix(circle_deriv(t) * 1.06, -squircle_deriv(t) * 1.18, blend) +
+                (inner_h - outer_h) * blend_deriv,
+            -0.42,
+        };
+    }
+
+    return SurfaceSample{ squircle_height(t), squircle_deriv(t), 0.05 };
+}
+
+// The transmitted ray bends by theta_i - theta_r in screen space.
+// tan(theta_i) - tan(theta_r) is NOT tan(theta_i - theta_r): it diverges
+// at a grazing bevel and produces huge clamped UV plateaus / rainbow streaks.
+// Resolve the angle difference algebraically to avoid atan/asin/tan per RGB.
+float snell_displacement(float slope, float height, float thickness_px, float bezel_w, float ior) {
+    float m = clamp(slope * thickness_px / max(bezel_w, 1e-4), -1e4, 1e4);
+    float cos_i = rsqrt(1.0 + m * m);
+    float sin_i = m * cos_i;
+    float sin_r = sin_i / ior;
+    float cos_r = sqrt(max(1.0 - sin_r * sin_r, 1e-6));
+    float tan_delta = (sin_i * cos_r - cos_i * sin_r) /
+                     max(cos_i * cos_r + sin_i * sin_r, 1e-4);
+    return height * thickness_px * tan_delta;
+}
+
+// Kawase stretches the valid capture pixel rectangle to the full blur texture.
+// Convert capture UVs to that domain; retain identity when no blur pass ran.
+float2 blur_uv(float2 uv, constant GlassUniforms& u) {
+    if (u.optic_params.w < 0.5) return uv;
+    float2 lo = u.valid_uv.xy;
+    float2 hi = max(u.valid_uv.zw, lo);
+    return saturate((uv - lo) / max(hi - lo, u.texel_size));
+}
+
+float4 coated_transmission(texture2d<float> tex, sampler smp, float2 uv,
+                           float2 step_x, float2 step_y, float2 lo, float2 hi, bool diffuse) {
+    // Pack a nine-tap Gaussian into five bilinear samples on each axis. Dense
+    // neighboring texels prevent the alternating dark/sharp bands produced
+    // by a widely spaced binomial kernel on thin backdrop detail.
+    float4 value = float4(0.0);
+    int support = diffuse ? 2 : 1;
+    for (int y = -support; y <= support; ++y) {
+        for (int x = -support; x <= support; ++x) {
+            float wx = diffuse ? (abs(x) == 2 ? 0.0939128 : (x == 0 ? 0.2041637 : 0.3040054)) : (x == 0 ? 0.5 : 0.25);
+            float wy = diffuse ? (abs(y) == 2 ? 0.0939128 : (y == 0 ? 0.2041637 : 0.3040054)) : (y == 0 ? 0.5 : 0.25);
+            float weight = wx * wy;
+            float px = diffuse ? sign(float(x)) * (abs(x) == 2 ? 3.294215 : 1.407333) : float(x);
+            float py = diffuse ? sign(float(y)) * (abs(y) == 2 ? 3.294215 : 1.407333) : float(y);
+            value += tex.sample(smp, clamp(uv + px * step_x + py * step_y, lo, hi)) * weight;
+        }
+    }
+    return value;
+}
+
+// CSS linear-gradient style local blur strength (scroll-edge etc.). Semantics in types.zig
+// BlurGradient: stop strength = absolute blur_level, global strength interpolates between uniform
+// base bl and profile. Returns {local_bl, gradient_scale}.
+float2 gradient_blur_level(float2 node_uv, float bl, constant GlassUniforms& u) {
+    if (!(u.edge_params.x > 0.5 && u.edge_params.z > 0.001)) return float2(bl, 1.0);
+    int   grad_dir = int(u.edge_params.x + 0.5);
+    float gt = (grad_dir == 1) ? node_uv.y
+             : (grad_dir == 2) ? (1.0 - node_uv.y)
+             : (grad_dir == 3) ? node_uv.x
+             : (1.0 - node_uv.x);
+    gt = clamp(gt, 0.0, 1.0);
+    int   stop_n = clamp(int(u.edge_params.w + 0.5), 2, 4);
+    float prof = u.edge_stop_str[0];
+    for (int i = 0; i < stop_n - 1; i++) {
+        float p0 = u.edge_stop_pos[i];
+        float p1 = max(u.edge_stop_pos[i + 1], p0 + 1e-4);
+        if (gt >= p0)
+            prof = mix(u.edge_stop_str[i], u.edge_stop_str[i + 1], smoothstep(p0, p1, gt));
+    }
+    float str = clamp(u.edge_params.z, 0.0, 1.0);
+    float pf  = clamp(prof, 0.0, 1.0);
+    return float2(mix(bl, pf, str), mix(1.0, pf, str));
+}
+
+// Measured Liquid Glass lens (macOS 26 SwiftUI glassEffect, four-phase stripe
+// captures): a superellipse (p=3) bevel of width B and height H sits on a flat
+// slab T; the viewer ray refracts (n=1.5) toward the interior and the sample
+// point moves along the inward SDF normal by (h + T)·tan(θi − θr). Beyond the
+// bevel the plate is flat and transmits straight. Units: physical px.
+float native_lens_displacement(float inset, float B, float H, float T) {
+    if (B <= 0.5) return 0.0;
+    float t = inset / B;
+    if (t >= 1.0) return 0.0;
+    float omt = 1.0 - saturate(t);
+    float base = max(1.0 - omt * omt * omt, 1e-6);
+    float hgt = H * pow(base, 1.0 / 3.0);
+    float slope = H * omt * omt / (B * pow(base, 2.0 / 3.0));
+    float cos_i = rsqrt(1.0 + slope * slope);
+    float sin_i = slope * cos_i;
+    float sin_r = sin_i / 1.5;
+    float cos_r = sqrt(max(1.0 - sin_r * sin_r, 1e-6));
+    float tan_delta = (sin_i * cos_r - cos_i * sin_r) / max(cos_i * cos_r + sin_i * sin_r, 1e-4);
+    return (hgt + T) * tan_delta;
+}
+
+// Continuous tint tone response identified from controlled gray/saturation
+// sweeps. Hue/backdrop holdouts are preserved in measured_tint_formula.json.
+// Rows select public material families, never a background class or test case.
+float3 measured_tint_tone(float3 source, float3 tint, float4 response) {
+    float clear = saturate(response.x - 1.0);
+    float dark = saturate(response.y);
+    float brightness = max(tint.r, max(tint.g, tint.b));
+    float3 c = tint / max(brightness, 1e-6);
+    float m = min(c.r, min(c.g, c.b));
+    float3 hue = saturate((c - m) / max(1.0 - m, 1e-6));
+    float3 luma_axis = mix(float3(0.299, 0.587, 0.114), float3(0.2126, 0.7152, 0.0722), dark * (1.0 - clear));
+    float Y = dot(source, luma_axis);
+    float4 maximum_white = mix(mix(float4(237.0, 15.9375, 252.666667, 1.9921875),
+        float4(256.332764, -2.655454, 243.666667, 2.65625), dark),
+        float4(161.0, 105.585938, 243.0, 13.9453125), clear);
+    float4 black_floor = mix(mix(float4(21.0, 3.984375, 0.0, 0.0),
+        float4(2.333333, 5.3125, -3.333333, 10.625), dark),
+        float4(2.371954, 23.669595, -17.700787, 21.584646), clear);
+    float2 hue_base = mix(mix(float2(1.011808, -0.000386914),
+        float2(1.003768, 0.000004516), dark), float2(1.0, 0.0), clear);
+    float2 hue_saturation = mix(mix(float2(0.338010130, -0.290842508),
+        float2(0.075152849, 0.007720448), dark), float2(2.769931890, -3.278093760), clear);
+    // Native controlled near-neutral captures establish a distinct response
+    // on the achromatic tint axis. Production tint is uint8, so its smallest
+    // nonzero chroma is far above the measured sub-byte switch interval.
+    // This is a tint-normalization distinction, never a backdrop classifier.
+    if (brightness - min(tint.r, min(tint.g, tint.b)) < 1e-6) {
+        float Yn = dot(source, float3(0.2126, 0.7152, 0.0722));
+        float3 boosted = clamp(Yn + 1.119065187 * (source - Yn), 0.0, 1.0);
+        float Yb = dot(boosted, float3(0.2126, 0.7152, 0.0722));
+        float Wn = (maximum_white.z + maximum_white.w * Yn) / 255.0;
+        float Kn = (black_floor.x + black_floor.y * Yn) / 255.0;
+        float gain = response.z + response.w * Yb;
+        return clamp(mix(Kn, Wn, brightness) + gain * (boosted - Yb), 0.0, 1.0);
+    }
+    float M = maximum_white.x + maximum_white.y * Y;
+    float R = black_floor.z + black_floor.w * Y;
+    // A shared saturation knee and raw-floor decay were identified from gray
+    // red sweeps. Cyan/cool backgrounds, blue brightness and an excluded knee
+    // point validate them independently (measured_tint_saturation.json).
+    float4 saturation_range = mix(mix(float4(202.124715, 46.7144574, 36.0066170, -31.5922686),
+        float4(241.917864, 31.0964696, -0.466673645, 0.913477417), dark),
+        float4(-21.9603055, 311.133878, 180.624812, -201.086020), clear);
+    float A = saturation_range.x + saturation_range.y * Y;
+    float V = M + m * (saturation_range.z + saturation_range.w * Y);
+    float knee = saturate((m - 0.830282515) / (1.0 - 0.830282515));
+    float knee_gain = mix(mix(0.176750492, 1.038711890, dark), 0.179975441, clear);
+    float N = m * A + (1.0 - m) * max(R, 0.0) + min(R, 0.0) * exp(-m / 0.072206719)
+        + knee_gain * (M - A) * knee;
+    float exponent = max(0.01, hue_base.x + hue_base.y * Y + m * (hue_saturation.x + hue_saturation.y * Y));
+    float3 raw = brightness * (N + (V - N) * pow(hue, exponent)) / 255.0;
+    float3 cap = mix(float3(1.0), tint, clear);
+    return clamp(raw, float3(0.0), cap);
+}
+
+// Native Liquid Glass material path (GlassBox). The empirical components are
+// identified from controlled captures; their limits are recorded in the model:
+//  1. lens: native_lens_displacement along the inward SDF normal (2-D field
+//     verified at corners: pure normal direction, magnitude = straight-edge curve);
+//  2. blur: gamma-space Gaussian banks, with regular's window-anchored 4-pixel
+//     box/reconstruction grid; source-space inset controls luma/chroma mixtures;
+//  3. material: encoded-space coating plus continuous tint tone response;
+//     neutral-chroma and ambient adaptation remain separately measured limits;
+//  4. rim: a body-color response times a shared signed-normal/inset profile.
+//     Outer coverage and some tinted corner colors remain unresolved. Uniform
+//     controls do not justify adding guessed Fresnel/dispersion/inner shading.
+// glass_intensity=0 keeps the blur-only registration contract.
+// GlassGroup union (M3). Measured on GlassEffectContainer: the silhouette of
+// two shapes is a circular smooth-min of their SDFs whose blend radius grows
+// with the shapes' current separation, k = k0(spacing) + c(spacing) * gap
+// (docs/GLASS_NATIVE_FIDELITY.md "Container merge"). The fragment blends the
+// two nearest shapes; the others join by hard min.
+struct GroupSample {
+    float d;        // union signed distance (physical px)
+    float2 n;       // outward normal of the union
+    float h;        // weight of shape `a` (1 = pure a)
+    int a;          // nearest shape
+    int b;          // second nearest (or a when count == 1)
+};
+
+// Veil transfer curve knot k (0..16): explicit component select (no dynamic vector indexing).
+float veil_curve_knot(constant GlassUniforms& u, int k) {
+    float4 q = u.veil_curve[k / 4];
+    int c = k - (k / 4) * 4;
+    return c == 0 ? q.x : (c == 1 ? q.y : (c == 2 ? q.z : q.w));
+}
+
+float group_cr(constant GlassUniforms& u, int i, float s) {
+    float4 r = u.shape_rect[i];
+    return clamp(u.shape_lens[i].x * s, 0.0, max(min(r.z, r.w), 0.0));
+}
+
+
+GroupSample group_union(float2 p, constant GlassUniforms& u, float s, int count) {
+    GroupSample gs;
+    // Distances, sorted nearest first (count <= 8).
+    float dist[8];
+    int order[8];
+    int nn = min(count, 8);
+    for (int i = 0; i < nn; ++i) {
+        float4 r = u.shape_rect[i];
+        float d_i = sdf_rr(p - r.xy, r.zw, group_cr(u, i, s));
+        int j = i;
+        while (j > 0 && dist[j - 1] > d_i) { dist[j] = dist[j - 1]; order[j] = order[j - 1]; --j; }
+        dist[j] = d_i; order[j] = i;
+    }
+    int best = order[0];
+    float4 ra = u.shape_rect[best];
+    float cra = group_cr(u, best, s);
+    float2 na = sdf_grad(p - ra.xy, ra.zw, cra);
+    gs.d = dist[0]; gs.n = na; gs.h = 1.0; gs.a = best; gs.b = best;
+    if (nn < 2 || max(u.group_params.y, u.group_params.w) <= 0.0) return gs;
+    // Silhouette: order-independent n-ary circular smooth union,
+    //   d = max(k, min_i d_i) - sqrt(sum_i max(k - d_i, 0)^2),
+    // identical to the measured two-shape blend, symmetric and continuous for
+    // three or more (a nearest-first chain switches order between pixels and
+    // leaves cusps where the nearest shape changes). Shapes that are
+    // materializing in / out only join the hard union (native: a growing card
+    // sweeps over the fading bars). The blend radius is the static law of the
+    // nearest blending pair, or the transition radius written by GlassBox.
+    float d = dist[0];
+    float2 n = na;
+    float lvl_best = u.shape_level[best].x;
+    int pair = -1;
+    for (int i = 1; i < nn; ++i) {
+        if (u.shape_level[order[i]].x >= 0.99) { pair = i; break; }
+    }
+    if (lvl_best >= 0.99 && pair > 0) {
+        int j = order[pair];
+        float4 rb = u.shape_rect[j];
+        float crb = group_cr(u, j, s);
+        float2 sep = max(abs(ra.xy - rb.xy) - (ra.zw - cra) - (rb.zw - crb), 0.0);
+        float gap = max(length(sep) - cra - crb, 0.0);
+        float k = max(u.group_params.y + u.group_params.z * gap, u.group_params.w);
+        if (k > 0.5) {
+            float S2 = 0.0;
+            float2 g = float2(0.0);
+            int contributing = 0;
+            for (int i = 0; i < nn; ++i) {
+                int m = order[i];
+                if (m != best && u.shape_level[m].x < 0.99) continue;
+                float A = max(k - dist[i], 0.0);
+                if (A <= 0.0) continue;
+                float4 rm = u.shape_rect[m];
+                float2 nm = (m == best) ? na : sdf_grad(p - rm.xy, rm.zw, group_cr(u, m, s));
+                S2 += A * A;
+                g += A * nm;
+                contributing += 1;
+            }
+            if (contributing >= 2) {
+                float dm = max(k, dist[0]) - sqrt(S2);
+                float2 nmv = length(g) > 1e-4 ? normalize(g) : na;
+                float dmin = dist[0];
+                // Interior: the smooth union must not deepen the field inside the
+                // shapes (that would shift the lens / rim of the interior); fade
+                // back to the hard union within 6 logical px of the edge.
+                if (dmin < 0.0) {
+                    float w = smoothstep(0.0, -6.0 * s, dmin);
+                    dm = mix(dm, dmin, w);
+                    float2 nn2 = mix(nmv, na, w);
+                    nmv = length(nn2) > 1e-4 ? normalize(nn2) : na;
+                }
+                d = min(dm, dist[0]);
+                n = dm < dist[0] ? nmv : na;
+            }
+        }
+    }
+    gs.d = d; gs.n = n;
+    int second = order[1];
+    float a = dist[0], b = dist[1];
+    // Material weight (measured on a blue-tinted + plain pair in a native
+    // container): colours do not flow like liquid. Across the bridge the two
+    // materials mix only within ≈8 logical px of the bisector; where the shapes
+    // overlap, the absorbing (Glass.tint) material covers the veil one with its
+    // own crisp silhouette (tint multiplies the veil, so the tint wins).
+    bool a_abs = u.shape_misc[best].w < 0.5, b_abs = u.shape_misc[second].w < 0.5;
+    float band = 4.0 * s;
+    float la = u.shape_level[best].x, lb = u.shape_level[second].x;
+    if (b <= 0.0 && abs(la - lb) > 0.02) {
+        // inside both, one of them materializing: the more formed shape covers
+        // the fading one (native card collapse), edge antialiased on its SDF.
+        gs.h = la > lb ? 1.0 : smoothstep(-0.75 * s, 0.75 * s, b);
+    } else if (b <= 0.0) {
+        // inside both: the absorbing shape dominates, edge antialiased on its SDF
+        gs.h = (a_abs == b_abs) ? 1.0 : (a_abs ? 1.0 : smoothstep(-0.75 * s, 0.75 * s, b));
+    } else if (a <= 0.0) {
+        gs.h = 1.0;   // inside the nearest shape only
+    } else {
+        gs.h = smoothstep(-band, band, b - a);   // bridge: narrow mix at the bisector (b >= a)
+    }
+    gs.b = second;
+    return gs;
+}
+
+float4 native_glass(GlassVertexOutput in, constant GlassUniforms& u,
+                    texture2d<float> blur_tex, texture2d<float> sharp_tex,
+                    texture2d<float> soft_tex, texture2d<float> coarse_tex, texture2d<float> alternate_main_tex, sampler smp) {
+    float  s       = max(u.scale_factor, 0.1);
+    float2 rect_px = max(u.rect_size * s, float2(2.0));
+    float2 half_px = rect_px * 0.5;
+    float  mh      = max(min(half_px.x, half_px.y), 1.0);
+    float  cr      = clamp(u.corner_radius * s, 0.0, mh);
+    float2 cuv_off   = u.content_uv.xy;
+    float2 cuv_scale = max(u.content_uv.zw, float2(1e-4));
+    float2 node_uv   = (in.uv - cuv_off) / cuv_scale;
+    float2 p         = (node_uv - 0.5) * rect_px;
+
+    // Per-shape material slots: a GlassGroup overrides them from the nearest
+    // shape; a single rectangle keeps the uniform values (bit-identical path).
+    float4 glass_tint = u.glass_tint;
+    float4 native_rim = u.native_rim;
+    float4 tint_resp  = u.native_tint_response;
+    float  sop_base   = u.specular_params.x;
+    float  size_dim   = min(u.rect_size.x, u.rect_size.y);
+    float  tint_mode  = u.tint_mode;
+    float B = u.native_params.x * s;
+    float H = u.native_params.y * s;
+    float T = u.native_params.z * s;
+    float edge_mix = clamp(u.native_params.w, 0.0, 1.0);
+    int shape_count = int(round(u.group_params.x));
+    float4 cr4 = clamp(u.corner_radii * s, 0.0, mh);
+    bool per_corner = shape_count == 0 && u.arrow_params.x < 0.5 && u.corner_radii.x >= 0.0
+        && (abs(cr4.x - cr4.y) + abs(cr4.y - cr4.z) + abs(cr4.z - cr4.w)) > 0.01;
+    float  d;
+    float2 out_n;
+    GroupSample gs;
+    gs.a = 0; gs.b = 0; gs.h = 1.0;
+    float shape_level = 1.0;
+    if (shape_count > 0) {
+        // GlassGroup: one capture and one composite for N shapes; the union SDF
+        // and the per-shape material are blended between the two nearest shapes.
+        gs = group_union(p, u, s, shape_count);
+        float wa = gs.h;
+        float4 lens = mix(u.shape_lens[gs.b], u.shape_lens[gs.a], wa);
+        float4 misc = mix(u.shape_misc[gs.b], u.shape_misc[gs.a], wa);
+        float2 half_a = u.shape_rect[gs.a].zw, half_b = u.shape_rect[gs.b].zw;
+        half_px = mix(half_b, half_a, wa);
+        mh = max(min(half_px.x, half_px.y), 1.0);
+        cr = clamp(lens.x * s, 0.0, mh);
+        B = lens.y * s;
+        H = lens.z * s;
+        T = lens.w * s;
+        edge_mix = clamp(misc.z, 0.0, 1.0);
+        glass_tint = mix(u.shape_tint[gs.b], u.shape_tint[gs.a], wa);
+        native_rim = mix(u.shape_rim[gs.b], u.shape_rim[gs.a], wa);
+        tint_resp  = mix(u.shape_resp[gs.b], u.shape_resp[gs.a], wa);
+        sop_base   = misc.x;
+        size_dim   = misc.y;
+        tint_mode  = misc.w;
+        shape_level = mix(u.shape_level[gs.b].x, u.shape_level[gs.a].x, wa);
+        d = gs.d;
+        out_n = gs.n;
+    } else if (u.arrow_params.x > 0.5) {
+        // popover: union silhouette; the lens / normalisation follow the body
+        d = sdf_popover(p, half_px, cr, u.arrow_params, s);
+        float e = 0.5;
+        float2 g = float2(sdf_popover(p + float2(e, 0), half_px, cr, u.arrow_params, s) - sdf_popover(p - float2(e, 0), half_px, cr, u.arrow_params, s),
+                          sdf_popover(p + float2(0, e), half_px, cr, u.arrow_params, s) - sdf_popover(p - float2(0, e), half_px, cr, u.arrow_params, s));
+        out_n = length(g) > 1e-5 ? normalize(g) : float2(0, 1);
+        ArrowBody ab = arrow_body(half_px, cr, u.arrow_params, s);
+        mh = max(min(ab.h.x, ab.h.y), 1.0);
+    } else if (per_corner) {
+        // ConcentricRectangle: each corner concentric with the container corner
+        float crp = corner_pick(p, cr4);
+        d = sdf_rr(p, half_px, crp);
+        out_n = sdf_grad(p, half_px, crp);
+    } else if (shape_count == 0 && u.tab_lens_params[0].x > 0.0) {
+        float3 tl_sd = sdf_tab_lens(p, half_px, cr);
+        d = tl_sd.x;
+        out_n = tl_sd.yz;
+    } else {
+        d = sdf_rr(p, half_px, cr);
+        out_n = sdf_grad(p, half_px, cr);
+    }
+    float  aa   = max(fwidth(d) * 0.5, 0.5);
+    float  mask = 1.0 - smoothstep(-aa, aa, d);
+    // GlassGroup drop shadow, drawn in this pass on the union SDF so merged
+    // shapes cast one continuous shadow (same profile as the SDF renderer's
+    // outer shadow: smoothstep(blur, -blur, sdf(p - offset)) outside the body).
+    float shadow_a = 0.0;
+    if (shape_count > 0 && mask < 0.999) {
+        float4 sh = mix(u.shape_shadow[gs.b], u.shape_shadow[gs.a], gs.h);
+        float blur = max(sh.y * s, 1.0);
+        // Cheap gate: the offset union is within |offset| of the union, and the
+        // shadow support ends at blur beyond it; everything farther is zero.
+        if (sh.x > 0.001 && d < blur + length(sh.zw) * s + 2.0 * aa) {
+            float dsh = group_union(p - sh.zw * s, u, s, shape_count).d;
+            shadow_a = sh.x * smoothstep(blur, -blur, dsh) * (1.0 - mask);
+        }
+    }
+    // Increase Contrast: a ~1 pt dark outline centred on the contour (native rows
+    // at 2x: 130 / 13 / 133 across the edge on white); its outer half lies outside
+    // the shape, where the material itself is not drawn.
+    bool a11y_ic = u.a11y_params.x > 1.5;
+    float a11y_ow = 1.0 * s;
+    bool a11y_tinted = tint_mode < 0.5 && glass_tint.a > 0.01;
+    if (mask < 0.001) {
+        if (a11y_ic) {
+            float oa = 1.0 - smoothstep(a11y_ow * 0.5 - aa, a11y_ow * 0.5 + aa, d);
+            if (oa > 0.002) {
+                float3 oc = a11y_outline(a11y_tinted ? clamp(glass_tint.rgb, 0.0, 1.0) : float3(u.a11y_params.y));
+                float a = oa + shadow_a * (1.0 - oa);
+                return float4(oc * oa, a);
+            }
+        }
+        if (shadow_a > 0.002) return float4(0.0, 0.0, 0.0, shadow_a);   // premultiplied black
+        discard_fragment();
+    }
+    float  inset = max(-d, 0.0);
+
+    float gi      = clamp(u.glass_intensity, 0.0, 2.0);
+    float gi_gate = clamp(gi, 0.0, 1.0);
+    // lens scale; negative = minifying lens (slider / toggle knob, native_slider_toggle.swift)
+    float rl  = clamp(u.specular_params.z, -1.0, 1.0) * gi_gate;
+    float bl  = clamp(u.specular_params.w, 0.0, 1.0);             // blur mix at the center
+    float sop = clamp(sop_base, 0.0, 1.0) * gi_gate;              // rim peak alpha
+
+    // ── lens ──
+    // The native bevel starts a quarter logical pixel outside the antialiased
+    // contour (phase captures: Zenit's d(o) matched native d(o + 0.5 px @2x)).
+    float disp = native_lens_displacement(max(inset - 0.25 * s, 0.0), B, H, T) * rl;
+    bool tab_lens = shape_count == 0 && u.tab_lens_params[0].x > 0.0;
+    // The tab lens fades as a whole with its materialize level (knob_rim_dark.w, 1 when shown):
+    // its displacement and its coverage, so the content under it shows through as it was drawn
+    // instead of being resampled until the lens switches off.
+    float tl_level = tab_lens ? saturate(u.knob_rim_dark.w) : 1.0;
+    // ... while its opacity (opacityPair) is k / 0.25, full from a quarter of the way (native: 0.47
+    // at k 0.12; 0.83 / 0.61 / 0.44 / 0.31 at k 0.21 / 0.15 / 0.11 / 0.08): a fading lens is
+    // mostly a weakening one, not a translucent one
+    float tl_cover = tab_lens ? saturate(tl_level / 0.25) : 1.0;
+    float tl_field_inset = inset;
+    float2 tl_axis = out_n;
+    // lens variant (tab_lens_params[0].y: 0 tab, 1 slider thumb, 2 switch knob), its half height
+    // in pt, and its aberration relative to the tab lens's (glassForeground aberrationAmount and
+    // edgeStart: 3.68 / -14 on the tab, 1.95 / -7.4 slider, 2.02 / -7.7 switch: [0].z)
+    float tl_v = u.tab_lens_params[0].y;
+    float tl_hh = min(half_px.x, half_px.y) / s;
+    float tl_ab = max(u.tab_lens_params[0].z, 0.0);
+    float2 ps;
+    // Knobs: Core Animation's displacement chain. The tab lens keeps its field measured on the
+    // device (tab_lens_sample_depth): its interior also shows the bar's content through two portal
+    // layers (one under the glass, one over glassBackground, magnified about the lens centre),
+    // which the chain alone does not have (it loses to the table on Simulator captures: 4.87 vs
+    // 4.40 held on Library, 5.55 vs 4.77 held on Home).
+    bool tl_exact = tab_lens && tl_v > 0.5;
+    float4 tl_kin = u.tab_lens_params[2];
+    if (tl_exact) {
+        // Core Animation's own displacement chain (2D, see lens_sample_point). The tab bar's accent
+        // content is drawn above the glass by the component.
+        ps = lens_sample_point(p / s, half_px / s, cr / s, tl_level, tl_kin, tl_v > 2.5 ? 0.0 : 0.5) * s;
+        disp = length(ps - p);
+    } else {
+        if (tab_lens) {
+            // knob lenses: the measured / fitted field along the contour's normal
+            float i_px = tl_field_inset / s;
+            disp = tab_lens_shift(i_px, tl_level, tl_v, tl_hh, u.tab_lens_params[2], tl_axis.y) * s;
+        }
+        ps = p - tl_axis * disp;
+    }
+    float2 uv_s = cuv_off + (ps / rect_px + 0.5) * cuv_scale;
+    float2 uv_lo = u.valid_uv.xy + u.texel_size * 0.5;
+    float2 uv_hi = max(u.valid_uv.zw - u.texel_size * 0.5, uv_lo);
+    uv_s = clamp(uv_s, uv_lo, uv_hi);
+
+    // ── blur mix (source-space normalized inset) ──
+    float inset_s = shape_count > 0 ? max(-group_union(ps, u, s, shape_count).d, 0.0)
+                  : u.arrow_params.x > 0.5 ? max(-sdf_popover(ps, half_px, cr, u.arrow_params, s), 0.0)
+                  : max(-sdf_rr(ps, half_px, per_corner ? corner_pick(ps, cr4) : cr), 0.0);
+    float rho = saturate(inset_s / mh);
+    float2 grad = gradient_blur_level(node_uv, bl, u);
+    float m = grad.x * mix(edge_mix, 1.0, smoothstep(0.1, 1.0, rho));
+    float2 local_blur_uv = u.native_gamma.w > 0.5
+        ? u.coarse_uv.xy + (ps / rect_px + 0.5) * u.coarse_uv.zw
+        : blur_uv(uv_s, u);
+    float4 b4 = blur_tex.sample(smp, local_blur_uv);
+    float3 bc = b4.rgb / max(b4.a, 1e-3);
+    // Regular's transmitted detail component is itself softly filtered
+    // natively (grid-line dips are ~9 physical px wide at 2x): sample the
+    // half-res downsample (soft_tex, σ ≈ 2–3 px at 2x) when optic_params.y
+    // asks for it; clear transmits the truly sharp capture. glass_intensity = 0
+    // keeps the exact unfiltered backdrop (registration contract).
+    float4 s4 = ((u.optic_params.y > 0.5 || u.native_blur.x > 0.0) && gi_gate > 0.0)
+        ? soft_tex.sample(smp, local_blur_uv)
+        : sharp_tex.sample(smp, uv_s);
+    float3 sc = mix(bc, s4.rgb / max(s4.a, 1e-3), saturate(s4.a));
+    // Both Gaussian components describe the measured gamma-space transfer.
+    // Mixing their decoded values in linear light would change the dark-line
+    // contrast again after an otherwise correct gamma-space convolution.
+    // All textures hold sRGB-encoded values (non-sRGB targets, gamma-space blur):
+    // the samples are already in the space the native model was measured in.
+    float3 fine_gamma = sc;
+    float3 main_gamma = bc;
+    if (u.native_gamma.w > 0.5 && u.native_chroma.w > 0.0 && gi_gate > 0.0) {
+        float4 alternate = alternate_main_tex.sample(smp, local_blur_uv);
+        main_gamma = mix(main_gamma, alternate.rgb / max(alternate.a, 1e-3), saturate(u.native_chroma.w));
+    }
+    float3 e = mix(fine_gamma, main_gamma, m);
+    if (tab_lens && disp != 0.0) {
+        // Dispersion = the lens's glassForeground (QuartzCore glass_foreground_sdf, read from the
+        // disassembled shader and its uniforms on a CARenderer replay of the archived iOS lens):
+        // a constant aberration amount A (3.684 pt on the tab lens) along a = Rot(-15 deg) n,
+        // n = the contour normal mixed half-way with the elliptical radial direction
+        // (gradientOvalization 0.5), applied swapped and negated, (-a.y, -a.x). Seven samples at
+        // t A for t = -1 .. 1 in thirds: R averages the + side with weights t, B the - side with
+        // weights -t, G the middle five with weights 1 - |t|. The layer then fades out with the
+        // depth: alpha = 1 - depth / 14 (edgeStart -14 -> edgeEnd 0, edgeOpacity 1 -> 0). Its
+        // backdrop is the lens so far, so each sample takes the lens field at its own point.
+        float tl_i = tl_field_inset / s;
+        float tl_A = TAB_LENS_ABER_AMOUNT * tl_ab * TAB_LENS_ABER_LEVEL(tl_level);
+        float2 tl_half = max(half_px / s, float2(1.0));
+        float2 tl_q = p / s;
+        float2 tl_rad = normalize(float2(tl_q.x, tl_q.y * tl_half.x / tl_half.y) + float2(1e-5, 0.0));
+        float2 tl_n = normalize(mix(tl_axis, tl_rad, TAB_LENS_ABER_OVAL) + float2(1e-5, 0.0));
+        float2 tl_a = float2(tl_n.x * TAB_LENS_ABER_COS - tl_n.y * TAB_LENS_ABER_SIN,
+                             tl_n.x * TAB_LENS_ABER_SIN + tl_n.y * TAB_LENS_ABER_COS);
+        // The swap goes through the backdrop texture's uv scale (dmat = 1 / its size, pt), so x
+        // takes W / H and y H / W: the lens's foreground backdrop is wider than tall (W / H 1.22
+        // on a CARenderer replay; 1.18 from the Simulator's long-edge / cap shifts 2.65 / 1.9).
+        float2 tl_dir = float2(-tl_a.y * TAB_LENS_ABER_ASPECT, -tl_a.x / TAB_LENS_ABER_ASPECT);
+        float3 tl_acc = float3(0.0);
+        for (int tl_n7 = 0; tl_n7 < 7; tl_n7++) {
+            float tl_t = float(tl_n7) / 3.0 - 1.0;
+            float2 tl_off = tl_dir * (tl_A * tl_t);                      // pt
+            float2 tl_p;
+            if (tl_exact) {
+                tl_p = lens_sample_point(p / s + tl_off, half_px / s, cr / s, tl_level, tl_kin, tl_v > 2.5 ? 0.0 : 0.5) * s;
+            } else {
+                float tl_ii = tl_i - dot(tl_off, tl_axis);               // the offset point's depth
+                tl_p = p + tl_off * s - tl_axis * (tab_lens_shift(tl_ii, tl_level, tl_v, tl_hh, u.tab_lens_params[2], tl_axis.y) * s);
+            }
+            float2 tl_uv = clamp(cuv_off + (tl_p / rect_px + 0.5) * cuv_scale, uv_lo, uv_hi);
+            float4 tl_c = sharp_tex.sample(smp, tl_uv);
+            float3 tl_w = float3(max(tl_t, 0.0) * 0.5, (1.0 - abs(tl_t)) / 3.0, max(-tl_t, 0.0) * 0.5);
+            tl_acc += tl_w * (tl_c.rgb / max(tl_c.a, 1e-3));
+        }
+        float tl_fade = saturate(1.0 - tl_i / max(TAB_LENS_ABER_EDGE * tl_ab, 1e-3));
+        e = mix(e, tl_acc, tl_fade);
+    }
+    if (tab_lens && tl_v > 0.5 && tl_v < 2.5) {
+        // iOS knobs: glassBackground's face colour matrix (face_cm, face_opacity 1; the same on
+        // the held UISwitch and UISlider, uniforms on CARenderer replays of their lenses): a lift
+        // of 0.1 with the green channel toned down. The tab lens's is the identity.
+        e = clamp(float3(dot(float3(0.9785, -0.07159, -0.007145), e),
+                         dot(float3(-0.02126, 0.9287, -0.00724), e),
+                         dot(float3(-0.02132, -0.07147, 0.9927), e)) + 0.09998, 0.0, 1.0);
+    }
+    if (tab_lens && tl_v > 0.5 && tl_v < 2.5) {
+        // iOS knobs: glassBackground's holding tone, x sdr_white_value 0.9702 from 0.667 pt in
+        // (ramping in from 0.333; the tab lens has it in its veil offset)
+        float ht = saturate((inset / s - 0.3333) / 0.3333);
+        e *= mix(1.0, 0.9702, ht);
+    }
+    // Transmission before the untinted chroma boost: a tinted material has none (the boost
+    // is disabled whenever the glass is fully tinted, so this equals e there).
+    float3 e_nochroma = e;
+    if (u.native_blur.y > 0.0 && u.native_gamma.z > 0.5 && gi_gate > 0.0) {
+        float4 wide = coarse_tex.sample(smp, u.coarse_uv.xy + (ps / rect_px + 0.5) * u.coarse_uv.zw);
+        float3 ce = wide.rgb / max(wide.a, 1e-3);
+        float fine_weight = u.native_blur.z + u.native_blur_profile.x * (rho - 1.0) + u.native_blur_profile.y * (rho * rho - 1.0);
+        float coarse_weight = u.native_blur.w + u.native_blur_profile.z * (rho - 1.0) + u.native_blur_profile.w * (rho * rho - 1.0);
+        // BlurGradient is an absolute fine/main mixing control. Keep the
+        // measured source aperture, then remove fine transmission as the
+        // gradient approaches full blur; the independent ambient term stays.
+        float fine_scale = (u.edge_params.x > 0.5 && u.edge_params.z > 0.001)
+            ? (1.0 - grad.x) / max(1.0 - bl, 1e-6) : 1.0;
+        fine_weight *= fine_scale;
+        e = fine_gamma * fine_weight
+          + main_gamma * (1.0 - fine_weight - coarse_weight)
+          + ce * coarse_weight;
+        e_nochroma = e;
+        if (u.native_chroma.z > 0.5) {
+            float cf = u.native_chroma.x + u.native_chroma_profile.x * (rho - 1.0) + u.native_chroma_profile.y * (rho * rho - 1.0);
+            float cc = u.native_chroma.y + u.native_chroma_profile.z * (rho - 1.0) + u.native_chroma_profile.w * (rho * rho - 1.0);
+            cf *= fine_scale;
+            float3 luma_axis = float3(0.2126, 0.7152, 0.0722);
+            float Y = dot(e, luma_axis);
+            e = Y + cf * (fine_gamma - dot(fine_gamma, luma_axis))
+                  + (1.0 - cf - cc) * (main_gamma - dot(main_gamma, luma_axis))
+                  + cc * (ce - dot(ce, luma_axis));
+        }
+    }
+
+    // Per-shape materialize: a dissolving group member keeps the group's blur
+    // bank but shows the sharp(er) transmitted component as its level drops.
+    if (shape_count > 0 && shape_level < 0.999) {
+        e = mix(fine_gamma, e, shape_level);
+        e_nochroma = mix(fine_gamma, e_nochroma, shape_level);
+    }
+
+    // ── material (sRGB space) ──
+    // The tint model was measured against the transmitted, encoded backdrop.
+    // Feeding the legacy untinted brightness/saturation transform into it
+    // would apply a second coating, especially on clear material.
+    float3 tint_source = e;
+    float sat = u.bottom_surface_params.z;
+    float bri = u.bottom_surface_params.w;
+    float Y = dot(e, float3(0.2126, 0.7152, 0.0722));
+    e = Y + (e - Y) * mix(1.0, sat, gi_gate);   // negative chroma is intended: the veil blend clips it
+    e = e * mix(1.0, bri, gi_gate);
+    float ta = clamp(glass_tint.a, 0.0, 1.0) * smoothstep(0.0, 0.05, gi);
+    float3 tint_rgb = clamp(glass_tint.rgb, 0.0, 1.0);
+    // Measured 2-px rim profile at 2x: 0.83 / 0.48 of the peak at 0.25 / 0.75
+    // logical px, body again by 1.25 px.
+    float rim = sop * saturate(1.0 - inset / (1.25 * s));
+    // Both material branches are evaluated and mixed by the (per-shape blended)
+    // tint mode, so a veil shape merging with a Glass.tint shape has no seam.
+    float3 e_untinted = e;   // container fusion: base coating applies to this, before any member tint
+    // A partial tint (tintColor alpha < 1, single glass) mixes the fully tinted result toward
+    // the untinted one (native: exactly linear in sRGB); the untinted share keeps its own veil.
+    float4 veil_c = (shape_count == 0 && u.base_veil.a >= 0.0) ? u.base_veil : glass_tint;
+    float3 e_veil = clamp(mix(e, clamp(veil_c.rgb, 0.0, 1.0), clamp(veil_c.a, 0.0, 1.0) * smoothstep(0.0, 0.05, gi)), 0.0, 1.0);
+    // Measured non-affine coating (iOS compact elements): the backdrop luma goes through a
+    // transfer curve; the chroma keeps the affine (1 - a) share. An affine curve gives the
+    // blend above exactly. In a container the curve is a shared item taken from member 0
+    // (like the blur bank) and replaces the affine base coating of every untinted member.
+    // Knots sit at backdrop gray 0, 16, ..., 256 (Y = 16k / 255, the measured grid); beyond
+    // the ends the end segments extrapolate, so an affine curve equals the blend for any Y.
+    bool veil_curved = u.veil_curve[4].y > 0.5;
+    float3 e_curved = e_veil;
+    if (veil_curved) {
+        float Yv = dot(e, float3(0.2126, 0.7152, 0.0722));
+        float x = Yv * (255.0 / 16.0);
+        int k0 = clamp(int(floor(x)), 0, 15);
+        float f = x - float(k0);
+        float t0 = veil_curve_knot(u, k0);
+        float t1 = veil_curve_knot(u, k0 + 1);
+        float3 curved = mix(t0, t1, f) + (e - Yv) * (1.0 - clamp(veil_c.a, 0.0, 1.0));
+        e_curved = clamp(mix(e, curved, smoothstep(0.0, 0.05, gi)), 0.0, 1.0);
+        if (shape_count == 0) e_veil = e_curved;
+    }
+    // Tab lens rim: a near-constant bright line (native 220-226 over both the dark backdrop and
+    // the 212 platter), not a mix toward white.
+    if (tab_lens) {
+        // Inner glow just inside the top / bottom contours (native held lens: the band brightens
+        // from 111 to 189 over the 6 pt above the bottom edge, from 115 to 175 over the 3 pt
+        // below the top edge; none at the caps). knob_rim_light.zw = top / bottom amplitudes.
+        float i_px = inset / s;
+        float g_top = u.knob_rim_light.z * exp(-max(i_px - 2.0, 0.0) / 1.0) * saturate(-out_n.y);
+        float g_bot = u.knob_rim_light.w * exp(-max(i_px - 2.0, 0.0) / 1.6) * saturate(out_n.y);
+        e_veil = clamp(e_veil + (g_top + g_bot) * smoothstep(0.0, 0.05, gi), 0.0, 1.0);
+        // Faint dark line just inside the bright rim (native side cut: 226, then 207 against a
+        // 212 interior). knob_rim_dark = {dip, dip inset (px), rim half width (px), rim
+        // strength (the materialize level: the rim fades with the lens, not after it)}.
+        float dip = u.knob_rim_dark.x * saturate(1.0 - abs(inset - u.knob_rim_dark.y * s) / (1.0 * s));
+        e_veil = clamp(e_veil - dip, 0.0, 1.0);
+        // Along the long edges the rim is cyan (native held lens, raw 3x: 204 / 231 / 238 at the
+        // contour against a neutral strip below it): red leaves the steep contour first.
+        if (tl_v > 0.5) {
+            // Knobs (iOS slider thumb / switch, macOS NSSwitch / NSSlider): the lens's two
+            // CASDFGlassHighlightEffect layers, each
+            // through its vibrantColorMatrix (QuartzCore sdf_glass_highlight; inputs read off the
+            // draws of the held UISwitch's layer tree replayed with CARenderer): a 1 pt band
+            // fading linearly inward (curvature 1) times saturate((n . dir - c) / (1 - c)), n the
+            // contour normal ovalized 0.5 on iOS (not at all on macOS: its elements'
+            // gradientOvalization is 0), then Schlick's bias by the amount. Down-right: c =
+            // cos 160 deg = -0.9395 (nearly all round), amount 0.25, the pale matrix; then
+            // up-left: c = 0 (90 deg), amount 0.5, the control tint's matrix.
+            float2 kh_half = max(half_px / s, float2(1.0));
+            float2 kh_rad = normalize(float2(p.x / s, p.y / s * kh_half.x / kh_half.y) + float2(1e-5, 0.0));
+            float2 kh_n = normalize(mix(out_n, kh_rad, tl_v > 2.5 ? 0.0 : 0.5) + float2(1e-5, 0.0));
+            float lv = u.knob_rim_dark.w;
+            float kh_band = saturate(1.0 - i_px);
+            float kh_dr = kh_band * saturate((dot(kh_n, float2(0.70710678, 0.70710678)) + 0.9395) / 1.9395);
+            kh_dr = kh_dr / (1.0 + 2.0 * (1.0 - kh_dr));
+            float kh_ul = kh_band * saturate(dot(kh_n, float2(-0.70710678, -0.70710678)));
+            float3 kh_fill = clamp(float3(dot(float3(1.2741, -0.7600, -0.0766), e_veil),
+                                          dot(float3(-0.2259, 0.7401, -0.0767), e_veil),
+                                          dot(float3(-0.2260, -0.7598, 1.4233), e_veil)) + 1.125, -0.75, 1.0);
+            e_veil = clamp(mix(e_veil, kh_fill, kh_dr * lv), 0.0, 1.0);
+            float3 kh_key = clamp(float3(dot(u.tab_lens_params[3].xyz, e_veil) + u.tab_lens_params[3].w,
+                                         dot(u.tab_lens_params[4].xyz, e_veil) + u.tab_lens_params[4].w,
+                                         dot(u.tab_lens_params[5].xyz, e_veil) + u.tab_lens_params[5].w), -0.75, 1.0);
+            e_veil = clamp(mix(e_veil, kh_key, kh_ul * lv), 0.0, 1.0);
+            // (no top-to-bottom shading: the replayed face is flat; the measured -7 / +8 was the
+            // face matrix, the holding tone and the tinted shadow seen together)
+        } else {
+            // Tab lens: the lens's "SDF" layer, a CASDFKeyFillHighlightEffect (iOS 26.5 archive:
+            // key / fill white, heights 1 pt, curvature 0.8, angles -45 / 135 deg, spreads pi/2,
+            // amounts default 0.5) drawn through vibrantColorMatrix. QuartzCore's own shader
+            // (sdf_key_fill_highlight, see scripts/glass_native_model/metallib_dump.py): per light,
+            // band = mix(step(t < 1), 1 - t, curvature) with t = depth / height, times
+            // saturate((n . dir - cos spread) / (1 - cos spread)) with dir = (sin a, -cos a) in
+            // the layer's y-down space, then Schlick's bias by the amount (0.5: identity); the
+            // two lights add. vibrant_color_matrix_sover: mix(dst, clamp(M dst + o, -0.75, 1), a).
+            // The SDF's gradient is ovalized (the element's gradientOvalization 0.5): the contour
+            // normal mixed half-way with the elliptical radial direction.
+            float2 tk_half = max(half_px / s, float2(1.0));
+            float2 tk_rad = normalize(float2(p.x / s, p.y / s * tk_half.x / tk_half.y) + float2(1e-5, 0.0));
+            float2 tk_n = normalize(mix(out_n, tk_rad, TAB_LENS_ABER_OVAL) + float2(1e-5, 0.0));
+            float tk_band = mix(i_px < 1.0 ? 1.0 : 0.0, saturate(1.0 - i_px), 0.8);
+            float tk_key = tk_band * saturate(dot(tk_n, float2(-0.70710678, -0.70710678)));
+            float tk_fill = tk_band * saturate(dot(tk_n, float2(0.70710678, 0.70710678)));
+            float tk_a = saturate(tk_key + tk_fill) * u.knob_rim_dark.w;
+            float3 tk_c = clamp(float3(dot(float3(1.2741, -0.7600, -0.0766), e_veil),
+                                       dot(float3(-0.2259, 0.7401, -0.0767), e_veil),
+                                       dot(float3(-0.2260, -0.7598, 1.4233), e_veil)) + 1.125, -0.75, 1.0);
+            e_veil = clamp(mix(e_veil, tk_c, tk_a), 0.0, 1.0);
+        }
+    }
+    else if (native_rim.y <= 0.0) e_veil = mix(e_veil, float3(1.0), rim);
+
+    float3 e_abs;
+    {
+        // Tinted native material (Glass.tint): the backdrop lifts toward white
+        // with the veil density and the result transmits through the tint
+        // color (blue tint over gray 128 reads (0, 118, 246), not a blend).
+        // The rim reads as the tint lifted toward white and then chroma-boosted
+        // (blue tint rim measures (48,199,254) over a (0,119,250) body).
+        // Saturated tint tones follow backdrop brightness. Neutral tint
+        // keeps the backdrop's RGB detail (independent solid-color captures).
+        float tint_max = max(tint_rgb.r, max(tint_rgb.g, tint_rgb.b));
+        float tint_min = min(tint_rgb.r, min(tint_rgb.g, tint_rgb.b));
+        float tint_sat = (tint_max - tint_min) / max(tint_max, 1e-4);
+        float3 ea = mix(e, float3(dot(e, float3(0.2126, 0.7152, 0.0722))), tint_sat);
+        ea = clamp(mix(ea, float3(1.0), ta), 0.0, 1.0) * tint_rgb;
+        float3 abs_source = shape_count == 0 ? e_nochroma : tint_source;
+        if (tint_resp.x > 0.5)
+            ea = mix(abs_source, measured_tint_tone(abs_source, tint_rgb, tint_resp), smoothstep(0.0, 0.05, gi));
+        float3 lifted = mix(tint_rgb, float3(1.0), 0.6);
+        float Yl = dot(lifted, float3(0.2126, 0.7152, 0.0722));
+        float3 rim_col = clamp(Yl + (lifted - Yl) * 3.3, 0.0, 1.0);
+        if (native_rim.y <= 0.0) ea = mix(ea, rim_col, rim);
+        e_abs = ea;
+    }
+    e = mix(e_abs, e_veil, clamp(tint_mode, 0.0, 1.0));
+    if (shape_count > 0) {
+        // GlassEffectContainer tint fusion (native_tint_merge.swift, white and
+        // gray-128 backdrops): the union is plain glass; a tinted member spreads
+        // its tint past its own edge only toward another member: the feather
+        // f(d) = 1 - smoothstep(1.5, 8.5, d) (measured 0.96/0.75/0.28/0.03 at
+        // 2/4/6/8 px, identical whether it runs into a touching member or across
+        // a 4 px bridge into it), allowed where the pixel is inside the member or
+        // where the local gap to another member through it (d_i + d_j) is below
+        // ≈5 px (closed by 9 px): a 4 px bridge carries the tint across, a 12 px
+        // bridge stays untinted and the tint is cut at its own geometry there.
+        // Overlapping tints compose (see below).
+        // Base (untinted) coating, blended between the two nearest members.
+        float2 veil = mix(u.shape_level[gs.b].yz, u.shape_level[gs.a].yz, gs.h);
+        float3 plain = veil_curved ? e_curved : clamp(mix(e_untinted, float3(veil.x), veil.y), 0.0, 1.0);
+        if (native_rim.y <= 0.0) plain = mix(plain, float3(1.0), rim);
+        float dm[8];
+        for (int i = 0; i < shape_count; ++i) {
+            float4 r = u.shape_rect[i];
+            dm[i] = sdf_rr(p - r.xy, r.zw, group_cr(u, i, s));
+        }
+        float3 chain = tint_source;
+        float max_cov = 0.0;
+        float3 chain_tint = float3(0.0);   // tinted colour laid so far (bottom layer for the next one)
+        float3 top_rim = float3(1.0);
+        for (int i = 0; i < shape_count; ++i) {
+            float4 ti = u.shape_tint[i];
+            // Only Glass.tint (absorption) members lay a tint; an untinted member's
+            // veil is the base coating above.
+            // misc.w is the member's surface-veil share: a partial tint (tintColor alpha < 1)
+            // lays its tint with the remaining share of coverage.
+            float tint_share = 1.0 - saturate(u.shape_misc[i].w);
+            if (ti.a <= 0.001 || tint_share <= 0.001) continue;
+            float di = dm[i];
+            float near_other = 0.0;
+            for (int j = 0; j < shape_count; ++j) {
+                if (j == i || u.shape_level[j].x < 0.01) continue;
+                // local gap between the two members through this pixel
+                near_other = max(near_other, 1.0 - smoothstep(5.0 * s, 9.0 * s, di + dm[j]));
+            }
+            float inside_i = 1.0 - smoothstep(-0.5 * s, 0.5 * s, di);
+            float cov = (1.0 - smoothstep(1.5 * s, 8.5 * s, di)) * max(inside_i, near_other) * saturate(u.shape_level[i].x) * tint_share;
+            if (cov <= 0.0) continue;
+            float3 trgb = clamp(ti.rgb, 0.0, 1.0);
+            float tai = clamp(ti.a, 0.0, 1.0) * smoothstep(0.0, 0.05, gi);
+            float3 toned;
+            if (u.shape_resp[i].x > 0.5) {
+                toned = mix(tint_source, measured_tint_tone(tint_source, trgb, u.shape_resp[i]), smoothstep(0.0, 0.05, gi));
+            } else {
+                float tmax = max(trgb.r, max(trgb.g, trgb.b)), tmin = min(trgb.r, min(trgb.g, trgb.b));
+                float tsat = (tmax - tmin) / max(tmax, 1e-4);
+                float3 ea = mix(tint_source, float3(dot(tint_source, float3(0.2126, 0.7152, 0.0722))), tsat);
+                toned = clamp(mix(ea, float3(1.0), tai), 0.0, 1.0) * trgb;
+            }
+            if (max_cov > 0.0) {
+                // Over another tint (native_tint_overlap.swift, 12 ordered pairs, white and
+                // gray backdrops alike): the top colour dominates, darkened and saturated by
+                // the bottom layer's brightness, in linear light:
+                //   top^(1 + 0.277·(1 - Lb)) · (0.473 + 0.741·Lb)   (8-bit error mean 5.1);
+                // the same tint over itself is unchanged.
+                float3 top_lin = srgb_to_linear(toned);
+                float Lb = dot(srgb_to_linear(chain_tint), float3(0.2126, 0.7152, 0.0722));
+                float3 over = linear_to_srgb(pow(max(top_lin, 1e-6), float3(1.0 + 0.277 * (1.0 - Lb))) * (0.473 + 0.741 * Lb));
+                float3 dif = abs(toned - chain_tint);
+                float differs = saturate(max(dif.r, max(dif.g, dif.b)) / 0.2);
+                toned = mix(toned, clamp(over, 0.0, 1.0), max_cov * differs);
+            }
+            float w = cov / max(max_cov, cov);
+            chain = mix(chain, toned, w);
+            chain_tint = chain;
+            max_cov = max(max_cov, cov);
+            float3 lifted = mix(trgb, float3(1.0), 0.6);
+            float Yl = dot(lifted, float3(0.2126, 0.7152, 0.0722));
+            top_rim = clamp(Yl + (lifted - Yl) * 3.3, 0.0, 1.0);
+        }
+        if (native_rim.y <= 0.0) chain = mix(chain, top_rim, rim);
+        e = mix(plain, chain, max_cov);
+    }
+
+    // Reduce Transparency / Increase Contrast (measured with the per-process
+    // AppKit argument domain, system settings untouched): the body turns opaque —
+    // a tinted glass shows its tint (×0.985 RT, backdrop-independent), plain glass
+    // a fixed-luma frost (RT 242; IC 234 + 14·Y) keeping 16 % / 10 % of the
+    // backdrop chroma. RT keeps the material rim; IC replaces it with the outline.
+    if (u.a11y_params.x > 0.5) {
+        float3 bd = clamp(main_gamma, 0.0, 1.0);
+        float Yb = dot(bd, float3(0.2126, 0.7152, 0.0722));
+        float3 body = a11y_tinted
+            ? clamp(glass_tint.rgb, 0.0, 1.0) * (a11y_ic ? 1.0 : 0.985)
+            : clamp(u.a11y_params.y + u.a11y_params.z * Yb + (bd - Yb) * u.a11y_params.w, 0.0, 1.0);
+        e = body;
+        if (a11y_ic) {
+            // the outline also covers the antialiased band just outside the contour
+            // (d in (0, aa)), where the shape coverage alone would lighten it
+            mask = max(mask, 1.0 - smoothstep(a11y_ow * 0.5 - aa, a11y_ow * 0.5 + aa, d));
+            float ow_in = 1.0 - smoothstep(a11y_ow * 0.5 - aa, a11y_ow * 0.5 + aa, inset);
+            e = mix(e, a11y_outline(a11y_tinted ? clamp(glass_tint.rgb, 0.0, 1.0) : float3(u.a11y_params.y + u.a11y_params.z * Yb)), ow_in);
+        }
+    }
+
+    // Pressed .glass button (native_interactive.swift button): the body shifts by
+    // a constant in sRGB, darker on the light family, lighter on the dark one,
+    // switched within one frame. Custom .interactive() glass shows no change.
+    float press = shape_count > 0 ? mix(u.shape_level[gs.b].w, u.shape_level[gs.a].w, gs.h) : u.edge_params.y;
+    if (press != 0.0) e = clamp(e + press, 0.0, 1.0);
+
+    // Slider / toggle knob held as glass (native_slider_toggle.swift): a two-tone
+    // rim instead of the material rim — a dark accent-coloured line on the
+    // upper-left half hugging the contour (~0.75 pt), a bright neutral line on
+    // the lower half 0.5 pt inside (+35..43 sRGB).
+    if (shape_count == 0 && u.knob_rim_light.w > 0.0) {
+        float o = inset / s;
+        float w = u.knob_rim_light.w;
+        // axis (0,0) = full ring (Increase Contrast: dark accent outline all round)
+        float t = length(u.knob_rim_light.yz) < 1e-3 ? 1.0 : dot(out_n, normalize(u.knob_rim_light.yz));
+        float dark_w = smoothstep(-0.2, 0.45, t) * (1.0 - smoothstep(0.0, w, o));
+        float light_w = smoothstep(0.05, 0.55, -t) * exp(-pow((o - 0.5) / (0.45 * w), 2.0));
+        e = mix(e, clamp(u.knob_rim_dark.rgb, 0.0, 1.0), clamp(u.knob_rim_dark.a, 0.0, 1.0) * dark_w);
+        e = clamp(e + u.knob_rim_light.x * light_w, 0.0, 1.0);
+    }
+
+    if (native_rim.y > 0.0) {
+        float luma = dot(e, float3(0.2126, 0.7152, 0.0722));
+        float3 target = clamp(native_rim.x + native_rim.y * luma
+                            + native_rim.z * (e - luma), 0.0, 1.0);
+        // Pixel-normalized rim response identified on r28 gray controls and
+        // independently validated on radius16/capsule/circle. This is an
+        // empirical orientation/size response, not a continuous optical PSF.
+        float o = inset / s;
+        float size_t = saturate((size_dim - 64.0) / 136.0);
+        float2 radial = mix(float2(1.210494850, -0.841979399), float2(1.212851075, -0.851404302), size_t);
+        float2 angular = mix(float2(0.509299606, -1.011969480), float2(0.568294933, -1.057282943), size_t);
+        float normal_l1 = abs(out_n.x) + abs(out_n.y);
+        float diagonal = sqrt(max(0.0, 1.0 + 2.0 * out_n.x * out_n.y) + 1e-6) / sqrt(1.0 + 1e-6);
+        float directional_strength = mix(0.939641238, 0.021349595, size_t);
+        float directional = mix(1.0, diagonal, directional_strength);
+        float profile = o < 1.0 ? directional * max(0.0, radial.x + radial.y * o
+                             + (normal_l1 - 1.0) * (angular.x + angular.y * o)) : 0.0;
+        // First-pixel alpha is a captured-color normalization. Curved pixels
+        // can exceed that first sample; clipping alpha at one loses the peak.
+        e = clamp(e + (target - e) * sop * profile, 0.0, 1.0);
+        // Controlled gray corner fits support a gamma-space edge blend,
+        // although the fixed SDF coverage and intrinsic rim still have an
+        // independent curvature residual (see RIM_MODEL.md).
+        float4 under = sharp_tex.sample(smp, clamp(in.uv, uv_lo, uv_hi));
+        float3 under_gamma = clamp(under.rgb / max(under.a, 1e-3), 0.0, 1.0) * (1.0 - shadow_a);
+        e = mix(under_gamma, e, mask * tl_cover);
+        return float4(e, 1.0);
+    }
+
+    return float4(e * mask * tl_cover, mask * tl_cover);
+}
+
+fragment float4 glass_fragment_main(
+    GlassVertexOutput in [[stage_in]],
+    constant GlassUniforms& u [[buffer(0)]],
+    texture2d<float> blur_tex  [[texture(0)]],
+    texture2d<float> sharp_tex [[texture(1)]],
+    texture2d<float> soft_tex  [[texture(2)]],
+    texture2d<float> coarse_tex [[texture(3)]],
+    texture2d<float> alternate_main_tex [[texture(4)]],
+    sampler smp [[sampler(0)]]
+) {
+    if (round(u.surface_params.x) == 5.0 && u.native_params.x > 0.0)
+        return native_glass(in, u, blur_tex, sharp_tex, soft_tex, coarse_tex, alternate_main_tex, smp);
+    // -- Parameter preprocessing (all clamped, prevent jump/invalid into compute) --
+    float gi  = clamp(u.glass_intensity,         0.0,  2.0);
+    // gi gate: glass_intensity=0 commits
+    // 'blur-only'—refraction/dispersion/rim-sharp/saturation/Fresnel/inner shadow all zero-gated;
+    // gi in (1,2] boosts specular only (spec_str *= gi).
+    float gi_gate = clamp(gi, 0.0, 1.0);
+    float sop = clamp(u.specular_params.x,       0.0,  1.0);
+    float sst = clamp(u.specular_params.y,       1.0, 12.0);
+    float rl  = clamp(u.specular_params.z,       0.0,  1.0);
+    float bl  = clamp(u.specular_params.w,       0.0,  1.0);
+    float wg  = clamp(u.optic_params.x,          0.0,  3.0);
+    float ct  = clamp(u.optic_params.y,          0.0, 20.0);
+    float gap = clamp(u.optic_params.z,          0.0, 40.0);
+    uint  top_surface_kind = (uint)clamp(round(u.surface_params.x), 0.0, 5.0);
+    if (top_surface_kind == 5) ct = clamp(u.optic_params.y, 0.0, 40.0);
+    float top_bezel_ratio  = clamp(u.surface_params.y, 0.04, top_surface_kind == 5 ? 1.0 : 0.45);
+    float spec_angle       = u.surface_params.z;
+    float magnify          = clamp(u.surface_params.w, -1.0, 2.0);
+    uint  bottom_surface_kind = (uint)clamp(round(u.bottom_surface_params.x), 0.0, 5.0);
+    float bottom_bezel_ratio  = clamp(u.bottom_surface_params.y, 0.04, bottom_surface_kind == 5 ? 1.0 : 0.45);
+    float field_radius        = clamp(u.lens_params.x, 0.1, 1.5);
+    float field_falloff       = clamp(u.lens_params.y, 0.4, 6.0);
+    float edge_field_strength = clamp(u.lens_params.z, 0.2, 4.0);
+    float scale_ratio         = clamp(u.lens_params.w, 0.35, 1.6);
+
+    float  s       = max(u.scale_factor, 0.1);
+    float ct_px = ct * s;
+    float gap_px = gap * s;
+    float2 rect_px = max(u.rect_size * s, float2(2.0));
+    float2 half_px = rect_px * 0.5;
+    float  mh      = max(min(half_px.x, half_px.y), 1.0);
+    float  cr      = clamp(u.corner_radius * s, 0.0, mh);
+    // Padded capture: in.uv spans padded texture, node region is sub-area.
+    float2 cuv_off   = u.content_uv.xy;
+    float2 cuv_scale = max(u.content_uv.zw, float2(1e-4));
+    float2 node_uv   = (in.uv - cuv_off) / cuv_scale;
+    float2 p         = (node_uv - 0.5) * rect_px;
+
+    // ── SDF & mask ─────────────────────────────────────────────────
+    float  d    = sdf_rr(p, half_px, cr);
+    float  aa   = max(fwidth(d) * 0.5, 0.5);
+    float  mask = 1.0 - smoothstep(-aa, aa, d);
+    if (mask < 0.001) discard_fragment();
+    float  inset = max(-d, 0.0);
+
+    // -- 2D edge normal (outward) --
+    float2 out_n = sdf_grad(p, half_px, cr);
+
+    // ── Glass Surface sampling ─────────────────────────────────────
+    float  top_bezel_w = clamp(mh * top_bezel_ratio, min(2.0 * s, mh), mh);
+    float coating_spread = saturate((top_bezel_w - max(cr * 0.5075, 4.0 * s)) / (3.5 * s));
+    // Broad plates need a slightly wider bevel through their curved corners.
+    // The SDF normal keeps this continuous and leaves straight edges unchanged.
+    float plate_corner = 2.0 * abs(out_n.x * out_n.y)
+        * smoothstep(96.0 * s, 160.0 * s, min(rect_px.x, rect_px.y));
+    if (top_surface_kind == 5) top_bezel_w = min(mh, top_bezel_w * (1.0 + 0.08 * plate_corner));
+    float  bottom_bezel_w = clamp(mh * bottom_bezel_ratio, min(2.0 * s, mh), mh);
+    float  t_top    = clamp(inset / top_bezel_w, 0.0, 1.0);
+    float  t_bottom = clamp(inset / bottom_bezel_w, 0.0, 1.0);
+    SurfaceSample top_surf = sample_surface(top_surface_kind, t_top);
+    SurfaceSample bot_surf = sample_surface(bottom_surface_kind, t_bottom);
+    float  top_edge_factor = pow(1.0 - t_top, 2.3);
+    float  bottom_edge_factor = pow(1.0 - t_bottom, 2.1);
+
+    // -- Pseudo-thickness (top+bottom height, concave bottom thins) --
+    float  top_thick = (top_surface_kind == 0) ? 0.0 : min(top_bezel_w * (0.52 + 0.48 * top_surf.height), 20.0 * s);
+    float  bottom_thick = (bottom_surface_kind == 0) ? 0.0 : min(bottom_bezel_w * (0.38 + 0.58 * bot_surf.height), 20.0 * s);
+    float  gap_scale = 1.0 + min(gap * 0.085, 2.6);
+    float  d_eff = max(
+        ct_px +
+        top_thick * (0.38 + top_edge_factor * 0.62) +
+        bottom_thick * (0.24 + bottom_edge_factor * 0.76) +
+        gap_px * 0.78,
+        0.5 * s  // minimum logical thickness
+    );
+
+    // -- 3D normal (Specular/Fresnel, full precision) --
+    // tilt unaffected by gi: gi already acts on refraction amplitude (rl_wg * gi_gate),
+    // double-weight via normal tilt causes non-linear double boost.
+    float  tilt = 0.52 + gap * 0.01;
+    float  top_slope_n = top_surf.slope * tilt * (0.30 + 0.70 * (1.0 - t_top));
+    float  bottom_presence = clamp(abs(bot_surf.center_bias) + abs(bot_surf.height) * 0.26, 0.0, 1.4);
+    float  bot_slope_n = bot_surf.slope * tilt * (0.18 + 0.38 * rl + bottom_presence * 0.22) * (0.25 + 0.75 * (1.0 - t_bottom));
+
+    // Body region: past bezel interior.
+    float  scale_t = saturate((scale_ratio - 0.35) / 1.25);
+    float  slab_t = saturate(inset / max(mh, 0.001));
+    float  spread_gain = mix(1.15, 3.75, scale_t);
+    float  body_t = 1.0 - pow(saturate(1.0 - slab_t), spread_gain);
+    float  body_coord = 1.0 - slab_t;
+    SurfaceSample top_body = sample_surface(top_surface_kind, body_t);
+    SurfaceSample bot_body = sample_surface(bottom_surface_kind, body_t);
+    bool plate = top_surface_kind == 5;
+    if (plate) top_body = SurfaceSample{ 1.0, 0.0, 0.0 };
+    float  body_profile = top_body.height + bot_body.height * 0.55;
+    float  body_t_slope = spread_gain * pow(saturate(1.0 - slab_t), max(spread_gain - 1.0, 0.0)) / max(mh, 0.001);
+    float  body_profile_slope = (top_body.slope + bot_body.slope * 0.55) * tilt * body_t_slope * s;
+
+    float  field_cover = max(saturate((field_radius - 0.1) / 1.4), 0.02);
+    float  field_hardness = saturate((field_falloff - 0.4) / 5.6);
+    float  field_base = 1.0 - exp(-body_t * (0.8 + field_cover * 4.2));
+    float  field_envelope = pow(saturate(field_base), mix(0.78, 2.4, field_hardness));
+    float  body_grad_gain = 0.18 + 0.82 * pow(saturate(1.0 - body_coord), 0.55) * (0.28 + 0.72 * field_envelope);
+
+    float2 ellipse_axis = max(half_px - float2(cr * 0.35), float2(1.0));
+    float2 ellipse_p = p / ellipse_axis;
+    float2 radial_dir = normalize(select(float2(0.0, -1.0), ellipse_p, length_squared(ellipse_p) > 1e-6));
+    float  body_dir_mix = smoothstep(0.10, 0.92, body_t);
+    float2 body_dir = normalize(mix(out_n, radial_dir, body_dir_mix));
+    float2 body_grad = -body_dir * body_profile_slope * body_grad_gain;
+    float2 edge_grad = out_n * (top_slope_n + bot_slope_n) * (0.16 + 0.34 * top_edge_factor + 0.10 * bottom_edge_factor);
+    float3 N = normalize(float3(body_grad + edge_grad, 1.0));
+
+    // -- Refraction shift: Snell angle-diff formula (physics-driven) --
+    // Merge slope = top + bottom (co-linear stack), analytical derivative not refract().
+    float  combined_slope = top_surf.slope + bot_surf.slope * 0.55;
+    float  combined_height = top_surf.height + bot_surf.height * 0.55;
+    // Body region also has profile slope.
+    float axis_ratio = min(rect_px.x, rect_px.y) / max(rect_px.x, rect_px.y);
+    float isotropy = pow(axis_ratio, 6.0);
+    float plate_slope = combined_slope * pow(max(1.0 - t_top, 1e-5), 0.4 * isotropy);
+    float  total_slope = plate ? plate_slope : mix(combined_slope, top_body.slope + bot_body.slope * 0.55, body_t);
+    bool diffuse_coating = u.tint_mode > 0.5 && u.glass_tint.a > 0.5;
+    float coating_aperture = pow(saturate(cr / mh), 8.0)
+        * exp(-max(min(rect_px.x, rect_px.y) / s - 64.0, 0.0) / 20.0);
+    // A plate has a nonzero slab below its rounded coating. The ray path must
+    // not collapse to zero at the outer edge when center thickness is nonzero.
+    float slab_floor = 0.25 + 0.10 * smoothstep(96.0 * s, 160.0 * s, min(rect_px.x, rect_px.y));
+    float slab = mix(slab_floor * saturate(ct / max(top_bezel_w / s, 1e-4)), 0.75, isotropy);
+    float  total_height = plate ? mix(slab, 1.0, combined_height) : mix(combined_height, body_profile, body_t);
+    // scale_ratio scales effective bezel: large scale_ratio -> wider bezel -> uniform shift; small
+    // scale_ratio -> narrow bezel -> edge-concentrated shift.
+    float  effective_bezel = (plate ? top_bezel_w : mix(top_bezel_w, mh, body_t)) * scale_ratio;
+
+    // Snell shift: R/G/B each use different IOR -> chromatic aberration.
+    float  disp_r = snell_displacement(total_slope, total_height, d_eff, effective_bezel, kDispersionIOR_R);
+    float  disp_g = snell_displacement(total_slope, total_height, d_eff, effective_bezel, kDispersionIOR_G);
+    float  disp_b = snell_displacement(total_slope, total_height, d_eff, effective_bezel, kDispersionIOR_B);
+    if (plate && diffuse_coating) {
+        // Live phase-coded window captures expose an accelerating grazing
+        // coating path, rather than a straight/bent double image. This bounded
+        // coating model vanishes smoothly at the flat core. It approximates
+        // the observed material; it is not Apple's private optical formula.
+        float coating_t = saturate(inset / max(effective_bezel, s));
+        float grazing_floor = min(1.0, 0.5 * s / max(effective_bezel, s));
+        float coating_path = ct_px * pow(1.0 - coating_t, 2.0)
+            * rsqrt(max(coating_t, grazing_floor));
+        disp_r = mix(disp_r, coating_path * (kDispersionIOR_R - 1.0) / (kDispersionIOR_G - 1.0), coating_aperture);
+        disp_g = mix(disp_g, coating_path, coating_aperture);
+        disp_b = mix(disp_b, coating_path * (kDispersionIOR_B - 1.0) / (kDispersionIOR_G - 1.0), coating_aperture);
+    }
+
+    // edge_field_strength scales bezel region shift strength.
+    float  edge_boost = mix(edge_field_strength, 1.0, body_t);
+    disp_r *= edge_boost;
+    disp_g *= edge_boost;
+    disp_b *= edge_boost;
+
+    // center_zoom_radius / center_zoom_falloff modulate body region shift envelope. field_envelope
+    // includes both: field_radius controls coverage radius, field_falloff controls falloff.
+    float  body_disp_envelope = plate ? 1.0 : 0.15 + 0.85 * field_envelope;
+    disp_r *= mix(1.0, body_disp_envelope, body_t);
+    disp_g *= mix(1.0, body_disp_envelope, body_t);
+    disp_b *= mix(1.0, body_disp_envelope, body_t);
+
+    // warp_gain as perceptual scale factor (physics formula gives baseline, wg fine-tunes).
+    // refraction_level blends refraction/straight; gi_gate zeros refraction/dispersion here (no
+    // double-weight on normal). A coated plate blends straight transmission and full bent ray.
+    // Scaling bent ray displacement loses second optical image.
+    float  rl_wg = (plate ? 1.0 : rl) * wg * gi_gate;
+    // The wide, flat slab has a concentrated outer sidewall lobe. Keep this
+    // additional bending within six logical pixels so its neutral interior
+    // remains registered; compact and circular controls retain their profile.
+    float plate_edge = smoothstep(96.0 * s, 160.0 * s, min(rect_px.x, rect_px.y))
+        * (1.0 - smoothstep(2.0 * s, 6.0 * s, inset));
+    float clear_coating = saturate((u.glass_tint.a - 0.08) / 0.12) * saturate((rl - 0.8) / 0.2);
+    if (plate && u.tint_mode > 0.5) rl_wg *= 1.0 + 0.30 * plate_edge * clear_coating;
+    disp_r *= rl_wg * gap_scale;
+    disp_g *= rl_wg * gap_scale;
+    disp_b *= rl_wg * gap_scale;
+
+    if (plate) {
+        // Rounded endcaps have in-plane curvature in addition to the cross-
+        // section bevel. The old plate ray treated them like straight walls,
+        // so nearby backdrop lines never reached the inside curved contour.
+        // Blend across the straight/corner join and taper toward the flat body.
+        float2 corner_q = abs(p) - half_px + cr;
+        float2 curve_mix = smoothstep(float2(0.0), float2(max(cr * 0.25, s)), corner_q);
+        if (half_px.x - cr < s) curve_mix.x = 1.0;
+        if (half_px.y - cr < s) curve_mix.y = 1.0;
+        float curved_contour = curve_mix.x * curve_mix.y;
+        float sidewall_support = 1.0 - smoothstep(6.0 * s, 12.0 * s, inset);
+        float curvature_path = 1.0 + min(top_bezel_w / max(cr, 4.0 * s), 1.0)
+            * curved_contour * (diffuse_coating ? mix(sidewall_support, t_top, coating_aperture) : sidewall_support);
+        disp_r *= curvature_path;
+        disp_g *= curvature_path;
+        disp_b *= curvature_path;
+        if (diffuse_coating) {
+            disp_r = min(disp_r, 2.0 * mh);
+            disp_g = min(disp_g, 2.0 * mh);
+            disp_b = min(disp_b, 2.0 * mh);
+        }
+    }
+
+    // The coated convex sidewall samples toward the interior. This folds the
+    // first interior detail outward along the rounded edge. Other artistic
+    // lens profiles retain their existing outward-sampling convention.
+    float2 disp_dir = plate ? -out_n : normalize(mix(out_n, radial_dir, body_dir_mix));
+
+    // Convert to UV shift (physical px -> padded texture UV, texel_size = 1/texture pixels).
+    float2 uv_disp_r = clamp(disp_dir * disp_r * u.texel_size, -0.45, 0.45);
+    float2 uv_disp_g = clamp(disp_dir * disp_g * u.texel_size, -0.45, 0.45);
+    float2 uv_disp_b = clamp(disp_dir * disp_b * u.texel_size, -0.45, 0.45);
+
+    // Magnification: scale about node center (padded uv space); padding provides real periphery,
+    // magnify sampling no longer small-texture interp.
+    float  magnify_strength = magnify * gi_gate * rl;
+    float  magnify_mix = clamp(magnify_strength * (0.10 + 0.26 * field_envelope), -0.55, 0.75);
+    float2 sample_center = cuv_off + 0.5 * cuv_scale;
+    float2 sample_uv = sample_center + (in.uv - sample_center) * (1.0 - magnify_mix);
+
+    // Clamp to valid backplate sub-rectangle (not full texture): glass on window edge, pad beyond
+    // RT is transparent black; rim shift samples there -> pure black (alpha normalization helpless
+    // on all-zero).
+    float2 uv_lo = u.valid_uv.xy + u.texel_size * 0.5;
+    float2 uv_hi = max(u.valid_uv.zw - u.texel_size * 0.5, uv_lo);
+    float2 uvr = clamp(sample_uv + uv_disp_r, uv_lo, uv_hi);
+    float2 uvg = clamp(sample_uv + uv_disp_g, uv_lo, uv_hi);
+    float2 uvb = clamp(sample_uv + uv_disp_b, uv_lo, uv_hi);
+
+    // -- Background sample: blur_level blends sharp/blur --
+    // Rim region (inside bezel) backs off to sharp: strongest refraction displacement must preserve
+    // recognizable backdrop, bent haze alone looks like fog not lensing (align Apple/kube.io:
+    // refraction visual from edge-bent sharp backplate). Rim sharp fallback width capped at
+    // physical 8px (logical), uncoupled from bezel geometry: large panel (100s px mh) expands to
+    // 10s-px 'sharp band', plain backdrop, zero frosted glass feel. 8px cap keeps small capsule
+    // (bezel ~7-8 logical px) unchanged, large panel converges to thin refraction edge.
+    float rim_sharp_w = min(top_bezel_w, 8.0 * s);
+    float t_rim = clamp(inset / rim_sharp_w, 0.0, 1.0);
+    float rim_sharp = (1.0 - smoothstep(0.0, 0.85, t_rim)) * step(0.5, (float)(top_surface_kind != 0)) * gi_gate * rl;
+    // Blur gradient (CSS linear-gradient style): local blur strength as property varying along
+    // axis—contract in types.zig BlurGradient. Stop strength = blur_level semantic (0=pure sharp,
+    // 1=pure blur), interpolate per-pixel local blur_level along axis; global strength fades
+    // between base bl and profile (below).
+    float local_bl = bl;
+    // Dense surface coating scatters more through a curved plate bevel. Fade
+    // it into the flat interior; optical intensity zero removes this response.
+    if (plate && u.tint_mode > 0.5) {
+        float corner_scatter = plate_corner * clear_coating * gi_gate
+            * (1.0 - smoothstep(8.0 * s, 20.0 * s, inset));
+        local_bl = saturate(local_bl + 0.20 * corner_scatter);
+        // A small-radius plate keeps a finite transmitting coating. At its
+        // grazing sidewall the footprint spreads before reaching the backdrop;
+        // raw narrow glyph cores must not fold into a sharp duplicate line.
+        // Capsule/circle and broad-radius coatings keep their existing kernel.
+        float sidewall_scatter = coating_spread * saturate((rl - 0.8) / 0.2) * gi_gate
+            * (1.0 - smoothstep(2.0 * s, 6.0 * s, inset));
+        local_bl = saturate(local_bl + 0.30 * sidewall_scatter);
+    }
+    // Gradient inactive -> always 1 -> local_bl == bl and gap preserved, plain glass bitwise
+    // identical pre-change.
+    float gradient_scale = 1.0;
+    if (u.edge_params.x > 0.5 && u.edge_params.z > 0.001) {
+        int   grad_dir = int(u.edge_params.x + 0.5);
+        float gt = (grad_dir == 1) ? node_uv.y
+                 : (grad_dir == 2) ? (1.0 - node_uv.y)
+                 : (grad_dir == 3) ? node_uv.x
+                 : (1.0 - node_uv.x);
+        gt = clamp(gt, 0.0, 1.0);
+        int   stop_n = clamp(int(u.edge_params.w + 0.5), 2, 4);
+        float prof = u.edge_stop_str[0];
+        for (int i = 0; i < stop_n - 1; i++) {
+            float p0 = u.edge_stop_pos[i];
+            float p1 = max(u.edge_stop_pos[i + 1], p0 + 1e-4);
+            if (gt >= p0)
+                prof = mix(u.edge_stop_str[i], u.edge_stop_str[i + 1], smoothstep(p0, p1, gt));
+        }
+        float str  = clamp(u.edge_params.z, 0.0, 1.0);
+        float pf   = clamp(prof, 0.0, 1.0);
+        // Two semantics (types.zig BlurGradient contract):
+        //   stop strength = absolute blur_level (0 = pure sharp, 1 = pure blur);
+        //   BlurGradient.strength = global fade between the 'no-gradient uniform base bl' and the
+        //   'gradient profile': local = mix(bl, prof, str).
+        //
+        // local = max(bl, str) * prof would treat str as a 'target blur': any str > 0.001 activates
+        // the gradient fully and a zero profile gives instant sharp; GlassBox scroll-edge str ramps
+        // from 0, so the first scroll frame would lose blur below the text. mix is continuous as
+        // str -> 0 back to base.
+        // Extrema check: progressiveBlurEdge (bl=0, str=1) -> mix(0,pf,1) = pf = max(0,1)*pf; gap
+        // scale likewise: mix(1,pf,1) = pf.
+        gradient_scale = mix(1.0, pf, str);
+        local_bl = mix(bl, pf, str);
+    }
+    // Gap (backdrop_distance) is 'farther from plate, more blur' physics, true for base; constant
+    // offset raises gradient sharp end (gap~2.5 contributes +0.112, eats ramp tail). Gradient
+    // active: scale by same profile, ensure prof=0 -> effective_blur exactly 0.
+    float effective_blur = clamp(local_bl + gap * 0.045 * gradient_scale, 0.0, 1.0) * (1.0 - (plate ? 0.0 : rim_sharp * 0.85));
+    // Sample carries alpha = coverage: capture pad beyond window/RT is transparent black (valid
+    // backplate alpha=1), post-blur rgb pre-multiplied. Unpremultiply equivalent to weighted avg of
+    // valid plate only (clamp-to-edge extend); else glass on window edge halos black.
+    float4 br = blur_tex.sample(smp, blur_uv(uvr, u));
+    float4 bg = blur_tex.sample(smp, blur_uv(uvg, u));
+    float4 bb = blur_tex.sample(smp, blur_uv(uvb, u));
+    // Legacy (non-native) model is calibrated in linear light: textures hold
+    // sRGB-encoded values, so decode at every sample and encode at the output.
+    float3 blur_c = srgb_to_linear(clamp(float3(br.r / max(br.a, 1e-3),
+                                                bg.g / max(bg.a, 1e-3),
+                                                bb.b / max(bb.a, 1e-3)), 0.0, 1.0));
+    // Sharp unblurred, pad hard 0/1: no content recoverable from pad, fallback to blur extend per
+    // coverage, avoid division-by-zero pure black.
+    float4 sr = sharp_tex.sample(smp, uvr);
+    float4 sg = sharp_tex.sample(smp, uvg);
+    float4 sb = sharp_tex.sample(smp, uvb);
+    float3 sharp_lin = srgb_to_linear(clamp(float3(sr.r / max(sr.a, 1e-3), sg.g / max(sg.a, 1e-3), sb.b / max(sb.a, 1e-3)), 0.0, 1.0));
+    float3 sharp_c = mix(blur_c, sharp_lin, saturate(float3(sr.a, sg.a, sb.a)));
+    // Filter a diffuse coating in source texture space before bending it.
+    // Destination derivatives smear compressed folds and reduce their contrast.
+    // Transmitting clear coatings retain their existing anisotropic footprint.
+    float core_footprint = (diffuse_coating ? 0.5 + 0.75 * plate_corner : 0.8 + 1.2 * plate_corner) * s;
+    float2 core_dx = (diffuse_coating ? float2(u.texel_size.x, 0.0) : dfdx(uvg)) * core_footprint;
+    float2 core_dy = (diffuse_coating ? float2(0.0, u.texel_size.y) : dfdy(uvg)) * core_footprint;
+    if (plate && gi_gate > 0.0 && effective_blur > 0.0 && effective_blur < 1.0) {
+        float4 core = coated_transmission(sharp_tex, smp, uvg, core_dx, core_dy, uv_lo, uv_hi, diffuse_coating);
+        float3 core_c = mix(blur_c, srgb_to_linear(clamp(core.rgb / max(core.a, 1e-3), 0.0, 1.0)), saturate(core.a));
+        sharp_c = mix(sharp_c, core_c, gi_gate * smoothstep(0.0, 0.05, effective_blur));
+    }
+    float3 base = mix(blur_c, sharp_c, 1.0 - effective_blur);
+    if (plate && rl < 1.0 && gi_gate > 0.0) {
+        float2 straight_uv = clamp(sample_uv, uv_lo, uv_hi);
+        float4 direct_blur = blur_tex.sample(smp, blur_uv(straight_uv, u));
+        float3 direct_c = srgb_to_linear(clamp(direct_blur.rgb / max(direct_blur.a, 1e-3), 0.0, 1.0));
+        if (effective_blur < 1.0) {
+            float4 direct_sharp = sharp_tex.sample(smp, straight_uv);
+            float3 core_c = mix(direct_c, srgb_to_linear(clamp(direct_sharp.rgb / max(direct_sharp.a, 1e-3), 0.0, 1.0)), saturate(direct_sharp.a));
+            if (effective_blur > 0.0) {
+                float4 direct_core = coated_transmission(sharp_tex, smp, straight_uv,
+                    dfdx(sample_uv) * core_footprint, dfdy(sample_uv) * core_footprint,
+                    uv_lo, uv_hi, diffuse_coating);
+                float3 filtered_c = mix(direct_c, srgb_to_linear(clamp(direct_core.rgb / max(direct_core.a, 1e-3), 0.0, 1.0)), saturate(direct_core.a));
+                core_c = mix(core_c, filtered_c, gi_gate * smoothstep(0.0, 0.05, effective_blur));
+            }
+            direct_c = mix(direct_c, core_c, 1.0 - effective_blur);
+        }
+        base = mix(direct_c, base, rl * gi_gate);
+    }
+
+    // -- Background saturate/brightness (CSS backdrop-filter order: before refraction/specular) --
+    float bd_sat = u.bottom_surface_params.z;
+    float bd_bri = u.bottom_surface_params.w;
+    if (abs(bd_sat - 1.0) > 1e-3) base = saturate_color(base, bd_sat);
+    if (abs(bd_bri - 1.0) > 1e-3) base = clamp(base * bd_bri, 0.0, 1.0);
+
+    // -- Refraction saturation micro-boost (both edges contribute dispersion) --
+    float combined_edge = top_edge_factor + bottom_edge_factor * 0.45;
+    float sat_boost = mix(1.0, 1.01 + combined_edge * 0.06, gi_gate);
+    base = saturate_color(base, sat_boost);
+
+    // -- Beer-Lambert colored transmission Tint --
+    float ta = clamp(u.glass_tint.a, 0.0, 1.0);
+    if (u.tint_mode > 0.5) {
+        // Veil opacity is a material parameter, independent of optical gain.
+        // Only the explicit blur-only state suppresses it.
+        base = mix(base, srgb_to_linear(clamp(u.glass_tint.rgb, float3(0.0), float3(1.0))), ta * smoothstep(0.0, 0.05, gi));
+    } else if (ta > 0.005) {
+        const float d_ref = 8.0;
+        float3 T_ref = mix(float3(1.0), srgb_to_linear(clamp(u.glass_tint.rgb, float3(0.0), float3(1.0))), ta * 0.60);
+        T_ref = max(T_ref, float3(0.05));
+        float3 sigma_a = -log(T_ref) / d_ref;
+        float  d_eff_clamped = clamp(d_eff / s, 0.0, 50.0);
+        float3 absorb = exp(-sigma_a * d_eff_clamped);
+        absorb = clamp(absorb, float3(0.02), float3(1.0));
+        base = base * absorb;
+    }
+
+    if (plate) {
+        // A thin coated edge reflects the backdrop's color. Applying a broad
+        // white dielectric highlight here turns dark material into a silver
+        // bevel and desaturates prominent tint. Keep its support in logical
+        // pixels, independently of the width of the refracting sidewall.
+        float edge = 1.0 - smoothstep(0.1 * s, 1.2 * s, inset);
+        float tint_chroma = ta * (max(max(u.glass_tint.r, u.glass_tint.g), u.glass_tint.b)
+            - min(min(u.glass_tint.r, u.glass_tint.g), u.glass_tint.b));
+        // The coating reflects a colored veil more strongly than a neutral
+        // transmission. Neutral highlights follow the projected light axis;
+        // an equal-strength outline overlights the oblique and side edges.
+        float directional = mix(1.0 - 0.7 * max(-2.0 * out_n.x * out_n.y, 0.0), 1.0, tint_chroma);
+        float3 reflection = clamp(base * (1.0 + mix(4.0, 12.0, tint_chroma) * sop * directional), 0.0, 1.0);
+        base = mix(base, reflection, edge * gi_gate);
+        return float4(linear_to_srgb(clamp(base, 0.0, 1.0)) * mask, mask);
+    }
+
+    // -- Specular Highlight (tunable angle)—primary surface highlight --
+    float2 light2d = normalize(float2(cos(spec_angle), sin(spec_angle)));
+    float3 light_dir = normalize(float3(light2d, 0.55));
+    float  ndotl     = dot(N, light_dir);
+    float  rim_light = smoothstep(-0.3, 1.0, ndotl);
+    // Rim_mask: bezel region strong highlight + body region subtle ambient specular.
+    float  rim_mask  = saturate(top_edge_factor * top_edge_factor + (plate ? 0.0 : 0.08));
+
+    float3 spec_base = saturate_color(base, 1.0 + (sst - 1.0) * 0.12);
+    float3 spec_col  = mix(spec_base, float3(1.0), clamp(rim_light * rim_light + top_surf.height * 0.25, 0.0, 1.0));
+    float  spec_str  = clamp(rim_light * rim_mask * sop * gi, 0.0, 1.0);
+    base = mix(base, spec_col, spec_str);
+
+    // -- Secondary highlight (bottom surface internal reflection) --
+    if (bottom_surface_kind != 0) {
+        float  bot_rim_mask = saturate(bottom_edge_factor * bottom_edge_factor);
+        float  bot_ndotl    = dot(N, normalize(float3(-light2d * 0.6, 0.75)));
+        float  bot_rim      = smoothstep(-0.2, 0.8, bot_ndotl);
+        float  bot_spec_str = clamp(bot_rim * bot_rim_mask * sop * gi * 0.30, 0.0, 0.35);
+        float3 bot_spec_col = mix(spec_base, float3(1.0, 1.0, 0.98), bot_rim * 0.5 + bot_surf.height * 0.2);
+        base = mix(base, bot_spec_col, bot_spec_str);
+    }
+
+    // -- Fresnel edge highlight (entry+exit surface) --
+    // N faces viewer (+Z); -Z made cosV zero everywhere.
+    float cosV     = saturate(N.z);
+    const float f0 = 0.03374; // ((IOR_G - 1) / (IOR_G + 1))^2
+    float fresnel  = f0 + (1.0 - f0) * pow(1.0 - cosV, 5.0);
+    float lit_side = max(dot(out_n, light2d), 0.0);
+    float rim_w_top = clamp(top_bezel_w * 0.20, 1.5 * s, 5.0 * s);
+    float edge_rim_top = 1.0 - smoothstep(0.0, rim_w_top, inset);
+    float f_str_top = clamp(fresnel * lit_side * edge_rim_top * (0.78 + gap * 0.015), 0.0, 0.9) * gi_gate;
+    base = mix(base, float3(1.0), f_str_top);
+    if (bottom_surface_kind != 0) {
+        float rim_w_bot = clamp(bottom_bezel_w * 0.20, 1.5 * s, 5.0 * s);
+        float edge_rim_bot = 1.0 - smoothstep(0.0, rim_w_bot, inset);
+        float f_str_bot = clamp(fresnel * lit_side * edge_rim_bot * 0.35, 0.0, 0.4) * gi_gate;
+        base = mix(base, float3(1.0), f_str_bot);
+    }
+
+    // -- Backlit inner shadow (both edges contribute) --
+    float2 shad2d = -light2d;
+    float  edge_rim_combined = edge_rim_top;
+    if (bottom_surface_kind != 0) {
+        float rim_w_bot2 = clamp(bottom_bezel_w * 0.20, 1.5 * s, 5.0 * s);
+        edge_rim_combined = max(edge_rim_top, (1.0 - smoothstep(0.0, rim_w_bot2, inset)) * 0.5);
+    }
+    float  shad_str = clamp(edge_rim_combined * max(dot(out_n, shad2d), 0.0) * 0.12, 0.0, 0.24) * gi_gate;
+    base = base * (1.0 - shad_str);
+
+    // Blur gradient already participates in background sample (effective_blur <- local_bl), drives
+    // sharp<->blur along axis, later refraction/specular/tint over correct base—no second-fog layer
+    // here.
+
+    base = clamp(base, 0.0, 1.0);
+    return float4(linear_to_srgb(clamp(base, 0.0, 1.0)) * mask, mask);
+}

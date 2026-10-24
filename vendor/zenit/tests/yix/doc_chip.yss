@@ -1,0 +1,24 @@
+//! Documentation example (docs/YIX_REFERENCE.md §2.1): Chip styles. Changes here must sync docs.
+const ui = @import("ui");
+
+/// Capsule: neutral / accent tones, outlined when selected; hover background fades in
+recipe Chip {
+  base {
+    direction: row;
+    align-items: center;
+    gap: space100;
+    padding: space50 space200;
+    corner-radius: full;
+    background: bg-secondary;
+    transition: background 120ms ease-out;
+    :hover { background: bg-hover; }
+  }
+  variant tone = neutral {
+    neutral { }
+    accent  { background: mix(bg-primary, accent, 0.15); }
+  }
+  flag selected { border: 1 accent; }
+}
+
+style label { color: fg-primary; font-size: sm; }
+style remove { padding: 0 space50; corner-radius: full; :hover { background: bg-hover; } }

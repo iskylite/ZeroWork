@@ -1,0 +1,20 @@
+//! Skeleton view. Styles in styles.yss, shared types and tests in mod.zig.
+const ui = @import("../../ui.zig");
+const mod = @import("mod.zig");
+const S = @import("styles.yss");
+const SkeletonVariant = mod.SkeletonVariant;
+
+/// Loading placeholder skeleton: count skeleton blocks stacked, can have shimmer animation.
+/// Skeleton visually means 'content not here yet', AT side conveys via outer busy state (announced
+/// once, not N times per block);
+/// live=polite lets content actually arriving be announced in passing.
+pub fn Skeleton(variant: SkeletonVariant = .text, width: f32 = 200, height: f32 = 16, animate: bool = true, count: u8 = 1, gap: f32 = 8) View {
+    const bones = computed(@as(usize, @max(count, 1)));
+    return (
+        <box style={S.stack.of(.{ .gap = gap })} a11y={.{ .role = .status, .label = "Loading", .busy = true, .live = "polite" }}>
+            {for (0..bones) |_|
+                <box style={.{ S.bone.of(.{ .variant = variant, .width = width, .height = height }), ui.view.loop(.{ .period_ms = S.shimmer_period_ms, .on = animate }, S.shimmer) }} />
+            }
+        </box>
+    );
+}

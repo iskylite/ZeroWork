@@ -1,0 +1,35 @@
+//! Stack styles: layout entirely from props (gap, alignment, size, padding, background, wrap). View
+//! in stack.yix.
+const ui = @import("../../ui.zig");
+
+/// Stack: shrinks to content when size not given; background default transparent. VStack / HStack
+/// shared, direction from view (includes reverse).
+style stack(
+  $direction: ui.Direction,
+  $gap: f32,
+  $justify: ui.JustifyContent,
+  $align_items: ui.AlignItems,
+  $width: ?f32,
+  $height: ?f32,
+  $padding: ?ui.Padding,
+  $background: ?ui.Color,
+  $wrap: bool = false,
+) {
+  direction: $direction;
+  gap: $gap;
+  justify: $justify;
+  align-items: $align_items;
+  width: $width ?? fit;
+  height: $height ?? fit;
+  padding: $padding ?? 0;
+  background: $background ?? transparent;
+  when $wrap { flex-wrap: wrap; }
+}
+
+/// Elastic spacing: occupies remaining space; fixed to min-size when given
+style spacer($min_size: f32) {
+  width: grow;
+  height: grow;
+  flex: 1;
+  when {$min_size > 0} { width: $min_size; height: $min_size; }
+}

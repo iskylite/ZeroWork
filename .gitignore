@@ -1,0 +1,71 @@
+zig-cache/
+.zig-cache/
+.zig-global-cache/
+.zig-local-cache/
+zig-out/
+.DS_Store
+.claude
+/data
+/exports
+/figma-review
+/logs
+
+# Local run/build artifacts
+dist/
+logs/
+.dsh-computer-use/
+zig-pkg/
+
+# Local test runs and design scratch exports; curated evidence lives in docs/.
+/artifacts/
+/screenshots/
+
+# Local JavaScript/Python dependencies and cache files.
+node_modules/
+__pycache__/
+*.py[cod]
+
+# Local credentials; keep shareable environment templates visible.
+.env
+.env.*
+!.env.example
+!.env.template
+
+# vendored libssh2 in-tree configure artifacts
+vendor/libssh2/Makefile
+vendor/libssh2/config.log
+vendor/libssh2/config.status
+vendor/libssh2/libtool
+vendor/libssh2/libssh2.pc
+vendor/libssh2/docs/Makefile
+vendor/libssh2/example/Makefile
+vendor/libssh2/example/.deps/
+vendor/libssh2/src/Makefile
+vendor/libssh2/src/.deps/
+vendor/libssh2/src/.libs/
+vendor/libssh2/src/*.o
+vendor/libssh2/src/*.lo
+vendor/libssh2/src/libssh2.la
+vendor/libssh2/src/libssh2_config.h
+vendor/libssh2/src/stamp-h1
+vendor/libssh2/tests/.deps/
+vendor/libssh2/tests/Makefile
+vendor/libssh2/tests/ossfuzz/.deps/
+vendor/libssh2/tests/ossfuzz/Makefile
+vendor/libssh2/tests/*/*.o
+vendor/libssh2/tests/*/*.lo
+vendor/libssh2/example/simple/.deps/
+vendor/libssh2/example/simple/Makefile
+docs/SPEC/figma
+docs/SPEC/html
+docs/SPEC/_legacy
+
+# Local configuration, private acceptance inputs and generated evidence.
+/config.toml
+/hosts.toml
+/evidence/
+/docs/DESIGN/evidence/
+/docs/DEVELOPMENT/UI_ACCEPTANCE_RECORDS/
+/*-before.png
+*.private.json
+*.private.toml

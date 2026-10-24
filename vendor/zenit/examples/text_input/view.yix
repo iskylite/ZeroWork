@@ -1,0 +1,48 @@
+const std = @import("std");
+const ui = @import("ui");
+const W = ui.widgets;
+
+/// Styles in styles.yss
+const S = @import("styles.yss");
+
+/// Controlled input parent: via ui.split, each proposed change converts to uppercase and applies.
+/// Cursor should stop after insertion point when inserting mid-string (not jump to end), Cmd+Z goes
+/// back before conversion.
+const UpperCode = struct {
+    code: *ui.Signal([]const u8),
+    buf: [64]u8 = undefined,
+
+    fn write(self: *UpperCode, proposed: []const u8) void {
+        const n = @min(proposed.len, self.buf.len);
+        for (proposed[0..n], 0..) |c, i| self.buf[i] = std.ascii.toUpper(c);
+        self.code.set(self.buf[0..n]);
+    }
+};
+
+/// Force-uppercase input: state object must be created at mount (imperative), so written as normal
+/// Zig component, used as tag in template.
+fn mountCodeInput(_: struct {}, scope: *ui.Scope, cx: *ui.Cx) anyerror!*ui.Node {
+    const upper = try cx.bindState(UpperCode, .{ .code = try scope.createText("ABCD", .{}) });
+    return ui.view.render(scope, cx, ui.view.attrs(.{ .test_id = "input.code" }, W.Input(.{
+        .label_text = "Code (forced upper case)",
+        .value = ui.split(upper.code, ui.on.call(upper, UpperCode.write)),
+        .width = 320,
+    })));
+}
+fn CodeInput(props: struct {}) ui.view.ComponentOf(mountCodeInput) {
+    return ui.view.component(mountCodeInput, props);
+}
+
+pub fn TextInputDemo() View {
+    return (
+        <col style={S.root}>
+            <text style={S.title}>Text Input Demo</text>
+            <text style={S.hint}>Tab between fields. Try IME (中文/日本語/한국어) too.</text>
+            <W.Input testId="input.name" labelText="Name" placeholder="Your name" width={320} />
+            <W.Input testId="input.email" labelText="Email" placeholder="you@example.com" inputType={.email} width={320} />
+            <W.Input testId="input.password" labelText="Password" placeholder="••••••••" inputType={.password} width={320} />
+            <CodeInput />
+            <W.Textarea testId="input.notes" labelText="Notes" placeholder="Anything you want to remember…" rows={6} width={480} />
+        </col>
+    );
+}

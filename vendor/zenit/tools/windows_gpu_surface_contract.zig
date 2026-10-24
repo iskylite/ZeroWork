@@ -1,0 +1,138 @@
+const std = @import("std");
+const d12 = @import("gpu").Backend.native;
+const b = d12.renderer_device;
+const a = std.heap.page_allocator;
+extern fn zenit_d12_test_hidden_window_create() ?*anyopaque;
+extern fn zenit_d12_test_hidden_window_destroy(*anyopaque) void;
+extern fn zenit_d12_test_gate_create(*anyopaque, *anyopaque) *anyopaque;
+extern fn zenit_d12_test_gate_signal(*anyopaque) void;
+extern fn zenit_d12_test_gate_release(*anyopaque) void;
+extern fn zenit_d12_test_fail_next_signal(*anyopaque) void;
+fn expectError(expected: anyerror, result: anytype) !void {
+    if (result) |_| return error.ExpectedFailure else |err| if (err != expected) return err;
+}
+pub fn run() !void {
+    const window = zenit_d12_test_hidden_window_create() orelse return error.WindowCreationFailed;
+    defer zenit_d12_test_hidden_window_destroy(window);
+    var instance = try b.Instance.init(a, .{});
+    defer instance.deinit();
+    const adapters = try instance.enumerateAdapters();
+    defer a.free(adapters);
+    defer for (adapters) |*adapter| adapter.deinit();
+    var dq = try adapters[0].requestDevice(a, .{});
+    defer dq.device.deinit();
+    defer dq.queue.deinit();
+    var surface = b.Surface.init(window);
+    defer surface.deinit();
+    try expectError(error.SurfaceNotConfigured, surface.acquireTexture(a));
+    var config = b.SurfaceConfiguration{ .format = .bgra8_unorm, .width = 8, .height = 4, .present_mode = .immediate, .usage = .color_target_and_read };
+    var unsupported = config;
+    unsupported.alpha_mode = .premultiplied;
+    try expectError(error.UnsupportedSurfaceAlpha, surface.configure(a, &dq.device, unsupported));
+    unsupported = config;
+    unsupported.present_mode = .mailbox;
+    try expectError(error.UnsupportedPresentMode, surface.configure(a, &dq.device, unsupported));
+    try surface.configure(a, &dq.device, config);
+    var invalid = config;
+    invalid.width = 0;
+    try expectError(error.InvalidSurface, surface.configure(a, &dq.device, invalid));
+    invalid = config;
+    invalid.format = .rgba8_unorm;
+    try expectError(error.UnsupportedSurfaceReconfiguration, surface.configure(a, &dq.device, invalid));
+    var other = try adapters[0].requestDevice(a, .{});
+    defer other.device.deinit();
+    defer other.queue.deinit();
+    try expectError(error.InvalidSurfaceDevice, surface.configure(a, &other.device, config));
+    var foreign_encoder = try b.CommandEncoder.init(&other.queue);
+    defer foreign_encoder.deinit();
+    var foreign_command = try foreign_encoder.finish();
+    defer foreign_command.deinit();
+    var module = try b.ShaderModule.initFromSource(&dq.device, @import("render").shader_sources.damage_clear);
+    defer module.deinit();
+    var vertex = try module.getFunction("damage_clear_vertex_main");
+    defer vertex.deinit();
+    var fragment = try module.getFunction("damage_clear_fragment_main");
+    defer fragment.deinit();
+    var pipeline = try b.createRenderPipeline(&dq.device, .{ .vertex_function = &vertex, .fragment_function = &fragment, .color_attachment_formats = &.{.bgra8_unorm} });
+    defer pipeline.deinit();
+    try expectError(error.ResourcesStillAlive, dq.device.deinitChecked());
+    // Discard acquisition without submitting or presenting.
+    var abandoned = try surface.acquireTexture(a);
+    try expectError(error.SurfaceBusy, surface.acquireTexture(a));
+    try expectError(error.SurfaceBusy, surface.deinitChecked());
+    try expectError(error.SurfaceBusy, surface.configure(a, &dq.device, config));
+    var held = abandoned.texture.binding().createView();
+    abandoned.deinit();
+    try expectError(error.SurfaceBusy, surface.configure(a, &dq.device, config));
+    held.destroy();
+    for (0..7) |i| {
+        var frame = try surface.acquireTexture(a);
+        defer frame.deinit();
+        var view = frame.texture.binding().createView();
+        defer view.destroy();
+        var encoder = try b.CommandEncoder.init(&dq.queue);
+        defer encoder.deinit();
+        const red = i % 2 == 0;
+        var pass = try encoder.beginRenderPass(.{ .color_attachments = &.{.{ .view = view, .load_op = .clear, .store_op = .store, .clear_value = if (red) .RED else .GREEN }} });
+        pass.setPipeline(&pipeline);
+        pass.setScissorRect(2, 1, 3, 2);
+        try pass.drawChecked(3, 1, 0, 0);
+        pass.end();
+        var command = try encoder.finish();
+        defer command.deinit();
+        frame.preparePresent(&command);
+        try expectError(error.InvalidSurfaceDevice, frame.preparePresentChecked(&foreign_command));
+        try expectError(error.CommandNotSubmitted, frame.presentAfterSubmitChecked(&command));
+        try command.submitChecked();
+        try command.waitChecked(5000);
+        var pixels: [128]u8 = undefined;
+        try frame.texture.readBgra8(8, 4, &pixels, 32);
+        for (0..32) |p| {
+            const x = p % 8;
+            const y = p / 8;
+            const expected: [4]u8 = if (x >= 2 and x < 5 and y >= 1 and y < 3) .{ 0, 0, 0, 0 } else if (red) .{ 0, 0, 255, 255 } else .{ 0, 255, 0, 255 };
+            if (!std.mem.eql(u8, pixels[p * 4 ..][0..4], &expected)) return error.IncorrectSwapChainPixel;
+            std.mem.swap(u8, &pixels[p * 4], &pixels[p * 4 + 2]);
+        }
+        if (i == 6) std.debug.print("RENDERER_SURFACE_RGBA8_HEX={s}\n", .{std.fmt.bytesToHex(pixels, .lower)});
+        try frame.presentAfterSubmitChecked(&command);
+        try expectError(error.SurfaceAlreadyPresented, frame.presentAfterSubmitChecked(&command));
+    }
+    config.width = 6;
+    config.height = 3;
+    zenit_d12_test_fail_next_signal(dq.device.context.queue.raw);
+    try expectError(error.NativeGpuFailure, surface.configure(a, &dq.device, config));
+    try surface.configure(a, &dq.device, config);
+    var frame = try surface.acquireTexture(a);
+    if (frame.texture.size.width != 6 or frame.texture.size.height != 3) return error.IncorrectResizedSurface;
+    var view = frame.texture.binding().createView();
+    var encoder = try b.CommandEncoder.init(&dq.queue);
+    defer encoder.deinit();
+    var pass = try encoder.beginRenderPass(.{ .color_attachments = &.{.{ .view = view, .load_op = .clear, .store_op = .store, .clear_value = .BLUE }} });
+    pass.end();
+    var command = try encoder.finish();
+    var command_live = true;
+    defer if (command_live) command.deinit();
+    const gate = zenit_d12_test_gate_create(dq.device.context.device.raw, dq.device.context.queue.raw);
+    var signaled = false;
+    defer {
+        if (!signaled) zenit_d12_test_gate_signal(gate);
+        dq.device.context.queue.waitIdle(5000) catch @panic("surface gate cleanup");
+        zenit_d12_test_gate_release(gate);
+    }
+    try command.submitChecked();
+    frame.deinit(); // Abandon presentation, GPU still retains attachment.
+    view.destroy();
+    command.deinit();
+    command_live = false;
+    dq.device.context.timeout_ms = 0;
+    try expectError(error.GpuTimeout, surface.configure(a, &dq.device, config));
+    try expectError(error.GpuTimeout, surface.deinitChecked());
+    zenit_d12_test_gate_signal(gate);
+    signaled = true;
+    dq.device.context.timeout_ms = 5000;
+    try surface.configure(a, &dq.device, config);
+    var resized = try surface.acquireTexture(a);
+    resized.deinit();
+    std.debug.print("PASS: real hidden-HWND D3D12 flip-discard Surface, seven production shader draw/readback/Present cycles (224 exact pixels), resize, acquired/view/device/format guards, discard, GPU-blocked resize/destruction timeout and retry; desktop presentation not claimed\n", .{});
+}

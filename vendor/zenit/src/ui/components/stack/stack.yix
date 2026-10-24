@@ -1,0 +1,42 @@
+//! VStack / HStack / Spacer views. Children passed via ui.view.with(W.VStack(...), .{ ... }) or Yix
+//! tag children.
+const ui = @import("../../ui.zig");
+const S = @import("styles.yss");
+
+/// Vertical stack: <W.VStack gap={8}>…</W.VStack>
+pub fn VStack(
+    gap: f32 = 0,
+    justify: ui.JustifyContent = .start,
+    alignItems: ui.AlignItems = .stretch,
+    width: ?f32 = null,
+    height: ?f32 = null,
+    padding: ?ui.Padding = null,
+    background: ?ui.Color = null,
+    reverse: bool = false,
+    children: View,
+) View {
+    const direction = computed(if (reverse) ui.Direction.column_reverse else .column);
+    return <box style={S.stack.of(.{ .direction = direction, .gap = gap, .justify = justify, .align_items = alignItems, .width = width, .height = height, .padding = padding, .background = background })}>{children}</box>;
+}
+
+/// Horizontal stack: <W.HStack gap={8} wrap>…</W.HStack>
+pub fn HStack(
+    gap: f32 = 0,
+    justify: ui.JustifyContent = .start,
+    alignItems: ui.AlignItems = .center,
+    width: ?f32 = null,
+    height: ?f32 = null,
+    padding: ?ui.Padding = null,
+    background: ?ui.Color = null,
+    reverse: bool = false,
+    wrap: bool = false,
+    children: View,
+) View {
+    const direction = computed(if (reverse) ui.Direction.row_reverse else .row);
+    return <box style={S.stack.of(.{ .direction = direction, .gap = gap, .justify = justify, .align_items = alignItems, .width = width, .height = height, .padding = padding, .background = background, .wrap = wrap })}>{children}</box>;
+}
+
+/// Elastic spacing: occupies remaining space in stack
+pub fn Spacer(minSize: f32 = 0) View {
+    return <box style={S.spacer.of(.{ .min_size = minSize })} />;
+}

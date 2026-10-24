@@ -1,0 +1,44 @@
+const std = @import("std");
+const ui = @import("ui");
+const TerminalView = @import("ui/terminal_view.zig").TerminalViewNode;
+const Surface = @import("ui/terminal_surface.zig").Surface;
+const Adapter = @import("vt/ghostty_adapter.zig").Adapter;
+const identity = @import("host/identity.zig");
+const a = std.testing.allocator;
+
+test "notification displayed Local receipt retains owner output identity and cannot acknowledge scrollback or history" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(640, 200);
+    var view = try TerminalView.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    var adapter = try Adapter.init(a, 2, 32);
+    defer adapter.destroy();
+    _ = try adapter.feed("0\r\n1\r\n2\r\n3\r\n4\r\n5\r\n6");
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(35), .generation = 4 };
+    var surface: Surface = undefined;
+    surface.owner = owner;
+    surface.snapshot = .{ .owner = owner, .output_sequence = 7, .geometry_revision = 1, .input_revision = 0, .read_only = false, .eof_seen = false, .projection = try adapter.copyProjection(a) };
+    defer surface.snapshot.?.deinit(a);
+    view.terminal_surface = &surface;
+    defer view.terminal_surface = null;
+    view.has_frame = true;
+    try std.testing.expectEqual(@as(?u64, 7), view.notificationReadSequence(owner));
+    var wrong = owner;
+    wrong.generation += 1;
+    try std.testing.expect(view.notificationReadSequence(wrong) == null);
+    try adapter.scrollToRow(0);
+    surface.snapshot.?.projection.deinit(a);
+    surface.snapshot.?.projection = try adapter.copyProjection(a);
+    try std.testing.expect(view.notificationReadSequence(owner) == null);
+    try adapter.scroll(.bottom);
+    surface.snapshot.?.projection.deinit(a);
+    surface.snapshot.?.projection = try adapter.copyProjection(a);
+    try std.testing.expectEqual(@as(?u64, 7), view.notificationReadSequence(owner));
+    view.history.selected = 0;
+    try std.testing.expect(view.notificationReadSequence(owner) == null);
+    view.history.selected = null;
+    surface.snapshot.?.output_sequence = 0;
+    try std.testing.expect(view.notificationReadSequence(owner) == null);
+}

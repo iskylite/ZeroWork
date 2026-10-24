@@ -1,0 +1,12 @@
+const ui = @import("ui");
+
+/// Styles in styles.yss
+const S = @import("styles.yss");
+
+pub fn Target() View {
+    return (
+        <col style={S.root}>
+            <text style={S.title}>Console probe target</text>
+        </col>
+    );
+}

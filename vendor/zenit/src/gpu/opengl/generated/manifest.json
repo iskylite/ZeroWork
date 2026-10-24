@@ -1,0 +1,2412 @@
+{
+  "schema": 1,
+  "glsl_version": 430,
+  "clip_z_fixup": true,
+  "zero_initialized_variables": true,
+  "first_instance": "explicit-uniform",
+  "entries": [
+    {
+      "program": "blur",
+      "name": "kawase_vertex_main",
+      "stage": "vertex",
+      "bindings": [],
+      "storage_layouts": {},
+      "source_sha256": "ae2659a0b5e07a61334d35b3156fdbe00fd682b1a977054cf016cb4196a65e9d",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "kawase_vertex_main.glsl",
+      "spirv_sha256": "7a527eb225a9304be0dd8affce303a87b154a785bfcf2f2b7641a4d20a52342e",
+      "glsl_sha256": "0ac4b16b18e4b94ed40ad58bca1952633ca2c3137dff11589059fe101169caa2",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "blur",
+      "name": "kawase_downsample",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 32,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "ae2659a0b5e07a61334d35b3156fdbe00fd682b1a977054cf016cb4196a65e9d",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "kawase_downsample.glsl",
+      "spirv_sha256": "e7803a6cefc03291144c32266b63aa341c91dd9456d757a53a87b535bce06fce",
+      "glsl_sha256": "1bbe6298ab4837343c9d58a00e2eea00c28df2356d9632cbac51a00f3424f328",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedsource_texturesource_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_37",
+            "name": "KawaseUniforms",
+            "block_size": 32,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "blur",
+      "name": "kawase_upsample",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 32,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "ae2659a0b5e07a61334d35b3156fdbe00fd682b1a977054cf016cb4196a65e9d",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "kawase_upsample.glsl",
+      "spirv_sha256": "a0309d6318e6bd5b45cfbab2f5c7a6141a1b39a84322a7990116a8bed498dec4",
+      "glsl_sha256": "5b15fa79e13d2504dea5a86757e07ba4b8f115ef3874ce40bd4b70e7eda51d28",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedsource_texturesource_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_37",
+            "name": "KawaseUniforms",
+            "block_size": 32,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "blur",
+      "name": "gaussian_blur",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 1584,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "ae2659a0b5e07a61334d35b3156fdbe00fd682b1a977054cf016cb4196a65e9d",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "gaussian_blur.glsl",
+      "spirv_sha256": "4b278b7c39ea8088310d7e7a574af268d20056903a3fd1868edcf9c1ba29388b",
+      "glsl_sha256": "67851b1b4bb3a1699704987a70cf756eeecee02ba2a2fd6b710a9c7b8ede933d",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedsource_texturesource_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_32",
+            "name": "GaussianUniforms",
+            "block_size": 1584,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "blur",
+      "name": "gaussian_downsample",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 32,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "ae2659a0b5e07a61334d35b3156fdbe00fd682b1a977054cf016cb4196a65e9d",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "gaussian_downsample.glsl",
+      "spirv_sha256": "0ea74ee699c9037f0cc4a9cff3ad97f3e0caebcc00c9926567d30898c8e96f49",
+      "glsl_sha256": "0b5dc451553f295f5e138cf32b9bba9d44e90d9b47fc630c83a33787ff3eaeb7",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedsource_texturesource_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_37",
+            "name": "KawaseUniforms",
+            "block_size": 32,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "blur",
+      "name": "gaussian_encode",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 32,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "ae2659a0b5e07a61334d35b3156fdbe00fd682b1a977054cf016cb4196a65e9d",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "gaussian_encode.glsl",
+      "spirv_sha256": "abaee06fd6cef1f034ab5a3bf6af26934d6b6d5aed25902df86354945d2a5822",
+      "glsl_sha256": "3cd3ba347ce401bf32b5ad2f5ed2457a1991600de01cd987ded4b43d9b49c26b",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedsource_texturesource_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_40",
+            "name": "KawaseUniforms",
+            "block_size": 32,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "blur",
+      "name": "gaussian_decode",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "ae2659a0b5e07a61334d35b3156fdbe00fd682b1a977054cf016cb4196a65e9d",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "gaussian_decode.glsl",
+      "spirv_sha256": "9f3d970e634515eacd15b0728066dd98f99eadebb7f3fc15ae5e9e8562f2fed6",
+      "glsl_sha256": "700feee0664e9be3c2b517ac5e7bd7f7eb8f0a015aa0b4f2156ddba118341ed7",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedsource_texturesource_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "blur",
+      "name": "gaussian_filter_gamma",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 1584,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "ae2659a0b5e07a61334d35b3156fdbe00fd682b1a977054cf016cb4196a65e9d",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "gaussian_filter_gamma.glsl",
+      "spirv_sha256": "423e92773ae7de859e5e8453300abdf1f7ee8bbcdcd1d80c179960906a6e7c21",
+      "glsl_sha256": "134017918ed23888cf95e117d72c4d1869db1c2f36cf126eab2415be1bece8d8",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedsource_texturesource_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_32",
+            "name": "GaussianUniforms",
+            "block_size": 1584,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "blur",
+      "name": "gaussian_downsample_gamma",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 32,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "ae2659a0b5e07a61334d35b3156fdbe00fd682b1a977054cf016cb4196a65e9d",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "gaussian_downsample_gamma.glsl",
+      "spirv_sha256": "c266892e9633d88b740e306071592224ba67af6c29892f3990b4145734b2bfd7",
+      "glsl_sha256": "ce8dfafdccecb0dec96956bc37bdaf7f2f14ad46abb0470773acd9b6c6ab6803",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedsource_texturesource_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_37",
+            "name": "GaussianAreaUniforms",
+            "block_size": 32,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "composite",
+      "name": "blend_vertex_main",
+      "stage": "vertex",
+      "bindings": [],
+      "storage_layouts": {},
+      "source_sha256": "38cb96380e71c67ee12c36204b2abd648af7970f3289a8a62b6342d2969c96ef",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "blend_vertex_main.glsl",
+      "spirv_sha256": "9c38af892aaf1c6a48344395601d410c794f8ca606c791747d4e8d582c3e9dee",
+      "glsl_sha256": "4ffa89dd5536114c0cddb18070f98f62e5fd907da5739df25287b9de09745e7c",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "composite",
+      "name": "blend_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 144,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 1,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "38cb96380e71c67ee12c36204b2abd648af7970f3289a8a62b6342d2969c96ef",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "blend_fragment_main.glsl",
+      "spirv_sha256": "727593c40ffb07e96e4cde813129996d851241ac5f88edbdba15bc7391712038",
+      "glsl_sha256": "a715ffe5cc550b6d33e9646c643ccf1e74c0063b5771d055a4cb7e3e48b6da7e",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combineddestination_textureSPIRV_Cross_DummySampler",
+          "texture_group": 1,
+          "texture_binding": 1,
+          "sampler_group": null,
+          "sampler_binding": null
+        },
+        {
+          "unit": 1,
+          "uniform": "SPIRV_Cross_Combinedsource_texturetexture_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_432",
+            "name": "BlendUniforms",
+            "block_size": 144,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "path",
+      "name": "path_vertex_main",
+      "stage": "vertex",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 28
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 0,
+          "min_size": 736,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {
+        "PathVertexIn": 28
+      },
+      "source_sha256": "5c6b4148743fe16ebffe105c25e5e27107520dba3fef84ff9a843388e05c4d16",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "path_vertex_main.glsl",
+      "spirv_sha256": "b38043436120e0e5187641024ce4e6a0a1dc4d45b277e38cbc679db2db116441",
+      "glsl_sha256": "3f25768106b9eed15f286816486a492b1ec59a23419030da5675167d391cdca8",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_67",
+            "name": "PathParams",
+            "block_size": 736,
+            "set": 0,
+            "binding": 1
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_22",
+            "name": "vertices",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 0
+          }
+        ]
+      }
+    },
+    {
+      "program": "path",
+      "name": "path_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 0,
+          "min_size": 736,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "5c6b4148743fe16ebffe105c25e5e27107520dba3fef84ff9a843388e05c4d16",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "path_fragment_main.glsl",
+      "spirv_sha256": "8ab681200756fe79484dd6464a508495344d67f06bc478598e24f7b2341cceb0",
+      "glsl_sha256": "49bbb120125dcd96b29e775b022290ae83cf8aef4afd1b63cd75e9babf9acfdb",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_94",
+            "name": "PathParams",
+            "block_size": 736,
+            "set": 0,
+            "binding": 1
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "image",
+      "name": "image_vertex_main",
+      "stage": "vertex",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 336,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 112
+        }
+      ],
+      "storage_layouts": {
+        "ImageInstanceData": 112
+      },
+      "source_sha256": "c469d1c98c1cc2f033a1cb5554bb85bc4f1dcc94c7fb68bc8d9b1fd111ca7cf0",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "image_vertex_main.glsl",
+      "spirv_sha256": "07ffd7ceacfc8ec58e31f382d64d6acf457c5901fb5dd97f4bf3d0be4de5c09d",
+      "glsl_sha256": "4d2f278418499f1b89d4cc43fbc3b9ec692d904f4be178cba177a8455fde8079",
+      "first_instance_uniform": "zenit_first_instance",
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_107",
+            "name": "ImageParams",
+            "block_size": 336,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_24",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "image",
+      "name": "image_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 336,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "c469d1c98c1cc2f033a1cb5554bb85bc4f1dcc94c7fb68bc8d9b1fd111ca7cf0",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "image_fragment_main.glsl",
+      "spirv_sha256": "8baa9e455d0478a0fe21f5528035f36f1a69620544dbc9b4c2bc3b6cb3ffe321",
+      "glsl_sha256": "a4f1d17dfdd6df60eda94b0c63ad177d634d15a57c51efab76736661d402fa53",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedimage_textureimage_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_775",
+            "name": "ImageParams",
+            "block_size": 336,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "image",
+      "name": "image_unmasked_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 336,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "c469d1c98c1cc2f033a1cb5554bb85bc4f1dcc94c7fb68bc8d9b1fd111ca7cf0",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "image_unmasked_fragment_main.glsl",
+      "spirv_sha256": "dfc6d01d1a68ac613c0f3f027a2d1a6a064ba0f9effba160ea0ac3d0a5aa8377",
+      "glsl_sha256": "95c256d4bccbabbb4d1c46f3742afd7fe81605e91132d92614ded827ad272810",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedimage_textureimage_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_775",
+            "name": "ImageParams",
+            "block_size": 336,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "damage_clear",
+      "name": "damage_clear_vertex_main",
+      "stage": "vertex",
+      "bindings": [],
+      "storage_layouts": {},
+      "source_sha256": "d32be116f46978b2b50ab6c0568e9d9929aadec581e9df45b9f10f10ba1e4ad6",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "damage_clear_vertex_main.glsl",
+      "spirv_sha256": "64c0deea61a57d43bb9676798584efdc5626b7954cc9357623f726f7bd59cb59",
+      "glsl_sha256": "7351bc4b1739ba156b4468f57714feb4565e44dff760e693573d2cbd13002642",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "damage_clear",
+      "name": "damage_clear_fragment_main",
+      "stage": "fragment",
+      "bindings": [],
+      "storage_layouts": {},
+      "source_sha256": "d32be116f46978b2b50ab6c0568e9d9929aadec581e9df45b9f10f10ba1e4ad6",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "damage_clear_fragment_main.glsl",
+      "spirv_sha256": "3afaecf17073762baf13d7e894ba530a1f1855609da7f21e3a31a89f2342cbdc",
+      "glsl_sha256": "45bca33e5f8d4cc4862d50052edad37413730329311707ebbf53a1538c8a25d1",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "icon",
+      "name": "icon_vertex_main",
+      "stage": "vertex",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 336,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 64
+        }
+      ],
+      "storage_layouts": {
+        "IconInstanceData": 64
+      },
+      "source_sha256": "854b7fc8cfe30dcc95f4010c2f54542de8f2cb22e167bb2cd0611b897c91dfd0",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "icon_vertex_main.glsl",
+      "spirv_sha256": "3069124cd3e64202f6512e64bc75204061e260a9aa023b1025a11724c08b5865",
+      "glsl_sha256": "936b5690c54ec35fdb811cf37a2c8cf5e89e9668434473ec325176cb9b612434",
+      "first_instance_uniform": "zenit_first_instance",
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_91",
+            "name": "Params",
+            "block_size": 336,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_23",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "icon",
+      "name": "icon_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 336,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 64
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {
+        "IconInstanceData": 64
+      },
+      "source_sha256": "854b7fc8cfe30dcc95f4010c2f54542de8f2cb22e167bb2cd0611b897c91dfd0",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "icon_fragment_main.glsl",
+      "spirv_sha256": "f9b643f5bd210c9af010533620a4ab01ca9535959a65d363b3eed8ba6b5e44f3",
+      "glsl_sha256": "70200d89806f64fc0c0444eefae26d464cc70ddfc5893d794e27ea55e23ab024",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedmask_texatlas_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_798",
+            "name": "Params",
+            "block_size": 336,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_770",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "text",
+      "name": "text_vertex_main",
+      "stage": "vertex",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 336,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 80
+        }
+      ],
+      "storage_layouts": {
+        "GlyphInstance": 80
+      },
+      "source_sha256": "2a28de192787634feab592a94e9b05a832f731f2bb9750179286fa248e55e539",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "text_vertex_main.glsl",
+      "spirv_sha256": "27c6d2a0ac2e68e6d622360065272eed4bd67839ee94552ded7300797afa5a31",
+      "glsl_sha256": "f639b8c12e214e4e99a55eb4286ebd4b01332cedcc2ea0c9f646272f691d2d68",
+      "first_instance_uniform": "zenit_first_instance",
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_97",
+            "name": "Params",
+            "block_size": 336,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_23",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "text",
+      "name": "text_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 336,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 80
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 1,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {
+        "GlyphInstance": 80
+      },
+      "source_sha256": "2a28de192787634feab592a94e9b05a832f731f2bb9750179286fa248e55e539",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "text_fragment_main.glsl",
+      "spirv_sha256": "b5b6e506df59e01549b041b10fc63f95f666aec7ea3c99e6f351479998e78958",
+      "glsl_sha256": "50a059b741308903172d5e7620256f74e09d2e9a4b43d8472e7c76f5a8140281",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedglyph_atlas_coloratlas_sampler",
+          "texture_group": 1,
+          "texture_binding": 1,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        },
+        {
+          "unit": 1,
+          "uniform": "SPIRV_Cross_Combinedglyph_atlasatlas_sampler",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_800",
+            "name": "Params",
+            "block_size": 336,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_770",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_tiled_rect_vertex_main",
+      "stage": "vertex",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 176
+        }
+      ],
+      "storage_layouts": {
+        "InstanceData": 176
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_tiled_rect_vertex_main.glsl",
+      "spirv_sha256": "ce13cda8f1eba9ed6951e3dbefe84e478c180f117d7982de6ded0c92e9ccec41",
+      "glsl_sha256": "222a108c6b21c5d16645019c6c05aeb3bc57b449892080e3364f10f522541a10",
+      "first_instance_uniform": "zenit_first_instance",
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_144",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_32",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_vertex_main",
+      "stage": "vertex",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 176
+        },
+        {
+          "group": 0,
+          "binding": 3,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 32
+        }
+      ],
+      "storage_layouts": {
+        "InstanceData": 176,
+        "ShadowParam": 32
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_vertex_main.glsl",
+      "spirv_sha256": "5a9d44fa57c6ab4b8fa158c5c65fa6c1fa72a18bf845a15508129066b305aaaf",
+      "glsl_sha256": "071a06ca24faf4057ddd2e4fab4985bee9247f0e3d7edcf966c2f7386b77a5fe",
+      "first_instance_uniform": "zenit_first_instance",
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_144",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_32",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          },
+          {
+            "type": "_191",
+            "name": "shadow_params",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 3
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_shadow_ring_vertex_main",
+      "stage": "vertex",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 176
+        },
+        {
+          "group": 0,
+          "binding": 3,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 32
+        }
+      ],
+      "storage_layouts": {
+        "InstanceData": 176,
+        "ShadowParam": 32
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_shadow_ring_vertex_main.glsl",
+      "spirv_sha256": "28e1b3c90fe6061eed4a6f0f2c57648e87d7eb6368fccb56660fc30103f3abf6",
+      "glsl_sha256": "67f68fb8376aa5b041f76524319d6afa2b1d7ab3503978d58830d6e17208424f",
+      "first_instance_uniform": "zenit_first_instance",
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_144",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_32",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          },
+          {
+            "type": "_191",
+            "name": "shadow_params",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 3
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_dual_shadow_vertex_main",
+      "stage": "vertex",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 176
+        },
+        {
+          "group": 0,
+          "binding": 3,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 32
+        }
+      ],
+      "storage_layouts": {
+        "InstanceData": 176,
+        "ShadowParam": 32
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_dual_shadow_vertex_main.glsl",
+      "spirv_sha256": "adcaabcb574cc7a325fa30dfec295f0c7297c65e142a162c5ab8f5d3fcfffb1b",
+      "glsl_sha256": "1120969b2c222700e1c4f0513f2b83c25669e20299ab99ba175e24073a4adf3f",
+      "first_instance_uniform": "zenit_first_instance",
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_144",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_32",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          },
+          {
+            "type": "_191",
+            "name": "shadow_params",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 3
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_shadow_ring_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 3,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 32
+        }
+      ],
+      "storage_layouts": {
+        "ShadowParam": 32
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_shadow_ring_fragment_main.glsl",
+      "spirv_sha256": "630f3c89c0d2b8866958623216ae44ee2a2c6c6e760cdc9b861ec9a248da7688",
+      "glsl_sha256": "f148a4894248eaf0fa0e5b0f5a9b2fc49b7ce42c5b0e2aba1a189f8915e07660",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1772",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_2414",
+            "name": "shadow_params",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 3
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_dual_shadow_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_dual_shadow_fragment_main.glsl",
+      "spirv_sha256": "a8f3900bec9306bd2f37bcbcb74749009055340132b7730190dc0e8d7e3faca2",
+      "glsl_sha256": "0b173a5d5a4d0e86df02dabeff7404cc4c0a464c7e8e29a23cf360862ef097f9",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1772",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_linear_x_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 176
+        },
+        {
+          "group": 0,
+          "binding": 2,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 32
+        },
+        {
+          "group": 0,
+          "binding": 3,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 32
+        }
+      ],
+      "storage_layouts": {
+        "GradientStop": 32,
+        "ShadowParam": 32,
+        "InstanceData": 176
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_linear_x_fragment_main.glsl",
+      "spirv_sha256": "e593050672a58812483105c24f8275499010817672b89edfb30093e9238bb131",
+      "glsl_sha256": "e1332d1c0dfa00e2a7c4bf26539417db9427e06f4a27a542e12b3156c8106acd",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1772",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_2414",
+            "name": "shadow_params",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 3
+          },
+          {
+            "type": "_63",
+            "name": "grad_stops",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 2
+          },
+          {
+            "type": "_2923",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_linear_y_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 176
+        },
+        {
+          "group": 0,
+          "binding": 2,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 32
+        },
+        {
+          "group": 0,
+          "binding": 3,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 32
+        }
+      ],
+      "storage_layouts": {
+        "GradientStop": 32,
+        "ShadowParam": 32,
+        "InstanceData": 176
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_linear_y_fragment_main.glsl",
+      "spirv_sha256": "8c7e80be6be1cdb59c5f5d6e615d6c3f17c0ce2a011a15d459e3d83ff1408fa2",
+      "glsl_sha256": "a7633590835be96f18c3efe14d6296c3aba51ea36a96a0f777c81bc7d1aad541",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1772",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_2414",
+            "name": "shadow_params",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 3
+          },
+          {
+            "type": "_63",
+            "name": "grad_stops",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 2
+          },
+          {
+            "type": "_2923",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_inset_rect_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 176
+        }
+      ],
+      "storage_layouts": {
+        "InstanceData": 176
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_inset_rect_fragment_main.glsl",
+      "spirv_sha256": "d07b1cca5bdd6094eb8cf16a149b15b1ff1238e7d2a659f48fb1da45a91fe2d2",
+      "glsl_sha256": "c60280d0bb1fe3d4835b5f4bc33927784f5ca25ae1c596269bbd6c7e4e13b18a",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1764",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_2898",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 176
+        },
+        {
+          "group": 0,
+          "binding": 2,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 32
+        },
+        {
+          "group": 0,
+          "binding": 3,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 32
+        }
+      ],
+      "storage_layouts": {
+        "GradientStop": 32,
+        "ShadowParam": 32,
+        "InstanceData": 176
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_fragment_main.glsl",
+      "spirv_sha256": "8082f0dda745354ace51425fbc497bdbc0ed8de9bf8ea2a2a8d3337cab2b2f68",
+      "glsl_sha256": "0ca1604c2be8d24828f113ca82ce42f4d18a181be965d7488b88ab55900c9c4f",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1772",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_2414",
+            "name": "shadow_params",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 3
+          },
+          {
+            "type": "_63",
+            "name": "grad_stops",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 2
+          },
+          {
+            "type": "_2922",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_body_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 176
+        },
+        {
+          "group": 0,
+          "binding": 2,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 32
+        }
+      ],
+      "storage_layouts": {
+        "GradientStop": 32,
+        "InstanceData": 176
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_body_fragment_main.glsl",
+      "spirv_sha256": "0c6367c91b38d9d4236d76d36099929716ab99a1e9242a163ef5bc86c6dae420",
+      "glsl_sha256": "15903e739fc76a133d04e6903a86b6707751298533a1c0a4a8601cfb4eadc8e9",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1764",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_63",
+            "name": "grad_stops",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 2
+          },
+          {
+            "type": "_2897",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_outer_shadow_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 176
+        },
+        {
+          "group": 0,
+          "binding": 3,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 32
+        }
+      ],
+      "storage_layouts": {
+        "ShadowParam": 32,
+        "InstanceData": 176
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_outer_shadow_fragment_main.glsl",
+      "spirv_sha256": "052c377792ef5b6ad13de0d80da69b5c8b1c1175a9520d98c4ccd2a4d17707ef",
+      "glsl_sha256": "68a68841360ed97bd549af837d209592f94897a0df6077853c1503b9bf198d1f",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1764",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_2406",
+            "name": "shadow_params",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 3
+          },
+          {
+            "type": "_2897",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_inset_layer_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 176
+        }
+      ],
+      "storage_layouts": {
+        "InstanceData": 176
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_inset_layer_fragment_main.glsl",
+      "spirv_sha256": "10616b0dad01a09db58e54337d08c21f00ca5927a273b1f2cc98e81ae45ca8b5",
+      "glsl_sha256": "9abdb313502222619b2184b5d549e9ecad7bad3708ee9db1485f65842380446d",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1764",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_2897",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_border_layer_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        },
+        {
+          "group": 0,
+          "binding": 1,
+          "kind": 2,
+          "min_size": 0,
+          "stride": 176
+        }
+      ],
+      "storage_layouts": {
+        "InstanceData": 176
+      },
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_border_layer_fragment_main.glsl",
+      "spirv_sha256": "805c3414391e8c68496cc7722a73790b569d4a168e97ca6196b620d9d8de0d76",
+      "glsl_sha256": "3bbab9cbaf99bf3f12c19084ffb8416bac14653babea8d386fd34d441f76496b",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1764",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": [
+          {
+            "type": "_2897",
+            "name": "instances",
+            "readonly": true,
+            "block_size": 0,
+            "set": 0,
+            "binding": 1
+          }
+        ]
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_rounded_clip_rect_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_rounded_clip_rect_fragment_main.glsl",
+      "spirv_sha256": "e0df1b637319cc5889df49ab75e82dab86b857f7209dbb632c0e573afa8d3eef",
+      "glsl_sha256": "2b93323c900b1b41c7b5e9e3239fd2452fea1961d898df86a5e343e4e5e34b9b",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1778",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_rect_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_rect_fragment_main.glsl",
+      "spirv_sha256": "6f4a0c16aa4a21e430c46390a264e7e79caeea73f11a6107503b99ca96519a1e",
+      "glsl_sha256": "c8d39db91578e16b980ae248b49d94719ae0e6b5794db708a73a0761ae6adb37",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1778",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_solid_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_solid_fragment_main.glsl",
+      "spirv_sha256": "845a75fcc66a24f96add6df45f1245fbd7f2a88cbafa681594651cad63262a1d",
+      "glsl_sha256": "b5df9511e7da6662fc7f107429b8110781454c3a6d40bcbd8837064e5d56221d",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1778",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "sdf_primitives",
+      "name": "sdf_plain_rect_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 340,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "9faff780a58ca41b82537cb7ff767ad613b5d456ba064de9042a3455a589c078",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "sdf_plain_rect_fragment_main.glsl",
+      "spirv_sha256": "79908bde0056aa2a17725221157ab48c9f4f4ee99206c075732e5888b3661ebc",
+      "glsl_sha256": "e77bd70e26f9fe898ba54887e78d021afeb0e0132eb1f1c6e3855d6f700803bc",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_271",
+            "name": "Params",
+            "block_size": 340,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "glass",
+      "name": "glass_vertex_main",
+      "stage": "vertex",
+      "bindings": [],
+      "storage_layouts": {},
+      "source_sha256": "aac8810183ff31363b8e656630d5b177efda45156b88b5ff3892e5255bec152a",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "glass_vertex_main.glsl",
+      "spirv_sha256": "f0a6114c12518ab740f3c91808c17fc68d446b85c5cb7b0e8145deb9ff1b4ac9",
+      "glsl_sha256": "e685e450de348015f57d6eb846a92f9e6c78f441e2672e55148c6ab1c168f891",
+      "first_instance_uniform": null,
+      "texture_units": [],
+      "gl_resources": {
+        "ubos": [],
+        "ssbos": []
+      }
+    },
+    {
+      "program": "glass",
+      "name": "glass_fragment_main",
+      "stage": "fragment",
+      "bindings": [
+        {
+          "group": 0,
+          "binding": 0,
+          "kind": 0,
+          "min_size": 1664,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 0,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 1,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 2,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 3,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 1,
+          "binding": 4,
+          "kind": 1,
+          "min_size": 0,
+          "stride": 0
+        },
+        {
+          "group": 2,
+          "binding": 0,
+          "kind": 4,
+          "min_size": 0,
+          "stride": 0
+        }
+      ],
+      "storage_layouts": {},
+      "source_sha256": "aac8810183ff31363b8e656630d5b177efda45156b88b5ff3892e5255bec152a",
+      "compiler_sha256": "72e3c48aee4bbb9cf02d1dcc338c82437df7d7426d1679c2b1a97091b8c72a54",
+      "source": "glass_fragment_main.glsl",
+      "spirv_sha256": "f79f028c860b46af1ac56ec39aad55d47f54c82e5d6ace0dcbdade1bdef5c19a",
+      "glsl_sha256": "7e45546b2dda1989077943810a5cc0f3261ba1738d13ad3edfc74b9ad97b1505",
+      "first_instance_uniform": null,
+      "texture_units": [
+        {
+          "unit": 0,
+          "uniform": "SPIRV_Cross_Combinedblur_texsmp",
+          "texture_group": 1,
+          "texture_binding": 0,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        },
+        {
+          "unit": 1,
+          "uniform": "SPIRV_Cross_Combinedsoft_texsmp",
+          "texture_group": 1,
+          "texture_binding": 2,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        },
+        {
+          "unit": 2,
+          "uniform": "SPIRV_Cross_Combinedsharp_texsmp",
+          "texture_group": 1,
+          "texture_binding": 1,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        },
+        {
+          "unit": 3,
+          "uniform": "SPIRV_Cross_Combinedalternate_main_texsmp",
+          "texture_group": 1,
+          "texture_binding": 4,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        },
+        {
+          "unit": 4,
+          "uniform": "SPIRV_Cross_Combinedcoarse_texsmp",
+          "texture_group": 1,
+          "texture_binding": 3,
+          "sampler_group": 2,
+          "sampler_binding": 0
+        }
+      ],
+      "gl_resources": {
+        "ubos": [
+          {
+            "type": "_1529",
+            "name": "GlassUniformsBuffer",
+            "block_size": 1664,
+            "set": 0,
+            "binding": 0
+          }
+        ],
+        "ssbos": []
+      }
+    }
+  ],
+  "pipelines": [
+    [
+      "kawase_vertex_main",
+      "kawase_downsample"
+    ],
+    [
+      "kawase_vertex_main",
+      "kawase_upsample"
+    ],
+    [
+      "kawase_vertex_main",
+      "gaussian_blur"
+    ],
+    [
+      "kawase_vertex_main",
+      "gaussian_downsample"
+    ],
+    [
+      "kawase_vertex_main",
+      "gaussian_encode"
+    ],
+    [
+      "kawase_vertex_main",
+      "gaussian_decode"
+    ],
+    [
+      "kawase_vertex_main",
+      "gaussian_filter_gamma"
+    ],
+    [
+      "kawase_vertex_main",
+      "gaussian_downsample_gamma"
+    ],
+    [
+      "blend_vertex_main",
+      "blend_fragment_main"
+    ],
+    [
+      "path_vertex_main",
+      "path_fragment_main"
+    ],
+    [
+      "image_vertex_main",
+      "image_fragment_main"
+    ],
+    [
+      "image_vertex_main",
+      "image_unmasked_fragment_main"
+    ],
+    [
+      "damage_clear_vertex_main",
+      "damage_clear_fragment_main"
+    ],
+    [
+      "icon_vertex_main",
+      "icon_fragment_main"
+    ],
+    [
+      "text_vertex_main",
+      "text_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_shadow_ring_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_dual_shadow_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_linear_x_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_linear_y_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_inset_rect_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_body_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_outer_shadow_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_inset_layer_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_border_layer_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_rounded_clip_rect_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_rect_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_solid_fragment_main"
+    ],
+    [
+      "sdf_vertex_main",
+      "sdf_plain_rect_fragment_main"
+    ],
+    [
+      "glass_vertex_main",
+      "glass_fragment_main"
+    ],
+    [
+      "sdf_tiled_rect_vertex_main",
+      "sdf_rect_fragment_main"
+    ],
+    [
+      "sdf_shadow_ring_vertex_main",
+      "sdf_shadow_ring_fragment_main"
+    ],
+    [
+      "sdf_dual_shadow_vertex_main",
+      "sdf_dual_shadow_fragment_main"
+    ]
+  ],
+  "excluded_entries": [
+    {
+      "name": "sdf_region_vertex_main",
+      "reason": "Windows-only viewport-index optimization; OpenGL uses normal SDF/scissor pipelines"
+    }
+  ]
+}

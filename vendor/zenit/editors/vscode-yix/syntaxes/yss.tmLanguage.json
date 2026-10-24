@@ -1,0 +1,194 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Yix Style",
+  "scopeName": "source.yss",
+  "patterns": [
+    {
+      "include": "#declaration"
+    },
+    {
+      "include": "source.zig"
+    }
+  ],
+  "repository": {
+    "declaration": {
+      "comment": "顶层 recipe / style / mixin 声明（DSL）；其余照搬 Zig",
+      "begin": "^\\s*(recipe|style|mixin)\\s+([A-Za-z_][\\w]*)",
+      "beginCaptures": {
+        "1": {
+          "name": "keyword.declaration.yss"
+        },
+        "2": {
+          "name": "entity.name.type.yss"
+        }
+      },
+      "end": "(?<=\\})",
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#block"
+        },
+        {
+          "include": "#header"
+        }
+      ]
+    },
+    "header": {
+      "patterns": [
+        {
+          "match": "\\bslots\\b",
+          "name": "keyword.other.slots.yss"
+        },
+        {
+          "match": "[A-Za-z_][\\w]*",
+          "name": "variable.parameter.yss"
+        },
+        {
+          "match": "[(),]",
+          "name": "punctuation.separator.yss"
+        }
+      ]
+    },
+    "block": {
+      "begin": "\\{",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.block.begin.yss"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.block.end.yss"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#comment"
+        },
+        {
+          "include": "#section"
+        },
+        {
+          "include": "#condition"
+        },
+        {
+          "include": "#property"
+        },
+        {
+          "include": "#call"
+        },
+        {
+          "include": "#block"
+        },
+        {
+          "include": "#name"
+        }
+      ]
+    },
+    "comment": {
+      "match": "//.*$",
+      "name": "comment.line.double-slash.yss"
+    },
+    "section": {
+      "patterns": [
+        {
+          "match": "\\b(variant|flag)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "keyword.control.yss"
+            },
+            "2": {
+              "name": "entity.name.tag.yss"
+            }
+          }
+        },
+        {
+          "match": "\\b(base|variant|flag|when|in)\\b",
+          "name": "keyword.control.yss"
+        },
+        {
+          "match": "[&!=]",
+          "name": "keyword.operator.yss"
+        }
+      ]
+    },
+    "condition": {
+      "match": "(:)(hover|active|focus-visible|focus|selected|expanded|invalid|disabled)\\b",
+      "captures": {
+        "1": {
+          "name": "punctuation.definition.condition.yss"
+        },
+        "2": {
+          "name": "entity.other.attribute-name.pseudo-class.yss"
+        }
+      }
+    },
+    "property": {
+      "begin": "([A-Za-z_][\\w-]*)\\s*(:)(?!:)",
+      "beginCaptures": {
+        "1": {
+          "name": "support.type.property-name.yss"
+        },
+        "2": {
+          "name": "punctuation.separator.key-value.yss"
+        }
+      },
+      "end": ";",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.terminator.yss"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#value"
+        }
+      ]
+    },
+    "value": {
+      "patterns": [
+        {
+          "match": "#(?:[0-9a-fA-F]{8}|[0-9a-fA-F]{6})\\b",
+          "name": "constant.other.color.yss"
+        },
+        {
+          "match": "-?\\d+(\\.\\d+)?(px|ms|s)?\\b",
+          "name": "constant.numeric.yss"
+        },
+        {
+          "match": "\\b(mix|rgba|rgb)(?=\\()",
+          "name": "support.function.yss"
+        },
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "name": "meta.embedded.expression.yss",
+          "patterns": [
+            {
+              "include": "source.zig"
+            }
+          ]
+        },
+        {
+          "match": "\\b(transparent|true|false|grow|fit|fill)\\b",
+          "name": "constant.language.yss"
+        },
+        {
+          "match": "[A-Za-z_][\\w-]*",
+          "name": "variable.other.token.yss"
+        }
+      ]
+    },
+    "call": {
+      "match": "\\b([A-Za-z_][\\w]*)(?=\\s*\\()",
+      "name": "entity.name.function.mixin.yss"
+    },
+    "name": {
+      "match": "[A-Za-z_][\\w]*",
+      "name": "entity.name.tag.yss"
+    }
+  }
+}

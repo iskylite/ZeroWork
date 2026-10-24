@@ -1,0 +1,105 @@
+{
+  "name": "zenit-yix",
+  "displayName": "Yix (zenit)",
+  "description": "Yix (.yix) and Yix style (.yss) support for zenit: Zig intelligence through ZLS with position mapping; .yss property / token / variant completion, hover, go-to-definition and outline; diagnostics; syntax highlighting. Generated twins (_x.yix.zig) nest under their source and open read-only.",
+  "version": "0.5.3",
+  "publisher": "zenit",
+  "license": "GPL-3.0-only OR LicenseRef-zenit-Commercial",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:yix",
+    "onLanguage:yss"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "yix",
+        "aliases": [
+          "Yix",
+          "yix"
+        ],
+        "extensions": [
+          ".yix"
+        ],
+        "configuration": "./language-configuration.json"
+      },
+      {
+        "id": "yss",
+        "aliases": [
+          "Yix Style",
+          "yss"
+        ],
+        "extensions": [
+          ".yss"
+        ],
+        "configuration": "./language-configuration.yss.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "yix",
+        "scopeName": "source.yix",
+        "path": "./syntaxes/yix.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.block.zig": "zig"
+        }
+      },
+      {
+        "language": "yss",
+        "scopeName": "source.yss",
+        "path": "./syntaxes/yss.tmLanguage.json",
+        "embeddedLanguages": {
+          "meta.embedded.expression.yss": "zig"
+        }
+      }
+    ],
+    "configuration": {
+      "title": "Yix",
+      "properties": {
+        "yix.lsp.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to yix-lsp (zig build yix-lsp installs it and zenit-zls). Empty: <workspace>/zig-out/bin/yix-lsp, then PATH; .exe on Windows."
+        },
+        "yix.zls.path": {
+          "type": "string",
+          "default": "",
+          "description": "Path to ZLS. Empty: zig.zls.path, then <workspace>/zig-out/bin/zenit-zls (zig build zls or dev-tools), then zenit-zls / zls on PATH, then the Zig extension download; .exe on Windows."
+        },
+        "yix.buildOnSave": {
+          "type": ["array", "null"],
+          "items": { "type": "string" },
+          "default": null,
+          "description": "Command run in the workspace root after saving a .yix / .yss file; its Zig compile errors are mapped back to the .yix / .yss source (ZLS does not report comptime type errors). null: `zig build` when the workspace has a build.zig. []: off."
+        }
+      }
+    },
+    "configurationDefaults": {
+      "explorer.fileNesting.enabled": true,
+      "explorer.fileNesting.patterns": {
+        "*.yix": "_${capture}.yix.zig",
+        "*.yss": "_${capture}.yss.zig"
+      },
+      "files.readonlyInclude": {
+        "**/_*.yix.zig": true,
+        "**/_*.yss.zig": true
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "scripts": {
+    "test": "node test/grammar.test.js && node tests/zls-resolver.test.js"
+  },
+  "devDependencies": {
+    "vscode-textmate": "^9.2.0",
+    "vscode-oniguruma": "^2.0.1"
+  }
+}

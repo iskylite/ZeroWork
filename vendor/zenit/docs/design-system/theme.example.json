@@ -1,0 +1,124 @@
+{
+  "$schema": "./theme.schema.json",
+  "$version": 1,
+  "$modes": {
+    "high_contrast": {
+      "scheme": "dark",
+      "fallback": "dark"
+    }
+  },
+  "tokens": {
+    "color": {
+      "ink": "#181818",
+      "paper": "#ffffff",
+      "black": "#000000",
+      "yellow": "#ffff00",
+      "blue": {
+        "300": "#93c5fd",
+        "500": "#3b82f6"
+      },
+      "gray": {
+        "50": "#f9fafb",
+        "900": "#111827"
+      }
+    },
+    "space": {
+      "space100": 4,
+      "space200": 8,
+      "space400": 16
+    },
+    "radius": {
+      "sm": 4,
+      "md": 8
+    },
+    "font_size": {
+      "md": {
+        "$value": 14,
+        "$description": "字号基础尺度，逻辑像素"
+      },
+      "xxxl": 32
+    },
+    "font_weight": {
+      "regular": 400,
+      "bold": 700
+    },
+    "line_height": {
+      "normal": 1.4,
+      "tight": 1.2
+    },
+    "border_width": {
+      "hairline": 1,
+      "strong": 2
+    },
+    "opacity": {
+      "muted": 0.6
+    },
+    "duration": {
+      "fast": 0.1,
+      "normal": 0.15
+    },
+    "breakpoint": {
+      "compact": 640,
+      "wide": 1024
+    },
+    "shadow": {
+      "soft": {
+        "color": "#00000026",
+        "blur": 8,
+        "offset_y": 2
+      }
+    }
+  },
+  "semantic": {
+    "color": {
+      "surface": {
+        "$light": "{tokens.color.gray.50}",
+        "$dark": "{tokens.color.gray.900}",
+        "$high_contrast": "{tokens.color.black}"
+      },
+      "text": {
+        "$light": "{tokens.color.ink}",
+        "$dark": "{tokens.color.paper}"
+      },
+      "accent": {
+        "$light": "{tokens.color.blue.500}",
+        "$dark": "{tokens.color.blue.300}",
+        "$high_contrast": "{tokens.color.yellow}"
+      },
+      "action": "{semantic.color.accent}",
+      "shadow": {
+        "$light": "#00000026",
+        "$dark": "#00000066"
+      }
+    },
+    "space": {
+      "content_gap": "{tokens.space.space400}"
+    },
+    "font_size": {
+      "title": "{tokens.font_size.xxxl}"
+    },
+    "typography": {
+      "body": {
+        "font_size": "{tokens.font_size.md}",
+        "font_weight": "{tokens.font_weight.regular}",
+        "line_height": "{tokens.line_height.normal}"
+      },
+      "heading": {
+        "font_size": "{semantic.font_size.title}",
+        "font_weight": "{tokens.font_weight.bold}",
+        "line_height": "{tokens.line_height.tight}"
+      }
+    },
+    "shadow": {
+      "floating": {
+        "color": "{semantic.color.shadow}",
+        "blur": "{tokens.space.space400}",
+        "offset_y": "{tokens.space.space100}"
+      }
+    },
+    "size": {
+      "icon": 16,
+      "sidebar": 240
+    }
+  }
+}

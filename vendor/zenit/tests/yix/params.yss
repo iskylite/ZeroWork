@@ -1,0 +1,16 @@
+//! Parameterized style runtime behavior (style name($p: T) { ... }): tests/yix/runtime_tests.zig
+const ui = @import("ui");
+
+pub const Tone = enum { calm, loud };
+
+/// Optional parameter without fallback: when null, property not declared (fall to lower / default);
+/// with ?? use fallback
+style panel($width: ?f32, $background: ?ui.Color, $tone: Tone = .calm, $pad: bool = false) {
+  width: $width ?? fit;
+  background: $background;
+  when $tone = loud { opacity: 0.5; }
+  when $pad { padding: 4; flex-wrap: wrap; }
+}
+
+/// Multi-layer shadow + token fallback (switches theme)
+style framed($fill: ?ui.Color) { shadow: md, 0 2 4 accent; background: $fill ?? bg-secondary; }

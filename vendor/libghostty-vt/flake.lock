@@ -1,0 +1,173 @@
+{
+  "nodes": {
+    "flake-compat": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1767039857,
+        "narHash": "sha256-vNpUSpF5Nuw8xvDLj2KCwwksIbjua2LZCqhV1LNRDns=",
+        "owner": "edolstra",
+        "repo": "flake-compat",
+        "rev": "5edf11c44bc78a0d334f6334cdaf7d60d732daab",
+        "type": "github"
+      },
+      "original": {
+        "owner": "edolstra",
+        "repo": "flake-compat",
+        "type": "github"
+      }
+    },
+    "home-manager": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1787661347,
+        "narHash": "sha256-THmnBAdAIV+jT348f3r/vyoeb6ilhcVLwVXkBU7Pai8=",
+        "owner": "nix-community",
+        "repo": "home-manager",
+        "rev": "52c3a5881c821ad7367bbde075e52b76cdb378ab",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-community",
+        "repo": "home-manager",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1790981744,
+        "narHash": "sha256-NkNW1Y9AiuKO0HfeTnY555OJTYq9MQE3+Wz4kfBp/fI=",
+        "rev": "55ba7f49ef2962b42cbd126522b7df5f95037679",
+        "type": "tarball",
+        "url": "https://releases.nixos.org/nixpkgs/nixpkgs-26.11pre1084552.55ba7f49ef29/nixexprs.tar.zst"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://channels.nixos.org/nixpkgs-unstable/nixexprs.tar.zst"
+      }
+    },
+    "root": {
+      "inputs": {
+        "flake-compat": "flake-compat",
+        "home-manager": "home-manager",
+        "nixpkgs": "nixpkgs",
+        "systems": "systems",
+        "zig": "zig",
+        "zon2nix": "zon2nix"
+      }
+    },
+    "systems": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
+        "owner": "nix-systems",
+        "repo": "default",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default",
+        "type": "github"
+      }
+    },
+    "zig": {
+      "inputs": {
+        "flake-compat": [
+          "flake-compat"
+        ],
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "systems": [
+          "systems"
+        ]
+      },
+      "locked": {
+        "lastModified": 1790988737,
+        "narHash": "sha256-b55etI4Uxu+WHhYZXym3HPIz63ipO9lqwJLAphjqtTc=",
+        "owner": "mitchellh",
+        "repo": "zig-overlay",
+        "rev": "dcffc7a25ed2cbbc7c1c3c448c312abf46ae6cb8",
+        "type": "github"
+      },
+      "original": {
+        "owner": "mitchellh",
+        "repo": "zig-overlay",
+        "type": "github"
+      }
+    },
+    "zig_2": {
+      "inputs": {
+        "nixpkgs": [
+          "zon2nix",
+          "nixpkgs"
+        ],
+        "zon2nix": "zon2nix_2"
+      },
+      "locked": {
+        "lastModified": 1791058473,
+        "narHash": "sha256-D5RPUNznXdjaJowpWBU/PsUy0Wf0GKeYam2AgncVBtQ=",
+        "ref": "refs/heads/main",
+        "rev": "37d17efdfa349f71f687e08746c19f67e0192b19",
+        "revCount": 1735,
+        "type": "git",
+        "url": "https://git.jcollie.dev/jeff/zig-overlay.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "https://git.jcollie.dev/jeff/zig-overlay.git"
+      }
+    },
+    "zon2nix": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ],
+        "zig": "zig_2"
+      },
+      "locked": {
+        "lastModified": 1790983378,
+        "narHash": "sha256-RB1SiCcumk7Y9NkBKJDq/Hg0NLyCmX/TX02EXp7QRco=",
+        "owner": "jcollie",
+        "repo": "zon2nix",
+        "rev": "d1c869946e98c380ff474c6bd30e2fe2f5110473",
+        "type": "github"
+      },
+      "original": {
+        "owner": "jcollie",
+        "repo": "zon2nix",
+        "type": "github"
+      }
+    },
+    "zon2nix_2": {
+      "inputs": {
+        "nixpkgs": [
+          "zon2nix",
+          "zig",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1790583033,
+        "narHash": "sha256-Eo3hR521Yc2Gsqw7m/aqd5sn3/qi0XoSpJBIPPIYKkg=",
+        "owner": "jcollie",
+        "repo": "zon2nix",
+        "rev": "8e91c0d44aa49d0ac415f7e3046662e9aa754335",
+        "type": "github"
+      },
+      "original": {
+        "owner": "jcollie",
+        "ref": "v0.9.0",
+        "repo": "zon2nix",
+        "type": "github"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}

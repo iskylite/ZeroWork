@@ -1,0 +1,42 @@
+//! Menu's row view: divider and menu item. Popover, keyboard nav and selection pipeline in mod.zig,
+//! styles in styles.yss.
+const ui = @import("../../ui.zig");
+const S = @import("styles.yss");
+
+/// Divider: vertical padding, line itself 1px
+pub fn MenuSeparator() View {
+    return <box style={S.separator} a11y={.{ .role = .separator }}><box style={S.separator_line} /></box>;
+}
+
+/// One menu item. highlighted is menu's current virtual highlight index (keyboard move, pointer
+/// enter both write it), when == index shows highlight.
+/// Report disabled items as-is (AT users otherwise retry activating unresponsive item), shortcut
+/// goes to a11y description.
+pub fn MenuEntry(
+    label: []const u8,
+    index: usize,
+    highlighted: usize,
+    danger: bool = false,
+    disabled: bool = false,
+    shortcut: ?[]const u8 = null,
+    iconAsset: ?ui.SvgAsset = null,
+    onPick: Handler(usize),
+    onEnter: Handler(usize),
+) View {
+    const lit = computed(highlighted == index);
+    const p = parts(S.MenuRow, .{ .danger = danger, .disabled = disabled, .lit = lit });
+    return (
+        <row
+            style={p.root}
+            a11y={.{ .role = .menuitem, .label = label, .disabled = disabled, .description = shortcut }}
+            onClick={if (!disabled) onPick(index)}
+            onHover={if (!disabled) onEnter(index)}
+        >
+            <row style={S.item_left}>
+                {if (iconAsset) |asset| <icon style={p.icon} src={asset} />}
+                <text style={p.label}>{label}</text>
+            </row>
+            {if (shortcut) |keys| <text style={S.shortcut}>{keys}</text>}
+        </row>
+    );
+}

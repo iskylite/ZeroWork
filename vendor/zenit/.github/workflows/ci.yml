@@ -1,0 +1,403 @@
+name: CI
+
+# Scope: build the zenit framework's core artifacts + verify the OSS boundary.
+# Includes the pinned ZLS/YIX protocol regressions and real Storybook window gates.
+# Downstream editor UI e2e and tree-sitter parser regeneration remain separate.
+
+on:
+  push:
+    branches: [main, dev/zig-0.17.0]
+  pull_request:
+    branches: [main, dev/zig-0.17.0]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Obsolete PR runs may be cancelled. Main runs may not: each pushed revision
+# must leave a terminal required-check result.
+concurrency:
+  group: zenit-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  windows-build:
+    name: Windows x64 host build
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          cache-key: ${{ hashFiles('build.zig', 'build.zig.zon') }}
+      - name: Verify installed Zig toolchain
+        shell: bash
+        run: |
+          test "$(zig version)" = "0.17.0"
+          zig env
+      - name: Verify build configuration
+        run: zig build test-build-config
+      - name: Build interactive examples with the native architecture default
+        run: zig build windows-storybook windows-text-input windows-render-gallery -Dgpu-backend=d3d12 -Doptimize=debug
+      - name: Build gallery acceptance contracts
+        run: zig build windows-render-gallery -Dtest-mode=true -Dgpu-backend=d3d12 -Doptimize=debug --prefix out/test-mode
+      - name: Build a Windows consumer using the public attach helper
+        working-directory: templates/minimal-app
+        run: zig build -Dtarget=x86_64-windows-gnu -Doptimize=debug
+
+  oss-boundary:
+    name: Framework checks
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Zig 0.17.0
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          cache-key: ${{ hashFiles('build.zig', 'build.zig.zon') }}
+      - name: Verify installed Zig toolchain
+        shell: bash
+        run: |
+          test "$(zig version)" = "0.17.0"
+          zig env
+
+      - name: Install Bun for E2E contract tests
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.2.22"
+
+      - name: Verify public source and E2E gate contracts
+        run: |
+          bash scripts/check_version_contract.sh
+          bash scripts/check_public_source.sh
+          bash scripts/test_public_source_contract.sh
+          bash scripts/check_oss_icon_license.sh
+          bash scripts/test_evidence_contract.sh
+          bash scripts/test_release_candidate_contract.sh
+          bash scripts/test_storybook_e2e_orchestrator.sh
+          bash scripts/test_e2e_leak_contract.sh
+          python3 tools/windows_batch_test.py
+          bash scripts/test_bench_regression_contract.sh
+          bash scripts/check_renderer_metal_boundary.sh
+          bash scripts/check_style_literals.sh
+
+      - name: Check Zig formatting
+        run: bash scripts/check_zig_format.sh
+
+      - name: Lock Signal-first props compile errors
+        run: bash scripts/check_compile_errors.sh
+
+      - name: Verify D3D12 glass/blur shaders match Metal
+        run: python3 tools/metal_to_hlsl.py --check
+
+      - name: Verify generated Unicode grapheme data
+        run: |
+          python3 tools/generate_grapheme_data.py --check
+          bash scripts/check_icon_architecture.sh
+          zig build gen-icons-lucide gen-icons-common
+          git diff --exit-code -- \
+            src/ui/icons_lucide_generated.zig \
+            src/ui/icons_common_generated.zig
+
+      - name: Verify generated component source index
+        run: |
+          zig build gen-component-index
+          git diff --exit-code -- src/ui/component_index_generated.zig
+
+      # Sibling and YSS prop table explicit verify, don't depend CI env-var infer -Dyix-gen default
+      - name: Verify generated Yix twins and YSS schema
+        run: zig build check-yix check-yss-schema
+
+      - name: Verify pinned Zig 0.17 language servers
+        run: zig build test-zls test-yix yix-lsp-smoke
+
+      - name: Verify Yix editor grammar and tool discovery
+        run: |
+          npm ci --prefix editors/vscode-yix
+          npm test --prefix editors/vscode-yix
+
+      - name: Verify downstream package consumers
+        run: zig build test-package-consumer
+
+      - name: Run allocation failure transaction campaign
+        run: zig build test-allocation-campaign
+
+      # ── boundary check: grep src/ui/ static import + zig build hello-button --verbose
+      - name: Verify open-source boundary
+        env:
+          ZIG: zig # mlugg/setup-zig put zig to PATH, not ~/bin/zig/zig
+        run: bash scripts/check_oss_boundary.sh
+
+      - name: Verify boundary gate failure handling
+        run: bash scripts/test_oss_boundary_contract.sh
+
+      # ── CI contract self-check: guardrail absent not guardrail ──
+      # This script static verify ci.yml self integrity (needed job/trigger/fail-closed
+      # assert/gate steps still there). Before not run in CI -- so delete any step it protect
+      # won't be found. 70ms.
+      - name: Verify CI fail-closed contract
+        run: bash scripts/check_ci_contract.sh
+
+      # ── Template = external user first touch, must verify outside repo ──
+      # examples/ use repo self build.zig, no attach(); template use path external consumer
+      # walk. Before template had zero auto verify.
+      - name: Verify minimal-app template builds outside the repo
+        run: bash scripts/check_template_builds.sh
+
+      # -- All examples must build --
+      # The repo has 10 example build steps; 5 (multi-window + four probes) must not be left unbuilt
+      # or they rot silently. They are the OSS showcase and real-hw verification targets.
+      # storybook is not here: the storybook-e2e job builds and really runs it.
+      - name: Build examples
+        run: |
+          zig build hello-button counter-reactive virtual-list-perf text-input \
+                    multi-window devtools-probe interop-probe console-probe design-probe
+
+      - name: Smoke-test each example (linked + executable)
+        run: |
+          set -e
+          # Only verify binary link success (codesign already run in bundleApp ad-hoc), no
+          # launch window -- four example each run once both slow and duplicate true render assert.
+          # Real window + interact + pixel assert by storybook-e2e job.
+          for app in "Hello Button" "Reactive Counter" "100k Virtual List" "Text Input Demo"; do
+            bin="zig-out/${app}.app/Contents/MacOS"
+            # Each .app hold one exe; use find avoid filename special-char issue
+            exe=$(find "$bin" -maxdepth 1 -type f -perm -u+x -print -quit)
+            test -n "$exe"
+            file "$exe"
+            test -x "$exe"
+            echo "✓ $app: ${exe##*/} linked + executable"
+          done
+
+      # Deterministic tests and live-device integration have different failure
+      # semantics. Keep them as separate CI steps so a missing Metal device is
+      # reported as infrastructure, not buried inside thousands of unit tests.
+      - name: Run deterministic framework tests
+        env:
+          ZENIT_TEST_SEED: "0x5eedcafe20260731"
+        run: |
+          bash scripts/run_gate_with_evidence.sh \
+            .ci-evidence/test-headless test-headless \
+            zig build test-headless
+
+      # -- RHI second backend gate (C1) --
+      # Runs the same renderer code on the device-free Null backend. Not 'run tests again' but
+      # **keeping gpu.Backend abstract**: any Metal semantic welded into the render layer or backend
+      # signature change fails here immediately instead of at real port time. Catches leaks such as
+      # Surface.init taking *CAMetalLayer, test stubs writing the .raw field directly, and the
+      # renderer directly @importing metal_bindings.
+      - name: Run deterministic tests on the Null GPU backend
+        env:
+          ZENIT_TEST_SEED: "0x5eedcafe20260731"
+        run: |
+          bash scripts/run_gate_with_evidence.sh \
+            .ci-evidence/test-headless-null-backend test-headless-null-backend \
+            zig build -Dgpu-backend=null test-headless
+
+      - name: Run live-device Metal integration tests
+        run: |
+          bash scripts/run_gate_with_evidence.sh \
+            .ci-evidence/test-metal test-metal \
+            zig build test-metal
+
+      # ── Native ObjC bridge test (native/macos/tests) ──
+      # clipboard/text/drag/global/menu queue and input pump in-process test,
+      # before only scripts/test_native_*.sh manual entry, never run in CI.
+      # Same class test-metal: need macOS session (NSApplication/MetalView), so list separate step.
+      - name: Run native macOS bridge tests
+        run: |
+          bash scripts/run_gate_with_evidence.sh \
+            .ci-evidence/test-native test-native \
+            zig build test-native
+
+      # ── Cross-platform compile-check (system_sdk Linux/Windows backend) ──
+      - name: Cross-platform compile check
+        run: zig build check-system-sdk-cross
+
+      - name: Build Windows acceptance artifacts with the test harness
+        run: |
+          zig build windows-arm64-storybook windows-arm64-text-input windows-arm64-render-gallery \
+            -Dtest-mode=true -Dgpu-backend=d3d12 -Doptimize=fast \
+            --prefix .ci-evidence/windows-arm64
+          zig build windows-arm64-gpu-resources-contract -Dwindows-gpu-contract-scope=all \
+            -Doptimize=fast --prefix .ci-evidence/windows-arm64
+
+      # ── perf bench: run full + vs main baseline compare ──
+      # v0.2-P1 intro; plan gate force each phase must pass regression < 15%.
+      # baseline file src/bench/baselines/main.json (each v0.2 phase accept by
+      # maintainer update; PR vs main compare, exceed threshold block merge).
+      - name: Run perf benchmarks
+        env:
+          ZENIT_BENCH_COMMIT: ${{ github.sha }}
+        run: |
+          ZENIT_BENCH_HOST="$(uname -m)-$(sw_vers -productVersion)"
+          export ZENIT_BENCH_HOST
+          mkdir -p .bench-output
+          zig build bench -- json=.bench-output/current.json
+
+      # BENCH_RERUN_CMD: exceed bench auto re-test confirm, fall back as outlier.
+      # Real bench has 18/62 jitter > 15% (a11y_tree_children_50 jitter 87%),
+      # no re-test must cycle fake red -- fake red train all people ignore gate.
+      - name: Compare bench vs main baseline
+        env:
+          BENCH_RERUN_CMD: 'zig build bench -- json=%OUT%'
+          ZENIT_BENCH_COMMIT: ${{ github.sha }}
+        run: |
+          ZENIT_BENCH_HOST="$(uname -m)-$(sw_vers -productVersion)"
+          export ZENIT_BENCH_HOST
+          test -s src/bench/baselines/main.json
+          bash scripts/check_bench_regression.sh \
+            src/bench/baselines/main.json \
+            .bench-output/current.json \
+            15
+
+      - name: Upload bench results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-${{ github.sha }}
+          path: .bench-output/current.json
+          retention-days: 30
+
+      - name: Upload deterministic/Metal gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-evidence-${{ github.sha }}
+          path: .ci-evidence/
+          retention-days: 30
+          if-no-files-found: warn
+
+      # ── storybook e2e: real window + screenshot pixel assert ──
+      # separate job (see below storybook-e2e), no here -- need WindowServer
+      # and take ~60s, vs pure compile/unit gate fail semantic different.
+
+      # -- GPU resource leak guard (headless equivalent) --
+      # A real soak (steady render, RSS slope) needs WindowServer, which headless CI lacks; run
+      # `bash scripts/run_soak.sh` locally (see script header).
+      # CI does two equivalent checks that work headless:
+      #   1. the soak script is syntactically usable (so it cannot rot unnoticed);
+      #   2. GPA leak check -- already in framework tests, plus a standalone
+      #      fallback-reclaim assert (a path GPA cannot see, see core/tests.zig).
+      - name: Soak script sanity (headless — full soak runs locally)
+        run: bash -n scripts/run_soak.sh
+
+      # ── Historical deletion / architecture invariants ──
+      # Removed files, fields, APIs and module boundaries must not regress.
+      # Implementation file length is review information, not a CI threshold.
+      - name: Verify architecture migration invariants
+        run: bash scripts/check_v04_deletions.sh all
+
+  # Storybook e2e -- real window launch + interaction + screenshot pixel assert.
+  #
+  # Why a separate job:
+  #   - Needs WindowServer (GitHub macOS runner default session has it; headless Linux does not).
+  #   - Several minutes; failure means 'render/interaction regression', kept apart from the compile gate.
+  #
+  # This is the only CI gate for render/interaction regressions.
+  storybook-e2e:
+    name: storybook e2e (real window)
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Zig 0.17.0
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.17.0
+          cache-key: ${{ hashFiles('build.zig', 'build.zig.zon') }}
+      - name: Verify installed Zig toolchain
+        shell: bash
+        run: |
+          test "$(zig version)" = "0.17.0"
+          zig env
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.22
+
+      - name: Validate visual regression comparator
+        run: bun e2e/golden_compare.ts --self-test
+
+      # CI runners are slower than dev machines; the 10s default RPC timeout occasionally gives fake
+      # reds (TagsInput under load). Relaxed to 30s: this is a **wait ceiling**, not assert
+      # strength: real failures still fail.
+      #
+      # This step is also the **GPU perf regression gate** (storybook.test.ts trailing
+      # 'perf gate: *' cases): datatable/virtuallist scroll asserts gpu_p95_us < 8000us. Data comes
+      # from MTLCommandBuffer GPUEndTime-GPUStartTime, **excluding** CPU/RPC pauses, so a slow
+      # runner
+      # won't turn it red (CPU-side timing jitters up to 15x, hence no cpu_p95 gate).
+      # If the gate still fakes red, read `[perf:*]` lines in artifact test.log, then adjust the
+      # threshold; don't delete the gate.
+      - name: Run storybook e2e
+        env:
+          ZENIT_E2E_TIMEOUT_MS: "30000"
+          ZENIT_E2E_EVIDENCE_DIR: "/tmp/zenit_e2e_evidence"
+        run: bash scripts/run_storybook_e2e.sh
+
+      - name: Run interaction lifecycle e2e
+        env:
+          ZENIT_E2E_TEST_FILE: "e2e/interaction-lifecycle.test.ts"
+          ZENIT_E2E_TIMEOUT_MS: "30000"
+          ZENIT_E2E_EVIDENCE_DIR: "/tmp/zenit_e2e_evidence/lifecycle"
+        run: bash scripts/run_storybook_e2e.sh
+
+      - name: Run review regression E2E files
+        env:
+          ZENIT_E2E_SKIP_BUILD: "1"
+          ZENIT_E2E_TIMEOUT_MS: "30000"
+        run: |
+          for fixture in atlas_eviction atlas_init cleanup_reentry event_depth frame_slot glyph_gutter local_sort reactive_oom retained_frame scope_reentry texture_stride; do
+            ZENIT_E2E_TEST_FILE="e2e/${fixture}.test.ts" \
+              ZENIT_E2E_EVIDENCE_DIR="/tmp/zenit_e2e_evidence/review/${fixture}" \
+              bash scripts/run_storybook_e2e.sh
+          done
+
+      - name: Upload e2e session artifacts (screenshots + logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-session-${{ github.sha }}
+          path: /tmp/zenit_e2e_test/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload e2e process evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-evidence-${{ github.sha }}
+          path: /tmp/zenit_e2e_evidence/
+          retention-days: 30
+          if-no-files-found: warn
+
+  # Protect main with this single aggregate status. `always()` plus explicit
+  # result checks make failed, skipped, and cancelled dependencies fail closed.
+  required:
+    name: required / all gates
+    if: always()
+    needs: [oss-boundary, storybook-e2e, windows-build]
+    runs-on: macos-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail closed on every required job
+        env:
+          CORE_RESULT: ${{ needs.oss-boundary.result }}
+          E2E_RESULT: ${{ needs.storybook-e2e.result }}
+          WINDOWS_RESULT: ${{ needs.windows-build.result }}
+        run: |
+          test "$CORE_RESULT" = success
+          test "$E2E_RESULT" = success
+          test "$WINDOWS_RESULT" = success

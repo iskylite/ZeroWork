@@ -1,0 +1,441 @@
+const std = @import("std");
+const ui = @import("ui");
+const Button = ui.widgets.Button;
+const W = ui.widgets;
+const States = @import("states.yss");
+const Tab = enum { home, settings };
+pub const Item = struct { id: u32, title: []const u8 };
+const items = [_]Item{ .{ .id = 1, .title = "first" }, .{ .id = 2, .title = "second" } };
+pub var batch_updates: usize = 0;
+pub var batch_values: [8]i32 = @splat(-1);
+fn observeBatch(value: i32) i32 {
+    batch_values[batch_updates] = value;
+    batch_updates += 1;
+    return value;
+}
+
+// M0 samples corresponding to storybook: layout, button, card, controlled
+// visibility, tabs, keyed rows, and a component receiving reactive props.
+pub fn Layout() View {
+    return <row style={.{ .gap = .space200 }}><W.ScrollArea parts={.{ .content = .{ .style = ui.css(.{ .gap = 21 }) } }}><text>Before</text></W.ScrollArea><spacer /><text>After</text></row>;
+}
+pub fn ButtonStory() View {
+    var count: i32 = signal(0);
+    const double = computed(count * 2);
+    return <col><text>Count {count}; double {double}</text><Button onClick={count += 1}>Increment</Button></col>;
+}
+pub fn CardStory() View {
+    return <ui.widgets.Card style={ui.css(.{ .opacity = 0.5 })}><text>Card body</text></ui.widgets.Card>;
+}
+pub fn BranchStory() View {
+    var expanded: bool = signal(false);
+    return <col><Button onClick={expanded = !expanded}>Toggle</Button>{if (expanded) <text>Expanded</text> else <text>Collapsed</text>}</col>;
+}
+pub fn TabsStory() View {
+    var tab: Tab = signal(.home);
+    return <col><Button onClick={tab = .settings}>Settings</Button>{switch (tab) { .home => <text>Home</text>, .settings => <text>Settings body</text> }}</col>;
+}
+pub fn ListStory() View {
+    var rows: []const Item = signal(&items);
+    return <col>{for (rows) |item| <text>{item.title}</text> else <text>Empty</text>}<Button onClick={rows = &.{}}>Clear</Button></col>;
+}
+/// Local variable shares name with generated function (b / row / k / run / compute): branch/row
+/// references cannot corrupt generated function names.
+pub fn GeneratedNameStory() View {
+    var b: i32 = signal(1);
+    var row: i32 = signal(2);
+    var rows: []const Item = signal(&items);
+    return <col>{if (b > 0) <text>b={b} row={row}</text>}{for (rows) |item| <text>{item.title}{b}{row}</text>}<Button onClick={b += 1}>bump</Button></col>;
+}
+/// Controlled (read-only): list row fields drive Checkbox; click only fires onChange, parent
+/// updates data.
+pub const Task = struct { id: u32, title: []const u8, done: bool };
+const tasks0 = [_]Task{ .{ .id = 1, .title = "a", .done = false }, .{ .id = 2, .title = "b", .done = true } };
+pub var task_store: [2]Task = tasks0;
+pub var toggles: usize = 0;
+fn toggleTask(id: u32) []const Task {
+    toggles += 1;
+    for (&task_store) |*t| if (t.id == id) { t.done = !t.done; };
+    return &task_store;
+}
+pub fn ControlledStory() View {
+    var list: []const Task = signal(&task_store);
+    var frozen: bool = signal(false);
+    return <col>{for (list) |task| <W.Checkbox key={task.id} label={task.title} checked={task.done} onChange={{ if (!frozen) list = toggleTask(task.id); }} />}<Button onClick={frozen = !frozen}>freeze</Button></col>;
+}
+/// Typed events on component element: installed in component root's capture slot, fire before
+/// component's own handlers; consume blocks component default behavior.
+pub fn ComponentKeys() View {
+    var text: []const u8 = signal("ab");
+    var keys: i32 = signal(0);
+    return <col><W.Input testId="field" value={text} onKeyDown={|e| if (e.key == .delete and keys == 0) { keys += 1; e.consume(); } else keys += 10} /><text>keys {keys} text {text}</text></col>;
+}
+/// Component root's typed events toggle mount/unmount across branches (table freed with component
+/// scope, no dangling pointers).
+pub fn ToggledKeys() View {
+    var show: bool = signal(true);
+    var keys: i32 = signal(0);
+    return <col>{if (show) <W.Input testId="tfield" onKeyDown={keys += 1} />}<Button onClick={show = !show}>toggle</Button><text>tk {keys}</text></col>;
+}
+/// Controlled rewrite: read-only value + onChange normalized by props into split; Input corrects
+/// buffer in-place per rewritten value.
+var upper_buf: [64]u8 = undefined;
+fn upper(v: []const u8) []const u8 {
+    const n = @min(v.len, upper_buf.len);
+    for (v[0..n], 0..) |c, i| upper_buf[i] = std.ascii.toUpper(c);
+    return upper_buf[0..n];
+}
+pub fn UpperInput() View {
+    var code: []const u8 = signal("AB");
+    const shown = computed(code);
+    return <col><W.Input testId="up" value={shown} onChange={|v| code = upper(v)} /><text>code {code}</text></col>;
+}
+/// Component property branch expressions typed by property type: enum literals, unequal-length
+/// string literals, `[]const u8` in type.
+pub fn TypedAttrStory() View {
+    var on: bool = signal(false);
+    return <col><Button variant={if (on) .primary else .ghost} label={if (on) "done" else "todo"} onClick={on = !on} /><Button label={if (on) @as([]const u8, "yes") else "no"} /></col>;
+}
+pub fn Label(count: i32 = 0) View {
+    return <text>Prop {count}</text>;
+}
+pub fn PropsStory() View {
+    var count: i32 = signal(3);
+    return <col><Label {count} /><Button onClick={count += 1}>Increment prop</Button></col>;
+}
+pub fn BatchStory() View {
+    var a: i32 = signal(0);
+    var b: i32 = signal(0);
+    const total = computed(observeBatch(a + b));
+    return <col><text>{total}</text><Button onClick={{ a += 1; b += 2; }}>Batch</Button></col>;
+}
+pub fn UnicodeStory() View {
+    var show: bool = signal(true);
+    return <col>{if (show) <text>中文 😀</text> else <text>空</text>}<Button onClick={show = false}>隐藏</Button></col>;
+}
+pub fn RowCaptureStory() View {
+    var rows: []const Item = signal(&items);
+    var selected: u32 = signal(0);
+    return <col><text>Selected {selected}</text>{for (rows) |item| <row><text>{item.title}: {selected}</text><Button label={item.title} onClick={selected = item.id} /></row>}<Button onClick={rows = &.{ items[1], items[0] }}>Reverse</Button></col>;
+}
+
+pub fn TextSignalStory() View {
+    var message: []const u8 = signal("before");
+    return <col><text>{message}</text><Button onClick={message = "after"}>Change text</Button></col>;
+}
+
+pub fn Doubled(n: i32 = 0) View {
+    const d = computed(n * 2);
+    return <text>double {d}</text>;
+}
+
+pub fn Panel(title: []const u8 = "", children: View) View {
+    return (
+        <col>
+            <text>{title}</text>
+            <col>{children}</col>
+        </col>
+    );
+}
+pub fn PanelUse() View {
+    var n: i32 = signal(1);
+    return <Panel title="Settings"><text>value {n}</text><Button onClick={n += 1}>More</Button></Panel>;
+}
+
+pub fn Closable(label: []const u8 = "", onClose: ?Handler(void) = null) View {
+    return <row><text>{label}</text><Button label="x" onClick={onClose} /></row>;
+}
+pub fn ClosableUse() View {
+    var closed: bool = signal(false);
+    return <col><Closable label="tab" onClose={closed = true} />{if (closed) <text>closed</text> else <text>open</text>}</col>;
+}
+
+pub fn Stars(total: usize = 5) View {
+    var lit: usize = signal(2);
+    return <row>{for (0..5) |i| <text>{i}/{lit}</text>}{for (0..3) |_| <spacer />}<Button onClick={lit += 1}>More</Button></row>;
+}
+
+pub fn GrowingStars(total: usize = 2) View {
+    var extra: usize = signal(0);
+    return <row>{for (0..total + extra) |i| <text>star {i}</text>}<Button onClick={extra += 1}>Add</Button></row>;
+}
+
+pub fn Forward(disabled: bool = false, onPress: ?Handler(void) = null, onPick: ?Handler(i32) = null) View {
+    return <col><Button onClick={if (!disabled) onPress}>Go</Button><Button onClick={onPick(7)}>Seven</Button></col>;
+}
+
+pub fn ForwardUse() View {
+    var n: i32 = signal(0);
+    var off: bool = signal(false);
+    return <col><Forward disabled={off} onPress={n += 1} onPick={|v| n = v} /><text>presses {n}</text><Button onClick={off = !off}>Lock</Button></col>;
+}
+
+pub fn Numbered() View {
+    var rows: []const Item = signal(&items);
+    return <col>{for (rows) |item, i| <text>{i}. {item.title}</text>}<Button onClick={rows = &.{ items[1], items[0] }}>Reverse</Button></col>;
+}
+
+pub fn NestedFlow() View {
+    var shown: bool = signal(true);
+    var rows: []const Item = signal(&items);
+    return <col>{if (shown) for (rows) |item| <text>row {item.title}</text>}<Button onClick={shown = !shown}>Hide</Button></col>;
+}
+
+pub fn Toggle(on: Model(bool) = false, onChange: ?Handler(bool) = null) View {
+    return <col>{if (on) <text>on</text> else <text>off</text>}<Button onClick={on = !on}>Flip</Button></col>;
+}
+pub fn ToggleBound() View {
+    var flag: bool = signal(true);
+    var changes: i32 = signal(0);
+    return <col><text>flag {flag} changes {changes}</text><Toggle on={flag} onChange={changes += 1} /></col>;
+}
+pub fn ToggleEcho() View {
+    var last: bool = signal(false);
+    var count: i32 = signal(0);
+    return <col><text>last {last} count {count}</text><Toggle onChange={|v| { last = v; count += 1; }} /></col>;
+}
+pub fn Guarded(locked: bool = false) View {
+    var n: i32 = signal(0);
+    return <col><text>n {n}</text><Button onClick={if (!locked) { n += 1; if (n > 2) n = 0; } else n = -1}>Step</Button></col>;
+}
+pub fn EventForms() View {
+    var a: i32 = signal(0);
+    var b: i32 = signal(0);
+    return <col><text>a {a} b {b}</text><Button onClick={{ if (a == 0) a = 1 else a = 2; b = if (a > 1) 10 else 20; }}>Go</Button></col>;
+}
+pub fn FieldNamedLikeProp(title: []const u8 = "prop") View {
+    var rows: []const Item = signal(&items);
+    return <col><text>{title}</text>{for (rows) |item| <text>{item.title}-{title} {item.title.len + title.len}</text>}</col>;
+}
+const Choice = struct { value: []const u8, label: []const u8 };
+const choices = [_]Choice{ .{ .value = "a", .label = "Apple" }, .{ .value = "b", .label = "Banana" } };
+fn isPicked(value: ?[]const u8, v: []const u8) bool {
+    return if (value) |x| std.mem.eql(u8, x, v) else false;
+}
+pub fn Picker(options: []const Choice = &choices, value: Model(?[]const u8) = null, onChange: ?Handler([]const u8) = null) View {
+    return <col>{for (options) |opt| <row key={opt.value}><text>{opt.label} {isPicked(value, opt.value)}</text><Button label={opt.label} onClick={value = opt.value} /></row>}</col>;
+}
+pub fn PickerUse() View {
+    var picked: ?[]const u8 = signal(null);
+    var count: i32 = signal(0);
+    return <col><text>count {count}</text><Picker value={picked} onChange={|v| { count += 1; _ = v; }} /></col>;
+}
+
+// B1: static lifting shrinks to actual dependencies. External store read via function call; static
+// params must follow.
+pub var external_count: ?*ui.Signal(i32) = null;
+fn externalCount() i32 {
+    return if (external_count) |s| s.get() else 0;
+}
+pub fn ExternalSum(n: i32 = 0) View {
+    const total = computed(n + externalCount());
+    return <text>sum {total}</text>;
+}
+pub fn StaticTwice(n: i32 = 0) View {
+    const twice = computed(n * 2);
+    return <text>twice {twice}</text>;
+}
+/// Text child elements determined by component parameter type, not name: aliased Buttons still
+/// treat text as label.
+const Btn = W.Button;
+pub fn AliasLabel() View {
+    var n: i32 = signal(0);
+    return <col><text>n {n}</text><Btn onClick={n += 1}>Aliased</Btn></col>;
+}
+/// Components without label parameter (with slots): text remains child element.
+pub fn TextIntoSlot() View {
+    return <Panel title="p">plain words</Panel>;
+}
+/// No default value means required (for data parameters and Handlers).
+pub fn Required(title: []const u8, onGo: Handler(void)) View {
+    return <Button label={title} onClick={onGo} />;
+}
+pub fn RequiredUse() View {
+    var n: i32 = signal(0);
+    return <col><text>went {n}</text><Required title="Go there" onGo={n += 1} /></col>;
+}
+/// I6: optional value capture. Value changes within the same branch update only text, branch does
+/// not rebuild.
+pub fn PickedName() View {
+    var picked: ?[]const u8 = signal(null);
+    return (
+        <col>
+            {if (picked) |name| <text>picked {name}</text> else <text>none</text>}
+            <Button onClick={picked = "a"}>A</Button>
+            <Button onClick={picked = "b"}>B</Button>
+            <Button onClick={picked = null}>Clear</Button>
+        </col>
+    );
+}
+pub const Shape = union(enum) { circle: i32, square: i32, none };
+/// I6: payload capture with tagged union.
+pub fn ShapeLabel() View {
+    var shape: Shape = signal(.{ .circle = 1 });
+    return (
+        <col>
+            {switch (shape) { .circle => |r| <text>circle {r}</text>, .square => |w| <text>square {w}</text>, .none => <text>no shape</text> }}
+            <Button onClick={shape = .{ .circle = 2 }}>Grow</Button>
+            <Button onClick={shape = .{ .square = 5 }}>Square</Button>
+            <Button onClick={shape = .none}>None</Button>
+        </col>
+    );
+}
+pub const ParseError = error{Bad};
+/// I6: value / error capture from error union.
+pub fn Parsed(result: ParseError!i32) View {
+    return <col>{if (result) |v| <text>value {v}</text> else |e| <text>error {@errorName(e)}</text>}</col>;
+}
+/// I12: lazy branch construction. Hidden branches do not construct derived values inside.
+pub fn LazyBranch(n: i32 = 0) View {
+    var shown: bool = signal(false);
+    return <col>{if (shown) <text>{n * 2 + 1}</text>}<Button onClick={shown = !shown}>Toggle</Button></col>;
+}
+/// B2: host element typed events (keyboard / pointer / scroll); e.consume() prevents default
+/// behavior.
+pub fn KeyPad() View {
+    var last: []const u8 = signal("none");
+    var px: f32 = signal(0);
+    var moves: i32 = signal(0);
+    return (
+        <col>
+            <box
+                testId="pad"
+                focusable
+                onKeyDown={|e| if (e.key == .escape) { last = "escape"; e.consume(); } else last = "other"}
+                onPointerDown={|e| px = e.x}
+                onPointerMove={moves += 1}
+                onScroll={|e| e.stop()}
+            />
+            <text>key {last}</text>
+            <text>x {px}</text>
+            <text>moves {moves}</text>
+        </col>
+    );
+}
+pub var lifecycle_log: [8]i32 = @splat(0);
+pub var lifecycle_len: usize = 0;
+fn logLifecycle(v: i32) void {
+    lifecycle_log[lifecycle_len] = v;
+    lifecycle_len += 1;
+}
+fn mounted(r: anytype) i32 {
+    return if (r.get() != null) 1 else 0;
+}
+/// B2: effects follow source; ref attached at onMount; onUnmount executes during unmount.
+pub fn Lifecycle(n: i32 = 0) View {
+    var doubled: i32 = signal(0);
+    const root = ref();
+    effect(doubled = n * 2);
+    onMount(logLifecycle(mounted(root)));
+    onUnmount(logLifecycle(-1));
+    return <col ref={root}><text>doubled {doubled}</text></col>;
+}
+fn mayFail(ok: bool) !i32 {
+    if (!ok) return error.Nope;
+    return 5;
+}
+/// B2: try in event (failure reported via ui.on.reportError, following statements don't execute)
+/// and const locals.
+pub fn TryEvent() View {
+    var n: i32 = signal(0);
+    return (
+        <col>
+            <text>n {n}</text>
+            <Button onClick={{ const v = try mayFail(true); n += v; }}>Ok</Button>
+            <Button onClick={{ const v = try mayFail(false); n += v; }}>Fail</Button>
+        </col>
+    );
+}
+/// P3a: :focus (click) / :focus-visible (keyboard) / :disabled (from a11y.disabled) on plain box.
+pub fn StateBox(disabled: bool = false) View {
+    return <box testId="sb" focusable style={States.field} a11y={.{ .role = .button, .disabled = disabled }} />;
+}
+/// P3b: named slots; {children} need not be the last child.
+pub fn Frame(title: []const u8 = "", header: View, children: View, footer: View) View {
+    return (
+        <col>
+            <row>{header}<text>{title}</text></row>
+            <col>{children}<text>after body</text></col>
+            {footer}
+        </col>
+    );
+}
+pub fn FrameUse() View {
+    var n: i32 = signal(0);
+    return <Frame title="T" header={<text>head</text>} footer={<Button onClick={n += 1}>More</Button>}><text>body {n}</text></Frame>;
+}
+/// P4: icon-color toggles with flag; reverts to mount-time tint on undo.
+pub fn GlyphBox(hot: bool = false) View {
+    return <icon testId="glyph" style={States.Glyph.of(.{ .hot = hot })} src={ui.icons.check} />;
+}
+pub fn GlyphTinted(hot: bool = false) View {
+    return <icon testId="glyph" style={States.GlyphOnHot.of(.{ .hot = hot })} src={ui.icons.check} />;
+}
+pub fn LinkText() View {
+    return <col><text testId="link" style={States.link}>Open docs</text></col>;
+}
+pub fn PillText() View {
+    return <col><text testId="pill" style={States.pill}>Beta</text></col>;
+}
+/// P5: in-place list row update -- same key, changed content does not rebuild row (focus/local
+/// state preserved); event reads latest data.
+pub var picked_title: []const u8 = "";
+fn pick(title: []const u8) void {
+    picked_title = title;
+}
+pub fn EditableRows(rows: []const Item = &.{}) View {
+    return (
+        <col>
+            {for (rows) |item, i|
+                <row testId="row" focusable onClick={pick(item.title)}>
+                    <text>{i}:{item.title}</text>
+                </row>
+            }
+        </col>
+    );
+}
+/// Data parameters named on* (e.g., onTop: bool) pass by value; event params receiving identifier
+/// call it.
+pub var saved_count: u32 = 0;
+fn save() void {
+    saved_count += 1;
+}
+fn Pin(onTop: bool = false, onSave: ?Handler(void) = null) View {
+    return <box testId="pin" visible={onTop} onClick={onSave} />;
+}
+pub fn PinBoard(pinned: bool = false) View {
+    return (
+        <col>
+            <Pin onTop={true} />
+            <Pin onTop={pinned} onSave={save} />
+            <Pin onTop={!pinned} onSave={save()} />
+        </col>
+    );
+}
+/// Text child elements into component declaration's Text parameter (regardless of param name);
+/// components without Text param collect as children.
+fn Caption(title: Text = "") View {
+    return <text testId="caption">{title}</text>;
+}
+pub fn Captions() View {
+    return <col><Caption>Hello</Caption></col>;
+}
+/// Nested for: inner row references outer row fields.
+pub const Group = struct { id: u64, name: []const u8, members: []const Item };
+pub fn Groups(groups: []const Group = &.{}) View {
+    return (
+        <col>
+            {for (groups) |g|
+                <col>
+                    <text>{g.name}</text>
+                    {for (g.members) |m| <text>{g.name}/{m.title}</text>}
+                </col>
+            }
+        </col>
+    );
+}
+/// Reactive name in type position.
+pub fn TypeOfProbe(n: u32 = 0) View {
+    const doubled = computed(@as(@TypeOf(n), n * 2));
+    return <text>{doubled}</text>;
+}

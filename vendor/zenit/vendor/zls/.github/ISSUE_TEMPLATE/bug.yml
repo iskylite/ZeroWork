@@ -1,0 +1,71 @@
+name: Bug Report
+description: File a bug report
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A bug is when something works differently than it is expected to.
+        ## Remember to search before filing a new report
+        Please search for this bug in the issue tracker, and use a bug report title that
+        would have made your bug report turn up in the search results for your search query.
+  - type: input
+    id: zig-version
+    attributes:
+      label: Zig Version
+      description: "The output of `zig version` or git commit hash"
+      placeholder: "0.9.0-dev.1275+ac52e0056"
+    validations:
+      required: true
+  - type: input
+    id: zls-version
+    attributes:
+      label: ZLS Version
+      description: "The output of `zls --version` or git commit hash"
+      placeholder: "b21039d51261923c665d3bc58fadc4b4d5e221ea"
+    validations:
+      required: true
+  - type: input
+    id: editor
+    attributes:
+      label: Client / Code Editor / Extensions
+      description: What client/code editor/extensions are you using, if any?
+      placeholder: "nvim 0.9.4 with CoC and ziglang/zig.vim"
+    validations:
+      required: false
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to Reproduce and Observed Behavior
+      description: What exactly can someone else do, in order to observe the problem that you observed?
+      placeholder: |
+        1. Setup X editor with Y config
+        2. Create X.zig file with content Y
+        3. Do X and observe Y
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Attach ZLS log output
+      description: Refer to the [documentation](https://zigtools.org/zls/guides/view-logs/) on how to aquire the ZLS log output.
+      value: |
+        <details><summary>zls.log</summary>
+
+        <!-- Paste the logs inside the code block below. -->
+        <!-- The placeholder below shows how they typically look like. -->
+        ```log
+        info  ( main ): Starting ZLS      VERSION @ '/path/to/zls'
+        ...
+        ```
+
+        </details>
+    validations:
+      required: false

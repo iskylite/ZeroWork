@@ -1,0 +1,6 @@
+//! devtools_probe styles
+const ui = @import("ui");
+
+style root { width: fill; height: fill; gap: space300; padding: space800; background: bg-primary; align-items: center; justify: center; }
+style title { font-size: xxl; font-weight: 600; color: fg-primary; }
+style hint { font-size: sm; color: fg-secondary; }

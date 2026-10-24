@@ -1,0 +1,51 @@
+//! Breadcrumb view. Styling in styles.yss; public types and tests in mod.zig.
+const std = @import("std");
+const ui = @import("../../ui.zig");
+const mod = @import("mod.zig");
+const S = @import("styles.yss");
+const BreadcrumbItem = mod.BreadcrumbItem;
+
+/// Row key: content + borrowed string address (row borrows id / label slices:
+/// must rebuild when other levels change or this level's string moves; can't keep
+/// row pointing to old string)
+fn crumbKey(it: BreadcrumbItem) u64 {
+    var h = std.hash.Wyhash.init(0);
+    for ([_][]const u8{ it.id, it.label }) |f| {
+        h.update(std.mem.asBytes(&f.len));
+        h.update(f);
+        h.update(std.mem.asBytes(&@intFromPtr(f.ptr)));
+    }
+    return h.final();
+}
+
+/// Level: link or current page + separator (none after current). Current uses
+/// listitem not unexposed: unfocusable no-role node dropped entirely by projection.
+/// Separator is decoration, unexposed to AT (VoiceOver reads each "/").
+fn Crumb(label: []const u8, current: bool, separator: []const u8, onPick: ?Handler(void) = null) View {
+    const role = computed(if (current) ui.A11yRole.listitem else ui.A11yRole.link);
+    const linked = computed(!current);
+    return (
+        <row style={S.crumb}>
+            <text
+                style={S.Crumb.slot(.label, .{ .current = current })}
+                box={S.Crumb.slot(.link, .{ .current = current })}
+                a11y={.{ .role = role, .label = label, .selected = current }}
+                onClick={if (!current) onPick}
+            >{label}</text>
+            {if (linked) <text style={S.separator} a11y={.{ .hidden = true }}>{separator}</text>}
+        </row>
+    );
+}
+
+/// Breadcrumb: current page position in hierarchy; last level is current (not
+/// clickable), clicking earlier levels reports their id.
+/// `W.Breadcrumb(.{ .items = path, .on_select = cx.on(S, s, S.go) })`
+pub fn Breadcrumb(items: []const BreadcrumbItem = &.{}, separator: []const u8 = "/", onSelect: ?Handler([]const u8) = null) View {
+    return (
+        <row style={S.root} a11y={.{ .role = .navigation, .label = "Breadcrumb" }}>
+            {for (items) |item, i|
+                <Crumb key={crumbKey(item)} label={item.label} current={i + 1 == items.len} {separator} onPick={onSelect(item.id)} />
+            }
+        </row>
+    );
+}

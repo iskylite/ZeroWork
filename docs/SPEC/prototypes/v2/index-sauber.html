@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ZeroWork · Sauber（itermcolors 精确提取）</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cdefs%3E%3ClinearGradient id='bg' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%236366f1'/%3E%3Cstop offset='1' stop-color='%238b5cf6'/%3E%3C/linearGradient%3E%3ClinearGradient id='rg' x1='0' y1='1' x2='1' y2='0'%3E%3Cstop offset='0' stop-color='%23fbbf24'/%3E%3Cstop offset='1' stop-color='%23f59e0b'/%3E%3C/linearGradient%3E%3ClinearGradient id='w1' x1='0' y1='1' x2='1' y2='0'%3E%3Cstop offset='0' stop-color='%233b82f6'/%3E%3Cstop offset='1' stop-color='%2306b6d4'/%3E%3C/linearGradient%3E%3ClinearGradient id='w2' x1='0' y1='1' x2='1' y2='0'%3E%3Cstop offset='0' stop-color='%232563eb'/%3E%3Cstop offset='1' stop-color='%230891b2'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='64' height='64' rx='16' fill='url(%23bg)'/%3E%3Ccircle cx='26' cy='38' r='11' fill='none' stroke='url(%23rg)' stroke-width='3.5'/%3E%3Cpath d='M 21 35 L 25 38 L 21 41' fill='none' stroke='%2322d3ee' stroke-width='2.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cline x1='27' y1='41' x2='31' y2='41' stroke='%2322d3ee' stroke-width='2.8' stroke-linecap='round'/%3E%3Cpath d='M 34 30 C 39 24, 46 18, 54 13 L 55.5 15 C 49 21, 42 27, 36 32 Z' fill='url(%23w1)' opacity='.95'/%3E%3Cpath d='M 36 35 C 41 31, 48 27, 55 25 L 56 27.5 C 50 30, 44 34, 38 37.5 Z' fill='url(%23w2)' opacity='.85'/%3E%3Cpath d='M 17 42 C 14 45, 13 48, 15 51 L 17.5 50 C 16.5 47.5, 17.5 45, 19.5 43 Z' fill='url(%23rg)' opacity='.9'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="vanta.css">
+<style>
+/* Sauber token 表：Sauber-Ghostty-NetCatty-FileTypes.itermcolors 精确 sRGB→hex
+   bg #ECFFE5 · accent #1345F6 · fg #0F172A · 语义色 = Ansi 1/2/3
+   浅色薄荷的分层逻辑：app 底用压暗薄荷，卡片用更亮薄荷，阴影带绿色相 */
+:root {
+  --accent: #1345F6; --accent-2: #2563EB; --accent-fg: #ffffff;
+  --group: #06B6D4;
+
+  --bg-app: #d9eccf;      /* 与卡片只差一档 —— 间隙不突兀 */
+  --surface-1: #f2fdec;   /* 比 bg #ECFFE5 更亮一档 */
+  --surface-2: #ecfbe5;
+  --well: #e2f5da;
+  --well-bd: #c9e4bd;
+  --bg-term: #ECFFE5;     /* 终端 = itermcolors bg 原值 */
+  --overlay: rgba(243,255,239,.96);  /* bg 提亮且保留绿色相 */
+  --card-deep: #f7fff2;
+  --card-deep-ft: #eefbe8;
+
+  --hover: #dbf0d6;
+  --sel-bg: rgba(19,69,246,.09);
+  --tab-on: #f8fff4;
+
+  --fg-1: #0F172A; --fg-2: #46604f; --fg-3: #8aa396;
+
+  --ok: #10B981; --warn: #D49A0C; --danger: #DC4C3F;
+  --warn-bg: rgba(212,154,12,.09);
+
+  --ansi-g: #0d9668; --ansi-b: #2563EB; --ansi-r: #DC4C3F;
+  --gutter: #8aa396; --cursor: #000000;   /* itermcolors 光标纯黑 */
+
+  --accent-05: rgba(19,69,246,.05); --accent-06: rgba(19,69,246,.06);
+  --accent-07: rgba(19,69,246,.07); --accent-12: rgba(19,69,246,.13);
+  --accent-22: rgba(19,69,246,.22); --accent-30: rgba(19,69,246,.32);
+  --accent-ring: rgba(19,69,246,.16);
+
+  /* 薄荷阴影：带绿色相、柔和低透明 */
+  --shadow-1: 0 1px 6px rgba(20,70,35,.07), 0 0 0 1px rgba(20,70,35,.04);
+  --shadow-2: 0 1px 3px rgba(20,70,35,.06), 0 0 0 1px rgba(20,70,35,.03);
+  --shadow-tab: 0 1px 6px rgba(20,70,35,.08), 0 0 0 1px rgba(20,70,35,.03);
+  --shadow-float: 0 24px 60px rgba(15,60,35,.19), 0 4px 14px rgba(15,60,35,.09), 0 0 0 1px rgba(19,69,246,.06);
+
+  /* 玻璃态 */
+  --glass-hi: rgba(255,255,255,.85); --glass-lo: rgba(240,252,233,.62);
+  --glass-spec: rgba(255,255,255,.65);
+
+  --grip: #b9d6ae;
+}
+</style>
+</head>
+<body>
+<div class="window">
+
+  <div class="titlebar">
+    <div class="tl"><i></i><i></i><i></i></div>
+    <div class="tabs">
+      <div class="tab on"><span class="dot"></span><span class="label">K8s-Node01</span><span class="x">×</span></div>
+      <div class="tab grp"><span class="dot"></span><span class="label">组 · k8s-nodes</span><span class="x">×</span></div>
+      <div class="tab off"><span class="dot"></span><span class="label">RDS-PG</span><span class="x">×</span></div>
+      <div class="tab-add">+</div>
+    </div>
+    <div class="icns">
+      <div class="icn" title="快速连接 ⌘K">⚡</div>
+      <div class="icn" title="传输管理器">⇅</div>
+      <div class="icn hot" title="AI 助手 ⌘J">✦</div>
+      <div class="icn" title="设置 ⌘,">⚙</div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="sidebar">
+      <div class="sb-head">
+        <span class="sb-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="7" rx="2"/><rect x="2" y="14" width="20" height="7" rx="2"/><line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/></svg></span><span class="sb-title-txt">主机与连接</span><span class="sp"></span>
+        <span class="a" title="新建主机 / 新建分组 ▸">＋</span>
+        <span class="a fold" title="折叠侧栏 ⌘B">⟨</span>
+      </div>
+      <div class="search-wrap"><div class="search-rel"><input class="search" placeholder="搜索主机或标签…"></div></div>
+      <div class="groups">
+        <div class="group-card">
+          <div class="gh">▾ Production <span class="n">4</span></div>
+          <div class="hi"><i class="sd"></i><span class="hname">Bastion-01</span><span class="hnote">直连</span><span class="hacts"><span class="hact">▶</span><span class="hact">⧉</span><span class="hact">✎</span></span></div>
+          <div class="hi on"><i class="sd"></i><span class="hname">K8s-Node01</span><span class="hnote">via Bastion</span><span class="hacts"><span class="hact">▶</span><span class="hact">⧉</span><span class="hact">✎</span></span></div>
+          <div class="hi"><i class="sd"></i><span class="hname">K8s-Node02</span><span class="hnote">via Bastion</span><span class="hacts"><span class="hact">▶</span><span class="hact">⧉</span><span class="hact">✎</span></span></div>
+          <div class="hi off"><i class="sd"></i><span class="hname">DB-Master</span><span class="hnote">2 级跳板</span><span class="hacts"><span class="hact">▶</span><span class="hact">⧉</span><span class="hact">✎</span></span></div>
+        </div>
+        <div class="group-card">
+          <div class="gh">▾ Staging <span class="n">2</span></div>
+          <div class="hi"><i class="sd"></i><span class="hname">Staging-API</span><span class="hnote">直连</span><span class="hacts"><span class="hact">▶</span><span class="hact">⧉</span><span class="hact">✎</span></span></div>
+          <div class="hi"><i class="sd"></i><span class="hname">Staging-Redis</span><span class="hnote">直连</span><span class="hacts"><span class="hact">▶</span><span class="hact">⧉</span><span class="hact">✎</span></span></div>
+        </div>
+      </div>
+      <div class="newhost">＋ 新建主机</div>
+    </div>
+
+    <div class="pane">
+      <div class="ai-strip" title="AI 助手 · hover 或 ⌘J 展开"><i></i><i></i><i></i></div>
+
+      <div class="term-body">
+        <div class="tr"><span class="ts">14:20:01</span><span class="tt"><span class="p">ubuntu@k8s-node01</span><span class="o">:~$ </span><span class="c">kubectl get pods -n production</span></span></div>
+        <div class="tr"><span class="ts">14:20:01</span><span class="tt o">NAME                              READY   STATUS    RESTARTS   AGE</span></div>
+        <div class="tr"><span class="ts">14:20:01</span><span class="tt o">api-server-7d9f4b5c5-x2v8z        <span class="chip-st ok">Running</span>   0          2d</span></div>
+        <div class="tr"><span class="ts">14:20:02</span><span class="tt o">web-frontend-6b8f9d4c7-m3n9p     <span class="chip-st ok">Running</span>   0          2d</span></div>
+        <div class="tr"><span class="ts">14:20:02</span><span class="tt o">worker-5c7d9e8f6a-q1w2e          <span class="chip-st err">CrashLoopBackOff</span>   12         2d</span></div>
+        <div class="tr"><span class="ts">14:20:05</span><span class="tt"><span class="p">ubuntu@k8s-node01</span><span class="o">:~$ </span><span class="c">tail -f /var/log/nginx/error.log</span></span></div>
+        <div class="tr"><span class="ts">14:21:15</span><span class="tt o">2024/10/08 14:21:15 [error] 1024#0: *88412 connect() failed (111: Connection refused)</span></div>
+        <div class="tr input-line"><span class="ts">14:21:30</span><span class="tt"><span class="p">ubuntu@k8s-node01</span><span class="o">:~$ </span><span class="cursor"></span></span></div>
+      </div>
+
+      <div class="ai-float">
+        <div class="grip"></div>
+        <div class="ai-hd">
+          <span class="ai-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.8a2 2 0 0 0 1.3 1.3L21 12l-5.8 1.9a2 2 0 0 0-1.3 1.3L12 21l-1.9-5.8a2 2 0 0 0-1.3-1.3L3 12l5.8-1.9a2 2 0 0 0 1.3-1.3L12 3z"/></svg></span>
+          <span class="ttl">AI 助手</span>
+          <span class="own">会话 · K8s-Node01</span>
+          <span class="win-ctl">
+            <span class="wc min" title="收缩到浮条 (esc)">–</span>
+            <span class="wc max" title="放大铺满面板">⤢</span>
+            <span class="wc cls" title="关闭并终止会话">×</span>
+          </span>
+        </div>
+        <div class="ai-body">
+          <div class="bub-u">worker pod 一直在 CrashLoopBackOff，帮我看下原因</div>
+          <div class="bub-a">我先拉取该 Pod 最近的事件与日志确认失败点：</div>
+          <div class="cmd-card">
+            <div class="cmd-hd">⚠ 写操作 · 需确认 · 目标：K8s-Node01</div>
+            <div class="cmd-bd"><span class="d">$</span> <span class="t">kubectl describe pod worker-5c7d9e8f6a-q1w2e -n production</span></div>
+            <div class="cmd-ft">
+              <button class="btn btn-p">批准此调用</button>
+              <button class="btn btn-s">拒绝</button>
+              <button class="btn btn-s">复制</button>
+            </div>
+          </div>
+          <div class="exec-card">
+            <div class="exec-hd"><span class="spin"></span>exec · 只读 · 自动执行 · 1.2s</div>
+            <div class="exec-bd">
+              <div><span class="k">$</span> kubectl logs worker-5c7d9e8f6a-q1w2e --tail=50</div>
+              <div class="err">Error: connect ECONNREFUSED 10.200.4.18:5432</div>
+              <div>&nbsp;&nbsp;at TCPConnectWrap.afterConnect (net.js:1141:16)</div>
+            </div>
+            <div class="exec-group"><span class="done">✓ K8s-Node01</span><span class="run">◌ K8s-Node02</span></div>
+          </div>
+          <div class="bub-a">初步判断：worker 连不上 <b>10.200.4.18:5432</b>（DB-Master，当前离线）。建议先确认数据库链路，再看应用侧。</div>
+        </div>
+        <div class="ai-in">
+          <textarea class="ai-ta" placeholder="继续追问，或 / 引用远程文件…"></textarea>
+          <div class="ai-ctl">
+            <span class="chip">＋</span>
+            <span class="chip">✋ 确认后执行 ▾</span>
+            <span class="chip"><i></i>Sonnet · 中 ▾</span>
+            <span class="chip"><span class="ring"><svg width="14" height="14"><circle cx="7" cy="7" r="5.5" fill="none" stroke="var(--well-bd)" stroke-width="2"/><circle cx="7" cy="7" r="5.5" fill="none" stroke="var(--accent)" stroke-width="2" stroke-dasharray="34.6" stroke-dashoffset="26.6"/></svg></span>23%</span>
+            <button class="send">➤</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusbar">
+    <span class="st"><i class="sd"></i>K8s-Node01 · via Bastion-01</span>
+    <span class="sep"></span>
+    <span class="st">RTT 24ms</span>
+    <span class="sep"></span>
+    <span class="st">UTF-8</span>
+    <span class="sep"></span>
+    <span class="st">120×36</span>
+    <span class="sep"></span>
+    <span class="chain">⛓ ProxyJump ×1 ▾</span>
+    <span class="st-r">
+      <span class="st socks">🧦 :1080</span>
+      <span class="sep"></span>
+      <span class="st">● 广播 · k8s-nodes</span>
+    </span>
+  </div>
+</div>
+</body>
+</html>

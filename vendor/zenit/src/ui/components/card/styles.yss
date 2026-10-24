@@ -1,0 +1,44 @@
+//! Card styles: appearance = variant (default / outlined / elevated) x selected x hover-responsive;
+//! all values reference tokens.
+//! View in card.yix; CardVariant is public API defined in mod.zig.
+const ui = @import("../../ui.zig");
+
+/// Card root: when selected, 2px accent border and no hover highlight; hover highlight changes
+/// border color for outlined, background for others.
+/// Background and border color changes via 120ms transition.
+recipe Card {
+  base {
+    direction: column;
+    background: bg-primary;
+    corner-radius: 6;
+    transition: background 120ms ease-out, border-color 120ms ease-out;
+  }
+  variant kind = default {
+    default  { border: 1 border; }
+    outlined { border: 1 border-strong; }
+    elevated { shadow: md; }
+  }
+  flag selected { border: 2 accent; }
+  flag hoverable;
+  when hoverable & !selected & kind in (default, elevated) {
+    :hover { background: bg-hover; }
+  }
+  when hoverable & !selected & kind = outlined {
+    :hover { border-color: accent; }
+  }
+}
+
+/// Shrink to content when size not specified
+style size($width: ?f32, $height: ?f32) { width: $width ?? fit; height: $height ?? fit; }
+
+style header { direction: column; gap: 4; padding: 12; }
+style title_row { height: 18; }
+style title { color: fg-primary; font-size: 14; font-weight: 600; }
+style subtitle_row { height: 16; }
+style subtitle { color: fg-secondary; font-size: 12; }
+
+/// Content area: children go here; when padded = false, flush to edges
+recipe Body {
+  base { width: grow; direction: column; }
+  flag padded = true { padding: 12; }
+}

@@ -1,0 +1,33 @@
+//! Menu styles: menu item recipe (danger variant + hover highlight + disabled state) and panel /
+//! divider / inline layout.
+//! View in menu.yix; popover, keyboard nav and selection pipeline in mod.zig.
+const ui = @import("../../ui.zig");
+const core = @import("../../core.zig");
+const theme = core.theme;
+const Color = core.Color;
+const Padding = core.Padding;
+
+/// Menu item: root (row, hover / keyboard virtual highlight use list-hover-bg), label (text), icon
+/// (icon, color follows text).
+/// lit is menu's current virtual highlight (pointer enter and keyboard move both write it); danger
+/// is per-item kind; disabled overrides danger and highlight.
+recipe MenuRow slots(root, label, icon) {
+  base {
+    root { width: grow; height: 32; direction: row; align-items: center; justify: space-between; padding: 0 10; corner-radius: 3; background: transparent; }
+    label { font-size: 13; color: fg-primary; }
+    icon { width: 16; height: 16; icon-color: fg-primary; }
+  }
+  flag danger { label { color: danger; } icon { icon-color: danger; } }
+  flag lit;
+  flag disabled { label { color: fg-disabled; } icon { icon-color: fg-disabled; } } else { root { cursor: pointer; } }
+  when lit & !disabled { root { background: list-hover-bg; } }
+}
+
+/// Item list in panel
+style list { width: grow; height: fit; direction: column; padding: 4; }
+
+/// Divider outer: vertical padding, line itself 1px
+style separator { width: grow; height: fit; padding: 4 0; }
+style separator_line { width: grow; height: 1; background: separator; }
+style item_left { width: fit; height: fit; direction: row; align-items: center; gap: 8; }
+style shortcut { color: fg-disabled; font-size: 11; }

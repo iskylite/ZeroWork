@@ -1,0 +1,94 @@
+// GENERATED FILE, do not edit: generated from styles.yss; after editing the source run `zig build gen-yix` (yix-lsp regenerates it on save).
+//! Spinner styles and rendering: container size/hit shape, plus MUI CircularProgress keyframes for
+//! arc drawing. A frame is determined solely by data (size, stroke width, color) and frame clock
+//! time; see `arcAt`. View in spinner.yix.
+//!
+//! Per 1.4s cycle:
+//!   sweep(p) = easeInOut map [MIN -> MAX -> MIN] (arc length grows then shrinks)
+//!   offset(p) = easeInOut map [0 -> OFFSET_MID -> OFFSET_MAX] (tail chases head)
+//!   rotation = uniform, 270 degrees per cycle (1.5pi), accumulates across cycles
+//! Coordinate system: start angle from -pi/2 (12 o'clock).
+const std = @import("std");
+const math = std.math;
+const ui = @import("../../ui.zig");
+const core = @import("../../core.zig");
+const Color = core.Color;
+
+/// Animation period (seconds)
+pub const cycle_seconds: f32 = 1.4;
+
+/// MUI dasharray 1 -> 100 -> 1 px (circumference ≈ 126.92px) normalized to radians
+const max_sweep: f32 = (100.0 / 126.92) * 2.0 * math.pi;
+const min_sweep: f32 = (1.0 / 126.92) * 2.0 * math.pi; // Prevent complete disappearance
+/// dashoffset 0 -> -15 -> -126 px, normalized to radians
+const offset_mid: f32 = (15.0 / 126.92) * 2.0 * math.pi;
+const offset_max: f32 = (126.0 / 126.92) * 2.0 * math.pi;
+/// 270 degrees rotation per cycle
+const rot_per_second: f32 = 1.5 * math.pi / cycle_seconds;
+
+/// Ring: outer diameter, stroke width, color (null = theme accent color, follows theme change)
+pub const Ring = struct {
+    size: f32,
+    stroke_width: f32,
+    color: ?Color,
+};
+
+/// Fixed size, no background; hit shape is ring
+pub const container = ui.paramStyle(struct { size: f32, stroke_width: f32, pub const declared = &[_][]const u8{ "width", "height", "hit_shape", }; pub fn resolve(args: @This(), t: *const ui.theme.Values) ui.BoxStyle { return ui.boxFrom(.{ .width = args.size, .height = args.size, .hit_shape = .{ .ring_arc = .{ .outer_radius = args.size / 2, .inner_radius = @max(0, args.size / 2 - args.stroke_width), .start_angle = 0, .end_angle = math.tau } }, }, t); } });
+
+/// ease-in-out cubic (CSS ease-in-out approximation, smoothstep)
+inline fn easeInOut(t: f32) f32 {
+    return t * t * (3.0 - 2.0 * t);
+}
+
+/// Arc length: grows in first half, shrinks in second half
+fn sweepAt(p: f32) f32 {
+    const tri = if (p < 0.5) p * 2.0 else (1.0 - p) * 2.0;
+    return min_sweep + easeInOut(tri) * (max_sweep - min_sweep);
+}
+
+/// Tail offset relative to head (always >= 0)
+fn tailOffsetAt(p: f32) f32 {
+    if (p < 0.5) return easeInOut(p * 2.0) * offset_mid;
+    return offset_mid + easeInOut((p - 0.5) * 2.0) * (offset_max - offset_mid);
+}
+
+pub const Arc = struct { start: f32, end: f32 };
+
+/// Arc at time now_ms (depends only on absolute time: zero cumulative error, framerate independent)
+pub fn arcAt(now_ms: f64) Arc {
+    const cycle_ms: f64 = cycle_seconds * 1000.0;
+    const p: f32 = @floatCast(@mod(now_ms, cycle_ms) / cycle_ms);
+    const rotation: f32 = @floatCast(@mod(now_ms * (@as(f64, rot_per_second) / 1000.0), math.tau));
+    return arcOf(p, rotation);
+}
+
+fn arcOf(p: f32, rotation: f32) Arc {
+    const start = -math.pi / 2.0 + rotation + tailOffsetAt(p);
+    return .{ .start = start, .end = start + sweepAt(p) };
+}
+
+/// Reduce visual effect: freeze at 0.35s cycle point with stable nonzero arc, no rotation (progress
+/// indication still visible)
+pub const reduced_motion_phase_seconds: f32 = 0.35;
+pub fn reducedMotionArc() Arc {
+    return arcOf(reduced_motion_phase_seconds / cycle_seconds, 0);
+}
+
+pub fn drawArc(ctx: ui.DrawContext, r: Ring, frame: ui.view.Frame) anyerror!void {
+    const dl = ctx.display_list orelse return;
+    const header = ctx.display_header orelse return;
+    const arc = if (core.render_engine.current_reduced_motion) reducedMotionArc() else arcAt(frame.now_ms);
+    try dl.append(.{ .arc = .{
+        .header = header,
+        .cx = ctx.local_w / 2.0,
+        .cy = ctx.local_h / 2.0,
+        .outer_radius = r.size / 2.0,
+        .stroke_width = r.stroke_width,
+        .start_angle = arc.start,
+        .end_angle = arc.end,
+        .color = r.color orelse frame.tokens.tokens.color.accent,
+    } });
+}
+
+//# yix-map styles.yss

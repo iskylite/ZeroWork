@@ -1,0 +1,55 @@
+//! Badge / StatusBadge view. Styles in styles.yss, shared types and tests in mod.zig.
+const std = @import("std");
+const ui = @import("../../ui.zig");
+const mod = @import("mod.zig");
+const S = @import("styles.yss");
+const BadgeStatus = mod.BadgeStatus;
+const BadgeSize = mod.BadgeSize;
+
+/// Badge text display: shows label if non-empty, else shows count if present ("N+" if exceeds
+/// max_count); dot mode doesn't display.
+/// Value type (count written to inline buffer, text borrows slice from source), can go directly in
+/// computed and interpolate.
+const Label = struct {
+    text: []const u8 = "",
+    digits: [24]u8 = undefined,
+    digits_len: usize = 0,
+
+    pub fn format(self: Label, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.writeAll(if (self.text.len > 0) self.text else self.digits[0..self.digits_len]);
+    }
+};
+
+fn labelOf(text: []const u8, count: ?u32, max_count: u32, dot: bool) Label {
+    if (dot) return .{};
+    if (text.len > 0) return .{ .text = text };
+    const c = count orelse return .{};
+    var out: Label = .{};
+    const s = if (c > max_count)
+        std.fmt.bufPrint(&out.digits, "{d}+", .{max_count}) catch unreachable
+    else
+        std.fmt.bufPrint(&out.digits, "{d}", .{c}) catch unreachable;
+    out.digits_len = s.len;
+    return out;
+}
+
+/// Badge: status (info / success / warning / error) x size (sm / md), switchable to 8x8 dot.
+/// Root node carries text (text node + capsule box style), test_id lookup gets the text-bearing
+/// node.
+/// W.Badge(.{ .count = unread, .dot = ui.map(unread, isZero) })
+pub fn Badge(label: Text = "", count: ?u32 = null, maxCount: u32 = 99, status: BadgeStatus = .info, size: BadgeSize = .md, dot: bool = false) View {
+    const shown = computed(labelOf(label, count, maxCount, dot));
+    return (
+        <text style={S.Badge.slot(.label, .{ .status = status, .size = size })} box={S.Badge.slot(.root, .{ .status = status, .size = size, .dot = dot })}>{shown}</text>
+    );
+}
+
+/// Status badge: status dot + label (label doesn't occupy space when empty).
+pub fn StatusBadge(status: BadgeStatus = .info, label: Text = "") View {
+    return (
+        <row style={S.status_row}>
+            <box style={S.StatusDot.of(.{ .status = status })} />
+            {if (label.len != 0) <text style={S.status_label}>{label}</text>}
+        </row>
+    );
+}

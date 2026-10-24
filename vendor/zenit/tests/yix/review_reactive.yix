@@ -1,0 +1,29 @@
+const ui = @import("ui");
+pub var store: ?*ui.Signal(i32) = null;
+fn readStore() i32 { return store.?.get(); }
+fn peekStore() i32 { return store.?.peek(); }
+fn storeSource() *ui.Signal(i32) { return store.?; }
+fn twice(x: i32) i32 { return x * 2; }
+pub fn ExternalOnly() View { return <text>{readStore()}</text>; }
+pub fn ExternalWithProp(n: i32 = 0) View { return <text>{readStore() + n}</text>; }
+pub fn PeekOnly() View { return <text>{peekStore()}</text>; }
+pub fn ReturnedSource() View { return <text>{storeSource()}</text>; }
+pub fn Pure() View { return <text>{twice(4)}</text>; }
+pub fn ExternalVisible() View { return <box visible={readStore() > 0} />; }
+fn nullValue() @TypeOf(null) { return null; }
+fn NullReceiver(args: anytype) @TypeOf(ui.view.text(.{}, "nil")) {
+    return ui.view.text(.{}, if (args.value == null) "nil" else "set");
+}
+const TypeConfig = struct { T: type };
+fn typeConfig() TypeConfig { return .{ .T = i32 }; }
+fn TypeReceiver(args: anytype) @TypeOf(ui.view.text(.{}, "i32")) {
+    return ui.view.text(.{}, @typeName(args.config.T));
+}
+pub fn NullCall() View { return <NullReceiver value={nullValue()} />; }
+pub fn ComptimeStructCall() View { return <TypeReceiver config={typeConfig()} />; }
+const reviewRecipe = ui.cva(.{ .base = .{ .gap = @as(f32, 7) } });
+pub fn StaticRecipeCall() View { return <box style={reviewRecipe.of(.{})} />; }
+const MixedConfig = struct { comptime T: type = i32, value: i32 };
+fn readMixed() MixedConfig { return .{ .value = readStore() }; }
+fn MixedReceiver(config: MixedConfig) View { return <text>{config.value}</text>; }
+pub fn MixedRuntimeCall() View { return <MixedReceiver config={readMixed()} />; }

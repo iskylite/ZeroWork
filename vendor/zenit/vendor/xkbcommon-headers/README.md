@@ -1,0 +1,1 @@
+Headers from libxkbcommon xkbcommon-1.13.0, unmodified. Runtime ABI loaded from libxkbcommon.so.0; no linked host library required. Upstream: https://github.com/xkbcommon/libxkbcommon/tree/xkbcommon-1.13.0

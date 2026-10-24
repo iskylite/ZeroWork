@@ -1,0 +1,548 @@
+# ZeroWork 设计规范与通用要求
+
+> 仓库清理说明：历史原始图像、日志和快照已移除；相关证据链接统一指向脱敏状态摘要，不表示原始逐项材料仍保存在仓库。
+
+> 本文件不属于实施子版本。它是全部功能版本共同遵循的工程、视觉、交互与验收规范；功能需求、接口和落地任务分别写入对应版本正文（V0.1.1–V0.2.3），不在这里另开实施顺序。实施入口见[版本路线](README.md)。
+
+## 1. 适用范围与事实边界
+
+当前首版包括macOS 14+、Apple Silicon、固定本地`/bin/zsh`、SSH、独立SFTP，以及原型里的工作区、历史、传输、转发、AI和八类设置。V0.1.1–V0.1.8是同一首版的实施拆分；FTP/VNC/RDP/KVM不因有规划稿就进入首版执行范围。
+
+优先级为用户明确决定（本轮以连接 V3 的设计语言为统一基线）→确认页原型业务目标→对应版本的实施补全→历史视觉材料。旧原型的装饰、字号或容器层级与 V3 冲突时，按 V3 更新，不以“当前 Figma 已如此”保留旧视觉。发现实质矛盾时记录同一功能版本的阻塞及可验证约束，不以旧修订号、截图数量或索引complete字段替代当前契约。基线审计保持Figma只读；用户本轮明确授权同步已裁决原型，修改仅限确认页相关节点。
+
+**原型只看“V2 · Vanta 设计系统”**，文件`ZeroWork · 交互原型`，记录ID`FOPeYuvmCL86rgev6Niobz`，页`214:329905`。设计节点读写仅用现有本地Figma MCP Bridge，不切换官方MCP、REST或其他设计工具，不核验其他页。Figma原生界面的连接/保存状态检查与本地备份属于辅助验收，不作为节点参数来源。
+
+**当前证据口径（2026-10-24）**：[独立交叉复核](../DEVELOPMENT/V0.2.1_STATUS.md)覆盖2497个当前项（2496产品UI＋1评审导航），1094根有参数或视觉变化；2756来源总表还包含241历史来源、12已移除指标详情和6原缺失来源，不能当作当前产品项数。后续[实机反馈修复](../DEVELOPMENT/V0.2.1_STATUS.md)、[设置摘要](../DEVELOPMENT/V0.2.1_STATUS.md)和[V3本机/外观纠错](../DEVELOPMENT/V0.2.1_STATUS.md)按其明确节点覆盖对应旧值。原型不要求补Present连线，保留既有有效交互；静态导图验收与Zenit真实窗口、资源和交互验收分别记录。
+
+[2026-10-18核验清单](../DEVELOPMENT/V0.2.1_STATUS.md)的基线558状态/569逻辑key、1674三主题场景根和其后5态/15根，以及[逐状态台账](../DEVELOPMENT/V0.2.1_STATUS.md)、[旧15节点读回](../DEVELOPMENT/V0.2.1_STATUS.md)、[冲突复核](../DEVELOPMENT/V0.2.1_STATUS.md)与[292 token](../DEVELOPMENT/V0.2.1_STATUS.md)均保留作历史来源与业务追踪，不能覆盖后续同ID的当前参数或冒充本次全量复核。云端命名检查点`2413747697384332675`已有历史确认；本次连接状态须单独记录，不能用旧检查点证明后续修改同步完成。
+
+用户已确认的产品裁决优先于裁决前原型文字；当前契约、原始证据和待同步节点分别登记，不能因旧键标或退役标本仍存在于快照就继续执行旧规则。快捷键动作与来源统一见V0.1.1§2.3，组关闭见V0.1.6，当前材质字段与旧透明色/浓度退役见V0.1.2§7.3。历史组件只保来源/原文/hash，不自动注册当前schema或新增未画入口；同页最新R24整页没有的已退役入口不得经“高级”或隐藏配置重新开放。
+
+工程固定Zig 0.17.0，API以`build.zig.zon`实际`vendor/zenit`源码为准；旧skill的0.15.2签名不能覆盖项目事实。Zenit负责原生macOS窗口、输入、Metal；ZeroWork不另建WebView/AppKit/SwiftUI平行视图树。优先`ui.widgets.*`，样式由tokens、styles.zig、recipes管理，缺能力补公共组件/平台接口，不靠遍历私有子节点或复制一套文本编辑引擎解决。
+
+正式 App 的功能通过默认行为、现有设置或对应操作控制，不要求用户手写环境变量，不新增隐藏环境开关或设置页面；数据目录、凭据及框架诊断同样遵守此边界。测试隔离仅限测试/自动化构建，保留路径、凭据作用域、进程锁与安全清除约束，完整契约见[V0.2.1§4.2.1](V0.2.1_PLUGIN_HOST.md#421-macos-数据目录与兼容迁移2026-10-24-补充)。终端子进程正常继承用户shell环境及用户自定义远端启动命令，不属于App功能开关。
+
+接口名称是目标职责，不强迫机械新增目录；现有可复用模块保留。设计规范不因框架stock widget外观不同而降级，源码存在也不等于原生接线或运行验收完成。
+
+### 1.1 2026-10-23 统一优化基线与原型收敛
+
+用户在连接设计会话（历史会话）确认的连接弹窗 V3 效果稿与后续落地要求，是本轮连接、底栏链路、端口转发及其他原型组件精修的共同设计依据。本轮提炼来源为读取时的`modal-v3/modal.css`、`modal-v3/modal.js`及`connection-modal-v3-requirements.txt`，以下保留必要规格。采用其紧凑层级、按需详情与稳定视口，不将连接专属尺寸机械套到所有页面。V3 为模拟数据的 HTML 效果稿，本文新增规则是设计契约，不表示真实连接、Figma 同步或应用接线已完成；Figma 修改仍限确认页，保留其他页面。
+
+- 每个面板先表达对象、当前状态和下一步；标题只保留身份与必要 Tag，正文承载任务，详细解释进入就近的提示或展开区。同一状态不同时重复在标题、副标题、状态卡和按钮旁。
+- 同一决策区域最多一个高强调主操作；等待时保留可用取消，认证时主操作放当前输入旁，失败时突出对应恢复动作。复制、刷新、展开等次操作用既有图标规格，不堆满文字按钮。
+- 用对齐、4/6/8px组内间距、文字强弱和单层背景建立秩序；避免每个字段套卡、卡内再套卡及连续标签墙。背景只表达输入、当前项或独立内容区，沿用无外框规则。
+- 常驻区显示完成判断所需的信息，说明和完整次要字段按需展开。错误目标、失败阶段、必须处理的挑战和危险影响始终可见；Tooltip不能承载唯一的关键结论或必填输入。
+- 日志、历史、长链路和长表格采用有界视口。新增内容不推挤固定操作栏，不抢用户阅读位置；尺寸与长文策略先统一，再做局部精修。
+- 原型按“组件 → 组合模块 → 场景”复用：公共Tag、提示、步骤行、链路行、日志头与操作区各有唯一规格；SSH/SFTP/KVM共用连接外壳，各自保留真实协议阶段。颜色/文案/数据不同优先用变体或实例，不能复制成新的组件家族。
+- 收敛重复画板时保留一份主场景及有业务差异的状态变体；同一场景中的重复说明和展示可合并。认证挑战、失败、重试、断线、空态及键盘路径不能因画面近似而丢失；合并需保留旧逻辑key到当前节点的映射、主题对应和验收覆盖，退役版本移至归档说明，不继续占用主流程位置。
+
+**2026-10-24 验收口径**：本轮以可编辑原型本身符合 V3 为硬指标，原型连线不作为必需交付。按实际导出图核对信息层级、文字与图标比例、Tag居中、按钮位置、渐变与玻璃表面、浮层锚点及留白；跨场景相同组件保持一致。节点数量、布局诊断或连线保存成功均不能替代视觉验收。保留现有有效交互，不为补导航重新组织产品根或增加重复画板；实现说明仍与产品界面分离。
+
+**逐项保留用户要求**：对齐、留白、按钮位置、组件/字体/图标尺寸、顶栏/底栏/侧栏比例、渐变/材质、Tag及图标内文字居中、跨场景一致性、重复内容和说明分离均为独立检查项，不能用“统一V3”一项代替。每项对应实际节点参数和最终图；全清单看图覆盖与控件参数专项测量分别记录。持续对照见[用户要求逐项对照](../DEVELOPMENT/V0.2.1_STATUS.md)。
+
+**全使用位置检查**：同类问题需遍历当前有效原型中全部使用位置，不能仅修发现问题的组件家族或挑代表图。共享源正确仍需核实例覆盖：外层按钮缩高后，内部surface/gradient不得留原高度；有渐变还需核对主题色、覆盖边界及文字层序。共享源同时承载普通、禁用和危险动作时，保持语义区别；源修改后由各域逐使用位置验证继承。最新全使用位置记录见[独立交叉复核](../DEVELOPMENT/V0.2.1_STATUS.md)，前轮记录保留为历史证据。
+
+**覆盖、裁切与可见性**：普通临时Popover/Toast可以覆盖背景，但持续提示不得遮住唯一重试、取消或恢复操作；窄pane空间不足时让状态与操作按内容换行，保命中区和终端视口边界。同一静态场景用详细侧栏覆盖壳层的示意，不代表实现时叠建两套侧栏。长列表初始离屏属于正常有界布局，需原生呈现滚动到底的文字和相邻上下文再验收，不能仅看初屏或参数；标题不重复页脚已有数量。应用窗口根应裁切窗口外绘制，保窗口内浮层阴影；局部浮层与内容滚动视口按各自职责设裁切，不能全页一律clip。既定最小阅读视口不能因当前示例文字少而缩低。
+
+**底栏只读指标（2026-10-24 用户裁决）**：编码、终端网格和延迟仅在底栏显示只读值，不提供点击或悬停详情气泡，不在“更多状态”中提供它们的重复详情入口。对应独立详情原型移除。连接状态与链路详情继续使用已确认的富信息浮层；此裁决不删除其中用于判断连接状态的端点、RTT等必要信息。
+
+### 1.2 产品界面与设计说明分离
+
+- 原型画板只包含实际产品应呈现的文案、状态、字段与操作。实现方式、尺寸标注、设计原因、交互时机、数据语义、覆盖清单、未实现能力和验收结果必须放入独立的“设计说明／实现约束”画板或本文，不得作为提示条、卡片、脚注等混入产品界面。
+- 说明区通过原型名称、逻辑 key 和节点 ID 关联，保持在产品原型 Frame 之外，不参与产品画板导出、自动布局、组件实例或原型交互。开发只复刻目标产品 Frame；关联说明作为行为契约阅读。
+- 不把设计说明伪装成 Tooltip。Tooltip 内仍应是实际产品需要提供给用户的信息；“此处使用 Popover”“固定两行”“阶段耗时与 RTT 分开记录”等属于实现说明。
+- 本轮独立说明区节点为 `1354:269096`，名称“设计说明 · V3 连接与全局原型优化 · 非产品界面 / 禁止作为UI复刻”，关联连接与链路样例及本轮验收证据。
+
+## 2. 主题与颜色
+
+### 2.1 全局主题语义
+
+主题选择气泡使用单一表面、紧凑选项行和当前主题浅色选中态。标题“全局主题”已说明作用域，不再叠加“应用与全部终端”“全局生效”或常驻成功说明。选择后以当前项反馈；管理主题保留次操作。选项行不各自包裹玻璃卡片或多层阴影。 同一裁决覆盖`@theme`候选、行内补全、帮助与短时Toast：键盘提示只写“Enter 应用主题”等操作，不在各入口重复作用范围；删除纯重复行时同步收紧容器。
+
+
+**原则**：APP 界面与所有终端网格**共用同一套全局主题 token**。底栏、设置和`@theme`均选择全局主题，同时作用于标题栏、侧栏、浮层、设置和全部终端；不提供单会话主题覆盖或“恢复跟随全局”分支。换主题只改 token 值，不改任何布局/结构。`default`恢复应用默认全局主题，和显式选择Sauber分开。
+
+**Token 表**（产品语义映射；现有 `Theme` 尚未一一覆盖以下全部字段，不能把目标表写成已接入结构）：
+
+| Token 组 | 变量 | 说明 | Zig `Theme` 字段 |
+|---|---|---|---|
+| 强调 | `--accent` / `--accent-2` / `--accent-fg`及R15 `action-*` | 强调、渐变副色、白字动作底分别有明确值，不能只给一个accent便认为足够 | `accent`为现有基础；UI token层须扩展 |
+| 背景层级 | `--bg-app` / `--surface-1` / `--surface-2` / `--well` | app底、卡片、次卡、输入井是独立语义槽；按§2.2精确值，不用任意统一提亮算法代替 | `bg`不足以表达全部槽位 |
+| 终端 | `--bg-term` `--ansi-g/b/r` `--gutter` `--cursor` | bg-term与bg-app不同；VT原ANSI保留，当前时间戳用fg-2而非旧gutter色 | `bg`/`ansi[]`/`gutter_*`/`cursor`及UI映射 |
+| 文字 | `--fg-1/2/3`及可读语义ink | 主文/次文/弱文按各主题取值，语义小字有独立可读变体 | `fg`及扩展UI token |
+| 语义 | `--ok` `--warn` `--danger` | 状态底、图标与小字可读ink分开，不改原VT ANSI调色板 | ansi[2]/[3]/[1]为基础来源 |
+| 强调透明度梯度 | `--accent-05/06/07/12/22/30` | 逐主题alpha见§2.2；token后缀不保证等于百分比，禁止按名称重新推算 | accent与显式alpha |
+| 玻璃 | `--glass-hi/lo` `--glass-spec` | 玻璃渐变两端 + 顶部高光线 | 见 §3.3 |
+| 阴影 | `--shadow-1/2/tab/float` | 层级投影阶梯 | 见 §3.3 |
+
+**默认主题**：`Vanta Dark`（`--accent: #6366f1`）与 `Vanta Light`（`#4f46e5`）为出厂黑白双主题；Sauber是蓝色强调`#1345F6`与薄荷背景`#ECFFE5`，为首个第三方主题验证样例（来源`.itermcolors`，UI层级另有产品语义值）。
+
+**Reset的默认值**按当前原型`settings-reset/reset-draft`载入Sauber草稿，保存前可放弃；出厂提供Dark/Light与Reset选择哪一主题是不同概念，不根据本段把Reset静默改为Dark。全局`@theme default`继续恢复应用默认值，不能把字符串default当Sauber的硬编码别名。
+
+**规则**：
+- T1. 任何新 UI 元素的颜色**必须引用 token**，禁止写字面 hex。主题导入色是受校验的配置数据；运行时所有控件仍引用同名语义槽，不能把某主题色抄进单个view。
+- T2. 启用的普通UI小字须按实际底色合成后检查4.5:1；基础ok/warn/danger值本身不保证小字通过，使用§2.2的可读ink与R15动作底。不能为了UI对比度改写VT原ANSI输出；禁用状态、纯装饰与可读正文分别验收。
+- T3. 浮层颜色永远从 `--bg-*` 派生（提亮或压暗），禁止引入体系外颜色。
+
+### 2.2 三主题精确token
+
+| Token | Vanta Dark | Vanta Light | Sauber |
+|---|---|---|---|
+| accent（HTML基础） | `#6366f1` → `#8b5cf6` | `#4f46e5` → `#7c3aed` | `#1345F6` → `#2563EB` |
+| action-accent → action-accent-2（R15白字动作底） | `#6164ec` → `#8457ea` | `#4f46e5` → `#7c3aed` | `#1345F6` → `#2563EB` |
+| action-danger（R15白字危险确认底） | `#d53d3d` | `#dc2626` | `#cd473b` |
+| bg-app | `#060608` | `#e6e6ea` | `#d9eccf` |
+| surface-1 | `#131316` | `#fbfbfc` | `#f2fdec` |
+| surface-2 | `#1b1b1f` | `#f4f4f7` | `#ecfbe5` |
+| well / well-bd | `#0c0c0f` / `#26262c` | `#ececf0` / `#d9d9e0` | `#e2f5da` / `#c9e4bd` |
+| bg-term | `#0a0a0d` | `#fbfbfc` | `#ECFFE5`（itermcolors 原值） |
+| overlay实底（当前Figma） | `#18181c` / alpha1 | `#ffffff` / alpha1 | `#f3ffef` / alpha1 |
+| overlay（HTML玻璃参考） | `rgba(24,24,28,.94)` | `rgba(255,255,255,.96)` | `rgba(243,255,239,.96)` |
+| card-deep / card-deep-ft | `#101014` / `#0c0c10` | `#fbfbfc` / `#f3f3f6` | `#f7fff2` / `#eefbe8` |
+| hover / tab-on | `#202026` / `#1e1e23` | `#ececf1` / `#ffffff` | `#dbf0d6` / `#f8fff4` |
+| sel-bg | accent / alpha.14 | accent / alpha.09 | accent / alpha.09 |
+| fg-1 | `#f4f4f5` | `#18181b` | `#0F172A`（Ansi 0） |
+| fg-2 / fg-3 | `#a1a1aa` / `#5b5b64` | `#52525b` / `#a1a1aa` | `#46604f` / `#8aa396` |
+| ok/warn/danger | `#22c55e`/`#f59e0b`/`#ef4444` | `#16a34a`/`#d97706`/`#dc2626` | `#10B981`/`#D49A0C`/`#DC4C3F`（Ansi 2/3/1） |
+| group | `#22d3ee` | `#0891b2` | `#06B6D4` |
+| ANSI装饰g/b/r（不替代16色VT调色板） | `#4ade80` / `#60a5fa` / `#f87171` | `#15803d` / `#2563eb` / `#dc2626` | `#0d9668` / `#2563EB` / `#DC4C3F` |
+| warn-bg | warn / alpha.10 | warn / alpha.08 | warn / alpha.09 |
+| 旧gutter / 当前时间戳 | `#4b4b54` / fg-2 | `#a1a1aa` / fg-2 | `#8aa396` / fg-2 |
+| cursor | `#818cf8` | `#4f46e5` | `#000000`（itermcolors） |
+| grip | `#3a3a42` | `#d4d4d8` | `#b9d6ae` |
+
+强调透明token是RGB=本主题accent、alpha取下表，token后缀是历史名称，不能按07/12/30直接除100计算：
+
+| Token | Dark alpha | Light alpha | Sauber alpha |
+| --- | --- | --- | --- |
+| accent-05 / accent-06 | .05 / .06 | .05 / .06 | .05 / .06 |
+| accent-07 | .08 | .08 | .07 |
+| accent-12 | .14 | .13 | .13 |
+| accent-22 | .24 | .22 | .22 |
+| accent-30 | .35 | .32 | .32 |
+| accent-ring | .18 | .16 | .16 |
+
+`build_vanta.py:readable_ui_ink`已为UI语义小字生成比基础token更亮/深的值。原生需在主题适配层保留同等语义槽，不能将HTML的基础ok/warn等直接替换所有文字；以下是当前三主题来源算法的确定结果，未知导入主题须按实际背景重新校验，不能套用别的主题硬值：
+
+| UI文字ink | Dark | Light | Sauber |
+| --- | --- | --- | --- |
+| accent | `#8c8ef5` | `#4f46e5` | `#1345F6` |
+| ok / warn / danger | `#22c55e` / `#f59e0b` / `#f36e6e` | `#107435` / `#985304` / `#c32222` | `#0a714f` / `#7f5c07` / `#ad3c32` |
+| group | `#22d3ee` | `#066f88` | `#046d7f` |
+| 状态装饰g / b / r文字 | `#4ade80` / `#60a5fa` / `#f87171` | `#137538` / `#225cd9` / `#c32222` | `#0a704e` / `#225ad6` / `#ad3c32` |
+
+该表不改VT原始ANSI、状态色底、投影或R15白字动作底。Figma中单页已明确的文字覆盖（如Sauber新建井`#425b4b`）继续保留并在theme recipe中命名。基础色、可读ink、alpha、disabled40%及整体素材alpha分别管理，禁止父子重复降透明度。
+
+HTML基础token见三份HTML的`:root`块；R15新增动作语义token以本表和§4.1为准，原生主题层须补相同映射。Figma变量集合的目标结构为同名语义token与Dark / Light / Sauber三个Mode。当前本地Bridge尚不能可靠写入多Mode，原型以三套对应画板/组件呈现，不能将目标结构写成已接通的一键换肤。
+
+## 3. 布局、边界与材质
+
+### 3.1 卡片与间距
+
+**整体结构**：保留工作区的外层窗口分区；每个任务面板内部采用 V3 的单一主表面，以对齐、字重、留白和按需展开组织信息。不能把每个字段、指标、步骤和说明再包成悬浮卡。外层分区几何如下，不能据此推导“每个子模块都要有底色与投影”。
+
+```
+.window { padding: 8px; gap: 6px }        ← 页面外边距8，卡片间隙6
+├─ 标题栏卡片  h46  r11  shadow-1
+├─ 主区 (gap 6)
+│   ├─ 侧栏卡片  w224 ⇄ 48  r11  shadow-1
+│   └─ Pane 卡片  flex1  r11  shadow-1   ← 终端/浮层锚定容器
+└─ 状态栏卡片  h32  r11  shadow-1
+```
+
+**间距分级**（窗口层级的三种用途；控件内部及组pane另遵循其精确4/6/8px规格）：
+
+| 级别 | 值 | 用途 |
+|---|---|---|
+| 页面呼吸 | 8px | 窗口外边距 |
+| 卡片间隙 | 6px | 卡片与卡片之间 |
+| 面板内部 | 水平12px为紧凑基线；行内5–8px；相邻模块6–10px | V3连接头40px、信息行48px；其他页面按内容调整。终端局部坐标沿用V0.1.2，不套浮层padding |
+
+**规则**：
+- L1. 浅色主题的 `--bg-app` 与 `--surface-1` 明度差**不得超过一档**（≈4-6%）；深色可略大。间隙突兀一律先收背景差，不是加阴影。
+- L2. 圆角分级：卡片11px / 内容器9px / 控件7–8px / chip5–8px；有实体背景的卡片与控件按角色取值。无背景布局Frame、VT单行裁切框、文字和SVG内部几何可以0圆角，不能为套规则改变裁切或文字基线。
+- L3. 侧栏默认 224px，折叠 48px 图标栏（`⌘B` 或头部折叠钮）；<1100px 窗口宽自动折叠（SPEC §2.0c），用户手动偏好优先于自动。
+
+### 3.2 描边允许场景
+
+**总纲：先用对齐、间距、文字与状态组织层级；只在输入、路径摘要、日志视口及当前选中项等有明确含义处加井底或浅色底。投影用于浮层及唯一主操作，不为普通信息行和分区标题加影。描边仅保留虚线空槽和组页签标记。**
+
+| ✅ 允许描边 | 样式 | 理由 |
+|---|---|---|
+| ① 虚线井 | 1.5px dashed `--well-bd`，hover 变 accent | "可填充的空槽"（新建主机/拖放区），虚线本身就表达 inviting |
+| 键盘焦点（不画描边） | `--sel-bg` / `--surface-2` 底色变化，输入保留 caret / IME | 所有普通控件、菜单、状态栏入口及浮窗操作均不画外框 |
+| ③ 组页签标记 | 仅组Tab左缘2.5px组色条＋8% tint底 | 组内pane靠r11卡片与4px间距区分，不在会话卡左侧画蓝细线 |
+| 危险提示（不画描边） | danger tint 底、图标与短文 | 保留警告含义，不添加整圈框线 |
+
+| ❌ 禁止描边 | 替代方案 |
+|---|---|
+| 外层容器与浮窗 | 主题表面与必要的浮层投影；内部信息分组靠留白和对齐，默认无子卡投影 |
+| 分区边界（标题栏底/状态栏顶/侧栏缘） | 6px 间隙 + app 底色透出 |
+| 按钮 | 主操作保留渐变轻影；普通图标次操作默认透明，hover浅底；取消等文字次按钮可用surface-2 |
+| 菜单/chip/标签/选中态 | tint 底（`--accent-07`/`--sel-bg`） |
+| 终端 gutter 与正文之间 | 弱文字明度＋8px留白；时间列48px右对齐，完整规则见V0.1.2，不画分隔线 |
+
+**违规自检**：界面里每看到一条线，问"它属于虚线空槽或组页签标记吗？"——不属于就删掉，改用层级表达。
+
+### 3.3 阴影与背景能力
+
+**阴影使用**：V3的主体是单表面，不能把下表视为逐层叠加要求。浮层用 `--shadow-float`，输入与日志井可用轻内凹影，主操作保留局部色影；普通信息行、标题、静态Tag及ghost图标次操作均不加影。旧 `shadow-1/2/tab` 仅适用于既有外层工作区或保留的特定组件。
+
+| Token | 用于 | Dark 参考 | Light 参考 |
+|---|---|---|---|
+| `--shadow-1` | 常驻卡片（标题栏/侧栏/状态栏/pane） | 0 2px 8px /40% + 1px 白 4% | 0 1px 6px /5% |
+| `--shadow-2` | 历史兼容；新分组/命令/执行信息默认并入主表面，不新增此影 | 0 1px 4px /35% | 0 1px 3px /5% |
+| `--shadow-tab` | 活跃 tab | 0 2px 8px /35% | 0 1px 6px /7% |
+| `--shadow-float` | 临时浮层（AI 浮窗/链路弹层/⌘K/菜单） | 0 24px 64px /55% 三层 | 0 24px 60px /17% 三层 |
+
+**玻璃态的HTML参考**（`backdrop-filter: blur(28px) saturate(1.5)` + 双层渐变 `--glass-hi→lo` + 顶部 1px `--glass-spec` 高光）：
+
+这里是适用浮层的材质选项，不能机械覆盖已确认的V3连接外壳。V3 `modal.css` 的 `.modal` 使用 `--overlay` 表面与浮层投影，未设置整窗 `backdrop-filter`；`.edge` 的1.5px模糊与渐变只表达滚动边缘。验收先识别具体表面角色与实际参考，不能因连接面板没有整窗模糊就判定漏做玻璃，也不能用多层硬色矩形模拟玻璃。
+
+- ✅ **临时浮层可用玻璃**：AI 浮窗、AI 边条（HTML参考blur16px）、链路弹层、⌘K快速连接、@指令面板、右键菜单、HUD。
+- ❌ **常驻卡片不用玻璃**：侧栏/标题栏/状态栏保持实底`--surface-1`。当前R24图片透明度和blur只作用于app与默认终端的背景层；文字、图标、输入和其他前景opacity保持1，不向整个控件树施加透明度或模糊。
+- **原生能力以vendor 0.17源码为准**：`ui.Color`支持RGBA，`BoxStyle.background`可用alpha；通用`opacity`存在，但不能用它降低整份前景透明度来冒充背景材质。`glass.backdrop_blur`范围为0–96逻辑px，采样窗口自身`mainRT`中已经绘制的内容，可作用于下层app背景图片；公开`GlassParams`也有`backdrop_saturation/brightness`并已传至shader。这不是桌面采样，与CSS `blur(28px) saturate(1.5)`的最终视觉等价仍须同尺寸实机验收。旧文的`DrawCmd.blur(r, radius, saturate)`不是当前依赖的API，不得据此推导实现或性能保证。
+- **窗口边界**：普通窗口surface为`fully_opaque`，`WindowConfig`没有透明窗口或`NSVisualEffect`接入；图像alpha与窗口桌面透出是不同能力。桌面透出需要独立原生窗口接入，原型不得承诺已具备。blur的应用绑定、采样顺序与性能仍需实机验证。
+- **图片边界**：`ui.image`及`loadTexture`可绘制RGBA纹理，现有`ImageProps`没有Fit/Fill等适配属性；缩放、等比裁切、平铺、对齐和遮罩须由应用布局/clip与绘制逻辑接入。当前`Config.Ui`没有alpha/blur/背景路径配置，Figma Bridge也不能写原生`BACKGROUND_BLUR`，静态材质稿不代表运行时已接通。
+
+## 4. 控件、文字与坐标
+
+### 4.1 按钮、输入和chip
+
+**按钮**：按任务重要性分级；一个决策区域最多一个高强调主操作，其余动作保留清晰命中、名称和反馈。
+- 主按钮：h30（弹层内）/ h34（表单内，SPEC §2.0b），圆角8，`linear-gradient(135deg, action-accent, action-accent-2)`（R15白字动作色见§2.2），色影 `0 3px 10px --accent-30`，顶部 `inset 0 1px 0 rgba(255,255,255,.18)` 高光；hover 上浮 1.5px + 影加重；active 压回。按钮、图标和chip各自精确动效以§5的M-*规则为准，不共用一个模糊的hover时长。
+- V3统一字体角色：标题Inter13/Bold700/20，正文Inter12/Regular400/18，次文字Inter11/Regular400/16，主次动作Inter12/Medium500/18；端点与时间用JetBrains Mono10.5/16。当前实例与该角色冲突时更新源组件；不能用旧Figma反向覆盖V3。页签同12/500/18，终端JetBrains Mono14/22；完整角色与Zenit绝对行高换算见§4.4。默认终端行高22，对应设置倍率`11/7`，用户已确认；原型字段旧1.5仅作待同步标注。
+- Tab左侧类型/系统图标沿用14×14槽位及当前主题前景色：会话组为两个错位叠放的窗口轮廓，本地macOS/ZSH为单色Apple，SSH按目标服务器真实OS/发行版元数据选择，未知用通用terminal；不能根据hostname、本机或跳板OS猜测。保持页签文字、宽度、间距、状态圆点、关闭槽、组色条和活动底条不变；按住Command时仍沿既有规则以1–9替换同一槽位。字段来源、缓存与旧响应隔离见V0.1.1§5.2及V0.1.3相关契约。该规则仅针对Tab，不扩展替换菜单、侧栏或正文图标。
+- V0.2.2新增BMC iKVM Tab使用同槽位单色`monitor`显示器轮廓，标题包含连接名称与“KVM”，状态点继续独立表达连接状态。图标不随远端OS或跳板系统变化；键鼠捕获、共享权限和电源状态在工作区工具栏表达，不叠入14×14图标。具体原型与几何见[V0.2.2 BMC iKVM](V0.2.2_BMC_IKVM.md)。
+- 次按钮：取消、返回等明确次级动作可用 `--surface-2` 与轻微投影；hover 换 `--hover` 底。不要为复制、刷新、展开和更多各加一块实体文字按钮。
+- ghost 图标次操作：默认透明、无描边无投影，24×24命中、图形14px、圆角8；hover浅底与前景变化，focus保留底色反馈。工作区原32/28px命中槽仍按所在区域保留。
+- 文字次操作可用于日志展开等有歧义的动作，12/18或次文字11/16，允许短标签；不限制为“仅工具栏图标”。
+
+**操作区的几何检查**：连接V3外壳以水平12px内距为基准，页脚动作之间8px；常规确认/恢复动作保持右侧末位，次操作排在其左侧。认证行内动作仍紧邻对应输入，不强行迁移到底栏。检查实际按钮右边缘与容器内边缘，不能只确认Auto Layout已开启；新增次按钮不得挤到主动作右侧，伸缩说明区不能留下额外空槽。Tag文字在自身槽位中水平、垂直居中，图标与文字按同一行的视觉中心对齐。
+
+**同角色尺寸的跨原型裁决**：普通24px图标按钮统一图形14px，并在槽内居中；适用于Pane工具栏、侧栏头部、内容浮层、菜单、字段帮助和设置关闭等普通次操作，不能用“外壳”泛称保留旧16px图。非交互类型/事件图标16px不因此缩小；32/28px工作区命中槽、22px AI控制、34px表单保存/恢复按其明确角色保持比例。KVM紧凑工具栏“执行”保留V0.2.2的78×28，文件确认/创建的紧凑主图标保28px槽/16px图形；其启用主操作仍使用对应主题渐变。AI composer的28px主图标与恢复提示中的30px文字主按钮分开验收。
+
+**角色边界与内容撑高**：表单内“选择文件/编辑路径”等尾部次操作仍用24px槽/14px图形，不能把34px提交/保存/恢复的规格套到它们上。传输管理器是锚定气泡，只保留右侧24px关闭，不放最小化/最大化；AI浮窗原22px三态控制继续保留。13/Bold/20适用于面板、分类及历史标题，首次使用主视觉18/Medium/26、对象身份和核心确认14/Medium/21、快速命令主输入14/Regular/20各有独立语义。修改共享文字源后检查所有实例的FIXED/HUG高度，18px行高不得留在16px固定槽中。
+
+**消息及重复数据**：用户消息气泡的渐变背景与外层实际高度一致，多行随内容撑高；不得用固定37px渐变覆盖35px气泡，也不能用根裁切掩盖背景越界。同一终端输出行只画一份时间戳；同父、同值、同坐标的叠字必须删除第二份，正文、原始复制和搜索数据不受影响。
+
+**下拉锚点**：同族SelectMenu按各自真实触发框定位，优先距底部4px、右缘对齐；不能复制另一规格触发框的固定y坐标。视口碰撞时按统一flip/shift策略处理，保持内容与命中区一致。
+
+**协议Tag**：SSH/SFTP/KVM身份Tag以40×20、Inter Regular400 10px/16px为共同规格，文字水平/垂直居中。交互式协议选择器、能力开关和终端日志中的语义状态chip各保其角色，不因含协议名而机械改成只读Tag。
+
+**图标按钮的特殊态**：`.icn.hot`（当前激活的功能入口，如 AI 已展开时）用 action-accent→action-accent-2 渐变底 + 色影，与普通图标拉开层级。
+
+**chip**：可交互选择入口以h24 r8为基线，默认中性浅底或透明，无常驻微影；hover/open用底色区分，字11/16。状态 chip（终端内 `Running`/`CrashLoopBackOff` 等）用语义色 13% 底 + 语义色字，**让状态词从日志流里跳出来**。
+
+**表单输入框**：常规h31–32 r8–9；V3认证紧凑输入h28 r7、内距8px，单字段独立表单可用h38。按内容角色选择，不统一压缩所有表单。井底 `--well` + 内阴影凹槽；聚焦 = 选中底色与插入光标，不画 border / outline / ring。AI composer沿用HTML `.ai-ta`：透明输入背景、无border及outline，普通输入焦点也不绘制整圈ring；以插入光标与IME标记表达输入状态。
+
+### 4.2 图标语义
+
+**总纲**：界面上所有图形元素必须先回答"它是**区域标识**还是**功能操作**"——两者的视觉规格完全不同，不可混用。这是避免"看着像按钮但不能点 / 能点但认不出"的关键。
+
+#### A. 区域标识图标（Decorative Icon）—— 纯视觉锚点，不可点击
+
+| 特征 | 规格 |
+|---|---|
+| 用途 | 卡片/浮层/分区的标题左侧，标记"这个区域是什么" |
+| 样式 | **单色线稿**（Lucide/Feather 风格），accent 色或 fg-2 色 |
+| 尺寸 | 16-18px（设置页分区 16px，卡片标题 18px） |
+| 底板 | **无底板、无背景、无圆角** |
+| 交互 | **无 hover 态、无点击**——鼠标移上去不变样 |
+
+**应用清单**：
+| 位置 | 图标 | 色 |
+|---|---|---|
+| 侧栏"主机与连接" | 服务器（双机架） | accent |
+| AI 浮窗"AI 助手" | ✦ 四角星（AI 符号） | accent |
+| 设置页各分区标题 | 齿轮/调色板/钥匙等 | fg-2 |
+| 状态栏只读指标的图形本身 | 终端 / activity / network；14px；可点击入口整体按下方功能按钮 | fg-2；活跃功能用语义色 |
+
+#### B. 功能操作按钮（Action Button）—— 可点击，必须有反馈
+
+| 特征 | 规格 |
+|---|---|
+| 用途 | 工具栏、操作行、窗口控制 |
+| 样式 | 图标＋独立命中区；默认透明，hover显示圆角浅底，不要求常驻底板 |
+| 尺寸 | 32×32（标题栏）/ 28×28（Tab 栏）/ 24×24（侧栏头部）/ 22×22（AI 三态钮） |
+| 底板 | 圆角 7-9px，默认透明，hover 浅底 `--hover` |
+| 交互 | **必须有 hover 态**（底色变化或上浮），点击有 active 态 |
+
+**应用清单**：
+| 位置 | 按钮 | 样式 |
+|---|---|---|
+| 标题栏 ⚡⇅✦⚙ | 功能入口（快速连接/传输/AI/设置） | 32×32 r8，hover 浅底；激活态 `.hot` 渐变 accent 底 |
+| AI 浮窗 –⤢× | 三态控制（收缩/放大/关闭） | 22×22 r6，hover 染黄/绿/红 |
+| 侧栏 ＋⟨ | 新建/折叠 | 24×24 r8，图形14px居中，hover 浅底 |
+| Tab × | 关闭页签 | 行内，hover 显现 |
+
+#### 判定自检
+
+看到一个图形元素，问三个问题：
+1. **它能点吗？** 不能 → 区域标识（A）；能 → 功能按钮（B）
+2. **它有独立命中区和交互语义吗？** 有 → 按钮（B）；静态Tag有底色仍是分类标识，不能只凭底板判断
+3. **hover 有反馈吗？** 没有且不可点 → A；必须有反馈 → B
+
+**禁止**：
+- 区域标识用按钮规格（渐变底板+色影）——会让用户以为能点
+- 功能按钮只有图形命中、缺少hover/focus反馈——默认透明的ghost图标按钮符合V3
+- 同层级元素混用两种规格（如侧栏图标是线稿、AI 头部图标是渐变方块）
+
+#### 灰区：chip 算什么？
+
+chip（如 AI 浮窗底部的 `✋ 确认后执行 ▾` / `Sonnet ▾`，推理另用sliders图标）是**功能按钮的变体**——它可点击（展开下拉），因此具备稳定命中区、可访问名称及hover/open/focus底色反馈；默认可透明或使用`--surface-2`，不强制微影和上浮。**chip = 小型功能按钮**，不是区域标识。
+
+### 4.3 图标提示与必要文字
+
+高频且语义明确的复制、刷新、文件选择/替换、移除、保存、导入/导出、展开和窗口控制优先使用图标按钮，不为同一动作再占一行长文本。图标必须有独立命中区、hover/pressed/disabled/focus反馈、可访问名称，450ms hover或键盘focus显示短tooltip，Esc关闭；命中区一般22/24/26/28/32px，不能只给细线图形本身命中。
+
+同一卡片的行内操作靠行尾，固定提交动作靠右；文件身份与选择/替换/移除在同一行，标题、路径、必要状态在剩余宽度内单行省略，完整值放tooltip或详情。能力如识图/推理用图标表达，重复说明与次要元信息移到tooltip。危险确认、首次理解成本高或图标有歧义的动作保留简短标签及必要影响说明，不能以省空间隐藏目标、错误、审批影响或禁止原因。
+
+#### Tag 与 Tooltip / Popover 的分工
+
+标题旁的 `SSH`、`SFTP`、`KVM` 使用无描边、小尺寸、中性底的静态 Tag；转发协议/方向、能力类别及确有区分价值的状态也可使用 Tag。协议Tag不着成功色，不用一串Tag复述整句正文。状态Tag配短文字，颜色仅辅助；同一行已有清晰状态文字或图标时避免重复。静态Tag不加关闭钮、不伪装按钮；筛选、选择及下拉入口仍是有交互语义的chip/Button。§4.2的“有底板应为按钮”判定针对图标，静态文字Tag是分类标识例外。
+
+同一身份Tag统一20px高、Inter10/Regular/16并双向居中；短协议基准宽40px，本机身份`LOCAL`保48px宽容纳五个字母，不以加高或加重字体区分。协议选择列表保其交互控件规格，不套静态身份Tag的固定宽高。
+
+本轮“toolkit”按上下文中的轻量提示诉求落实为 Tooltip / Popover：短动作名、快捷键、截断后的次要完整值用 Tooltip；包含多字段、逐跳关系、复制/刷新、滚动或其他交互的详情用 Popover。Tooltip 默认 hover 450ms、focus立即显示；点击底栏连接详情打开可停留的 Popover，不能点击后仅出现一句状态。两者都从当前数据读取，详情不复制独立状态；原生能力限制见§7.3。
+
+### 4.3a 信息组织与组件复用
+
+先确定“对象 → 当前状态 → 可执行动作”，再布局。普通信息行用48px两行结构：图标槽18px、与内容间距6px、主文字12/18、次文字11/16、数值右侧等宽10.5/16；路径摘要用井底9px圆角与11px文字，步骤当前项用约7%强调底，其余行并入面板。连接路径图标11px、步骤状态图标14px、标题身份图标18px，不能混成一组相同大小的大图标。
+
+信息从左到右共用固定内容起点；标题与Tag同一行，状态只显示一次。避免“标题＋大号状态卡＋指标卡组＋重复摘要＋操作卡”逐层堆砌。先合并表达同一对象的身份、路径、状态，再把认证、故障恢复等必须操作放到相应当前行；日志、高级字段、逐跳详情按需展开。设置、多列文件列表和KVM工作区按自身内容宽度组织，540px仅是连接弹窗宽度。
+
+组件源按语义命名，使用主题/状态变体与实例文本属性；同一语义只因示例宽度不同不新建组件家族。拆分只为不同任务或独立交互；同一任务的阶段、主题、颜色、数据及开合优先归入变体/状态。合并前保留状态映射与交互目的地，不能把“减少占位”当成删功能。
+
+### 4.4 字体、度量和坐标转换
+
+V3已通过本地字体文件使用`Inter`界面文字与`JetBrains Mono`技术值，三主题共用几何与字体。以下是统一角色规格；旧实例的任意字号不构成覆盖依据。终端等专用内容保留自身度量，不把全界面统一成12px。
+
+| 角色 | 字体/字号/字重 | 行高与对齐 |
+| --- | --- | --- |
+| 页签标题 | Inter 12 / Medium 500 | 18px；单行省略，标题槽固定，不随关闭显隐改变 |
+| 侧栏及浮层标题 | Inter 13 / Bold 700 | 20px；图标18，正文与动作分别对齐 |
+| 普通信息正文 | Inter 12 / Regular 400 | 18px；首列身份左对齐，数值/耗时右对齐 |
+| 次文字/辅助信息 | Inter 11 / Regular 400 | 16px；与主信息共用内容起点，避免灰字跨多个盒子漂移 |
+| 表单输入/主次动作 | Inter 12 / Regular或Medium，按对应实例 | 常见18px；字号不代替控件30–34px命中高度 |
+| 终端正文 | JetBrains Mono 14 / Regular 400 | 22px行容器，原VT列宽与字素独立保存 |
+| 时间戳 | JetBrains Mono 9.5 / Regular 400 | 14px文字框、行内y4、48px右对齐；`fg-2`，不沿用早期低对比度gutter色 |
+| 主机链路跳数、工具耗时 | JetBrains Mono 10.5 / Regular 400 | 16px；数值右对齐 |
+| AI工具头标题/摘要 | Inter 11.5 / Medium或Regular | 16px；32px头、耗时44px槽，见V0.1.7 |
+
+尺寸为macOS逻辑px；Figma `lineHeight:{unit:PIXELS,value:22}`不能直接填入Zenit的倍率`TextProps.line_height`，14px正文的等价倍率是`22/14`，9.5px时间是`14/9.5`。用户已确认默认以终端视觉22px为准，V0.1.2设置默认倍率同步为`11/7`（显示可约1.5714），配置/计算保留足够精度使14字号得到22px，不能把显示四舍五入后的1.57反复写回；原型设置字段仍标1.5，记录为只读待同步标注，不作为当前默认。
+
+`FontRegistry`、`App.setFontRegistry`和`TextProps.font_family`已有实际实现；测量、省略、绘制、选区与IME必须使用同一解析字体和fallback，不能按字符数或`fontSize×0.6`猜宽。字体未安装时保留用户选择并明确fallback，预览显示实际结果；不能显示JetBrains Mono却使用比例字体计算VT列数。设置的用户可调范围仍为有限数1.0–3.0，变更同一轮更新所有终端与几何。
+
+Figma节点`bounds`相对直接父级；画板在canvas上的x/y不进入应用坐标。浮层锚点、绘制、命中和IME先累加祖先变换再转为窗口坐标，不能把row-local的x68直接当成pane内x68。布局、字体、颜色与身份示例分开：`K8s-Node01`、`14:20:01`、`120×36`、`64%`均由运行时数据替换，控件尺寸和token不随示例文字硬编码。
+
+### 4.5 品牌资产
+
+沿用定稿OK手势翼状流线Logo：O环/短手腕弧为橙色渐变`#fbbf24→#f59e0b`，环内`>_`青色`#22d3ee`；三条翼状流线依次蓝青渐变`#3b82f6→#06b6d4`/95%、`#2563eb→#0891b2`/85%、`#1d4ed8→#0e7490`/75%，底板为主题accent渐变、圆角16/64。品牌资产固定色是资产数据，不是普通控件绕过语义token的许可。
+
+源为`docs/SPEC/prototypes/v2/index-*.html`中64×64 viewBox的内联SVG；128px可用提示符发光，小尺寸去滤镜保清晰。保留比例、不拉伸，最小16px。用于关于页、浏览器favicon及安装包.icns；侧栏标题用服务器线稿，不将品牌Logo放进侧栏/工具栏/设置导航等功能区。V0.1.8从同源生成安装图标，不另创Logo。
+
+## 5. 动效与控件状态
+
+本节统一规定动效精确值。共享主次按钮、ghost图标、输入、浮层与提示以`artifacts/connection-experience-proposal/modal-v3/modal.css`为新基线；工作区专属行为仍参考`docs/SPEC/prototypes/v2/vanta.css`，不能将旧chip色影套到所有新次操作。Dark/Light/Sauber正文和动效规则相同，只替换各HTML的主题token。`E=cubic-bezier(.4,0,.2,1)`，`ease=cubic-bezier(.25,.1,.25,1)`；以下transition默认delay=0。HTML的`all`是参考源码写法，原生只对表中列出的视觉属性插值，不对尺寸、命中区或业务属性做无差别动画。所有位移/scale仅影响绘制，布局占位、点击区和锚点保持原尺寸。
+
+**HTML已有的控件反馈**：ID同时用于Figma控件层`motion[...]`引用及“R13动效规格”三主题样例板，不能仅靠一张hover截图推断参数。旧R13样板用于历史来源，冲突时采用本文V3规则。
+
+| 规则ID / HTML selector / 位置 | 触发与过渡 | 精确视觉变化 / 覆盖关系 | 源码 |
+|---|---|---|---|
+| M-PRIMARY `.btn.btn-p` / 主操作及保存 | hover、active；160ms E | hover translateY −1.5px；影`0 3px 10px accent-30`→`0 6px 16px accent-30`，保留顶部白18% inset。active优先于hover：y=0、影`0 2px 6px accent-30`，去inset；135°accent→accent-2及accent-fg不变 | CSS323–335 |
+| M-SECONDARY `.btn.btn-s` / 次操作 | hover；160ms E | y−1px；surface-2→hover、fg-2→fg-1；黑影`0 1px 3px /9%`→`0 3px 8px /11%`，两态保留glass-spec顶部inset。HTML无独立active | CSS336–340 |
+| M-ICON `.icn` / 标题栏及通用图标操作 | hover；160ms E | y−1px，透明→hover、fg-2→fg-1；普通态不新增投影。侧栏头部图标用M-SIDEBAR，不误套上浮 | CSS82–87 |
+| M-ICON-HOT `.icn.hot` / 强调功能入口（HTML为强调外观，非selected状态） | hover；160ms E | accent渐变/前景不变，y−1px；色影`0 3px 10px`→`0 5px 14px accent-30`；hot优先于普通hover底色 | CSS88–93 |
+| M-CHIP / 权限、模型、筛选等选择入口 | hover/open/focus；140ms ease | 默认无微影与位移；透明或surface-2→hover/open底，fg-2→fg-1；稳定命中，不将静态Tag接入此动效 | V3轻量次操作语义；§4.1 |
+| M-SEND `.send` / composer单一主控件 | hover；160ms ease | scale1→1.08，中心缩放；色影`0 3px 10px`→`0 5px 14px accent-30`；无y位移。当前发送/运行/待批/停止图标由业务状态决定，不因hover另增第二按钮 | CSS371–378；V0.1.7 |
+| M-WINDOW `.wc.min/.max/.cls` / AI独立浮窗三态钮（锚定传输管理气泡不适用） | hover；140ms ease | y−1px，fg-3分别→warn/ok/danger，well底不变，不增强阴影 | CSS292–300 |
+| M-TAB `.tab` / 会话与组页签 | hover/on；160ms E | 背景→hover、fg-2→fg-1，无位移；on保留tab-on及shadow-tab；组tab保组tint/组色条，活动底条仍在tab内部。状态点另用M-STATUS | CSS44–70；V0.1.1 |
+| M-TAB-CLOSE `.tab .x` / 页签关闭 | 选中、父hover/focus-within显示；叉hover变色 | opacity0→1直接切换，fg-3→fg-1直接切换；HTML无transition。始终保留20×20槽；隐藏时不接受指针点击，焦点进入tab后显示 | CSS65–67；V0.1.1页签命中 |
+| M-TAB-ADD `.tab-add` / 新增页签 | hover；150ms ease | 透明→hover、fg-3→accent，无上浮/阴影 | CSS74–79 |
+| M-SIDEBAR `.sb-head .a` / 侧栏新建与折叠 | hover；150ms ease | 透明→hover、fg-3→fg-1，无位移/旋转/阴影 | CSS127–133 |
+| M-ROW `.hi` / 主机、菜单及选项行 | hover；140ms ease | 只变hover底；选中主机保sel-bg，仍允许行内动作显示；离线不等于disabled。菜单/设置分类沿用该无位移反馈 | CSS170–188；扩展至同类行 |
+| M-HOST-ACTIONS `.hacts/.hact/.hnote` / 行内操作 | 父hover/focus-within；opacity120ms ease | R19固定52×24槽，默认32×20 route＋数字与连接/更多两个24px按钮原位互斥；操作组opacity0→1，无transform，名称视口不变。按钮hover即时well/fg-1，隐藏组不命中/不入Tab；键盘进入后保留操作并以选中底色表达焦点 | CSS186–190为来源；52px/双动作/键盘按V0.1.3补全 |
+| M-NEWHOST `.newhost` / 新建主机虚线井 | hover；160ms ease | 字与虚线颜色→accent，底→sel-bg，无位移/阴影；虚线仍属描边例外① | CSS193–200 |
+| M-INPUT `.search` / 表单与搜索 | focus；box-shadow/background150ms ease | well→surface-2；内凹影→选中底色，不添加描边或外圈。AI textarea继续透明无outline/ring，以caret/IME反馈 | CSS141–148、357；§4.1 |
+| M-CHAIN `.chain` / 链路chip | hover；150ms ease | y−0.5px，accent-07→accent-12、accent字不变，无阴影 | CSS390–396 |
+| M-STATUS-ACTION / 底栏图标入口 | hover/open；150ms ease（落地补充） | 入口hover底/fg-1，无上浮，避免贴近窗口边缘抖动；链路chip单独按M-CHAIN。选中保语义色，打开浮卡用M-FLOAT | HTML的SOCKS仅pointer，CSS398无反馈；按§4.3补全 |
+| M-DANGER / 危险确认操作 | hover/pressed；160ms E（落地补充） | danger底与accent-fg，y−1px→按下0，影采用danger22%同主按钮3/10→6/16→2/6；保留简短危险标签，不靠颜色表达后果 | HTML无独立danger按钮态；按§4.1补全 |
+
+**连续与容器动效**：仅所选组件配方声明的影与高光参与动画，禁止为ghost/Tag继承实体按钮投影。有限动画只在对应状态进入时播放一次；持续动画仅在所属组件可见且业务状态需要时运行，结束/断开/移除即停。全局主题切换使用相同时间轴，不能Dark/Light/Sauber各自改变节奏。CSS中写死的按钮/chip黑色投影与白18%高光保持上述值；token名不是opacity数值，例如Dark的accent-07实际alpha=.08。
+
+| 规则ID / 对象 | 时序与关键帧 | 触发、终止与状态含义 | 源码 |
+|---|---|---|---|
+| M-STATUS / 在线tab点 | 2000ms ease-in-out infinite；0/100%=opacity .55、50%=1 | 在线tab启用；重连tab用warn黄点、1000ms同曲线急促呼吸；offline animation:none，fg-3且opacity1。主机/底栏在线点是静态ok点及55%光晕，不套tab脉冲 | CSS60–63、182–183、388 |
+| M-STRIP / AI三点 | 1200ms ease infinite；opacity .35→1→.35；三点delay0/150/300ms | HTML只有该通用序列，正延迟前opacity1。落地按V0.1.7状态机用色：请求中轮转、待批琥珀、失败静态红；待机低亮，成功绿3s后待机。不把演示中持续三点当作请求始终运行 | CSS251–254；V0.1.7 |
+| M-SPINNER / 执行与loading图标 | 1000ms linear infinite，0→360°顺时针，轴心为图标中心 | 仅请求/执行/加载期间旋转，结束后切实际成功/失败图标；标题中的“1.2s”为耗时文案，非旋转周期。普通刷新图标不自行无限旋转 | CSS348–349 |
+| M-CURSOR / 终端光标 | 1100ms steps(1,end) infinite；前550ms opacity1、后550ms0 | 聚焦且可输入时；失焦/回放/IME按终端状态接管，不动画整行或正文 | CSS237–238 |
+| M-FLOAT / 浮窗打开 | 180ms cubic-bezier(.34,1.2,.64,1)，一次；opacity0→1、scale .98→1、y−4→0px | 仅实际打开；translateX(−50%)是HTML居中定位，不作为动画插值。重新排版/增量输出/切换内容不重播 | CSS257–270 |
+| M-FLOAT / 浮窗关闭 | 140ms ease-in（指南补全） | opacity1→0，尺寸及布局不回弹；关闭业务请求立即按V0.1.7执行，视觉退出不能延迟停止请求 | §6；HTML无退出动画 |
+| M-SIDEBAR / 侧栏折叠 | width224⇄48，200ms E | 标题/搜索/分组在边界切换显隐，不把正文文字缩放。HTML仅提供collapsed类、没有事件路由；新建文字在折叠态明确隐藏 | CSS99–113；V0.1.3 |
+| M-DISCLOSURE / 分区与卡片展开 | 160ms E旋转chevron0⇄90°；正文opacity120ms ease（落地补全） | 保持草稿与阅读锚点，思考/工具固定视口按V0.1.7，header不伸缩。HTML分组箭头只有静态pointer，没有旋转定义 | CSS159–162；V0.1.7 |
+| M-SWITCH / 开关 | thumb x2⇄14、底色切换120ms ease（既有设计补全） | 点击或键盘切换；disabled不移动；不对label或整行施加scale | 本文件§4.1；HTML无switch样例 |
+| M-TOOLTIP / 短提示 | hover等待450ms，focus立即显示；出现/消失opacity80ms ease（落地补全） | pointerleave、blur或Esc关闭；保持命中/焦点，不盖住原按钮；无晃动/位移 | §4.3；V3 `#tooltip`为自定义提示 |
+| M-RESIZE / 拖柄与边缘缩放 | 指针位移直接跟随，不插值、不加spring；hover cue颜色80ms ease（落地补全） | grabbing/方向光标，pointer-up提交、Esc还原；夹取/尺寸下限按V0.1.7。放大/还原几何即时完成，不重播float-in | CSS278只有grab；V0.1.7 |
+| M-STATIC / 区域标识、只读owner、终端状态chip、能力图标与上下文环 | 无hover/active上浮、无脉冲/旋转；实际数值变化即时绘制 | `.sb-icon/.ai-icon/.own/.chip-st/.ring`保持纯语义；ring的−90°为绘制起点定位，非loading动画。父chip可按M-CHIP响应，子图形不能独立叠加同一变换 | CSS120–125、224–230、281–288、368–370 |
+
+**M-ACCESS：HTML缺项的统一落地补全**（以上表格中的“补全”均非宣称HTML已实现）：
+
+- 优先级为`disabled/不可用门控 > 正在停止或重复提交门控 > pressed > hover`；selected保留选中身份、hot保留强调外观，两者不被hover刷掉，focus-visible以底色独立表达。离线只表示连接状态，不能一律禁掉查看/复制等本地动作。主按钮active沿用HTML160ms E；HTML未定义按下态的次按钮、图标、chip、send、窗口钮补80ms E回到y0/scale1并收浅投影，释放按仍hover回hover目标，不移动布局。
+- disabled单次降至40%（不得父子叠乘），保持真实禁用原因；不触发hover/pressed/点击，不上浮、不放大、不旋转；必要原因提示仍可由外围focus/help显示。loading只锁重复提交，不能屏蔽本来可用的“停止当前调用/停止回合”。动作成功/失败更换对应状态，不以无限spinner伪装完成。
+- 图标按钮、chip、关闭和行内操作具备可访问名称及键盘语义。键盘focus使用选中底色（输入按M-INPUT150ms、其他操作即时可见），禁止整圈 border / outline / ring，不自动浮起；Enter/Space与鼠标执行同一动作。AI textarea不套ring，caret与IME保持可见。隐藏关闭/行内操作保持布局但指针不命中，focus进入其所属控件后先显现。
+- 系统“减少动态效果”启用时，禁用y位移、scale、弹性入场、侧栏连续宽度插值、pulse/blink和无限旋转；用静态可辨状态图标/低亮三点及至多80ms透明度或颜色变化替代。spinner静态仍配“处理中/停止中”可访问状态，不能伪装成功；终端光标常显。用户直接拖动/缩放仍1:1跟随；status、hover、pressed、focus、错误和操作门控不可因此省略。
+- 多个动画在同控件共存时仅父绘制层做hover变换，spinner独立子层绕自身中心旋转，不能覆盖父transform或重复位移。所有循环离开可见区域/生命周期即取消；不中断工具清理、不派发额外请求。Figma静态关键帧及`motion[...]`是规格记录，不添加Present连线、不冒称播放或原生实机动效已验证。
+
+**R15动作配色修正**：HTML原参考色保留为来源事实，白字操作底另用语义token，不能把其原值误记为已通过。Dark的`action-accent=#6164ec`、`action-accent-2=#8457ea`、`action-danger=#d53d3d`；Sauber的`action-danger=#cd473b`，其他动作色沿用各主题accent/danger。基础accent、ANSI、状态文字与accent-30投影token不随之改写。主按钮、hot图标、发送和用户渐变气泡使用action-accent→action-accent-2；危险确认使用action-danger；白字步骤圆底使用action-accent。新建井默认文字使用可读fg-2，Sauber已有更深`#425b4b`语义文字可保留，hover仍用accent。静态配色核验不能代替全部叠层文字、原生渲染或动画验收；正常滚动裁切与无法判定背景逐项记录，不豁免正文或真实控件越界。
+
+---
+
+## 6. 浮层、焦点与可访问性
+
+层级依次为常驻工作区、所属pane浮层、锚定菜单/tooltip、需明确决策的模态。OverlayRecord保存owner、trigger、anchor rect、focus return、dismiss policy；同一次动作绘制与命中使用同一几何来源。普通popover不加整窗scrim；局部删除确认、单字段编辑、列表选择及滑块使用锚定Popover，复杂表单、批量不可恢复操作、运行资源关闭与安全核对保留Modal。Esc先处理IME，再最上层可关闭浮层，不能穿透触发终端行为；焦点回到原触发项，触发项已不存在时回所属内容区。
+
+表单、菜单、选择器、chip、图标、开关统一使用本文件§4–5参数；静态标识无点击/hover，动作有独立命中/名称/禁用原因。焦点、hover、selected、pressed不是互斥一枚enum；disabled与业务门控优先，focus独立，操作中的停止除外。隐藏的tab关闭/行内按钮不命中不入Tab，显示不挤动文字。
+
+默认图标优先，危险影响与歧义操作保留短文；完整身份、路径、错误、审批目标不能仅藏tooltip。长内容用内容视口滚动/省略+详情，不缩字。进度未知不画假百分比；错误持续至原因解除/主动关闭，成功提示所属pane3s且hover暂停，不抢焦点。
+
+动效按M-*逐项recipe，位移仅绘制、不移动命中区；循环随可见/运行生命周期取消。减少动态效果保状态静态呈现。VoiceOver提供控件名称、状态、列表选中/排序和操作结果；真实IME、右中键、拖动捕获、Esc取消、系统文件选择与读屏必须在Zenit运行验收，静态图不证明已接通。
+
+**状态入口、折叠侧栏与终端反馈**：本机及SSH/SFTP底栏状态入口固定112×26，独立于侧栏224/48宽度；点、文字、箭头左坐标为18.5/29.5/79.5，不随折叠漂移。折叠主机详情使用公共Popover，触发图标、连接间隙与portal面板共同保持悬停，允许移入面板操作；移出整体、外部点击或Esc关闭，键盘焦点打开仍可用。当前三行文字加按钮的主机详情为320×135、padding14；外框、背景和阴影随实际内容同步，不能保留旧154高度。终端输入高亮仅保整行底色，隐藏左侧竖条；彩色/加粗SGR文本仍按VT固定列宽advance定位，不能因指定字体走比例定位。对应参数与原生验证见[实机反馈修复](../DEVELOPMENT/V0.2.1_STATUS.md)。本机身份浮层360×152是另一角色，不能混用主机详情尺寸。
+
+### 6.1 命中与数据绑定
+
+公共控件优先 `ui.widgets.*`，token/styles/recipes管理视觉；本文件§7列出可组合、需补接口、尚未接入的边界。不要把Figma一个Frame机械翻成无语义box，也不要让框架默认style覆盖当前原型。
+
+| 设计对象 | 实施绑定 | 必须可观察的验收 |
+| --- | --- | --- |
+| Button/Icon/Chip | command、独立test_id、名称/状态、disabled reason；图标与命中区分开 | hover/focus/pressed/disabled正确；绘制位移不移动点击几何；危险说明不只藏tooltip |
+| Input/Select/Slider | 同份raw/typed、单位和错误；控件setter不自动等于用户on_change | IME保留；非法输入不跳回旧值；滑条和数值同步；Enter只提交一次 |
+| Menu/Popover/Tooltip | trigger、owner、anchor rect、focus return、dismiss policy | 安全8px夹取；空间不足翻向；Esc按栈关闭并回焦；tooltip450ms |
+| Modal/Auth/审批 | 明确决策对象与不可变影响；焦点限制在当前决策层 | 取消不产生副作用；晚回调不能关闭新对话框；停止不假报远端已清理 |
+| Table/列表/滚动区 | entry key/JobId、稳定选区、独立滚动与焦点 | 长文省略但可取完整值；52px任务行不因新条目改变选择；大列表虚拟化仍保键盘定位 |
+| 终端/历史/AI | 原始内容层与装饰层、阅读锚、owner与revision | 新输出不抢上翻阅读；只读页不可执行；AI审批和composer固定可达 |
+| 三主题/缩放 | 同结构/尺寸，不同语义token；CoreText真实字体度量 | 同尺寸对比；出厂主题、Sauber以及预览白名单颜色正确；Retina逻辑px不翻倍 |
+
+### 6.2 连接流程与底栏链路详情
+
+连接弹窗遵循“标题＋协议Tag → 路径 → 当前步骤/挑战 → 折叠日志 → 操作”的顺序。V3基线为宽540px、圆角14px、头40px、水平内距12px、底栏最小48px；普通步骤48px、步骤区固定154px，约三条空间。标题/底栏不压缩，小窗口保留可达操作并约束正文滚动；此局部浮层圆角覆盖§3.1普通卡片11px。常态高度由内容组合确定，不把演示页工具栏计入应用布局。
+
+步骤最新在上，保留历史和失败；重试新增尝试边界，顶部路径显示本次尝试状态。认证由当前服务端事件驱动，不预告固定总步数；短挑战占98px（两条），长说明/多输入占148px（三条），挑战视口分别66/116px，外部步骤区仍为154px。完整服务端标题、说明、提示与所有字段保留，超出内部滚动；按echo决定明文/隐藏，允许空响应并按顺序一次提交本轮字段。零字段自动回复空数组并等待；普通多轮请求不推断前一方式通过，partial_success和节点认证完成必须来自对应真实事件。新请求清空旧输入；同一请求展开日志保留输入、显隐和阅读位置。具体认证语义沿用V3落地要求。
+
+日志默认折叠，展开区域124px，顺序为“时间戳｜耗时｜日志”，只有正文换行；开始事件耗时为“—”，耗时为事件/步骤耗时，非累计会话时间。新增日志不改变展开高度；仅位于末尾时跟随新日志，上翻阅读保持位置。用户展开/收起允许改变弹窗高度。取消、清理与失败显示真实结果；SSH shell、SFTP初始目录或KVM首帧实际就绪后自动关闭，仅140ms退场，不再要求点击“完成”，不因单跳认证成功提前关闭。此关闭行为不套用§6普通成功提示3s驻留规则。
+
+底栏连接详情采用同一链路模块的**运行态视图**：
+
+- 点击已有连接入口打开锚定Popover，标题为目标身份＋协议Tag＋当前连接状态，下方按“本机 → 跳板 → 目标”真实顺序展示路径与逐跳行。直连保留本机与目标，不虚构跳板；本机只显示发起端信息，不附虚构认证或网络延迟。
+- 每跳行默认展示名称/角色、地址与端口、连接/认证状态以及可用的延迟；账号、协议、上游和阶段耗时在同一详情内按需展开。失败行明确哪一跳、哪个阶段及简短原因；等待认证、重连、断开和未知各有可读文字，不能只画红绿点。长链路滚动，头部身份与必要操作保持可达。
+- **RTT延迟、建立连接耗时、认证耗时、会话存续时长分别标注**。已有V3面包屑的“耗时”不能重命名为实时延迟；RTT仅展示真实探测结果并说明测量范围和更新时间，未测量用“未测量”，过期用“已过期”，不填0ms、不将多跳RTT直接相加。端到端指标与逐跳指标分开，无法获取逐跳数据时明确不可用。
+- 底栏入口保留简短摘要，Popover承担具体链路信息与按当前状态可用的操作，复制/刷新用图标提示；重连或断开复用已有命令和确认规则。端口转发复用此信息层级：名称＋类型Tag，源端点→目标端点，绑定会话/链路、运行状态与必要故障原因；详细配置按需展示，不把“监听中”写成远端目标已连通。
+
+## 7. Zenit公共能力与必要适配
+
+以下§7.1–7.2保留设计基线时的源码审查与适配职责，表内“当前/未接入/需补”指该次审查快照，不是2026-10-24的逐项未完成结论。现行API始终以实际vendor源码为准；实现与验收状态见[V0.2.1实现记录](../DEVELOPMENT/V0.2.1_IMPLEMENTATION.md)，后续正式环境控制验收见[专项记录](../DEVELOPMENT/V0.2.1_STATUS.md)。
+
+依据本项目`build.zig.zon`指向的`vendor/zenit`、Zig **0.17.0**，已核对整个`vendor/zenit/src/ui/ui.zig`公共面、对应组件实现、Storybook和平台/渲染调用链。旧skill的0.15.2及“所有widget均快照主题”不适用于当前依赖。以下为源码能力及确定的差异，未运行应用、构建、系统面板、PTY或网络请求，不等于实机/VoiceOver/性能验收。本轮仅记录必要落地约束，保留用户已有vendor修改。
+
+**结论**：Vanta布局、主要控件、窗口内blur/饱和度、多层阴影、portal、拖动与虚拟列表均有公共基础，无需更换Zenit或另建WebView/AppKit平行UI树；但不能直接把所有stock widget按名字映射便认为完成。统一用现有编辑/焦点/overlay/drag引擎，再补可复用的配方、插槽和少量平台API。禁止遍历私有子节点硬改内部控件尺寸作为长期方案。
+
+### 7.1 逐组件适配
+
+| 当前原型组件 | 当前能力与明确差异 | 落地方法 | 源码依据 |
+| :--- | :--- | :--- | :--- |
+| 主窗、224/48侧栏、组pane、固定头尾/正文滚动 | Flex/Grid、fit/grow/min/max、absolute/sticky、clip可用 | 公共布局组合；保存每owner的布局/滚动状态，固定区不参与压缩 | `vendor/zenit/src/ui/core/types.zig:1999`；`core/layout_engine.zig:894` |
+| 页签、压缩/自然宽横滚/全部列表/拖序 | Tabs有稳定ID、键盘与close回调，但非Vanta完整TabStrip；变更重建子树 | 产品SessionTabStrip组合，normal/compressed/overflow三态、96–200自然宽/76px chrome/20px关闭槽/固定工具区/选中滚入可见；owner/draft置于可重建子树外 | `vendor/zenit/src/ui/components/tabs/mod.zig:53,135` |
+| Inter/JetBrains、文字省略/度量与字体选择 | 公共TextProps已有font_family、text_overflow、font_weight及倍率line_height；FontRegistry可按family/size/weight解析且测量绘制共用，ui.zig“family轴尚不存在”的注释已过时 | 经`zenit_app.FontRegistry`注册字体并绑定App；按§4.4将Figma绝对行高换算倍率；原始family名持久化、进程u16 ID不写配置；缺字fallback、VT列宽/IME在实机核对 | `vendor/zenit/src/ui/core/types.zig:3044`；`vendor/zenit/src/render/font_registry.zig:65`；`vendor/zenit/src/zenit_app/runtime.zig:629` |
+| 原生标题栏、红绿灯与860×480最小窗口 | custom_inset/traffic lights inset与窗口拖动区域已有；WindowConfig仅width/height/title/titlebar等，无min size字段 | 保留原生关闭/最小化/缩放语义，按8px窗口外距和46px标题卡实测对齐inset/拖动热区；补系统minimum接口落实860×480，不用body裁切假装最小窗口；按钮、页签和原生控件区不触发拖窗 | `vendor/zenit/src/zenit_app/window_config.zig:10`；`vendor/zenit/src/zenit_app/runtime.zig:421`；`vendor/zenit/native/macos/window_bridge.m:2864` |
+| 主/次/图标按钮、发送与停止 | Button有键盘/a11y/disabled基础；样式仅转发部分字段，hover/active主要返回background，loading会锁点击 | 补完整state recipe/visual slot，保留稳定命中外层；运行中停止用业务图标状态，不设stock loading禁掉停止 | `components/button/_button.yix.zig:135`；`components/button/styles.yss:59` |
+| Checkbox/Radio/Switch | mixed和初始未选已有；Switch固定40×22/18px knob/200ms/.5，和30×18/14px/120ms/.4不符 | Checkbox/Radio直接复用；Switch补内部size/style/motion参数，不能只缩root | `components/checkbox/_switch.yix.zig:14`；`components/checkbox/styles.yss:12` |
+| 推理/透明度/blur滑条与数值输入 | Slider有step、Model、键盘/捕获/取消；内部样式固定、快照tokens，焦点底色反馈需补 | 允许effort列表映射整数索引；滑条与数值共享规范化draft；补track/thumb/focus/theme入口 | `components/slider/mod.zig:42,447`；`components/slider/styles.zig:1` |
+| 输入、认证、设置表单、连接三步 | Input含embedded/error/submit；FormOf没有异步保存事务/commit baseline；Steps无步骤点击回调 | 复用Input编辑引擎；应用拥有baseline/draft/validation/saving/result，完成步骤用可访问动作包装，保留同一草稿 | `components/input/mod.zig:62`；`components/form/form_data.zig:140`；`components/steps/_steps.yix.zig:210` |
+| 模型/Provider/主机丰富选择行 | stock Select限64且硬编码浅色；ComboBox键盘候选最多256、关闭重置query、无自定义行和有界长列表保证 | Input+Popover+VirtualList+选择状态机，公开受控query/render_item/stable ID；Headless Select非虚拟custom renderer状态更新也须修复 | `components/select/mod.zig:189`；`components/combo_box/mod.zig:214,620`；`components/select_headless/mount.zig:373,545` |
+| 页签/终端/主机菜单 | Popover支持virtual anchor/manual/flip/shift/portal；MenuProps未转发anchor/trigger | 给Menu补anchor/manual转发或公开Popover+MenuEntry组合，保留菜单键盘语义；三种上下文固定owner | `components/popover/mod.zig:119`；`components/menu/mod.zig:69,299` |
+| hover/focus tooltip | open Model/delay已有；默认200ms、Escape关闭被禁用，未见focus即时开/blur关 | 统一Tooltip helper或补props：450ms hover、focus立即、Esc/blur/leave关闭、80ms opacity；标签挂真实动作节点 | `components/tooltip/mod.zig:29,73` |
+| Modal、危险确认、固定保存栏 | portal/focus trap/restore已有 | 直接组合；取消默认焦点，saving阻关闭，正文滚动与固定footer分离；实机核对焦点恢复 | `components/modal/mod.zig:31,122` |
+| Card、工具卡、Accordion、24px dropdown chip | Card/Badge有响应主题配方；Card默认border，Accordion会重写border及展开时长，Chip pill不等dropdown | 用无border/elevated配方；工具固定视口/审批外置；补disclosure slots/motion，chip用Button+Popover统一变体 | `components/card/_card.yix.zig:65`；`components/accordion/mod.zig:138`；`components/chip/mod.zig:118` |
+| AI透明composer、多行/IME/发送 | stock Textarea固定rows且无embedded/submit/auto-grow，内部focus边框不符；公开EditableText有无外壳multiline/softwrap/autoheight | 用EditableText的编辑/IME/undo作composer adapter，1–6行后内部滚动；Enter/Cmd+Enter先检查composition，不另写文本引擎 | `components/input/textarea.zig:2619`；`components/input/editable_text.zig:29,345`；`components/input/events.zig:170` |
+| AI消息/工具输出/公开摘要/Markdown | VirtualList可变/测量高度、stable key/data_version/滚动补偿；Markdown不含完整嵌套表格/图片等 | 应用保存message ID+像素阅读锚、原在底部才跟随；resize重测；完整Markdown能力单独扩展，不能用重建整列替代流式局部更新 | `components/virtual_list/mod.zig:53,655`；`components/markdown/mod.zig:1` |
+| 184×44附件与单行引用/预览 | FileUpload基本路径列表/Browse/drop已有，不含来源/缩略图/读取态 | Image/Text/Button+横向ScrollArea组合；原owner/generation/路径/bytes/截断从数据层传入，系统选择与解码另接 | `components/file_upload/mod.zig:218` |
+| SFTP双pane、文件表、多选/排序/X-Y滚动 | Table有custom cell/sort/虚拟化但无完整selection/column resize；DataTable有Cmd/Shift和resize但字符串cell/分页、header排序未接；Grid有冻结行列及双轴虚拟化 | 产品FileTable用Grid+SelectionModel或VirtualList+同步header，按稳定file ID映射索引，各pane独立path/sort/selection/scroll；后端IO经插件服务 | `components/table/mod.zig:105`；`components/data_table/mod.zig:724`；`components/grid/state.zig:34`；`components/selection.zig:115` |
+| Toast、焦点与快捷键 | Notification有duration/sticky/hover pause/update；Focus/Actions有基础 | 信息3000ms、错误sticky；pane右上adapter；按focus/IME/能力/owner路由，不全局截获普通shell输入 | `components/notification/mod.zig:78`；`ui/focus.zig:1`；`ui/actions.zig:51` |
+| AI浮条/浮窗/边角resize | portal/hit shape/drag.Binding公开；V0.1.7矩形事务、阅读恢复及八命中带未接 | 6px边/14px角、activation_distance=0、角优先、8px clamp、起始矩形+累计delta、Esc/blur rollback、desired/clamped/restore rect；不能覆盖编辑器raw handler | `ui/interaction/drag.zig:34,482,642`；`src/main.zig:3041` |
+| 新建会话、Local/SSH/SFTP插件入口 | manifest/caps模型为设计目标，当前src无统一registry；runtime/view硬编码SshWorker | 先实现V0.1.1静态注册与中性SessionCreateSpec，UI按插件terminal/files及可选服务挂载；Local PTY/exec在Local插件内部，复用同一VT/controller | `src/ui/session_runtime.zig:60`；`src/ui/terminal_view.zig:70`；`V0.1.1_FOUNDATION.md §3` |
+
+表内`components/`路径均相对`vendor/zenit/src/ui/`；`core/`亦同。命名相同的widget不自动具有目标的完整组合行为。
+
+### 7.2 主题、动效、渲染与平台差距
+
+- **全局主题需补旧式控件rebind**：当前`Cx.setTheme`会遍历主树、portal与overlay，view式Button/Switch/Card/Steps/Badge/MenuEntry能够响应主题；Input/Textarea/Slider/Select/ComboBox/Tabs/Chip及部分Popover/Tooltip仍保存mount-time tokens，`useFocusRing`也捕获旧色。优先统一theme signal/rebind，不能笼统宣称“所有widget快照”或“setTheme已覆盖一切”。确须remount时，draft/selection/scroll/owner在外部，禁止销毁正在组字的编辑器。依据`vendor/zenit/src/ui/core.zig:1974`、`ui/view.zig:3522`、`ui/hooks.zig:775`。
+- **§5精确动效需要统一MotionPolicy**：`animateNode/Tween`和数值cubicBezier可用，声明式restyle却只有部分属性走transition，translateY/scale/rotate/width会跳变；recipe的ease名为二次曲线近似，stock浮层200ms/.95与目标180ms/.98/y−4不符，stock Spinner为1.4s可变弧而非1s恒速旋转。采用明确数值曲线和共享progress插值shadow；稳定命中wrapper+非命中visual child，spinner再独立子层旋转；离屏/业务结束/销毁即停。统一reduced-motion停位移/scale/连续宽度/所有循环，颜色/opacity最多80ms，不能只依赖当前部分transition跳过。依据`ui/view.zig:3792`、`ui/recipe.zig:614`、`ui/core/cx_render.zig:564`、`ui/components/spinner/_styles.yss.zig:6`、`ui/overlay_transition.zig:53`。
+- **材质有基础但有已确认缺陷**：多层outer/inset shadow、RGBA、窗口内mainRT blur/saturation/brightness存在；dual-shadow分支将body填充一次，后续background再次绘制，半透明外壳会被重复合成。修dual shadow透明fill、body只画一次，再做command/像素回归。公开linear gradient的diagonal是`(u+v)/2`，非正方形控件不等CSS135°，精确角度需端点/angle扩展或正确纹理。Image只有texture/tint，Fit/Fill/Tile/九点对齐可用布局/clip/重复绘制组合；普通窗口`fully_opaque`，桌面透出需独立原生窗口能力，当前设计不承诺。依据`ui/core/types.zig:787,1501,3145`、`ui/core/render_engine/node_style_render.zig:159,261`、`render/shaders/sdf_primitives.metal:791`、`zenit_app/runtime.zig:1153`。
+- **浮层与输入的公共能力可复用**：z-index不逃离祖先clip，菜单需portal与真实virtual anchor；终端custom draw是公开DisplayItem/DrawContext、不是raw Metal，替代子树paint，采用独立绘制leaf配兄弟hit/AX/overlay节点。V0.1.7 drag capture/Esc/blur/dispose已有，macOS对角resize cursor目前回arrow，需修原生映射或custom cursor。依据`ui/core/paint_order.zig:1`、`ui/core/render_engine/mod.zig:2542`、`native/macos/window_bridge.m:4618`。
+- **系统文件与拖放须补API**：DialogRequest单路径、多选禁用，open/folder忽略title/default_path；扩展多路径返回及请求参数，选择器打开前捕获owner/generation/cwd/source。图片剪贴板和多文件URL/异步file promise输入已有基础，产品接线待做；通用剪贴板file-list、批量drag-out/outgoing promise及completion UI回调不完整。远端拖出需promise或完成staging；拖入Local终端只插入路径，SSH终端拖入按V0.1.4上传流程；不能用原型示例授权真实I/O。依据`system_sdk/backends/macos.zig:1169`、`system_sdk/api.zig:185`、`native/macos/window_bridge.m:5055`、`ui/core/cx_input.zig:672`；应用owner获取缺口`src/main.zig:4026`。
+- **原生菜单有优先修复项**：默认File菜单写旧队列，SDK只读新队列，旧队列非空令pump提前返回；须统一/drain两条路径并接产品command router。标准Edit roles的copy:/paste:与MetalView的zenitCopy:/zenitPaste:也需转发；多窗口collector不能丢弃其他窗口ID。依据`zenit_app/runtime.zig:415`、`system_sdk/backends/macos.zig:148,798`、`native/macos/window_bridge.m:5451,6178,6450`。
+- **可访问性与凭据不冒充完成**：原生IME/NSAccessibility bridge存在，所有icon/关闭/resize控件仍需名称、角色、键盘与状态，VoiceOver未实机验收；Keychain无运行时adapter，当前host/provider秘密可写入0600 TOML，若承诺安全持久化需Security.framework和迁移/拒绝/锁定状态。依据`ui/core/a11y_projection.zig:228`、`ui/a11y/nsaccessibility_router.zig:14`、`src/config/hosts.zig:97`、`src/config/config.zig:99`。
+
+本节后两段平台/渲染路径均以`vendor/zenit/src/`为根，`native/`以`vendor/zenit/`为根；`src/`为ZeroWork应用。
+
+### 7.3 V3复用组件的源码边界（2026-10-23）
+
+下表依据当前`vendor/zenit/src/ui/ui.zig`公开的`ui.widgets`及对应组件源码；是选型依据，不是应用已接入证明。设计参数通过公共样式/recipe/插槽适配；缺少公开接口时补公共能力，不访问私有子节点改外观。
+
+| 组件 | 当前源码能力 | 本项目用法与必要补齐 | 源码（相对`vendor/zenit/src/ui/`） |
+| --- | --- | --- | --- |
+| `Tooltip` | `text`支持响应式值，`position`、`open_delay_ms`、`open`可配置；默认hover 200ms，内容不命中，内部关闭Esc行为被禁用 | 短文本提示设450ms；focus/blur/Esc由公共helper接线。不是富字段/可点击/可滚动详情容器 | `components/tooltip/mod.zig`：`TooltipProps`、`TooltipBuilder.mount` |
+| `Popover` | click/hover/manual，受控`open`，外点/Esc策略、portal、锚点flip/shift、宽高上限与`size_policy`；`.fit_or_scroll`有内置纵向ScrollArea路径 | 底栏点击详情优先`.top_start`并留视口边距；富提示由内容槽组合。默认`.hard_clip`会裁切；不能漏配长内容策略。`.fit_or_scroll`源码仍注明适配调试边界，需验证嵌套滚动/小窗口；焦点返回仍按§6验收 | `components/popover/mod.zig`：`PopoverProps`、`SizePolicy`、`PopoverBuilder` |
+| `Tag` | `label`、语义`color`、`variant`、`size`、`closable`；sm/md默认22/26px，`.outline`为1px描边 | 协议使用`.neutral`/`.sm`/`.default`/不可关闭；特殊紧凑尺寸经公共recipe适配，不通过缩放整节点压字；不得选outline绕过无框规则 | `components/tag/mod.zig`、`tag.yix`、`styles.yss` |
+| `AccordionItem` | `expanded`受控状态、标题、展开回调、ghost/default/outline；内部有高度/箭头动画及固定头部间距 | 日志/高级详情优先ghost，复用展开状态但需紧凑标题槽、尺寸与动效公共适配。默认头部14×20px padding、12px gap和320ms展开不能直接当作V3规格 | `components/accordion/mod.zig`：`AccordionItemProps`；`styles.zig` |
+| `ScrollArea` | 固定width/height、纵横方向、独立`state`与内容节点、滚动条/回弹 | 步骤154px、日志124px及挑战66/116px使用独立滚动；追加跟随、历史阅读锚和边缘渐隐由应用适配，stock控件不自动实现这些业务规则 | `components/scroll_area/mod.zig`：`ScrollAreaProps`、`ScrollAreaResult` |
+| `Timeline` / `timeline.TimelineRow` | 纵向标题/说明/时间，仅`completed/active/pending`三状态，默认点与连接线 | 可参考事件行结构；V3需失败/等待/重试标记、无竖线、认证输入槽和实际动态事件，不能直接宣称stock Timeline满足要求。扩展共享步骤行，输入复用Input，不以固定Steps总数替代 | `components/timeline/mod.zig`、`timeline.yix` |
+
+## 8. 数据、线程和安全要求
+
+UI/Cx/Node/Signal只在主线程访问，worker处理IO与计算，以不可变或自有payload发布结果；跨线程借用切片必须拷贝或明确转移所有权。单libssh2 Session由一个IO执行者串行访问；SPSC只能一个生产者一个消费者，多worker不能直接共写同一SPSC。输出/输入原始字节不能静默丢弃；进度/dirty可合并，认证、退出、失败和清理回执可靠投递。
+
+所有异步动作捕获实体ID、generation/revision、operation/attempt及参数快照；结果只更新原owner，晚回调不查active tab替代。accepted不等于completed，cancel函数返回不等于资源已释放，exit0不等于远端业务收敛；失败域、可能副作用与cleanup分开。不可用能力、生命周期、用户权限都要验证，不能只禁按钮却让命令/快捷键绕过。
+
+凭据、OTP、私钥口令、API key不进入manifest、普通日志、tooltip、AI上下文或错误正文。V0.2.1持久秘密使用macOS Keychain单scope vault，TOML只保存不透明引用；0600是私有文件权限，不能代替凭据存储。旧明文迁移遵循[V0.2.1§4.2.1–4.2.2](V0.2.1_PLUGIN_HOST.md#421-macos-数据目录与兼容迁移2026-10-24-补充)的原子移动、失败保留和秘密事务，不额外生成明文备份。主机信任与替换落盘在V0.1.3，AI工具参数/范围/审批在V0.1.7；文件内容和工具输出都是不可信数据，不执行其中的宿主指令。
+
+每个字段同时区分raw输入域、typed持久化域与引擎可应用域；范围由对应版本唯一字段表规定。有限浮点拒NaN/Infinity；整数检查符号、尾随垃圾和乘法溢出；单位不混bit/byte、MB/MiB。输入错误保raw并定位字段，禁止静默clamp再保存。
+
+## 9. 验证与完成定义
+
+一个实施子版本完成，须同时具有其非UI/接口验收或UI/事件验收证据，并满足前一子版本门槛。原型台账、生成脚本完成、纯模型已有测试、构建成功和进程启动都不能单独证明对应功能已完成；尚未通过的门槛保留未勾选。
+
+每个版本包含适用的正常、空态、失败、取消、旧响应、窄窗、键盘与真实资源清理路径。针对改动做必要构建/测试；UI段导出对应Figma并看真实Zenit同尺寸窗口，三主题1440×900及860×480，局部panel按其真实尺寸比，不把画布外边距当应用尺寸。几何目标≤2px，字体/裁切/颜色/焦点/操作各自判定；IME、右中键、拖动捕获、系统选择器、VoiceOver与真实IO分别验证。
+
+减少动态效果、可访问名称/角色/状态、稳定命中是各UI版本的完成门槛；各功能出现的设置字段同时闭环保存和生效，不能全部留到最终整合才第一次验证。V0.1.8复核整合与发布，不替前面版本补空实现。
+
+性能目标沿用既有预算：常规刷新≤4ms/帧（M系列）、1MB/s输出下UI CPU≤15%、单会话10万行滚动≤120MB、30会话常驻≤800MB；这些是待测目标，历史数据见迁移证据，不能由类比其他终端推定达标。原始流背压按85%暂停/30%恢复的既定目标接入，运行时若已有不同容量要核定后验证，不把4096示意消息数当真实ABI。
+
+[2026-10-18历史局部诊断](../DEVELOPMENT/V0.2.1_STATUS.md)扫描1260节点、18项后达上限、complete=false；含阴影/SVG/截断/背景不确定限制，不是零告警或布局全通过。该报告只证明当时诊断边界；Local重复时间装饰后续已修正，当前终端按14/22及倍率11/7执行，不能据旧报告恢复旧样式。
+
+## 10. 扩展范围与资料归档
+
+首版只静态注册Local/SSH/SFTP，设置中未来插件详情、权限、错误、不兼容、重载/获取状态仅为只读规划信息，不触发安装、动态加载或热卸载。FTP/FTPS后续需要文件服务适配，VNC/RDP需要视频输入与纹理服务，KVM/Redfish需要电源与设备服务；保留显式服务扩展点，不按旧LOC/工期估计排进本轮子版本，也不提供可执行入口。
+
+旧按主题排列的01–12已迁入版本正文，旧R*修订流水账不再作为当前执行指令。迁移来源、旧完成记录与性能决策保存在[迁移核对记录](../DEVELOPMENT/V0.2.1_STATUS.md)；状态台账用于节点追踪，原始读取/图片证据保留。归一化实时读回集中在ZIP归档；链接中`readbacks.zip#roots/ID.json`的`#`后为归档内成员，解压或用zipfile读取，父局部几何与semantic hash不变。基础区1748直属节点已分段完整读取，含1032个Type样式、376个Primary、298个Secondary及其他组件/说明；实施取实际场景实例参数，库内样例标签和画布摆放不作产品数据，通用控件按本规范管理。新增需求优先修订其所属功能版本与状态映射；全局规则只修本文件，避免再增加一份横向补充覆盖前文。
+
+### 10.1 X1逐项来源与可观察验收
+
+下列5态来自同一确认页的真实组件/交互规格，作为各v0.N.2的共同完成门槛，V0.1.1开始应用；不另设X1实施子版本，也不延迟到V0.1.8才首次检查。精确Motion参数仍唯一归§5，本表只登记原型来源与差异验收；Figma静态规格不能证明曲线/键盘已运行。
+
+| 来源 | 覆盖动作与状态 | 非UI/失效要求 | 可观察验收 |
+| --- | --- | --- | --- |
+| <a id="case-r3-interaction-feedback"></a>`r3-interaction-feedback` · [274:913755](../DEVELOPMENT/V0.2.1_STATUS.md) | 查看交互反馈状态板/对应控件操作→default/hover/pressed/focus/disabled/tooltip各独立 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；静态关键帧不表示播放已验收 | disabled不触发hover或点击，焦点有单独的底色反馈；DESIGN_STANDARDS.md §5/§6 |
+| <a id="case-component-motion-buttons"></a>`component-motion-buttons` · [434:175329](../DEVELOPMENT/V0.2.1_STATUS.md) | 通用按钮/图标/chip/send各变体→按M-PRIMARY160ms等逐项反馈 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；loading仍允许本来有效的停止 | send仅scale1.08无y；危险保短标签；命中区不位移；DESIGN_STANDARDS.md §5/§4.1 |
+| <a id="case-component-motion-navigation"></a>`component-motion-navigation` · [434:176073](../DEVELOPMENT/V0.2.1_STATUS.md) | tab/主机/侧栏/底栏/静态图标变体→各自M-*曲线及固定尾槽切换 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；focus与hover互不覆盖，隐藏动作不命中 | host52尾槽名称不重排，静态owner/badge不误上浮；DESIGN_STANDARDS.md §5/§6 |
+| <a id="case-component-motion-feedback"></a>`component-motion-feedback` · [434:176637](../DEVELOPMENT/V0.2.1_STATUS.md) | 在线点/AI三点/spinner/caret/float状态板→2000/1200/1000/1100ms各自生命周期 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；离屏/结束取消循环，不用演示动画假请求 | 光标550显550隐，离线静态，浮卡180ms只打开播；DESIGN_STANDARDS.md §5/§7.2 |
+| <a id="case-component-motion-accessibility"></a>`component-motion-accessibility` · [435:177090](../DEVELOPMENT/V0.2.1_STATUS.md) | 键盘/tooltip/resize/减少动态效果变体→focus独立、disabled40一次、hover450ms/focus立即、resize1:1 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；Esc拖动还原，不改变owner/call或业务清理 | 禁位移/scale/循环后仍保静态状态和停止操作；DESIGN_STANDARDS.md §5/§6.1 |
+
+> 2026-10-21 用户确认：原型未绘制的控件框线不得由 zenit 默认样式补出。默认、hover、focus、selected、错误提示都遵循无外框规则；键盘焦点通过底色、图标/文字和 caret 表达。终端内容自身的下划线、进度条与图标笔画不属于控件边框。
+
+> 2026-10-22 原型精修：直连主机的默认尾槽留空，链路详情通过既有 hover/focus 提示查看；正数跳板数量保留。连接向导步骤仅保留序号/完成图标、名称与当前底色，删除重复状态小字。文件列表焦点通过现有行状态表达，不在选择栏重复显示“浏览/键盘焦点”。传输面板仅保留一个状态筛选入口；正常运行时不显示固定单主机的解释行，实际任务归属和异常说明保留。快速连接使用固定标题，结果/错误在内容区呈现。侧栏分组间距6px、新建主机高34px。
+
+0.2 插件接入：公共侧栏、顶栏/Tab、底栏、AI 和设置自动消费标准贡献，不由插件复制。配置界面由插件 ConnectionEditor 在宿主创建/编辑槽内组织公共控件，流程由 ConnectionController 决定，schema 是可选辅助；内容槽是完全定制工作区。连接只复用保存配置，新运行会话/转发独立创建，见 [插件宿主§2–6](V0.2.1_PLUGIN_HOST.md)。
+
+KVM 遵循 [V0.2.2§11](V0.2.2_BMC_IKVM.md)：在既有r11内容卡片内，上方44px单行图标/标题/状态及五组功能气泡，下方无内框的最大视频区域。电源/启动设备使用Select后点击执行，持续生效使用Switch，无更改禁用，浮层HUG；显示入口内区分缩放选择与全屏动作。只有视频黑色固定，其余跟随主题。业务结果调用[插件宿主§6.1统一通知](V0.2.1_PLUGIN_HOST.md#61-全局统一通知)，常规动作不增加Modal确认，真实固件二次认证仍走宿主challenge。创建/测试/连接由插件editor/controller接线，见[V0.2.2§3.3](V0.2.2_BMC_IKVM.md#33-用户操作与宿主接线)。

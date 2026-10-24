@@ -1,0 +1,32 @@
+//! Tag view. Styles in styles.yss, shared types and tests in mod.zig.
+const ui = @import("../../ui.zig");
+const mod = @import("mod.zig");
+const S = @import("styles.yss");
+const TagColor = mod.TagColor;
+const TagVariant = mod.TagVariant;
+const TagSize = mod.TagSize;
+
+/// Tag: color (can switch with state) x outline variant x size, can close.
+/// W.Tag(.{ .label = "Beta", .color = .accent, .closable = true, .on_close = remove })
+pub fn Tag(
+    label: Text = "",
+    variant: TagVariant = .default,
+    color: TagColor = .neutral,
+    size: TagSize = .md,
+    closable: bool = false,
+    onClose: ?Handler(void) = null,
+    closeIconAsset: ?ui.SvgAsset = null,
+) View {
+    // One dimension set drives all slots (missing dimension compile error)
+    const p = parts(S.Tag, .{ .color = color, .kind = variant, .size = size });
+    return (
+        <row style={p.root}>
+            {if (label.len != 0) <text style={p.label}>{label}</text>}
+            {if (closable)
+                <box style={p.close} a11y={.{ .role = .button, .label = "Remove" }} onClick={onClose}>
+                    {if (closeIconAsset) |asset| <icon style={p.close_icon} src={asset} /> else <text style={p.close_text}>x</text>}
+                </box>
+            }
+        </row>
+    );
+}

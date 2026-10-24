@@ -1,0 +1,5 @@
+//! console_probe styles
+const ui = @import("ui");
+
+style root { width: fill; height: fill; padding: space800; background: bg-primary; }
+style title { font-size: {ui.arb.px(22)}; font-weight: 600; color: fg-primary; }

@@ -1,0 +1,148 @@
+{
+  "$version": 1,
+  "$modes": {"high_contrast": {"scheme": "dark", "fallback": "dark"}},
+  "tokens": {
+    "font_weight": {
+      "thin": 100,
+      "extralight": 200,
+      "light": 300,
+      "regular": 400,
+      "normal": 400,
+      "medium": 500,
+      "semibold": 600,
+      "bold": 700,
+      "extrabold": 800,
+      "black": 900
+    },
+    "font_size": {
+      "xxs": 9,
+      "xs": 11,
+      "sm": 12,
+      "md": 13,
+      "lg": 14,
+      "xl": 16,
+      "xxl": 20,
+      "xxxl": 24
+    },
+    "line_height": {
+      "tight": 1.25
+    },
+    "space": {
+      "space0": 0,
+      "space50": 2,
+      "space100": 4,
+      "space150": 6,
+      "space200": 8,
+      "space300": 12,
+      "space400": 16,
+      "space600": 24,
+      "space800": 32,
+      "space1000": 40,
+      "space1200": 48
+    },
+    "radius": {
+      "none": 0,
+      "sm": 3,
+      "md": 4,
+      "lg": 6,
+      "xl": 8,
+      "full": 9999,
+      "xxl": 10
+    },
+    "border_width": {
+      "none": 0,
+      "thin": 1,
+      "medium": 1.5,
+      "thick": 2
+    },
+    "size": {
+      "xs": 12,
+      "sm": 14,
+      "md": 16,
+      "lg": 20
+    },
+    "duration": {
+      "fast": 0.1,
+      "normal": 0.15,
+      "slow": 0.25
+    },
+    "shadow": {
+      "sm": {"$light": {"color": "#00000010", "blur": 4, "offset_x": 0, "offset_y": 2, "spread": 0}, "$dark": {"color": "#00000028", "blur": 4, "offset_x": 0, "offset_y": 2, "spread": 0}},
+      "md": {"$light": {"color": "#00000018", "blur": 8, "offset_x": 0, "offset_y": 4, "spread": 0}, "$dark": {"color": "#00000050", "blur": 8, "offset_x": 0, "offset_y": 4, "spread": 0}},
+      "lg": {"$light": {"color": "#00000028", "blur": 24, "offset_x": 0, "offset_y": 8, "spread": 0}, "$dark": {"color": "#00000064", "blur": 24, "offset_x": 0, "offset_y": 8, "spread": 0}}
+    }
+  },
+  "semantic": {
+    "color": {
+      "bg_base": {"$light": "#f5f5f5ff", "$dark": "#0d1119ff", "$high_contrast": "#000000ff"},
+      "bg_primary": {"$light": "#ffffffff", "$dark": "#141820ff", "$high_contrast": "#000000ff"},
+      "bg_secondary": {"$light": "#f7f7f7ff", "$dark": "#12161eff", "$high_contrast": "#000000ff"},
+      "bg_tertiary": {"$light": "#eeeeeeff", "$dark": "#1e2230ff", "$high_contrast": "#1a1a1aff"},
+      "bg_hover": {"$light": "#f0f0f0ff", "$dark": "#1a1e2aff", "$high_contrast": "#404040ff"},
+      "bg_active": {"$light": "#e0e0e0ff", "$dark": "#2a3450ff", "$high_contrast": "#0000ffff"},
+      "bg_inset": {"$light": "#f8f8f8ff", "$dark": "#1c2028ff", "$high_contrast": "#000000ff"},
+      "fg_primary": {"$light": "#1c1612ff", "$dark": "#d7ccc4ff", "$high_contrast": "#ffffffff"},
+      "fg_secondary": {"$light": "#555555ff", "$dark": "#b8aea6ff", "$high_contrast": "#ffffffff"},
+      "fg_tertiary": {"$light": "#888888ff", "$dark": "#958b84ff", "$high_contrast": "#c0c0c0ff"},
+      "fg_disabled": {"$light": "#bbbbbbff", "$dark": "#7e746dff", "$high_contrast": "#808080ff"},
+      "fg_inverse": {"$light": "#ffffffff", "$dark": "#141820ff", "$high_contrast": "#000000ff"},
+      "accent": {"$light": "#1c1612ff", "$dark": "#c7bbb3ff", "$high_contrast": "#ffff00ff"},
+      "accent_hover": {"$light": "#2a2320ff", "$dark": "#e8e0daff", "$high_contrast": "#ffffc0ff"},
+      "accent_subtle": {"$light": "#e4edfaff", "$dark": "#2a3450ff", "$high_contrast": "#404000ff"},
+      "accent_muted": {"$light": "#f0f0f0ff", "$dark": "#1a1e2aff", "$high_contrast": "#202000ff"},
+      "success": {"$light": "#2e8b37ff", "$dark": "#8cb87cff", "$high_contrast": "#00ff00ff"},
+      "success_subtle": {"$light": "#e4f2e6ff", "$dark": "#1e2820ff", "$high_contrast": "#003300ff"},
+      "warning": {"$light": "#aa7700ff", "$dark": "#d4a843ff", "$high_contrast": "#ffff00ff"},
+      "warning_subtle": {"$light": "#f7eedbff", "$dark": "#2a2418ff", "$high_contrast": "#333300ff"},
+      "danger": {"$light": "#dd0000ff", "$dark": "#c14545ff", "$high_contrast": "#ff6060ff"},
+      "danger_hover": {"$light": "#b30000ff", "$dark": "#ff6b6bff", "$high_contrast": "#ff8080ff"},
+      "danger_subtle": {"$light": "#fbe4e4ff", "$dark": "#2e1c1cff", "$high_contrast": "#330000ff"},
+      "info": {"$light": "#1144aaff", "$dark": "#6b9bffff", "$high_contrast": "#00ffffff"},
+      "info_subtle": {"$light": "#e4edfaff", "$dark": "#1a2030ff", "$high_contrast": "#003333ff"},
+      "status_fg": {"$light": "#ffffffff", "$high_contrast": "#000000ff"},
+      "border": {"$light": "#e0e0e0ff", "$dark": "#263048ff", "$high_contrast": "#ffffffff"},
+      "border_strong": {"$light": "#ccccccff", "$dark": "#2a3248ff", "$high_contrast": "#ffffffff"},
+      "border_focus": {"$light": "#6699ccff", "$high_contrast": "#ffff00ff"},
+      "focus_ring": "{semantic.color.border_focus}",
+      "selection_bg": {"$light": "#b5d5ffff", "$dark": "#3a4d70ff", "$high_contrast": "#ffff00ff"},
+      "button_primary_bg": {"$light": "#1c1612ff", "$dark": "#c7bbb3ff", "$high_contrast": "#ffffffff"},
+      "button_primary_fg": "{semantic.color.fg_inverse}",
+      "button_secondary_bg": {"$light": "#eeeeeeff", "$dark": "#1e2638ff", "$high_contrast": "#000000ff"},
+      "button_secondary_fg": "{semantic.color.fg_primary}",
+      "input_bg": "{semantic.color.bg_primary}",
+      "input_border": "{semantic.color.border}",
+      "checkbox_bg": "{semantic.color.bg_primary}",
+      "checkbox_border": {"$light": "#ccccccff", "$dark": "#263048ff", "$high_contrast": "#ffffffff"},
+      "checkbox_disabled_bg": {"$light": "#f5f5f5ff", "$dark": "#12161eff", "$high_contrast": "#000000ff"},
+      "checkbox_disabled_border": {"$light": "#e0e0e0ff", "$dark": "#1e2230ff", "$high_contrast": "#808080ff"},
+      "checkbox_disabled_checked_bg": {"$light": "#e0e0e0ff", "$dark": "#1e2230ff", "$high_contrast": "#404040ff"},
+      "switch_thumb": {"$light": "#ffffffff", "$dark": "#e8e0daff", "$high_contrast": "#ffffffff"},
+      "switch_track_off": {"$light": "#e0e0e0ff", "$dark": "#263048ff", "$high_contrast": "#404040ff"},
+      "switch_track_on": {"$light": "#1c1612ff", "$dark": "#c7bbb3ff", "$high_contrast": "#ffff00ff"},
+      "list_hover_bg": "{semantic.color.bg_hover}",
+      "list_selection_bg": {"$light": "#e4edfaff", "$dark": "#2a3450ff", "$high_contrast": "#ffff00ff"},
+      "list_selection_hover_bg": {"$light": "#d8e4f4ff", "$dark": "#344060ff", "$high_contrast": "#ffffc0ff"},
+      "table_header_bg": {"$light": "#f5f5f5ff", "$dark": "#12161eff", "$high_contrast": "#000000ff"},
+      "separator": {"$light": "#ebebebff", "$dark": "#1e2230ff", "$high_contrast": "#ffffffff"},
+      "scrollbar_thumb": {"$light": "#00000026", "$dark": "#ffffff21", "$high_contrast": "#ffffffc8"},
+      "tooltip_bg": {"$light": "#1c1612ff", "$dark": "#1e2230ff", "$high_contrast": "#ffffffff"},
+      "tooltip_fg": {"$light": "#ffffffff", "$dark": "#d7ccc4ff", "$high_contrast": "#000000ff"},
+      "overlay": {"$light": "#00000050", "$dark": "#000000a0", "$high_contrast": "#000000dc"}
+    },
+    "typography": {
+      "counterTitle": {"font_size": "{semantic.font_size.counterHeading}", "font_weight": "{tokens.font_weight.semibold}"}
+    },
+    "size": {
+      "checkbox": 18,
+      "switch_width": 40,
+      "switch_height": 22,
+      "dot": 8,
+      "close_button": 24
+    },
+    "font_size": {
+      "counterValue": 18,
+      "counterHeading": "{tokens.font_size.xxxl}"
+    }
+  },
+  "$schema": "../docs/design-system/theme.schema.json"
+}

@@ -1,0 +1,6 @@
+//! text_input styles
+const ui = @import("ui");
+
+style root { width: grow; height: grow; gap: space400; padding: space800; background: bg-primary; }
+style title { font-size: xxl; font-weight: 600; color: fg-primary; }
+style hint { font-size: md; color: fg-secondary; }

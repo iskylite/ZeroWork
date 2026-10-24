@@ -1,0 +1,35 @@
+//! Modal's dialog panel: title bar (title + close button) and body slot. Popover, toggle pipeline
+//! and focus trap in mod.zig, styles in styles.yss.
+const ui = @import("../../ui.zig");
+const S = @import("styles.yss");
+
+/// Dialog panel. hasTitle determined at mount by mod.zig (when title statically empty, no title
+/// bar, thus no close button).
+/// title is mount-time snapshot: title changes after mount and dialog's a11y name written by
+/// mod.zig's bindTextLabel (name points to text node's own copy,
+/// pointing at source data directly would dangle after source update). Icon / 'X' glyph not
+/// readable name, close button's a11y name states Close.
+pub fn ModalPanel(
+    title: []const u8,
+    hasTitle: bool,
+    width: f32,
+    maxHeight: f32,
+    background: ?ui.Color = null,
+    closeIconAsset: ?ui.SvgAsset = null,
+    onClose: Handler(void),
+    children: View,
+) View {
+    return (
+        <box style={.{ S.dialog.of(.{ .width = width, .max_height = maxHeight, .background = background }) }} a11y={.{ .role = .dialog, .modal = true }}>
+            {if (hasTitle)
+                <box style={S.header}>
+                    <text style={S.title}>{title}</text>
+                    <box style={S.close_button} onClick={onClose} testId="modal.close" a11y={.{ .role = .button, .label = "Close" }}>
+                        {if (closeIconAsset) |asset| <icon style={S.close_icon} src={asset} /> else <text box={S.close_glyph_box} style={S.close_glyph}>✕</text>}
+                    </box>
+                </box>
+            }
+            <box style={S.body}>{children}</box>
+        </box>
+    );
+}

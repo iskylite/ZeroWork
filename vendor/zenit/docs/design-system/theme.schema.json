@@ -1,0 +1,1254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Zenit Design System Tokens v1（设计规格）",
+  "description": "结构校验。合并消费路径的唯一性及 token/分组冲突、引用存在性、基础到 semantic 的依赖方向、已注册模式/回退图、引用环、f32 可表示范围由生成器校验。JSON 重复键须在解析前校验。",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "$version": {
+      "type": "integer",
+      "const": 1
+    },
+    "$modes": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$",
+        "not": {
+          "enum": [
+            "light",
+            "dark",
+            "version",
+            "schema",
+            "modes",
+            "value",
+            "description"
+          ]
+        }
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "scheme": {
+            "enum": [
+              "light",
+              "dark"
+            ]
+          },
+          "fallback": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+          }
+        },
+        "required": [
+          "scheme",
+          "fallback"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "tokens": {
+      "$ref": "#/$defs/materials"
+    },
+    "semantic": {
+      "$ref": "#/$defs/materials"
+    }
+  },
+  "required": [
+    "$version",
+    "tokens"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "colorValue": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:color)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "colorModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/colorValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "colorToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/colorValue"
+            },
+            {
+              "$ref": "#/$defs/colorModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/colorValue"
+                },
+                {
+                  "$ref": "#/$defs/colorModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "colorNode": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/colorToken"
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/colorNode"
+          }
+        }
+      ]
+    },
+    "colorCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/colorNode"
+      }
+    },
+    "spaceValue": {
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:space)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "spaceModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/spaceValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "spaceToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/spaceValue"
+            },
+            {
+              "$ref": "#/$defs/spaceModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/spaceValue"
+                },
+                {
+                  "$ref": "#/$defs/spaceModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "spaceNode": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/spaceToken"
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/spaceNode"
+          }
+        }
+      ]
+    },
+    "spaceCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/spaceNode"
+      }
+    },
+    "radiusValue": {
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:radius)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "radiusModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/radiusValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "radiusToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/radiusValue"
+            },
+            {
+              "$ref": "#/$defs/radiusModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/radiusValue"
+                },
+                {
+                  "$ref": "#/$defs/radiusModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "radiusNode": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/radiusToken"
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/radiusNode"
+          }
+        }
+      ]
+    },
+    "radiusCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/radiusNode"
+      }
+    },
+    "font_sizeValue": {
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:font_size)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "font_sizeModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/font_sizeValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "font_sizeToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/font_sizeValue"
+            },
+            {
+              "$ref": "#/$defs/font_sizeModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/font_sizeValue"
+                },
+                {
+                  "$ref": "#/$defs/font_sizeModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "font_sizeNode": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/font_sizeToken"
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/font_sizeNode"
+          }
+        }
+      ]
+    },
+    "font_sizeCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/font_sizeNode"
+      }
+    },
+    "font_weightValue": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:font_weight)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "font_weightModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/font_weightValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "font_weightToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/font_weightValue"
+            },
+            {
+              "$ref": "#/$defs/font_weightModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/font_weightValue"
+                },
+                {
+                  "$ref": "#/$defs/font_weightModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "font_weightNode": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/font_weightToken"
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/font_weightNode"
+          }
+        }
+      ]
+    },
+    "font_weightCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/font_weightNode"
+      }
+    },
+    "line_heightValue": {
+      "oneOf": [
+        {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:line_height)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "line_heightModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/line_heightValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "line_heightToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/line_heightValue"
+            },
+            {
+              "$ref": "#/$defs/line_heightModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/line_heightValue"
+                },
+                {
+                  "$ref": "#/$defs/line_heightModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "line_heightNode": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/line_heightToken"
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/line_heightNode"
+          }
+        }
+      ]
+    },
+    "line_heightCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/line_heightNode"
+      }
+    },
+    "border_widthValue": {
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:border_width)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "border_widthModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/border_widthValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "border_widthToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/border_widthValue"
+            },
+            {
+              "$ref": "#/$defs/border_widthModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/border_widthValue"
+                },
+                {
+                  "$ref": "#/$defs/border_widthModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "border_widthNode": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/border_widthToken"
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/border_widthNode"
+          }
+        }
+      ]
+    },
+    "border_widthCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/border_widthNode"
+      }
+    },
+    "sizeValue": {
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:size)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "sizeModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/sizeValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "sizeToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/sizeValue"
+            },
+            {
+              "$ref": "#/$defs/sizeModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/sizeValue"
+                },
+                {
+                  "$ref": "#/$defs/sizeModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "sizeNode": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/sizeToken"
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/sizeNode"
+          }
+        }
+      ]
+    },
+    "sizeCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/sizeNode"
+      }
+    },
+    "opacityValue": {
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:opacity)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "opacityModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/opacityValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "opacityToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/opacityValue"
+            },
+            {
+              "$ref": "#/$defs/opacityModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/opacityValue"
+                },
+                {
+                  "$ref": "#/$defs/opacityModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "opacityNode": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/opacityToken"
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/opacityNode"
+          }
+        }
+      ]
+    },
+    "opacityCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/opacityNode"
+      }
+    },
+    "durationValue": {
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:duration)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "durationModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/durationValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "durationToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/durationValue"
+            },
+            {
+              "$ref": "#/$defs/durationModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/durationValue"
+                },
+                {
+                  "$ref": "#/$defs/durationModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "durationNode": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/durationToken"
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/durationNode"
+          }
+        }
+      ]
+    },
+    "durationCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/durationNode"
+      }
+    },
+    "breakpointValue": {
+      "oneOf": [
+        {
+          "type": "number",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:breakpoint)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "breakpointModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/breakpointValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "breakpointToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/breakpointValue"
+            },
+            {
+              "$ref": "#/$defs/breakpointModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/breakpointValue"
+                },
+                {
+                  "$ref": "#/$defs/breakpointModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "breakpointNode": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/breakpointToken"
+        },
+        {
+          "type": "object",
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/breakpointNode"
+          }
+        }
+      ]
+    },
+    "breakpointCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/breakpointNode"
+      }
+    },
+    "shadowValue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "color": {
+              "$ref": "#/$defs/colorValue"
+            },
+            "blur": {
+              "oneOf": [
+                {
+                  "type": "number",
+                  "minimum": 0
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\{(?:tokens|semantic)\\.(?:space|size)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+                }
+              ]
+            },
+            "spread": {
+              "oneOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\{(?:tokens|semantic)\\.(?:space|size)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+                }
+              ]
+            },
+            "offset_x": {
+              "oneOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\{(?:tokens|semantic)\\.(?:space|size)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+                }
+              ]
+            },
+            "offset_y": {
+              "oneOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string",
+                  "pattern": "^\\{(?:tokens|semantic)\\.(?:space|size)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+                }
+              ]
+            }
+          },
+          "required": [
+            "color"
+          ],
+          "additionalProperties": false,
+          "description": "未声明的 blur/spread/offset_x/offset_y 均按 0 生成；不采用 Zig Shadow 的原始默认值。"
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:shadow)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "shadowModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/shadowValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "shadowToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/shadowValue"
+            },
+            {
+              "$ref": "#/$defs/shadowModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/shadowValue"
+                },
+                {
+                  "$ref": "#/$defs/shadowModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "shadowCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/shadowToken"
+      }
+    },
+    "typographyValue": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "font_size": {
+              "$ref": "#/$defs/font_sizeValue"
+            },
+            "font_weight": {
+              "$ref": "#/$defs/font_weightValue"
+            },
+            "line_height": {
+              "$ref": "#/$defs/line_heightValue"
+            }
+          },
+          "required": [],
+          "additionalProperties": false,
+          "minProperties": 1
+        },
+        {
+          "type": "string",
+          "pattern": "^\\{(?:tokens|semantic)\\.(?:typography)\\.[A-Za-z0-9_][A-Za-z0-9_-]*(?:\\.[A-Za-z0-9_][A-Za-z0-9_-]*)*\\}$"
+        }
+      ]
+    },
+    "typographyModes": {
+      "type": "object",
+      "required": [
+        "$light"
+      ],
+      "patternProperties": {
+        "^\\$(?!(?:version|schema|modes|value|description)$)[A-Za-z0-9_][A-Za-z0-9_-]*$": {
+          "$ref": "#/$defs/typographyValue"
+        }
+      },
+      "additionalProperties": false
+    },
+    "typographyToken": {
+      "oneOf": [
+        {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/typographyValue"
+            },
+            {
+              "$ref": "#/$defs/typographyModes"
+            }
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "$value": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/typographyValue"
+                },
+                {
+                  "$ref": "#/$defs/typographyModes"
+                }
+              ]
+            },
+            "$description": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "$value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "typographyCategory": {
+      "type": "object",
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/typographyToken"
+      }
+    },
+    "materials": {
+      "type": "object",
+      "properties": {
+        "color": {
+          "$ref": "#/$defs/colorCategory"
+        },
+        "space": {
+          "$ref": "#/$defs/spaceCategory"
+        },
+        "radius": {
+          "$ref": "#/$defs/radiusCategory"
+        },
+        "font_size": {
+          "$ref": "#/$defs/font_sizeCategory"
+        },
+        "font_weight": {
+          "$ref": "#/$defs/font_weightCategory"
+        },
+        "line_height": {
+          "$ref": "#/$defs/line_heightCategory"
+        },
+        "border_width": {
+          "$ref": "#/$defs/border_widthCategory"
+        },
+        "size": {
+          "$ref": "#/$defs/sizeCategory"
+        },
+        "opacity": {
+          "$ref": "#/$defs/opacityCategory"
+        },
+        "duration": {
+          "$ref": "#/$defs/durationCategory"
+        },
+        "breakpoint": {
+          "$ref": "#/$defs/breakpointCategory"
+        },
+        "shadow": {
+          "$ref": "#/$defs/shadowCategory"
+        },
+        "typography": {
+          "$ref": "#/$defs/typographyCategory"
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  }
+}

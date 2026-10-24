@@ -1,0 +1,160 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Yix",
+  "scopeName": "source.yix",
+  "patterns": [
+    {
+      "include": "#element"
+    },
+    {
+      "include": "source.zig"
+    }
+  ],
+  "repository": {
+    "element": {
+      "comment": "<tag …> … </tag> 或 <tag … />：开始标签里是属性，子元素区里只有 {…} 与嵌套标签；标签名紧跟 <（避免把 a < b 当标签）",
+      "begin": "(?=<[A-Za-z_][\\w.]*(?:[\\s/>]|$))",
+      "end": "(/>)|(</)([A-Za-z_][\\w.]*)\\s*(>)",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.tag.end.yix"
+        },
+        "2": {
+          "name": "punctuation.definition.tag.begin.yix"
+        },
+        "3": {
+          "patterns": [
+            {
+              "include": "#tag-name"
+            }
+          ]
+        },
+        "4": {
+          "name": "punctuation.definition.tag.end.yix"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#tag-open"
+        },
+        {
+          "include": "#children"
+        }
+      ]
+    },
+    "tag-name": {
+      "patterns": [
+        {
+          "match": "\\b(box|row|col|grid|text|icon|spacer)\\b",
+          "name": "entity.name.tag.yix"
+        },
+        {
+          "match": "[\\w.]+",
+          "name": "support.class.component.yix"
+        }
+      ]
+    },
+    "attribute": {
+      "match": "\\b([A-Za-z_]\\w*)(?:\\s*(=))?",
+      "captures": {
+        "1": {
+          "name": "entity.other.attribute-name.yix"
+        },
+        "2": {
+          "name": "keyword.operator.assignment.yix"
+        }
+      }
+    },
+    "embedded": {
+      "comment": "{ Zig 表达式 / 控制流 }：里面还可以出现标签",
+      "begin": "\\{",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.section.embedded.begin.yix"
+        }
+      },
+      "end": "\\}",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.section.embedded.end.yix"
+        }
+      },
+      "contentName": "meta.embedded.block.zig",
+      "patterns": [
+        {
+          "include": "#element"
+        },
+        {
+          "include": "#braces"
+        },
+        {
+          "include": "source.zig"
+        }
+      ]
+    },
+    "braces": {
+      "begin": "\\{",
+      "end": "\\}",
+      "patterns": [
+        {
+          "include": "#element"
+        },
+        {
+          "include": "#braces"
+        },
+        {
+          "include": "source.zig"
+        }
+      ]
+    },
+    "text": {
+      "match": "\"[^\"]*\"",
+      "name": "string.quoted.double.yix"
+    },
+    "tag-open": {
+      "begin": "\\G(<)([A-Za-z_][\\w.]*)",
+      "beginCaptures": {
+        "1": {
+          "name": "punctuation.definition.tag.begin.yix"
+        },
+        "2": {
+          "patterns": [
+            {
+              "include": "#tag-name"
+            }
+          ]
+        }
+      },
+      "end": "(?=/>)|(>)",
+      "endCaptures": {
+        "1": {
+          "name": "punctuation.definition.tag.end.yix"
+        }
+      },
+      "patterns": [
+        {
+          "include": "#attribute"
+        },
+        {
+          "include": "#embedded"
+        },
+        {
+          "include": "#text"
+        }
+      ]
+    },
+    "children": {
+      "begin": "(?<=>)",
+      "end": "(?=</)",
+      "contentName": "meta.jsx.children.yix",
+      "patterns": [
+        {
+          "include": "#embedded"
+        },
+        {
+          "include": "#element"
+        }
+      ]
+    }
+  }
+}

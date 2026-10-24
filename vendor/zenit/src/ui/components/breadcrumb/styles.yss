@@ -1,0 +1,19 @@
+//! Breadcrumb styles: link (accent) / current page (primary text) / divider (disabled), all colors
+//! reference tokens.
+//! View in breadcrumb.yix; BreadcrumbItem is public API defined in mod.zig.
+const ui = @import("../../ui.zig");
+
+style root { width: fit; height: fit; align-items: center; gap: 4; }
+style crumb { width: fit; height: fit; align-items: center; gap: 4; }
+
+/// One level: last is current page (primary text, unclickable), earlier are links (accent, hand
+/// cursor)
+recipe Crumb slots(link, label) {
+  base {
+    link { width: fit; height: fit; padding: 2; }
+    label { font-size: sm; }
+  }
+  flag current { label { color: fg-primary; } } else { link { cursor: pointer; } label { color: accent; } }
+}
+
+style separator { color: fg-disabled; font-size: sm; }

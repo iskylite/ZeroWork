@@ -1,0 +1,98 @@
+//! Steps view. Styling in styles.yss; public types and tests in mod.zig.
+const std = @import("std");
+const ui = @import("../../ui.zig");
+const mod = @import("mod.zig");
+const S = @import("styles.yss");
+const StepItem = mod.StepItem;
+
+/// Text in circle: done is "v", otherwise number (starting from 1)
+const CircleLabel = struct {
+    completed: bool,
+    n: usize,
+    pub fn format(self: CircleLabel, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        if (self.completed) return w.writeAll("v");
+        try w.print("{d}", .{self.n});
+    }
+};
+
+/// Circle displays number / checkmark, purely visual signals: explicitly state three
+/// states -- selected = current step ("you are here"), checked = done, disabled = not
+/// yet reached.
+fn a11yOf(item: StepItem, completed: bool, active: bool) ui.A11yProps {
+    return .{ .role = .listitem, .label = item.title, .description = item.description, .selected = active, .checked = completed, .disabled = !completed and !active };
+}
+
+/// Row key: content + borrow string address (row borrows title / description)
+fn rowKey(it: StepItem) u64 {
+    var h = std.hash.Wyhash.init(0);
+    for ([_]?[]const u8{ it.title, it.description }) |field| {
+        const f = field orelse "";
+        h.update(&[_]u8{@intFromBool(field != null)});
+        h.update(std.mem.asBytes(&f.len));
+        h.update(f);
+        h.update(std.mem.asBytes(&@intFromPtr(f.ptr)));
+    }
+    return h.final();
+}
+
+// Circle: number text is the circle node itself (text_align = center, excludes
+// children); with checkmark icon, done step becomes circle with icon (icon =
+// checkmark when done, else null).
+
+/// Horizontal step: equal-width column (circle + title + description)
+fn HStep(item: StepItem, index: usize, current: usize, check: ?ui.SvgAsset) View {
+    const completed = computed(index < current);
+    const active = computed(index == current);
+    const p = parts(S.Step, .{ .completed = completed, .active = active });
+    const semantics = computed(a11yOf(item, index < current, index == current));
+    const label = computed(CircleLabel{ .completed = index < current, .n = index + 1 });
+    const icon = computed(if (index < current) check else null);
+    return (
+        <box style={S.h_step} a11y={semantics}>
+            {if (icon) |asset| <box style={p.circle}><icon style={p.icon} src={asset} /></box> else <text style={p.num} box={p.circle}>{label}</text>}
+            <text style={p.title}>{item.title}</text>
+            {if (item.description) |desc| <text style={S.desc}>{desc}</text>}
+        </box>
+    );
+}
+
+/// Vertical step: indicator column (circle + connector to next step) + text column
+fn VStep(item: StepItem, index: usize, current: usize, count: usize, check: ?ui.SvgAsset) View {
+    const completed = computed(index < current);
+    const active = computed(index == current);
+    const p = parts(S.Step, .{ .completed = completed, .active = active });
+    const semantics = computed(a11yOf(item, index < current, index == current));
+    const label = computed(CircleLabel{ .completed = index < current, .n = index + 1 });
+    const icon = computed(if (index < current) check else null);
+    return (
+        <box style={S.v_step} a11y={semantics}>
+            <box style={S.v_indicator}>
+                {if (icon) |asset| <box style={p.circle}><icon style={p.icon} src={asset} /></box> else <text style={p.num} box={p.circle}>{label}</text>}
+                {if (index + 1 < count) <box style={p.connector} />}
+            </box>
+            <box style={S.vText}>
+                <text style={p.title}>{item.title}</text>
+                {if (item.description) |desc| <text style={S.desc}>{desc}</text>}
+            </box>
+        </box>
+    );
+}
+
+/// Steps control: `W.Steps(.{ .items = &items, .current = step })`. Steps before
+/// current are done; >= step count means all done. Horizontal: each step gets an equal
+/// column; connector spans first circle center to last, done segment stops at the current
+/// circle center. Vertical: one row per step, connector reaches next circle.
+/// items/current can come from signals (reconcile by row key; state only changes
+/// appearance).
+pub fn Steps(items: []const StepItem = &.{}, current: usize = 0, direction: mod.StepsDirection = .horizontal, checkIconAsset: ?ui.SvgAsset = null) View {
+    const horizontal = computed(direction == .horizontal);
+    const count = computed(items.len);
+    return (
+        <box style={S.Container.of(.{ .horizontal = horizontal })} a11y={.{ .role = .list, .label = "Steps" }}>
+            {if (direction == .horizontal and items.len > 1) <box style={S.track.of(.{ .steps = count })} />}
+            {if (direction == .horizontal and items.len > 1) <box style={S.progress.of(.{ .steps = count, .current = current })} />}
+            {if (horizontal) for (items) |item, i| <HStep key={rowKey(item)} {item} index={i} {current} check={checkIconAsset} />}
+            {if (direction == .vertical) for (items) |item, i| <VStep key={rowKey(item)} {item} index={i} {current} {count} check={checkIconAsset} />}
+        </box>
+    );
+}

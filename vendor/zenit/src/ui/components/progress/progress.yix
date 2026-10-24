@@ -1,0 +1,31 @@
+//! Progress view. Styles and drawing in styles.yss, shared types and tests in mod.zig.
+const std = @import("std");
+const ui = @import("../../ui.zig");
+const mod = @import("mod.zig");
+const S = @import("styles.yss");
+const ProgressStatus = mod.ProgressStatus;
+
+/// Determinate mode reports value (AT announces '70%'); indeterminate mode per ARIA spec doesn't
+/// report value, announces busy instead
+fn a11yOf(indeterminate: bool, percent: f32) ui.A11yProps {
+    if (indeterminate) return .{ .role = .progressbar, .busy = true };
+    return .{ .role = .progressbar, .value_min = 0, .value_max = 100, .value_now = percent, .value_range = .{ .now = percent, .min = 0, .max = 100 } };
+}
+
+/// Progress bar: W.Progress(.{ .value = upload_ratio, .show_text = true }).
+/// value (0-100, clamps to range) and status can be signals; indeterminate mode ignores value,
+/// gloss stripe sweeps with frame clock.
+pub fn Progress(value: f32 = 0, status: ProgressStatus = .normal, height: f32 = 4, showText: bool = false, indeterminate: bool = false, width: ?f32 = null) View {
+    const percent = computed(std.math.clamp(value, 0, 100));
+    const bar = computed(S.Bar{ .status = status, .height = height });
+    const has_text = computed(showText and !indeterminate);
+    const semantics = computed(a11yOf(indeterminate, percent));
+    return (
+        <row style={S.container.of(.{ .width = width })} a11y={semantics}>
+            <box style={S.track.of(.{ .height = height })}>
+                {if (indeterminate) <canvas style={S.sweep_area} draw={S.drawBar} data={bar} animate /> else <box style={.{ S.fill.of(.{ .percent = percent, .height = height }), ui.view.styleBy(status, S.fillGradient) }} />}
+            </box>
+            {if (has_text) <text style={S.percent_text}>{percent:.0}%</text>}
+        </row>
+    );
+}

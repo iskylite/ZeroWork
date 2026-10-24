@@ -1,0 +1,18 @@
+//! yix-lsp smoke fixture: built-in components (hand-written Zig) and this file's Yix components,
+//! test property / tag name completion.
+const ui = @import("../../../src/ui/ui.zig");
+const W = ui.widgets;
+
+pub fn Card2(title: []const u8 = "", count: i32 = 0, onPick: ?Handler(void) = null) View {
+    return <col><text>{title} {count}</text></col>;
+}
+
+pub fn Demo() View {
+    return (
+        <col>
+            <W.Button label="Save" />
+            <Card2 title="a" />
+            <row />
+        </col>
+    );
+}

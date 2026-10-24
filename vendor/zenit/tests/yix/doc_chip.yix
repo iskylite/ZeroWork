@@ -1,0 +1,31 @@
+//! Documentation example (docs/YIX_REFERENCE.md §2.1): Chip component. Changes here must sync docs.
+const ui = @import("ui");
+const S = @import("doc_chip.yss");
+
+pub const Tone = enum { neutral, accent };
+
+/// Selectable capsule; when onRemove given, show remove button
+pub fn Chip(
+    label: Text = "",
+    tone: Tone = .neutral,
+    selected: Model(bool) = false,
+    onChange: ?Handler(bool) = null,
+    onRemove: ?Handler(void) = null,
+) View {
+    return (
+        <row
+            style={S.Chip.of(.{ .tone = tone, .selected = selected })}
+            focusable
+            focusRing
+            a11y={.{ .role = .button, .label = label, .selected = selected }}
+            onClick={selected = !selected}
+        >
+            <text style={S.label}>{label}</text>
+            {if (onRemove != null)
+                <row style={S.remove} a11y={.{ .role = .button, .label = "Remove" }} onClick={onRemove}>
+                    <text>×</text>
+                </row>
+            }
+        </row>
+    );
+}

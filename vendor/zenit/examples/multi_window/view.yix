@@ -1,0 +1,18 @@
+const ui = @import("ui");
+const Button = ui.widgets.Button;
+
+/// Styles in styles.yss
+const S = @import("styles.yss");
+
+/// Each window mounts one: signal built on that window's own scope, clicking only affects this
+/// window.
+pub fn WindowUi(tag: []const u8, heading: []const u8, button: []const u8) View {
+    var clicks: u32 = signal(0);
+    return (
+        <col style={S.root}>
+            <text style={S.heading}>{heading}</text>
+            <Button label={button} variant={.primary} onClick={clicks += 1} />
+            <text style={S.caption}>[{tag}] clicked {clicks} times</text>
+        </col>
+    );
+}

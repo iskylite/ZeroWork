@@ -1,0 +1,2 @@
+wayland-devel-1.26.0-1.fc44.aarch64
+wayland-protocols-devel-1.49-1.fc44.noarch

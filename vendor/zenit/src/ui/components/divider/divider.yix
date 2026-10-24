@@ -1,0 +1,47 @@
+//! Divider view. Styles and geometry in styles.yss, shared types and tests in mod.zig.
+const ui = @import("../../ui.zig");
+const mod = @import("mod.zig");
+const S = @import("styles.yss");
+const DividerOrientation = mod.DividerOrientation;
+const DividerVariant = mod.DividerVariant;
+const DividerSpacing = mod.DividerSpacing;
+const LabelPosition = mod.LabelPosition;
+
+/// Label only applies to horizontal dividers
+fn kindOf(orientation: DividerOrientation, variant: DividerVariant, label: []const u8, label_position: LabelPosition) S.Kind {
+    if (label.len > 0 and orientation == .horizontal) return switch (label_position) {
+        .left => .label_left,
+        .center => .label_center,
+        .right => .label_right,
+    };
+    return if (variant == .solid) .solid else .patterned;
+}
+
+/// Divider: horizontal / vertical, solid / dashed / dotted, can have label (only horizontal,
+/// left/center/right).
+/// W.Divider(.{ .label = "OR" })
+pub fn Divider(
+    orientation: DividerOrientation = .horizontal,
+    variant: DividerVariant = .solid,
+    spacing: DividerSpacing = .md,
+    label: []const u8 = "",
+    labelPosition: LabelPosition = .center,
+    color: ?ui.Color = null,
+    thickness: f32 = 1,
+    dashLength: f32 = 8,
+    dashGap: f32 = 8,
+) View {
+    const kind = computed(kindOf(orientation, variant, label, labelPosition));
+    const patterned = computed(kind == .patterned);
+    const lead = computed(kind == .label_center or kind == .label_right);
+    const labeled = computed(kind == .label_left or kind == .label_center or kind == .label_right);
+    const trail = computed(kind == .label_left or kind == .label_center);
+    return (
+        <box style={S.root.of(.{ .kind = kind, .orientation = orientation, .thickness = thickness, .color = color, .spacing = spacing, .dash_gap = dashGap })}>
+            {if (patterned) for (0..S.dash_count) |_| <box style={S.dash.of(.{ .orientation = orientation, .variant = variant, .thickness = thickness, .length = dashLength, .color = color })} />}
+            {if (lead) <box style={S.label_line.of(.{ .thickness = thickness, .color = color })} />}
+            {if (labeled) <text style={S.label_text}>{label}</text>}
+            {if (trail) <box style={S.label_line.of(.{ .thickness = thickness, .color = color })} />}
+        </box>
+    );
+}

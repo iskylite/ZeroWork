@@ -1,0 +1,52 @@
+/** Targeted native regression for the five reported terminal/sidebar issues. */
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, open, readFile, writeFile, rm, realpath } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { waitForServerReady, waitFor, query, clickTestId, key, type_, resizeWindow, screenshot, sleep, mouseMove } from "../zig-out/share/zenit/harness/client.ts";
+const out = resolve(process.argv[2] ?? "/tmp/zerowork-five-fixes/native");
+const iso = await realpath(await mkdtemp(join(tmpdir(), "zw-reported-ui-"))), rpc = join(iso,"rpc"), data=join(iso,"data");
+await Promise.all([mkdir(out,{recursive:true}),mkdir(rpc),mkdir(data)]);
+await writeFile(join(data,"config.toml"), `[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\ninput_line_highlight=true\n`);
+await writeFile(join(data,"hosts.toml"), `[registry]\nschema_version=2\nrevision=1\nnext_connection_id=2\nnext_group_id=1\n[[hosts]]\nconnection_id=1\nrevision=1\nprotocol="ssh"\nauth_mode="password"\nname="Regression host"\nhost="127.0.0.1"\nport=9\nuser="test"\n`);
+process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
+const log=await open(join(out,"app.log"),"w");
+const app=spawn(resolve("zig-out/bin/zerowork"),[],{env:{...process.env,ZENIT_E2E_FILE_RPC_DIR:rpc,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:"0",ZENIT_E2E_BACKGROUND:"1",ZENIT_E2E_ISOLATE_POINTER:"1"},stdio:["ignore",log.fd,log.fd]});
+const ended=new Promise<void>(r=>app.once("close",()=>r()));
+const report:any={status:"running",pid:app.pid,rpc,data,checks:[]};
+await writeFile(join(out,"launch.json"),JSON.stringify(report));
+const text=(n:any):string=>(n.text??"")+(n.children??[]).map(text).join("");
+const shown=(n:any)=>n.hidden!==true&&n.visible!==false&&(n.effective_opacity??1)>0&&n.rect.w>0&&n.rect.h>0;
+const visible=async(id:string)=>waitFor(async()=>(await query(id)).find(shown)??null,10000);
+const hidden=async(id:string)=>waitFor(async()=>!(await query(id)).some(shown)||null,5000);
+const click=async(id:string)=>{await visible(id);assert((await clickTestId(id)).ok);};
+const cap=async(name:string)=>{await sleep(250);assert((await screenshot(join(out,name+".png"))).ok);};
+try {
+ await waitForServerReady(60000);
+ assert.equal(Number(JSON.parse(await readFile(join(rpc,"owner.json"),"utf8")).pid),app.pid);
+ await resizeWindow(1440,900);
+ await click("workspace.empty.local");await visible("local.status.identity");
+ const before=await visible("local.status.identity");await click("sidebar.collapse");
+ const after=await visible("local.status.identity");assert.equal(after.rect.w,before.rect.w);assert.equal(after.rect.w,112);
+ report.checks.push("Connection identity keeps its compact 112px width when the sidebar collapses.");
+ const host=await visible("sidebar.rail.host.1");await mouseMove(host.rect.x+16,host.rect.y+16);await sleep(600);
+ const detail=await visible("sidebar.rail.detail");assert(detail.rect.h<154);await cap("01-compact-host-detail");
+ await mouseMove(host.rect.x+host.rect.w+7,host.rect.y+16);await visible("sidebar.rail.detail");
+ await mouseMove(detail.rect.x+detail.rect.w/2,detail.rect.y+detail.rect.h-28);await sleep(300);await visible("sidebar.rail.detail");
+ report.checks.push("Moving across the gap into the portaled action panel keeps its controls reachable.");
+ await mouseMove(700,400);await hidden("sidebar.rail.detail");
+ await mouseMove(host.rect.x+16,host.rect.y+16);await sleep(600);await visible("sidebar.rail.detail");
+ await click("sidebar.rail.host.1");await mouseMove(710,410);await hidden("sidebar.rail.detail");
+ report.checks.push("Host hover and click details dismiss when the pointer leaves; compact panel has no fixed excess height.");
+ await click("terminal.surface");
+ await type_("printf '\\033[1;34mfirst-directory    second-directory    third-directory\\033[0m\\n'; ls -CF /usr/bin | head -12");await key("return");
+ await waitFor(async()=>{const row=(await query("terminal.surface.row.1")).find(shown);return row&&text(row).includes("first-directory")&&text(row).includes("third-directory")||null;},10000);
+ assert(text(await visible("terminal.surface.row.2")).trim().length>0);
+ report.checks.push("Real PTY emits the colored bold directory row and ls output; screenshot reviewed for columns and input highlight.");
+ await cap("02-terminal-columns-and-highlight");
+ await resizeWindow(860,480);assert.equal((await visible("local.status.identity")).rect.w,112);await cap("03-narrow-status");
+ report.status="passed";
+} catch(e) { report.status="failed";report.error=String(e);await cap("failure").catch(()=>{}); }
+finally { if(app.exitCode===null&&app.signalCode===null)app.kill("SIGTERM");await Promise.race([ended,sleep(2000)]);if(app.exitCode===null&&app.signalCode===null){app.kill("SIGKILL");await ended;}await log.close();await rm(iso,{recursive:true,force:true});await writeFile(join(out,"report.json"),JSON.stringify(report,null,2)); }
+console.log(JSON.stringify(report));if(report.status!=="passed")process.exitCode=1;

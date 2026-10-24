@@ -1,0 +1,36 @@
+//! P3a: normal element's :focus / :focus-visible / :disabled state source (tests/yix/stories.yix
+//! StateBox)
+const ui = @import("ui");
+
+style field {
+  padding: space100;
+  opacity: 1;
+  :focus { opacity: 0.9; }
+  :focus-visible { opacity: 0.8; }
+  :disabled { opacity: 0.5; }
+}
+
+/// P4: custom shadow (token color) and icon-color switch with variant
+recipe Glyph {
+  base { width: 16; height: 16; icon-color: fg-secondary; shadow: 0 2 6 accent; }
+  flag hot { icon-color: accent; }
+}
+recipe GlyphOnHot {
+  base { width: 16; height: 16; }
+  flag hot { icon-color: accent; }
+}
+
+/// P4: text's :hover (link hover color)
+style link {
+  color: accent;
+  :hover { color: fg-primary; }
+}
+
+/// P4: one style writes both box and text properties, auto-split when used on <text>
+style pill {
+  padding: 4 8;
+  background: bg-secondary;
+  corner-radius: 6;
+  color: accent;
+  font-size: sm;
+}

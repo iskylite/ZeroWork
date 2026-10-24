@@ -1,0 +1,33 @@
+//! Switch view. Styles in styles.yss (SwitchParts), tests in mod.zig.
+const ui = @import("../../ui.zig");
+const S = @import("styles.yss");
+
+/// Switch: W.Switch(.{ .label = "Wi-Fi", .checked = wifi }).
+/// checked is controlled value: pass bool = component self-holds, pass signal = interaction writes
+/// directly, ui.split = parent decides;
+/// on_change only reports settled value. Disabled suppresses click / space / enter, exits Tab
+/// order.
+pub fn Switch(
+    checked: Model(bool) = false,
+    label: Text = "",
+    disabled: bool = false,
+    focusRing: ui.FocusRingConfig = .{},
+    onChange: ?Handler(bool) = null,
+) View {
+    const enabled = computed(!disabled);
+    return (
+        <row
+            style={S.SwitchParts.slot(.root, .{ .disabled = disabled })}
+            tag={.button}
+            focusable={enabled}
+            focusRing={focusRing}
+            a11y={.{ .role = .switch_role, .checked = checked, .disabled = disabled, .label = label }}
+            onClick={if (!disabled) checked = !checked}
+        >
+            <box style={S.SwitchParts.slot(.track, .{ .checked = checked })}>
+                <box style={S.SwitchParts.slot(.thumb, .{ .checked = checked })} />
+            </box>
+            {if (label.len != 0) <text style={S.SwitchParts.slot(.label, .{ .checked = checked, .disabled = disabled })}>{label}</text>}
+        </row>
+    );
+}

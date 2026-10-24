@@ -1,0 +1,53 @@
+//! Alert view. Styles in styles.yss, shared types and tests in mod.zig.
+const ui = @import("../../ui.zig");
+const mod = @import("mod.zig");
+const S = @import("styles.yss");
+const AlertVariant = mod.AlertVariant;
+
+/// Announcement level: error / warning interrupts current speech (assertive), info / success
+/// announces after (polite).
+/// role=alert alone won't be announced; AT only auto-announces live regions when non-off.
+fn liveLevel(v: AlertVariant) []const u8 {
+    return switch (v) {
+        .@"error", .warning => "assertive",
+        .info, .success => "polite",
+    };
+}
+
+/// Announcement content: announces message if present, otherwise title
+fn spoken(title: []const u8, message: []const u8) ?[]const u8 {
+    if (message.len > 0) return message;
+    if (title.len > 0) return title;
+    return null;
+}
+
+/// Static message alert (see Notifier for global alerts): info / success / warning / error, can
+/// dismiss;
+/// title and message can be signals; new content announced via live region.
+/// W.Alert(.{ .variant = .warning, .message = status_text })
+pub fn Alert(
+    variant: AlertVariant = .info,
+    title: []const u8 = "",
+    message: []const u8 = "",
+    closable: bool = false,
+    onClose: ?Handler(void) = null,
+    closeIconAsset: ?ui.SvgAsset = null,
+) View {
+    const has_title = computed(title.len != 0);
+    const live = computed(liveLevel(variant));
+    const live_text = computed(spoken(title, message));
+    return (
+        <row style={S.Alert.slot(.root, .{ .kind = variant, .titled = has_title })} a11y={.{ .role = .alert, .live = live, .live_text = live_text }}>
+            <box style={S.Alert.slot(.accent, .{ .kind = variant })} />
+            <col style={S.content}>
+                {if (has_title) <text style={S.title}>{title}</text>}
+                {if (message.len != 0) <text style={S.message}>{message}</text>}
+            </col>
+            {if (closable)
+                <row style={S.close} a11y={.{ .role = .button, .label = "Dismiss" }} onClick={onClose}>
+                    {if (closeIconAsset) |asset| <icon style={S.close_icon} src={asset} /> else <text style={S.close_label}>x</text>}
+                </row>
+            }
+        </row>
+    );
+}

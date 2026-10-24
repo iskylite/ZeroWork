@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Generate Unicode 17 bidi lookup tables from vendored UCD inputs.
+
+The generator is deliberately offline.  Unicode source files are reviewed and
+vendored separately; this script only turns their normative properties into a
+compact Zig table and can verify that the checked-in output is current.
+"""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+
+UNICODE_VERSION = "17.0.0"
+MAX_CODE_POINT = 0x10FFFF
+CLASS_NAMES = {
+    "L": "l",
+    "R": "r",
+    "AL": "al",
+    "EN": "en",
+    "ES": "es",
+    "ET": "et",
+    "AN": "an",
+    "CS": "cs",
+    "NSM": "nsm",
+    "BN": "bn",
+    "B": "b",
+    "S": "s",
+    "WS": "ws",
+    "ON": "on",
+    "LRE": "lre",
+    "LRO": "lro",
+    "RLE": "rle",
+    "RLO": "rlo",
+    "PDF": "pdf",
+    "LRI": "lri",
+    "RLI": "rli",
+    "FSI": "fsi",
+    "PDI": "pdi",
+    "Left_To_Right": "l",
+    "Right_To_Left": "r",
+    "Arabic_Letter": "al",
+    "European_Terminator": "et",
+}
+DATA_RE = re.compile(
+    r"^([0-9A-F]+)(?:\.\.([0-9A-F]+))?\s*;\s*([A-Za-z_]+)"
+)
+MISSING_RE = re.compile(
+    r"^#\s*@missing:\s*([0-9A-F]+)(?:\.\.([0-9A-F]+))?\s*;\s*([A-Za-z_]+)"
+)
+
+
+def checked_text(path: Path, marker: str) -> str:
+    text = path.read_text(encoding="utf-8")
+    if marker not in "\n".join(text.splitlines()[:12]):
+        raise ValueError(f"{path}: expected Unicode {UNICODE_VERSION} header")
+    return text
+
+
+def merged_ranges(values: list[str]):
+    start = 0
+    current = values[0]
+    for index in range(1, len(values)):
+        if values[index] != current:
+            yield start, index - 1, current
+            start = index
+            current = values[index]
+    yield start, len(values) - 1, current
+
+
+def bidi_classes(path: Path):
+    text = checked_text(path, f"DerivedBidiClass-{UNICODE_VERSION}")
+    values = ["l"] * (MAX_CODE_POINT + 1)
+
+    # @missing entries are ordered broad-to-specific in the UCD file.  Applying
+    # them in source order preserves the normative defaults for unassigned RTL
+    # blocks before explicit records override assigned code points.
+    for line_number, line in enumerate(text.splitlines(), 1):
+        match = MISSING_RE.match(line)
+        if not match:
+            continue
+        start = int(match.group(1), 16)
+        end = int(match.group(2) or match.group(1), 16)
+        try:
+            value = CLASS_NAMES[match.group(3)]
+        except KeyError as error:
+            raise ValueError(
+                f"{path}:{line_number}: unsupported @missing class {match.group(3)}"
+            ) from error
+        values[start : end + 1] = [value] * (end - start + 1)
+
+    for line_number, line in enumerate(text.splitlines(), 1):
+        match = DATA_RE.match(line)
+        if not match:
+            continue
+        start = int(match.group(1), 16)
+        end = int(match.group(2) or match.group(1), 16)
+        try:
+            value = CLASS_NAMES[match.group(3)]
+        except KeyError as error:
+            raise ValueError(
+                f"{path}:{line_number}: unsupported bidi class {match.group(3)}"
+            ) from error
+        values[start : end + 1] = [value] * (end - start + 1)
+    return list(merged_ranges(values))
+
+
+def bracket_records(path: Path):
+    text = checked_text(path, f"BidiBrackets-{UNICODE_VERSION}")
+    records = []
+    pattern = re.compile(r"^([0-9A-F]+)\s*;\s*([0-9A-F]+)\s*;\s*([ocn])")
+    for line_number, line in enumerate(text.splitlines(), 1):
+        match = pattern.match(line)
+        if not match:
+            continue
+        kind = {"o": "open", "c": "close", "n": "none"}[match.group(3)]
+        if kind == "none":
+            continue
+        records.append((int(match.group(1), 16), int(match.group(2), 16), kind))
+    if records != sorted(records):
+        raise ValueError(f"{path}: records are not sorted")
+    return records
+
+
+def mirror_records(path: Path):
+    text = checked_text(path, f"BidiMirroring-{UNICODE_VERSION}")
+    records = []
+    pattern = re.compile(r"^([0-9A-F]+)\s*;\s*([0-9A-F]+)")
+    for line in text.splitlines():
+        match = pattern.match(line)
+        if match:
+            records.append((int(match.group(1), 16), int(match.group(2), 16)))
+    if records != sorted(records):
+        raise ValueError(f"{path}: records are not sorted")
+    return records
+
+
+def generate(source_root: Path) -> str:
+    for filename in ("BidiTest.txt", "BidiCharacterTest.txt"):
+        conformance = checked_text(
+            source_root / filename, f"{filename.removesuffix('.txt')}-{UNICODE_VERSION}"
+        )
+        if not conformance.rstrip().endswith("# EOF"):
+            raise ValueError(f"{source_root / filename}: truncated conformance data")
+    classes = bidi_classes(source_root / "DerivedBidiClass.txt")
+    brackets = bracket_records(source_root / "BidiBrackets.txt")
+    mirrors = mirror_records(source_root / "BidiMirroring.txt")
+
+    lines = [
+        "// Generated by tools/generate_bidi_data.py; DO NOT EDIT.",
+        f'pub const unicode_version = "{UNICODE_VERSION}";',
+        "",
+        "pub const BidiClass = enum(u5) { l, r, al, en, es, et, an, cs, nsm, bn, b, s, ws, on, lre, lro, rle, rlo, pdf, lri, rli, fsi, pdi };",
+        "pub const BracketType = enum(u2) { none, open, close };",
+        "pub const BracketInfo = struct { pair: u21, kind: BracketType };",
+        "const ClassRange = struct { start: u21, end: u21, value: BidiClass };",
+        "const BracketRecord = struct { codepoint: u21, pair: u21, kind: BracketType };",
+        "const MirrorRecord = struct { codepoint: u21, mirror: u21 };",
+        "",
+        "const class_ranges = [_]ClassRange{",
+    ]
+    for start, end, value in classes:
+        lines.append(
+            f"    .{{ .start = 0x{start:X}, .end = 0x{end:X}, .value = .{value} }},"
+        )
+    lines.extend(["};", "", "const bracket_records = [_]BracketRecord{"])
+    for codepoint, pair, kind in brackets:
+        lines.append(
+            f"    .{{ .codepoint = 0x{codepoint:X}, .pair = 0x{pair:X}, .kind = .{kind} }},"
+        )
+    lines.extend(["};", "", "const mirror_records = [_]MirrorRecord{"])
+    for codepoint, mirror in mirrors:
+        lines.append(
+            f"    .{{ .codepoint = 0x{codepoint:X}, .mirror = 0x{mirror:X} }},"
+        )
+    lines.extend(
+        [
+            "};",
+            "",
+            "pub fn classify(cp: u21) BidiClass {",
+            "    var low: usize = 0;",
+            "    var high: usize = class_ranges.len;",
+            "    while (low < high) {",
+            "        const mid = low + (high - low) / 2;",
+            "        const range = class_ranges[mid];",
+            "        if (cp < range.start) high = mid else if (cp > range.end) low = mid + 1 else return range.value;",
+            "    }",
+            "    unreachable; // class_ranges covers the full Unicode scalar range",
+            "}",
+            "",
+            "pub fn bracket(cp: u21) ?BracketInfo {",
+            "    var low: usize = 0;",
+            "    var high: usize = bracket_records.len;",
+            "    while (low < high) {",
+            "        const mid = low + (high - low) / 2;",
+            "        const record = bracket_records[mid];",
+            "        if (cp < record.codepoint) high = mid else if (cp > record.codepoint) low = mid + 1 else return .{ .pair = record.pair, .kind = record.kind };",
+            "    }",
+            "    return null;",
+            "}",
+            "",
+            "pub fn mirrored(cp: u21) ?u21 {",
+            "    var low: usize = 0;",
+            "    var high: usize = mirror_records.len;",
+            "    while (low < high) {",
+            "        const mid = low + (high - low) / 2;",
+            "        const record = mirror_records[mid];",
+            "        if (cp < record.codepoint) high = mid else if (cp > record.codepoint) low = mid + 1 else return record.mirror;",
+            "    }",
+            "    return null;",
+            "}",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def formatted(rendered: str, filename: str) -> str:
+    with tempfile.TemporaryDirectory() as directory:
+        candidate = Path(directory) / filename
+        candidate.write_text(rendered, encoding="utf-8")
+        subprocess.run(["zig", "fmt", str(candidate)], check=True, capture_output=True)
+        return candidate.read_text(encoding="utf-8")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--source", type=Path, default=Path("vendor/unicode") / UNICODE_VERSION
+    )
+    parser.add_argument(
+        "--output", type=Path, default=Path("src/i18n/bidi_data_generated.zig")
+    )
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args()
+
+    rendered = formatted(generate(args.source), args.output.name)
+    if args.check:
+        if not args.output.exists() or args.output.read_text(encoding="utf-8") != rendered:
+            print(f"stale generated file: {args.output}", file=sys.stderr)
+            return 1
+        return 0
+    args.output.write_text(rendered, encoding="utf-8")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

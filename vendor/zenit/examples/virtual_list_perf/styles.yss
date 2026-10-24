@@ -1,0 +1,14 @@
+//! virtual_list_perf styles
+const ui = @import("ui");
+
+style root { width: grow; height: grow; background: bg-primary; }
+style header { width: grow; height: 48; padding: 0 20; align-items: center; background: bg-secondary; }
+style header_text { font-size: lg; font-weight: 600; color: fg-primary; }
+style list { width: grow; height: grow; }
+/// Zebra stripes: odd/even rows two background colors, switches theme
+recipe Row {
+  base { width: fill; height: fill; padding: space200 space400; align-items: center; gap: space300; }
+  flag odd { background: bg-primary; } else { background: bg-secondary; }
+}
+style index { font-size: sm; font-weight: 500; color: fg-secondary; }
+style title { font-size: lg; color: fg-primary; }

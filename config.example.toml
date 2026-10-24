@@ -1,0 +1,37 @@
+# 示例配置；正式 App 通过设置管理配置。勿在仓库保存实际凭据。
+[ui]
+theme = "sauber"
+font_family = "JetBrains Mono"
+font_size = 14
+font_weight = "regular"
+line_height = 1.50
+cursor_style = "block"
+sidebar_collapsed = false
+input_line_highlight = true
+timestamp_gutter = false
+
+[completion]
+enabled = true
+
+[transfer]
+dedicated_connection = true
+window_chunks = 16
+chunk_kb = 64
+download_dir = "~/Downloads"
+verify_md5 = false
+shared_pacing_kbps = 2048
+
+[ssh]
+keepalive_sec = 30
+reconnect_max = 5
+reconnect_backoff = [1,2,4,8,16]
+
+[ai]
+default_provider = "anthropic"
+permission_mode = "confirm"
+redact_ip = true
+error_hint = true
+
+[log]
+ring_mb = 64
+checkpoint_sec = 30

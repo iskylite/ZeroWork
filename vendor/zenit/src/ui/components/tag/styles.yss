@@ -1,0 +1,50 @@
+//! Tag styles: color determines background / text / border color (background and border are token
+//! blend),
+//! kind (component parameter variant) determines whether outlined, size determines height / padding
+//! / font size / gap.
+//! View in tag.yix; TagColor / TagVariant / TagSize are public APIs defined in mod.zig.
+const ui = @import("../../ui.zig");
+const mod = @import("mod.zig");
+
+/// One color's appearance set: background is bg-primary toward foreground 25%, border 50%; close
+/// button hover is the foreground color faded by 80%.
+mixin tone(fg) {
+  root { background: mix(bg-primary, fg, 0.25); border-color: mix(bg-primary, fg, 0.5); }
+  label { color: fg; }
+  close_text { color: fg; }
+  close_icon { icon-color: fg; }
+  close { :hover { background: mix(fg, transparent, 0.8); } }
+}
+
+recipe Tag slots(root, label, close, close_text, close_icon) {
+  base {
+    root { width: fit; direction: row; align-items: center; corner-radius: full; }
+    close { width: 14; height: 14; corner-radius: full; justify: center; align-items: center; cursor: pointer; transition: background 150ms ease-out; }
+    close_text { font-size: 10; }
+    close_icon { width: 10; height: 10; }
+  }
+  variant color = neutral {
+    neutral {
+      root { background: bg-tertiary; border-color: border; }
+      label { color: fg-primary; }
+      close_text { color: fg-primary; }
+      close_icon { icon-color: fg-primary; }
+      close { :hover { background: mix(fg-primary, transparent, 0.8); } }
+    }
+    accent { tone(accent); }
+    success { tone(success); }
+    warning { tone(warning); }
+    danger { tone(danger); }
+    info { tone(info); }
+  }
+  variant kind = default {
+    default { root { border-width: 0; } }
+    outline { }
+  }
+  variant size = md {
+    sm { root { height: 22; padding: space50 space150; gap: space100; } label { font-size: xs; } }
+    md { root { height: 26; padding: 3 space200; gap: space100; } label { font-size: sm; } }
+  }
+  // outline: transparent background + 1px border (overrides color dimension's background)
+  when kind = outline { root { background: transparent; border-width: 1; } }
+}

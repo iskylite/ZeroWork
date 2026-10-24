@@ -1,0 +1,890 @@
+//! Presentation/controller facade for an already-created TerminalService.
+//! This module never owns a VT engine, process, file descriptor, or raw-output
+//! reader. All mutable UI state is confined to the UI thread.
+const std = @import("std");
+const ui = @import("ui");
+const terminal = @import("../host/terminal_service.zig");
+const identity = @import("../host/identity.zig");
+const vt = @import("../vt/snapshot.zig");
+const TextSlot = @import("../vt/text_slot.zig").TextSlot;
+const S = @import("terminal_styles.zig");
+const input = @import("terminal_surface_input.zig");
+const blink_half_period_ms = 550;
+
+pub const Options = struct {
+    font_size: f32 = S.body_size,
+    row_height: f32 = S.body_height,
+    cell_width: f32,
+    family_id: u16,
+    family_name: []const u8,
+    weight: u16 = 400,
+    foreground: ui.Color,
+    background: ui.Color,
+    cursor: ui.Color,
+    timestamps: bool,
+    highlight: bool,
+    cursor_style: enum { block, bar, underline },
+};
+const Glyph = struct { node: *ui.Node, overline: *ui.Node, double_underline: ?*ui.Node = null };
+const Row = struct {
+    root: *ui.Node,
+    test_id: []u8,
+    time: *ui.Node,
+    selected: *ui.Node,
+    glyphs: std.ArrayList(Glyph) = .empty,
+    hash: u64 = 0,
+};
+const Pending = union(enum) { bytes: []u8, key: terminal.KeyEvent, mouse: terminal.MouseRequest };
+
+pub const Surface = struct {
+    pub const MenuHandler = struct {
+        context: ?*anyopaque = null,
+        request: *const fn (?*anyopaque, identity.SessionHandle, f32, f32) void,
+    };
+
+    pub const Feedback = struct {
+        context: ?*anyopaque = null,
+        publish: *const fn (?*anyopaque, *ui.Cx, identity.SessionHandle, []const u8) anyerror!void = publishFeedback,
+    };
+    feedback: Feedback = .{},
+    cx: *ui.Cx,
+    host: *ui.Node,
+    root: *ui.Node,
+    service: terminal.Service,
+    owner: identity.SessionHandle,
+    menu_handler: ?MenuHandler = null,
+    shell_observer: ?struct {
+        context: *anyopaque,
+        accepted: *const fn (*anyopaque, identity.SessionHandle, u64, @import("broadcast_event.zig").Payload) void,
+        paste_stamp: *const fn (*anyopaque, identity.SessionHandle) u64,
+    } = null,
+    broadcast_paste_stamp: u64 = 0,
+    enhancement: ?struct {
+        context: *anyopaque,
+        key: *const fn (*anyopaque, ui.events.KeyCode, ui.events.Modifiers) bool,
+        text: *const fn (*anyopaque, []const u8) bool,
+    } = null,
+    trusted_outcome: ?terminal.trusted_edit.Outcome = null,
+    trusted_pending: ?u64 = null,
+    recovered_input: std.ArrayList(u8) = .empty,
+
+    options: Options,
+    requested_theme: ?terminal.Theme = null,
+    displayed_theme: ?terminal.Theme = null,
+    sent_theme_revision: u64 = 0,
+    theme_error_seen: ?[]const u8 = null,
+    snapshot: ?terminal.TerminalSnapshot = null,
+    rows: std.ArrayList(Row) = .empty,
+    document_version: ?u64 = null,
+    slot_generation: u64 = 0,
+    next_input: u64 = 1,
+    next_geometry: u64 = 1,
+    requested_cols: u16 = 0,
+    requested_rows: u16 = 0,
+    pending: std.ArrayList(Pending) = .empty,
+    pending_bytes: usize = 0,
+    force_snapshot: bool = true,
+    active: bool = false,
+    focused: bool = false,
+    blink: bool = true,
+    blink_running: bool = false,
+    reduced_motion: bool = false,
+    last_blink: f64 = 0,
+    last_second: i64 = -1,
+    error_message: ?[]const u8 = null,
+    error_until_ms: f64 = 0,
+    message: *ui.Node,
+    message_root: *ui.Node,
+    caret: *ui.Node,
+    preedit_node: *ui.Node,
+    preedit: []u8 = &.{},
+    preedit_cursor: u32 = 0,
+    document: std.ArrayList(u8) = .empty,
+    caret_byte: u32 = 0,
+    selection: ?terminal.Selection = null,
+    released_anchors: std.ArrayList(terminal.Anchor) = .empty,
+    dragging: bool = false,
+    rectangle: bool = false,
+    mouse_reporting: bool = false,
+    wheel_remainder: f32 = 0,
+    pending_paste: ?terminal.Paste = null,
+    paste_requested: ?[]u8 = null,
+    paste_confirmed: bool = false,
+    modal_scope: ?*ui.Scope = null,
+    modal_open: ?*ui.Signal(bool) = null,
+    modal: ?ui.widgets.ModalResult = null,
+    modal_text: ?*ui.Node = null,
+
+    pub fn create(cx: *ui.Cx, host: *ui.Node, service: terminal.Service, options: Options) !*Surface {
+        if (service.binding.kind != .terminal) return error.InvalidTerminalBinding;
+        const owner = switch (service.binding.resource_owner) {
+            .session => |value| value,
+            else => return error.InvalidTerminalBinding,
+        };
+        if (service.binding.origin_session) |origin| if (!origin.eql(owner)) return error.InvalidTerminalBinding;
+        const self = try cx.allocator.create(Surface);
+        errdefer cx.allocator.destroy(self);
+        var owned_options = options;
+        owned_options.family_name = try cx.allocator.dupe(u8, options.family_name);
+        errdefer cx.allocator.free(owned_options.family_name);
+        const root = try ui.boxStyled(cx, S.surface, .{});
+        errdefer cx.destroyDetached(root);
+        root.meta.ownership.meta.test_id = "terminal.surface";
+        const caret = try leaf(cx, options.cursor);
+        (try caret.style.ensureExtFallible(cx.allocator)).z_index = 5;
+        try root.appendChild(cx.allocator, caret);
+        const preedit = try ui.text(cx, "", .{ .font_size = options.font_size, .font_family = options.family_id, .use_monospace_font = options.family_id == 0, .selectable = false });
+        try absolute(cx, preedit, 0, 0, 0, options.row_height);
+        (try preedit.style.ensureExtFallible(cx.allocator)).z_index = 6;
+        preedit.setDisplay(.none);
+        try root.appendChild(cx.allocator, preedit);
+        const message_root = try ui.box(cx, S.errorMessage(0, 0, options.row_height, options.background), .{});
+        message_root.meta.ownership.meta.test_id = "terminal.message";
+        message_root.behavior.interaction.a11y = .{ .role = .status, .live = "polite" };
+        try root.appendChild(cx.allocator, message_root);
+        const message = try ui.textStyled(cx, S.copiedText, "");
+        message.meta.ownership.meta.test_id = "terminal.message.text";
+        message.setStyleInline(cx.allocator, S.messageTextBox(cx.tokens));
+        try message_root.appendChild(cx.allocator, message);
+        message_root.setDisplay(.none);
+        message.setDisplay(.none);
+        self.* = .{ .cx = cx, .host = host, .root = root, .service = service, .owner = owner, .options = owned_options, .caret = caret, .preedit_node = preedit, .message = message, .message_root = message_root };
+        try host.appendChild(cx.allocator, root);
+        return self;
+    }
+    pub fn install(self: *Surface) void {
+        self.host.behavior.events.event_context = self;
+        self.host.behavior.events.key_context = self;
+        self.host.behavior.events.on_event = onEvent;
+        self.host.behavior.events.on_key_down = onKey;
+        // The host also contains search and other editable overlays. Pointer
+        // events belong to the canvas; a child's handled event still bubbles.
+        self.root.behavior.events.event_context = self;
+        self.root.behavior.events.on_event = onCanvasEvent;
+        self.root.behavior.events.on_scroll = onScroll;
+        self.host.behavior.interaction.focusable = true;
+        self.host.behavior.interaction.a11y = .{ .role = .textarea, .label = "终端", .multiline = true };
+        self.host.on_capture_lost = captureLost;
+        self.host.behavior.interaction.text_input_client = .{ .context = self, .text_len = textLen, .copy_text = copyText, .selection = imeSelection, .frame_for_range = frameForRange, .range_at_point = rangeAtPoint };
+    }
+    pub fn destroy(self: *Surface) void {
+        self.host.behavior.interaction.text_input_client = null;
+        self.host.behavior.events.on_event = null;
+        self.host.behavior.events.on_key_down = null;
+        self.host.behavior.events.on_scroll = null;
+        self.host.on_capture_lost = null;
+        self.clearSelection();
+        if (self.dragging) self.cx.releasePointerCapture();
+        self.cancelPaste();
+        if (self.paste_requested) |bytes| self.cx.allocator.free(bytes);
+        if (self.modal_scope) |scope| scope.dispose();
+        for (self.pending.items) |item| if (item == .bytes) self.cx.allocator.free(item.bytes);
+        self.pending.deinit(self.cx.allocator);
+        self.released_anchors.deinit(self.cx.allocator);
+        self.cx.allocator.free(self.preedit);
+        self.recovered_input.deinit(self.cx.allocator);
+        self.document.deinit(self.cx.allocator);
+        for (self.rows.items) |*row| row.glyphs.deinit(self.cx.allocator);
+        if (self.snapshot) |*value| value.deinit(self.cx.allocator);
+        self.cx.allocator.free(self.options.family_name);
+        if (self.root.parent) |parent| self.cx.detachChild(parent, self.root);
+        self.cx.destroyDetached(self.root);
+        for (self.rows.items) |row| self.cx.allocator.free(row.test_id);
+        self.rows.deinit(self.cx.allocator);
+        self.cx.allocator.destroy(self);
+    }
+    pub fn configure(self: *Surface, options: Options) void {
+        var next = options;
+        next.family_name = self.options.family_name;
+        if (std.meta.eql(self.options, next) and std.mem.eql(u8, options.family_name, next.family_name)) return;
+        const family = self.cx.allocator.dupe(u8, options.family_name) catch return;
+        self.cx.allocator.free(self.options.family_name);
+        next.family_name = family;
+        self.options = next;
+        for (self.rows.items) |*row| row.hash = 0;
+        self.force_snapshot = true;
+    }
+    pub fn setTheme(self: *Surface, theme: terminal.Theme) !void {
+        if (theme.revision == 0) return error.InvalidTheme;
+        if (self.requested_theme) |previous| {
+            if (theme.revision < previous.revision) return error.StaleTheme;
+            if (theme.revision == previous.revision) {
+                if (!std.meta.eql(theme, previous)) return error.ConflictingTheme;
+                return;
+            }
+        }
+        self.requested_theme = theme;
+        self.theme_error_seen = null;
+        self.force_snapshot = true;
+        self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+    }
+    pub fn refresh(self: *Surface, expected: identity.SessionHandle, active: bool) !bool {
+        if (!self.owner.eql(expected)) return error.StaleOwner;
+        // A retained, exited pane has no worker/clock tick to wake it. Keep
+        // polling only until this request appears in an actual owned frame.
+        defer if (self.requested_theme) |theme| {
+            if (self.snapshot == null or self.snapshot.?.applied_theme_revision != theme.revision)
+                self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+        };
+        const activated = active and !self.active;
+        self.active = active;
+        if (activated) self.force_snapshot = true;
+        // The public preferences reader is fed by the native NSWorkspace
+        // accessibility notification. Host/renderer overrides also apply.
+        const reduced = ui.a11y.preferences.reduceMotion() or self.cx.reduced_motion or self.cx.renderer_reduced_motion;
+        const reduced_changed = self.reduced_motion != reduced;
+        self.reduced_motion = reduced;
+        const focused = self.cx.focus_manager.getFocused();
+        const was_focused = self.focused;
+        self.focused = active and self.cx.window_active and focused != null and focused.? == self.host;
+        if (was_focused and !self.focused) {
+            self.setPreedit("");
+            if (self.dragging) self.cx.releasePointerCapture();
+            self.dragging = false;
+            if (self.modal_open == null or !self.modal_open.?.get()) self.cancelPaste();
+        }
+        if (!active) {
+            self.cancelPaste();
+            if (self.preedit.len != 0) self.setPreedit("");
+        }
+        if (self.requested_theme) |theme| if (theme.revision != self.sent_theme_revision) {
+            var sent = true;
+            self.service.setTheme(theme) catch |err| {
+                if (err != error.WorkerBusy) self.showError(err);
+                sent = false;
+            };
+            if (sent) self.sent_theme_revision = theme.revision;
+        };
+        const slot = self.service.textSlot() catch |err| {
+            if (err == error.WorkerBusy) {
+                self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
+                return false;
+            }
+            return err;
+        };
+        var changed = self.force_snapshot or self.snapshot == null;
+        if (slot.acknowledge(self.slot_generation)) |generation| {
+            self.slot_generation = generation;
+            changed = true;
+        }
+        const status = self.service.status() catch |err| {
+            if (err == error.WorkerBusy) {
+                self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
+                self.force_snapshot = changed;
+                return false;
+            }
+            return err;
+        };
+        if (status.theme_error != null and self.theme_error_seen == null) {
+            self.theme_error_seen = status.theme_error;
+            self.showError(error.ThemeApplyFailed);
+        }
+        var gate_changed = false;
+        if (self.snapshot) |*current| {
+            gate_changed = current.read_only == status.writable or current.eof_seen != status.eof_seen;
+            changed = changed or current.read_only == status.writable or current.eof_seen != status.eof_seen or current.geometry_revision != status.geometry.revision or current.projection.mode_revision != status.mode_revision or current.applied_theme_revision != status.applied_theme_revision;
+            // End-of-life input gates cannot wait behind an appearance update.
+            current.read_only = !status.writable;
+            current.eof_seen = status.eof_seen;
+        }
+        if (changed) update: {
+            const next = self.service.snapshot(self.cx.allocator) catch |err| {
+                self.force_snapshot = true;
+                if (err == error.WorkerBusy or err == error.SnapshotUnavailable) {
+                    self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
+                    return false;
+                }
+                return err;
+            };
+            if (!next.owner.eql(self.owner)) {
+                var stale = next;
+                stale.deinit(self.cx.allocator);
+                return error.StaleOwner;
+            }
+            if (self.requested_theme) |theme| if (next.applied_theme_revision != theme.revision) {
+                var deferred = next;
+                deferred.deinit(self.cx.allocator);
+                self.force_snapshot = true;
+                changed = false;
+                break :update;
+            };
+            if (self.snapshot) |*old| old.deinit(self.cx.allocator);
+            self.snapshot = next;
+            self.displayed_theme = self.requested_theme;
+            self.next_input = @max(self.next_input, next.input_revision +| 1);
+            self.next_geometry = @max(self.next_geometry, next.geometry_revision +| 1);
+            self.force_snapshot = false;
+            self.blink = true;
+            self.last_blink = self.cx.frame_time_ms;
+            if (next.read_only) {
+                self.cancelPaste();
+                self.setPreedit("");
+                for (self.pending.items) |item| if (item == .bytes) self.cx.allocator.free(item.bytes);
+                self.pending.clearRetainingCapacity();
+                self.pending_bytes = 0;
+            }
+        }
+        changed = changed or gate_changed or reduced_changed;
+        if (!status.writable) {
+            self.cancelPaste();
+            if (self.preedit.len != 0) self.setPreedit("");
+            for (self.pending.items) |item| if (item == .bytes) self.cx.allocator.free(item.bytes);
+            self.pending.clearRetainingCapacity();
+            self.pending_bytes = 0;
+        }
+        if (self.snapshot == null) return changed;
+        if (was_focused != self.focused and self.snapshot.?.projection.modes.focus_events and !self.snapshot.?.read_only) {
+            self.queueText(if (self.focused) "\x1b[I" else "\x1b[O") catch |err| self.showError(err);
+        }
+        try self.pump();
+        // Retain fresh input/mode/notification facts for hidden group members,
+        // but do not generate glyph/layout work until the pane is visible.
+        if (!self.host.isDisplayedInTree()) {
+            self.force_snapshot = true;
+            return changed;
+        }
+        try self.resize();
+        const now = @import("../platform/realtime.zig").milliseconds(undefined);
+        if (self.error_message != null and self.cx.frame_time_ms >= self.error_until_ms) {
+            self.error_message = null;
+            self.message_root.setDisplay(.none);
+            self.message.setDisplay(.none);
+            changed = true;
+        }
+        const value = &self.snapshot.?;
+        const current_input = self.focused and !value.read_only and value.projection.cursor.visible and value.projection.cursor.row < value.projection.rows;
+        const text_blinking = for (value.projection.cells) |cell| {
+            if (cell.attributes & (1 << 3) != 0) break true;
+        } else false;
+        const blink_running = self.focused and !value.read_only and !reduced and ((current_input and value.projection.modes.cursor_blinking) or text_blinking);
+        if (blink_running != self.blink_running) {
+            self.blink_running = blink_running;
+            self.last_blink = self.cx.frame_time_ms;
+            self.blink = true;
+            changed = true;
+        }
+        if (blink_running and self.cx.frame_time_ms - self.last_blink >= blink_half_period_ms) {
+            self.last_blink = self.cx.frame_time_ms;
+            self.blink = !self.blink;
+            changed = true;
+        }
+        const clock_running = current_input and self.options.timestamps;
+        const second = @divFloor(now, 1000);
+        if (clock_running and second != self.last_second) {
+            self.last_second = second;
+            changed = true;
+        }
+        if (changed or was_focused != self.focused) try self.render(now);
+        if (blink_running) {
+            const remaining = @max(1, blink_half_period_ms - (self.cx.frame_time_ms - self.last_blink));
+            self.cx.scheduleRedrawAfterNs(@intFromFloat(remaining * std.time.ns_per_ms));
+        }
+        if (clock_running) self.cx.scheduleRedrawAfterNs(@intCast((1000 - @mod(now, 1000)) * std.time.ns_per_ms));
+        return changed;
+    }
+    fn resize(self: *Surface) !void {
+        if (self.snapshot.?.read_only or !self.active) return;
+        const rect = self.root.rectFromWorldOrFallback();
+        if (rect.w <= 2 * S.inset or rect.h <= 2 * S.inset or self.options.cell_width <= 0 or self.options.row_height <= 0) return;
+        const cols: u16 = @intFromFloat(std.math.clamp(@floor((rect.w - 2 * S.inset - self.bodyX()) / self.options.cell_width), 1, 65535));
+        const rows: u16 = @intFromFloat(std.math.clamp(@floor((rect.h - 2 * S.inset) / self.options.row_height), 1, 65535));
+        if (cols == self.requested_cols and rows == self.requested_rows) return;
+        self.service.resize(.{ .revision = self.next_geometry, .cols = cols, .rows = rows }) catch |err| {
+            if (err == error.WorkerBusy) return;
+            return err;
+        };
+        self.next_geometry = try std.math.add(u64, self.next_geometry, 1);
+        self.requested_cols = cols;
+        self.requested_rows = rows;
+    }
+    pub fn bodyX(self: *const Surface) f32 {
+        return if (self.options.timestamps) S.gutter else 0;
+    }
+    fn render(self: *Surface, now_ms: i64) !void {
+        const projection = &self.snapshot.?.projection;
+        if (self.displayed_theme) |theme| self.root.setBackground(if (projection.colors.background != @as(u24, @truncate(theme.background >> 8))) ui.Color.hex(projection.colors.background) else ui.Color.TRANSPARENT);
+        const row_width = @max(0, self.root.rectFromWorldOrFallback().w - 2 * S.inset);
+        while (self.rows.items.len < projection.rows) {
+            try self.rows.ensureUnusedCapacity(self.cx.allocator, 1);
+            const test_id = try std.fmt.allocPrint(self.cx.allocator, "terminal.surface.row.{d}", .{self.rows.items.len});
+            errdefer self.cx.allocator.free(test_id);
+            const root = try ui.boxStyled(self.cx, S.row, .{});
+            errdefer self.cx.destroyDetached(root);
+            root.meta.ownership.meta.test_id = test_id;
+            const time = try ui.textStyled(self.cx, S.timestamp, "");
+            try root.appendChild(self.cx.allocator, time);
+            const selected = try leaf(self.cx, S.selection(self.cx.tokens));
+            (try selected.style.ensureExtFallible(self.cx.allocator)).z_index = 4;
+            try root.appendChild(self.cx.allocator, selected);
+            try self.root.appendChild(self.cx.allocator, root);
+            self.rows.appendAssumeCapacity(.{ .root = root, .test_id = test_id, .time = time, .selected = selected });
+        }
+        while (self.rows.items.len > projection.rows) {
+            var row = self.rows.pop().?;
+            row.glyphs.deinit(self.cx.allocator);
+            self.cx.detachChild(self.root, row.root);
+            self.cx.destroyDetached(row.root);
+            self.cx.allocator.free(row.test_id);
+        }
+        for (projection.visible_rows) |value| {
+            const row = &self.rows.items[value.viewport_y];
+            if (self.displayed_theme) |theme| row.selected.setBackground(rgba(theme.selection));
+            try absolute(self.cx, row.root, S.inset, S.inset + @as(f32, @floatFromInt(value.viewport_y)) * self.options.row_height, row_width, self.options.row_height);
+            const current = !self.snapshot.?.read_only and projection.cursor.visible and value.viewport_y == projection.cursor.row;
+            row.root.setBackground(if (current and self.options.highlight) S.inputHighlight(self.cx.tokens) else ui.Color.TRANSPARENT);
+            const stamp = if (current and self.focused) now_ms else value.submitted_wallclock_ms orelse value.received_wallclock_ms;
+            try self.renderTime(row, stamp);
+            const cells = projection.cells[value.cell_start .. value.cell_start + value.cell_count];
+            var hash = std.hash.Wyhash.init(0);
+            hash.update(std.mem.asBytes(&value.id));
+            for (cells) |cell| {
+                std.hash.autoHash(&hash, cell);
+                hash.update(projection.grapheme(cell));
+                if (cell.attributes & (1 << 3) != 0) {
+                    hash.update(std.mem.asBytes(&self.blink));
+                    hash.update(std.mem.asBytes(&self.focused));
+                }
+            }
+            std.hash.autoHash(&hash, projection.colors);
+            std.hash.autoHash(&hash, projection.modes.reverse_colors);
+            std.hash.autoHash(&hash, .{ @as(u32, @bitCast(self.options.font_size)), @as(u32, @bitCast(self.options.row_height)), @as(u32, @bitCast(self.options.cell_width)), self.options.family_id, self.options.weight, self.options.foreground, self.options.background, self.options.timestamps });
+            if (row.hash != hash.final()) {
+                try self.renderGlyphs(row, cells, projection);
+                row.hash = hash.final();
+            }
+        }
+        try self.renderSelection();
+        try self.renderCaret();
+        try self.buildDocument();
+        self.cx.requestRedraw();
+    }
+    fn renderTime(self: *Surface, row: *Row, timestamp: ?i64) !void {
+        row.time.setDisplay(if (self.options.timestamps and timestamp != null) .flex else .none);
+        if (!self.options.timestamps or timestamp == null) return;
+        var bytes: [8]u8 = undefined;
+        const stamp = try input.localTimestamp(&bytes, timestamp.?);
+        if (row.time.getText()) |props| if (!std.mem.eql(u8, props.content, stamp)) try row.time.setTextContent(self.cx.allocator, stamp);
+        var props = row.time.getText().?;
+        if (props.font_family != self.options.family_id or props.use_monospace_font != (self.options.family_id == 0)) {
+            props.font_family = self.options.family_id;
+            props.use_monospace_font = self.options.family_id == 0;
+            row.time.setText(props);
+        }
+        try absolute(self.cx, row.time, S.timestamp_x, S.timestamp_y, S.timestamp_width, S.timestamp_height);
+    }
+    fn renderGlyphs(self: *Surface, row: *Row, cells: []const vt.Cell, projection: *const vt.Projection) !void {
+        var used: usize = 0;
+        for (cells, 0..) |cell, col| {
+            if (cell.width == .wide_tail) continue;
+            const text = projection.grapheme(cell);
+            if (text.len == 0 and cell.background == .default and cell.attributes == 0) continue;
+            if (used == row.glyphs.items.len) {
+                try row.glyphs.ensureUnusedCapacity(self.cx.allocator, 1);
+                const node = try ui.text(self.cx, "", .{ .selectable = false });
+                errdefer {
+                    if (node.parent) |parent| self.cx.detachChild(parent, node);
+                    self.cx.destroyDetached(node);
+                }
+                try row.root.appendChild(self.cx.allocator, node);
+                const overline = try leaf(self.cx, self.options.foreground);
+                errdefer {
+                    if (overline.parent) |parent| self.cx.detachChild(parent, overline);
+                    self.cx.destroyDetached(overline);
+                }
+                try row.root.appendChild(self.cx.allocator, overline);
+                row.glyphs.appendAssumeCapacity(.{ .node = node, .overline = overline });
+            }
+            const glyph = &row.glyphs.items[used];
+            var fg = resolveColor(cell.foreground, ui.Color.hex(projection.colors.foreground), projection.colors);
+            var bg = resolveColor(cell.background, ui.Color.hex(projection.colors.background), projection.colors);
+            if ((cell.attributes & (1 << 4) != 0) != projection.modes.reverse_colors) std.mem.swap(ui.Color, &fg, &bg);
+            if (cell.attributes & (1 << 6) != 0) fg.a = @intCast(@as(u16, fg.a) / 2);
+            if (cell.attributes & (1 << 7) != 0) fg = bg;
+            if (cell.attributes & (1 << 3) != 0 and self.focused and !self.reduced_motion and !self.blink) fg = bg;
+            var props = glyph.node.getText().?;
+            const spans = try self.cx.allocator.alloc(ui.types.TextSpan, 1);
+            var published = false;
+            errdefer if (!published) self.cx.allocator.free(spans);
+            try props.setContent(self.cx.allocator, if (text.len == 0) " " else text);
+            props.font_size = self.options.font_size;
+            props.line_height = self.options.row_height / self.options.font_size;
+            props.font_weight = if (cell.attributes & 1 != 0) @min(@as(u16, 900), self.options.weight +| 300) else self.options.weight;
+            props.font_family = self.options.family_id;
+            props.use_monospace_font = self.options.family_id == 0;
+            props.use_italic_font = cell.attributes & 2 != 0;
+            props.strikethrough = cell.attributes & (1 << 5) != 0;
+            props.color = fg;
+            spans[0] = .{ .start = 0, .end = @intCast(props.content.len), .underline = cell.underline != 0 and cell.underline != 2, .underline_color = resolveColor(cell.underline_color, fg, projection.colors), .underline_style = switch (cell.underline) {
+                3 => .wavy,
+                4 => .dotted,
+                5 => .dashed,
+                else => .solid,
+            }, .underline_thickness = 1 };
+            props.spans = spans;
+            props.spans_owned = true;
+            glyph.node.setText(props);
+            published = true;
+            glyph.node.setBackground(if (cell.background == .default and cell.attributes & (1 << 4) == 0 and !projection.modes.reverse_colors) ui.Color.TRANSPARENT else bg);
+            glyph.node.setDisplay(.flex);
+            const x = self.bodyX() + @as(f32, @floatFromInt(col)) * self.options.cell_width;
+            const width = self.options.cell_width * @as(f32, if (cell.width == .wide_lead) 2 else 1);
+            try absolute(self.cx, glyph.node, x, 0, width, self.options.row_height);
+            glyph.overline.setDisplay(if (cell.attributes & (1 << 8) != 0) .flex else .none);
+            glyph.overline.setBackground(fg);
+            try absolute(self.cx, glyph.overline, x, 1, width, 1);
+            if (cell.underline == 2 and glyph.double_underline == null) {
+                const line = try leaf(self.cx, ui.Color.TRANSPARENT);
+                errdefer self.cx.destroyDetached(line);
+                try row.root.appendChild(self.cx.allocator, line);
+                glyph.double_underline = line;
+            }
+            if (glyph.double_underline) |line| {
+                line.setDisplay(if (cell.underline == 2) .flex else .none);
+                const color = resolveColor(cell.underline_color, fg, projection.colors);
+                line.setStyleInline(self.cx.allocator, .{ .border_top_width = 1, .border_bottom_width = 1, .border_top_color = color, .border_bottom_color = color });
+                try absolute(self.cx, line, x, self.options.row_height - 5, width, 4);
+            }
+            used += 1;
+        }
+        for (row.glyphs.items[used..]) |glyph| {
+            glyph.node.setDisplay(.none);
+            glyph.overline.setDisplay(.none);
+            if (glyph.double_underline) |line| line.setDisplay(.none);
+        }
+    }
+    fn renderCaret(self: *Surface) !void {
+        const value = &self.snapshot.?;
+        const cursor = value.projection.cursor;
+        const show = !value.read_only and self.active and cursor.visible and cursor.row < value.projection.rows and (self.reduced_motion or !self.focused or self.blink or !value.projection.modes.cursor_blinking);
+        self.caret.setDisplay(if (show) .flex else .none);
+        if (!show) return;
+        var x = S.inset + self.bodyX() + @as(f32, @floatFromInt(cursor.col)) * self.options.cell_width;
+        var y = S.inset + @as(f32, @floatFromInt(cursor.row)) * self.options.row_height;
+        var width = self.options.cell_width;
+        var height = self.options.row_height;
+        if (self.preedit.len != 0) x += self.measured(self.preedit[0..self.preedit_cursor]);
+        switch (self.options.cursor_style) {
+            .block => {},
+            .bar => width = 2,
+            .underline => {
+                height = 2;
+                y += self.options.row_height - height;
+            },
+        }
+        const cursor_color = if (value.projection.colors.cursor) |color| ui.Color.hex(color) else self.options.cursor;
+        self.caret.setBackground(cursor_color.withAlpha(if (self.focused) 160 else 65));
+        try absolute(self.cx, self.caret, x, y, width, height);
+        try self.renderPreedit();
+    }
+    pub fn measured(self: *Surface, bytes: []const u8) f32 {
+        if (self.cx.text.shapeText(.{ .text = bytes, .font_family = self.options.family_name, .font_family_id = self.options.family_id, .font_size = self.options.font_size, .font_weight = self.options.weight, .use_monospace = self.options.family_id == 0 })) |run| return run.total_advance else |_| return 0;
+    }
+    pub fn setPreedit(self: *Surface, bytes: []const u8) void {
+        const next = self.cx.allocator.dupe(u8, bytes) catch return;
+        self.cx.allocator.free(self.preedit);
+        self.preedit = next;
+        self.document_version = null;
+        self.preedit_cursor = @intCast(bytes.len);
+        self.renderPreedit() catch {};
+        self.buildDocument() catch {};
+        self.cx.requestRedraw();
+    }
+    fn renderPreedit(self: *Surface) !void {
+        self.preedit_node.setDisplay(if (self.preedit.len != 0 and self.snapshot != null and !self.snapshot.?.read_only) .flex else .none);
+        if (self.preedit.len == 0 or self.snapshot == null) return;
+        const cursor = self.snapshot.?.projection.cursor;
+        var props = self.preedit_node.getText().?;
+        const spans = try self.cx.allocator.alloc(ui.types.TextSpan, 1);
+        var published = false;
+        errdefer if (!published) self.cx.allocator.free(spans);
+        try props.setContent(self.cx.allocator, self.preedit);
+        props.font_size = self.options.font_size;
+        props.font_family = self.options.family_id;
+        props.use_monospace_font = self.options.family_id == 0;
+        props.font_weight = self.options.weight;
+        props.line_height = self.options.row_height / self.options.font_size;
+        props.color = self.options.foreground;
+        spans[0] = .{ .start = 0, .end = @intCast(self.preedit.len), .underline = true };
+        props.spans = spans;
+        props.spans_owned = true;
+        self.preedit_node.setText(props);
+        published = true;
+        self.preedit_node.setBackground(self.options.background);
+        try absolute(self.cx, self.preedit_node, S.inset + self.bodyX() + @as(f32, @floatFromInt(cursor.col)) * self.options.cell_width, S.inset + @as(f32, @floatFromInt(cursor.row)) * self.options.row_height, @max(self.options.cell_width, self.measured(self.preedit)), self.options.row_height);
+    }
+    pub fn queueText(self: *Surface, bytes: []const u8) !void {
+        if (bytes.len == 0) return;
+        if (self.snapshot == null or self.snapshot.?.read_only) return error.ReadOnlyTerminal;
+        if (self.snapshot.?.projection.modes.keyboard_disabled) return error.KeyboardDisabled;
+        const limit: usize = if (self.trusted_pending != null) terminal.trusted_edit.max_buffer else 1024 * 1024;
+        if (self.pending.items.len >= 256 or self.pending_bytes > limit or bytes.len > limit - self.pending_bytes) return error.InputQueueFull;
+        // Reserve before allocating bytes. After append, pending owns the
+        // copy even if the first pump cannot acquire the worker guard.
+        try self.pending.ensureUnusedCapacity(self.cx.allocator, 1);
+        const owned = try self.cx.allocator.dupe(u8, bytes);
+        self.pending.appendAssumeCapacity(.{ .bytes = owned });
+        self.pending_bytes += bytes.len;
+        self.pump() catch |err| {
+            if (err != error.WorkerBusy) return err;
+        };
+    }
+    pub fn requestTrustedEdit(self: *Surface, request: terminal.trusted_edit.Request) !void {
+        if (self.pending.items.len != 0 or self.pending_paste != null or self.paste_requested != null or self.preedit.len != 0) return error.WorkerBusy;
+        try self.service.trustedRequest(request);
+        self.trusted_pending = request.operation;
+    }
+    pub fn cancelTrustedEdit(self: *Surface) !void {
+        try self.service.cancelTrustedEdit();
+        try self.recoverQueuedInput();
+        self.trusted_pending = null;
+    }
+    fn recoverQueuedInput(self: *Surface) !void {
+        for (self.pending.items) |item| if (item == .bytes) try self.recovered_input.appendSlice(self.cx.allocator, item.bytes);
+        for (self.pending.items) |item| if (item == .bytes) self.cx.allocator.free(item.bytes);
+        self.pending.clearRetainingCapacity();
+        self.pending_bytes = 0;
+        self.cancelPaste();
+    }
+    pub fn pump(self: *Surface) !void {
+        defer if (self.pending.items.len > 0 or self.trusted_pending != null) self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
+        if (try self.service.trustedOutcome()) |outcome| {
+            self.trusted_outcome = outcome;
+            if (self.trusted_pending == outcome.operation) {
+                self.trusted_pending = null;
+                if (!outcome.applied) {
+                    try self.recoverQueuedInput();
+                    self.showError(error.TrustedEditRejected);
+                }
+            }
+        }
+
+        while (self.released_anchors.items.len > 0) {
+            self.service.releaseAnchor(self.released_anchors.items[0]) catch |err| {
+                if (err == error.WorkerBusy) break;
+            };
+            _ = self.released_anchors.orderedRemove(0);
+        }
+        while (try self.service.takeWriteReceipt()) |receipt| {
+            self.force_snapshot = true;
+            if (receipt.state == .failed) self.showError(if (receipt.failure == .stale_mode) error.StaleMode else error.TransportFailed);
+        }
+        while (self.pending.items.len > 0 and self.snapshot != null and !self.snapshot.?.read_only) {
+            const item = self.pending.items[0];
+            const mode = self.snapshot.?.projection.mode_revision;
+            _ = switch (item) {
+                .bytes => |bytes| self.service.write(.{ .input_sequence = self.next_input, .mode_revision = mode, .bytes = bytes }),
+                .key => |key| self.service.writeKey(.{ .input_sequence = self.next_input, .mode_revision = mode, .event = key }),
+                .mouse => |request| value: {
+                    var current = request;
+                    current.input_sequence = self.next_input;
+                    break :value self.service.writeMouse(current);
+                },
+            } catch |err| {
+                if (err == error.WorkerBusy or err == error.InputFull or err == error.InputQueueFull or err == error.ReceiptQueueFull or err == error.TrustedEditPending) return;
+                if (item == .bytes) {
+                    self.pending_bytes -= item.bytes.len;
+                    self.cx.allocator.free(item.bytes);
+                }
+                _ = self.pending.orderedRemove(0);
+                self.showError(err);
+                self.force_snapshot = true;
+                continue;
+            };
+            if (self.shell_observer) |observer| switch (item) {
+                .bytes => |bytes| observer.accepted(observer.context, self.owner, self.next_input, .{ .bytes = bytes }),
+                .key => |key| observer.accepted(observer.context, self.owner, self.next_input, .{ .key = key }),
+                .mouse => {},
+            };
+            self.next_input = try std.math.add(u64, self.next_input, 1);
+            if (item == .bytes) {
+                self.pending_bytes -= item.bytes.len;
+                self.cx.allocator.free(item.bytes);
+            }
+            _ = self.pending.orderedRemove(0);
+        }
+        try input.pumpPaste(self);
+    }
+    pub fn showError(self: *Surface, err: anyerror) void {
+        self.error_message = switch (err) {
+            error.TrustedEditRejected => "Shell 编辑状态已变化；后续文字保留为本地草稿，提交键已取消。",
+            error.TrustedEditUnavailable => "当前 Shell 尚未提供可信编辑能力。",
+            error.StaleEdit => "Shell 输入已变化，请重新选择候选。",
+            error.ClipboardUnavailable => "复制失败：剪贴板不可用。",
+            error.InvalidPaste, error.PasteTooLarge => "粘贴未插入：请检查 UTF-8、1 MiB 上限及终端控制边界。",
+            error.ReadOnlyTerminal => "当前会话只读，仍可选择和复制输出。",
+            error.StaleOwner, error.StaleSession, error.StaleBinding => "原会话已失效，本次操作未转交其它终端。",
+            error.StaleMode, error.StaleInput => "终端输入或模式已变化，请重新发起操作。",
+            error.StaleProjection => "终端输出已更新，请在新画面上继续选择。",
+            error.WorkerBusy, error.InputQueueFull, error.ReceiptQueueFull => "终端繁忙，请稍后重试。",
+            error.KeyboardDisabled => "终端程序暂时停用了键盘输入。",
+            error.ThemeApplyFailed => "主题尚未应用，终端保留上一次已生效的配色。",
+            else => "终端操作未完成，请重试。",
+        };
+        self.error_until_ms = self.cx.frame_time_ms + 3000;
+        const rect = self.root.rectFromWorldOrFallback();
+        self.message_root.setStyleInline(self.cx.allocator, S.errorMessage(@max(0, rect.w - 2 * S.inset), @max(S.inset, rect.h - self.options.row_height - S.inset), self.options.row_height, self.options.background));
+        self.message.setStyleInline(self.cx.allocator, .{ .height = .{ .px = self.options.row_height } });
+        var props = self.message.getText().?;
+        props.font_size = 11;
+        props.font_weight = 400;
+        props.line_height = self.options.row_height / 11;
+        props.color = self.cx.tokens.tokens.color.fg_secondary;
+        self.message.setText(props);
+        self.message_root.behavior.interaction.a11y.?.live_text = self.error_message;
+        self.message.setTextContent(self.cx.allocator, self.error_message.?) catch {};
+        self.message_root.setDisplay(.flex);
+        self.message.setDisplay(.flex);
+        self.cx.requestRedraw();
+        self.cx.scheduleRedrawAfterNs(3 * std.time.ns_per_s);
+    }
+
+    /// Shared by drag-release, Cmd-C and the host's captured menu-copy path.
+    /// The acknowledgement is published only after a real clipboard write.
+    pub fn copySelectionToClipboard(self: *Surface, text: []const u8) !void {
+        if (text.len == 0) return;
+        const status = try self.service.status();
+        if (!status.owner.eql(self.owner)) return error.StaleOwner;
+        if (!ui.platform_services.clipboardSetText(self.cx.system_sdk, text)) return error.ClipboardUnavailable;
+        // Clipboard success belongs to the window's single notification stream.
+        // Existing inline validation stays attached to its input location.
+        self.feedback.publish(self.feedback.context, self.cx, self.owner, "选区已复制") catch |err| {
+            std.log.debug("terminal copy feedback unavailable: {s}", .{@errorName(err)});
+        };
+    }
+    fn publishFeedback(_: ?*anyopaque, cx: *ui.Cx, owner: identity.SessionHandle, summary: []const u8) !void {
+        try @import("plugin_window_host.zig").Host.publishFeedback(cx, owner, summary);
+    }
+    // Input, selection and IME callbacks are below; they use only this binding.
+    fn onKey(key: ui.events.KeyCode, modifiers: ui.events.Modifiers, raw: ?*anyopaque) ui.events.EventResult {
+        const self: *Surface = @ptrCast(@alignCast(raw orelse return .ignored));
+        if (self.cx.focus_manager.getFocused() != self.host) return .ignored;
+        if (key == .c and modifiers.ctrl and !modifiers.alt and !modifiers.super) {
+            self.cancelTrustedEdit() catch |err| {
+                self.showError(err);
+                return .stop;
+            };
+        }
+        if (self.preedit.len == 0 and self.pending_paste == null and self.paste_requested == null) if (self.enhancement) |handler| {
+            if (handler.key(handler.context, key, modifiers)) return .stop;
+        };
+        return input.onKey(self, key, modifiers);
+    }
+    fn captureLost(node: *ui.Node) void {
+        const self: *Surface = @ptrCast(@alignCast(node.behavior.events.event_context orelse return));
+        self.dragging = false;
+        self.mouse_reporting = false;
+    }
+    pub fn releaseAnchorLater(self: *Surface, anchor: terminal.Anchor) void {
+        self.service.releaseAnchor(anchor) catch |err| {
+            if (err == error.WorkerBusy) self.released_anchors.append(self.cx.allocator, anchor) catch {};
+        };
+    }
+    fn onEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
+        const self: *Surface = @ptrCast(@alignCast(raw orelse return .ignored));
+        switch (event) {
+            .key_down, .key_up, .text_input, .ime_preedit, .ime_commit => {
+                if (self.cx.focus_manager.getFocused() != self.host) return .ignored;
+            },
+            // Pointer capture is deliberately held by the original host, so
+            // an active canvas drag still receives release outside its rect.
+            .mouse_move, .mouse_up => if (!self.dragging and !self.mouse_reporting) return .ignored,
+            .mouse_down, .click, .scroll => return .ignored,
+            else => {},
+        }
+        switch (event) {
+            .text_input => |value| if (self.preedit.len == 0 and self.pending_paste == null and self.paste_requested == null) {
+                if (self.enhancement) |handler| if (handler.text(handler.context, value.text)) return .stop;
+            },
+            .ime_commit => |value| if (self.pending_paste == null and self.paste_requested == null) {
+                self.setPreedit("");
+                if (self.enhancement) |handler| if (handler.text(handler.context, value.text)) return .stop;
+            },
+            else => {},
+        }
+        return input.onEvent(self, event);
+    }
+    fn onCanvasEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
+        return switch (event) {
+            .mouse_down, .mouse_move, .mouse_up => input.onEvent(@ptrCast(@alignCast(raw orelse return .ignored)), event),
+            // The specialized callback declares the canvas as a scroll owner.
+            // Deliver a wheel event exactly once after generic dispatch.
+            else => .ignored,
+        };
+    }
+    fn onScroll(event: ui.events.ScrollEvent, raw: ?*anyopaque) ui.events.EventResult {
+        return input.onEvent(@ptrCast(@alignCast(raw orelse return .ignored)), .{ .scroll = event });
+    }
+    fn textLen(raw: *anyopaque) usize {
+        const self: *Surface = @ptrCast(@alignCast(raw));
+        return self.document.items.len;
+    }
+    fn copyText(raw: *anyopaque, offset: usize, out: []u8) usize {
+        const self: *Surface = @ptrCast(@alignCast(raw));
+        if (offset >= self.document.items.len) return 0;
+        const count = @min(out.len, self.document.items.len - offset);
+        @memcpy(out[0..count], self.document.items[offset..][0..count]);
+        return count;
+    }
+    fn imeSelection(raw: *anyopaque) ui.TextInputSelection {
+        const self: *Surface = @ptrCast(@alignCast(raw));
+        const caret = self.caret_byte + self.preedit_cursor;
+        return .{ .start = caret, .end = caret, .caret = caret };
+    }
+    fn frameForRange(raw: *anyopaque, start: u32, end: u32, out: *ui.types.A11yRect) bool {
+        return input.frameForRange(@ptrCast(@alignCast(raw)), start, end, out);
+    }
+    fn rangeAtPoint(raw: *anyopaque, x: f32, y: f32, start: *u32, end: *u32) bool {
+        return input.rangeAtPoint(@ptrCast(@alignCast(raw)), x, y, start, end);
+    }
+    fn clearSelection(self: *Surface) void {
+        input.clearSelection(self);
+    }
+    fn cancelPaste(self: *Surface) void {
+        input.cancelPaste(self);
+    }
+    fn renderSelection(self: *Surface) !void {
+        try input.renderSelection(self);
+    }
+    fn buildDocument(self: *Surface) !void {
+        const version = if (self.snapshot) |value| value.projection.version else return;
+        if (self.document_version == version) return;
+        try input.buildDocument(self);
+        self.document_version = version;
+    }
+    pub fn requestPaste(self: *Surface, bytes: []const u8) !void {
+        try input.requestPaste(self, bytes);
+    }
+    pub fn hasSelection(self: *Surface) !bool {
+        return input.hasSelection(self);
+    }
+    pub fn copySelectionText(self: *Surface, allocator: std.mem.Allocator) !?[]u8 {
+        return input.copySelectionText(self, allocator);
+    }
+};
+
+pub fn resolveColor(value: vt.Color, fallback: ui.Color, colors: vt.Colors) ui.Color {
+    return switch (value) {
+        .default => fallback,
+        .rgb => |rgb| ui.Color.hex(rgb),
+        .ansi => |index| ui.Color.hex(colors.palette[index]),
+        .indexed => |index| ui.Color.hex(colors.palette[index]),
+    };
+}
+fn rgba(value: u32) ui.Color {
+    return .{ .r = @truncate(value >> 24), .g = @truncate(value >> 16), .b = @truncate(value >> 8), .a = @truncate(value) };
+}
+pub fn absolute(cx: *ui.Cx, node: *ui.Node, x: f32, y: f32, w: f32, h: f32) !void {
+    const ext = try node.style.ensureExtFallible(cx.allocator);
+    const inset: ui.Inset = .{ .left = .{ .px = x }, .top = .{ .px = y } };
+    if (node.style.position == .absolute and std.meta.eql(ext.inset, inset) and std.meta.eql(node.style.width, ui.Sizing{ .px = w }) and std.meta.eql(node.style.height, ui.Sizing{ .px = h })) return;
+    node.style.position = .absolute;
+    ext.inset = inset;
+    node.style.width = .{ .px = w };
+    node.style.height = .{ .px = h };
+    node.markLayoutDirty();
+}
+fn leaf(cx: *ui.Cx, color: ui.Color) !*ui.Node {
+    const node = try ui.box(cx, .{ .position = .absolute, .background = color }, .{});
+    node.setDisplay(.none);
+    return node;
+}

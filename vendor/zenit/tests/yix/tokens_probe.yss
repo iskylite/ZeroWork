@@ -1,0 +1,9 @@
+//! Token mapping probe: examples/theme.json tokens read via .yss (runtime_tests compiles it under
+//! example theme)
+const ui = @import("ui");
+
+/// semantic.typography.counterTitle: font-size = semantic.font_size.counterHeading (->
+/// tokens.font_size.xxxl), font-weight = semibold
+style heading { typography: counterTitle; }
+/// Single property overrides same-name property in typography
+style heading_light { typography: counterTitle; font-weight: regular; }

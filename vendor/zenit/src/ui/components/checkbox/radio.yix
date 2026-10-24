@@ -1,0 +1,80 @@
+//! Radio / RadioGroup view. Styling in styles.yss (RadioParts / RadioGroupLayout);
+//! public types and tests in mod.zig.
+const std = @import("std");
+const ui = @import("../../ui.zig");
+const mod = @import("mod.zig");
+const S = @import("styles.yss");
+const RadioOption = mod.RadioOption;
+
+/// Standalone Radio: display only (selection logic via RadioGroup).
+/// `W.Radio(.{ .label = "A", .checked = ui.map(sel, isA) })`
+pub fn Radio(checked: bool = false, label: Text = "", disabled: bool = false) View {
+    return (
+        <row style={S.RadioParts.slot(.root, .{ .disabled = disabled })} a11y={.{ .role = .radio, .checked = checked, .disabled = disabled, .label = label }}>
+            <box style={S.RadioParts.slot(.circle, .{ .checked = checked })}>
+                <box style={S.RadioParts.slot(.dot, .{ .checked = checked })} />
+            </box>
+            {if (label.len != 0) <text style={S.RadioParts.slot(.label, .{})}>{label}</text>}
+        </row>
+    );
+}
+
+/// RadioGroup option: button semantic node, focusable, focus ring; unhovered
+/// highlights circle border on hover. Caller's `testId` lands on root node (this
+/// button semantic node).
+fn RadioChoice(label: []const u8, checked: bool, disabled: bool, onPick: ?Handler(void) = null, focusRing: ui.FocusRingConfig = .{}) View {
+    var hovered: bool = signal(false);
+    const enabled = computed(!disabled);
+    return (
+        <row
+            style={S.RadioParts.slot(.root, .{ .disabled = disabled })}
+            tag={.button}
+            focusable={enabled}
+            focusRing={focusRing}
+            a11y={.{ .role = .radio, .label = label, .checked = checked, .disabled = disabled }}
+            onClick={onPick}
+            onHover={hovered = true}
+            onLeave={hovered = false}
+        >
+            <box style={S.RadioParts.slot(.circle, .{ .checked = checked, .hovered = hovered })}>
+                <box style={S.RadioParts.slot(.dot, .{ .checked = checked })} />
+            </box>
+            <text style={S.RadioParts.slot(.label, .{})}>{label}</text>
+        </row>
+    );
+}
+
+fn isSelected(value: ?[]const u8, option: []const u8) bool {
+    const v = value orelse return false;
+    return std.mem.eql(u8, v, option);
+}
+
+/// Radio group: `W.RadioGroup(.{ .options = &opts, .value = theme_choice })`.
+/// value is controlled (option's value string, borrows option); on_change only
+/// reports the landed selection. Reconciles by content: same content in a new array
+/// doesn't rebuild (keeps hover / focus / transition), changed content rebuilds.
+/// Ignores selection when group or option is disabled.
+pub fn RadioGroup(
+    options: []const RadioOption = &.{},
+    value: Model(?[]const u8) = null,
+    disabled: bool = false,
+    horizontal: bool = false,
+    focusRing: ui.FocusRingConfig = .{},
+    onChange: ?Handler([]const u8) = null,
+) View {
+    return (
+        <box style={S.RadioGroupLayout.of(.{ .horizontal = horizontal })} a11y={.{ .role = .radiogroup, .required = true }}>
+            {for (options) |opt|
+                <RadioChoice
+                    key={.{ opt.value, opt.label, opt.disabled }}
+                    focusRing={focusRing}
+                    label={opt.label}
+                    checked={isSelected(value, opt.value)}
+                    disabled={disabled or opt.disabled}
+                    testId={opt.test_id}
+                    onPick={if (!disabled and !opt.disabled) value = opt.value}
+                />
+            }
+        </box>
+    );
+}

@@ -1,0 +1,17 @@
+//! JSON token reference + component recipe, separated from interface structure (view.yix).
+//! Auto-replay on theme / variant change.
+const ui = @import("ui");
+
+style root { width: fill; height: fill; direction: column; gap: space400; padding: space1000; background: bg-primary; align-items: center; justify: center; }
+style title { typography: counterTitle; color: fg-primary; }
+style counter_label { font-size: lg; color: fg-secondary; }
+
+/// Count panel: after clicked, switches to highlight
+recipe Panel {
+  base { padding: space200 space400; corner-radius: md; }
+  variant emphasis = neutral {
+    neutral { background: bg-secondary; }
+    highlight { background: bg-tertiary; border: thin accent; }
+  }
+}
+pub const PanelEmphasis = Panel.Dim(.emphasis);

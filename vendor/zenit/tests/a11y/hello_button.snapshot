@@ -1,0 +1,8 @@
+# initial
+AXStaticText = "Hello, zenit!"
+AXButton "Click me"
+AXStaticText = "Clicked 0 times"
+# after AXPress
+AXStaticText = "Hello, zenit!"
+AXButton "Click me" [focused]
+AXStaticText = "Clicked 1 times"

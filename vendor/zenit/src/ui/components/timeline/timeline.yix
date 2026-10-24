@@ -1,0 +1,67 @@
+//! Timeline view (with row key). Styling in styles.yss; public types and tests in
+//! mod.zig.
+const std = @import("std");
+const ui = @import("../../ui.zig");
+const mod = @import("mod.zig");
+const S = @import("styles.yss");
+const TimelineStatus = mod.TimelineStatus;
+const TimelineItem = mod.TimelineItem;
+
+/// Row key: content + borrowed string address (row borrows title / description / time
+/// slices: must rebuild when caller provides same content at different address; can't
+/// keep row pointing to old string)
+fn rowKey(it: TimelineItem) u64 {
+    var h = std.hash.Wyhash.init(0);
+    h.update(&[_]u8{@intFromEnum(it.status)});
+    for ([_]?[]const u8{ it.title, it.description, it.time }) |field| {
+        const f = field orelse "";
+        h.update(&[_]u8{@intFromBool(field != null)});
+        h.update(std.mem.asBytes(&f.len));
+        h.update(f);
+        h.update(std.mem.asBytes(&@intFromPtr(f.ptr)));
+    }
+    return h.final();
+}
+
+/// Timeline row: status dot + connector line (none on last) + title / description /
+/// time. Status only via dot color, inaccessible to AT users, state explicitly: checked =
+/// done, selected = in progress, disabled = not started.
+pub fn TimelineRow(
+    title: []const u8 = "",
+    description: ?[]const u8 = null,
+    time: ?[]const u8 = null,
+    status: TimelineStatus = .pending,
+    isLast: bool = false,
+) View {
+    const has_line = computed(!isLast);
+    const completed = computed(status == .completed);
+    const active = computed(status == .active);
+    const pending = computed(status == .pending);
+    return (
+        <row style={S.row} a11y={.{ .role = .listitem, .label = title, .description = description, .value_text = time, .checked = completed, .selected = active, .disabled = pending }}>
+            <col style={S.indicator}>
+                <box style={S.Row.slot(.dot, .{ .status = status })} />
+                {if (has_line) <box style={S.Row.slot(.line, .{ .status = status })} />}
+            </col>
+            <col style={S.Content.of(.{ .last = isLast })}>
+                <text style={S.Row.slot(.title, .{ .status = status })}>{title}</text>
+                {if (description) |d| <text style={S.description}>{d}</text>}
+                {if (time) |t| <text style={S.time}>{t}</text>}
+            </col>
+        </row>
+    );
+}
+
+/// Timeline: `W.Timeline(.{ .items = activity })`. items can come from signals: reconcile
+/// by row key (reuse rows where content and borrowed address unchanged; rebuild when
+/// caller provides same content at different address, row doesn't point to freed old
+/// string), last row by index (reused rows add/remove connectors as list grows/shrinks).
+pub fn Timeline(items: []const TimelineItem = &.{}) View {
+    return (
+        <col style={S.list} a11y={.{ .role = .list, .label = "Timeline" }}>
+            {for (items) |item, i|
+                <TimelineRow key={rowKey(item)} title={item.title} description={item.description} time={item.time} status={item.status} isLast={i + 1 == items.len} />
+            }
+        </col>
+    );
+}

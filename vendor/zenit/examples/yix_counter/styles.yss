@@ -1,0 +1,17 @@
+//! yix_counter styles (separated from counter.yix interface structure). Token names by field
+//! category in examples/theme.json, typos are compile errors.
+const ui = @import("ui");
+
+style root { width: fill; height: fill; direction: column; gap: space300; padding: space1000; background: bg-primary; align-items: center; justify: center; }
+style title { typography: counterTitle; }
+/// App's own counterValue token (18px)
+style counter_text { font-size: counterValue; }
+style derived_text { color: fg-secondary; }
+style button_row { gap: space200; }
+
+/// Even/odd badge: business gives even, recipe manages background and hover
+recipe Badge {
+  base { padding: space100 space300; corner-radius: full; background: bg-secondary; border: thin border; :hover { opacity: 0.8; } }
+  flag even { background: success-subtle; border-color: success; }
+}
+style badge_text { font-size: sm; font-weight: semibold; }

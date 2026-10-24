@@ -1,0 +1,13 @@
+const ui = @import("ui");
+
+/// Styles in styles.yss
+const S = @import("styles.yss");
+
+pub fn Target() View {
+    return (
+        <col style={S.root}>
+            <text style={S.title}>devtools probe target</text>
+            <text style={S.hint}>smoke 模式下由驱动线程强制重绘/停帧</text>
+        </col>
+    );
+}

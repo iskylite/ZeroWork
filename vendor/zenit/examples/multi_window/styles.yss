@@ -1,0 +1,6 @@
+//! multi_window styles
+const ui = @import("ui");
+
+style root { width: fill; height: fill; gap: space400; padding: space1000; background: bg-primary; align-items: center; justify: center; }
+style heading { font-size: xxxl; font-weight: 600; color: fg-primary; }
+style caption { font-size: lg; color: fg-secondary; }

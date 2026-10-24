@@ -1,0 +1,25 @@
+const ui = @import("ui");
+const Button = ui.widgets.Button;
+/// Stylesheet (styles.yss): JSON token reference + app recipe S.Panel, separated from interface
+/// structure.
+const S = @import("styles.yss");
+
+fn emphasisOf(n: u32) S.PanelEmphasis {
+    return if (n > 0) .highlight else .neutral;
+}
+
+/// Click +1; after clicked, count panel switches to highlight variant (cva variant directly
+/// receives computed source).
+pub fn HelloButton() View {
+    var count: u32 = signal(0);
+    const emphasis = computed(emphasisOf(count));
+    return (
+        <col style={S.root}>
+            <text style={S.title}>Hello, zenit!</text>
+            <Button testId="hello.increment" variant={.primary} size={.md} onClick={count += 1}>Click me</Button>
+            <box style={S.Panel.of(.{ .emphasis = emphasis })}>
+                <text testId="hello.counter" style={S.counter_label}>Clicked {count} times</text>
+            </box>
+        </col>
+    );
+}

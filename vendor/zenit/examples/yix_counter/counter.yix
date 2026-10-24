@@ -1,0 +1,24 @@
+const ui = @import("ui");
+const Button = ui.widgets.Button;
+/// Styles in styles.yss
+const S = @import("styles.yss");
+
+pub fn Counter(start: u32 = 0) View {
+    var count: u32 = signal(start);
+    const doubled = computed(count * 2);
+    const even = computed(count % 2 == 0);
+    return (
+        <col style={S.root}>
+            <text style={S.title}>Reactive Counter</text>
+            <text style={S.counter_text}>count = {count}</text>
+            <text style={S.derived_text}>doubled = {doubled}</text>
+            <row style={S.Badge.of(.{ .even = even })}>
+                {if (even) <text style={S.badge_text}>even</text> else <text style={S.badge_text}>odd</text>}
+            </row>
+            <row style={S.button_row}>
+                <Button variant={.primary} onClick={count += 1}>+1</Button>
+                <Button variant={.secondary} onClick={count = 0}>Reset</Button>
+            </row>
+        </col>
+    );
+}

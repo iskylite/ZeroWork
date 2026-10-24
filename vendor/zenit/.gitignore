@@ -1,0 +1,71 @@
+# Zig build artifacts
+zig-cache/
+zig-out/
+.zig-cache/
+.zig-global-cache/
+
+# macOS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Editor
+.vscode/
+.idea/
+*.sublime-*
+
+# Build outputs
+dist/
+node_modules/
+*.o
+*.a
+*.so
+*.dylib
+*.dSYM/
+
+# Logs
+*.log
+
+# Python (e2e helpers)
+__pycache__/
+*.pyc
+*.pyo
+
+# Claude Code local state
+.claude/
+.bench-output/
+# Gate artifacts must not make a clean candidate appear dirty while evidence is
+# being recorded. These are uploaded/archived separately, never source inputs.
+.ci-evidence/
+release-evidence/
+# Internal documentation and research
+docs/internal/
+docs/reviews/
+docs/research/
+scripts/glass_native_model/
+.zig-lib-*/
+.zig-local-cache/
+.zig-global-cache/
+
+# agent worktrees
+.codex-worktrees/
+
+# Scenario automation artifacts (report + golden-candidate + screenshots / recordings)
+reports/
+golden-candidate/
+designs-cache/
+
+# glmx batch agent-isolated worktree (temporary, don't commit)
+.glmwt-*/
+test-results/
+# Private assets, local secrets and developer state never belong in public commits.
+private/
+.env
+.env.*
+.codex/
+.agents/
+dist/
+
+# Zig 0.17 dependency extraction cache.
+zig-pkg/

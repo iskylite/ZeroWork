@@ -1,0 +1,51 @@
+//! Card view. Styles in styles.yss, shared types and tests in mod.zig.
+const ui = @import("../../ui.zig");
+const mod = @import("mod.zig");
+const S = @import("styles.yss");
+const CardVariant = mod.CardVariant;
+
+/// Interactive card reports button to AT (name from title; falls back to child text when no title),
+/// selected state; display-only card has no semantic node.
+fn semanticsOf(interactive: bool, title: []const u8, selected: bool) ?ui.A11yProps {
+    if (!interactive) return null;
+    return .{ .role = .button, .label = if (title.len > 0) title else null, .selected = selected };
+}
+
+/// Card: title / subtitle + content area (children). Pass on_click to make interactive: enter Tab
+/// order, report button to AT.
+/// ui.view.with(W.Card(.{ .title = "Plan", .selected = is_current, .on_click = pick }), .{ children
+/// })
+pub fn Card(
+    title: []const u8 = "",
+    subtitle: []const u8 = "",
+    variant: CardVariant = .default,
+    interactive: bool = false,
+    hoverable: bool = false,
+    selected: bool = false,
+    padded: bool = true,
+    width: ?f32 = null,
+    height: ?f32 = null,
+    onClick: ?Handler(void) = null,
+    children: View,
+) View {
+    const clickable = onClick != null;
+    const is_interactive = computed(interactive or clickable);
+    const lights_up = computed(hoverable or interactive or clickable);
+    const semantics = computed(semanticsOf(interactive or clickable, title, selected));
+    return (
+        <box
+            style={.{ S.Card.of(.{ .kind = variant, .selected = selected, .hoverable = lights_up }), S.size.of(.{ .width = width, .height = height }) }}
+            focusable={is_interactive}
+            a11y={semantics}
+            onClick={onClick}
+        >
+            {if (title.len != 0 or subtitle.len != 0)
+                <box style={S.header}>
+                    {if (title.len != 0) <text style={S.title} box={S.title_row}>{title}</text>}
+                    {if (subtitle.len != 0) <text style={S.subtitle} box={S.subtitle_row}>{subtitle}</text>}
+                </box>
+            }
+            <box style={S.Body.of(.{ .padded = padded })}>{children}</box>
+        </box>
+    );
+}
