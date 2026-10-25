@@ -1,0 +1,7 @@
+/* Shared V3 primitive geometry, consumed by component routes and settings templates. */
+:root{--v3-input-height:32px;--v3-input-radius:8px;--v3-icon-action-size:24px;--v3-icon-size:14px;--v3-switch-width:30px;--v3-switch-height:18px;--v3-switch-thumb:14px}
+.v3-control-input{height:var(--v3-input-height);min-height:var(--v3-input-height);border:0;border-radius:var(--v3-input-radius);cursor:text}.v3-control-input:disabled{cursor:default}.v3-control-input[readonly]{cursor:default}
+.v3-icon-action{width:var(--v3-icon-action-size);height:var(--v3-icon-action-size);min-height:var(--v3-icon-action-size);padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:7px;cursor:pointer}.v3-icon-action svg{width:var(--v3-icon-size);height:var(--v3-icon-size)}.v3-icon-action:disabled{cursor:default}
+.v3-control-toggle{width:var(--v3-switch-width);height:var(--v3-switch-height);min-height:var(--v3-switch-height);padding:2px;border:0;border-radius:20px;cursor:pointer}.v3-control-toggle>:first-child{display:block;width:var(--v3-switch-thumb);height:var(--v3-switch-thumb);border-radius:50%}.v3-control-toggle[aria-checked=true]>:first-child,.v3-control-toggle.on>:first-child{transform:translateX(12px)}
+/* Toolbars consume the same icon action geometry instead of the legacy 30px rule. */
+.toolbar .v3-icon-action{width:var(--v3-icon-action-size);min-width:var(--v3-icon-action-size);height:var(--v3-icon-action-size);min-height:var(--v3-icon-action-size)}.toolbar .v3-icon-action svg{width:var(--v3-icon-size);height:var(--v3-icon-size)}

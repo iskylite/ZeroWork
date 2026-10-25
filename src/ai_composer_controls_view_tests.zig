@@ -146,7 +146,7 @@ test "AI composer grouped model list uses configured capabilities and a captured
     const menu = find(f.cx.root.?, "ai.model.menu").?;
     const r = menu.globalRect();
     try std.testing.expectEqual(@as(f32, 336), r.w);
-    try std.testing.expectEqual(@as(f32, 254), r.h);
+    try std.testing.expectEqual(@as(f32, 321.5), r.h);
     try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x, r.x, 0.1);
     try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().y - 6, r.y + r.h, 0.1);
     try std.testing.expectEqual(@as(usize, 5), f.view.model_rows.items.len);
@@ -164,6 +164,7 @@ test "AI composer grouped model list uses configured capabilities and a captured
     try std.testing.expectEqualStrings("quiet", f.view.labels[2].?.getText().?.content);
     try std.testing.expect(f.view.disabled[3].peek());
     try std.testing.expectEqualStrings("不支持推理", f.view.labels[3].?.getText().?.content);
+    try std.testing.expectEqual(.none, f.view.labels[3].?.style.display);
 }
 
 test "AI composer vision icon follows selected model capability" {
@@ -178,7 +179,9 @@ test "AI composer vision icon follows selected model capability" {
     try f.view.update(next);
     f.settle();
     try std.testing.expectEqual(.none, f.view.model_vision_hint.wrapper.style.display);
-    try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + 8, f.view.labels[2].?.globalRect().x, 0.1);
+    try std.testing.expectEqual(.flex, f.view.model_text_icon.style.display);
+    try std.testing.expectEqual(ui.icons.get("brain").?.icon_id.?, f.view.model_text_icon.getIcon().?.icon_id);
+    try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + 26, f.view.labels[2].?.globalRect().x, 0.1);
     try std.testing.expect(!f.view.model_vision_hint.open.?.peek());
 }
 
@@ -208,13 +211,13 @@ test "AI composer effort is a real slider whose keyboard skips unsupported model
     f.enter(f.view.buttons[2]);
     const menu = find(f.cx.root.?, "ai.model.menu").?;
     try std.testing.expectEqual(@as(f32, 336), menu.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 254), menu.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 284), f.view.slider_track.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 321.5), menu.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 266), f.view.slider_track.globalRect().w);
     try std.testing.expect(ui.Color.eql(Styles.theme.current().accent, f.view.slider_thumb.getBackground()));
     try std.testing.expectEqual(@as(usize, 2), f.view.reasoning_count);
     for (f.view.slider_markers[0..2], 0..) |marker, index| {
         try std.testing.expectEqual(@as(f32, 4), marker.globalRect().w);
-        try std.testing.expectApproxEqAbs(f.view.slider.wrapper.globalRect().x + 10 + @as(f32, @floatFromInt(index)) * 284, marker.globalRect().x, 0.1);
+        try std.testing.expectApproxEqAbs(f.view.slider_track.globalRect().x - 2 + @as(f32, @floatFromInt(index)) * f.view.slider_track.globalRect().w, marker.globalRect().x, 0.1);
     }
     f.cx.setFocus(f.view.slider.wrapper);
     f.cx.handleKeyDown(.left, .{});
@@ -314,8 +317,8 @@ test "AI composer usage and ring reflect only provided measurements and source l
     try std.testing.expectEqualStrings("history", f.view.source.?.value.usage.?.parts[0].name);
     f.click(f.view.buttons[4]);
     const menu = find(f.cx.root.?, "ai.usage.menu").?;
-    try std.testing.expectEqual(@as(f32, 288), menu.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 128), menu.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 344), menu.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 276), menu.globalRect().h);
     var found = false;
     for (f.cx.display_list.items.items) |item| if (item == .arc and item.arc.header.node_id == f.view.ring.id and ui.Color.eql(item.arc.color, Styles.theme.current().accent)) {
         found = true;
@@ -375,8 +378,8 @@ test "AI composer model identities expose provider and ID and unconfigured model
     defer f.deinit();
     f.enter(f.view.buttons[2]);
     const alpha = modelOption(f.cx.root.?, "alpha").?;
-    try std.testing.expectEqualStrings("lab · alpha", alpha.behavior.interaction.a11y.?.label.?);
-    try std.testing.expectEqualStrings("lab · alpha", alpha.behavior.interaction.a11y.?.description.?);
+    try std.testing.expectEqualStrings("alpha\nlab · alpha\n上下文 200000 tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.label.?);
+    try std.testing.expectEqualStrings("alpha\nlab · alpha\n上下文 200000 tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.description.?);
     const Hook = struct {
         fn open(raw: *anyopaque) void {
             const fixture: *Fixture = @ptrCast(@alignCast(raw));
@@ -495,6 +498,44 @@ test "AI composer provider groups are all expanded without extra controls" {
     try std.testing.expect(f.view.model_rows.items[0].header);
     try std.testing.expect(f.view.model_rows.items[3].header);
     try std.testing.expect(!f.view.model_rows.items[4].header);
-    try std.testing.expectEqualStrings("模型列表", f.view.model_title.getText().?.content);
-    try std.testing.expectApproxEqAbs(f.view.model_card.globalRect().h - 12, f.view.model_list.globalRect().h, 0.1);
+    try std.testing.expectEqualStrings("模型与推理强度", f.view.model_title.getText().?.content);
+    try std.testing.expectApproxEqAbs(f.view.model_card.globalRect().h - 8, f.view.model_list.globalRect().h, 0.1);
+}
+
+test "AI composer context compaction emits captured start and cancel with acknowledged states" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var snapshot = f.snapshot();
+    snapshot.usage = .{ .used_tokens = 6000, .limit_tokens = 32000, .can_compact = true };
+    try f.view.update(snapshot);
+    f.settle();
+    f.click(f.view.buttons[4]);
+    const status_card = find(f.cx.root.?, "ai.usage.compaction.status").?;
+    try std.testing.expectEqual(@as(f32, 314), status_card.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 84), status_card.globalRect().h);
+    f.enter(find(f.cx.root.?, "ai.usage.compaction.start").?);
+    try std.testing.expectEqual(@as(usize, 1), f.calls);
+    try std.testing.expect(f.last.?.action == .compact_context);
+    try std.testing.expect(f.view.source.?.value.usage.?.compaction == .idle);
+    snapshot.usage.?.compaction = .running;
+    snapshot.usage.?.can_compact = false;
+    try f.view.update(snapshot);
+    f.settle();
+    f.enter(find(f.cx.root.?, "ai.usage.compaction.cancel").?);
+    try std.testing.expectEqual(@as(usize, 2), f.calls);
+    try std.testing.expect(f.last.?.action == .cancel_compaction);
+    snapshot.usage.?.compaction = .failed;
+    snapshot.usage.?.can_compact = true;
+    try f.view.update(snapshot);
+    f.settle();
+    f.enter(find(f.cx.root.?, "ai.usage.compaction.start").?);
+    try std.testing.expect(f.last.?.action == .compact_context);
+    snapshot.usage.?.can_compact = false;
+    snapshot.usage.?.compaction = .idle;
+    try f.view.update(snapshot);
+    f.settle();
+    const before = f.calls;
+    f.enter(find(f.cx.root.?, "ai.usage.compaction.start").?);
+    try std.testing.expectEqual(before, f.calls);
 }

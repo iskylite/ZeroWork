@@ -17,7 +17,10 @@ fn frame(cx: *ui.Cx) []const ui.DisplayItem {
     return cx.render();
 }
 
-test "socks global material paints retained foreground from every theme without private blur or state changes" {
+test "socks global material paints retained foreground from every theme with local backdrop blur and no state changes" {
+    const saved_material = theme.materialParameters();
+    defer _ = theme.setMaterialParameters(saved_material.transparency, saved_material.blur);
+    _ = theme.setMaterialParameters(50, 12);
     const previous = theme.currentName();
     const visible = theme.materialVisible();
     defer {
@@ -29,6 +32,11 @@ test "socks global material paints retained foreground from every theme without 
     const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();
     cx.setViewport(1280, 720);
+    // Widget transitions read the renderer's shared clock at mount. Bind this
+    // fixture's clock before creating controls so earlier Cx tests cannot leave
+    // their animation starts in this fixture's future.
+    try cx.setTestFrameStep(16);
+    cx.bindFrameClock();
     const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
     defer scope.dispose();
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
@@ -43,7 +51,7 @@ test "socks global material paints retained foreground from every theme without 
     };
     var receipt: Receipt = .{};
     const view = try socks.mount(cx, scope, .{ .context = &receipt, .action = Receipt.action });
-    try cx.root.?.appendChild(cx.allocator, view.root);
+    if (!view.portaled) try cx.root.?.appendChild(cx.allocator, view.wrapper);
     try source.isolate(view.scope, view.root);
     const trigger = try ui.box(cx, .{ .position = .absolute, .width = .{ .px = 80 }, .height = .{ .px = 24 }, .inset = .{ .right = .{ .px = 20 }, .bottom = .{ .px = 12 } } }, .{});
     try cx.root.?.appendChild(cx.allocator, trigger);
@@ -69,13 +77,13 @@ test "socks global material paints retained foreground from every theme without 
         try std.testing.expectEqual(ui.Color.TRANSPARENT, view.pointer.getBackground());
         try std.testing.expectEqual(c.border, view.root.style.border.color);
         try std.testing.expectEqual(c.surface_2, view.copy_button.getBackground());
-        try std.testing.expectEqual(ui.Color.TRANSPARENT, view.config_button.getBackground());
+        try std.testing.expectEqual(c.accent, view.config_button.getBackground());
         try std.testing.expectEqual(c.fg_1, view.address.getText().?.color);
         try std.testing.expectEqual(c.fg_3, view.route.getText().?.color);
         try std.testing.expectEqual(c.ok_ink, view.status.getText().?.color);
         try std.testing.expectEqual(c.fg_2, view.control_text.getText().?.color);
         try std.testing.expectEqual(c.fg_2, view.message.getText().?.color);
-        try std.testing.expectEqual(@as(f32, 0), view.root.style.backdrop_blur());
+        try std.testing.expectEqual(@as(f32, 12), view.root.style.backdrop_blur());
         try std.testing.expectEqual(socks.State.running, view.state);
         try std.testing.expectEqualStrings("original-target", view.exit.getText().?.content);
         try std.testing.expectEqualStrings("original-route", view.route.getText().?.content);

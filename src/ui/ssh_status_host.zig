@@ -87,7 +87,13 @@ pub const Controls = struct {
     progress_slot: *ui.Node,
     file_icon: *ui.Node,
     chain_button: *ui.Node,
+    chain_label: *ui.Node,
+    forward_label: *ui.Node,
     socks_button: *ui.Node,
+    broadcast_button: *ui.Node,
+    broadcast_icon: *ui.Node,
+    broadcast_style: *ui.Signal(S.ButtonStyle),
+    broadcast_label: *ui.Node,
     icons: [8]*ui.Node,
     disabled: *ui.Signal(bool),
     theme_disabled: *ui.Signal(bool),
@@ -143,6 +149,10 @@ pub fn mountStatusBar(cx: *ui.Cx, scope: *ui.Scope, status_node: *ui.Node) !Stat
     try id.appendChild(cx.allocator, chevron);
     try left.appendChild(cx.allocator, id);
     const rtt = try metric(cx, scope, left, "往返延迟", "status.connection.rtt", 64, ui.icons.activity, hover, disabled);
+    cx.detachChild(rtt.button, rtt.label);
+    rtt.label.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 80 }, .top = .{ .px = 5 } }, .width = .{ .px = 52 }, .height = .{ .px = 16 }, .overflow_hidden = true });
+    try id.appendChild(cx.allocator, rtt.label);
+    rtt.button.setDisplay(.none);
     const encoding = try metric(cx, scope, left, "终端编码", "status.connection.encoding", 68, ui.icons.get("type").?, hover, disabled);
     const grid = try metric(cx, scope, left, "终端网格", "status.connection.grid", 82, ui.icons.get("move-diagonal").?, hover, disabled);
     try bar.appendChild(cx.allocator, try ui.spacer(cx));
@@ -156,16 +166,35 @@ pub fn mountStatusBar(cx: *ui.Cx, scope: *ui.Scope, status_node: *ui.Node) !Stat
     const chain_icon = try ui.iconTint(cx, ui.icons.network, S.theme.current().fg_2, .{});
     chain_icon.setStyleInline(cx.allocator, S.metricIcon());
     try chain.appendChild(cx.allocator, chain_icon);
+    const chain_label = try ui.text(cx, "连接链路", S.triggerText(false));
+    chain_label.setStyleInline(cx.allocator, S.metricLabel(86));
+    try chain.appendChild(cx.allocator, chain_label);
     try bar.appendChild(cx.allocator, chain);
-    const socks = try makeButton(cx, scope, "SOCKS5 转发", "status.connection.forward", S.metricTrigger(28), hover, disabled);
+    const socks = try makeButton(cx, scope, "端口转发", "status.connection.forward", S.metricTrigger(28), hover, disabled);
     const socks_icon = try ui.iconTint(cx, ui.icons.get("plug-zap").?, S.theme.current().fg_2, .{});
     socks_icon.setStyleInline(cx.allocator, S.metricIcon());
     try socks.appendChild(cx.allocator, socks_icon);
+    const forward_label = try ui.text(cx, "端口转发", S.triggerText(false));
+    forward_label.setStyleInline(cx.allocator, S.metricLabel(86));
+    try socks.appendChild(cx.allocator, forward_label);
     // The existing SOCKS controller retains its label and click channel.
     const socks_label = try ui.text(cx, "SOCKS5", S.triggerText(false));
     socks_label.setDisplay(.none);
     try socks.appendChild(cx.allocator, socks_label);
     try bar.appendChild(cx.allocator, socks);
+    const broadcast_enabled = try scope.createSignal(bool, false);
+    const broadcast_style = try scope.createSignal(S.ButtonStyle, S.metricTrigger(28));
+    const broadcast = try ui.widgets.Button(.{ .a11y_label = "组广播 · 已关闭", .variant = .ghost, .base_style = broadcast_style, .hover_style = hover, .disabled = broadcast_enabled }).mount(scope, cx);
+    broadcast.meta.ownership.meta.test_id = "status.group.broadcast";
+    const broadcast_icon = try ui.iconTint(cx, ui.icons.get("radio").?, S.theme.current().fg_2, .{});
+    broadcast_icon.setStyleInline(cx.allocator, S.metricIcon());
+    try broadcast.appendChild(cx.allocator, broadcast_icon);
+    const broadcast_label = try ui.text(cx, "", S.triggerText(false));
+    try broadcast.appendChild(cx.allocator, broadcast_label);
+    broadcast.setDisplay(.none);
+    try bar.appendChild(cx.allocator, broadcast);
+    cx.detachChild(bar, broadcast);
+    try bar.insertChildBefore(cx.allocator, broadcast, chain);
     const theme = try makeButton(cx, scope, "全局主题 · 应用与全部终端", "status.connection.theme", S.metricTrigger(28), hover, theme_disabled);
     const theme_icon = try ui.iconTint(cx, ui.icons.palette, S.theme.current().fg_2, .{});
     theme_icon.setStyleInline(cx.allocator, S.metricIcon());
@@ -173,7 +202,7 @@ pub fn mountStatusBar(cx: *ui.Cx, scope: *ui.Scope, status_node: *ui.Node) !Stat
     try bar.appendChild(cx.allocator, theme);
     const progress = try ui.box(cx, .{ .height = .fill(), .direction = .row, .align_items = .center, .gap = 10, .margin = .{ .left = 6 }, .flex_shrink = 0 }, .{});
     try bar.appendChild(cx.allocator, progress);
-    const controls = try scope.createState(Controls, .{ .bar = bar, .identity_button = id, .identity_label = status_node, .state_dot = dot, .rtt_button = rtt.button, .rtt_label = rtt.label, .encoding_button = encoding.button, .encoding_label = encoding.label, .grid_button = grid.button, .grid_label = grid.label, .more_button = more, .theme_button = theme, .progress_slot = progress, .file_icon = file_icon, .chain_button = chain, .socks_button = socks, .icons = .{ id_icon, chevron, rtt.icon, encoding.icon, grid.icon, more_icon, socks_icon, theme_icon }, .disabled = disabled, .theme_disabled = theme_disabled });
+    const controls = try scope.createState(Controls, .{ .bar = bar, .identity_button = id, .identity_label = status_node, .state_dot = dot, .rtt_button = rtt.button, .rtt_label = rtt.label, .encoding_button = encoding.button, .encoding_label = encoding.label, .grid_button = grid.button, .grid_label = grid.label, .more_button = more, .theme_button = theme, .progress_slot = progress, .file_icon = file_icon, .chain_button = chain, .chain_label = chain_label, .forward_label = forward_label, .socks_button = socks, .broadcast_button = broadcast, .broadcast_icon = broadcast_icon, .broadcast_style = broadcast_style, .broadcast_label = broadcast_label, .icons = .{ id_icon, chevron, rtt.icon, encoding.icon, grid.icon, more_icon, socks_icon, theme_icon }, .disabled = disabled, .theme_disabled = theme_disabled });
     return .{ .bar = bar, .details = left, .grid = grid.label, .progress_slot = progress, .socks_chip = socks, .socks_label = socks_label, .chain_trigger = chain, .chain_icon = chain_icon, .chain_hover = hover, .controls = controls };
 }
 fn makeButton(cx: *ui.Cx, scope: *ui.Scope, name: []const u8, id: []const u8, style: S.ButtonStyle, hover: *ui.Signal(?S.ButtonStyle), disabled: *ui.Signal(bool)) !*ui.Node {
@@ -333,7 +362,8 @@ pub const Host = struct {
             self.detail.dirty = true;
             self.colors = colors;
         }
-        const identity_width = S.identity_width;
+        const identity_width: f32 = if (self.active != null) S.identity_width else 112;
+        controls.icons[1].setStyleInline(self.cx.allocator, .{ .inset = .{ .left = .{ .px = identity_width - 24 }, .top = .{ .px = 6 } } });
         controls.identity_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = identity_width } });
         controls.identity_label.setDisplay(.flex);
         controls.icons[1].setDisplay(if (self.file_active != null) .none else .flex);
@@ -342,7 +372,12 @@ pub const Host = struct {
         const empty = self.active == null and self.file_active == null;
         controls.theme_button.setDisplay(if (empty) .none else .flex);
         controls.narrow = narrow;
-        controls.rtt_button.setDisplay(if (empty or narrow or self.file_active != null) .none else .flex);
+        controls.rtt_button.setDisplay(.none);
+        controls.rtt_label.setDisplay(if (self.active == null) .none else .flex);
+        const compact_actions = controls.bar.globalRect().w < 1100;
+        controls.chain_label.setDisplay(if (compact_actions) .none else .flex);
+        controls.forward_label.setDisplay(if (compact_actions) .none else .flex);
+        for ([_]*ui.Node{ controls.chain_button, controls.socks_button }) |node| node.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (compact_actions) @as(f32, 28) else 86 } });
         for ([_]*ui.Node{ controls.encoding_button, controls.grid_button }) |node| node.setDisplay(if (empty or narrow or self.file_active != null) .none else .flex);
         self.detail.reanchor(controls.bar.globalRect().y);
         try self.detail.flush();
@@ -440,6 +475,10 @@ pub fn infoSnapshot(snapshot: Details.Snapshot, can_reconnect: bool) Info.Snapsh
         endpoint.* = hop.endpoint;
         online = online and hop.status == .online;
     }
+    const target = snapshot.hops[snapshot.hop_count - 1];
+    result.cipher_c2s = target.metadata.cipher_c2s;
+    result.cipher_s2c = target.metadata.cipher_s2c;
+    if (Details.usableTarget(snapshot)) |sample| result.latency_ms = sample.duration_ms;
     result.state = if (online) .online else if (snapshot.hops[snapshot.hop_count - 1].status == .released) .disconnected else .unknown;
     return result;
 }

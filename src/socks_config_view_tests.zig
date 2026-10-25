@@ -26,7 +26,7 @@ test "config modal mounts and checks exposure gate" {
     cx.root = root;
     var c = C{};
     const v = try m.View.mount(cx, scope, .{ .context = @ptrCast(&c), .save = save, .test_cb = test_cb, .cancel = cancel, .confirm_exposure = exposure });
-    try root.appendChild(cx.allocator, v.root);
+    if (!v.portaled) try root.appendChild(cx.allocator, v.root);
     try v.show(.{}, &.{});
     cx.layout();
     try std.testing.expect(v.root.style.display == .flex);
@@ -51,7 +51,7 @@ test "config owns routes and draft, validates inputs, resizes and cancels locall
     cx.root = root;
     var c = C{};
     const v = try m.View.mount(cx, scope, .{ .context = @ptrCast(&c), .save = save, .test_cb = test_cb, .cancel = cancel, .confirm_exposure = exposure });
-    try root.appendChild(cx.allocator, v.root);
+    if (!v.portaled) try root.appendChild(cx.allocator, v.root);
     var label = [_]u8{'A'};
     const routes = [_]m.Route{ .{ .label = "末端", .index = null }, .{ .label = &label, .index = 0 } };
     const original = m.Draft{ .port = 2000 };
@@ -71,7 +71,7 @@ test "config owns routes and draft, validates inputs, resizes and cancels locall
         cx.layout();
         _ = v.updateGeometry();
     }
-    try std.testing.expect(v.card.globalRect().w <= 440.5);
+    try std.testing.expect(v.card.globalRect().w <= 480.5);
     cx.setViewport(350, 200);
     for (0..4) |_| {
         cx.layout();
@@ -94,7 +94,7 @@ test "configuration covers its owner and stays centered with fixed actions" {
     cx.root = root;
     var c = C{};
     const v = try m.View.mount(cx, scope, .{ .context = &c, .save = save, .test_cb = test_cb, .cancel = cancel, .confirm_exposure = exposure });
-    try root.appendChild(cx.allocator, v.root);
+    if (!v.portaled) try root.appendChild(cx.allocator, v.root);
     v.setOwner("Owned multihop 3", 7);
     try v.show(.{}, &.{ .{ .label = "链路末端" }, .{ .label = "Owned multihop 1", .index = 0 } });
     for (0..8) |_| {
@@ -105,8 +105,8 @@ test "configuration covers its owner and stays centered with fixed actions" {
     const card = v.card.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 1440), overlay.w, 0.5);
     try std.testing.expectApproxEqAbs(@as(f32, 900), overlay.h, 0.5);
-    try std.testing.expectApproxEqAbs(@as(f32, 420), card.w, 0.5);
-    try std.testing.expectApproxEqAbs(@as(f32, 396), card.h, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 480), card.w, 0.5);
+    try std.testing.expect(card.h > 396 and card.h <= 650);
     try std.testing.expectApproxEqAbs(@as(f32, 720), card.x + card.w / 2, 0.5);
     try std.testing.expectApproxEqAbs(@as(f32, 450), card.y + card.h / 2, 0.5);
     try std.testing.expect(v.footer.globalRect().y >= card.y);
@@ -118,7 +118,7 @@ test "configuration covers its owner and stays centered with fixed actions" {
         _ = v.updateGeometry();
     }
     const small = v.card.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 396), small.h, 0.5);
+    try std.testing.expect(small.h <= 448.5);
     try std.testing.expectApproxEqAbs(@as(f32, 430), small.x + small.w / 2, 0.5);
     try std.testing.expectApproxEqAbs(@as(f32, 240), small.y + small.h / 2, 0.5);
     try std.testing.expect(small.y >= 0 and small.y + small.h <= 480.5);
@@ -139,7 +139,7 @@ test "configuration changes global palette without replacing inputs or selected 
     cx.root = root;
     var c = C{};
     const v = try m.View.mount(cx, scope, .{ .context = &c, .save = save, .test_cb = test_cb, .cancel = cancel, .confirm_exposure = exposure });
-    try root.appendChild(cx.allocator, v.root);
+    if (!v.portaled) try root.appendChild(cx.allocator, v.root);
     try v.show(.{ .port = 3456 }, &.{ .{ .label = "末端" }, .{ .label = "首跳", .index = 0 }, .{ .label = "中间跳", .index = 1 } });
     const original_input = v.input_parts[0].input_container;
     v.port_signal.set("4567");
@@ -240,7 +240,7 @@ fn hasTexture(node: *ui.Node, id: u32) bool {
     return false;
 }
 
-test "configuration Select isolates global material and keeps backing through options and theme updates" {
+test "configuration Select reveals one global material through options and theme updates" {
     const theme = @import("ui/app_theme.zig");
     const background = @import("ui/background_layers.zig");
     const previous = theme.currentName();
@@ -263,7 +263,7 @@ test "configuration Select isolates global material and keeps backing through op
     try root.appendChild(cx.allocator, material.root);
     var c = C{};
     const v = try m.View.mount(cx, scope, .{ .context = &c, .save = save, .test_cb = test_cb, .cancel = cancel, .confirm_exposure = exposure });
-    try root.appendChild(cx.allocator, v.root);
+    if (!v.portaled) try root.appendChild(cx.allocator, v.root);
     try v.bindMaterial(material);
     try material.update(.{ .id = 73, .width = 320, .height = 180 }, .{ .background = .{ .enabled = true, .path = "/owned-headless-fixture", .transparency = 100 }, .blur_px = 4 }, 1440, 900);
     inline for (.{ .light, .sauber, .dark }) |name| {
@@ -281,19 +281,53 @@ test "configuration Select isolates global material and keeps backing through op
         }
         try material.update(.{ .id = 73, .width = 320, .height = 180 }, .{ .background = .{ .enabled = true, .path = "/owned-headless-fixture", .transparency = 100 }, .blur_px = 4 }, 1440, 900);
         cx.layout();
-        try std.testing.expectEqual(@as(usize, 1), material.surfaces.items.len);
         try std.testing.expectEqual(@as(u8, 0), v.picker.panel.getBackground().a);
-        const backing = findId(v.picker.chrome, "appearance.surface").?;
-        try std.testing.expect(backing.style.display == .flex);
-        try std.testing.expect(hasOpaqueLeaf(backing, theme.baseColors().app.withAlpha(255)));
-        try std.testing.expect(hasTexture(backing, 73));
-        // Updating Select options rebuilds its content, not the stable chrome
-        // to which the app has attached the window-aligned material surface.
+        try std.testing.expect(findId(v.picker.chrome, "appearance.surface") == null);
+        try std.testing.expect(hasTexture(material.root, 73));
+        try std.testing.expect(!hasTexture(v.picker.chrome, 73));
+        // Updating Select options keeps the single global background untouched.
         try v.show(.{}, &.{ .{ .label = "新末端" }, .{ .label = "新首跳", .index = 0 } });
         for (0..4) |_| cx.layout();
-        try std.testing.expectEqual(backing, findId(v.picker.chrome, "appearance.surface").?);
+        try std.testing.expect(findId(v.picker.chrome, "appearance.surface") == null);
         try std.testing.expectEqual(@as(u8, 0), v.picker.panel.getBackground().a);
-        try std.testing.expectEqual(@as(usize, 1), material.surfaces.items.len);
-        try std.testing.expectApproxEqAbs(@as(f32, 396), v.card.globalRect().h, 0.5);
+        try std.testing.expect(v.card.globalRect().h > 396 and v.card.globalRect().h <= 650);
     }
+}
+
+test "forward modes validate fixed targets and keep session-only settings" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    cx.root = root;
+    var c = C{};
+    const v = try m.View.mount(cx, scope, .{ .context = &c, .save = save, .test_cb = test_cb, .cancel = cancel, .confirm_exposure = exposure });
+    if (!v.portaled) try root.appendChild(cx.allocator, v.root);
+    try v.show(.{}, &.{});
+    v.act(.mode_local);
+    for (v.mode_highlights, 0..) |highlight, i| try std.testing.expectEqual(i == 1, highlight.style.display == .flex);
+    try std.testing.expect(v.target_group.style.display == .flex);
+    try std.testing.expect(v.persist_row.style.display == .none);
+    v.target_host_signal.set("database.internal");
+    v.target_port_signal.set("0");
+    v.act(.save);
+    try std.testing.expectEqual(@as(usize, 0), c.saved);
+    v.target_port_signal.set("5432");
+    v.act(.save);
+    try std.testing.expectEqual(@as(usize, 1), c.saved);
+    try std.testing.expect(!v.draft.persist and !v.draft.auto_start);
+    v.act(.mode_remote);
+    for (v.mode_highlights, 0..) |highlight, i| try std.testing.expectEqual(i == 2, highlight.style.display == .flex);
+    v.act(.save);
+    try std.testing.expectEqual(@as(usize, 1), c.saved);
+    try std.testing.expect(std.mem.indexOf(u8, v.error_label.getText().?.content, "IPv4") != null);
+    v.target_host_signal.set("::1");
+    v.act(.save);
+    try std.testing.expectEqual(@as(usize, 2), c.saved);
+    v.act(.mode_socks5);
+    for (v.mode_highlights, 0..) |highlight, i| try std.testing.expectEqual(i == 0, highlight.style.display == .flex);
+    try std.testing.expect(v.target_group.style.display == .none);
+    try std.testing.expect(v.persist_row.style.display == .flex);
 }

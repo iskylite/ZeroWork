@@ -13,6 +13,7 @@ test {
     _ = @import("wizard_tests.zig");
     _ = @import("wizard_probe_tests.zig");
     _ = @import("settings_content_tests.zig");
+    _ = @import("plugin_settings_v3_tests.zig");
     _ = @import("settings_transfer_budget_tests.zig");
     _ = @import("settings_transfer_defaults_tests.zig");
     _ = @import("theme_layer_tests.zig");
@@ -111,4 +112,8 @@ test {
 test {
     _ = @import("file_mkdir_view_tests.zig");
     _ = @import("transfer_conflict_view_tests.zig");
+}
+
+test {
+    _ = @import("broadcast_view_tests.zig");
 }

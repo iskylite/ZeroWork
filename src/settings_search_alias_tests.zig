@@ -68,7 +68,7 @@ test "settings search schema aliases mount their actual appearance section and c
         defer f.deinit();
         f.controller.model.selectPage(2);
         try f.controller.setSearch(case.query);
-        try std.testing.expectEqual(@as(usize, 0), f.controller.model.page_index);
+        try std.testing.expectEqual(@as(usize, 2), f.controller.model.page_index);
         const mounted = try f.mount();
         var buffer: [80]u8 = undefined;
         const id = try std.fmt.bufPrint(&buffer, "settings.appearance.{s}", .{case.section});
@@ -77,7 +77,7 @@ test "settings search schema aliases mount their actual appearance section and c
         try std.testing.expect(section != null);
         try std.testing.expect(section.?.globalRect().h > 0);
         if (case.control) |control| {
-            if (byId(section.?, control) == null) std.debug.print("missing control {s} for alias {s}\n", .{control, case.query});
+            if (byId(section.?, control) == null) std.debug.print("missing control {s} for alias {s}\n", .{ control, case.query });
             try std.testing.expect(byId(section.?, control) != null);
         }
     }
@@ -93,6 +93,11 @@ test "settings search aliases preserve invalid raw draft and original category o
     const mounted = try f.mount();
     const field = byId(mounted.root, "settings.field.font_size");
     try std.testing.expect(field != null);
+    try std.testing.expect(byId(mounted.root, "settings.field.font_family") == null);
+    try std.testing.expect(byId(mounted.root, "settings.field.font_weight") == null);
+    try std.testing.expect(byId(mounted.root, "settings.field.line_height") == null);
+    try std.testing.expect(byId(mounted.root, "settings.field.cursor_style") != null);
+    try std.testing.expect(byId(mounted.root, "settings.font.preview") != null);
     const raw = f.controller.raw_fields[schema.find("ui", "font_size").?];
     try std.testing.expectEqualStrings("97", raw.input.?);
     try std.testing.expect(raw.problem != null);

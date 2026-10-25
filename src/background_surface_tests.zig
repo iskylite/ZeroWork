@@ -61,221 +61,111 @@ fn expectRect(a: ui.ComputedRect, b: ui.ComputedRect) !void {
     inline for (.{ "x", "y", "w", "h" }) |key| try std.testing.expectApproxEqAbs(@field(a, key), @field(b, key), 0.01);
 }
 
-fn expectImages(source: *ui.Node, projection: *ui.Node) !void {
-    try std.testing.expectEqual(source.children.items.len, projection.children.items.len);
-    for (source.children.items, projection.children.items) |a, b| {
-        try std.testing.expectEqual(a.style.display, b.style.display);
-        if (a.style.display == .none) continue;
-        try std.testing.expectEqual(a.getImage().?.texture_id, b.getImage().?.texture_id);
-        try expectRect(a.globalRect(), b.globalRect());
-    }
-}
-
-test "isolated material render covers workspace before image and original surface tint while keeping controls" {
-    const previous = theme.currentName();
-    const visible = theme.materialVisible();
-    defer {
-        theme.select(previous);
-        _ = theme.setMaterialVisible(visible);
-    }
-    theme.select(.dark);
-    _ = theme.setMaterialVisible(true);
-    const w = try Window.init();
-    defer w.deinit();
-    const image: layers.Image = .{ .id = 777, .width = 640, .height = 256 };
-    const materials: assets.Materials = .{ .background = .{ .enabled = true, .path = "/fixture", .fit = .fit, .transparency = 50 } };
-    try w.source.update(image, materials, 1440, 900);
-    const items = w.frame();
-    const surface = find(w.card, "appearance.surface").?;
-    const plane = surface.children.items[0];
-    const floor = plane.children.items[0];
-    const images = plane.children.items[1];
-    const tint = plane.children.items[4];
-    const workspace = find(w.cx.root.?, "workspace.body").?;
-    try std.testing.expectEqual(surface, w.card.children.items[0]);
-    try std.testing.expectEqual(w.content, w.card.children.items[1]);
-    try std.testing.expectEqual(@as(u8, 255), floor.getBackground().a);
-    try std.testing.expectEqual(w.card.getBackground(), tint.getBackground());
-    try std.testing.expectEqual(theme.current().overlay, tint.getBackground());
-    try std.testing.expectEqual(@as(f32, 14), surface.style.corner_radius().?.resolve());
-    try std.testing.expect(surface.style.overflow_hidden);
-    try expectRect(w.card.globalRect(), surface.globalRect());
-    try expectRect(ui.ComputedRect.init(0, 0, 1440, 900), plane.globalRect());
-    try expectImages(w.source.images, images);
-    var body_order: ?usize = null;
-    var floor_order: ?usize = null;
-    var image_order: ?usize = null;
-    var tint_order: ?usize = null;
-    var floor_count: usize = 0;
-    var image_count: usize = 0;
-    var tint_count: usize = 0;
-    for (items, 0..) |item, index| switch (item) {
-        .fill_rect => |fill| {
-            if (fill.header.node_id == workspace.id) body_order = index;
-            if (fill.header.node_id == floor.id and fill.color.a == 255) {
-                floor_order = index;
-                floor_count += 1;
-            }
-            if (fill.header.node_id == tint.id) {
-                tint_order = index;
-                tint_count += 1;
-            }
-        },
-        .image_quad => |quad| if (quad.header.node_id == images.children.items[0].id) {
-            image_order = index;
-            image_count += 1;
+fn imageCount(items: []const ui.DisplayItem, texture: u32) usize {
+    var count: usize = 0;
+    for (items) |item| switch (item) {
+        .image_quad => |quad| if (quad.texture_id == texture) {
+            count += 1;
         },
         else => {},
     };
-    try std.testing.expect(body_order != null and floor_order != null and image_order != null and tint_order != null);
-    try std.testing.expect(body_order.? < floor_order.? and floor_order.? < image_order.? and image_order.? < tint_order.?);
-    try std.testing.expectEqual(@as(usize, 1), floor_count);
-    try std.testing.expectEqual(@as(usize, 1), image_count);
-    try std.testing.expectEqual(@as(usize, 1), tint_count);
-    // The material has no hit/scroll role and does not replace the focused control.
+    return count;
+}
+
+test "global background remains the only image through floating card move resize hide and reopen" {
+    const w = try Window.init();
+    defer w.deinit();
+    var materials: assets.Materials = .{ .background = .{ .enabled = true, .path = "/fixture", .fit = .fit }, .blur_px = 12 };
+    const image: layers.Image = .{ .id = 777, .width = 640, .height = 256 };
+    const children = w.card.children.items.len;
+    const hooks = w.cx.after_layout_hooks.items.len;
+    try w.source.isolate(w.scope, w.card);
+    try std.testing.expectEqual(children, w.card.children.items.len);
+    try std.testing.expectEqual(hooks, w.cx.after_layout_hooks.items.len);
+    try std.testing.expectEqual(@as(f32, 16), w.card.style.backdrop_blur());
+    try std.testing.expect(!w.card.style.glass_params().?.capture_current_target);
+    try std.testing.expect(find(w.card, "appearance.surface") == null);
+    for ([_]assets.Fit{ .fill, .fit, .center, .tile }) |fit| {
+        materials.background.fit = fit;
+        // Tile uses a larger fixture to keep the test's paint stream small.
+        try w.source.update(image, materials, 1440, 900);
+        _ = w.frame();
+        const original = w.source.tiles.items[0].globalRect();
+        w.card.setStyleInline(w.cx.allocator, .{ .width = .{ .px = 620 }, .height = .{ .px = 500 }, .translate_x = 37, .translate_y = -17 });
+        _ = w.frame();
+        try expectRect(original, w.source.tiles.items[0].globalRect());
+        try std.testing.expectEqual(children, w.card.children.items.len);
+    }
+    materials.background.fit = .fit;
+    w.cx.setViewport(1600, 1000);
+    try w.source.update(image, materials, 1600, 1000);
+    for ([_]bool{ false, true, false, true }) |visible| {
+        w.card.setDisplay(if (visible) .flex else .none);
+        const items = w.frame();
+        try std.testing.expectEqual(@as(usize, 1), imageCount(items, 777));
+        var encoded: usize = 0;
+        for (w.cx.lowering.main_paint.items) |item| if (item.kind == .image and item.resource_handle == 777) {
+            encoded += 1;
+        };
+        try std.testing.expectEqual(@as(usize, 1), encoded);
+    }
     w.cx.setFocus(w.content);
     _ = w.frame();
     try std.testing.expectEqual(w.content, w.cx.focus_manager.getFocused().?);
-    try std.testing.expectEqual(.pass_through, surface.style.hit_behavior().?);
+    try std.testing.expectEqual(w.content, w.card.children.items[0]);
+    const button_rect = w.content.globalRect();
+    const hit = w.cx.hitTest(button_rect.x + button_rect.w / 2, button_rect.y + button_rect.h / 2).?;
+    try std.testing.expect(hit == w.content or hit.isDescendantOf(w.content));
 }
 
-test "isolated material keeps window fit tile phase after move resize theme and image visibility" {
+test "global base remains visible without an enabled decoded image and removes stale image effects" {
     const previous = theme.currentName();
-    const visible = theme.materialVisible();
-    defer {
-        theme.select(previous);
-        _ = theme.setMaterialVisible(visible);
-    }
-    theme.select(.dark);
-    _ = theme.setMaterialVisible(true);
+    defer theme.select(previous);
     const w = try Window.init();
     defer w.deinit();
-    const image: layers.Image = .{ .id = 7, .width = 3, .height = 5, .repeating = .{ .id = 8, .width = 66, .height = 65 } };
-    var materials: assets.Materials = .{ .background = .{ .enabled = true, .path = "/fixture" }, .blur_px = 12 };
-    const surface = find(w.card, "appearance.surface").?;
-    const plane = surface.children.items[0];
-    const floor = plane.children.items[0];
-    const images = plane.children.items[1];
-    const blur = plane.children.items[2];
-    const veil = plane.children.items[3];
-    // Ordinary glass keeps the window backdrop. Only the image-only material
-    // opts into the raw pixels already drawn in its own isolated target.
-    const default_glass: ui.GlassParams = .{};
-    try std.testing.expect(!default_glass.capture_current_target);
-    try std.testing.expect(!default_glass.resolve().capture_current_target);
-    for ([_]assets.Fit{ .fill, .fit, .center, .tile }) |fit| {
-        materials.background.fit = fit;
-        try w.source.update(image, materials, 1440, 900);
-        _ = w.frame();
-        try expectImages(w.source.images, images);
-        try std.testing.expectEqual(@as(f32, 12), blur.style.backdrop_blur());
-        try std.testing.expect(!w.source.blur.style.glass_params().?.capture_current_target);
-        try std.testing.expect(blur.style.glass_params().?.capture_current_target);
-        try std.testing.expect(blur.style.glass_params().?.resolve().capture_current_target);
-        try std.testing.expectEqual(w.source.veil.getBackground(), veil.getBackground());
-    }
-    w.card.setStyleInline(w.cx.allocator, .{ .width = .{ .px = 620 }, .height = .{ .px = 500 }, .translate_x = 37, .translate_y = -17 });
-    _ = w.frame();
-    try expectRect(w.card.globalRect(), surface.globalRect());
-    try expectImages(w.source.images, images);
-    w.cx.setViewport(1600, 1000);
-    try w.source.update(image, materials, 1600, 1000);
-    _ = w.frame();
-    try expectRect(ui.ComputedRect.init(0, 0, 1600, 1000), plane.globalRect());
-    try expectImages(w.source.images, images);
-    const publication = try w.cx.bindState(shell.ThemePublication, .{});
+    const image: layers.Image = .{ .id = 777, .width = 640, .height = 256 };
+    var materials: assets.Materials = .{ .background = .{ .enabled = true, .path = "/fixture", .fit = .fit }, .blur_px = 12 };
     for (std.enums.values(theme.Name)) |name| {
         theme.select(name);
-        publication.publish(w.cx, theme.widgetTheme(name));
-        for ([_]f32{ 0, 50, 100 }) |transparency| {
-            materials.background.transparency = transparency;
-            try w.source.update(image, materials, 1600, 1000);
-            _ = w.frame();
-            try std.testing.expectEqual(theme.baseColors().app.withAlpha(255), floor.getBackground());
-            try std.testing.expectEqual(w.card.getBackground(), plane.children.items[4].getBackground());
-            try std.testing.expectEqual(w.source.veil.getBackground(), veil.getBackground());
+        try w.source.update(image, materials, 1440, 900);
+        try std.testing.expectEqual(@as(usize, 1), imageCount(w.frame(), 777));
+        for ([_]bool{ false, true }) |enabled| {
+            materials.background.enabled = enabled;
+            try w.source.update(null, materials, 1440, 900);
+            try std.testing.expectEqual(@as(usize, 0), imageCount(w.frame(), 777));
+            try std.testing.expectEqual(.flex, w.source.root.style.display);
+            try std.testing.expectEqual(theme.baseColors().app, w.source.root.getBackground());
+            try std.testing.expectEqual(.none, w.source.images.style.display);
+            try std.testing.expectEqual(.none, w.source.blur.style.display);
+            try std.testing.expectEqual(.none, w.source.veil.style.display);
         }
     }
-    materials.background.enabled = false;
-    try w.source.update(null, materials, 1600, 1000);
-    _ = w.frame();
-    try std.testing.expectEqual(.none, surface.style.display);
-    try std.testing.expectEqual(w.content, w.card.children.items[1]);
-    materials.background.enabled = true;
-    try w.source.update(image, materials, 1600, 1000);
-    _ = w.frame();
-    try std.testing.expectEqual(.flex, surface.style.display);
-    try expectImages(w.source.images, images);
 }
 
-test "isolated material registration is idempotent and child scope removes nodes and hooks" {
+test "global surface compatibility keeps target hierarchy and scope disposal independent" {
     const w = try Window.init();
     defer w.deinit();
-    const child = try ui.Scope.init(std.testing.allocator, w.scope, w.cx.owner);
-    const target = try ui.box(w.cx, .{ .width = .{ .px = 120 }, .height = .{ .px = 90 } }, .{});
-    try w.cx.root.?.appendChild(w.cx.allocator, target);
-    const hooks = w.cx.after_layout_hooks.items.len;
-    try w.source.isolate(child, target);
-    try w.source.isolate(child, target);
-    try std.testing.expectEqual(@as(usize, 2), w.source.surfaces.items.len);
-    try std.testing.expectEqual(@as(usize, 1), target.children.items.len);
-    try std.testing.expectEqual(hooks + 1, w.cx.after_layout_hooks.items.len);
-    child.dispose();
-    try std.testing.expectEqual(@as(usize, 1), w.source.surfaces.items.len);
-    try std.testing.expectEqual(@as(usize, 0), target.children.items.len);
-    try std.testing.expectEqual(hooks, w.cx.after_layout_hooks.items.len);
-    _ = w.frame();
-}
-
-test "isolated material hide and reopen leave no image residue in the encoder paint stream" {
-    const previous = theme.currentName();
-    const visible = theme.materialVisible();
-    defer {
-        theme.select(previous);
-        _ = theme.setMaterialVisible(visible);
-    }
-    theme.select(.dark);
-    _ = theme.setMaterialVisible(true);
-    const w = try Window.init();
-    defer w.deinit();
-    const materials: assets.Materials = .{ .background = .{ .enabled = true, .path = "/fixture", .fit = .fit, .transparency = 50 } };
-    try w.source.update(.{ .id = 777, .width = 640, .height = 256 }, materials, 1440, 900);
-    for (0..4) |_| {
-        w.card.setDisplay(.flex);
-        for (0..4) |_| {
-            const items = w.frame();
-            var image_count: usize = 0;
-            for (items) |item| switch (item) {
-                .image_quad => |image| if (image.texture_id == 777) {
-                    image_count += 1;
-                },
-                else => {},
-            };
-            try std.testing.expectEqual(@as(usize, 2), image_count);
-            var encoder_images: usize = 0;
-            for (w.cx.lowering.main_paint.items) |item| if (item.kind == .image and item.resource_handle == 777) {
-                encoder_images += 1;
-            };
-            try std.testing.expectEqual(@as(usize, 2), encoder_images);
+    for ([_]bool{ false, true }) |destroy_first| {
+        const child = try ui.Scope.init(std.testing.allocator, w.scope, w.cx.owner);
+        const target = try ui.box(w.cx, .{}, .{});
+        try w.cx.root.?.appendChild(w.cx.allocator, target);
+        const hooks = w.cx.after_layout_hooks.items.len;
+        try w.source.isolate(child, target);
+        try w.source.isolate(child, target);
+        try std.testing.expectEqual(@as(usize, 0), target.children.items.len);
+        try std.testing.expectEqual(hooks, w.cx.after_layout_hooks.items.len);
+        if (destroy_first) {
+            w.cx.root.?.removeChild(target);
+            w.cx.destroyDetached(target);
+            try w.source.update(null, .{}, 1440, 900);
+            child.dispose();
+        } else {
+            child.dispose();
+            try std.testing.expectEqual(@as(usize, 0), target.children.items.len);
+            w.cx.root.?.removeChild(target);
+            w.cx.destroyDetached(target);
         }
-        w.card.setDisplay(.none);
-        for (0..4) |_| {
-            w.cx.requestRedraw();
-            const items = w.frame();
-            var image_count: usize = 0;
-            for (items) |item| switch (item) {
-                .image_quad => |image| if (image.texture_id == 777) {
-                    image_count += 1;
-                },
-                else => {},
-            };
-            try std.testing.expectEqual(@as(usize, 1), image_count);
-            var encoder_images: usize = 0;
-            for (w.cx.lowering.main_paint.items) |item| if (item.kind == .image and item.resource_handle == 777) {
-                encoder_images += 1;
-            };
-            try std.testing.expectEqual(@as(usize, 1), encoder_images);
-        }
+        _ = w.frame();
     }
 }
 
@@ -292,7 +182,7 @@ fn detailSnapshot() !detail.Snapshot {
     return snapshot;
 }
 
-test "isolated material survives real connection and status foreground rebuilds and lazy node dialog" {
+test "global background survives real connection and status foreground rebuilds and lazy node dialog" {
     const previous = theme.currentName();
     const visible = theme.materialVisible();
     defer {
@@ -307,14 +197,14 @@ test "isolated material survives real connection and status foreground rebuilds 
     const view = try detail.View.mount(w.cx, w.scope, .{ .context = w.source });
     try w.cx.root.?.appendChild(w.cx.allocator, view.root);
     try view.setMaterial(w.source);
-    const material_node = find(view.chrome, "appearance.surface").?;
+    try std.testing.expect(find(view.chrome, "appearance.surface") == null);
     const Callback = struct {
         fn copy(_: *anyopaque, _: detail.OperationKey, _: []const u8) !void {}
     };
     const info = try status_connection.View.mount(w.cx, w.scope, .{ .context = w.source, .copy = Callback.copy });
     try w.cx.root.?.appendChild(w.cx.allocator, info.root);
     try w.source.isolate(info.scope, info.chrome);
-    const info_material = find(info.chrome, "appearance.surface").?;
+    try std.testing.expect(find(info.chrome, "appearance.surface") == null);
     const material: assets.Materials = .{ .background = .{ .enabled = true, .path = "/fixture" } };
     try w.source.update(.{ .id = 777, .width = 640, .height = 256 }, material, 1440, 900);
     _ = w.frame();
@@ -325,29 +215,28 @@ test "isolated material survives real connection and status foreground rebuilds 
     for (0..3) |_| {
         try view.retheme();
         try view.flush();
-        try std.testing.expectEqual(material_node, find(view.chrome, "appearance.surface").?);
+        try std.testing.expect(find(view.chrome, "appearance.surface") == null);
         try info.retheme();
-        try std.testing.expectEqual(info_material, find(info.chrome, "appearance.surface").?);
+        try std.testing.expect(find(info.chrome, "appearance.surface") == null);
         _ = w.frame();
-        try std.testing.expectEqual(material_node, find(view.chrome, "appearance.surface").?);
-        try std.testing.expectEqual(info_material, find(info.chrome, "appearance.surface").?);
-        try std.testing.expectEqual(.flex, material_node.style.display);
-        try std.testing.expectEqual(.flex, info_material.style.display);
+        try std.testing.expect(find(view.chrome, "appearance.surface") == null);
+        try std.testing.expect(find(info.chrome, "appearance.surface") == null);
+        try std.testing.expectEqual(@as(usize, 1), imageCount(w.frame(), 777));
     }
     view.pending_selection = .{ .hop = 0 };
     try view.flush();
     _ = w.frame();
-    const node_material = find(view.node_modal.?.dialog, "appearance.surface").?;
-    try std.testing.expectEqual(.flex, node_material.style.display);
+    try std.testing.expect(find(view.node_modal.?.dialog, "appearance.surface") == null);
     var newer = snapshot;
     newer.revision = 2;
     try view.update(newer);
     try view.flush();
     _ = w.frame();
-    try std.testing.expectEqual(node_material, find(view.node_modal.?.dialog, "appearance.surface").?);
+    try std.testing.expect(find(view.node_modal.?.dialog, "appearance.surface") == null);
+    try std.testing.expectEqual(@as(usize, 1), imageCount(w.frame(), 777));
 }
 
-test "isolated material binds authentication created after startup and remains across challenges" {
+test "global background supports authentication created after startup and remains across challenges" {
     const previous = theme.currentName();
     const visible = theme.materialVisible();
     defer {
@@ -372,8 +261,8 @@ test "isolated material binds authentication created after startup and remains a
     _ = try bridge.offerChallenge(.{ .key = operation, .hop_index = 0, .kind = .host_key_unknown, .endpoint_identity = .{ .host = "target.example", .user = "operator", .port = 22 }, .prompts = &.{}, .presentation = .otp_modal, .presentation_config_revision = 1 });
     try auth.show(bridge.snapshot().?);
     _ = w.frame();
-    const surface = find(auth.modal.?.dialog, "appearance.surface").?;
-    try std.testing.expectEqual(.flex, surface.style.display);
+    try std.testing.expect(find(auth.modal.?.dialog, "appearance.surface") == null);
+    try std.testing.expectEqual(@as(usize, 1), imageCount(w.frame(), 777));
     auth.hide();
     bridge.cancel();
     bridge = .{};
@@ -382,7 +271,7 @@ test "isolated material binds authentication created after startup and remains a
     _ = try bridge.offerChallenge(.{ .key = next_operation, .hop_index = 0, .kind = .password, .endpoint_identity = .{ .host = "target.example", .user = "operator", .port = 22 }, .prompts = &.{.{ .text = "Password:", .echo = false }}, .presentation = .otp_modal, .presentation_config_revision = 1 });
     try auth.show(bridge.snapshot().?);
     _ = w.frame();
-    try std.testing.expectEqual(surface, find(auth.modal.?.dialog, "appearance.surface").?);
-    try std.testing.expectEqual(.flex, surface.style.display);
+    try std.testing.expect(find(auth.modal.?.dialog, "appearance.surface") == null);
+    try std.testing.expectEqual(@as(usize, 1), imageCount(w.frame(), 777));
     bridge.cancel();
 }

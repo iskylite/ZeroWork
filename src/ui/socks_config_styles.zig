@@ -1,16 +1,16 @@
 //! Bridge V2 configuration panels: 358:1367616 / 358:1368844 / 358:1369644.
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
-pub const width: f32 = 420;
-pub const panel_height: f32 = 396;
-// Header30 + footer30 + gaps18 + top17/bottom18.
-pub const chrome_height: f32 = 113;
-pub const inset: f32 = 14;
+pub const width: f32 = 480;
+pub const panel_height: f32 = 650;
+// Header30 + footer30 + two 12px gaps + top18/bottom18.
+pub const chrome_height: f32 = 120;
+pub const inset: f32 = 22;
 pub fn overlay() ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .display = .none, .z_index = 80, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .hit_behavior = .@"opaque" };
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .display = .none, .z_index = 80, .align_items = .center, .justify = .center, .background = ui.Color.BLACK.withAlpha(96), .hit_behavior = .@"opaque" };
 }
 pub fn panel() ui.BoxStyle {
-    return .{ .width = .{ .px = width }, .direction = .column, .padding = .{ .left = inset, .right = inset, .top = 17, .bottom = 18 }, .gap = 9, .background = theme.current().overlay, .border = .{ .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 24, .color = theme.current().shadow }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = width }, .direction = .column, .gap = 0, .background = theme.current().overlay, .border = .{ .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 24, .color = theme.current().shadow }, .flex_shrink = 0 };
 }
 pub fn row(height: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = height }, .direction = .row, .gap = 6, .align_items = .center, .flex_shrink = 0 };
@@ -31,3 +31,7 @@ pub fn text(size: f32, weight: u16, secondary: bool) ui.TextStyle {
     return .{ .font_size = size, .font_weight = weight, .line_height = (if (size == 13) @as(f32, 20) else @as(f32, 16)) / size, .color = if (secondary) theme.current().fg_2 else theme.current().fg_1, .selectable = false, .text_overflow = .ellipsis };
 }
 pub const repaint = @import("quick_connect_styles.zig").repaint;
+
+pub fn modeCard(selected: bool) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 54 }, .padding = ui.Padding.all(10), .background = if (selected) theme.current().selection else theme.current().well, .border = .{ .radius = 9 }, .flex_shrink = 0, .gap = 0 };
+}

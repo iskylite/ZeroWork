@@ -21,10 +21,10 @@ pub fn panel() ui.BoxStyle {
     const c = theme.current();
     return .{
         .background = c.overlay,
-        // The shared image layer owns blur. Blurring this card's backdrop
-        // would also include terminal text and apply the global blur twice.
-        .glass = .{ .backdrop_blur = 0, .glass_intensity = 0, .specular_opacity = 0, .refraction_level = 0, .warp_gain = 0 },
-        .border = .{ .width = 0, .color = c.border, .radius = 14 },
+        // Filter the existing window backdrop locally so workspace text does
+        // not compete with foreground content; the global image is drawn once.
+        .glass = theme.overlayGlass(),
+        .border = .{ .width = 0, .color = c.border, .radius = 11 },
         .shadow = .{ .blur = 32, .offset_y = 24, .color = c.shadow },
     };
 }
@@ -36,21 +36,21 @@ pub fn pointer() ui.BoxStyle {
 pub fn button(role: ButtonRole) ui.BoxStyle {
     return .{ .background = if (role == .icon) ui.Color.TRANSPARENT else theme.current().surface_2, .border = .{ .width = 0, .radius = if (role == .icon) 7 else 8 } };
 }
-pub const width: f32 = 360;
-pub const normal_height: f32 = 212;
-pub const body_height: f32 = 102;
-pub const chrome_height: f32 = 110;
+pub const width: f32 = 344;
+pub const normal_height: f32 = 271;
+pub const body_height: f32 = 144;
+pub const chrome_height: f32 = 127;
 pub fn header() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 6, .margin = .{ .bottom = 9 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 26 }, .direction = .row, .align_items = .center, .gap = 8, .margin = .{ .bottom = 12 }, .flex_shrink = 0 };
 }
 pub fn body() ui.BoxStyle {
-    return .{ .width = .fill(), .direction = .column, .gap = 6, .flex_shrink = 0, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 0, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn line(height: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = height }, .direction = .row, .align_items = .center, .gap = 4, .flex_shrink = 0, .min_width = 0, .overflow_hidden = true };
 }
 pub fn footer() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 6, .margin = .{ .top = 6 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 45 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .top = 12, .bottom = 2 }, .margin = .{ .top = 14 }, .flex_shrink = 0 };
 }
 pub fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };

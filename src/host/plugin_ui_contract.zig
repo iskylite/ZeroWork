@@ -13,11 +13,17 @@ pub const EditorEvents = struct {
     dismiss: ?*const fn (*anyopaque) void = null,
     cancelled: ?*const fn (*anyopaque) void = null,
 };
+pub const EditorProtocolPicker = struct {
+    context: *anyopaque,
+    mount: *const fn (*anyopaque, *ui.Cx, *ui.Scope) anyerror!*ui.Node,
+};
 pub const EditorMount = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
     slot: *ui.Node,
     protocol_id: []const u8,
+    /// Shared host component, instantiated in the editor scope.
+    protocol_picker: ?EditorProtocolPicker = null,
     initial: ?envelope.Envelope = null,
     draft_revision: u64,
     events: EditorEvents,
@@ -34,6 +40,12 @@ pub const EditorInstance = struct {
         clear_secrets: *const fn (*anyopaque) void,
         unmount: *const fn (*anyopaque) void,
         cancel: ?*const fn (*anyopaque) void = null,
+        /// Optional presentation preference for a compact confirmation state.
+        /// The host owns centering, viewport clamping and the modal itself.
+        preferred_modal_height: ?*const fn (*anyopaque) ?f32 = null,
+        /// Retain the editor scope and draft while a portaled child replaces
+        /// the parent's visible dialog. Host evaluates this at layout safety.
+        parent_presentation_visible: ?*const fn (*anyopaque) bool = null,
         visibility_changed: ?*const fn (*anyopaque, bool) void = null,
         child_completed: ?*const fn (*anyopaque, @import("content_context.zig").ChildCompletion) void = null,
     };

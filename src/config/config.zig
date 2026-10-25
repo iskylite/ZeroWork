@@ -235,6 +235,7 @@ pub const Config = struct {
         } else if (self.ai.providers.ptr == default_providers[0..].ptr) {
             self.ai.providers = a.dupe(AiProvider, self.ai.providers) catch return error.OutOfMemory;
         }
+        self.ai.provider_count = @max(self.ai.provider_count, i + 1);
         const suffix = rest[sep + 1 ..];
         const p = &self.ai.providers[i];
         if (eq(suffix, "name")) {
@@ -372,9 +373,9 @@ pub const Ai = struct {
     permission_mode: PermissionMode = .confirm,
     redact_ip: bool = false,
     error_hint: bool = true,
-    /// Provider slots are keyed by registry order: anthropic, openai_compat, ollama.
-    /// Empty slots mean the provider has not been configured by the user.
-    provider_count: usize = 3,
+    /// Legacy backing slots retain protocol identities for flat-key migration.
+    /// New installations have no Provider until the user adds one.
+    provider_count: usize = 0,
     providers: []AiProvider = @constCast(&default_providers),
 };
 pub const Log = struct { ring_mb: u16 = 64, checkpoint_sec: u16 = 30, retention_days: u16 = 14, export_format: []const u8 = "txt_cast" };
@@ -599,4 +600,20 @@ test "AI image token reservation round trips only explicit bounded values" {
     try std.testing.expectError(error.OutOfRange, Config.parseWithAllocator(arena.allocator(), prefix ++ "image_token_reservation=0\n"));
     try std.testing.expectError(error.OutOfRange, Config.parseWithAllocator(arena.allocator(), prefix ++ "image_token_reservation=131073\n"));
     try std.testing.expectError(error.Overflow, Config.parseWithAllocator(arena.allocator(), prefix ++ "image_token_reservation=-1\n"));
+}
+
+test "new configuration starts with no provider and flat legacy providers retain their protocol" {
+    const fresh = try Config.parse("");
+    try std.testing.expectEqual(@as(usize, 0), fresh.ai.provider_count);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const old = try Config.parseWithAllocator(arena.allocator(), "[ai]\nprovider_1_endpoint = \"https://gateway.example.test/v1\"\nprovider_1_enabled = false\n");
+    try std.testing.expectEqual(@as(usize, 2), old.ai.provider_count);
+    try std.testing.expectEqual(ProviderKind.openai_compat, old.ai.providers[1].kind);
+    try std.testing.expectEqualStrings("https://gateway.example.test/v1", old.ai.providers[1].endpoint);
+    var buffer: [8192]u8 = undefined;
+    const written = try old.format(&buffer);
+    const loaded = try Config.parseWithAllocator(arena.allocator(), written);
+    try std.testing.expectEqual(@as(usize, 2), loaded.ai.provider_count);
+    try std.testing.expectEqualStrings(old.ai.providers[1].endpoint, loaded.ai.providers[1].endpoint);
 }

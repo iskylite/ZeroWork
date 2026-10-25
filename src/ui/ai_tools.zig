@@ -44,6 +44,7 @@ pub const Bridge = struct {
     controller: ?*ControllerExchange = null,
     running: ?tools.DynamicInvocation = null,
     sequence: u64 = 0,
+    approval_target: [4096]u8 = undefined,
     stopped: std.atomic.Value(bool) = .init(false),
     owned_history: operations.Store,
     shared_history: ?*operations.Store = null,
@@ -229,7 +230,25 @@ pub const Bridge = struct {
         defer self.mutex.unlock();
         const current = self.pending orelse return null;
         if (current.decision != .pending or self.stopped.load(.acquire)) return null;
-        return .{ .group = current.invocation.table.captured_scope.owner == .group, .target = current.invocation.parsed.entry.definition.description, .tool_id = current.invocation.parsed.entry.definition.id, .owner = current.ticket.targets[0].owner, .cwd = null, .sequence = current.sequence, .arguments_hash = current.invocation.parsed.arguments_hash, .command = current.invocation.arguments, .call_id = current.invocation.call_id };
+        const group = current.invocation.table.captured_scope.owner == .group;
+        var target_writer: std.Io.Writer = .fixed(&self.approval_target);
+        for (current.ticket.targets[0..current.ticket.len], 0..) |target, index| {
+            var label: []const u8 = "会话";
+            for (self.children.items) |child| if (child.owner.eql(target.owner)) {
+                label = if (child.adapter) |adapter| adapter.vtable.label(adapter.context) else child.member.plugin_id;
+                break;
+            };
+            if (index != 0) target_writer.writeAll("、") catch {};
+            target_writer.writeAll(label) catch {};
+            if (group) target_writer.print(" · #{d}", .{@backingInt(target.owner.session_id)}) catch {};
+        }
+        const tool_id = current.invocation.parsed.entry.definition.id;
+        const arguments = current.invocation.parsed.json.value;
+        const command = if (std.mem.eql(u8, tool_id, "run_command") and arguments == .object) blk: {
+            const value = arguments.object.get("command") orelse break :blk current.invocation.arguments;
+            break :blk if (value == .string) value.string else current.invocation.arguments;
+        } else current.invocation.arguments;
+        return .{ .group = group, .target = target_writer.buffered(), .tool_id = tool_id, .owner = current.ticket.targets[0].owner, .cwd = null, .sequence = current.sequence, .arguments_hash = current.invocation.parsed.arguments_hash, .command = command, .call_id = current.invocation.call_id };
     }
     pub fn decide(self: *Bridge, sequence: u64, hash: [32]u8, approved: bool) !void {
         self.lock();

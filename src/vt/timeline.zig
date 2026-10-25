@@ -14,7 +14,7 @@ pub const Timeline = struct {
         timestamp_ms: i64,
         stream_offset: u64,
         payload: []u8,
-        kind: enum { output, resize } = .output,
+        kind: enum { output, resize, application } = .output,
     };
 
     pub fn init(allocator: std.mem.Allocator, max_events: usize, max_bytes: usize) !Timeline {
@@ -43,6 +43,20 @@ pub const Timeline = struct {
         errdefer self.allocator.free(owned);
         try self.events.append(self.allocator, .{ .timestamp_ms = timestamp_ms, .stream_offset = stream_offset, .payload = owned });
         self.bytes += owned.len;
+    }
+
+    pub fn appendApplication(self: *Timeline, record: @import("../host/terminal_service.zig").ApplicationRecord, stream_offset: u64) !void {
+        return self.appendApplicationAt(record, stream_offset, record.timestamp_ms);
+    }
+    pub fn appendApplicationAt(self: *Timeline, record: @import("../host/terminal_service.zig").ApplicationRecord, stream_offset: u64, event_ms: i64) !void {
+        const payload = try std.json.Stringify.valueAlloc(self.allocator, record, .{});
+        errdefer self.allocator.free(payload);
+        self.lock();
+        defer self.mutex.unlock();
+        if (payload.len > self.max_bytes) return error.EventTooLarge;
+        while (self.events.items.len >= self.max_events or self.bytes + payload.len > self.max_bytes) self.evictOldest();
+        try self.events.append(self.allocator, .{ .timestamp_ms = event_ms, .stream_offset = stream_offset, .payload = payload, .kind = .application });
+        self.bytes += payload.len;
     }
 
     pub fn appendTap(self: *Timeline, tap: *const raw_stream_tap.Tap, timestamp_ms: i64) !void {
@@ -82,6 +96,12 @@ pub const Timeline = struct {
 
     fn exportTextUnlocked(self: *const Timeline, writer: *std.Io.Writer) !void {
         for (self.events.items) |event| {
+            if (event.kind == .application) {
+                const value = try std.json.parseFromSlice(@import("../host/terminal_service.zig").ApplicationRecord, self.allocator, event.payload, .{});
+                defer value.deinit();
+                try writer.print("[{d}] ZeroWork #{d} {s}\n{s}\n", .{ event.timestamp_ms, value.value.id, value.value.command, value.value.output });
+                continue;
+            }
             try writer.print("[{d}] offset={d} ", .{ event.timestamp_ms, event.stream_offset });
             for (event.payload) |byte| {
                 switch (byte) {
@@ -113,6 +133,12 @@ pub const Timeline = struct {
             const monotonic_ms = @max(previous_ms, event.timestamp_ms);
             previous_ms = monotonic_ms;
             const elapsed = @as(f64, @floatFromInt(monotonic_ms - origin)) / 1000.0;
+            if (event.kind == .application) {
+                try writer.print("[{d:.3},\"a\",", .{elapsed});
+                try std.json.Stringify.value(event.payload, .{}, writer);
+                try writer.writeAll("]\n");
+                continue;
+            }
             if (event.kind == .resize) {
                 try writer.print("[{d:.3},\"r\",\"{s}\"]\n", .{ elapsed, event.payload });
                 continue;

@@ -9,14 +9,14 @@ pub fn width(kind: Kind) f32 {
         .permission => 344,
         .model => 336,
         .effort => 276,
-        .usage => 288,
+        .usage => 344,
     };
 }
 pub fn height(kind: Kind) f32 {
     return switch (kind) {
         .attachment => 166,
         .permission => 194,
-        .model => 272,
+        .model => 321.5,
         .effort => 86,
         .usage => 156,
     };
@@ -80,7 +80,7 @@ pub fn wrapper() ui.BoxStyle {
 }
 pub fn panel(kind: Kind, viewport: ui.Size) ui.BoxStyle {
     const panel_height = @min(height(kind), @max(0, viewport.height - 16));
-    return .{ .width = .{ .px = @min(width(kind), @max(0, viewport.width - 16)) }, .height = .{ .px = panel_height }, .min_height = panel_height, .direction = .column, .padding = if (kind == .model) ui.Padding.all(8) else if (kind == .attachment) ui.Padding.all(10) else .{ .top = 10, .left = 12, .right = 12, .bottom = 12 }, .gap = if (kind == .attachment or kind == .model) 6 else 8, .background = theme.current().overlay, .border = .{ .width = 0, .radius = if (kind == .attachment or kind == .usage) 11 else 14 }, .shadow = .{ .offset_y = 12, .blur = 24, .color = theme.current().shadow } };
+    return .{ .width = .{ .px = @min(width(kind), @max(0, viewport.width - 16)) }, .height = .{ .px = panel_height }, .min_height = panel_height, .direction = .column, .padding = if (kind == .model) ui.Padding.all(15) else if (kind == .attachment) ui.Padding.all(10) else if (kind == .usage) ui.Padding.all(14) else .{ .top = 10, .left = 12, .right = 12, .bottom = 12 }, .gap = if (kind == .attachment or kind == .model) 6 else 8, .background = theme.current().overlay, .border = .{ .width = if (kind == .model or kind == .usage) 1 else 0, .color = theme.current().border, .radius = if (kind == .attachment or kind == .usage or kind == .model) 11 else 14 }, .shadow = .{ .offset_y = 12, .blur = 24, .color = theme.current().shadow } };
 }
 pub fn header() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 };
@@ -114,7 +114,7 @@ pub fn slider() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 16 }, .padding = .{ .left = 12, .right = 12, .top = 5, .bottom = 0 }, .flex_shrink = 0 };
 }
 pub fn sliderTick(index: usize, count: usize) ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = -2 + @as(f32, @floatFromInt(index)) * 284 / @as(f32, @floatFromInt(@max(2, count) - 1)) }, .top = .{ .px = 4 } }, .width = .{ .px = 4 }, .height = .{ .px = 4 }, .background = theme.current().accent, .border = .{ .radius = 2 } };
+    return .{ .position = .absolute, .inset = .{ .left = .{ .percent = @as(f32, @floatFromInt(index)) * 100 / @as(f32, @floatFromInt(@max(2, count) - 1)) }, .top = .{ .px = 4 } }, .margin = .{ .left = -2 }, .width = .{ .px = 4 }, .height = .{ .px = 4 }, .background = theme.current().accent, .border = .{ .radius = 2 } };
 }
 pub fn sliderThumb() ui.BoxStyle {
     return .{ .background = theme.current().accent, .border = .{ .width = 0, .radius = 6 }, .shadow = .{ .color = ui.Color.TRANSPARENT } };
@@ -152,19 +152,21 @@ pub fn modelCard(h: f32) ui.BoxStyle {
 }
 pub fn modelHeader() ui.BoxStyle {
     var s = header();
-    s.height = .{ .px = 24 };
-    s.gap = 4;
+    s.height = .{ .px = 26 };
+    s.padding = .{ .top = 2 };
+    s.margin = .{ .bottom = 6 };
+    s.gap = 8;
     return s;
 }
 pub fn modelListCard(h: f32) ui.BoxStyle {
     var s = modelCard(h);
-    s.padding = ui.Padding.all(6);
+    s.padding = .{ .top = 4, .bottom = 4, .left = 6, .right = 6 };
     s.gap = 0;
-    s.flex_shrink = 1;
+    s.flex_shrink = 0;
     return s;
 }
 pub fn groupLabel() ui.BoxStyle {
-    var s = option(30, false);
+    var s = option(24, false);
     s.background = ui.Color.TRANSPARENT;
     return s;
 }
@@ -172,6 +174,14 @@ pub fn combinedEffortLabel() ui.BoxStyle {
     return slot(134, 4, 32, 16);
 }
 
+pub fn modelOption(selected: bool) ui.BoxStyle {
+    var s = option(30, selected);
+    s.padding = .{ .left = 6, .right = 6 };
+    s.gap = 8;
+    s.background = if (selected) theme.current().selection else ui.Color.TRANSPARENT;
+    s.border = .{ .radius = 6 };
+    return s;
+}
 pub fn modelRowWrapper() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 30 }, .min_width = 0 };
 }
@@ -221,4 +231,22 @@ pub fn modelMarkerText() ui.TextStyle {
     value.color = theme.current().accent;
     value.text_align = .center;
     return value;
+}
+
+// The usage panel owns the full-width native action, matching its option rows.
+pub fn compactionButton() ui.BoxStyle {
+    var style = option(28, false);
+    style.width = .{ .px = 112 };
+    style.flex_shrink = 0;
+    return style;
+}
+
+pub fn compactionStatus() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 84 }, .direction = .row, .background = theme.current().well, .border = .{ .radius = 8 }, .overflow = .hidden, .margin = .{ .top = 8, .left = 1, .right = 1 }, .flex_shrink = 0 };
+}
+pub fn compactionStatusBody() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .direction = .column, .padding = .{ .top = 10, .bottom = 10, .left = 12, .right = 12 }, .gap = 4 };
+}
+pub fn compactionFooter() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .justify = .end, .align_items = .center, .gap = 8, .flex_shrink = 0 };
 }

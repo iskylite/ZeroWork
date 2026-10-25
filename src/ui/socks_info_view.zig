@@ -6,7 +6,11 @@ const S = @import("socks_info_styles.zig");
 
 pub const State = enum { off, connecting, running, paused, failed };
 pub const Data = struct {
+    mode: @import("../proto/ssh/socks5_listener.zig").ForwardMode = .socks5,
+    target_host: []const u8 = "",
+    target_port: u16 = 0,
     state: State = .off,
+    configured: bool = false,
     port: u16 = 1080,
     bind: []const u8 = "127.0.0.1",
     host: []const u8 = "",
@@ -34,76 +38,102 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     const self = try cx.allocator.create(View);
     self.* = .{ .cx = cx, .scope = scope, .hooks = hooks, .root = undefined, .body = undefined, .header = undefined, .footer = undefined, .status = undefined, .address = undefined, .bind_note = undefined, .exit = undefined, .route = undefined, .statistics = undefined, .message = undefined, .control_text = undefined, .test_button = undefined, .copy_button = undefined, .config_button = undefined, .control_button = undefined, .pointer = undefined, .protocol = undefined, .owner = undefined, .title_icon = undefined, .close_button = undefined, .test_disabled = try scope.createSignal(bool, true), .control_disabled = try scope.createSignal(bool, false) };
     try scope.onCleanup(View, self, View.cleanup);
+    const focus_guard = try scope.childScope();
+    self.open = try scope.createSignal(bool, false);
+    const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = false, .shift_main_axis = false, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.openChanged) }).mount(scope, cx);
+    self.scope = popup.scope;
+    self.wrapper = popup.wrapper;
+    self.portaled = popup.portaled;
+    self.frame = popup.content;
+    self.frame.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .column, .gap = 0, .padding = .{} });
+    try focus_guard.onCleanup(View, self, View.releaseFocus);
     var panel_style = S.panel();
     panel_style.position = .absolute;
-    panel_style.inset = .{ .right = .{ .px = 24 }, .bottom = .{ .px = 62 } };
     panel_style.width = .{ .px = S.width };
     panel_style.height = .{ .px = S.normal_height };
     panel_style.direction = .column;
     panel_style.display = .none;
-    panel_style.padding = .{ .left = 14, .right = 14, .top = 17, .bottom = 18 };
+    panel_style.padding = ui.Padding.all(15);
     panel_style.gap = 0;
-    panel_style.z_index = 50;
     panel_style.flex_shrink = 0;
-    self.root = try ui.box(cx, panel_style, .{});
+    self.root = popup.chrome;
+    self.root.setStyleInline(cx.allocator, panel_style);
     self.root.meta.ownership.meta.test_id = "socks.info";
     self.pointer = try ui.iconTint(cx, ui.icons.get("chevron-down").?, S.theme.current().fg_3, S.icon(12));
+    self.pointer.setDisplay(.none);
     self.pointer.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .bottom = .{ .px = 0 }, .right = .{ .px = 64 } }, .z_index = 51 });
     try self.root.appendChild(cx.allocator, self.pointer);
     self.header = try ui.box(cx, S.header(), .{});
-    self.title_icon = try ui.iconTint(cx, ui.icons.get("plug-zap").?, S.theme.current().accent, S.icon(18));
+    self.title_icon = try ui.iconTint(cx, ui.icons.get("plug-zap").?, S.theme.current().accent, S.icon(14));
     try self.header.appendChild(cx.allocator, self.title_icon);
-    try self.header.appendChild(cx.allocator, try text(self, "SOCKS5 转发", 13, 700, .primary, false));
+    self.title = try text(self, "端口转发", 12, 700, .primary, false);
+    try self.header.appendChild(cx.allocator, self.title);
     try self.header.appendChild(cx.allocator, try ui.spacer(cx));
-    self.close_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "关闭 SOCKS5 信息", .on_click = cx.on(View, self, View.hide) }).mount(scope, cx);
-    self.close_button.setStyleInline(cx.allocator, S.iconButton(26));
+    self.close_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "关闭端口转发信息", .base_style = S.iconButton(24), .hover_style = .{ .background = S.theme.current().hover }, .on_click = cx.on(View, self, View.hide) }).mount(scope, cx);
+    self.close_button.setStyleInline(cx.allocator, S.iconButton(24));
     try self.close_button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.x, S.theme.current().fg_2, S.icon(14)));
     self.close_button.meta.ownership.meta.test_id = "socks.info.close";
     try self.header.appendChild(cx.allocator, self.close_button);
-    try self.root.appendChild(cx.allocator, self.header);
+    try self.frame.appendChild(cx.allocator, self.header);
     self.body = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
     self.body.container.style.width = .fill();
     self.body.container.style.height = .{ .px = S.body_height };
     self.body.container.style.flex_shrink = 0;
     self.body.content.setStyleInline(cx.allocator, S.body());
-    try self.root.appendChild(cx.allocator, self.body.container);
-    const identity = try ui.box(cx, S.line(16), .{});
-    self.owner = try text(self, "归属", 9.5, 400, .secondary, false);
-    self.exit = try text(self, "—", 9.5, 400, .secondary, false);
-    self.route = try text(self, "", 9.5, 400, .muted, false);
-    self.address = try text(self, "", 9.5, 400, .primary, true);
-    self.bind_note = try text(self, "", 9.5, 400, .muted, false);
-    self.bind_note.setDisplay(.none);
+    try self.frame.appendChild(cx.allocator, self.body.container);
+    self.intro = try text(self, "每个 SSH 会话同时运行一个转发，停止后可切换模式。", 10.5, 400, .secondary, false);
+    self.intro.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 18 }, .flex_shrink = 0 });
+    try self.body.content.appendChild(cx.allocator, self.intro);
+    self.empty = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 126 }, .direction = .column, .align_items = .center, .justify = .center, .gap = 10, .flex_shrink = 0 }, .{});
+    self.empty.meta.ownership.meta.test_id = "socks.info.empty";
+    try self.empty.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("plug-zap").?, S.theme.current().fg_3, S.icon(24)));
+    try self.empty.appendChild(cx.allocator, try text(self, "没有转发规则", 12, 500, .primary, false));
+    try self.empty.appendChild(cx.allocator, try text(self, "本地 L · 远端 R · 动态 SOCKS5", 10, 400, .secondary, false));
+    try self.body.content.appendChild(cx.allocator, self.empty);
+    self.rule = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 6, .padding = ui.Padding.all(10), .margin = .{ .top = 10 }, .background = S.theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
+    self.rule.meta.ownership.meta.test_id = "socks.info.rule";
+    const identity = try ui.box(cx, S.line(18), .{});
+    self.owner = try text(self, "归属", 10, 400, .secondary, false);
+    self.owner.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+    self.exit = try text(self, "—", 9, 400, .secondary, false);
+    self.route = try text(self, "", 9, 400, .muted, false);
+    self.address = try text(self, "", 11, 500, .primary, true);
+    self.address.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 32 }, .flex_shrink = 0 });
+    if (self.address.getText()) |old| {
+        var style = old;
+        style.wrap = .char;
+        self.address.setText(style);
+    }
+    self.bind_note = try text(self, "", 10, 400, .muted, false);
+    self.status = try text(self, "未开启", 9, 500, .muted, false);
     try identity.appendChild(cx.allocator, self.owner);
-    try identity.appendChild(cx.allocator, self.exit);
-    try identity.appendChild(cx.allocator, self.route);
-    try identity.appendChild(cx.allocator, self.address);
-    try identity.appendChild(cx.allocator, self.bind_note);
-    try self.body.content.appendChild(cx.allocator, identity);
-    var listener_style = S.line(26);
-    listener_style.padding = .{ .left = 6, .right = 6 };
-    listener_style.gap = 6;
-    const listener = try ui.box(cx, listener_style, .{});
-    try listener.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("plug-zap").?, S.theme.current().ok_ink, S.icon(14)));
-    try listener.appendChild(cx.allocator, try text(self, "监听状态", 11, 400, .primary, false));
-    try listener.appendChild(cx.allocator, try ui.spacer(cx));
-    self.status = try text(self, "未开启", 10.5, 500, .muted, false);
-    try listener.appendChild(cx.allocator, self.status);
-    try self.body.content.appendChild(cx.allocator, listener);
-    const statistics = try ui.box(cx, S.line(26), .{});
-    self.statistics = try text(self, "0 B ↓ · 0 B ↑", 17, 500, .primary, false);
-    try statistics.appendChild(cx.allocator, self.statistics);
-    try self.body.content.appendChild(cx.allocator, statistics);
+    try identity.appendChild(cx.allocator, self.status);
+    try self.rule.appendChild(cx.allocator, identity);
+    self.mode_label = try text(self, "SOCKS5", 11, 500, .primary, false);
+    try self.rule.appendChild(cx.allocator, self.mode_label);
+    try self.rule.appendChild(cx.allocator, self.address);
+    try self.rule.appendChild(cx.allocator, self.bind_note);
+    try self.rule.appendChild(cx.allocator, self.exit);
+    try self.rule.appendChild(cx.allocator, self.route);
+    self.statistics = try text(self, "0 B ↓ · 0 B ↑", 11, 500, .primary, false);
+    try self.rule.appendChild(cx.allocator, self.statistics);
     self.protocol = try text(self, "0 个活跃连接 · 仅 TCP CONNECT · UDP 不支持", 10, 400, .secondary, false);
-    try self.body.content.appendChild(cx.allocator, self.protocol);
+    try self.rule.appendChild(cx.allocator, self.protocol);
+    try self.body.content.appendChild(cx.allocator, self.rule);
     self.message = try text(self, "", 10.5, 400, .secondary, false);
+    self.message.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 32 }, .margin = .{ .top = 8 }, .flex_shrink = 0 });
+    if (self.message.getText()) |old| {
+        var style = old;
+        style.wrap = .word;
+        self.message.setText(style);
+    }
     self.message.setDisplay(.none);
     try self.body.content.appendChild(cx.allocator, self.message);
     const foot = try ui.box(cx, S.footer(), .{});
     self.footer = foot;
     self.copy_button = try button(self, foot, "复制代理", .copy_export);
     self.test_button = try button(self, foot, "测试", .test_proxy);
-    self.config_button = try button(self, foot, "配置 SOCKS5", .config);
+    self.config_button = try button(self, foot, "添加转发", .config);
     try foot.appendChild(cx.allocator, try ui.spacer(cx));
     self.control_button = try button(self, foot, "开启", .start);
     self.status.meta.ownership.meta.test_id = "socks.info.status";
@@ -114,7 +144,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     self.copy_button.meta.ownership.meta.test_id = "socks.info.copy";
     self.config_button.meta.ownership.meta.test_id = "socks.info.config";
     self.control_button.meta.ownership.meta.test_id = "socks.info.control";
-    try self.root.appendChild(cx.allocator, foot);
+    try self.frame.appendChild(cx.allocator, foot);
     try self.update(.{});
     try cx.addAfterLayoutHook(self, View.afterLayout);
     return self;
@@ -125,6 +155,10 @@ pub const View = struct {
     scope: *ui.Scope,
     hooks: Hooks,
     root: *ui.Node,
+    wrapper: *ui.Node = undefined,
+    frame: *ui.Node = undefined,
+    open: *ui.Signal(bool) = undefined,
+    portaled: bool = false,
     body: ui.widgets.ScrollAreaResult,
     header: *ui.Node,
     footer: *ui.Node,
@@ -144,7 +178,14 @@ pub const View = struct {
     protocol: *ui.Node,
     owner: *ui.Node,
     title_icon: *ui.Node,
+    title: *ui.Node = undefined,
     close_button: *ui.Node,
+    intro: *ui.Node = undefined,
+    empty: *ui.Node = undefined,
+    rule: *ui.Node = undefined,
+    mode_label: *ui.Node = undefined,
+    config_text: *ui.Node = undefined,
+    has_rule: bool = false,
     test_disabled: *ui.Signal(bool),
     control_disabled: *ui.Signal(bool),
     button_paints: [4]struct { style: *ui.Signal(ui.BoxStyle), action: Action } = undefined,
@@ -164,16 +205,27 @@ pub const View = struct {
     pub fn update(self: *View, data: Data) !void {
         self.state = data.state;
         self.message_is_error = data.error_text.len > 0;
-        var buffer: [128]u8 = undefined;
-        try self.address.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "{s}:{d}", .{ data.bind, data.port }));
-        try self.bind_note.setTextContent(self.cx.allocator, if (std.mem.eql(u8, data.bind, "0.0.0.0")) "局域网可访问" else "仅本机");
+        self.has_rule = data.configured or data.state != .off;
+        self.empty.setDisplay(if (self.has_rule) .none else .flex);
+        self.rule.setDisplay(if (self.has_rule) .flex else .none);
+        self.control_button.setDisplay(if (self.has_rule) .flex else .none);
+        try self.config_text.setTextContent(self.cx.allocator, if (self.has_rule) "编辑配置" else "＋ 添加转发");
+        try self.mode_label.setTextContent(self.cx.allocator, switch (data.mode) {
+            .socks5 => "SOCKS5 · 动态目标",
+            .local => "本地 L",
+            .remote => "远端 R",
+        });
+        var buffer: [384]u8 = undefined;
+        try self.address.setTextContent(self.cx.allocator, if (data.mode == .socks5) try std.fmt.bufPrint(&buffer, "{s}:{d}", .{ data.bind, data.port }) else try std.fmt.bufPrint(&buffer, "{s}:{d} → {s}:{d}", .{ data.bind, data.port, data.target_host, data.target_port }));
+        try self.bind_note.setTextContent(self.cx.allocator, if (data.mode == .remote) "监听位于SSH端 · 目标位于本机" else if (std.mem.eql(u8, data.bind, "0.0.0.0")) "局域网可访问" else "仅本机");
         try self.exit.setTextContent(self.cx.allocator, if (data.session_id != null and std.mem.eql(u8, data.host, if (data.exit.len > 0) data.exit else data.host)) "出口" else if (data.exit.len > 0) data.exit else if (data.host.len > 0) data.host else "—");
         try self.route.setTextContent(self.cx.allocator, data.route);
+        self.route.setDisplay(if (data.route.len == 0) .none else .flex);
         var count_buffer: [192]u8 = undefined;
         var down_buf: [32]u8 = undefined;
         var up_buf: [32]u8 = undefined;
         try self.statistics.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "{s} ↓ · {s} ↑", .{ try formatBytes(&down_buf, data.downloaded), try formatBytes(&up_buf, data.uploaded) }));
-        try self.protocol.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "{d} 个活跃连接 · 仅 TCP CONNECT · UDP 不支持", .{data.connections}));
+        try self.protocol.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "{d} 个活跃连接 · {s}", .{ data.connections, if (data.mode == .socks5) "仅 TCP CONNECT · UDP 不支持" else "固定TCP目标" }));
         if (data.session_id) |session_id| {
             try self.owner.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "归属 {s} #{d} ·", .{ data.host, session_id }));
         } else {
@@ -186,10 +238,14 @@ pub const View = struct {
             .paused => "◌ 已暂停(断线)",
             .failed => "开启失败",
         });
-        self.test_disabled.set(data.state != .running);
+        self.test_disabled.set(data.state != .running or data.mode != .socks5);
+        self.copy_button.setDisplay(if (self.has_rule and data.mode == .socks5) .flex else .none);
+        self.test_button.setDisplay(if (self.has_rule and data.mode == .socks5) .flex else .none);
         self.control_disabled.set(data.state == .connecting);
         const active = data.state == .running or data.state == .paused;
         try self.control_text.setTextContent(self.cx.allocator, if (active) "停止" else "开启");
+        if (self.control_button.behavior.interaction.a11y) |*attrs| attrs.label = if (active) "停止转发" else "开启转发";
+        if (self.config_button.behavior.interaction.a11y) |*attrs| attrs.label = if (self.has_rule) "编辑转发配置" else "添加转发";
         const message = if (data.error_text.len > 0) data.error_text else data.test_result;
         try self.message.setTextContent(self.cx.allocator, message);
         self.message.setDisplay(if (message.len > 0) .flex else .none);
@@ -205,10 +261,11 @@ pub const View = struct {
         if (self.paint_colors) |old| if (std.meta.eql(old, colors)) return;
         if (self.paint_colors) |previous| repaintIcons(self.root, previous);
         self.root.setStyleInline(self.cx.allocator, S.panel());
+        self.rule.setBackground(colors.well);
         self.pointer.setStyleInline(self.cx.allocator, S.pointer());
         _ = self.title_icon.setTint(colors.accent);
         _ = self.pointer.setTint(colors.fg_3);
-        self.close_button.setStyleInline(self.cx.allocator, S.iconButton(26));
+        self.close_button.setStyleInline(self.cx.allocator, S.iconButton(24));
         for (self.button_paints[0..self.button_count]) |paint| paint.style.set(buttonStyle(paint.action));
         for (self.painted_text.items) |item| setColor(item.node, S.text(item.role));
         self.paint_colors = colors;
@@ -224,11 +281,18 @@ pub const View = struct {
             .off => c.fg_3,
         });
         setColor(self.control_text, c.fg_2);
+        setColor(self.config_text, ui.Color.WHITE);
+        for (self.button_paints[0..self.button_count]) |paint| if (paint.action == .config) {
+            var style = buttonStyle(.config);
+            style.background = c.accent;
+            paint.style.set(style);
+        };
         setColor(self.message, if (self.message_is_error) c.danger_ink else c.fg_2);
     }
     pub fn show(self: *View, anchor: ui.ComputedRect) void {
         self.anchor_node = null;
         self.anchor = anchor;
+        self.open.set(true);
         self.root.setDisplay(.flex);
         self.cx.requestRedraw();
     }
@@ -238,70 +302,57 @@ pub const View = struct {
     pub fn showNode(self: *View, anchor: *ui.Node) void {
         self.anchor_node = anchor;
         self.anchor = anchor.globalRect();
+        self.open.set(true);
         self.root.setDisplay(.flex);
         self.cx.requestRedraw();
     }
     pub fn hide(self: *View) void {
+        self.open.set(false);
         self.root.setDisplay(.none);
         self.cx.requestRedraw();
     }
     /// Public for layout tests and host resize integration.
     pub fn updateGeometry(self: *View) bool {
         if (self.root.style.display == .none) return false;
-        const parent = self.root.parent orelse return false;
-        const bounds = parent.globalRect();
-        if (bounds.w <= 0 or bounds.h <= 0) return false;
-        const width = @max(@as(f32, 1), @min(S.width, bounds.w - 16));
-        const available = @max(@as(f32, 1), bounds.h - 16);
-        const natural: f32 = S.body_height + (if (self.message.style.display != .none or self.state != .running) @as(f32, 22) else 0);
-        const fixed: f32 = S.chrome_height;
-        const body_h = @min(natural, @max(@as(f32, 1), available - fixed));
-        const card_h = body_h + fixed;
-        // Original card is at the lower-right, 34px above the statusbar. The
-        // status chip is the trigger, not a floating object over terminal text.
-        const anchor = if (self.anchor_node) |node| node.globalRect() else self.anchor orelse ui.ComputedRect{ .x = bounds.x, .y = bounds.y + bounds.h - 28, .w = 0, .h = 0 };
-        const status_top = if (self.anchor_node) |node| if (node.parent) |parent_node| if (parent_node.meta.ownership.meta.test_id != null and std.mem.eql(u8, parent_node.meta.ownership.meta.test_id.?, "workspace.statusbar")) parent_node.globalRect().y else anchor.y else anchor.y else anchor.y;
-        const ideal_y = status_top - bounds.y - 6 - card_h;
-        const top = std.math.clamp(ideal_y, @as(f32, 8), @max(@as(f32, 8), bounds.h - card_h - 8));
-        // Center the card on the live trigger first, then clamp it inside the
-        // parent.  A fixed right inset makes the card appear stuck while the
-        // status chip moves during resize/reflow.
-        const desired_root_x = anchor.x + anchor.w / 2 - width / 2;
-        const desired_right = bounds.x + bounds.w - desired_root_x - width;
-        const right = std.math.clamp(desired_right, @as(f32, 8), @max(@as(f32, 8), bounds.w - width - 8));
-        const ext = self.root.style.ensureExtPanic(self.cx.allocator);
-        // Keep the pointer centered on the trigger, clamped inside the card.
-        // A fixed `right: 64px` drifts when the chip width or window changes.
-        const root_x = bounds.x + bounds.w - right - width;
-        const pointer_left = std.math.clamp(anchor.x + anchor.w / 2 - root_x - 6, @as(f32, 8), @max(@as(f32, 8), width - 20));
-        const pointer_right = width - pointer_left - 12;
+        if (self.anchor_node) |node| if (!node.isDisplayedInTree()) {
+            self.hide();
+            return false;
+        };
+        const upper = anchorRect(self).y;
+        const available = @max(@as(f32, 1), @min(self.cx.viewport.height - 16, upper - 14));
+        const width = @max(@as(f32, 1), @min(S.width, self.cx.viewport.width - 16));
+        const natural = @max(S.body_height, self.body.content.globalRect().h);
+        const body_h = @min(natural, @max(@as(f32, 1), available - S.chrome_height));
+        const card_h = body_h + S.chrome_height;
         var changed = false;
         if (self.root.style.width != .px or @abs(self.root.style.width.px - width) > 0.5) {
-            self.root.style.width = .{ .px = width };
+            self.root.setStyleInline(self.cx.allocator, .{ .width = .{ .px = width } });
             changed = true;
         }
         if (self.root.style.height != .px or @abs(self.root.style.height.px - card_h) > 0.5) {
-            self.root.style.height = .{ .px = card_h };
+            self.root.setStyleInline(self.cx.allocator, .{ .height = .{ .px = card_h } });
             changed = true;
         }
         if (self.body.container.style.height != .px or @abs(self.body.container.style.height.px - body_h) > 0.5) {
-            self.body.container.style.height = .{ .px = body_h };
-            self.body.container.markLayoutDirty();
+            self.body.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = body_h } });
             changed = true;
         }
-        if (ext.inset.top != .px or @abs(ext.inset.top.px - top) > 0.5 or ext.inset.right != .px or @abs(ext.inset.right.px - right) > 0.5) {
-            ext.inset.top = .{ .px = top };
-            ext.inset.right = .{ .px = right };
-            ext.inset.bottom = .auto;
-            changed = true;
+        if (changed) {
+            self.root.markLayoutDirty();
+            self.cx.requestRedraw();
         }
-        const pointer_ext = self.pointer.style.ensureExtPanic(self.cx.allocator);
-        if (pointer_ext.inset.right != .px or @abs(pointer_ext.inset.right.px - pointer_right) > 0.5) {
-            pointer_ext.inset.right = .{ .px = pointer_right };
-            changed = true;
-        }
-        if (changed) self.root.markLayoutDirty();
         return changed;
+    }
+    fn anchorRect(raw: *anyopaque) ui.widgets.popover.AnchorRect {
+        const self: *View = @ptrCast(@alignCast(raw));
+        const rect = if (self.anchor_node) |node| node.globalRect() else self.anchor orelse ui.ComputedRect{ .x = 8, .y = self.cx.viewport.height - 32, .w = 0, .h = 0 };
+        return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+    }
+    fn openChanged(self: *View, value: bool) void {
+        if (!value) self.hide();
+    }
+    fn releaseFocus(self: *View) void {
+        if (self.cx.focus_manager.current_focus) |focused| if (focused.isDescendantOf(self.root)) self.cx.clearFocus();
     }
     pub fn dispatch(self: *View, requested: Action) void {
         const action = if (requested == .start or requested == .stop) (if (self.state == .running or self.state == .paused) Action.stop else Action.start) else requested;
@@ -349,7 +400,7 @@ fn formatBytes(buffer: []u8, value: u64) ![]const u8 {
     return std.fmt.bufPrint(buffer, "{d} B", .{value});
 }
 fn button(self: *View, parent: *ui.Node, label: []const u8, action: Action) !*ui.Node {
-    const icon_only = action == .copy_export or action == .config;
+    const icon_only = action == .copy_export;
     const click = try self.cx.allocator.create(Click);
     click.* = .{ .view = self, .action = action };
     try self.scope.onCleanup(Click, click, Click.cleanup);
@@ -357,15 +408,16 @@ fn button(self: *View, parent: *ui.Node, label: []const u8, action: Action) !*ui
     const paint = try self.scope.createSignal(ui.BoxStyle, buttonStyle(action));
     self.button_paints[self.button_count] = .{ .style = paint, .action = action };
     self.button_count += 1;
-    const node = try ui.widgets.Button(.{ .base_style = paint, .variant = .ghost, .icon_only = icon_only, .a11y_label = label, .disabled = if (disabled) |signal| ui.Source(bool){ .signal = signal } else ui.Source(bool){ .value = false }, .on_click = self.cx.on(Click, click, Click.invoke) }).mount(self.scope, self.cx);
+    const node = try ui.widgets.Button(.{ .base_style = paint, .variant = .ghost, .hover_style = .{ .background = if (action == .config) S.theme.current().accent else S.theme.current().hover }, .icon_only = icon_only, .a11y_label = label, .disabled = if (disabled) |signal| ui.Source(bool){ .signal = signal } else ui.Source(bool){ .value = false }, .on_click = self.cx.on(Click, click, Click.invoke) }).mount(self.scope, self.cx);
     if (icon_only) {
         try node.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get(if (action == .copy_export) "copy" else "settings-2").?, S.theme.current().fg_2, S.icon(if (action == .config) @as(f32, 14) else 16)));
     } else {
         const copy = try text(self, label, 12, 500, .secondary, false);
         if (action == .start) self.control_text = copy;
+        if (action == .config) self.config_text = copy;
         try node.appendChild(self.cx.allocator, copy);
     }
-    try parent.appendChild(self.cx.allocator, node);
+    try parent.appendChild(self.cx.allocator, if (icon_only) try @import("connection_details_view.zig").iconTooltip(self.cx, self.scope, node, label) else node);
     return node;
 }
 
@@ -384,14 +436,15 @@ fn repaintIcons(node: *ui.Node, previous: S.theme.Colors) void {
 }
 
 fn buttonStyle(action: Action) ui.BoxStyle {
-    const icon_only = action == .copy_export or action == .config;
+    const icon_only = action == .copy_export;
     var skin = S.button(if (action == .config) .icon else .ordinary);
     skin.width = .{ .px = switch (action) {
-        .copy_export, .config => 28,
+        .copy_export => 24,
+        .config => 96,
         .test_proxy => 58,
         else => 82,
     } };
-    skin.height = .{ .px = if (action == .config) 26 else if (icon_only) 28 else 30 };
+    skin.height = .{ .px = if (icon_only) 24 else 30 };
     skin.padding = .{};
     skin.gap = 0;
     skin.flex_shrink = 0;

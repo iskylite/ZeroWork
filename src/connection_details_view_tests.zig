@@ -105,7 +105,7 @@ fn hasText(node: *ui.Node, text: []const u8) bool {
     return false;
 }
 
-test "connection details view copies direct and ordered route facts at the three Figma heights" {
+test "connection details view copies direct and ordered route facts in the V3 node list" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -113,18 +113,18 @@ test "connection details view copies direct and ordered route facts at the three
         var source = try snapshot(count);
         source.revision = count;
         try f.show(source);
-        try std.testing.expectEqual(@as(f32, 560), f.view.chrome.globalRect().w);
+        try std.testing.expectEqual(@as(f32, 344), f.view.chrome.globalRect().w);
         try std.testing.expectEqual(S.height(count), f.view.chrome.globalRect().h);
         try std.testing.expectEqual(count + 1, f.view.row_count);
-        try std.testing.expectEqual(@as(f32, 46), f.view.rows[1].?.globalRect().h);
-        try std.testing.expectApproxEqAbs(@as(f32, 32), f.view.row_names[1].?.globalRect().x - f.view.rows[1].?.globalRect().x, 0.01);
-        try std.testing.expectApproxEqAbs(@as(f32, 5), f.view.row_names[1].?.globalRect().y - f.view.rows[1].?.globalRect().y, 0.01);
-        try std.testing.expectEqual(@as(f32, 332), f.view.source_label.?.parent.?.globalRect().w);
+        try std.testing.expectEqual(@as(f32, 52), f.view.rows[1].?.globalRect().h);
+        try std.testing.expectApproxEqAbs(@as(f32, 34), f.view.row_names[1].?.globalRect().x - f.view.rows[1].?.globalRect().x, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 10.5), f.view.row_names[1].?.globalRect().y - f.view.rows[1].?.globalRect().y, 0.01);
+        try std.testing.expectEqual(@as(f32, 314), f.view.source_label.?.parent.?.globalRect().w);
         try std.testing.expectEqualStrings("DB-Master", f.view.row_names[count].?.getText().?.content);
         source.hops[count - 1].endpoint.name.bytes[0] = 'x';
         try std.testing.expectEqualStrings("DB-Master", f.view.row_names[count].?.getText().?.content);
         try std.testing.expect(hasText(f.view.chrome, "admin@db.example:22"));
-        try std.testing.expect(hasText(f.view.chrome, "交互认证"));
+        try std.testing.expect(hasText(f.view.chrome, "↓ SSH 隧道"));
         try std.testing.expect(!hasText(f.view.chrome, "OTP"));
     }
     try std.testing.expectEqual(@as(usize, 1), f.samples);
@@ -194,11 +194,14 @@ test "connection details view released test and missing metadata cannot advertis
     source.hops[0].status = .released;
     source.hops[0].metadata = .{};
     try f.show(source);
-    try std.testing.expectEqualStrings("最近检测", f.view.source_label.?.getText().?.content);
+    try std.testing.expectEqualStrings("连接链路 · 最近检测", f.view.source_label.?.getText().?.content);
     try std.testing.expectEqualStrings("已释放", f.view.source_status.?.getText().?.content);
     try std.testing.expectEqualStrings("—", f.view.rtt_label.?.getText().?.content);
     try std.testing.expect(!hasText(f.view.chrome, "在线"));
-    try std.testing.expect(hasText(f.view.chrome, "未知"));
+    f.click(f.view.rows[1].?);
+    try f.view.flush();
+    f.cx.layout();
+    try std.testing.expect(hasText(f.view.node_modal.?.body, "未知"));
     try std.testing.expectEqual(@as(usize, 0), f.samples);
 }
 
@@ -297,7 +300,9 @@ test "connection details view small viewport keeps a bounded scroll region and r
     f.cx.layout();
     try std.testing.expect(f.view.chrome.globalRect().w <= 464);
     try std.testing.expect(f.view.chrome.globalRect().h <= 426);
-    try std.testing.expectApproxEqAbs(f.view.pointer.?.style.inset().left.px, f.view.pointer.?.globalRect().x - f.view.chrome.globalRect().x, 0.01);
+    try std.testing.expect(f.view.pointer.?.style.display == .none);
+    const footer = findId(f.view.chrome, "connection.details.footer").?.globalRect();
+    try std.testing.expect(footer.y + footer.h <= f.view.chrome.globalRect().y + f.view.chrome.globalRect().h);
     const first = f.view.chrome.getBackground();
     theme.select(.light);
     try f.view.retheme();
@@ -340,4 +345,27 @@ test "connection details view protocol switch dismisses its original sample with
     try std.testing.expect(f.last_key.?.eql(key));
     f.view.dismiss();
     try std.testing.expectEqual(@as(usize, 1), f.cancellations);
+}
+
+test "connection details view explicit sample is deferred and retains the captured operation" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.show(try snapshot(1));
+    const button = findId(f.view.chrome, "connection.details.sample").?;
+    f.click(button);
+    try std.testing.expectEqual(@as(usize, 1), f.samples);
+    try f.view.flush();
+    f.cx.layout();
+    try std.testing.expectEqual(@as(usize, 2), f.samples);
+    try std.testing.expectEqual(@as(usize, 1), f.cancellations);
+    try std.testing.expect(f.last_key.?.eql(key));
+    try std.testing.expectEqualStrings("已请求链路采样", f.view.feedback_label.?.getText().?.content);
+    f.view.invalidate(key);
+    try f.view.flush();
+    f.cx.layout();
+    f.click(findId(f.view.chrome, "connection.details.sample").?);
+    try f.view.flush();
+    try std.testing.expectEqual(@as(usize, 2), f.samples);
+    try std.testing.expectEqual(@as(usize, 2), f.cancellations);
 }

@@ -30,6 +30,7 @@ pub fn mount(_: ?*anyopaque, args: contract.EditorMount) !contract.EditorInstanc
         args.cx.allocator.destroy(self);
         return err;
     };
+    self.editor.protocol_picker = args.protocol_picker;
     self.editor.protocol_id = args.protocol_id;
     self.editor.protocol = std.meta.stringToEnum(types.Protocol, args.protocol_id) orelse return error.UnsupportedProtocol;
     if (self.editor.protocol != .ssh and self.editor.protocol != .sftp) return error.UnsupportedProtocol;
@@ -93,11 +94,20 @@ fn release(raw: *anyopaque) void {
     const self: *Instance = @ptrCast(@alignCast(raw));
     self.released = true;
 }
-const vtable: contract.EditorInstance.VTable = .{ .snapshot = snapshot, .clear_secrets = clear, .unmount = release, .cancel = cancel, .visibility_changed = visibility };
+fn preferredModalHeight(raw: *anyopaque) ?f32 {
+    const self: *Instance = @ptrCast(@alignCast(raw));
+    return self.editor.preferredModalHeight();
+}
+fn parentPresentationVisible(raw: *anyopaque) bool {
+    const self: *Instance = @ptrCast(@alignCast(raw));
+    return !self.editor.copy_open.?.peek();
+}
+const vtable: contract.EditorInstance.VTable = .{ .snapshot = snapshot, .clear_secrets = clear, .unmount = release, .cancel = cancel, .preferred_modal_height = preferredModalHeight, .parent_presentation_visible = parentPresentationVisible, .visibility_changed = visibility };
 
 /// Explicit legacy remote UI adapter for the application's existing Draft and
 /// probe callers. A missing/replaced contribution cannot construct this view.
 pub fn loadDraft(shell: anytype, draft: types.Draft) !void {
+    if (shell.title) |title| try title.setTextContent(shell.alloc, if (draft.source_owner != null) "编辑连接" else "新建连接");
     const protocol_id = @tagName(draft.protocol);
     if (!std.mem.eql(u8, shell.protocol_id, protocol_id) or current(shell) == null) try shell.selectContribution(protocol_id);
     const state = current(shell) orelse return error.RemoteEditorUnavailable;

@@ -557,11 +557,14 @@ const Runtime = struct {
         // only Listener's single native IO owner may use it until stop joins.
         self.proxy = try listener.Socks5Listener.init(self.allocator, &self.session.?);
         try self.proxy.?.startWithOptions(self.options.listener);
+        while (self.proxy.?.state() == .starting and !self.closing.load(.acquire)) pause();
+        if (self.closing.load(.acquire)) return error.Cancelled;
+        if (self.proxy.?.state() != .listening) return self.proxy.?.last_failure orelse error.ForwardListenFailed;
         self.port.store(self.proxy.?.port(), .release);
         self.phase.store(.ready, .release);
         while (!self.closing.load(.acquire)) {
             self.copyStats();
-            if (self.proxy.?.state() != .listening) return error.SocksListenerStopped;
+            if (self.proxy.?.state() != .listening) return self.proxy.?.last_failure orelse error.SocksListenerStopped;
             pause();
         }
     }

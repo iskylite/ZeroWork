@@ -151,7 +151,7 @@ pub fn assign(ai: *config.Ai, address: Address, text: []const u8) !void {
             if (was_default) ai.default_provider = trimmed;
         },
         .endpoint => {
-            if (!endpointValid(trimmed)) return error.InvalidEndpoint;
+            if (trimmed.len != 0 and !endpointValid(trimmed)) return error.InvalidEndpoint;
             p.endpoint = trimmed;
         },
         .api_key => p.api_key = text,
@@ -168,7 +168,32 @@ pub fn assign(ai: *config.Ai, address: Address, text: []const u8) !void {
             p.models[address.model].context_window = window;
         },
     }
-    p.enabled = eligible(p.*);
+}
+
+/// Configuration edits never enable a provider. The explicit switch owns that transition.
+pub fn setEnabled(ai: *config.Ai, index: usize, enabled: bool) !void {
+    if (index >= ai.provider_count) return error.UnknownProvider;
+    const p = &ai.providers[index];
+    if (enabled) {
+        if (std.mem.trim(u8, p.name, " \t\r\n").len == 0) return error.EmptyProviderName;
+        if (!eligible(p.*)) return error.IncompleteProvider;
+        p.enabled = true;
+        var valid_default = false;
+        for (ai.providers[0..ai.provider_count]) |other| if (other.enabled and eligible(other) and std.mem.eql(u8, providerName(other), ai.default_provider)) {
+            valid_default = true;
+        };
+        if (!valid_default) ai.default_provider = providerName(p.*);
+        return;
+    }
+    if (std.mem.eql(u8, ai.default_provider, providerName(p.*))) {
+        var replacement: ?[]const u8 = null;
+        for (ai.providers[0..ai.provider_count], 0..) |other, i| if (i != index and other.enabled and eligible(other)) {
+            replacement = providerName(other);
+            break;
+        };
+        ai.default_provider = replacement orelse return error.DefaultProtected;
+    }
+    p.enabled = false;
 }
 pub fn modelValid(model: config.AiModel) bool {
     if (std.mem.trim(u8, model.id, " \t\r\n").len == 0 or model.context_window == 0) return false;
@@ -179,7 +204,7 @@ pub fn modelValid(model: config.AiModel) bool {
     return true;
 }
 pub fn eligible(p: config.AiProvider) bool {
-    if (!endpointValid(p.endpoint) or p.model_count == 0 or p.model_count > p.models.len or (p.kind != .ollama and p.api_key.len == 0)) return false;
+    if (!endpointValid(p.endpoint) or p.model_count == 0 or p.model_count > p.models.len or (p.api_key.len == 0 and !@import("../ai/provider_config.zig").allowsNoAuth(p.kind, p.endpoint))) return false;
     for (p.models[0..p.model_count]) |model| if (!modelValid(model)) return false;
     return true;
 }

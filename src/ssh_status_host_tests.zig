@@ -119,7 +119,7 @@ test "SSH status host mounts exact live bar geometry and publishes only authorit
     defer f.deinit();
     try f.update(try snapshot(key, "DB-A"), false);
     const Item = struct { node: *ui.Node, x: f32, w: f32 };
-    for ([_]Item{ .{ .node = f.bar.controls.identity_button, .x = 0, .w = 112 }, .{ .node = f.bar.controls.rtt_button, .x = 118, .w = 64 }, .{ .node = f.bar.controls.encoding_button, .x = 188, .w = 68 }, .{ .node = f.bar.controls.grid_button, .x = 262, .w = 82 }, .{ .node = f.bar.chain_trigger, .x = 1044, .w = 28 }, .{ .node = f.bar.controls.theme_button, .x = 1112, .w = 28 } }) |item| {
+    for ([_]Item{ .{ .node = f.bar.controls.identity_button, .x = 0, .w = 162 }, .{ .node = f.bar.controls.encoding_button, .x = 168, .w = 68 }, .{ .node = f.bar.controls.grid_button, .x = 242, .w = 82 }, .{ .node = f.bar.chain_trigger, .x = 928, .w = 86 }, .{ .node = f.bar.controls.theme_button, .x = 1112, .w = 28 } }) |item| {
         const r = item.node.globalRect();
         try std.testing.expectApproxEqAbs(8 + item.x, r.x, 0.1);
         try std.testing.expectEqual(item.w, r.w);
@@ -136,6 +136,14 @@ test "SSH status host mounts exact live bar geometry and publishes only authorit
     source.target_rtt_sample = source.hops[1].rtt_sample;
     try f.update(source, false);
     try std.testing.expectEqualStrings("17ms", f.bar.controls.rtt_label.getText().?.content);
+    source.hops[1].metadata.cipher_c2s = try D.details.Text(64).init("aes256-ctr");
+    source.hops[1].metadata.cipher_s2c = try D.details.Text(64).init("aes128-ctr");
+    const captured_info = SSH.infoSnapshot(source, false);
+    try std.testing.expectEqual(@as(?u64, 17), captured_info.latency_ms);
+    try std.testing.expectEqualStrings("aes256-ctr", captured_info.cipher_c2s.slice());
+    try std.testing.expectEqualStrings("aes128-ctr", captured_info.cipher_s2c.slice());
+    try std.testing.expect(f.bar.controls.rtt_label.parent == f.bar.controls.identity_button);
+    try std.testing.expect(f.bar.controls.rtt_button.style.display == .none);
     try std.testing.expectEqual(@as(usize, 0), f.captures);
 }
 
@@ -148,7 +156,7 @@ test "SSH status host identity keyboard capture copies original owner and contex
     try std.testing.expect(f.host.info.isVisible());
     try std.testing.expectEqualStrings("未知", f.host.info.duration.getText().?.content);
     f.enter(f.host.info.copy_button);
-    try std.testing.expectEqualStrings("admin@db.example:22", f.copied.?);
+    try std.testing.expect(std.mem.indexOf(u8, f.copied.?, "身份：admin@db.example:22") != null);
     try std.testing.expect(f.last_key.?.eql(key));
     var next = key;
     next.owner.session.session_id = @fromBackingInt(902);
@@ -179,7 +187,7 @@ test "SSH status host metrics remain static and collapsed state follows sidebar"
     try std.testing.expectEqual(.none, f.bar.controls.more_button.style.display);
     f.bar.controls.sidebar_width = 48;
     try f.update(try snapshot(key, "DB-A"), false);
-    try std.testing.expectEqual(@as(f32, 112), f.bar.controls.identity_button.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 162), f.bar.controls.identity_button.globalRect().w);
     try std.testing.expectEqual(.flex, f.bar.controls.identity_label.style.display);
 }
 
@@ -297,7 +305,7 @@ test "SSH status host projects only the original ready SFTP attachment without t
 
     try f.update(try snapshot(key, "DB-A"), false);
     try std.testing.expect(f.host.file_active == null);
-    for ([_]*ui.Node{ f.bar.controls.rtt_button, f.bar.controls.encoding_button, f.bar.controls.grid_button, f.bar.chain_trigger, f.bar.socks_chip, f.bar.controls.icons[1] }) |node| try std.testing.expectEqual(.flex, node.style.display);
+    for ([_]*ui.Node{ f.bar.controls.rtt_label, f.bar.controls.encoding_button, f.bar.controls.grid_button, f.bar.chain_trigger, f.bar.socks_chip, f.bar.controls.icons[1] }) |node| try std.testing.expectEqual(.flex, node.style.display);
     try std.testing.expectEqual(.none, f.bar.controls.file_icon.style.display);
     try std.testing.expectEqualStrings("已连接", f.bar.controls.identity_label.getText().?.content);
     try std.testing.expectEqualStrings("UTF-8", f.bar.controls.encoding_label.getText().?.content);

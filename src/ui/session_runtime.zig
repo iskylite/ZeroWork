@@ -162,6 +162,7 @@ pub const SessionRuntime = struct {
     /// Marks members unavailable as soon as release starts; only the release
     /// task's receipt proves they are freed. The scope owns the struct itself.
     torn_down: bool = false,
+    document_source: ?@import("terminal_document_source.zig").Source = null,
     log_directory: ?std.Io.Dir = null,
     checkpoint_path: []u8,
     raw_path: []u8,

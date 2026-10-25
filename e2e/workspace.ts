@@ -7,20 +7,22 @@
  */
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rename, rm, writeFile, open, cp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile, open, cp, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   waitForServerReady, waitFor, tree, stats, screenshot, resizeWindow,
-  clickTestId, key, type_, query, sleep, mouseDown, mouseMove, mouseUp, scrollAt, focused,
+  clickTestId, key, type_, query, screenPos, sleep, mouseDown, mouseMove, mouseUp, scrollAt, focused,
 } from "../zig-out/share/zenit/harness/client.ts";
 
 type HarnessNode = Awaited<ReturnType<typeof tree>>;
 async function visibleNodes(testId: string): Promise<HarnessNode[]> {
   // Production mounts enough retained overlays to exceed the full-tree RPC
   // buffer. Query projects inherited visibility for this bounded subtree.
-  return (await query(testId)).filter(node => node.visible !== false && node.hidden !== true && (node.effective_opacity ?? 1) > 0 && node.rect.w > 0 && node.rect.h > 0);
+  const nodes = await query(testId);
+  if (!Array.isArray(nodes)) throw new Error(`Cannot query ${testId}: ${JSON.stringify(nodes)}`);
+  return nodes.filter(node => node.visible !== false && node.hidden !== true && (node.effective_opacity ?? 1) > 0 && node.rect.w > 0 && node.rect.h > 0);
 }
 
 async function visibleTabOrder(): Promise<string[]> {
@@ -37,6 +39,7 @@ async function visibleTabOrder(): Promise<string[]> {
 type Step =
   | { action: "resize"; width: number; height: number }
   | { action: "size"; width: number; height: number }
+  | { action: "bounds"; test_id: string; x: number; y: number; width: number; height: number }
   | { action: "rect"; test_id: string; x: number; y: number; width: number; height: number }
   | { action: "capture"; name: string }
   | { action: "click"; test_id: string }
@@ -80,7 +83,8 @@ const steps: Step[] = options["--steps"]
 if (!Array.isArray(steps)) throw new Error("Steps must be a JSON array");
 const binaryHash = createHash("sha256").update(await readFile(binary)).digest("hex");
 await mkdir(output, { recursive: true });
-const isolated = await mkdtemp(join(tmpdir(), "zerowork-harness-"));
+// Native data safety rejects symlink ancestors (macOS /var and /tmp aliases).
+const isolated = await realpath(await mkdtemp(join(tmpdir(), "zerowork-harness-")));
 const rpc = join(isolated, "rpc");
 const data = join(isolated, "data");
 await mkdir(rpc);
@@ -139,6 +143,15 @@ try {
         record.actual_root = rect;
         break;
       }
+      case "bounds": {
+        const expected = { x: step.x, y: step.y, w: step.width, h: step.height };
+        const actual = await waitFor(async () => {
+          const rect = await screenPos(step.test_id);
+          return (["x", "y", "w", "h"] as const).every(axis => Math.abs(rect[axis] - expected[axis]) <= 0.5) ? rect : null;
+        }, 3000);
+        record.actual_rect = actual;
+        break;
+      }
       case "rect": {
         const expected = { x: step.x, y: step.y, w: step.width, h: step.height };
         const node = await waitFor(async () => {
@@ -158,7 +171,7 @@ try {
         const nodeTree = await tree();
         await writeFile(join(output, `${step.name}.tree.json`), JSON.stringify(nodeTree, null, 2));
         if (!nodeTree.rect) {
-          const bounded = Object.fromEntries(await Promise.all(["workspace.body", "workspace.sidebar.collapsed", "history.panel", "ai.panel", "settings.panel", "tabs.strip"].map(async id => [id, await query(id)])));
+          const bounded = Object.fromEntries(await Promise.all(["workspace.body", "workspace.sidebar.collapsed", "history.panel", "ai.panel", "settings.panel", "tabs.strip", "wizard.steps", "wizard.protocol", "wizard.footer", "wizard.close"].map(async id => [id, await query(id)])));
           await writeFile(join(output, `${step.name}.queries.json`), JSON.stringify(bounded, null, 2));
           record.tree_limit = "Full tree RPC exceeded its buffer; bounded projections saved separately.";
         }
@@ -271,8 +284,10 @@ try {
         break;
       }
       case "text": {
-        const nodes = await query(step.test_id);
-        if (!nodes.some((node) => node.text === step.text)) throw new Error(`Text mismatch: ${step.test_id}`);
+        const matches = (node: HarnessNode): boolean =>
+          node.visible !== false && node.hidden !== true && (node.effective_opacity ?? 1) > 0 &&
+          (node.text === step.text || (node.children ?? []).some(matches));
+        await waitFor(async () => (await visibleNodes(step.test_id)).some(matches) || null);
         break;
       }
       default:

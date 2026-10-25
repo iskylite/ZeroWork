@@ -447,10 +447,36 @@ pub const Host = struct {
                     count += 1;
                 }
             };
-            try view.update(now_ms, self.cx.window_active, if (active) |owner| .{ .session = owner } else null, .{ .content = workspace.terminal_area.globalRect(), .avoid = avoid[0..count] });
+            // App-owned detail cards may be retained outside Zenit's overlay
+            // stack (notably global/session transfer popovers). Their public
+            // roots are the same ones used by native Harness and presentation.
+            const app_root = self.cx.root orelse return;
+            collectNotificationObstacles(self.cx, app_root, &avoid, &count);
+            try view.update(now_ms, self.cx.window_active, if (active) |owner| .{ .session = owner } else null, .{ .content = app_root.globalRect(), .avoid = avoid[0..count] });
         }
     }
 };
+// Explicit host-owned floating surfaces only; ordinary workspace panels and
+// notification descendants must never become their own avoidance obstacles.
+fn collectNotificationObstacles(cx: *ui.Cx, node: *ui.Node, avoid: []ui.ComputedRect, count: *usize) void {
+    if (node.isPaintSkipped() or count.* == avoid.len or cx.overlay_stack.isNodeInSuspendedLayer(node)) return;
+    if (node.style.overflow_hidden) {
+        const bounds = node.globalRect();
+        if (bounds.w <= 0.1 or bounds.h <= 0.1) return;
+    }
+    if (node.meta.ownership.meta.test_id) |id| {
+        const floating = [_][]const u8{ "ai.panel", "transfer.manager", "transfer.session", "transfer.confirmation", "transfer.conflict", "connection.details", "status.connection", "status.detail", "status.theme", "session.menu", "files.context.menu", "files.history.menu", "asset.action", "asset.group.dialog", "tabs.rename" };
+        for (floating) |known| if (std.mem.eql(u8, id, known)) {
+            const rect = node.globalRect();
+            if (rect.w > 0 and rect.h > 0) {
+                avoid[count.*] = rect;
+                count.* += 1;
+            }
+            return;
+        };
+    }
+    for (node.children.items) |child| collectNotificationObstacles(cx, child, avoid, count);
+}
 pub const WindowHost = Host;
 
 // Independent process allocations preserve an incomplete native cleanup graph

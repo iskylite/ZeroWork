@@ -59,7 +59,7 @@ pub fn icon(size: f32) ui.Style {
 }
 pub fn fade() ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .fill(), .height = .{ .px = 72 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 }, .right = .{ .px = 0 } }, .gradient = .{ .from = c.well_border.withAlpha(184), .to = ui.Color.lerp(c.surface_1, c.overlay, 0.6).withAlpha(140) }, .border = .{ .radius = 14 }, .hit_behavior = .pass_through, .z_index = -1 };
+    return .{ .width = .fill(), .height = .{ .px = 72 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 }, .right = .{ .px = 0 } }, .gradient = .{ .from = c.well_border.withAlpha(48), .to = ui.Color.lerp(c.surface_1, c.overlay, 0.6) }, .border = .{ .radius = 14 }, .hit_behavior = .pass_through, .z_index = -1 };
 }
 pub fn scrollHint(left: f32) ui.BoxStyle {
     return .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .position = .absolute, .inset = .{ .left = .{ .px = left }, .bottom = .{ .px = 0 } }, .hit_behavior = .pass_through };

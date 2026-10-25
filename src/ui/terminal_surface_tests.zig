@@ -263,8 +263,8 @@ test "terminal surface binds real owned VT projection and preserves over sixty r
     const surface = view.terminal_surface.?;
     try std.testing.expectEqual(@as(usize, 70), surface.rows.items.len);
     const glyph = surface.rows.items[0].glyphs.items[0].node;
-    try std.testing.expectEqual(@as(f32, 76), glyph.globalRect().x);
-    try std.testing.expectEqual(@as(f32, 8), glyph.globalRect().y);
+    try std.testing.expectEqual(@as(f32, 96), glyph.globalRect().x);
+    try std.testing.expectEqual(@as(f32, 18), glyph.globalRect().y);
     try std.testing.expectEqual(@as(u8, 0), glyph.getText().?.color.r);
     try std.testing.expectEqualStrings("界", surface.rows.items[0].glyphs.items[1].node.getText().?.content);
     try std.testing.expectEqualStrings("e\u{301}", surface.rows.items[0].glyphs.items[2].node.getText().?.content);
@@ -499,7 +499,7 @@ test "terminal surface native input queues once across busy service and exposes 
     const client = view.root.behavior.interaction.text_input_client.?;
     var frame: ui.types.A11yRect = undefined;
     try std.testing.expect(client.frame_for_range.?(client.context, surface.caret_byte, surface.caret_byte, &frame));
-    try std.testing.expectEqual(surface.root.globalRect().x + 8 + view.cell_width, frame.x);
+    try std.testing.expectEqual(surface.root.globalRect().x + 20 + view.cell_width, frame.x);
     _ = view.root.behavior.events.on_event.?(.{ .ime_commit = .{ .text = "候选" } }, view.root.behavior.events.event_context);
     try std.testing.expectEqualStrings("中文\x1b[Z\x03候选", transport.written.items);
     try view.pasteTerminalText(owner, "a\nb");
@@ -844,8 +844,8 @@ test "terminal surface selection remains original VT text and waits for applied 
     _ = cx.render();
     try std.testing.expect(!view.hasSelection());
     const surface = view.terminal_surface.?;
-    const x = surface.root.globalRect().x + 76;
-    const y = surface.root.globalRect().y + 12;
+    const x = surface.root.globalRect().x + 20 + 76;
+    const y = surface.root.globalRect().y + 18 + surface.options.row_height * 0.5;
     cx.handleMouseDownEx(x, y, .left, .{});
     cx.handleMouseMoveEx(x + 5 * view.cell_width, y, .{});
     cx.handleMouseUpEx(x + 5 * view.cell_width, y, .left, .{});
@@ -894,8 +894,8 @@ test "terminal surface public Cx drag release copies and right click always past
     surface.feedback.publish = struct {
         fn publish(_: ?*anyopaque, _: *ui.Cx, _: identity.SessionHandle, _: []const u8) !void {}
     }.publish;
-    const x = surface.root.globalRect().x + 8 + surface.bodyX();
-    const y = surface.root.globalRect().y + 8 + surface.options.row_height * 0.5;
+    const x = surface.root.globalRect().x + 20 + surface.bodyX();
+    const y = surface.root.globalRect().y + 18 + surface.options.row_height * 0.5;
     cx.handleMouseDownEx(x, y, .left, .{});
     try std.testing.expect(!view.hasSelection());
     cx.handleMouseUpEx(x, y, .left, .{});
@@ -1016,8 +1016,8 @@ test "terminal surface selection clears invalid anchors and zero width rectangle
     _ = try view.refreshTerminalService(owner, false);
     _ = cx.render();
     const surface = view.terminal_surface.?;
-    const x = surface.root.globalRect().x + 8 + surface.bodyX();
-    const y = surface.root.globalRect().y + 8 + surface.options.row_height * 0.5;
+    const x = surface.root.globalRect().x + 20 + surface.bodyX();
+    const y = surface.root.globalRect().y + 18 + surface.options.row_height * 0.5;
     cx.handleMouseDownEx(x, y, .left, .{ .alt = true });
     cx.handleMouseMoveEx(x, y + surface.options.row_height, .{ .alt = true });
     cx.handleMouseUpEx(x, y + surface.options.row_height, .left, .{ .alt = true });
@@ -1084,8 +1084,8 @@ test "terminal surface offset pane uses window logical points for selection mous
     const bounds = surface.root.globalRect();
     try std.testing.expectEqual(@as(f32, 238), bounds.x);
     try std.testing.expectEqual(@as(f32, 60), bounds.y);
-    const body_x = bounds.x + 8 + surface.bodyX();
-    const body_y = bounds.y + 8;
+    const body_x = bounds.x + 20 + surface.bodyX();
+    const body_y = bounds.y + 18;
     const cell = surface.options.cell_width;
     const row_height = surface.options.row_height;
     const start_x = body_x + 6 * cell;
@@ -1455,4 +1455,77 @@ test "terminal surface defers hidden painting but preserves latest output when r
     try std.testing.expect(surface.rows.items.len > 0);
     try std.testing.expectEqualStrings("L", surface.rows.items[0].glyphs.items[0].node.getText().?.content);
     try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "LATEST") != null);
+}
+
+test "terminal surface visible grouped inactive pane resizes but hidden group does not" {
+    var transport: FakeTransport = undefined;
+    try transport.init(3, 16);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 320);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    view.setTypography(14, 22.0 / 14.0, 400);
+    try view.bindTerminalService(transport.service());
+    view.setGrouped(true);
+    _ = cx.render();
+    _ = try view.refreshTerminalService(owner, false);
+    try std.testing.expectEqual(@as(usize, 1), transport.resize_calls);
+    try std.testing.expectEqual(@as(u16, 13), transport.controller.geometry.rows);
+    view.root.setDisplay(.none);
+    cx.setViewport(800, 500);
+    _ = cx.render();
+    _ = try view.refreshTerminalService(owner, false);
+    try std.testing.expectEqual(@as(usize, 1), transport.resize_calls);
+    view.root.setDisplay(.flex);
+    _ = cx.render();
+    _ = try view.refreshTerminalService(owner, false);
+    try std.testing.expectEqual(@as(usize, 2), transport.resize_calls);
+    try std.testing.expectEqual(@as(u16, 21), transport.controller.geometry.rows);
+}
+
+test "global backdrop survives OSC default backgrounds while explicit ANSI cells keep their color" {
+    var transport: FakeTransport = undefined;
+    try transport.init(3, 16);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 160);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.setTerminalTheme(.{ .revision = 1, .foreground = 0xeeeeeeff, .background = 0x112233ff, .cursor = 0xffffffff, .selection = 0x99999940, .ansi = @splat(0xaa3300ff) });
+    try view.bindTerminalService(transport.service());
+    _ = cx.render();
+    _ = try view.refreshTerminalService(owner, false);
+    try transport.controller.feedOutput(owner, 1, "\x1b]11;#445566\x07plain\x1b[41mX", 1);
+    // The fixture does not run the worker publication clock; explicitly fetch
+    // the new parser state when its text publication is coalesced.
+    view.terminal_surface.?.force_snapshot = true;
+    _ = try view.refreshTerminalService(owner, false);
+    const surface = view.terminal_surface.?;
+    try std.testing.expectEqual(@as(u24, 0x445566), surface.snapshot.?.projection.colors.background);
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, surface.root.getBackground());
+    var found_plain = false;
+    var found_ansi = false;
+    for (surface.rows.items) |row| for (row.glyphs.items) |glyph| {
+        const text = glyph.node.getText().?.content;
+        if (std.mem.eql(u8, text, "p")) {
+            try std.testing.expectEqual(ui.Color.TRANSPARENT, glyph.node.getBackground());
+            found_plain = true;
+        } else if (std.mem.eql(u8, text, "X")) {
+            try std.testing.expectEqual(ui.Color.hex(0xaa3300), glyph.node.getBackground());
+            found_ansi = true;
+        }
+    };
+    try std.testing.expect(found_plain and found_ansi);
+    // UI overlays must remain translucent even if a caller supplies a VT RGB.
+    surface.options.background = ui.Color.hex(0x112233);
+    cx.setFocus(view.root);
+    _ = view.root.behavior.events.on_event.?(.{ .ime_preedit = .{ .text = "候选" } }, view.root.behavior.events.event_context);
+    try std.testing.expect(surface.preedit_node.getBackground().a <= 64);
+    surface.showError(error.WorkerBusy);
+    try std.testing.expect(surface.message_root.getBackground().a <= 64);
 }

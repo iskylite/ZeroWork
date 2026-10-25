@@ -1,0 +1,54 @@
+# 上下文压缩 · HTML / 原生交接合同
+
+本文件约束当前工作区 AI 原型。压缩操作和所有进度/取消/失败重试/成功统计统一放在已有上下文用量气泡内，不新增消息流卡片，不提供摘要查看入口。HTML 以本地定时器模拟摘要服务，不调用模型；用量由示例文本 UTF-8 字节数 / 4 向上取整，仅为估算；这些实现边界只放在产品窗口外，产品组件中不写模拟/设计说明。没有“清空上下文”操作，不用删除附件替代压缩，不使用固定百分比伪造节省量。原生后端的实际结果须由其自身验证，本文件不宣称后端通过。
+
+## 可编辑源与入口
+
+- 实现：`workspace/app.js` 中 `compressAiContext`、`cancelAiCompression`、`requestHistory`、`compressionStatus`、`compressionUsagePopover`。
+- 共享标题入口：`shared/ai-assistant.js` 的 `header`，由 owner 提供 `compressAttrs`、disabled 和原因。
+- 样式：`workspace/styles.css` 的 `.context-compression` 与 `[data-compression-usage=true]`。
+- 打开 `workspace/index.html?mode=ai`，在应用画布外展开“上下文压缩验证（原型模拟）”，可载入五轮历史、失败、无历史、生成中。
+
+## 状态与文案
+
+| 状态 | 文案 / 操作 | 状态不变量 |
+| --- | --- | --- |
+| 无历史 | 压缩入口禁用；tooltip“暂无对话可压缩” | 不发起请求 |
+| 仅最近两轮 | 禁用；“保留最近两轮，暂无更早对话可压缩” | 不重复压缩同一边界 |
+| 生成中 | 禁用；tooltip“生成中，暂不能压缩” | 不与回答生成并发 |
+| 可压缩 | 标题栏及用量浮层“压缩上下文” | 无清空、无删除附件 |
+| 压缩中 | “正在压缩上下文”；“保留最近两轮完整对话，正在整理更早的目标、约束与执行结果。”；按钮“取消压缩” | 禁用发送与重复压缩；可见历史、附件、已提交摘要保持原值 |
+| 已取消 | “已取消压缩”；“原上下文与可见历史均未改变。”；“重新压缩” | 失效原请求代次，迟到结果不能提交 |
+| 失败 | “上下文压缩失败”；“摘要服务暂时不可用（HTTP503）”；“原上下文与可见历史均未改变。”；“重试压缩” | 不提交待定摘要、不改变原请求历史 |
+| 成功 | “上下文已压缩”；“历史输入：3,375 tokens（估算） → 1,458 tokens（估算）”；“可见历史与附件已保留；后续请求使用摘要 + 最近两轮。” | 原可见10条记录不变；仅requestHistory投影为摘要+最近2轮；重新计算用量，不按固定比例缩放 |
+
+截图中的具体token数来自当前夹具，不是固定产品常量。原生应显示服务返回的真实统计；没有真实统计时必须明确标注估算。原生摘要请求必须不携带可执行工具；失败/取消不提交；摘要提交须绑定原owner与有效请求版本。HTML定时器同时绑定owner对象和单调请求代次，切换会话不把结果提交给当前其它owner。
+
+## 尺寸与布局
+
+实际DOM测量：应用1440×900 CSS px，浏览器1500×1040，DPR1。详见 `verification/review-20261026/compression-metrics.json`。
+
+| 元素 | 合同 |
+| --- | --- |
+| AI浮窗 | 600×456；保留现有拖动/缩放；内容滚动，固定composer |
+| 标题压缩图标 | 22×22，圆角6；当前600宽布局相对浮窗x423/y17；该标题快捷入口属于原型，原生本轮仍使用既有用量入口；不把位置硬编码到原生，随header flex流布局 |
+| 状态区 | 仅在上下文用量Popover内；padding10×12；圆角8；左色条2；11px字/16px行高；最大高180内部滚动；不占消息流或composer空间 |
+| 成功状态实测 | HTML与原生共同使用314×84；11px/16px；文本随宽度换行，不硬编码其它状态高度 |
+| 取消/重试 | 文字按钮，最小高24；无需二次确认 |
+| 用量Popover | 宽344；padding14；圆角11；锚定用量触发器向上展开；根据应用可用高度限制并滚动，HTML当前成功463高、max-height477；原生相同内容采用自适应内容高度，不将不同说明行数称为总高像素一致 |
+| Popover状态区 | margin-top8、其余margin0；最大高180 |
+| Popover底部 | 纵向排列说明、操作和禁用原因；gap8；操作右对齐；说明11px/16px，不能被横向flex挤成窄列 |
+
+## 实际验证与效果图
+
+已在浏览器操作：载入五轮→压缩→取消；载入失败→压缩→失败→重试→成功；无历史禁用；生成中禁用；成功后打开用量浮层。取消后10条可见消息保留、发送恢复；验证消息流无压缩卡且无摘要查看入口；失败后可重试；成功后仍10条、历史文本12950字符，用量重新估算为3375→1458 tokens。
+
+- `verification/review-20261026/compression-running.png`
+- `verification/review-20261026/compression-cancelled.png`
+- `verification/review-20261026/compression-failed.png`
+- `verification/review-20261026/compression-success.png`
+- `verification/review-20261026/compression-usage.png`
+- `verification/review-20261026/compression-empty.png`
+- `verification/review-20261026/compression-generating.png`
+
+本聊天未执行真实模型摘要或原生UI测试。原生负责会话另行交接报告 `/private/tmp/zw-compaction-native-final/report.json` passed：气泡344宽、状态314×84；真实HTTP夹具验证失败/取消/重试、保留可见历史及下一次请求使用memory+最近两轮；示例484→107 tokens为估算。该结果来自原生负责人的实际报告，不以HTML截图代替。外部LLM摘要质量及KVM规划助手历史/摘要服务接线仍不在本次HTML验证内。

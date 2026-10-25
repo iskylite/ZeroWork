@@ -8,9 +8,9 @@ pub const g = struct {
     pub const gap: f32 = 6;
     pub const card_padding: f32 = 10;
     pub const card_radius: f32 = 9;
-    pub const row: f32 = 36;
-    pub const control: f32 = 30;
-    pub const control_width: f32 = 164;
+    pub const row: f32 = 52;
+    pub const control: f32 = 32;
+    pub const control_width: f32 = 220;
     pub const icon: f32 = 16;
     pub const tile_height: f32 = 56;
     pub const thumbnail_width: f32 = 40;
@@ -32,10 +32,10 @@ pub fn pageTitle(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 13, .font_weight = 600, .line_height = 20.0 / 13.0, .color = theme.current().fg_1 };
 }
 pub fn row(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = g.row }, .direction = .row, .align_items = .center, .gap = 28, .flex_shrink = 0, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = g.row, .padding = .{ .top = 8, .bottom = 8 }, .direction = .row, .align_items = .center, .gap = 20, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn labelGroup(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .row, .gap = g.gap, .align_items = .center };
+    return .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 3, .align_items = .start };
 }
 pub fn control(width: f32, height: f32) ButtonStyle {
     const c = theme.current();
@@ -104,6 +104,8 @@ pub fn toggleKnob(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn materialRow(_: *const ui.ThemeTokens) ui.BoxStyle {
     var s = row(undefined);
     s.height = .{ .px = 32 };
+    s.min_height = 32;
+    s.padding = .ZERO;
     s.gap = 6;
     return s;
 }

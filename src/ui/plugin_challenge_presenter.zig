@@ -15,6 +15,7 @@ const Choice = struct {
     index: usize,
     root: *ui.Node,
     label: *ui.Node,
+    value: *ui.Signal([]const u8),
     id: [48]u8 = undefined,
     fn choose(self: *Choice) void {
         self.presenter.choose(self.index);
@@ -54,6 +55,7 @@ pub const Presenter = struct {
     prefill_edited: bool = false,
     submit_button: *ui.Node = undefined,
     submit_disabled: *ui.Signal(bool) = undefined,
+    submit_label: *ui.Signal([]const u8) = undefined,
     choices: [32]Choice = undefined,
     choice_scroll: *ui.Node = undefined,
     current: ?Current = null,
@@ -72,6 +74,7 @@ pub const Presenter = struct {
         self.source = try label(cx, self.modal.body, "", S.text(11, 500, false));
         self.source.meta.ownership.meta.test_id = "plugin.challenge.source";
         self.detail = try label(cx, self.modal.body, "", S.text(11, 400, false));
+        self.detail.meta.ownership.meta.test_id = "plugin.challenge.detail";
         const material_scroll = try ui.widgets.ScrollArea(.{ .height = 120 }).mount(scope, cx);
         self.material_scroll = material_scroll.container;
         try self.modal.body.appendChild(cx.allocator, material_scroll.container);
@@ -109,8 +112,9 @@ pub const Presenter = struct {
         scroll.content.setStyleInline(cx.allocator, S.stack());
         try self.modal.body.appendChild(cx.allocator, scroll.container);
         for (&self.choices, 0..) |*choice, i| {
-            const button = try ui.widgets.Button(.{ .label = " ", .variant = .secondary, .on_click = cx.on(Choice, choice, Choice.choose) }).mount(scope, cx);
-            choice.* = .{ .presenter = self, .index = i, .root = button, .label = textNode(button).? };
+            const value = try scope.createSignal([]const u8, " ");
+            const button = try ui.widgets.Button(.{ .label = value, .variant = .secondary, .on_click = cx.on(Choice, choice, Choice.choose) }).mount(scope, cx);
+            choice.* = .{ .presenter = self, .index = i, .root = button, .label = textNode(button).?, .value = value };
             button.meta.ownership.meta.test_id = try std.fmt.bufPrint(&choice.id, "plugin.challenge.choice.{d}", .{i});
             try scroll.content.appendChild(cx.allocator, button);
             button.setDisplay(.none);
@@ -123,7 +127,8 @@ pub const Presenter = struct {
         cancel_button.meta.ownership.meta.test_id = "plugin.challenge.cancel";
         try footer.appendChild(cx.allocator, cancel_button);
         self.submit_disabled = try scope.createSignal(bool, true);
-        self.submit_button = try ui.widgets.Button(.{ .label = "确认", .disabled = self.submit_disabled, .variant = .primary, .on_click = cx.on(Presenter, self, submit) }).mount(scope, cx);
+        self.submit_label = try scope.createSignal([]const u8, "确认");
+        self.submit_button = try ui.widgets.Button(.{ .label = self.submit_label, .disabled = self.submit_disabled, .variant = .primary, .on_click = cx.on(Presenter, self, submit) }).mount(scope, cx);
         self.submit_button.meta.ownership.meta.test_id = "plugin.challenge.submit";
         try footer.appendChild(cx.allocator, self.submit_button);
         return self;
@@ -168,13 +173,13 @@ pub const Presenter = struct {
         self.choice_scroll.setDisplay(if (view.payload.choices.len != 0) .flex else .none);
         self.choice_scroll.setStyle(self.cx.allocator, .height, .{ .px = @min(@as(f32, @floatFromInt(view.payload.choices.len)) * 40, @max(80, self.cx.viewport.height - 360)) });
         self.submit_button.setDisplay(if (view.payload.choices.len != 0) .none else .flex);
-        try textNode(self.submit_button).?.setTextContent(self.cx.allocator, view.payload.submit_label);
+        self.submit_label.set(view.payload.submit_label);
         for (&self.choices, 0..) |*choice, i| {
             if (i >= view.payload.choices.len) {
                 choice.root.setDisplay(.none);
                 continue;
             }
-            try choice.label.setTextContent(self.cx.allocator, view.payload.choices[i].label);
+            choice.value.set(view.payload.choices[i].label);
             choice.root.setDisplay(.flex);
         }
         self.refreshSubmit();

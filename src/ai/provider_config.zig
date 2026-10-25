@@ -17,6 +17,11 @@ pub const ModelSelection = struct {
     }
 };
 
+/// The UI and transport share the same explicit no-auth policy.
+pub fn allowsNoAuth(kind: registry.Kind, endpoint: []const u8) bool {
+    return kind == .ollama or (kind == .openai_compat and @import("provider_http.zig").isLoopbackHttp(endpoint));
+}
+
 pub const Auth = union(enum) {
     none,
     bearer_memory: []const u8,
@@ -53,7 +58,7 @@ pub const ProviderConfig = struct {
         if (self.image_token_reservation) |value| if (!@import("image_budget.zig").validReservation(value)) return error.InvalidImageTokenReservation;
         switch (self.kind) {
             .anthropic => if (self.auth != .anthropic_memory) return error.InvalidAuth,
-            .openai_compat => if (self.auth != .bearer_memory) return error.InvalidAuth,
+            .openai_compat => if (self.auth != .bearer_memory and !(self.auth == .none and allowsNoAuth(self.kind, self.endpoint))) return error.InvalidAuth,
             .ollama => if (self.auth != .none and self.auth != .bearer_memory) return error.InvalidAuth,
         }
     }
@@ -87,7 +92,7 @@ pub fn fromSettingsSelection(ai: app_config.Ai, selection: ?ModelSelection) !Pro
     const auth: Auth = switch (p.kind) {
         .ollama => if (p.api_key.len == 0) .none else .{ .bearer_memory = p.api_key },
         .anthropic => if (p.api_key.len == 0) return error.MissingApiKey else .{ .anthropic_memory = p.api_key },
-        .openai_compat => if (p.api_key.len == 0) return error.MissingApiKey else .{ .bearer_memory = p.api_key },
+        .openai_compat => if (p.api_key.len != 0) .{ .bearer_memory = p.api_key } else if (allowsNoAuth(p.kind, p.endpoint)) .none else return error.MissingApiKey,
     };
     const result = ProviderConfig{ .kind = p.kind, .endpoint = p.endpoint, .model = resolved.model.id, .auth = auth, .context_window = resolved.model.context_window, .vision = resolved.model.vision, .image_token_reservation = resolved.model.image_token_reservation, .native_effort = resolved.model.reasoning_discovered, .reasoning_wire = if (p.kind == .anthropic and resolved.model.reasoning_adaptive) .anthropic_adaptive else toggleProtocol(p.kind, p.endpoint, resolved.model.id) };
     try result.validate();
@@ -373,4 +378,15 @@ pub fn toggleProtocol(kind: registry.Kind, endpoint: []const u8, model: []const 
 pub fn supportsThinking(ai: app_config.Ai, selection: ?ModelSelection) !bool {
     const resolved = try settingsModel(ai, selection);
     return resolved.model.reasoning and resolved.model.reasoning_toggle and (resolved.model.reasoning_adaptive or toggleProtocol(resolved.provider.kind, resolved.provider.endpoint, resolved.model.id) != .none);
+}
+
+test "local OpenAI gateway accepts no auth while remote providers still require a key" {
+    var models = [_]app_config.AiModel{.{ .id = "local-model", .context_window = 8192, .default = true }};
+    var providers = [_]app_config.AiProvider{.{ .name = "local", .kind = .openai_compat, .enabled = true, .endpoint = "http://127.0.0.1:3425/v1/chat/completions", .model_count = 1, .models = &models }};
+    const ai = app_config.Ai{ .default_provider = "local", .provider_count = 1, .providers = &providers };
+    try std.testing.expect((try fromSettings(ai)).auth == .none);
+    for ([_][]const u8{ "https://example.test/v1/chat/completions", "http://localhost.evil.test/chat/completions", "http://127.0.0.1@evil.test/chat/completions" }) |endpoint| {
+        providers[0].endpoint = endpoint;
+        try std.testing.expectError(error.MissingApiKey, fromSettings(ai));
+    }
 }

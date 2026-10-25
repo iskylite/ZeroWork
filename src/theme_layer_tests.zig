@@ -137,6 +137,8 @@ fn findText(node: *ui.Node, text: []const u8) ?*ui.Node {
 }
 
 test {
+    _ = @import("ui/app_theme.zig");
+    _ = @import("ui/shell_styles.zig");
     _ = @import("status_detail_tests.zig");
     _ = @import("auxiliary_appearance_tests.zig");
 }

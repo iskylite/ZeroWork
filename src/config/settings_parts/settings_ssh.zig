@@ -19,9 +19,9 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const page = try controls.Page.create(cx, bound, "settings.ssh");
     const query = bound.controller.search_query;
     if (binding.matches(query, "连接 保活 KeepAlive 超时 终端 TERM 压缩 keepalive_sec connect_timeout_sec term compression")) {
-        const section = try page.section("连接", "", ui.icons.network, 8, "settings.ssh.connection", connectionSummary);
+        const section = try page.section("连接", "连接保活、超时与终端类型", ui.icons.network, 8, "settings.ssh.connection", null);
         try section.input(.{ .section = "ssh", .key = "keepalive_sec" }, "KeepAlive 间隔（秒）", "用于新连接和重连。", null);
-        try section.input(.{ .section = "ssh", .key = "connect_timeout_sec" }, "连接超时（秒）", "用于新连接和重连。", null);
+        try section.input(.{ .section = "ssh", .key = "connect_timeout_sec" }, "连接超时（秒）", "", null);
         var term_options: [terms.len + 1]ui.widgets.SelectOption = undefined;
         @memcpy(term_options[0..terms.len], &terms);
         const current_term = bound.controller.model.value.ssh.term;
@@ -38,21 +38,21 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try section.toggle(.{ .section = "ssh", .key = "compression" }, "SSH 压缩", "", null);
     }
     if (binding.matches(query, "断线 自动重连 最大次数 退避 输入缓存 auto_reconnect reconnect_max reconnect_backoff buffer_input")) {
-        const section = try page.section("断线重连", "", ui.icons.rotate_ccw, 9, "settings.ssh.reconnect", reconnectSummary);
+        const section = try page.section("断线重连", "自动重连与输入缓存", ui.icons.rotate_ccw, 9, "settings.ssh.reconnect", null);
         try section.toggle(.{ .section = "ssh", .key = "auto_reconnect" }, "自动重连", "", null);
-        try section.input(.{ .section = "ssh", .key = "reconnect_max" }, "最大重连次数", "0–5 次；0 表示不重试。", reconnectEnabled);
-        try section.input(.{ .section = "ssh", .key = "reconnect_backoff" }, "重连间隔（秒）", "输入 5 个间隔，以逗号分隔，每项 0–255 秒。", retriesEnabled);
-        try section.toggle(.{ .section = "ssh", .key = "buffer_input" }, "重连期间缓存输入", "恢复后会回放缓存输入。\n关闭可避免意外执行。", retriesEnabled);
+        try section.input(.{ .section = "ssh", .key = "reconnect_max" }, "最大重连次数（次）", "0 表示不重试。", reconnectEnabled);
+        try section.input(.{ .section = "ssh", .key = "reconnect_backoff" }, "重连间隔（秒）", "5 个间隔，以逗号分隔；每项 0–255 秒。", retriesEnabled);
+        try section.toggle(.{ .section = "ssh", .key = "buffer_input" }, "重连期间缓存输入", "恢复后回放缓存输入，关闭可避免意外执行。", retriesEnabled);
     }
     if (binding.matches(query, "SOCKS5 默认值 本地端口 绑定地址 socks_port socks_bind")) {
-        const section = try page.section("SOCKS5 默认值", "", ui.icons.share_2, 10, "settings.ssh.socks", socksSummary);
-        try section.input(.{ .section = "ssh", .key = "socks_port" }, "默认本地端口", "用于下次开启的转发。", null);
-        try section.select(.{ .section = "ssh", .key = "socks_bind" }, "默认绑定地址", "0.0.0.0 允许局域网内其他设备访问此代理。", &binds, null);
+        const section = try page.section("SOCKS5 默认值", "用于下次开启的转发", ui.icons.network, 10, "settings.ssh.socks", null);
+        try section.input(.{ .section = "ssh", .key = "socks_port" }, "默认本地端口", "", null);
+        try section.select(.{ .section = "ssh", .key = "socks_bind" }, "默认绑定地址", "0.0.0.0 允许局域网内其他设备访问。", &binds, null);
     }
     if (binding.matches(query, "双因素 认证 验证码 OTP TOTP 自动填充 otp_modal totp_autofill")) {
-        const section = try page.section("双因素认证", "", ui.icons.shield, 11, "settings.ssh.authentication", authenticationSummary);
+        const section = try page.section("双因素认证", "验证码输入与自动填充", ui.icons.shield, 11, "settings.ssh.authentication", null);
         try section.toggle(.{ .section = "ssh", .key = "otp_modal" }, "专用验证码表单", "为六位验证码显示专用输入框。", null);
-        try section.toggle(.{ .section = "ssh", .key = "totp_autofill" }, "TOTP 自动填充", "自动填入已配置主机的验证码，提交前仍需确认。", null);
+        try section.toggle(.{ .section = "ssh", .key = "totp_autofill" }, "TOTP 自动填充", "填入已配置主机的验证码，提交前仍需确认。", null);
     }
     return page.finish();
 }

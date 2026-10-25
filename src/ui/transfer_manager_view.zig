@@ -1,4 +1,4 @@
-//! Vanta transfer views. The application owns IO and native windows. Closing
+//! Frozen UI_V3 transfer views. The application owns IO and native windows. Closing
 //! these views never changes jobs; snapshots and displayed strings are copied.
 const std = @import("std");
 const ui = @import("ui");
@@ -10,6 +10,9 @@ pub const Action = enum { pause, resume_transfer, cancel, retry, promote, reveal
 pub const Callbacks = struct {
     context: *anyopaque,
     action: *const fn (*anyopaque, backend.JobId, Action) void,
+    can_reveal: ?*const fn (*anyopaque, backend.JobId) bool = null,
+    open_sftp: ?*const fn (*anyopaque) void = null,
+    open_manager: ?*const fn (*anyopaque, Scope) void = null,
     scope_choices: ?*const fn (*anyopaque, std.mem.Allocator) anyerror![]const ScopeChoice = null,
     owner_label: ?*const fn (*anyopaque, backend.JobId) []const u8 = null,
     metadata: ?*const fn (*anyopaque, backend.JobId) []const u8 = null,
@@ -45,6 +48,7 @@ pub const Task = struct {
     events: []const u8 = "",
     event_summary: []const u8 = "",
     can_resume: bool = true,
+    can_reveal: bool = true,
 };
 pub const Snapshot = struct {
     revision: u64,
@@ -153,7 +157,7 @@ fn copyScope(a: std.mem.Allocator, scope: Scope) !Scope {
 fn taskEql(a: Task, b: Task) bool {
     if (!same(a.target, b.target) or a.direction != b.direction or a.phase != b.phase or
         a.done_bytes != b.done_bytes or a.total_bytes != b.total_bytes or a.speed_bps != b.speed_bps or
-        a.can_resume != b.can_resume) return false;
+        a.can_resume != b.can_resume or a.can_reveal != b.can_reveal) return false;
     inline for (.{ "name", "owner_label", "local_path", "remote_path", "route", "status_detail", "options", "events", "event_summary" }) |field| {
         if (!std.mem.eql(u8, @field(a, field), @field(b, field))) return false;
     }
@@ -203,7 +207,7 @@ pub fn mountProjection(cx: *ui.Cx, scope: *ui.Scope, options: Options, hooks: Ho
     return Panel.mountProjection(cx, scope, options, hooks);
 }
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, manager: *backend.Manager, callbacks: Callbacks) !*Panel {
-    const panel = try mountProjection(cx, scope, .{ .presentation = .session_popover }, .{ .context = callbacks.context });
+    const panel = try mountProjection(cx, scope, .{ .presentation = .session_popover }, .{ .context = callbacks.context, .new_transfer = callbacks.open_sftp, .open_manager = callbacks.open_manager });
     panel.manager = manager;
     panel.callbacks = callbacks;
     return panel;
@@ -229,12 +233,14 @@ const Control = struct {
     action: ?TaskAction = null,
     window: ?WindowAction = null,
     choice: ?usize = null,
-    kind: enum { action, detail, events, copy_path, window, choice, search, filter, new_transfer, batch, batch_pause, batch_resume, batch_cancel, all_tasks, scope_tasks } = .action,
+    state_filter: ?Filter = null,
+    kind: enum { action, detail, events, copy_path, window, choice, search, filter, new_transfer, batch, batch_pause, batch_resume, batch_cancel, all_tasks, scope_tasks, state_filter } = .action,
     fn run(self: *Control) void {
         const p = self.panel;
         p.in_action = true;
         defer p.in_action = false;
         switch (self.kind) {
+            .state_filter => p.setFilter(self.state_filter.?),
             .action => p.perform(self.target.?, self.action.?) catch |err| p.fail(err),
             .events => {
                 const task_ = p.task(self.target.?) orelse return;
@@ -355,6 +361,8 @@ pub const Panel = struct {
     foot: *ui.Node,
     scope_row: *ui.Node,
     scope_scope: ?*ui.Scope = null,
+    v3_filters: ?*ui.Node = null,
+    v3_filter_labels: [3]?*ui.Node = @splat(null),
     counts_row: *ui.Node,
     counts_labels: [5]*ui.Node,
     title_badge: *ui.Node,
@@ -362,6 +370,8 @@ pub const Panel = struct {
     footer_label: *ui.Node,
     footer_rate: *ui.Node,
     empty: *ui.Node,
+    empty_container: *ui.Node = undefined,
+    empty_description: ?*ui.Node = null,
     failure: *ui.Node,
     search: *ui.Signal([]const u8),
     search_node: *ui.Node,
@@ -380,29 +390,56 @@ pub const Panel = struct {
         try scope.onCleanup(Panel, p, cleanup);
         const window = options.presentation != .session_popover;
         const native_window = options.presentation == .window;
-        p.root = try ui.box(cx, S.panel(window), .{});
+        p.root = try ui.box(cx, if (native_window) S.panel(window) else S.v3Panel(window), .{});
         p.root.meta.ownership.meta.test_id = "transfer.manager";
         if (!native_window) p.root.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .top = .{ .px = 46 }, .right = .{ .px = 14 } }, .z_index = 50 });
         p.root.setDisplay(.none);
-        p.head = try ui.box(cx, S.row(30, 6), .{});
+        p.head = try ui.box(cx, S.row(if (native_window) 30 else 26, if (native_window) 6 else 8), .{});
+        p.head.meta.ownership.meta.test_id = "transfer.header";
+        if (!native_window) p.head.setStyleInline(cx.allocator, .{ .padding = .{ .top = 2 } });
         try p.root.appendChild(cx.allocator, p.head);
-        try p.root.insertChildBefore(cx.allocator, try ui.boxStyled(cx, S.topFade, .{}), p.head);
-        try p.root.appendChild(cx.allocator, try ui.boxStyled(cx, S.grip, .{}));
-        try p.head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("arrow-down-up").?, S.theme.current().accent, S.icon(18)));
-        const heading_title = try p.label(p.head, if (window) "传输任务" else "本会话传输", 13, 700, false);
+        if (native_window) {
+            try p.root.insertChildBefore(cx.allocator, try ui.boxStyled(cx, S.topFade, .{}), p.head);
+            try p.root.appendChild(cx.allocator, try ui.boxStyled(cx, S.grip, .{}));
+        }
+        try p.head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("arrow-down-up").?, S.theme.current().accent_ink, S.icon(if (native_window) 18 else 17)));
+        const heading_title = try p.label(p.head, if (native_window) "传输任务" else if (window) "全局传输管理器" else "文件传输", 13, 700, false);
         p.heading_title = heading_title;
-        heading_title.setStyleInline(cx.allocator, S.label(72));
-        if (!window) try p.head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("lock-keyhole").?, S.theme.current().fg_2, S.icon(12)));
+        heading_title.meta.ownership.meta.test_id = "transfer.header.title";
+        if (!native_window) if (heading_title.getText()) |old| {
+            var props = old;
+            props.line_height = 20.0 / 13.0;
+            heading_title.setText(props);
+        };
+        heading_title.setStyleInline(cx.allocator, if (native_window) S.label(72) else S.flexibleLabel());
         p.title_badge = try p.label(p.head, "", 10.5, 400, true);
-        p.title_badge.setDisplay(if (window) .none else .flex);
+        p.title_badge.setDisplay(.none);
         p.title_badge.setStyleInline(cx.allocator, .{ .height = .{ .px = 22 }, .padding = .{ .left = 8, .right = 8 }, .background = S.theme.current().surface_2, .border = .{ .radius = 6 } });
-        try p.head.appendChild(cx.allocator, try ui.spacer(cx));
+        if (native_window) try p.head.appendChild(cx.allocator, try ui.spacer(cx));
         if (native_window) {
             _ = try p.button(p.head, scope, "最小化传输窗口", "transfer.window.minimize", "minus", .{ .panel = p, .kind = .window, .window = .minimize }, p.window_disabled, 22);
             _ = try p.button(p.head, scope, "缩放传输窗口", "transfer.window.zoom", "maximize-2", .{ .panel = p, .kind = .window, .window = .zoom }, p.window_disabled, 22);
         }
-        _ = try p.button(p.head, scope, "收起传输", "transfer.window.close", "x", .{ .panel = p, .kind = .window, .window = .close }, false, 22);
-        try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(9), .{}));
+        _ = try p.button(p.head, scope, if (native_window) "收起传输" else "关闭浮卡", "transfer.window.close", "x", .{ .panel = p, .kind = .window, .window = .close }, false, if (native_window) 22 else 24);
+        try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(if (native_window) 9 else 8), .{}));
+        if (!native_window and window) {
+            const segments = try ui.box(cx, S.v3Segment(), .{});
+            segments.meta.ownership.meta.test_id = "transfer.filters";
+            p.v3_filters = segments;
+            try p.root.appendChild(cx.allocator, segments);
+            for ([_][]const u8{ "全部", "进行中", "已完成" }, [_]Filter{ .all, .active, .ended }, 0..) |name_, filter_, i| {
+                const state = try scope.createState(Control, .{ .panel = p, .kind = .state_filter, .state_filter = filter_ });
+                const b = try ui.widgets.Button(.{ .label = name_, .variant = .ghost, .base_style = S.v3Filter(i == 0), .on_click = cx.on(Control, state, Control.run) }).mount(scope, cx);
+                b.meta.ownership.meta.test_id = switch (filter_) {
+                    .all => "transfer.filter.all",
+                    .active => "transfer.filter.active",
+                    else => "transfer.filter.completed",
+                };
+                p.v3_filter_labels[i] = b;
+                try segments.appendChild(cx.allocator, b);
+            }
+            try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(8), .{}));
+        }
         p.scope_row = try ui.box(cx, S.row(32, 6), .{});
         try p.root.appendChild(cx.allocator, p.scope_row);
         p.counts_row = try ui.box(cx, S.row(28, 6), .{});
@@ -449,11 +486,38 @@ pub const Panel = struct {
         p.failure = try p.label(p.root, "", 10.5, 400, true);
         p.failure.setStyleInline(cx.allocator, S.errorLine());
         p.failure.setDisplay(.none);
-        const empty_state = try ui.box(cx, S.emptyState(), .{});
+        const empty_state = try ui.box(cx, if (native_window) S.emptyState() else S.v3EmptyState(), .{});
+        p.empty_container = empty_state;
         empty_state.meta.ownership.meta.test_id = "transfer.empty";
         try p.root.appendChild(cx.allocator, empty_state);
-        try empty_state.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.folder_open, S.theme.current().fg_2, S.icon(18)));
-        p.empty = try p.label(empty_state, "", 12, 500, false);
+        if (native_window) {
+            try empty_state.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.folder_open, S.theme.current().fg_2, S.icon(18)));
+            p.empty = try p.label(empty_state, "", 12, 500, false);
+        } else {
+            const icon_ = try ui.iconTint(cx, ui.icons.arrow_down_up, S.theme.current().fg_2, S.icon(24));
+            icon_.meta.ownership.meta.test_id = "transfer.empty.icon";
+            try empty_state.appendChild(cx.allocator, icon_);
+            const text_column = try ui.box(cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 3 }, .{});
+            text_column.meta.ownership.meta.test_id = "transfer.empty.text";
+            try empty_state.appendChild(cx.allocator, text_column);
+            p.empty = try p.label(text_column, "", 12, 600, false);
+            p.empty.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 18 }, .flex_shrink = 0 });
+            if (p.empty.getText()) |old| {
+                var props = old;
+                props.line_height = 1.5;
+                p.empty.setText(props);
+            }
+            const description = try p.label(text_column, if (options.presentation == .global_popover or window) "从文件工作区或 @up / @dl 开始。" else "选择文件后上传或下载。", 11, 400, true);
+            description.meta.ownership.meta.test_id = "transfer.empty.description";
+            description.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .flex_shrink = 0 });
+            if (description.getText()) |old| {
+                var props = old;
+                props.line_height = 16.0 / 11.0;
+                description.setText(props);
+            }
+            p.empty_description = description;
+        }
+        p.empty.meta.ownership.meta.test_id = "transfer.empty.title";
         empty_state.setDisplay(.none);
         p.batch_row = try ui.box(cx, S.row(30, 6), .{});
         p.batch_label = try p.label(p.batch_row, "", 11, 400, true);
@@ -467,10 +531,10 @@ pub const Panel = struct {
         p.virtual = list.state;
         p.list = .{ .container = list.container, .content = list.state.content_node, .state = list.state.scroll_state };
         list.container.setStyleInline(cx.allocator, S.viewport());
-        p.list.content.style.padding.right = 14;
+        p.list.content.style.padding.right = if (native_window) 14 else 0;
         try p.root.appendChild(cx.allocator, list.container);
-        try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(if (window) 6 else 12), .{}));
-        p.foot = try ui.box(cx, S.row(if (window) 32 else 30, 6), .{});
+        try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(if (native_window) 6 else if (window) 0 else 10), .{}));
+        p.foot = try ui.box(cx, if (native_window or window) S.row(32, 6) else S.v3Footer(), .{});
         try p.root.appendChild(cx.allocator, p.foot);
         p.footer_label = try p.label(p.foot, "", 10.5, 400, true);
         p.footer_label.setStyleInline(cx.allocator, .{ .width = .{ .px = 210 }, .min_width = 0, .overflow = .hidden, .flex_shrink = 1 });
@@ -480,8 +544,11 @@ pub const Panel = struct {
             _ = try p.button(p.foot, scope, "查看全部任务", "transfer.open.all", "list", .{ .panel = p, .kind = .all_tasks }, false, 28);
             _ = try p.button(p.foot, scope, "所选任务操作", "transfer.batch", "ellipsis", .{ .panel = p, .kind = .batch }, false, 28);
         } else {
-            _ = try p.button(p.foot, scope, "查看全部任务", "transfer.open.all", "list", .{ .panel = p, .kind = .all_tasks }, hooks.open_manager == null, 28);
-            _ = try p.button(p.foot, scope, "查看会话任务", "transfer.open.scope", "list", .{ .panel = p, .kind = .scope_tasks }, hooks.open_manager == null, 28);
+            p.footer_label.setDisplay(.none);
+            p.footer_rate.setDisplay(.none);
+            try p.v3FooterAction(p.foot, scope, "打开 SFTP", "transfer.open.sftp", .{ .panel = p, .kind = .new_transfer }, hooks.new_transfer == null, false);
+            try p.foot.appendChild(cx.allocator, try ui.spacer(cx));
+            try p.v3FooterAction(p.foot, scope, "全局传输管理", "transfer.open.all", .{ .panel = p, .kind = .all_tasks }, hooks.open_manager == null, true);
         }
         try cx.addAfterLayoutHook(p, afterLayout);
         return p;
@@ -504,7 +571,7 @@ pub const Panel = struct {
     fn button(self: *Panel, parent: *ui.Node, scope: *ui.Scope, label_: []const u8, test_id: []const u8, icon: []const u8, control: Control, disabled: anytype, size: f32) !*ui.Node {
         const state = try scope.createState(Control, control);
         const owned_label = try scope.createText(label_, .{});
-        const node = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get(icon), .icon_size = 16, .a11y_label = owned_label, .base_style = S.action(size), .disabled = disabled, .on_click = self.cx.on(Control, state, Control.run) }).mount(scope, self.cx);
+        const node = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get(icon), .icon_size = if (self.options.presentation != .window and control.kind == .window) @as(f32, 14) else 16, .a11y_label = owned_label, .base_style = S.action(size), .disabled = disabled, .on_click = self.cx.on(Control, state, Control.run) }).mount(scope, self.cx);
         node.meta.ownership.meta.test_id = test_id;
         try parent.appendChild(self.cx.allocator, node);
         return node;
@@ -563,9 +630,14 @@ pub const Panel = struct {
         self.visible.clearRetainingCapacity();
         self.counts = .{};
         const query = self.search.peek();
+        var v3_active: usize = 0;
+        var v3_completed: usize = 0;
         for (source.value.rows, 0..) |task_, i| {
             if (!belongs(self.selected_scope, task_.target.owner)) continue;
             const kind = category(task_.phase);
+            const active = task_.phase == .queued or task_.phase == .retry_wait or task_.phase == .running or task_.phase == .verifying;
+            if (active) v3_active += 1;
+            if (task_.phase == .succeeded) v3_completed += 1;
             switch (kind) {
                 .active => self.counts.active += 1,
                 .waiting => self.counts.waiting += 1,
@@ -575,9 +647,22 @@ pub const Panel = struct {
                 .all => unreachable,
             }
             if (task_.phase == .running) self.counts.speed_bps +|= task_.speed_bps;
-            if (self.filter != .all and self.filter != kind) continue;
+            if (self.options.presentation != .window and self.filter == .active) {
+                if (!active) continue;
+            } else if (self.options.presentation != .window and self.filter == .ended) {
+                if (task_.phase != .succeeded) continue;
+            } else if (self.filter != .all and self.filter != kind) continue;
             if (query.len > 0 and !contains(task_.name, query) and !contains(task_.local_path, query) and !contains(task_.remote_path, query) and !contains(task_.owner_label, query)) continue;
             try self.visible.append(self.cx.allocator, i);
+        }
+        if (self.options.presentation != .window) {
+            // UI_V3 prepends queued jobs; its session preview uses jobs.slice(-3).
+            std.mem.reverse(usize, self.visible.items);
+            if (self.options.presentation == .session_popover and self.visible.items.len > 3) {
+                const start = self.visible.items.len - 3;
+                std.mem.copyForwards(usize, self.visible.items[0..3], self.visible.items[start..]);
+                self.visible.shrinkRetainingCapacity(3);
+            }
         }
         var selected_index: usize = 0;
         while (selected_index < self.selection.items.len) {
@@ -592,7 +677,7 @@ pub const Panel = struct {
             self.expanded = null;
             self.events_open = false;
         };
-        if (self.options.presentation == .session_popover) try self.heading_title.setTextContent(self.cx.allocator, if (self.selected_scope == .sessions) "本组传输" else "本会话传输");
+
         const scope_label = if (self.scope_choice) |i| source.value.choices[i].label else source.value.scope_label;
         if (self.selected_scope == .session) {
             try self.format(self.title_badge, "会话 #{d}", .{@backingInt(self.selected_scope.session.session_id)});
@@ -606,18 +691,41 @@ pub const Panel = struct {
             node.parent.?.setStyleInline(self.cx.allocator, S.badge(if (i == 0) 84 else 74, if (count == 0) S.theme.current().fg_3 else countColor(i)));
         }
         const has_tasks = self.counts.active + self.counts.waiting + self.counts.paused + self.counts.failed + self.counts.ended != 0;
-        self.counts_row.setDisplay(if (self.options.presentation != .session_popover and has_tasks) .flex else .none);
+        self.counts_row.setDisplay(if (self.options.presentation == .window and has_tasks) .flex else .none);
         self.footer_rate.setDisplay(if (has_tasks) .flex else .none);
         try self.footer_label.setTextContent(self.cx.allocator, if (self.options.presentation == .session_popover) scope_label else "");
         self.footer_label.setDisplay(if (self.options.presentation == .session_popover) .flex else .none);
         try self.format(self.footer_rate, "{d} 进行中 · {d:.1} MiB/s · {d} 等待", .{ self.counts.active, @as(f64, @floatFromInt(self.counts.speed_bps)) / 1048576, self.counts.waiting });
         self.search_node.setDisplay(if (self.search_visible) .flex else .none);
         self.filters_node.setDisplay(if (self.filter_visible) .flex else .none);
-        self.batch_row.setDisplay(if (self.batch_visible) .flex else .none);
+        self.batch_row.setDisplay(if (self.batch_visible and self.options.presentation == .window) .flex else .none);
+        if (self.options.presentation != .window) {
+            self.scope_row.setDisplay(.none);
+            self.search_node.setDisplay(.none);
+            self.filters_node.setDisplay(.none);
+            if (self.options.presentation == .global_popover) self.foot.setDisplay(.none);
+            self.footer_label.setDisplay(.none);
+            self.footer_rate.setDisplay(.none);
+            const total_count = self.counts.active + self.counts.waiting + self.counts.paused + self.counts.failed + self.counts.ended;
+            for ([_][]const u8{ "全部", "进行中", "已完成" }, [_]usize{ total_count, v3_active, v3_completed }, [_]Filter{ .all, .active, .ended }, 0..) |name_, count, filter_, i| if (self.v3_filter_labels[i]) |button_| {
+                const label_ = firstTextNode(button_) orelse return error.MissingFilterLabel;
+                try self.format(label_, "{s} {d}", .{ name_, count });
+                label_.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 16 } });
+                if (label_.getText()) |old| {
+                    var props = old;
+                    props.font_size = 11;
+                    props.font_weight = 400;
+                    props.line_height = 16.0 / 11.0;
+                    props.color = if (self.filter == filter_) S.theme.current().accent_ink else S.theme.current().fg_2;
+                    label_.setText(props);
+                }
+                button_.setStyleInline(self.cx.allocator, S.v3Filter(self.filter == filter_));
+            };
+        }
         try self.format(self.batch_label, "已选择 {d} 项", .{self.selection.items.len});
-        self.empty.parent.?.setDisplay(if (self.visible.items.len == 0) .flex else .none);
+        self.empty_container.setDisplay(if (self.visible.items.len == 0) .flex else .none);
         self.list.container.setDisplay(if (self.visible.items.len == 0) .none else .flex);
-        try self.empty.setTextContent(self.cx.allocator, if (self.filter != .all or query.len > 0) "没有符合筛选的任务" else switch (self.selected_scope) {
+        try self.empty.setTextContent(self.cx.allocator, if (self.options.presentation == .global_popover) "没有传输任务" else if (self.options.presentation == .session_popover) "当前没有传输任务" else if (self.filter != .all or query.len > 0) "没有符合筛选的任务" else switch (self.selected_scope) {
             .all => "暂无传输任务",
             .session => "本会话暂无传输任务",
             .sessions => "所选组暂无传输任务",
@@ -666,6 +774,7 @@ pub const Panel = struct {
     }
     fn renderTask(self: *Panel, index: usize, scope: *ui.Scope, cx: *ui.Cx) !*ui.Node {
         const task_ = self.source.?.value.rows[self.visible.items[index]];
+        if (self.options.presentation != .window) return self.renderV3Task(task_, scope, cx);
         const expanded = self.expanded != null and same(self.expanded.?, task_.target);
         const root = try ui.box(cx, S.stack(), .{});
         root.setStyleInline(cx.allocator, .{ .gap = 4 });
@@ -753,6 +862,160 @@ pub const Panel = struct {
         if (expanded) try self.renderDetail(root, scope, task_);
         return root;
     }
+    fn v3TaskAction(self: *Panel, parent: *ui.Node, scope: *ui.Scope, label_: []const u8, test_id: []const u8, control: Control, disabled: bool) !void {
+        const state = try scope.createState(Control, control);
+        const owned = try scope.createText(label_, .{});
+        const button_ = try ui.widgets.Button(.{ .label = owned, .a11y_label = owned, .variant = .ghost, .base_style = S.v3TextAction(), .disabled = disabled, .on_click = self.cx.on(Control, state, Control.run) }).mount(scope, self.cx);
+        button_.meta.ownership.meta.test_id = test_id;
+        const label_node = firstTextNode(button_) orelse return error.MissingActionLabel;
+        label_node.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 18 } });
+        if (label_node.getText()) |old| {
+            var props = old;
+            props.font_size = 11;
+            props.font_weight = 400;
+            props.line_height = 18.0 / 11.0;
+            label_node.setText(props);
+        }
+        try parent.appendChild(self.cx.allocator, button_);
+    }
+    fn v3FooterAction(self: *Panel, parent: *ui.Node, scope: *ui.Scope, label_: []const u8, test_id: []const u8, control: Control, disabled: bool, primary: bool) !void {
+        const state = try scope.createState(Control, control);
+        const owned = try scope.createText(label_, .{});
+        const button_ = try ui.widgets.Button(.{ .label = owned, .a11y_label = owned, .variant = if (primary) ui.widgets.button.ButtonVariant.primary else ui.widgets.button.ButtonVariant.secondary, .base_style = S.v3FooterButton(primary), .disabled = disabled, .on_click = self.cx.on(Control, state, Control.run) }).mount(scope, self.cx);
+        button_.meta.ownership.meta.test_id = test_id;
+        const label_node = firstTextNode(button_) orelse return error.MissingFooterLabel;
+        label_node.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 18 } });
+        if (label_node.getText()) |old| {
+            var props = old;
+            props.font_size = 11;
+            props.font_weight = 500;
+            props.line_height = 18.0 / 11.0;
+            props.color = if (primary) ui.Color.WHITE else S.theme.current().fg_1;
+            label_node.setText(props);
+        }
+        try parent.appendChild(self.cx.allocator, button_);
+    }
+    fn renderV3Task(self: *Panel, task_: Task, scope: *ui.Scope, cx: *ui.Cx) !*ui.Node {
+        const expanded = self.expanded != null and same(self.expanded.?, task_.target);
+        const root = try ui.box(cx, S.stack(), .{});
+        root.setStyleInline(cx.allocator, .{ .gap = 4 });
+        var card_style = S.v3Card();
+        card_style.height = .{ .px = v3TaskHeight(task_) };
+        const card = try ui.box(cx, card_style, .{});
+        card.meta.ownership.meta.test_id = "transfer.task";
+        try root.appendChild(cx.allocator, card);
+        const head = try ui.box(cx, S.row(20, 8), .{});
+        head.meta.ownership.meta.test_id = "transfer.task.head";
+        try card.appendChild(cx.allocator, head);
+        const color = if (task_.phase == .succeeded) S.theme.current().ok_ink else S.theme.current().fg_2;
+        try head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (task_.direction == .upload) "upload" else "download").?, S.theme.current().accent_ink, S.icon(15)));
+        // The existing native detail state is entered through the file title.
+        // Its control adds no extra action or height to the frozen collapsed card.
+        const detail_control = try scope.createState(Control, .{ .panel = self, .target = task_.target, .kind = .detail });
+        const name_label = try scope.createText(task_.name, .{});
+        const name_button = try ui.widgets.Button(.{ .label = name_label, .variant = .ghost, .a11y_label = name_label, .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 20 }, .flex = 1, .min_width = 0, .padding = .ZERO, .font_size = 12, .font_weight = 600, .text_color = S.theme.current().fg_1, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 0 }, .shadow = .{}, .justify = .start }, .on_click = cx.on(Control, detail_control, Control.run) }).mount(scope, cx);
+        name_button.meta.ownership.meta.test_id = "transfer.task.expand";
+        try head.appendChild(cx.allocator, name_button);
+        const name = firstTextNode(name_button) orelse return error.MissingTaskName;
+        if (name.parent) |parent| if (parent != name_button) parent.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_width = 0, .justify = .start, .align_items = .center });
+        name.meta.ownership.meta.test_id = "transfer.task.name";
+        name.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0 });
+        if (name.getText()) |old| {
+            var props = old;
+            props.font_size = 12;
+            props.font_weight = 600;
+            props.color = S.theme.current().fg_1;
+            props.line_height = 16.0 / 12.0;
+            props.text_overflow = .ellipsis;
+            name.setText(props);
+        }
+        const badge = try ui.box(cx, .{ .height = .{ .px = 18 }, .padding = .{ .left = 5, .right = 5, .top = 2, .bottom = 2 }, .background = S.theme.current().well, .border = .{ .radius = 5 }, .flex_shrink = 0 }, .{});
+        badge.meta.ownership.meta.test_id = "transfer.task.status";
+        const status = try self.label(badge, if (task_.phase == .failed) "失败" else phaseLabel(task_.phase), 10, 400, true);
+        status.setTextColor(color);
+        status.setStyleInline(cx.allocator, .{ .height = .{ .px = 14 }, .flex_shrink = 0 });
+        if (status.getText()) |old| {
+            var props = old;
+            props.line_height = 1.4;
+            status.setText(props);
+        }
+        try head.appendChild(cx.allocator, badge);
+        try card.appendChild(cx.allocator, try ui.box(cx, S.gap(8), .{}));
+        var track_style = S.track();
+        track_style.height = .{ .px = 3 };
+        track_style.background = S.theme.current().hover;
+        track_style.border = .{ .radius = 2 };
+        track_style.overflow = .hidden;
+        const track = try ui.box(cx, track_style, .{});
+        track.meta.ownership.meta.test_id = "transfer.task.progress";
+        try card.appendChild(cx.allocator, track);
+        const fraction: f64 = if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
+        var fill_style = S.fill(@floatCast(fraction), S.theme.current().accent);
+        fill_style.border = .{ .radius = 2 };
+        try track.appendChild(cx.allocator, try ui.box(cx, fill_style, .{}));
+        try card.appendChild(cx.allocator, try ui.box(cx, S.gap(6), .{}));
+        const meta = try ui.box(cx, S.row(14, 8), .{});
+        meta.meta.ownership.meta.test_id = "transfer.task.meta";
+        try card.appendChild(cx.allocator, meta);
+        const path = try self.label(meta, "", 10, 400, true);
+        const destination = if (task_.direction == .upload) task_.remote_path else task_.local_path;
+        const directory = std.fs.path.dirname(destination) orelse destination;
+        try self.format(path, "{s} · {s}", .{ task_.owner_label, directory });
+        path.setStyleInline(cx.allocator, S.flexibleLabel());
+        if (path.getText()) |old| {
+            var props = old;
+            props.text_overflow = .ellipsis;
+            props.line_height = 1.4;
+            path.setText(props);
+        }
+        var total_buffer: [40]u8 = undefined;
+        var rate_buffer: [96]u8 = undefined;
+        const description = v3RateLabel(task_, &rate_buffer, &total_buffer);
+        const rate = try self.label(meta, description, 10, 400, true);
+        rate.meta.ownership.meta.test_id = "transfer.task.rate";
+        rate.setStyleInline(cx.allocator, .{ .height = .{ .px = 14 }, .flex_shrink = 0 });
+        if (rate.getText()) |old| {
+            var props = old;
+            props.line_height = 1.4;
+            rate.setText(props);
+        }
+        if (v3HasError(task_)) {
+            try card.appendChild(cx.allocator, try ui.box(cx, S.gap(6), .{}));
+            const failure = try self.label(card, task_.status_detail, 11, 400, true);
+            failure.meta.ownership.meta.test_id = "transfer.task.error";
+            failure.setTextColor(S.theme.current().danger);
+            failure.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .flex_shrink = 0 });
+            if (failure.getText()) |old| {
+                var props = old;
+                props.line_height = 16.0 / 11.0;
+                props.text_overflow = .ellipsis;
+                failure.setText(props);
+            }
+        }
+        try card.appendChild(cx.allocator, try ui.box(cx, S.gap(6), .{}));
+        const actions = try ui.box(cx, S.row(24, 8), .{});
+        actions.meta.ownership.meta.test_id = "transfer.task.actions";
+        try card.appendChild(cx.allocator, actions);
+        try actions.appendChild(cx.allocator, try ui.spacer(cx));
+        const primary: ?TaskAction = switch (task_.phase) {
+            .queued, .retry_wait, .running => .pause,
+            .paused => .resume_transfer,
+            .failed => .retry,
+            .succeeded => .reveal,
+            .conflict => .resolve_conflict,
+            else => null,
+        };
+        if (primary) |action_| try self.v3TaskAction(actions, scope, switch (action_) {
+            .reveal => "查看位置",
+            .pause => "暂停",
+            .resume_transfer => "继续",
+            .retry => "重试",
+            else => actionLabel(action_, task_.direction),
+        }, "transfer.task.primary", .{ .panel = self, .target = task_.target, .action = action_ }, !self.actionAvailable(task_.target) or (action_ == .resume_transfer and !task_.can_resume) or (action_ == .reveal and !self.canReveal(task_.target)));
+        if (allows(task_.phase, .cancel)) try self.v3TaskAction(actions, scope, "取消任务", "transfer.task.cancel", .{ .panel = self, .target = task_.target, .action = .cancel }, !self.actionAvailable(task_.target));
+        if (expanded) try self.renderDetail(root, scope, task_);
+        return root;
+    }
     fn renderDetail(self: *Panel, root: *ui.Node, scope: *ui.Scope, task_: Task) !void {
         const detail_box = try ui.box(self.cx, S.detail(), .{});
         try root.appendChild(self.cx.allocator, detail_box);
@@ -784,7 +1047,9 @@ pub const Panel = struct {
     fn itemHeight(index: usize, raw: ?*anyopaque) f32 {
         const p: *Panel = @ptrCast(@alignCast(raw.?));
         if (p.source == null or index >= p.visible.items.len) return S.row_pitch;
-        return if (p.expanded != null and same(p.expanded.?, p.source.?.value.rows[p.visible.items[index]].target)) S.detail_height + 2 else S.row_pitch;
+        const expanded = p.expanded != null and same(p.expanded.?, p.source.?.value.rows[p.visible.items[index]].target);
+        if (p.options.presentation != .window) return v3TaskHeight(p.source.?.value.rows[p.visible.items[index]]) + (if (index + 1 < p.visible.items.len) @as(f32, 8) else 0) + (if (expanded) @as(f32, 153) else 0);
+        return if (expanded) S.detail_height + 2 else S.row_pitch;
     }
     fn itemLabel(index: usize, buffer: []u8, raw: ?*anyopaque) []const u8 {
         const p: *Panel = @ptrCast(@alignCast(raw.?));
@@ -797,6 +1062,12 @@ pub const Panel = struct {
         for (source.value.rows) |task_| if (same(task_.target, target)) return task_;
         return null;
     }
+    fn canReveal(self: *const Panel, target: Target) bool {
+        if (self.options.presentation == .window) return self.actionAvailable(target);
+        if (self.manager == null) return (self.task(target) orelse return false).can_reveal and self.actionAvailable(target);
+        const callback = self.callbacks.?.can_reveal orelse return false;
+        return callback(self.callbacks.?.context, target.job);
+    }
     fn actionAvailable(self: *const Panel, target: Target) bool {
         return target.owner != null and (self.manager != null or self.hooks.action != null);
     }
@@ -804,6 +1075,7 @@ pub const Panel = struct {
         const task_ = self.task(target) orelse return error.StaleTask;
         if (!allows(task_.phase, action)) return error.ActionUnavailable;
         if (action == .resume_transfer and !task_.can_resume) return error.ActionUnavailable;
+        if (action == .reveal and self.options.presentation != .window and !self.canReveal(target)) return error.ActionUnavailable;
         if (target.owner == null) return error.UnknownOwner;
         if (self.manager) |manager| {
             const actual = manager.progress(target.job) orelse return error.StaleTask;
@@ -865,7 +1137,7 @@ pub const Panel = struct {
             error.ActionUnavailable => "此任务当前不支持该操作",
             else => @errorName(err),
         }) catch {};
-        self.failure.setTextColor(S.theme.current().danger_ink);
+        self.failure.setTextColor(S.theme.current().danger);
         self.failure.setDisplay(.flex);
         self.cx.requestRedraw();
     }
@@ -910,9 +1182,10 @@ pub const Panel = struct {
         self.window_disabled.set(false);
     }
     pub fn retheme(self: *Panel) void {
+        if (self.event_view) |view| view.retheme();
         S.repaint(self.root, self.paint_colors);
         self.paint_colors = S.theme.current();
-        self.root.setStyleInline(self.cx.allocator, S.panel(self.options.presentation != .session_popover));
+        self.root.setStyleInline(self.cx.allocator, if (self.options.presentation == .window) S.panel(true) else S.v3Panel(self.options.presentation == .global_popover));
         self.scopes_dirty = true;
         self.invalidate();
     }
@@ -957,6 +1230,7 @@ pub const Panel = struct {
             const history = manager.eventHistory(p.job) orelse &.{};
             row.event_summary = try std.fmt.allocPrint(a, "{d} 条状态事件 · 当前尝试 {d} · {s}", .{ history.len, p.attempt, phaseLabel(row.phase) });
             row.can_resume = manager.canResume(p.job);
+            row.can_reveal = if (self.callbacks.?.can_reveal) |read_capability| read_capability(self.callbacks.?.context, p.job) else false;
         }
         var speed: u64 = 0;
         for (rows) |row| if (row.phase == .running) {
@@ -988,6 +1262,27 @@ pub const Panel = struct {
         };
         try self.update(.{ .revision = self.revision + 1, .rows = rows, .choices = choices.items, .scope = selected, .scope_label = scope_label });
     }
+    fn v3Measure(self: *Panel, value: []const u8, size: f32, weight: u16) f32 {
+        return ui.Cx.measureTextWidthCallback(self.cx, value.ptr, value.len, size, weight, false);
+    }
+    fn v3ContentWidth(self: *Panel) f32 {
+        const source = self.source orelse return 360;
+        var result: f32 = 360;
+        for (self.visible.items) |i| {
+            const task_ = source.value.rows[i];
+            const head_width = self.v3Measure(task_.name, 12, 600) + self.v3Measure(if (task_.phase == .failed) "失败" else phaseLabel(task_.phase), 10, 400) + 87;
+            const destination = if (task_.direction == .upload) task_.remote_path else task_.local_path;
+            const directory = std.fs.path.dirname(destination) orelse destination;
+            var rate_buffer: [96]u8 = undefined;
+            var total_buffer: [40]u8 = undefined;
+            const rate = v3RateLabel(task_, &rate_buffer, &total_buffer);
+            const meta_width = self.v3Measure(task_.owner_label, 10, 400) + self.v3Measure(" · ", 10, 400) + self.v3Measure(directory, 10, 400) + self.v3Measure(rate, 10, 400) + 54;
+            result = @max(result, @max(head_width, meta_width));
+            if (v3HasError(task_)) result = @max(result, self.v3Measure(task_.status_detail, 11, 400) + 46);
+            if (result >= 460) return 460;
+        }
+        return @min(@as(f32, 460), @ceil(result));
+    }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const p: *Panel = @ptrCast(@alignCast(raw));
         if (p.pending_refresh) |pending| {
@@ -1013,31 +1308,57 @@ pub const Panel = struct {
             return .needs_layout;
         }
         const global = p.options.presentation == .global_popover;
-        const width = @max(@as(f32, 1), @min(@as(f32, if (global) 840 else 620), bounds.w - 16));
-        var height = @max(@as(f32, 1), @min(@as(f32, if (global) 578 else 330), bounds.h - 16));
+        const desired_width: f32 = if (p.visible.items.len == 0) 320 else if (global) p.v3ContentWidth() else 344;
+        const width = @max(@as(f32, 1), @min(desired_width, bounds.w - 24));
+        var list_height: f32 = 0;
+        for (p.visible.items, 0..) |_, i| list_height += itemHeight(i, p);
+        if (list_height == 0) list_height = 53;
+        const max_height = @max(@as(f32, 1), @min(bounds.h - 24, @min(@as(f32, 420), @max(@as(f32, 160), @floor(bounds.h * 0.65)))));
+        const failure_height: f32 = if (p.failure.style.display != .none) @max(@as(f32, 24), p.failure.globalRect().h) else 0;
+        const notice_height: f32 = if (p.notice.parent.?.style.display != .none) @max(@as(f32, 36), p.notice.parent.?.globalRect().h) else 0;
+        const height = @min((if (global) @as(f32, 98) else 108) + list_height + failure_height + notice_height, max_height);
         var top: f32 = 46;
-        var right: f32 = 14;
+        var right: f32 = 12;
         if (p.anchor_id) |id| {
             if (findNode(p.cx.root orelse return .done, id)) |anchor| {
                 const r = anchor.globalRect();
-                top = if (global) r.y - bounds.y + r.h + 4 else r.y - bounds.y - height - 9;
-                right = bounds.x + bounds.w - r.x - r.w;
+                const left = std.math.clamp(r.x - bounds.x, @as(f32, 12), @max(@as(f32, 12), bounds.w - width - 12));
+                right = bounds.w - width - left;
+                top = if (global) r.y - bounds.y + r.h + 8 else r.y - bounds.y - height - 8;
+                if (global and top + height > bounds.h - 12) top = r.y - bounds.y - height - 8;
             } else {
                 p.hide();
                 return .done;
             }
         }
-        // The titlebar list stays below its trigger in compact windows; its
-        // existing task viewport absorbs the height reduction.
-        if (global) height = @max(@as(f32, 1), @min(height, bounds.h - @max(@as(f32, 8), top) - 8));
-        top = std.math.clamp(top, @as(f32, 8), @max(@as(f32, 8), bounds.h - height - 8));
-        right = std.math.clamp(right, @as(f32, 8), @max(@as(f32, 8), bounds.w - width - 8));
+        // UI_V3 placeOverlay: 12px window bounds, 8px anchor gap, flip before clamping.
+        top = std.math.clamp(top, @as(f32, 12), @max(@as(f32, 12), bounds.h - height - 12));
+        right = std.math.clamp(right, @as(f32, 12), @max(@as(f32, 12), bounds.w - width - 12));
         const ext = p.root.style.ensureExtPanic(p.cx.allocator);
         if (p.root.style.width.px == width and p.root.style.height.px == height and ext.inset.top.px == top and ext.inset.right.px == right) return .done;
         p.root.setStyleInline(p.cx.allocator, .{ .width = .{ .px = width }, .height = .{ .px = height }, .inset = .{ .top = .{ .px = top }, .right = .{ .px = right } } });
         return .needs_layout;
     }
 };
+fn firstTextNode(node: *ui.Node) ?*ui.Node {
+    if (node.getText() != null) return node;
+    for (node.children.items) |child| if (firstTextNode(child)) |found| return found;
+    return null;
+}
+fn v3RateLabel(task_: Task, buffer: *[96]u8, total_buffer: *[40]u8) []const u8 {
+    if (task_.status_detail.len > 0 and !v3HasError(task_)) return task_.status_detail;
+    if (task_.phase == .paused) return if (task_.can_resume) "等待继续" else "数据已保留";
+    const fraction: f64 = if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
+    if (task_.phase == .running) return std.fmt.bufPrint(buffer, "{d:.0}% · {d:.1} MiB/s", .{ fraction * 100, @as(f64, @floatFromInt(task_.speed_bps)) / 1048576 }) catch "大小待确认";
+    const total = if (task_.total_bytes) |bytes| byteLabel(total_buffer, bytes) catch "大小待确认" else "大小待确认";
+    return std.fmt.bufPrint(buffer, "{d:.0}% · {s}", .{ fraction * 100, total }) catch "大小待确认";
+}
+fn v3HasError(task_: Task) bool {
+    return (task_.phase == .failed or task_.phase == .checksum_failed) and task_.status_detail.len > 0;
+}
+fn v3TaskHeight(task_: Task) f32 {
+    return S.v3_card_height + (if (v3HasError(task_)) @as(f32, 22) else 0);
+}
 fn contains(haystack: []const u8, needle: []const u8) bool {
     return std.ascii.findIgnoreCase(haystack, needle) != null;
 }

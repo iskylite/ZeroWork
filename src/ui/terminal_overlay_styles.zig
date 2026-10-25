@@ -63,7 +63,7 @@ pub fn catalogueDescription() ui.TextStyle {
 
 pub fn panelPaint() ui.BoxStyle {
     const c = theme.current();
-    return .{ .background = c.overlay, .border_color = c.border, .shadow = .{ .color = c.shadow, .blur = 28, .offset_x = 0, .offset_y = 10 } };
+    return .{ .background = c.overlay, .glass = theme.overlayGlass(), .border_color = c.border, .shadow = .{ .color = c.shadow, .blur = 28, .offset_x = 0, .offset_y = 10 } };
 }
 
 pub fn rowBackground(selected: bool) ui.Color {
@@ -86,4 +86,8 @@ pub fn badgeBackground(source: completion.Source) ui.Color {
         .path => c.accent.withAlpha(26),
         .builtin => c.surface_2,
     };
+}
+
+pub fn timestampText(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 11, .line_height = 2, .color = theme.current().fg_3, .use_monospace_font = true, .wrap = .none };
 }

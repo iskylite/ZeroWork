@@ -66,24 +66,33 @@ test "picker measured height flips above bottom anchor and follows resized card"
     try std.testing.expect(next.y >= 7.5 and next.y + next.h <= 172.5);
 }
 
-test "key recorder uses measured bounds in short card" {
+test "V3 key recorder uses a centered 390px Modal independent of the shortcut anchor" {
     const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();
-    cx.setViewport(270, 110);
+    cx.setViewport(860, 480);
     const root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     cx.root = root;
     const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
     defer scope.dispose();
     var map: @import("config/keybindings.zig").Map = .{};
     var context: u8 = 0;
-    const anchor = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 240 }, .top = .{ .px = 85 } }, .width = .{ .px = 20 }, .height = .{ .px = 20 } }, .{});
+    const anchor = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 820 }, .top = .{ .px = 440 } }, .width = .{ .px = 20 }, .height = .{ .px = 20 } }, .{});
     try root.appendChild(cx.allocator, anchor);
-    const p = try @import("config/keybinding_picker.zig").mount(cx, scope, root, anchor, &map, "搜索当前终端", .{ .context = &context, .changed = call, .dismiss = call });
+    const p = try @import("config/keybinding_picker.zig").mount(cx, scope, root, anchor, &map, "search", .{ .context = &context, .changed = call, .dismiss = call });
     try root.appendChild(cx.allocator, p.root);
     _ = cx.render();
-    const r = p.root.globalRect();
-    try std.testing.expect(r.x + r.w <= 262.5);
-    try std.testing.expect(r.y + r.h <= anchor.globalRect().y - 3.5);
+    const Find = struct {
+        fn tagged(node: *ui.Node, id: []const u8) ?*ui.Node {
+            if (node.meta.ownership.meta.test_id) |test_id| if (std.mem.eql(u8, id, test_id)) return node;
+            for (node.children.items) |child| if (tagged(child, id)) |found| return found;
+            return null;
+        }
+    };
+    const r = Find.tagged(p.root, "settings.keybinding.dialog").?.globalRect();
+    try std.testing.expectApproxEqAbs(@as(f32, 390), r.w, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 430), r.x + r.w / 2, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 240), r.y + r.h / 2, 0.5);
+    try std.testing.expect(r.y >= 24 and r.y + r.h <= 456);
 }
 
 test "short picker scroll exposes final choice and numeric input receives focus" {

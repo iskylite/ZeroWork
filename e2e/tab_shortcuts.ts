@@ -79,8 +79,10 @@ try {
   assert.equal(Number(owner.pid), child.pid, "Never attach to a different process");
   for (let i = 1; i <= 10; i++) {
     await click("toolbar.new_session");
-    await waitFor(async () => (await query("session.menu.saved.1")).some(shown) || null);
-    await click("session.menu.saved.1"); await expectActive(i);
+    await waitFor(async () => (await query("session.menu.quick")).some(shown) || null);
+    await click("session.menu.quick");
+    await waitFor(async () => (await query("quick.submit")).some(shown) || null);
+    await click("quick.submit"); await expectActive(i);
   }
   report.tab_count = 10;
   await check("Command shows ordered slots 1–9 and leaves tab 10 as its type icon", async () => {

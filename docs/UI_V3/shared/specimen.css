@@ -1,0 +1,78 @@
+/* A story isolates one component; the full stage remains available to its overlays. */
+body[data-functional-component]{padding:16px;display:grid;place-items:center}
+body[data-functional-component] #app{background:transparent;box-shadow:none;border-radius:0;isolation:isolate}
+body[data-functional-component="shell-tabs"] #app{height:100%!important;display:flex;justify-content:flex-start;overflow:hidden}
+body[data-functional-component="shell-tabs"] .titlebar{border-radius:12px;background:var(--panel);width:100%;margin-top:24px;overflow:visible}
+body[data-functional-component="shell-tabs"] .titlebar .tabs{overflow-x:auto;overflow-y:hidden;flex:1;min-width:0}
+body[data-functional-component="shell-tabs"] .title-actions{display:none!important}
+body[data-functional-component="shell-tabs"] .sidebar-toggle{display:none!important}
+body[data-functional-component="shell-tabs"] .tab{flex:0 0 158px!important;width:158px;min-width:158px;max-width:158px;transition:background 160ms,color 160ms}
+body[data-functional-component="shell-tabs"] .tab:hover{width:158px;min-width:158px;max-width:158px}
+body[data-functional-component="shell-tabs"] .popover,body[data-functional-component="shell-tabs"] .context-menu{max-height:calc(100% - 94px);overflow:auto}
+body[data-functional-component="shell-tabs"] .toast-stack{top:90px}
+body[data-functional-component^="connection-"] #app,body[data-functional-component="broadcast"] #app,body[data-functional-component="port-forward"] #app,body[data-functional-component="transfer"] #app{max-width:none;max-height:none}
+body[data-functional-component^="connection-"] .statusbar,body[data-functional-component="broadcast"] .statusbar,body[data-functional-component="port-forward"] .statusbar,body[data-functional-component="transfer"] .statusbar{background:transparent;justify-content:center;gap:0}
+body[data-functional-component^="connection-"] .statusbar>*,body[data-functional-component="broadcast"] .statusbar>*,body[data-functional-component="port-forward"] .statusbar>*,body[data-functional-component="transfer"] .statusbar>*{display:none!important}
+body[data-functional-component="connection-status"] .statusbar [data-act="identity"],body[data-functional-component="connection-route"] .statusbar [data-act="chain"],body[data-functional-component="broadcast"] .statusbar [data-act="broadcast"],body[data-functional-component="port-forward"] .statusbar [data-act="forward"],body[data-functional-component="transfer"] .statusbar [data-act="transfer-popover"]{display:flex!important;background:var(--panel);padding:7px 12px;border-radius:8px;min-height:32px}
+body[data-functional-component] .modal-scrim{border-radius:12px}
+body[data-functional-component="statusbar"] .titlebar,body[data-functional-component="statusbar"] .workspace-body,body[data-functional-component="statusbar"] #ai-edge{display:none}
+body[data-functional-component="statusbar"] #app{justify-content:center}
+body[data-functional-component="statusbar"] .statusbar{border-radius:10px;background:var(--panel)}
+
+/* KVM stories expose exactly one control and its complete popup, never an entire console. */
+body[data-functional-kvm]{padding:16px!important;display:grid;place-items:center}
+body[data-functional-kvm] #app{position:relative;isolation:isolate;width:100%!important;height:100%!important;min-width:0!important;min-height:0!important;margin:0!important;background:transparent;box-shadow:none;border-radius:0}
+body[data-functional-kvm] #app>.layout,body[data-functional-kvm] #app>.statusbar,body[data-functional-kvm] #ai-edge{display:none!important}
+body[data-functional-kvm] #app>.titlebar{justify-content:center;background:transparent;margin-top:24px}
+body[data-functional-kvm] #app>.titlebar>*{display:none!important}
+body[data-functional-kvm] #app>.titlebar>#protocol-tools{display:flex!important;margin:0;padding:5px;background:var(--panel);border-radius:8px}
+body[data-functional-kvm] #protocol-tools>[data-tool]{display:none!important}
+body[data-functional-kvm="control"] #protocol-tools>[data-tool="control"],body[data-functional-kvm="display"] #protocol-tools>[data-tool="display"],body[data-functional-kvm="keys"] #protocol-tools>[data-tool="keys"],body[data-functional-kvm="power"] #protocol-tools>[data-tool="power"],body[data-functional-kvm="boot"] #protocol-tools>[data-tool="boot"]{display:flex!important}
+body[data-functional-kvm="route"] #app>.titlebar,body[data-functional-kvm="ai"] #app>.titlebar{display:none!important}
+body[data-functional-kvm="route"] #app>.statusbar{display:flex!important;justify-content:center;background:transparent;margin-top:auto}
+body[data-functional-kvm="route"] .statusbar>*{display:none!important}
+body[data-functional-kvm="route"] .statusbar>[data-tool="route"]{display:block!important;padding:8px 12px;background:var(--panel);border-radius:8px}
+body[data-functional-kvm="ai"] #ai-edge{display:block!important}
+body[data-functional-component="ai"] .workspace-body{display:none!important}
+
+body[data-functional-component="note-actions"] #notes-app{position:relative;background:transparent;box-shadow:none}
+body[data-functional-component="note-actions"] .note-toolbar,body[data-functional-component="note-actions"] .note-meta,body[data-functional-component="note-actions"] #editor-grid{display:none!important}
+body[data-functional-component="note-actions"] .note-content{justify-content:center;background:transparent}
+body[data-functional-component="note-actions"] .note-actions{background:var(--panel);border-radius:12px;flex-wrap:wrap;justify-content:center;padding:16px}
+
+body[data-functional-kvm]{height:100vh;min-height:0;margin:0;overflow:hidden}
+body[data-functional-component="ai"] #assistant{left:50%!important;top:50%!important;right:auto!important;bottom:auto!important;transform:translate(-50%,-50%)}
+body[data-functional-component="ai"] #ai-edge{display:none!important}
+body[data-functional-kvm="ai"] .assistant-float{left:50%!important;top:50%!important;right:auto!important;bottom:auto!important;transform:translate(-50%,-50%)}
+body[data-functional-kvm="ai"] #ai-edge{left:50%;top:50%;transform:translate(-50%,-50%)}
+body[data-functional-component="ai"]:has(#assistant[hidden]) #ai-edge{display:flex!important;left:50%;top:50%;bottom:auto;transform:translate(-50%,-50%)}
+body[data-functional-kvm="ai"]:has(#assistant:not([hidden])) #ai-edge{display:none!important}
+body[data-functional-component="ai"]:has(#assistant[hidden]) #ai-edge{left:50%!important;top:50%!important;right:auto!important;bottom:auto!important;transform:translate(-50%,-50%)}
+
+/* Model-row story is a row with its own editor, not provider management. */
+body[data-component-preview="model-row"] .settings-window>.window-head,
+body[data-component-preview="model-row"] .page-heading,
+body[data-component-preview="model-row"] .settings-footer,
+body[data-component-preview="model-row"] .providers-card>.group-heading,
+body[data-component-preview="model-row"] .provider-body>.group-heading{display:none!important}
+body[data-component-preview="model-row"] .settings-window{background:transparent;box-shadow:none;height:auto!important;min-height:0!important;max-height:100%;width:min(900px,100%)}
+body[data-component-preview="model-row"] .main-pane,body[data-component-preview="model-row"] .settings-layout,body[data-component-preview="model-row"] .settings-scroll{background:transparent;padding:0;min-height:0}
+body[data-component-preview="model-row"] .providers-card,body[data-component-preview="model-row"] .provider,body[data-component-preview="model-row"] .provider-body{background:transparent;padding:0}
+
+body[data-component-preview="model-row"] .providers-card .group-heading,body[data-component-preview="model-row"] .settings-window:before{display:none!important}
+body[data-component-preview="model-row"] .providers-card .models-heading,body[data-component-preview="model-row"] .providers-card .catalog-message{display:none!important}
+/* Settings stories expose the selected functional unit, never the frozen module chrome. */
+body[data-component-preview="theme-picker"] .window-head,body[data-component-preview="font-settings"] .window-head,
+body[data-component-preview="theme-picker"] .page-heading,body[data-component-preview="font-settings"] .page-heading,
+body[data-component-preview="theme-picker"] .settings-footer,body[data-component-preview="font-settings"] .settings-footer{display:none!important}
+body[data-component-preview="theme-picker"] .settings-window:before,body[data-component-preview="font-settings"] .settings-window:before,body[data-component-preview="settings-navigation"] .settings-window:before{display:none!important}
+body[data-component-preview="theme-picker"] .settings-window,body[data-component-preview="font-settings"] .settings-window{background:transparent;box-shadow:none;max-height:100%;height:auto!important;min-height:0!important}
+body[data-component-preview="settings-navigation"] .main-pane,body[data-component-preview="settings-navigation"] .window-title,body[data-component-preview="settings-navigation"] .window-head>.icon-btn{display:none!important}
+body[data-component-preview="settings-navigation"] .settings-window{width:260px!important;min-width:0!important;height:min(416px,100%)!important;min-height:0!important}
+body[data-component-preview="settings-navigation"] .settings-layout>aside{width:100%;min-width:0;flex:1}
+body[data-component-preview="settings-navigation"] .window-head{padding:12px;height:52px;min-height:52px}
+body[data-component-preview="settings-navigation"] .window-head .search{width:100%;min-width:0}
+body[data-component-preview="theme-picker"] .settings-window,body[data-component-preview="font-settings"] .settings-window{height:100%!important}
+body[data-component-preview="theme-picker"] .settings-layout,body[data-component-preview="font-settings"] .settings-layout{height:100%;padding:0}
+body[data-component-preview="theme-picker"] .settings-scroll,body[data-component-preview="font-settings"] .settings-scroll{display:flex;flex-direction:column;justify-content:safe center;padding:0 0 8px}
+body[data-component-preview="theme-picker"] .settings-scroll>.card,body[data-component-preview="font-settings"] .settings-scroll>.card{flex-shrink:0}

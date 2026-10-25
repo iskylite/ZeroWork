@@ -146,22 +146,28 @@ test "file workspace file tooltip keeps filename path and metadata on separate v
     try std.testing.expectEqual(@as(usize, 0), f.calls);
 }
 
-test "file workspace exact wide cards and fixed header footer match Bridge" {
+test "file workspace V3 independent cards and fixed header footer use measured geometry" {
     var f: Fixture = undefined;
     try f.init(1194, 794);
     defer f.deinit();
     for (f.view.panes) |pane| {
         try std.testing.expectEqual(@as(f32, 594), pane.root.globalRect().w);
         try std.testing.expectEqual(@as(f32, 794), pane.root.globalRect().h);
-        try std.testing.expectEqual(@as(f32, 574), pane.table.globalRect().w);
-        try std.testing.expectEqual(@as(f32, 626), pane.table.globalRect().h);
-        try std.testing.expectEqual(@as(f32, 28), pane.header.globalRect().h);
-        try std.testing.expectEqual(@as(f32, 718), pane.footer.globalRect().y);
-        try std.testing.expectEqual(@as(f32, 752), pane.actions.globalRect().y);
-        try std.testing.expectEqual(@as(f32, 300), pane.name_width);
+        try std.testing.expectEqual(@as(f32, 594), pane.table.globalRect().w);
+        try std.testing.expectEqual(@as(f32, 623), pane.table.globalRect().h);
+        try std.testing.expectEqual(@as(f32, 34), pane.header.globalRect().h);
+        try std.testing.expectEqual(@as(f32, 758), pane.footer.globalRect().y);
+        try std.testing.expectEqual(@as(f32, 758), pane.actions.globalRect().y);
+        try std.testing.expectEqual(@as(f32, 312), pane.name_width);
     }
-    try std.testing.expect(f.row(.local, entries[2].absolute_path).globalRect().h == 28);
+    try std.testing.expect(f.row(.local, entries[2].absolute_path).globalRect().h == 40);
     const aligned = f.row(.local, entries[2].absolute_path);
+    const filename = find(aligned, "files.row.name").?.globalRect();
+    // Browser computed styles, including the final V3 typography overrides.
+    try std.testing.expectEqual(@as(f32, 12), find(aligned, "files.row.name").?.getText().?.font_size);
+    try std.testing.expectEqual(@as(f32, 13), f.view.panes[0].title.getText().?.font_size);
+    try std.testing.expectEqual(@as(u16, 700), f.view.panes[0].title.getText().?.font_weight);
+    try std.testing.expectApproxEqAbs(aligned.globalRect().y + 20, filename.y + filename.h / 2, 0.5);
     try std.testing.expectEqual(f.view.panes[0].heading_buttons[0].globalRect().x + 22, find(aligned, "files.row.name").?.globalRect().x);
     try std.testing.expectEqual(f.view.panes[0].heading_buttons[1].globalRect().x, find(aligned, "files.row.size").?.globalRect().x);
     try std.testing.expectEqualStrings("0 B", find(f.row(.local, entries[3].absolute_path), "files.row.size").?.getText().?.content);
@@ -189,10 +195,10 @@ test "file workspace narrow columns fit with independent vertical scrolling and 
     const left = f.view.panes[0];
     const right = f.view.panes[1];
     try std.testing.expectEqual(@as(f32, 392), left.root.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 206), left.table.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 150), left.name_width);
-    try std.testing.expectEqual(@as(f32, 372), left.column_width);
-    try std.testing.expectEqual(@as(f32, 178), left.list.state.viewport_height);
+    try std.testing.expectEqual(@as(f32, 211), left.table.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 272), left.name_width);
+    try std.testing.expectEqual(@as(f32, 392), left.column_width);
+    try std.testing.expectEqual(@as(f32, 177), left.list.state.viewport_height);
     const footer = left.footer.globalRect();
     const path = left.path.node.globalRect();
     const header = left.header.globalRect();
@@ -208,7 +214,8 @@ test "file workspace narrow columns fit with independent vertical scrolling and 
     try std.testing.expectEqual(path, left.path.node.globalRect());
     try std.testing.expectEqual(header.y, left.header.globalRect().y);
     const date = left.heading_buttons[2].globalRect();
-    try std.testing.expect(date.x >= body.x and date.x + date.w <= body.x + body.w);
+    try std.testing.expectEqual(@as(f32, 0), date.w);
+    try std.testing.expect(left.heading_buttons[2].style.display == .none);
     f.cx.setViewport(1194, 794);
     f.settle();
     try std.testing.expectEqual(@as(f32, 0), left.list.state.scroll_x);
@@ -245,7 +252,7 @@ test "file workspace real row click Cmd Shift checkbox selection uses original k
 
 test "file workspace compact horizontal rail truly clips row paint and hit testing" {
     var f: Fixture = undefined;
-    try f.init(650, 374);
+    try f.init(620, 374);
     defer f.deinit();
     var many: [20]files.Entry = undefined;
     var paths: [20][64]u8 = undefined;
@@ -265,7 +272,7 @@ test "file workspace compact horizontal rail truly clips row paint and hit testi
     const clip = pane.list.content.parent.?;
     try std.testing.expect(clip != pane.list.container);
     try std.testing.expect(clip.style.overflow_hidden);
-    try std.testing.expectEqual(@as(f32, 166), clip.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 165), clip.globalRect().h);
     try std.testing.expectEqual(body.y + body.h - 12, clip.globalRect().y + clip.globalRect().h);
     const y = body.y + body.h - 6;
     f.cx.handleMouseDown(body.x + 80, y, .{});
@@ -316,7 +323,7 @@ test "file workspace keyboard focus advances through acknowledged original entri
     try std.testing.expectEqual(f.row(.local, entries[4].absolute_path), f.cx.focused_node.?);
 }
 
-test "file workspace path Enter and magnifier submit same original input with frozen pane stamp" {
+test "file workspace path Enter submits original input with frozen pane stamp" {
     var f: Fixture = undefined;
     try f.init(790, 374);
     defer f.deinit();
@@ -330,15 +337,13 @@ test "file workspace path Enter and magnifier submit same original input with fr
     try std.testing.expectEqual(std.meta.Tag(files.Action).navigate, f.record.tag);
     try std.testing.expectEqualStrings("../archive", f.record.path[0..f.record.path_len]);
     try std.testing.expectEqual(pane.projection().?.stamp, f.record.stamp);
-    const calls = f.calls;
-    f.click(f.node(.remote, "files.open_path"), .{});
-    try std.testing.expectEqual(calls + 1, f.calls);
-    try std.testing.expectEqualStrings("../archive", f.record.path[0..f.record.path_len]);
+    try std.testing.expectEqual(@as(usize, 1), f.calls);
+    try std.testing.expect(find(pane.root, "files.open_path") == null);
 }
 
 test "file workspace failed refresh preserves rows path and scroll and disables writes to stale destination" {
     var f: Fixture = undefined;
-    try f.init(650, 374);
+    try f.init(620, 374);
     defer f.deinit();
     var next = f.current();
     next.revision += 1;
@@ -371,14 +376,13 @@ test "file workspace failed refresh preserves rows path and scroll and disables 
     // eight pixels while visible siblings retain their exact gap and padding.
     const table = remote.table.globalRect();
     const stale = remote.stale_notice.globalRect();
-    const footer = remote.footer.globalRect();
+    try std.testing.expect(remote.footer.style.display == .none);
     const failure = remote.error_box.globalRect();
     const pane = remote.root.globalRect();
-    try std.testing.expectEqual(@as(f32, 148), table.h);
-    try std.testing.expectEqual(stale.y + stale.h + 6, table.y);
-    try std.testing.expectEqual(table.y + table.h + 6, footer.y);
-    try std.testing.expectEqual(footer.y + footer.h + 6, failure.y);
-    try std.testing.expectEqual(pane.y + pane.h - 10, failure.y + failure.h);
+    try std.testing.expectEqual(@as(f32, 163), table.h);
+    try std.testing.expectEqual(stale.y + stale.h, table.y);
+    try std.testing.expectEqual(table.y + table.h, failure.y);
+    try std.testing.expectEqual(pane.y + pane.h, failure.y + failure.h);
     try std.testing.expect(f.node(.local, "files.transfer").behavior.interaction.a11y.?.disabled);
     try std.testing.expect(f.node(.remote, "files.new_folder").behavior.interaction.a11y.?.disabled);
     const calls = f.calls;
@@ -403,7 +407,7 @@ test "file workspace projection ownership old revisions and in-flight old press 
     try f.view.update(next);
     @memset(&title, 'x');
     f.settle();
-    try std.testing.expectEqualStrings("Captured local title", f.view.panes[0].title.getText().?.content);
+    try std.testing.expectEqualStrings("Captured local title", f.view.panes[0].projection().?.title);
     try std.testing.expectError(error.StaleFileProjection, f.view.update(f.current()));
     next = f.current();
     next.revision += 1;
@@ -448,8 +452,8 @@ test "file workspace global theme material updates every card without replacing 
     f.view.retheme();
     f.settle();
     for (f.view.panes) |pane| {
-        try std.testing.expectEqual(theme.current().surface_1, pane.root.getBackground());
-        try std.testing.expectEqual(theme.current().surface_2, pane.table.getBackground());
+        try std.testing.expectEqual(theme.current().terminal, pane.root.getBackground());
+        try std.testing.expectEqual(theme.current().terminal, pane.table.getBackground());
         try std.testing.expectEqual(theme.current().fg_1, pane.title.getText().?.color);
         try std.testing.expectEqual(@as(f32, 11.5), pane.path.state.text_display_node.?.getText().?.font_size);
     }

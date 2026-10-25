@@ -19,7 +19,7 @@ pub const View = struct {
     target_owned: ?[]u8 = null,
     tail: *ui.Node,
     group_mode: bool = false,
-    card_height: f32 = 152,
+    card_height: f32 = 167.625,
     identity: *ui.Node,
     title: *ui.Node,
     command_copy: *ui.Node,
@@ -44,15 +44,16 @@ pub const View = struct {
         try self.root.appendChild(cx.allocator, self.card);
         const header = try ui.boxStyled(cx, S.header, .{});
         try self.card.appendChild(cx.allocator, header);
-        const disclosure = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.hand, .icon_size = @as(f32, 14), .a11y_label = "查看待批准调用详情", .base_style = S.disclosureButton(), .on_click = cx.on(View, self, toggle) }).mount(scope, cx);
+        const disclosure = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.terminal, .icon_size = @as(f32, 17), .a11y_label = "查看待批准调用详情", .base_style = S.disclosureButton(), .on_click = cx.on(View, self, toggle) }).mount(scope, cx);
         disclosure.meta.ownership.meta.test_id = "ai.approval.disclosure";
         try header.appendChild(cx.allocator, disclosure);
         self.title = try ui.textStyled(cx, S.title, "工具调用");
         self.title.meta.ownership.meta.test_id = "ai.approval.title";
         try header.appendChild(cx.allocator, self.title);
-        const state = try ui.textStyled(cx, S.secondary, "待批准");
-        try header.appendChild(cx.allocator, state);
         try header.appendChild(cx.allocator, try ui.spacer(cx));
+        const state = try ui.text(cx, "待确认", .{ .font_size = 10, .line_height = 1.65, .color = theme.current().fg_2 });
+        state.setStyleInline(cx.allocator, .{ .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = theme.current().well, .corner_radius = 5 });
+        try header.appendChild(cx.allocator, state);
         self.target_copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制全部目标信息", .base_style = S.disclosureButton(), .on_click = cx.on(View, self, copyTargets) }).mount(scope, cx);
         self.target_copy.meta.ownership.meta.test_id = "ai.approval.copy_targets";
         self.target_copy.setDisplay(.none);
@@ -65,6 +66,7 @@ pub const View = struct {
         try self.card.appendChild(cx.allocator, self.body);
         self.identity = try ui.textStyled(cx, S.secondary, "");
         self.identity.meta.ownership.meta.test_id = "ai.approval.target";
+        self.identity.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 20.625 }, .flex_shrink = 0 });
         try scroll.content.appendChild(cx.allocator, self.identity);
         const command_row = try ui.boxStyled(cx, S.commandRow, .{});
         try scroll.content.appendChild(cx.allocator, command_row);
@@ -83,15 +85,16 @@ pub const View = struct {
         try command_row.appendChild(cx.allocator, copy);
         self.feedback = try ui.textStyled(cx, S.impact, "影响 · 尚未核实");
         self.feedback.meta.ownership.meta.test_id = "ai.approval.impact";
+        self.feedback.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 13 }, .flex_shrink = 0 });
         try scroll.content.appendChild(cx.allocator, self.feedback);
         const footer = try ui.boxStyled(cx, S.footer, .{});
         self.footer = footer;
         try self.card.appendChild(cx.allocator, footer);
         try footer.appendChild(cx.allocator, try ui.spacer(cx));
-        const reject = try ui.widgets.Button(.{ .variant = .secondary, .label = "拒绝", .icon_asset = ui.icons.x, .icon_size = @as(f32, 16), .a11y_label = "拒绝此调用", .base_style = self.reject_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, rejectCall) }).mount(scope, cx);
+        const reject = try ui.widgets.Button(.{ .variant = .secondary, .label = "拒绝", .a11y_label = "拒绝此调用", .base_style = self.reject_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, rejectCall) }).mount(scope, cx);
         reject.meta.ownership.meta.test_id = "ai.approval.reject";
         try footer.appendChild(cx.allocator, reject);
-        const accept = try ui.widgets.Button(.{ .variant = .primary, .label = "批准执行", .icon_asset = ui.icons.check, .icon_size = @as(f32, 16), .a11y_label = "批准此调用", .base_style = self.accept_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, acceptCall) }).mount(scope, cx);
+        const accept = try ui.widgets.Button(.{ .variant = .primary, .label = "批准此调用", .a11y_label = "批准此调用", .base_style = self.accept_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, acceptCall) }).mount(scope, cx);
         accept.meta.ownership.meta.test_id = "ai.approval.accept";
         try footer.appendChild(cx.allocator, accept);
         self.group_footer = try ui.boxStyled(cx, S.groupFooter, .{});
@@ -141,17 +144,16 @@ pub const View = struct {
             self.decision_pending.set(false);
         }
         self.body.setDisplay(.flex);
-        const parent_height = if (self.root.parent) |parent| parent.globalRect().h else 0;
-        const desired: f32 = if (source.group and parent_height >= 420) 216 else 152;
+        const desired: f32 = if (source.group) 207.625 else 167.625;
         self.card_height = desired;
         self.target_copy.setDisplay(if (source.group) .flex else .none);
-        const compact_group = source.group and desired == 152;
-        self.footer.setDisplay(if (compact_group) .none else .flex);
-        if (source.group) self.footer.setStyleInline(self.cx.allocator, S.groupIconFooter(self.cx.tokens)) else self.footer.setStyleInline(self.cx.allocator, S.footer(self.cx.tokens));
-        self.group_footer.setDisplay(if (compact_group) .flex else .none);
-        self.tail.setDisplay(if (source.group) .none else .flex);
-        self.root.setStyleInline(self.cx.allocator, .{ .padding = .{ .left = if (compact_group) 14 else 20, .right = if (compact_group) 14 else 20 } });
-        self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (source.group) desired - 66 else 73 } });
+        self.footer.setDisplay(.flex);
+        self.footer.setStyleInline(self.cx.allocator, S.footer(self.cx.tokens));
+        self.group_footer.setDisplay(.none);
+        self.tail.setDisplay(.none);
+        self.root.setStyleInline(self.cx.allocator, .{ .padding = .{ .left = 14, .right = 14, .top = 9 } });
+        self.identity.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (source.group) 60.625 else 20.625 } });
+        self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (source.group) 130.625 else 90.625 } });
         if (self.card.style.height != .px or self.card.style.height.px != desired) self.card.setStyleInline(self.cx.allocator, .{ .height = .{ .px = desired } });
         self.root.setDisplay(.flex);
     }

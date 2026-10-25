@@ -5,6 +5,7 @@ pub const View = struct {
     cx: *ui.Cx,
     root: *ui.Node,
     dots: [3]*ui.Node,
+    lip: *ui.Node,
     open: ui.Handler(void),
     hovered: *ui.Signal(bool),
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, open: ui.Handler(void)) !*View {
@@ -12,8 +13,9 @@ pub const View = struct {
         root.meta.ownership.meta.test_id = "ai.strip";
         for (root.children.items) |child| child.setDisplay(.none);
         root.setStyleInline(cx.allocator, S.trigger());
-        const self = try scope.createState(View, .{ .cx = cx, .root = root, .dots = undefined, .open = open, .hovered = undefined });
+        const self = try scope.createState(View, .{ .cx = cx, .root = root, .dots = undefined, .lip = undefined, .open = open, .hovered = undefined });
         const lip = try ui.boxStyled(cx, S.lip, .{});
+        self.lip = lip;
         lip.meta.ownership.meta.test_id = "ai.strip.lip";
         try root.appendChild(cx.allocator, lip);
         for (&self.dots, 0..) |*dot, index| {
@@ -30,21 +32,22 @@ pub const View = struct {
         root.setDisplay(.none);
         return self;
     }
-    pub fn update(self: *View, pane: ?ui.ComputedRect, visible: bool, state: State, phase: usize) void {
+    pub fn update(self: *View, pane: ?ui.ComputedRect, visible: bool, state: State, phase: usize, expanded: bool) void {
         self.root.setDisplay(if (visible and pane != null) .flex else .none);
         const rect = pane orelse return;
         self.root.style.align_items = .center;
         self.root.style.justify = .center;
         self.root.style.gap = 0;
         const parent = (self.root.parent orelse return).globalRect();
-        const x = rect.x + (rect.w - 88) / 2 - parent.x;
-        const y = rect.y + rect.h - 9 - parent.y;
+        const x = rect.x + (rect.w - 100) / 2 - parent.x;
+        const y = rect.y + 3 - parent.y;
         const ext = self.root.style.ensureExtPanic(self.cx.allocator);
         if (ext.inset.left != .px or ext.inset.top != .px or @abs(ext.inset.left.px - x) > 0.5 or @abs(ext.inset.top.px - y) > 0.5) {
             ext.inset = .{ .left = .{ .px = x }, .top = .{ .px = y } };
             self.root.markLayoutDirty();
             self.root.markRenderDirty();
         }
+        self.lip.setStyleInline(self.cx.allocator, S.activeLip(expanded or self.hovered.get()));
         for (self.dots, 0..) |dot, index| dot.setStyleInline(self.cx.allocator, .{ .background = S.color(state, index, phase) });
         if (visible and (state == .working or state == .approval)) self.cx.scheduleRedrawAfterNs(200 * 1_000_000);
     }

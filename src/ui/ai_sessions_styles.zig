@@ -4,30 +4,30 @@ pub fn listSurface() ui.BoxStyle {
     return .{
         .width = .fill(),
         .height = .{ .px = 0 },
-        .max_height = 168,
+        .max_height = 260,
         .flex_shrink = 0,
-        .display = .none,
-        .background = T.current().well,
+        .display = .flex,
+        .background = ui.Color.TRANSPARENT,
         .corner_radius = 0,
     };
 }
 pub fn menu() ui.BoxStyle {
-    return .{ .width = .fill(), .direction = .column, .padding = .{ .top = 4, .bottom = 4, .left = 0, .right = 0 }, .gap = 2 };
+    return .{ .width = .fill(), .direction = .column, .padding = .{}, .gap = 6 };
 }
 pub fn heading() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 24 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 14, .right = 14 } };
+    return .{ .width = .fill(), .height = .{ .px = 26 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .top = 2 } };
 }
 pub fn rowBackground(active: bool, hovered: bool) ui.BoxStyle {
-    return .{ .background = if (hovered) T.current().hover else if (active) T.current().accent.withAlpha(24) else ui.Color.TRANSPARENT, .corner_radius = 0 };
+    return .{ .background = if (hovered) T.current().hover else if (active) T.current().accent.withAlpha(24) else T.current().well, .corner_radius = 8 };
 }
 pub fn actionHover(danger: bool) ui.BoxStyle {
     return .{ .background = if (danger) T.current().danger.withAlpha(20) else T.current().hover, .corner_radius = 5 };
 }
 pub fn row() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 14, .right = 14 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 54.5 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 12, .right = 12, .top = 10, .bottom = 10 }, .flex_shrink = 0 };
 }
 pub fn text(primary: bool) ui.TextStyle {
-    return .{ .font_size = if (primary) 11.5 else 10.5, .color = if (primary) T.current().fg_1 else T.current().fg_2, .text_overflow = .ellipsis };
+    return .{ .font_size = if (primary) 12 else 11, .font_weight = if (primary) 700 else 400, .line_height = if (primary) 16.5 / 12.0 else 15.0 / 11.0, .color = if (primary) T.current().fg_1 else T.current().fg_2, .text_overflow = .ellipsis };
 }
 pub fn dialogDetail() ui.TextStyle {
     var result = text(false);
@@ -59,4 +59,8 @@ fn dangerBackground() ui.Color {
         .light => ui.arb.hex(0xbb2020),
         .sauber => ui.arb.hex(0xcd473b),
     };
+}
+
+pub fn popover() ui.BoxStyle {
+    return .{ .width = .{ .px = 344 }, .direction = .column, .padding = ui.Padding.all(15), .background = T.current().overlay, .border = .{ .width = 1, .color = T.current().border, .radius = 11 }, .shadow = .{ .color = T.current().shadow, .blur = 24, .offset_y = 12 } };
 }

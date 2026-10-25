@@ -7,6 +7,10 @@ const viewport = @import("viewport.zig");
 pub const Span = struct { start: u32, end: u32, row: u32, col: u16, width: u16, color: u32 = 0, bg: u32 = 0, flags: u32 = 0 };
 pub const Row = struct {
     id: vt.RowId,
+    presentation: @import("../ui/terminal_record_geometry.zig").Layout = .{},
+    application_kind: u8 = 0,
+    application_state: u8 = 0,
+    timestamp_ms: ?i64 = null,
     logical_id: vt.RowId,
     screen_row: u32,
     start: u32,

@@ -69,6 +69,10 @@ pub const View = struct {
     readonly: bool = false,
     pending_readonly: bool = false,
     popup: ?ui.widgets.popover.PopoverResult = null,
+    modal: ?ui.widgets.ModalResult = null,
+    modal_open: ?*ui.Signal(bool) = null,
+    modal_card: ?*ui.Node = null,
+    modal_body: ?*ui.Node = null,
     inline_parent: ?*ui.Node = null,
     preview_panel: *ui.Node = undefined,
     preview_scope: *ui.Scope = undefined,
@@ -181,7 +185,7 @@ pub const View = struct {
         if (!self.isPreviewOpen() and self.preview_ticket == null) return;
         if (self.popup) |popup| popup.open.?.set(false) else {
             self.inline_open = false;
-            self.preview_panel.setDisplay(.none);
+            if (self.modal_open) |open| open.set(false) else self.preview_panel.setDisplay(.none);
             if (self.callbacks.preview_visibility) |callback| callback(self.callbacks.context, false);
         }
         self.closed();
@@ -208,81 +212,93 @@ pub const View = struct {
     }
 
     fn mountPreview(self: *View) !void {
-        if (self.inline_parent) |parent| {
-            self.preview_scope = try self.scope.childScope();
-            self.preview_panel = try ui.boxStyled(self.cx, S.inlinePreview, .{});
-            self.preview_panel.setDisplay(.none);
-            try parent.appendChild(self.cx.allocator, self.preview_panel);
-        } else {
-            self.popup = try ui.widgets.Popover(.{ .trigger = .manual, .position = .top_start, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .offset = .{ .static = 6 }, .width = S.preview_width, .max_height = S.preview_height, .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .on_open_change = self.cx.on(View, self, openChanged) }).mount(self.scope, self.cx);
-            const popup = self.popup.?;
-            popup.wrapper.setStyleInline(self.cx.allocator, S.invisibleWrapper());
-            popup.chrome.setStyleInline(self.cx.allocator, S.previewPanel());
-            self.preview_panel = popup.chrome;
-            self.preview_scope = popup.scope;
-            try self.root.appendChild(self.cx.allocator, popup.wrapper);
-        }
-        self.preview_panel.meta.ownership.meta.test_id = "ai.attachment.preview";
-        const content = if (self.popup) |popup| popup.content else self.preview_panel;
-        const scope = self.preview_scope;
-        const heading = try ui.boxStyled(self.cx, S.heading, .{});
-        try content.appendChild(self.cx.allocator, heading);
-        self.preview_icons[0] = try ui.iconTint(self.cx, ui.icons.get("file-text").?, S.theme.current().accent, icon(S.heading_icon_size));
-        try heading.appendChild(self.cx.allocator, self.preview_icons[0]);
-        self.preview_terminal_icon = try ui.iconTint(self.cx, ui.icons.terminal, S.theme.current().accent, icon(S.heading_icon_size));
-        self.preview_terminal_icon.setDisplay(.none);
-        try heading.appendChild(self.cx.allocator, self.preview_terminal_icon);
-        const title = try ui.textStyled(self.cx, S.headingText, "本地文本预览");
-        self.preview_title = title;
-        title.setStyleInline(self.cx.allocator, S.fillLabel());
-        try heading.appendChild(self.cx.allocator, title);
-        _ = try self.previewButton(scope, heading, "ai.attachment.preview.close", "关闭预览", ui.icons.x, closePreview);
-        const identity = try ui.boxStyled(self.cx, S.identity, .{});
-        self.preview_identity_box = identity;
-        try content.appendChild(self.cx.allocator, identity);
-        self.preview_icons[1] = try ui.iconTint(self.cx, ui.icons.get("file-text").?, S.theme.current().fg_2, icon(S.heading_icon_size));
-        try identity.appendChild(self.cx.allocator, self.preview_icons[1]);
-        self.preview_identity = try ui.textStyled(self.cx, S.identityText, "");
-        self.preview_identity.setStyleInline(self.cx.allocator, S.fillLabel());
+        const cx = self.cx;
+        const scope = try self.scope.childScope();
+        self.preview_scope = scope;
+        self.modal_open = try scope.createSignal(bool, false);
+        const modal = try ui.widgets.Modal(.{ .open = self.modal_open.?, .width = 480, .max_height = @max(200, cx.viewport.height - 32), .background = S.theme.current().overlay, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        self.modal = modal;
+        if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
+        self.preview_panel = modal.dialog;
+        modal.dialog.meta.ownership.meta.test_id = "ai.attachment.preview";
+        modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = 480 }, .height = .{ .fit = .{} }, .padding = ui.Padding.all(1), .background = S.theme.current().overlay, .border = .{ .width = 1, .color = S.theme.current().border, .radius = 14 } });
+        modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = .{}, .gap = 0, .direction = .column });
+        const heading = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 79.1484375 }, .padding = .{ .top = 20, .left = 22, .right = 22, .bottom = 16 }, .gap = 12, .direction = .row, .align_items = .start, .flex_shrink = 0 }, .{});
+        heading.meta.ownership.meta.test_id = "ai.attachment.preview.header";
+        try modal.body.appendChild(cx.allocator, heading);
+        const titles = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 5, .min_width = 0 }, .{});
+        try heading.appendChild(cx.allocator, titles);
+        self.preview_title = try ui.text(cx, "上下文附件", .{ .font_size = 15, .font_weight = 700, .line_height = 20.0 / 15.0, .color = S.theme.current().fg_1 });
+        try titles.appendChild(cx.allocator, self.preview_title);
+        self.preview_identity = try ui.text(cx, "", .{ .font_size = 11, .line_height = 1.65, .color = S.theme.current().fg_2, .text_overflow = .ellipsis });
+        self.preview_identity.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 18.1484375 } });
         self.preview_identity.meta.ownership.meta.test_id = "ai.attachment.preview.path";
-        try identity.appendChild(self.cx.allocator, self.preview_identity);
-        self.preview_reselect = try self.previewButton(scope, identity, "ai.attachment.preview.reselect", "重新选择本地文本", ui.icons.get("folder-open").?, reselectPreview);
-        self.preview_primary = try self.previewButton(scope, identity, "ai.attachment.preview.keep", "保留附加", ui.icons.check, confirmPreview);
-        self.preview_primary_check = self.preview_primary.children.items[self.preview_primary.children.items.len - 1];
-        self.preview_primary_plus = try ui.iconTint(self.cx, ui.icons.plus, S.theme.current().fg_2, icon(S.icon_size));
-        self.preview_primary_plus.setDisplay(.none);
-        try self.preview_primary.appendChild(self.cx.allocator, self.preview_primary_plus);
-        self.preview_remove = try self.previewButton(scope, identity, "ai.attachment.preview.remove", "移除附件", ui.icons.x, removePreview);
-        const source = try ui.boxStyled(self.cx, S.source, .{});
-        try content.appendChild(self.cx.allocator, source);
-        self.preview_metadata = try ui.textStyled(self.cx, S.sourceText, "");
-        self.preview_metadata.setStyleInline(self.cx.allocator, S.fillLabel());
-        self.preview_metadata.meta.ownership.meta.test_id = "ai.attachment.preview.metadata";
-        try source.appendChild(self.cx.allocator, self.preview_metadata);
+        try titles.appendChild(cx.allocator, self.preview_identity);
+        const close = try self.previewButton(scope, heading, "ai.attachment.preview.close", "关闭预览", ui.icons.x, closePreview);
+        close.setStyleInline(cx.allocator, .{ .width = .{ .px = 30 }, .height = .{ .px = 30 } });
+        const body = try ui.box(cx, .{ .width = .fill(), .direction = .column, .padding = .{ .left = 22, .right = 22, .bottom = 20 }, .flex_shrink = 0 }, .{});
+        self.modal_body = body;
+        body.meta.ownership.meta.test_id = "ai.attachment.preview.body";
+        try modal.body.appendChild(cx.allocator, body);
+        const card = try ui.box(cx, .{ .width = .fill(), .padding = ui.Padding.all(14), .direction = .column, .background = S.theme.current().surface_2, .corner_radius = 11, .flex_shrink = 0 }, .{});
+        self.modal_card = card;
+        self.preview_identity_box = card;
+        try body.appendChild(cx.allocator, card);
+        const status = try ui.box(cx, .{ .height = .{ .px = 18 }, .width = .fill(), .direction = .row }, .{});
+        try card.appendChild(cx.allocator, status);
+        const badge = try ui.text(cx, "ready", .{ .font_size = 10, .line_height = 1.2, .color = S.theme.current().fg_2 });
+        badge.setStyleInline(cx.allocator, .{ .height = .{ .px = 18 }, .padding = .{ .top = 3, .bottom = 3, .left = 6, .right = 6 }, .background = S.theme.current().well, .corner_radius = 5 });
+        try status.appendChild(cx.allocator, badge);
+        self.preview_metadata = try ui.text(cx, "", .{ .font_size = 12, .line_height = 1.65, .color = S.theme.current().fg_2, .wrap = .word });
+        self.preview_metadata.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 19.796875 } });
+        try card.appendChild(cx.allocator, self.preview_metadata);
         self.preview_info_text = try scope.createText("", .{});
-        const info = try ui.widgets.Tooltip(.{ .text = self.preview_info_text }).mount(scope, self.cx);
-        self.preview_info = info.wrapper;
-        info.wrapper.setStyleInline(self.cx.allocator, S.infoSlot());
-        info.trigger.setStyleInline(self.cx.allocator, S.infoTrigger());
-        info.trigger.meta.ownership.meta.test_id = "ai.attachment.preview.info";
-        try info.trigger.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.info, S.theme.current().fg_2, icon(S.icon_size)));
-        try source.appendChild(self.cx.allocator, info.wrapper);
-        self.preview_body = try ui.widgets.ScrollArea(.{ .direction = .vertical, .height = S.preview_body_height }).mount(scope, self.cx);
-        self.preview_body.container.setStyleInline(self.cx.allocator, S.bodyViewport());
+        self.preview_info = try ui.box(cx, .{ .display = .none }, .{});
+        try card.appendChild(cx.allocator, self.preview_info);
+        self.preview_icons[0] = try ui.box(cx, .{ .display = .none }, .{});
+        self.preview_icons[1] = try ui.box(cx, .{ .display = .none }, .{});
+        self.preview_terminal_icon = try ui.box(cx, .{ .display = .none }, .{});
+        // Empty compatibility handles belong to the existing info subtree;
+        // the preview portal owns their lifetime and they retain zero size.
+        try self.preview_info.appendChild(cx.allocator, self.preview_icons[0]);
+        try self.preview_info.appendChild(cx.allocator, self.preview_icons[1]);
+        try self.preview_info.appendChild(cx.allocator, self.preview_terminal_icon);
+        self.preview_body = try ui.widgets.ScrollArea(.{ .direction = .vertical, .height = 41.796875 }).mount(scope, cx);
+        self.preview_body.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 41.796875 }, .padding = .{ .top = 11, .bottom = 11 }, .flex_shrink = 0 });
         self.preview_body.container.meta.ownership.meta.test_id = "ai.attachment.preview.viewport";
-        self.preview_body.content.setStyleInline(self.cx.allocator, S.bodyContent());
-        try content.appendChild(self.cx.allocator, self.preview_body.container);
-        self.preview_label = try ui.textStyled(self.cx, S.bodyText, "");
-        self.preview_label.setStyleInline(self.cx.allocator, S.fillLabel());
+        try card.appendChild(cx.allocator, self.preview_body.container);
+        self.preview_label = try ui.text(cx, "", .{ .font_size = 11, .line_height = 1.8, .use_monospace_font = true, .color = S.theme.current().fg_1, .wrap = .word });
+        self.preview_label.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 0 });
         self.preview_label.meta.ownership.meta.test_id = "ai.attachment.preview.text";
-        try self.preview_body.content.appendChild(self.cx.allocator, self.preview_label);
+        try self.preview_body.content.appendChild(cx.allocator, self.preview_label);
+        const footer = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 63.5 }, .padding = .{ .top = 15, .bottom = 14, .left = 22, .right = 22 }, .direction = .row, .align_items = .center, .justify = .end, .gap = 8, .background = S.theme.current().surface_1, .flex_shrink = 0 }, .{});
+        footer.meta.ownership.meta.test_id = "ai.attachment.preview.footer";
+        try modal.body.appendChild(cx.allocator, footer);
+        self.preview_reselect = try self.previewButton(scope, footer, "ai.attachment.preview.reselect", "重新选择本地文本", ui.icons.get("folder-open").?, reselectPreview);
+        self.preview_remove = try self.previewButton(scope, footer, "ai.attachment.preview.remove", "移除附件", ui.icons.x, removePreview);
+        self.preview_primary = try ui.widgets.Button(.{ .label = "关闭", .variant = .primary, .base_style = @as(ui.BoxStyle, .{ .width = .{ .px = 52 }, .height = .{ .px = 34.5 }, .padding = .{ .left = 14, .right = 14, .top = 9, .bottom = 9 }, .font_size = 12, .font_weight = 500, .corner_radius = 8 }), .on_click = cx.on(View, self, confirmPreview) }).mount(scope, cx);
+        self.preview_primary.meta.ownership.meta.test_id = "ai.attachment.preview.keep";
+        try footer.appendChild(cx.allocator, self.preview_primary);
+        self.preview_primary_check = try ui.box(cx, .{ .display = .none }, .{});
+        try self.preview_info.appendChild(cx.allocator, self.preview_primary_check);
+        self.preview_primary_plus = try ui.iconTint(cx, ui.icons.plus, S.theme.current().fg_2, icon(17));
+        self.preview_primary_plus.setDisplay(.none);
+        try self.preview_primary.appendChild(cx.allocator, self.preview_primary_plus);
     }
 
+    fn setButtonCopy(cx: *ui.Cx, node: *ui.Node, copy: []const u8) void {
+        if (node.getText() != null) {
+            node.setTextContent(cx.allocator, copy) catch {};
+            return;
+        }
+        for (node.children.items) |child| setButtonCopy(cx, child, copy);
+    }
     fn previewButton(self: *View, scope: *ui.Scope, parent: *ui.Node, test_id: []const u8, label: []const u8, asset: ui.SvgAsset, comptime action: *const fn (*View) void) !*ui.Node {
         const button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = label, .base_style = self.icon_style, .hover_style = self.icon_hover, .on_click = self.cx.on(View, self, action) }).mount(scope, self.cx);
         button.meta.ownership.meta.test_id = test_id;
         const image = try ui.iconTint(self.cx, asset, S.theme.current().fg_2, icon(S.icon_size));
         try button.appendChild(self.cx.allocator, image);
+        button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 30 }, .height = .{ .px = 30 }, .padding = .{} });
         // The close and keep/remove icons are recolored by walking actual
         // icon nodes during theme refresh, not by mounting another window.
         try parent.appendChild(self.cx.allocator, button);
@@ -311,7 +327,7 @@ pub const View = struct {
         filename.setStyleInline(self.cx.allocator, S.filenameTrigger());
         filename.meta.ownership.meta.test_id = "ai.attachment.filename";
         try name_hint.trigger.appendChild(self.cx.allocator, filename);
-        try card.appendChild(self.cx.allocator, name_hint.wrapper);
+        try state.preview.appendChild(self.cx.allocator, name_hint.wrapper);
         var buffer: [80]u8 = undefined;
         const metadata = try ui.textStyled(self.cx, S.metadata, "");
         state.metadata = metadata;
@@ -360,11 +376,7 @@ pub const View = struct {
         };
         defer self.cx.allocator.free(metadata);
         try self.preview_metadata.setTextContent(self.cx.allocator, metadata);
-        try self.preview_title.setTextContent(self.cx.allocator, switch (content.source) {
-            .local_file => "本地文本预览",
-            .remote_file => "远程文件预览",
-            .terminal => |terminal| if (terminal.origin == .selection) "终端选区预览" else "命令上下文预览",
-        });
+        try self.preview_title.setTextContent(self.cx.allocator, "上下文附件");
         var time_buffer: [8]u8 = undefined;
         const capture_time = try @import("terminal_surface_input.zig").localTimestamp(&time_buffer, content.captured_at_ms);
         var info_buffer: [40]u8 = undefined;
@@ -373,6 +385,9 @@ pub const View = struct {
         self.preview_icons[0].setDisplay(if (content.source == .terminal) .none else .flex);
         self.preview_terminal_icon.setDisplay(if (content.source == .terminal) .flex else .none);
         try self.preview_label.setTextContent(self.cx.allocator, content.bytes);
+        const line_count = @max(1, std.mem.count(u8, content.bytes, "\n") + 1);
+        const preview_h = @min(@max(41.796875, @as(f32, @floatFromInt(line_count)) * 19.8 + 22), @max(41.796875, self.cx.viewport.height - 260));
+        self.preview_body.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = preview_h } });
         self.preview_reference.release();
         self.preview_reference = reference.retain();
         self.preview_ticket = ticket;
@@ -387,14 +402,16 @@ pub const View = struct {
             .draft => "保留附加",
             .history => "关闭预览",
         };
-        const candidate_plus = kind == .candidate and content.source == .terminal;
+        self.preview_primary.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (kind == .candidate) 88 else 52 } });
+        setButtonCopy(self.cx, self.preview_primary, if (kind == .candidate) "附加快照" else "关闭");
+        const candidate_plus = false;
         self.preview_primary_plus.setDisplay(if (candidate_plus) .flex else .none);
         self.preview_primary_check.setDisplay(if (candidate_plus) .none else .flex);
         self.preview_remove.setDisplay(if (kind == .history or self.callbacks.remove == null) .none else .flex);
         self.preview_reselect.setDisplay(if (kind == .history or content.source != .local_file or self.callbacks.reselect == null) .none else .flex);
         if (self.popup) |popup| popup.open.?.set(true) else {
             self.inline_open = true;
-            self.preview_panel.setDisplay(.flex);
+            if (self.modal_open) |open| open.set(true) else self.preview_panel.setDisplay(.flex);
             if (self.callbacks.preview_visibility) |callback| callback(self.callbacks.context, true);
             self.cx.setFocus(self.preview_primary);
         }
@@ -523,7 +540,7 @@ pub const View = struct {
             self.icon_style.set(S.iconButton());
             self.icon_hover.set(S.hover());
             for (self.cards.items) |card| card.retheme();
-            self.preview_panel.setStyleInline(self.cx.allocator, if (self.inline_parent != null) S.inlinePanel() else S.previewPanel());
+            self.preview_panel.setBackground(S.theme.current().overlay);
             self.preview_title.setTextColor(self.colors.fg_1);
             self.preview_identity_box.setBackground(self.colors.well);
             self.preview_identity.setTextColor(self.colors.fg_1);
@@ -534,8 +551,8 @@ pub const View = struct {
             _ = self.preview_terminal_icon.setTint(S.theme.current().accent);
         }
         const row_height = self.height();
-        if (self.inline_parent != null) self.preview_panel.setDisplay(if (self.inline_open) .flex else .none);
-        self.root.setStyleInline(self.cx.allocator, .{ .height = .{ .px = row_height } });
+        if (self.modal == null and self.inline_parent != null) self.preview_panel.setDisplay(if (self.inline_open) .flex else .none);
+        self.root.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (row_height > 0) row_height - 4 else 0 } });
         self.rail.container.setDisplay(if (row_height > 0) .flex else .none);
         self.root.setDisplay(if (row_height > 0 or (self.candidate != null and self.inline_parent == null)) .flex else .none);
         var parent = self.root.parent;
@@ -550,10 +567,10 @@ pub const View = struct {
     }
     fn release(self: *View) void {
         self.cx.removeAfterLayoutHook(self);
-        if (self.inline_parent) |parent| {
+        if (self.inline_parent) |parent| if (self.modal == null) {
             self.cx.detachChild(parent, self.preview_panel);
             self.cx.destroyDetached(self.preview_panel);
-        }
+        };
         self.preview_reference.release();
         if (self.candidate) |*value| value.reference.release();
         if (self.pending_candidate) |*value| value.reference.release();

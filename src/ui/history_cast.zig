@@ -20,6 +20,9 @@ pub fn load(allocator: std.mem.Allocator, cast: []const u8) !Timeline {
     defer adapter.destroy();
     var timeline = Timeline.init(allocator, 128 * 1024 * 1024);
     errdefer timeline.deinit();
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(1) } };
+    var composite = @import("terminal_document.zig").Document.init(allocator, source.service(), source.owner);
+    defer composite.deinit();
     var previous_ms: i64 = 0;
     while (lines.next()) |line| {
         if (std.mem.trim(u8, line, " \r\t").len == 0) continue;
@@ -45,7 +48,28 @@ pub fn load(allocator: std.mem.Allocator, cast: []const u8) !Timeline {
             try adapter.resize(width, height);
         } else if (std.mem.eql(u8, items[1].string, "o")) {
             _ = try adapter.feed(items[2].string);
+        } else if (std.mem.eql(u8, items[1].string, "a")) {
+            const record = try std.json.parseFromSlice(@import("../host/terminal_service.zig").ApplicationRecord, allocator, items[2].string, .{});
+            defer record.deinit();
+            try composite.restore(record.value);
         } else continue;
+        if (composite.enabled) {
+            var combined = try composite.service().snapshot(allocator);
+            defer combined.deinit(allocator);
+            var captured = try composite.service().searchSnapshot(allocator);
+            const search_bytes = captured.document.text.len + captured.document.rows.len * @sizeOf(@import("../vt/search_snapshot.zig").Row) + captured.document.spans.len * @sizeOf(@import("../vt/search_snapshot.zig").Span);
+            if (timeline.bytes + Timeline.projectionStorageBytes(&combined.projection) + search_bytes > timeline.limit) {
+                captured.deinit(allocator);
+                return error.HistoryRecordingTooLarge;
+            }
+            timeline.appendProjection(ms, &combined.projection) catch |err| {
+                captured.deinit(allocator);
+                return err;
+            };
+            timeline.frames.items[timeline.frames.items.len - 1].search = captured.document;
+            timeline.bytes += search_bytes;
+            continue;
+        }
         const snap = adapter.snapshot();
         const styled = try projection.renderVisibleTextStyled(Engine.from(Adapter, &adapter), allocator);
         defer allocator.free(styled.text);
@@ -92,4 +116,66 @@ test "archived search source follows recorded resize and keeps offscreen logical
     try std.testing.expectEqual(@as(u16, 13), frame.decode(latest.wire).?.cols);
     try std.testing.expectEqual(@as(u16, 3), frame.decode(latest.wire).?.rows);
     try std.testing.expect(std.mem.indexOf(u8, latest.search.?.text, "abcdefghijk") != null);
+}
+
+test "builtin_records archive application events restore ordered records without feeding application text to VT" {
+    const a = std.testing.allocator;
+    var recording = try @import("../vt/timeline.zig").Timeline.init(a, 16, 65536);
+    defer recording.deinit();
+    try recording.append(0, 0, "before\r\nprompt% ");
+    const owner: @import("../host/identity.zig").SessionHandle = .{ .session_id = @fromBackingInt(5) };
+    try recording.appendApplication(.{ .id = 1, .owner = owner, .timestamp_ms = 1, .command = "@ts", .output = "执行中…", .state = .pending }, 16);
+    try recording.appendApplication(.{ .id = 1, .owner = owner, .timestamp_ms = 2, .command = "@ts", .output = "已开启时间戳", .state = .success }, 16);
+    try recording.append(3, 16, "echo after\r\nafter\r\nprompt% ");
+    var buffer: [65536]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try recording.exportCast(&writer, 32, 6);
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"a\"") != null);
+    var timeline = try load(a, writer.buffered());
+    defer timeline.deinit();
+    const latest = timeline.latest().?;
+    const text = latest.search.?.text;
+    const command = std.mem.indexOf(u8, text, "@ts").?;
+    const result = std.mem.indexOf(u8, text, "已开启时间戳").?;
+    const after = std.mem.indexOf(u8, text, "echo after").?;
+    try std.testing.expect(command < result and result < after);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "@ts"));
+    try std.testing.expect(std.mem.indexOf(u8, text, "执行中…") == null);
+}
+
+test "builtin_records delayed application events retain their original row and stream clock" {
+    const a = std.testing.allocator;
+    var recording = try @import("../vt/timeline.zig").Timeline.init(a, 8, 8192);
+    defer recording.deinit();
+    try recording.append(10, 0, "before\r\nprompt% ");
+    try recording.append(11, 16, "echo later\r\nlater\r\nprompt% ");
+    try recording.appendApplicationAt(.{ .id = 1, .owner = .{ .session_id = @fromBackingInt(5) }, .timestamp_ms = 1792937468187, .anchor_row = 1, .command = "@help", .output = "help result", .state = .success }, 40, 12);
+    var bytes: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try recording.exportCast(&writer, 32, 6);
+    var timeline = try load(a, writer.buffered());
+    defer timeline.deinit();
+    const latest = timeline.latest().?;
+    try std.testing.expectEqual(@as(i64, 2), latest.time_ms);
+    const text = latest.search.?.text;
+    try std.testing.expect(std.mem.indexOf(u8, text, "@help").? < std.mem.indexOf(u8, text, "echo later").?);
+}
+
+test "builtin_records replay keys command identity by source generation" {
+    const a = std.testing.allocator;
+    var recording = try @import("../vt/timeline.zig").Timeline.init(a, 8, 8192);
+    defer recording.deinit();
+    try recording.append(0, 0, "prompt% ");
+    try recording.appendApplication(.{ .id = 1, .owner = .{ .session_id = @fromBackingInt(5), .generation = 1 }, .timestamp_ms = 1, .command = "@ts", .output = "first generation", .state = .success }, 8);
+    try recording.appendApplication(.{ .id = 1, .owner = .{ .session_id = @fromBackingInt(5), .generation = 2 }, .timestamp_ms = 2, .command = "@theme", .output = "second generation", .state = .success }, 8);
+    var bytes: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&bytes);
+    try recording.exportCast(&writer, 32, 6);
+    var timeline = try load(a, writer.buffered());
+    defer timeline.deinit();
+    const text = timeline.latest().?.search.?.text;
+    try std.testing.expect(std.mem.indexOf(u8, text, "first generation") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "second generation") != null);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "@ts"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "@theme"));
 }

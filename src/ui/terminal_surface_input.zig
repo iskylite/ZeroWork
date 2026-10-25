@@ -4,7 +4,6 @@ const ui = @import("ui");
 const terminal = @import("../host/terminal_service.zig");
 const Surface = @import("terminal_surface.zig").Surface;
 const absolute = @import("terminal_surface.zig").absolute;
-const S = @import("terminal_styles.zig");
 const Time = extern struct { sec: c_int, min: c_int, hour: c_int, day: c_int, month: c_int, year: c_int, week_day: c_int, year_day: c_int, daylight: c_int, offset: c_long, zone: ?[*:0]const u8 };
 extern "c" fn localtime_r(*const c_long, *Time) ?*Time;
 pub fn localTimestamp(out: *[8]u8, wall_ms: i64) ![]const u8 {
@@ -187,7 +186,7 @@ fn mouseReport(self: *Surface, action: @FieldType(terminal.MouseEvent, "action")
     if (self.snapshot == null or self.pending.items.len >= 256) return error.InputQueueFull;
     const rect = self.root.globalRect();
     const value = self.snapshot.?;
-    try self.pending.append(self.cx.allocator, .{ .mouse = .{ .input_sequence = self.next_input, .mode_revision = value.projection.mode_revision, .geometry_revision = value.geometry_revision, .event = .{ .action = action, .button = button, .modifiers = mods(modifiers), .x = @max(0, x - rect.x - S.inset - self.bodyX()), .y = @max(0, y - rect.y - S.inset), .screen_width = @intFromFloat(@as(f32, @floatFromInt(value.projection.cols)) * self.options.cell_width), .screen_height = @intFromFloat(@as(f32, @floatFromInt(value.projection.rows)) * self.options.row_height), .cell_width = @intFromFloat(@max(1, self.options.cell_width)), .cell_height = @intFromFloat(@max(1, self.options.row_height)), .any_button_pressed = self.mouse_reporting } } });
+    try self.pending.append(self.cx.allocator, .{ .mouse = .{ .input_sequence = self.next_input, .mode_revision = value.projection.mode_revision, .geometry_revision = value.geometry_revision, .event = .{ .action = action, .button = button, .modifiers = mods(modifiers), .x = @max(0, x - rect.x - self.contentPadding().left - self.bodyX()), .y = @max(0, y - rect.y - self.contentPadding().top), .screen_width = @intFromFloat(@as(f32, @floatFromInt(value.projection.cols)) * self.options.cell_width), .screen_height = @intFromFloat(@as(f32, @floatFromInt(value.projection.rows)) * self.options.row_height), .cell_width = @intFromFloat(@max(1, self.options.cell_width)), .cell_height = @intFromFloat(@max(1, self.options.row_height)), .any_button_pressed = self.mouse_reporting } } });
     try self.pump();
 }
 fn pointAt(self: *Surface, x: f32, y: f32) !terminal.Point {
@@ -195,8 +194,16 @@ fn pointAt(self: *Surface, x: f32, y: f32) !terminal.Point {
     // Native pointer and text-input-client points are window logical values.
     // Layout rects are parent-local; include the pane's ancestor offsets once.
     const rect = self.root.globalRect();
-    const row: u32 = @intFromFloat(std.math.clamp(@floor((y - rect.y - S.inset) / self.options.row_height), 0, @as(f32, @floatFromInt(snapshot.projection.rows - 1))));
-    var col: u16 = @intFromFloat(std.math.clamp(@floor((x - rect.x - S.inset - self.bodyX()) / self.options.cell_width + 0.5), 0, @as(f32, @floatFromInt(snapshot.projection.cols))));
+    const local_y = y - rect.y - self.contentPadding().top;
+    var row: u32 = 0;
+    for (snapshot.projection.visible_rows) |line| {
+        const top = self.presentationY(line.viewport_y);
+        if (local_y < top - line.presentation.before * 0.5 and line.viewport_y > 0) break;
+        row = line.viewport_y;
+        if (local_y < top + self.options.row_height) break;
+    }
+    const shift = snapshot.projection.visible_rows[row].presentation.shift_x;
+    var col: u16 = @intFromFloat(std.math.clamp(@floor((x - rect.x - self.contentPadding().left - self.bodyX() - shift) / self.options.cell_width + 0.5), 0, @as(f32, @floatFromInt(snapshot.projection.cols))));
     for (snapshot.projection.visible_rows) |line| if (line.viewport_y == row and col < line.cell_count) {
         if (snapshot.projection.cells[line.cell_start + col].width == .wide_tail and col > 0) col -= 1;
     };
@@ -295,7 +302,7 @@ pub fn renderSelection(self: *Surface) !void {
         const left = if (selection.rectangle) @min(a.col, b.col) else if (absolute_row == a.row) a.col else 0;
         const right = if (selection.rectangle) @max(a.col, b.col) else if (absolute_row == b.row) b.col else snapshot.projection.cols;
         if (right <= left) continue;
-        try absolute(self.cx, row.selected, self.bodyX() + @as(f32, @floatFromInt(left)) * self.options.cell_width, 0, @as(f32, @floatFromInt(right - left)) * self.options.cell_width, self.options.row_height);
+        try absolute(self.cx, row.selected, self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(left)) * self.options.cell_width, 0, @as(f32, @floatFromInt(right - left)) * self.options.cell_width, self.options.row_height);
         row.selected.setDisplay(.flex);
     }
 }
@@ -330,6 +337,7 @@ pub fn pasteClipboard(self: *Surface) void {
     requestPaste(self, text) catch |err| self.showError(err);
 }
 pub fn requestPaste(self: *Surface, text: []const u8) !void {
+    if (self.enhancement) |handler| if (handler.text(handler.context, text)) return;
     if (self.pending_paste != null or self.paste_requested != null) return error.PendingPaste;
     if ((terminal.PastePolicy{}).inspect(text) == .reject) return error.InvalidPaste;
     // Freeze bytes immediately; preparation may retry while worker owns VT.
@@ -461,7 +469,7 @@ pub fn frameForRange(self: *Surface, start: u32, _: u32, out: *ui.types.A11yRect
             offset += 1;
         }
     }
-    out.* = .{ .x = rect.x + S.inset + self.bodyX() + col * self.options.cell_width, .y = rect.y + S.inset + @as(f32, @floatFromInt(row)) * self.options.row_height, .width = self.options.cell_width, .height = self.options.row_height };
+    out.* = .{ .x = rect.x + self.contentPadding().left + self.bodyX() + col * self.options.cell_width, .y = rect.y + self.contentPadding().top + @as(f32, @floatFromInt(row)) * self.options.row_height, .width = self.options.cell_width, .height = self.options.row_height };
     return true;
 }
 pub fn rangeAtPoint(self: *Surface, x: f32, y: f32, start: *u32, end: *u32) bool {

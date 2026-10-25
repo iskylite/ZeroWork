@@ -129,7 +129,10 @@ test "connection host keeps a failed original owner while a foreign challenge wa
     f.cx.handleKeyDown(.@"return", .{});
     for (0..4) |_| try f.tick();
     try std.testing.expect(f.host.last_error == null);
-    try std.testing.expect(f.host.progress.matches(second.operation));
+    // Protected authentication owns the modal; progress must stay hidden so
+    // its focus trap cannot make the password form inert.
+    try std.testing.expect(!f.host.progress.isVisible());
+    try std.testing.expect(f.host.bridge.current.?.identity.key.eql(second.operation));
     try std.testing.expect(f.host.authentication.isVisible());
 }
 
@@ -374,12 +377,14 @@ test "connection host shared OTP prefill waits for confirmation preserves manual
         }
     };
     const validity: @import("ui/plugin_challenge_presenter.zig").PrefillGuard = .{ .context = &f, .valid = Validity.valid };
-    try service.host.offer(owner, 1, 2, .secret_input, .{ .title = "One-time verification", .fields = &.{.{ .label = "OTP", .max_bytes = 256 }} }, std.math.maxInt(u64));
+    try service.host.offer(owner, 1, 2, .secret_input, .{ .title = "One-time verification", .submit_label = "验证并继续", .fields = &.{.{ .label = "OTP", .max_bytes = 256 }} }, std.math.maxInt(u64));
     for (0..2) |_| try f.tick();
     try std.testing.expect(try view.prefill(shared.Owner.from(owner), 1, 2, "123456", window, null, validity));
     try std.testing.expect(service.host.takeAnswer(owner, 1, 2) == null);
     f.cx.setFocus(view.fields[0].input.input_container);
     f.cx.handleTextInput("7");
+    try f.tick();
+    try std.testing.expectEqualStrings("验证并继续", view.submit_button.behavior.interaction.a11y.?.label.?);
     const manual = try a.dupe(u8, view.fields[0].input.state.getText());
     defer a.free(manual);
     try std.testing.expect(!try view.prefill(shared.Owner.from(owner), 1, 2, "654321", window + 1, null, validity));

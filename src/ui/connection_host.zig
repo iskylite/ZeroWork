@@ -103,7 +103,9 @@ pub const Host = struct {
             .phase = if (current.journal.failure) |entry| entry.phase else null,
             .reason = if (current.failure) |err| Progress.failureText(err) else "终端接入失败",
         } else null;
-        try self.progress.show(.{ .key = key, .hops = hops[0..current.hop_count], .journal = current.journal, .logs = logs[0..current.log_count], .dropped = current.dropped, .resources = current.resources, .state = state, .cleanup = current.cleanup, .attached = current.attached, .local_ready = true, .inline_authentication = false, .failure = failure });
+        // A protected challenge owns the active modal/focus trap. Reopening
+        // progress while it is visible makes the password form inert.
+        if (waiting) self.progress.hide() else try self.progress.show(.{ .key = key, .hops = hops[0..current.hop_count], .journal = current.journal, .logs = logs[0..current.log_count], .dropped = current.dropped, .resources = current.resources, .state = state, .cleanup = current.cleanup, .attached = current.attached, .local_ready = true, .inline_authentication = false, .failure = failure });
         if (challenge) |request| {
             try self.showAuthentication(request);
         } else {

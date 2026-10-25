@@ -129,7 +129,7 @@ pub const View = struct {
         const scope = try self.scope.childScope();
         self.row_scope = scope;
         if (self.picker.results.items.len == 0) {
-            const empty = try ui.text(self.cx, "没有匹配的页签", .{ .font_size = 12, .color = theme.current().fg_3 });
+            const empty = try ui.text(self.cx, "没有匹配的页签", .{ .font_size = 12, .color = theme.current().fg_2 });
             empty.meta.ownership.meta.test_id = "tabs.picker.empty";
             try self.rows.appendChild(self.cx.allocator, empty);
             return;
@@ -149,9 +149,9 @@ pub const View = struct {
             // provide the prototype's two-line row content and right status.
             const labels = try ui.box(self.cx, .{ .width = .fill(), .direction = .column, .gap = 3 }, .{});
             try labels.appendChild(self.cx.allocator, try ui.text(self.cx, tab.name(), .{ .font_size = 12, .font_weight = 500, .color = theme.current().fg_1, .text_overflow = .ellipsis }));
-            try labels.appendChild(self.cx.allocator, try ui.text(self.cx, tab.details, .{ .font_size = 10, .color = theme.current().fg_3, .text_overflow = .ellipsis }));
+            try labels.appendChild(self.cx.allocator, try ui.text(self.cx, tab.details, .{ .font_size = 10, .color = theme.current().fg_2, .text_overflow = .ellipsis }));
             try row.appendChild(self.cx.allocator, labels);
-            try row.appendChild(self.cx.allocator, try ui.text(self.cx, self.hooks.status(self.hooks.context, id), .{ .font_size = 10, .color = if (self.model.active == id) theme.current().accent_ink else theme.current().fg_3 }));
+            try row.appendChild(self.cx.allocator, try ui.text(self.cx, self.hooks.status(self.hooks.context, id), .{ .font_size = 10, .color = if (self.model.active == id) theme.current().accent_ink else theme.current().fg_2 }));
             try self.rows.appendChild(self.cx.allocator, row);
         }
         if (self.picker.highlighted) |id| {

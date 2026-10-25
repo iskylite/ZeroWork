@@ -317,7 +317,7 @@ fn cursorStyle(name: []const u8) TerminalViewNode.CursorStyle {
     return .block;
 }
 
-pub const GroupAction = enum { pin, leave, broadcast, split_side, split_stack, stop_broadcast, stop_group_ai };
+pub const GroupAction = enum { pin, leave, close_member, broadcast, split_side, split_stack, stop_broadcast, stop_group_ai };
 
 pub const Workspace = struct {
     plugins: plugin_registry.Registry = .{},
@@ -404,6 +404,9 @@ pub const Workspace = struct {
     terminal_area: *ui.Node,
     empty_state: *ui.Node,
     status_node: ?*ui.Node = null,
+    status_feedback: ?struct { context: *anyopaque, publish: *const fn (*anyopaque, []const u8) void } = null,
+    command_output: ?*TerminalViewNode = null,
+    creation_group: ?u32 = null,
     /// Status-bar grid-size label; bound to the active tab's terminal so the
     /// live PTY dimensions (frame_cols/frame_rows) replace the static text.
     grid_node: ?*ui.Node = null,
@@ -851,6 +854,11 @@ pub const Workspace = struct {
     }
 
     pub fn status(self: *Workspace, text: []const u8) void {
+        if (self.command_output) |terminal| {
+            terminal.showCommandMessage(text);
+            return;
+        }
+        if (self.status_feedback) |feedback| feedback.publish(feedback.context, text);
         const target = self.status_node orelse return;
         target.setTextContent(self.allocator, text) catch return;
         target.markRenderDirty();
@@ -1083,15 +1091,25 @@ pub const Workspace = struct {
         } else try self.allocator.dupe(u8, if (tab.local) "本机 · macOS · /bin/zsh" else if (self.plugins.find(tab.plugin_protocol_id)) |manifest| manifest.display_name else tab.titleSlice());
         defer self.allocator.free(detail);
         try self.model.setDetails(tab.tab_id, detail);
+        if (self.creation_group) |group_id| if (self.group_roster) |roster| if (roster.findById(group_id)) |group| {
+            if (!self.groupClosing(group_id) and tab.terminal != null and !tab.archived) {
+                _ = try roster.join(group.name, tab.id, group.color);
+                if (self.groupTabId(group_id)) |parent| try self.model.setContainer(tab.tab_id, parent);
+                self.active_group_view = group_id;
+                self.group_present_pending = true;
+                if (self.groupView(group_id)) |view| view.dirty = true;
+            }
+        };
         self.reveal_active = true;
     }
 
     fn measureTabs(self: *Workspace) !void {
-        const count = self.model.tabs.items.len;
+        const count = self.model.visibleCount();
         try self.strip_advances.resize(self.allocator, count);
         try self.strip_widths.resize(self.allocator, count);
         const family = if (self.font_family_resolver) |resolve| resolve("Inter") else 0;
-        for (self.model.tabs.items, self.strip_advances.items[0..self.model.tabs.items.len]) |*tab, *advance| {
+        for (self.strip_advances.items, 0..) |*advance, ordinal| {
+            const tab = &self.model.tabs.items[self.model.visibleAt(ordinal).?];
             // Match the visual line used by native Text's ellipsis check.
             // Round outward so adding/removing the 76px chrome cannot round
             // a fractional title width down and spuriously truncate it.
@@ -1105,7 +1123,7 @@ pub const Workspace = struct {
         self.strip_geometry = try tab_layout.calculate(self.header_width, self.strip_advances.items, self.strip_widths.items, self.strip_offset);
         if (self.reveal_active) {
             if (self.model.active) |id| {
-                if (self.model.indexOf(id)) |index| self.strip_geometry.offset = try tab_layout.reveal(self.strip_geometry, self.strip_widths.items, index);
+                if (self.model.visibleIndexOf(id)) |index| self.strip_geometry.offset = try tab_layout.reveal(self.strip_geometry, self.strip_widths.items, index);
             }
             self.reveal_active = false;
         }
@@ -1174,17 +1192,28 @@ pub const Workspace = struct {
         try viewport.appendChild(self.allocator, drag_gap);
         self.drag_gap = drag_gap;
         const family = if (self.font_family_resolver) |resolve| resolve("Inter") else 0;
-        for (self.model.tabs.items, 0..) |*model_tab, index| {
+        for (0..self.model.visibleCount()) |ordinal| {
+            const index = self.model.visibleAt(ordinal).?;
+            const model_tab = &self.model.tabs.items[index];
             const tab = if (self.tabIndexById(model_tab.id)) |at| self.tabs.items[at] else null;
             const group_id = self.groupIdByTab(model_tab.id);
-            const width = self.strip_widths.items[index];
+            const width = self.strip_widths.items[ordinal];
             const active = self.model.active == model_tab.id;
             const holder = try ui.box(self.cx, .{ .width = .{ .px = width }, .height = .{ .px = tab_styles.height }, .flex_shrink = 0 }, .{});
             if (group_id != null) holder.meta.ownership.meta.test_id = "groups.tab";
             const select_ctx = try self.newTabClickCtx(index);
-            const full_name = try std.fmt.allocPrint(self.allocator, "{s} · {s}", .{ self.model.tabs.items[index].name(), self.model.tabs.items[index].details });
+            const full_name = try std.fmt.allocPrint(self.allocator, "{s}\n{s}\n{s}", .{ self.model.tabs.items[index].name(), self.model.tabs.items[index].details, self.tabStatus(model_tab.id) });
             defer self.allocator.free(full_name);
             const tooltip = try ui.widgets.Tooltip(.{ .text = full_name, .position = .bottom_start, .open_delay_ms = 450, .background = app_theme.current().overlay, .text_color = app_theme.current().fg_1, .font_size = 11 }).mount(scope, self.cx);
+            tooltip.content.meta.ownership.meta.test_id = "tabs.tooltip";
+            tooltip.content.setStyleInline(self.allocator, tab_styles.tooltip());
+            for (tooltip.content.children.items) |label| if (label.getText()) |old| {
+                var text_style = old;
+                text_style.wrap = .word;
+                text_style.line_height = 1.5;
+                label.setText(text_style);
+                label.setStyleInline(self.allocator, .{ .width = .fill(), .min_width = 0, .max_width = 280 });
+            };
             tooltip.wrapper.style.width = .fill();
             tooltip.wrapper.style.height = .fill();
             tooltip.trigger.style.width = .fill();
@@ -1220,11 +1249,11 @@ pub const Workspace = struct {
             label_style.font_family = family;
             label_style.color = if (active) app_theme.current().fg_1 else app_theme.current().fg_2;
             const title = try ui.text(self.cx, self.model.tabs.items[index].name(), label_style);
-            title.setStyleInline(self.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 30 }, .top = .{ .px = 7 } }, .width = .{ .px = width - 76 }, .height = .{ .px = 18 }, .overflow_hidden = true });
+            title.setStyleInline(self.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 30 }, .top = .{ .px = (tab_styles.height - 18) / 2 } }, .width = .{ .px = width - 76 }, .height = .{ .px = 18 }, .overflow_hidden = true });
             try tab_box.appendChild(self.cx.allocator, title);
             const status_dot = try dot(self.cx, 6, if (group_id) |id| self.groupTabStatusColor(id) else if (tab.?.failed) self.palette.red else if (tab.?.plugin_renderer != null) (if (tab.?.content_ready) self.palette.green else self.palette.fg_muted) else if (tab.?.terminal == null) (if (tab.?.file_ready) self.palette.green else self.palette.fg_muted) else if (tab.?.terminal.?.tombstone.state != .active) self.palette.fg_muted else if (tab.?.runtime != null or (tab.?.local and tab.?.local_state == .running)) self.palette.green else self.palette.fg_muted);
             status_dot.meta.ownership.meta.test_id = "tabs.connection_status";
-            status_dot.setStyleInline(self.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = width - 40 }, .top = .{ .px = 13 } } });
+            status_dot.setStyleInline(self.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = width - 40 }, .top = .{ .px = (tab_styles.height - 6) / 2 } } });
             try tab_box.appendChild(self.cx.allocator, status_dot);
             const close_ctx = try self.newTabClickCtx(index);
             const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = if (group_id != null) "关闭组内全部会话" else "关闭页签", .base_style = tab_styles.close(width), .on_click = ui.Cx.simpleHandler(onCloseTabTrampoline, close_ctx) }).mount(scope, self.cx);
@@ -1239,7 +1268,7 @@ pub const Workspace = struct {
             close.setFocusable(active);
             try tab_box.appendChild(self.cx.allocator, close);
             if (active) {
-                const underline = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = 29.5 } }, .width = .{ .px = width - 16 }, .height = .{ .px = 2.5 }, .background = self.palette.accent, .border = .{ .radius = 1.25 } }, .{});
+                const underline = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 10 }, .top = .{ .px = tab_styles.height - 3 } }, .width = .{ .px = width - 20 }, .height = .{ .px = 3 }, .background = self.palette.accent, .border = .{ .radius = 1.25 } }, .{});
                 try tab_box.appendChild(self.cx.allocator, underline);
             }
             try tooltip.trigger.appendChild(self.cx.allocator, tab_box);
@@ -1320,13 +1349,15 @@ pub const Workspace = struct {
     }
     fn pickerStatus(context: *anyopaque, id: identity.TabId) []const u8 {
         const self: *Workspace = @ptrCast(@alignCast(context));
+        if (self.model.active == id) return "当前";
+        return self.tabStatus(id);
+    }
+    fn tabStatus(self: *Workspace, id: identity.TabId) []const u8 {
         if (self.groupIdByTab(id)) |group| {
-            if (self.model.active == id) return "当前";
             return if (self.groupClosing(group)) "关闭中" else "终端组";
         }
         const index = self.tabIndexById(id) orelse return "已关闭";
         const tab = self.tabs.items[index];
-        if (self.model.active == id) return "当前";
         if (tab.archived) return "只读";
         if (tab.failed) return "离线";
         if (tab.local) return switch (tab.local_state) {
@@ -1479,7 +1510,7 @@ pub const Workspace = struct {
             if (content_x < left + width / 2) break;
             left += width + tab_styles.gap;
         }
-        self.model.moveTab(id, target) catch return;
+        self.model.moveTab(id, self.model.visibleAt(target) orelse return) catch return;
         self.syncModelOrder() catch {};
         if (self.drag_gap) |gap| {
             var destination: f32 = 0;
@@ -1642,7 +1673,7 @@ pub const Workspace = struct {
 
     pub fn activateTabId(self: *Workspace, id: identity.TabId) void {
         self.model.activate(id) catch return;
-        self.presentTabId(id);
+        self.presentTabId(self.model.active orelse return);
     }
 
     fn presentTabId(self: *Workspace, id: identity.TabId) void {
@@ -1677,6 +1708,7 @@ pub const Workspace = struct {
     }
 
     pub fn refreshGroup(self: *Workspace, id: u32) void {
+        for (self.model.tabs.items) |tab| self.restoreStandaloneIfUngrouped(tab.id);
         if (self.groupView(id)) |view| view.dirty = true;
         self.group_present_pending = self.active_group_view == id;
         self.rebuildTabBar() catch {};
@@ -1710,19 +1742,20 @@ pub const Workspace = struct {
         const count = self.tabs.items.len;
         try self.newSessionFromTab(active);
         if (self.tabs.items.len <= count) return error.SessionNotCreated;
-        self.pending_split = .{ .group = id.?, .session = self.tabs.items[self.tabs.items.len - 1].id, .revision = revision };
+        const destination = self.tabs.items[self.tabs.items.len - 1].id;
+        if (!group.contains(destination)) self.pending_split = .{ .group = id.?, .session = destination, .revision = revision };
         // Startup owns its independent tab until a real terminal service exists.
         try self.openGroup(roster, id.?);
     }
 
     pub fn selectTabOrdinal(self: *Workspace, index: usize) void {
-        if (index < self.model.tabs.items.len) self.activateTabId(self.model.tabs.items[index].id);
+        if (self.model.visibleAt(index)) |at| self.activateTabId(self.model.tabs.items[at].id);
     }
 
     pub fn selectAdjacentTab(self: *Workspace, next: bool) void {
-        const count = self.model.tabs.items.len;
+        const count = self.model.visibleCount();
         if (count == 0) return;
-        const at = if (self.model.active) |id| self.model.indexOf(id) orelse 0 else 0;
+        const at = if (self.model.active) |id| self.model.visibleIndexOf(id) orelse 0 else 0;
         self.selectTabOrdinal(if (next) (at + 1) % count else (at + count - 1) % count);
     }
 
@@ -1732,10 +1765,11 @@ pub const Workspace = struct {
 
     fn restoreGroupRoots(self: *Workspace) void {
         for (self.tabs.items) |tab| {
+            if (tab.terminal) |*terminal| terminal.setGrouped(false);
             if (tab.root.parent != self.terminal_area) {
                 if (tab.root.parent) |parent| self.cx.detachChild(parent, tab.root);
                 self.terminal_area.appendChild(self.allocator, tab.root) catch {};
-                tab.root.setStyleInline(self.allocator, .{ .width = .fill(), .height = .fill(), .flex_shrink = 1, .padding = .{ .top = 8, .bottom = 8, .left = 12, .right = 12 } });
+                tab.root.setStyleInline(self.allocator, .{ .width = .fill(), .height = .fill(), .flex_shrink = 1, .padding = .{} });
             }
         }
         for (self.group_views.items) |view| if (view.root) |root| root.setDisplay(.none);
@@ -1873,6 +1907,7 @@ pub const Workspace = struct {
         for (ordered.items) |member| {
             const tab = self.sessionTab(member.pane_id) orelse continue;
             if (tab.terminal == null or tab.archived) continue;
+            tab.terminal.?.setGrouped(true);
             const pane = try ui.box(self.cx, group_styles.pane(), .{});
             const cell = try self.groupCell(scope, view.id, tab.id, .pin);
             pane.meta.ownership.meta.test_id = try std.fmt.bufPrint(&cell.test_id, "groups.pane.{d}", .{tab.id});
@@ -1895,14 +1930,14 @@ pub const Workspace = struct {
             status_label.setStyleInline(self.allocator, .{ .flex_shrink = 0 });
             try header.appendChild(self.allocator, status_label);
             try self.groupControl(scope, header, view.id, tab.id, .pin, ui.icons.pin, if (group.pinned_pane == tab.id) "取消置顶" else "置顶成员", "groups.pin");
-            var menu_items: [7]ui.widgets.MenuItem = undefined;
-            const menu_actions = [_]GroupAction{ .leave, .split_side, .split_stack, .broadcast, .stop_broadcast };
-            const menu_labels = [_][]const u8{ "移出组，保留会话", "新建左右分栏", "新建上下分栏", "输入广播…", "停止输入广播" };
+            var menu_items: [8]ui.widgets.MenuItem = undefined;
+            const menu_actions = [_]GroupAction{ .leave, .split_side, .split_stack, .broadcast, .stop_broadcast, .close_member };
+            const menu_labels = [_][]const u8{ "移出组，保留会话", "新建左右分栏", "新建上下分栏", "输入广播…", "停止输入广播", "断开并关闭会话" };
             for (menu_actions, menu_labels, 0..) |action, action_label, action_index| {
                 const action_cell = try self.groupCell(scope, view.id, tab.id, action);
                 menu_items[action_index] = .{ .label = action_label, .on_click = self.cx.on(GroupCell, action_cell, GroupCell.act) };
             }
-            for ([_]group_view.Layout{ .side_by_side, .stacked }, 5..) |layout, layout_index| {
+            for ([_]group_view.Layout{ .side_by_side, .stacked }, menu_actions.len..) |layout, layout_index| {
                 const layout_cell = try self.groupCell(scope, view.id, tab.id, .pin);
                 layout_cell.layout = layout;
                 menu_items[layout_index] = .{ .label = if (layout == .stacked) "切换上下布局" else "切换左右布局", .on_click = self.cx.on(GroupCell, layout_cell, GroupCell.act) };
@@ -1917,7 +1952,7 @@ pub const Workspace = struct {
             try header.appendChild(self.allocator, menu.wrapper);
             try pane.appendChild(self.allocator, header);
             if (tab.root.parent) |parent| self.cx.detachChild(parent, tab.root);
-            tab.root.setStyleInline(self.allocator, .{ .width = .fill(), .height = .fill(), .flex_shrink = 1, .padding = .{ .top = 0, .bottom = 8, .left = 8, .right = 8 } });
+            tab.root.setStyleInline(self.allocator, .{ .width = .fill(), .height = .fill(), .flex_shrink = 1, .padding = .{} });
             tab.root.setDisplay(.flex);
             try pane.appendChild(self.allocator, tab.root);
             try root.appendChild(self.allocator, pane);
@@ -1941,7 +1976,27 @@ pub const Workspace = struct {
         view.dirty = false;
     }
 
+    fn restoreStandaloneIfUngrouped(self: *Workspace, tab_id: identity.TabId) void {
+        const index = self.model.indexOf(tab_id) orelse return;
+        const parent = self.model.tabs.items[index].container orelse return;
+        const group_id = self.groupIdByTab(parent) orelse {
+            self.model.setContainer(tab_id, null) catch {};
+            return;
+        };
+        const session_index = self.tabIndexById(tab_id) orelse return;
+        const roster = self.group_roster orelse return;
+        const group = roster.findById(group_id);
+        if (group == null or !group.?.contains(self.tabs.items[session_index].id)) self.model.setContainer(tab_id, null) catch {};
+    }
+    fn creationGroupFor(self: *Workspace, source: SessionId) ?u32 {
+        const roster = self.group_roster orelse return null;
+        if (self.active_group_view) |id| if (roster.findById(id)) |group| if (group.contains(source) and !self.groupClosing(id)) return id;
+        for (roster.groups.items) |group| if (group.contains(source) and !self.groupClosing(group.id)) return group.id;
+        return null;
+    }
+
     fn pollGroupWorkspace(self: *Workspace) bool {
+        for (self.model.tabs.items) |tab| self.restoreStandaloneIfUngrouped(tab.id);
         if (self.pending_split) |pending| {
             if (self.sessionTab(pending.session)) |tab| {
                 const ready = tab.terminal != null and (if (tab.local) tab.local_state == .running else tab.runtime != null and !tab.failed);
@@ -2280,7 +2335,13 @@ pub const Workspace = struct {
     pub fn selectTab(self: *Workspace, index: usize) void {
         if (self.tabs.items.len == 0) return;
         if (index >= self.tabs.items.len) return;
-        self.model.activate(self.tabs.items[index].tab_id) catch return;
+        const tab_id = self.tabs.items[index].tab_id;
+        self.restoreStandaloneIfUngrouped(tab_id);
+        self.model.activate(tab_id) catch return;
+        if (self.model.active != tab_id) {
+            self.presentTabId(self.model.active orelse return);
+            return;
+        }
         self.presentActiveTab(index);
     }
     fn presentActiveTab(self: *Workspace, index: usize) void {
@@ -2467,6 +2528,7 @@ pub const Workspace = struct {
                 .rejected => {
                     tab.closing = false;
                     self.abortCloseBatch();
+                    self.status("关闭失败：会话状态已变化，请重试；连接资源尚未确认释放。");
                 },
             }
             return;
@@ -3605,6 +3667,7 @@ pub const Workspace = struct {
         if (self.sessionTab(id)) |tab| {
             if (tab.terminal) |*terminal| {
                 terminal.removeFrameHook(self.cx);
+                terminal.releaseCommandDocument();
                 terminal.worker = null;
             }
             tab.root.behavior.interaction.text_input_client = null;
@@ -3702,6 +3765,14 @@ pub const Workspace = struct {
         const source = self.tabs.items[index];
         if (source.archived) return error.ArchivedSessionReadOnly;
         const recreate = self.session_bridge.recreate orelse return error.SessionHostUnavailable;
+        const previous_group = self.creation_group;
+        const previous_output = self.command_output;
+        self.creation_group = self.creationGroupFor(source.id);
+        self.command_output = null;
+        defer {
+            self.creation_group = previous_group;
+            self.command_output = previous_output;
+        }
         try recreate(self.session_bridge.context, source.id);
     }
 
@@ -3713,6 +3784,14 @@ pub const Workspace = struct {
         if (index >= self.tabs.items.len) return error.InvalidTab;
         const source = self.tabs.items[index];
         if (source.archived) return error.ArchivedSessionReadOnly;
+        const previous_group = self.creation_group;
+        const previous_output = self.command_output;
+        self.creation_group = self.creationGroupFor(source.id);
+        self.command_output = null;
+        defer {
+            self.creation_group = previous_group;
+            self.command_output = previous_output;
+        }
         if (source.local) {
             const duplicate = self.session_bridge.duplicate_local orelse return error.LocalAdapterUnavailable;
             return duplicate(self.session_bridge.context, source.id);
@@ -4266,7 +4345,7 @@ test "first tab resizes an already laid out empty title strip" {
     try std.testing.expectEqual(tab_styles.title_weight, workspace.tab_nodes.items[0].label.getText().?.font_weight);
     const close_rect = workspace.tab_nodes.items[0].close.globalRect();
     try std.testing.expectApproxEqAbs(tab_rect.x + tab_rect.w - 26, close_rect.x, 0.01);
-    try std.testing.expectApproxEqAbs(tab_rect.y + 6, close_rect.y, 0.01);
+    try std.testing.expectApproxEqAbs(tab_rect.y + (tab_styles.height - 20) / 2, close_rect.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 20), close_rect.w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 20), close_rect.h, 0.01);
     const Sink = struct {
@@ -5172,7 +5251,7 @@ test "notification tab attention preserves status geometry and follows exact own
     try std.testing.expectApproxEqAbs(@as(f32, 6), original_first.h, 0.01);
     const tab_rect = workspace.tab_nodes.items[0].node.globalRect();
     try std.testing.expectApproxEqAbs(tab_rect.x + tab_rect.w - 40, original_first.x, 0.01);
-    try std.testing.expectApproxEqAbs(tab_rect.y + 13, original_first.y, 0.01);
+    try std.testing.expectApproxEqAbs(tab_rect.y + (tab_styles.height - 6) / 2, original_first.y, 0.01);
 
     preferences.tab_dot = false;
     _ = try coordinator.updatePolicy(preferences);
@@ -5564,4 +5643,75 @@ test "workspace creation without its registered session host never starts a nati
     var workspace: Workspace = undefined;
     workspace.session_bridge = .{};
     try std.testing.expectError(error.SessionHostUnavailable, workspace.createSession(.{ .name = "offline", .host = "unreachable.invalid", .user = "test" }, 1, 0, ""));
+}
+
+test "group session creation new and duplicate preserve group without duplicate tab or source feedback" {
+    const allocator = std.testing.allocator;
+    const cx = try ui.Cx.init(allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(allocator, null, cx.owner);
+    defer scope.dispose();
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const strip = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 46 }, .flex_shrink = 0 }, .{});
+    try root.appendChild(allocator, strip);
+    const area = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .flex = 1, .direction = .column }, .{});
+    try root.appendChild(allocator, area);
+    const empty = try ui.box(cx, .{ .display = .none }, .{});
+    try area.appendChild(allocator, empty);
+    const sidebar = try ui.box(cx, .{ .display = .none }, .{});
+    try root.appendChild(allocator, sidebar);
+    const config: config_mod.Config = .{};
+    const workspace = try allocator.create(Workspace);
+    workspace.* = .{ .allocator = allocator, .cx = cx, .scope = scope, .io = std.testing.io, .app_config = &config, .palette = Palette.fromTheme(), .registry = .{ .arena = std.heap.ArenaAllocator.init(allocator), .hosts = &.{} }, .hosts_path = "", .sidebar_list = sidebar, .tab_bar = strip, .terminal_area = area, .empty_state = empty, .model = .{ .allocator = allocator, .window = @fromBackingInt(1), .workspace = @fromBackingInt(1) } };
+    try scope.onCleanup(Workspace, workspace, Workspace.cleanup);
+    cx.setViewport(1194, 800);
+    var roster = group_model.Roster.init(allocator);
+    defer roster.deinit();
+    const original = try workspace.createLocalSessionDirect(.{ .session_id = @fromBackingInt(50) });
+    const group = (try roster.join("Acceptance", original, 0xff818cf8)).id;
+    try workspace.openGroup(&roster, group);
+    const Factory = struct {
+        workspace: *Workspace,
+        calls: usize = 0,
+        feedback: usize = 0,
+        fn create(raw: ?*anyopaque, _: SessionId) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            _ = try self.workspace.createLocalSessionDirect(.{ .session_id = @fromBackingInt(50 + self.calls) });
+            self.workspace.status("连接中…");
+        }
+        fn feedbackStatus(raw: *anyopaque, _: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.feedback += 1;
+        }
+    };
+    var factory: Factory = .{ .workspace = workspace };
+    workspace.session_bridge = .{ .context = &factory, .recreate = Factory.create, .duplicate_local = Factory.create };
+    workspace.status_feedback = .{ .context = &factory, .publish = Factory.feedbackStatus };
+    workspace.command_output = &workspace.sessionTab(original).?.terminal.?;
+    try workspace.newSessionFromTab(workspace.tabIndex(original).?);
+    try std.testing.expectEqual(@as(usize, 1), factory.calls);
+    try std.testing.expectEqual(@as(usize, 2), workspace.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), workspace.model.visibleCount());
+    try std.testing.expectEqual(group, workspace.active_group_view.?);
+    const created = workspace.tabs.items[1];
+    try std.testing.expect(roster.findById(group).?.contains(created.id));
+    try std.testing.expectEqual(workspace.groupTabId(group), workspace.model.tabs.items[workspace.model.indexOf(created.tab_id).?].container);
+    try workspace.duplicateSessionFromTab(workspace.tabIndex(original).?);
+    try std.testing.expectEqual(@as(usize, 2), factory.calls);
+    try std.testing.expectEqual(@as(usize, 3), workspace.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 3), roster.findById(group).?.members.items.len);
+    try std.testing.expectEqual(@as(usize, 2), workspace.model.visibleCount());
+    try std.testing.expectEqual(@as(usize, 2), factory.feedback);
+    try std.testing.expect(workspace.sessionTab(original).?.terminal.?.command_message == null);
+    try roster.leave("Acceptance", created.id);
+    workspace.refreshGroup(group);
+    try std.testing.expectEqual(@as(?identity.TabId, null), workspace.model.tabs.items[workspace.model.indexOf(created.tab_id).?].container);
+    try std.testing.expectEqual(@as(usize, 3), workspace.model.visibleCount());
+    workspace.selectTab(workspace.tabIndex(created.id).?);
+    try std.testing.expect(workspace.active_group_view == null);
+    try std.testing.expectEqual(created.tab_id, workspace.model.active.?);
+    workspace.command_output = null;
+    workspace.status_feedback = null;
 }

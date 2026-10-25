@@ -10,6 +10,8 @@ pub const Tab = struct {
     title: [64]u8 = @splat(0),
     title_len: u8 = 0,
     revision: u64 = 1,
+    /// A session created inside a group retains its owner but has one visual entry.
+    container: ?TabId = null,
     details: []const u8 = "",
 
     pub fn name(self: *const Tab) []const u8 {
@@ -49,7 +51,7 @@ pub const Picker = struct {
         var matches: std.ArrayList(TabId) = .empty;
         errdefer matches.deinit(allocator);
         for (workspace.tabs.items) |*tab| {
-            if (matchesTab(tab, query))
+            if (tab.container == null and matchesTab(tab, query))
                 try matches.append(allocator, tab.id);
         }
         try self.query.ensureTotalCapacity(allocator, copy.len);
@@ -137,6 +139,41 @@ pub const Model = struct {
         return null;
     }
 
+    pub fn visibleCount(self: *const Model) usize {
+        var count: usize = 0;
+        for (self.tabs.items) |tab| if (tab.container == null) {
+            count += 1;
+        };
+        return count;
+    }
+    pub fn visibleAt(self: *const Model, ordinal: usize) ?usize {
+        var next: usize = 0;
+        for (self.tabs.items, 0..) |tab, index| if (tab.container == null) {
+            if (next == ordinal) return index;
+            next += 1;
+        };
+        return null;
+    }
+    pub fn visibleIndexOf(self: *const Model, id: TabId) ?usize {
+        var next: usize = 0;
+        for (self.tabs.items) |tab| if (tab.container == null) {
+            if (tab.id == id) return next;
+            next += 1;
+        };
+        return null;
+    }
+    pub fn setContainer(self: *Model, id: TabId, container: ?TabId) !void {
+        const index = self.indexOf(id) orelse return error.TabClosed;
+        if (container) |parent| {
+            const at = self.indexOf(parent) orelse return error.TabClosed;
+            if (self.tabs.items[at].owner != .group or parent == id) return error.InvalidIdentity;
+        }
+        self.tabs.items[index].container = container;
+        self.recent_cursor = null;
+        self.recent_cycle.clearRetainingCapacity();
+        if (self.active == id and container != null) try self.activate(container.?);
+    }
+
     /// A retry keeps the tab but changes the exact attempt owner. Captured
     /// rename/menu/close requests from the old generation remain stale.
     pub fn replaceOwner(self: *Model, id: TabId, expected: Owner, next: Owner) !void {
@@ -175,7 +212,8 @@ pub const Model = struct {
         tab.details = owned;
     }
     pub fn activate(self: *Model, id: TabId) !void {
-        if (self.indexOf(id) == null) return error.TabClosed;
+        const index = self.indexOf(id) orelse return error.TabClosed;
+        if (self.tabs.items[index].container) |parent| return self.activate(parent);
         self.recent_cursor = null;
         self.recent_cycle.clearRetainingCapacity();
         self.active = id;
@@ -193,7 +231,7 @@ pub const Model = struct {
             try self.recent_cycle.ensureTotalCapacity(self.allocator, self.recent.items.len);
             self.recent_cycle.clearRetainingCapacity();
             for (self.recent.items) |id| {
-                if (self.indexOf(id) == null or std.mem.indexOfScalar(TabId, excluded, id) != null) continue;
+                if (self.visibleIndexOf(id) == null or std.mem.indexOfScalar(TabId, excluded, id) != null) continue;
                 self.recent_cycle.appendAssumeCapacity(id);
             }
             if (self.recent_cycle.items.len == 0) return null;
@@ -205,7 +243,7 @@ pub const Model = struct {
         for (0..count) |_| {
             cursor = if (reverse) (if (cursor == 0) count - 1 else cursor - 1) else (if (cursor + 1 == count) 0 else cursor + 1);
             const id = self.recent_cycle.items[cursor];
-            if (self.indexOf(id) == null or std.mem.indexOfScalar(TabId, excluded, id) != null) continue;
+            if (self.visibleIndexOf(id) == null or std.mem.indexOfScalar(TabId, excluded, id) != null) continue;
             self.recent_cursor = cursor;
             self.active = id;
             return id;
@@ -230,6 +268,17 @@ pub const Model = struct {
         errdefer targets.deinit(self.allocator);
         for (self.tabs.items) |tab| {
             if (tab.id == keep) continue;
+            if (tab.container) |parent| {
+                if (parent == keep) continue;
+                if (self.indexOf(parent)) |at| if (self.tabs.items[at].owner == .group) {
+                    var retained = false;
+                    for (excluded_groups) |group| if (group == self.tabs.items[at].owner.group.id) {
+                        retained = true;
+                        break;
+                    };
+                    if (retained) continue;
+                };
+            }
             if (tab.owner == .group) {
                 var excluded = false;
                 for (excluded_groups) |group| if (group == tab.owner.group.id) {
@@ -271,11 +320,24 @@ pub const Model = struct {
         if (!std.meta.eql(self.tabs.items[index].owner, owner)) return error.StaleOwner;
         if (self.order_revision == std.math.maxInt(u64)) return error.RevisionExhausted;
         const removed = self.tabs.orderedRemove(index);
+        for (self.tabs.items) |*tab| if (tab.container == id) {
+            tab.container = null;
+        };
         if (std.mem.indexOfScalar(TabId, self.recent.items, id)) |recent_index| _ = self.recent.orderedRemove(recent_index);
         if (removed.details.len > 0) self.allocator.free(removed.details);
         self.order_revision += 1;
         if (self.active == id) {
-            self.active = if (self.tabs.items.len == 0) null else self.tabs.items[@min(index, self.tabs.items.len - 1)].id;
+            self.active = null;
+            if (self.tabs.items.len > 0) {
+                const start = @min(index, self.tabs.items.len - 1);
+                for (0..self.tabs.items.len) |offset| {
+                    const at = (start + offset) % self.tabs.items.len;
+                    if (self.tabs.items[at].container == null) {
+                        self.active = self.tabs.items[at].id;
+                        break;
+                    }
+                }
+            }
             if (self.active) |active| self.touchRecent(active);
         }
     }
@@ -510,4 +572,39 @@ test "window close freezes owners and gates new content until matching cancellat
     try std.testing.expectError(error.StaleClose, model.cancelWindowClose(6));
     try model.cancelWindowClose(7);
     try model.append(@fromBackingInt(2), session(2), "new");
+}
+
+test "group created sessions have one visible entry and recover their own tab when detached" {
+    var model = testModel();
+    defer model.deinit();
+    const original: TabId = @fromBackingInt(1);
+    const group: TabId = @fromBackingInt(2);
+    const created: TabId = @fromBackingInt(3);
+    try model.append(original, session(1), "source");
+    try model.append(group, .{ .group = .{ .id = @fromBackingInt(7) } }, "group");
+    try model.append(created, session(3), "created");
+    try model.setContainer(created, group);
+    try std.testing.expectEqual(@as(usize, 3), model.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), model.visibleCount());
+    try std.testing.expect(model.visibleIndexOf(created) == null);
+    try model.activate(created);
+    try std.testing.expectEqual(group, model.active.?);
+    const excluded = try model.freezeCloseTargets(original, &.{@fromBackingInt(7)});
+    defer model.allocator.free(excluded);
+    try std.testing.expectEqual(@as(usize, 0), excluded.len);
+    var picker: Picker = .{};
+    defer picker.deinit(model.allocator);
+    try picker.show(model.allocator, &model, 1);
+    try std.testing.expectEqual(@as(usize, 2), picker.results.items.len);
+    _ = try model.cycleRecent(false, &.{});
+    try std.testing.expect(model.active != created);
+    model.finishRecentSwitch();
+    try model.setContainer(created, null);
+    try std.testing.expectEqual(@as(usize, 3), model.visibleCount());
+    try model.activate(created);
+    try std.testing.expectEqual(created, model.active.?);
+    try model.setContainer(created, group);
+    try model.completeClose(group, .{ .group = .{ .id = @fromBackingInt(7) } });
+    try std.testing.expectEqual(@as(?TabId, null), model.tabs.items[model.indexOf(created).?].container);
+    try std.testing.expect(model.isCurrentTarget(.{ .tab = created, .owner = session(3) }));
 }

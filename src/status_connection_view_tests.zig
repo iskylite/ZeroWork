@@ -93,7 +93,7 @@ const Fixture = struct {
     }
 };
 
-test "status connection view follows exact live Figma geometry and copies source values" {
+test "status connection view follows V3 labeled facts geometry and copies source values" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -101,16 +101,17 @@ test "status connection view follows exact live Figma geometry and copies source
     try f.show(source);
     const r = f.view.chrome.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 8), r.x, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 646), r.y, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 360), r.w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 208), r.h, 0.1);
-    try std.testing.expectApproxEqAbs(r.x + 12, f.view.name.parent.?.globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(r.y + 46, f.view.name.parent.?.globalRect().y, 0.1);
-    try std.testing.expectApproxEqAbs(r.x + 38, f.view.name.globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(r.y + 78, f.view.address.globalRect().y, 0.1);
-    try std.testing.expectApproxEqAbs(r.y + 167, f.view.copy_button.globalRect().y, 0.1);
-    try std.testing.expectEqual(@as(f32, 28), f.view.copy_button.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 30), f.view.reconnect_button.globalRect().w);
+    try std.testing.expectApproxEqAbs(f.trigger.globalRect().y - 6 - S.height, r.y, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 344), r.w, 0.1);
+    try std.testing.expectApproxEqAbs(S.height, r.h, 0.1);
+    try std.testing.expectApproxEqAbs(r.x + 15, f.view.name.parent.?.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(r.y + 53, f.view.name.parent.?.globalRect().y, 0.1);
+    try std.testing.expectApproxEqAbs(r.y + 80, f.view.address.globalRect().y, 0.1);
+    const footer = f.view.footer.globalRect();
+    try std.testing.expect(footer.y >= f.view.scroll.container.globalRect().y + f.view.scroll.container.globalRect().h);
+    try std.testing.expect(footer.y + footer.h <= r.y + r.h - 14.5);
+    try std.testing.expectEqual(@as(f32, 90), f.view.copy_button.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 74), f.view.reconnect_button.globalRect().w);
     try std.testing.expectEqualStrings("ubuntu@10.0.1.11:22", f.view.address.getText().?.content);
     try std.testing.expectEqualStrings("会话 101", f.view.session.getText().?.content);
     try std.testing.expectEqualStrings("42 分钟", f.view.duration.getText().?.content);
@@ -133,7 +134,8 @@ test "status connection view mouse and keyboard copy use the captured endpoint a
     f.click(f.view.copy_button);
     try std.testing.expectEqual(@as(usize, 1), f.copies);
     try std.testing.expect(f.last_key.?.eql(key));
-    try std.testing.expectEqualStrings("ubuntu@[2001:db8::1]:22", f.copied.?);
+    try std.testing.expect(std.mem.indexOf(u8, f.copied.?, "身份：ubuntu@[2001:db8::1]:22") != null);
+    try std.testing.expect(std.mem.indexOf(u8, f.copied.?, "协议：SSH · 交互式 Shell") != null);
     f.cx.setFocus(f.view.copy_button);
     f.cx.handleKeyDown(.@"return", .{});
     try std.testing.expectEqual(@as(usize, 2), f.copies);
@@ -250,7 +252,7 @@ test "status connection view reanchors and rethemes a bounded scroll card withou
     f.settle();
     const r = f.view.chrome.globalRect();
     try std.testing.expect(r.x >= 8 and r.x + r.w <= 472.1 and r.y >= 8);
-    try std.testing.expectApproxEqAbs(@as(f32, 184), r.y + r.h, 0.1);
+    try std.testing.expectApproxEqAbs(f.trigger.globalRect().y - 6, r.y + r.h, 0.1);
     try std.testing.expect(f.view.scroll.content.globalRect().h > f.view.scroll.container.globalRect().h);
     f.trigger.setDisplay(.none);
     f.view.reanchor(190);
@@ -279,7 +281,7 @@ test "status connection view icon tooltips appear on keyboard focus and hover wi
     f.cx.setFocus(f.view.copy_button);
     f.settle();
     f.settle();
-    try std.testing.expect(visibleHint(f.cx.root.?, "复制地址"));
+    try std.testing.expectEqualStrings("复制信息", f.view.copy_button.behavior.interaction.a11y.?.label.?);
     try std.testing.expectEqual(before, f.view.copy_button.globalRect());
     f.cx.clearFocus();
     const logs_rect = f.view.logs_button.globalRect();

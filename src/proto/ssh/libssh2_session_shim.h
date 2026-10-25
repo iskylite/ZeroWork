@@ -88,6 +88,18 @@ int zw_ssh_private_key_readable(const char *path);
 LIBSSH2_CHANNEL *zw_libssh2_open_shell(LIBSSH2_SESSION *session, const char *term, int cols, int rows);
 LIBSSH2_CHANNEL *zw_libssh2_open_direct_tcpip(LIBSSH2_SESSION *session, const char *host, unsigned short port);
 LIBSSH2_CHANNEL *zw_libssh2_open_exec(LIBSSH2_SESSION *session, const char *command);
+/* Single nonblocking remote forwarding operations. Listener stays owned until
+   cancel returns 0 or the owning Session release receipt is complete. */
+typedef struct _LIBSSH2_LISTENER LIBSSH2_LISTENER;
+LIBSSH2_LISTENER *zw_libssh2_forward_listen(LIBSSH2_SESSION *session, const char *host, unsigned short port, int *bound_port, int queue_max);
+LIBSSH2_CHANNEL *zw_libssh2_forward_accept(LIBSSH2_LISTENER *listener);
+int zw_libssh2_forward_cancel(LIBSSH2_LISTENER *listener);
+/* Fixed remote-forward target: numeric IPv4/IPv6 or localhost, no blocking DNS
+   on the PTY owner. fd is nonblocking; ready returns 0 pending/1 ready/-1 fail. */
+int zw_ssh_forward_target_valid(const char *host);
+int zw_ssh_forward_connect(const char *host, unsigned short port);
+int zw_ssh_forward_connect_ready(int fd);
+
 /* Single nonblocking steps: 0 success, 1 EAGAIN, negative native failure.
    Retain the same channel/command across retries. One channel-open per Session. */
 int zw_libssh2_exec_channel_open_step(LIBSSH2_SESSION *session, LIBSSH2_CHANNEL **channel);

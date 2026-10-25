@@ -259,6 +259,12 @@ pub const View = struct {
         const self: *View = @ptrCast(@alignCast(raw));
         var dirty = self.flush() catch false;
         if (self.source != null) for (self.panes) |pane| {
+            if (pane.filter_pending) {
+                pane.filter_pending = false;
+                pane.apply(null) catch |err| pane.report(err);
+                ui.widgets.setScrollY(pane.list.state, pane.list.content, 0);
+                dirty = true;
+            }
             dirty = pane.geometry() or dirty;
         };
         if (dirty) self.cx.requestRedraw();
@@ -269,6 +275,7 @@ pub const View = struct {
         if (self.source) |*owned| owned.arena.deinit();
         if (self.pending) |*owned| owned.arena.deinit();
         if (self.drag_source) |*owned| owned.arena.deinit();
+        for (self.panes) |pane| pane.filtered.deinit(self.cx.allocator);
     }
 };
 
@@ -295,6 +302,7 @@ pub const Pane = struct {
     write_disabled: *ui.Signal(bool),
     mkdir_disabled: *ui.Signal(bool),
     table: *ui.Node,
+    toolbar: *ui.Node = undefined,
     data_clip: *ui.Node = undefined,
     draft_editor: ?*ui.Node = null,
     draft_result: ?*ui.Node = null,
@@ -323,8 +331,12 @@ pub const Pane = struct {
     name_width: f32 = S.min_columns - S.columns_fixed,
     size_width: f32 = 76,
     date_width: f32 = 140,
-    empty_y: f32 = 28,
+    empty_y: f32 = S.header_height,
     focus_requested: bool = false,
+    filter: ui.widgets.input.InputResult = undefined,
+    filter_value: *ui.Signal([]const u8) = undefined,
+    filter_pending: bool = false,
+    filtered: std.ArrayList(Entry) = .empty,
 
     fn mount(view: *View, side: Side) !*Pane {
         const cx = view.cx;
@@ -332,26 +344,34 @@ pub const Pane = struct {
         const self = try scope.createState(Pane, .{ .view = view, .side = side, .root = undefined, .title = undefined, .subtitle = undefined, .endpoint_tip = try scope.createText("", .{}), .badge = undefined, .path = undefined, .path_value = try scope.createText("", .{}), .nav_disabled = try scope.createSignal(bool, true), .back_disabled = try scope.createSignal(bool, true), .parent_disabled = try scope.createSignal(bool, true), .write_disabled = try scope.createSignal(bool, true), .mkdir_disabled = try scope.createSignal(bool, true), .table = undefined, .header = undefined, .headings = undefined, .heading_buttons = undefined, .all_checked = try scope.createSignal(bool, false), .mixed = try scope.createSignal(bool, false), .list = undefined, .virtual = undefined, .empty = undefined, .empty_text = undefined, .footer = undefined, .summary = undefined, .mode = undefined, .actions = undefined, .status = undefined, .error_box = undefined, .error_text = undefined, .error_detail = undefined, .recovery_detail = undefined, .paint = try scope.createSignal(u64, 0) });
         self.root = try ui.boxStyled(cx, S.card, .{});
         self.root.meta.ownership.meta.test_id = if (side == .local) "files.local" else "files.remote";
-        const top = try ui.box(cx, S.line(32), .{});
-        try self.root.appendChild(cx.allocator, top);
+        self.toolbar = try ui.boxStyled(cx, S.toolbar, .{});
+        self.toolbar.meta.ownership.meta.test_id = "files.toolbar";
+        try self.root.appendChild(cx.allocator, self.toolbar);
+        const top = try ui.box(cx, S.line(30), .{});
+        try self.toolbar.appendChild(cx.allocator, top);
         try top.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (side == .local) "laptop" else "folder-open").?, S.theme.current().fg_2, S.icon(16)));
         const endpoint = try ui.widgets.Tooltip(.{ .text = self.endpoint_tip, .open_delay_ms = 450 }).mount(scope, cx);
-        endpoint.wrapper.setStyleInline(cx.allocator, S.flexible());
-        endpoint.trigger.setStyleInline(cx.allocator, S.flexible());
+        endpoint.wrapper.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .flex_shrink = 0 });
+        endpoint.trigger.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .flex_shrink = 0 });
         self.title = try label(cx, endpoint.trigger, S.title, "");
-        self.title.setStyleInline(cx.allocator, S.flexible());
+        self.title.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .flex_shrink = 0 });
         try top.appendChild(cx.allocator, endpoint.wrapper);
         const badge = try ui.boxStyled(cx, S.badge, .{});
-        badge.setStyleInline(cx.allocator, .{ .width = .{ .px = if (side == .local) 70 else 84 } });
+        badge.setStyleInline(cx.allocator, .{ .max_width = 150, .min_width = 0, .flex_shrink = 1, .overflow = .hidden });
         self.badge = try label(cx, badge, S.secondary, "");
+        self.badge.setStyleInline(cx.allocator, .{ .min_width = 0, .overflow = .hidden });
+        if (self.badge.getText()) |value| {
+            var text_style = value;
+            text_style.text_overflow = .ellipsis;
+            self.badge.setText(text_style);
+        }
         try top.appendChild(cx.allocator, badge);
-        _ = try self.button(top, "folder-plus", "新建文件夹", .new_folder, self.mkdir_disabled, 24);
+        try top.appendChild(cx.allocator, try ui.spacer(cx));
         _ = try self.button(top, "refresh-cw", "刷新当前目录", .refresh, null, 24);
-        self.context_button = try self.button(top, "ellipsis", "当前文件操作", .context, null, 24);
         self.subtitle = try label(cx, self.root, S.subtitle, "");
         self.subtitle.setStyleInline(cx.allocator, .{ .height = .{ .px = 18 }, .flex_shrink = 0, .width = .fill(), .overflow = .hidden });
-        const path_row = try ui.box(cx, S.line(32), .{});
-        try self.root.appendChild(cx.allocator, path_row);
+        const path_row = try ui.box(cx, S.line(30), .{});
+        try self.toolbar.appendChild(cx.allocator, path_row);
         _ = try self.button(path_row, "arrow-left", "返回上一个目录", .back, self.back_disabled, 24);
         _ = try self.button(path_row, "arrow-up", "上级目录", .parent, self.parent_disabled, 24);
         const field = try ui.boxStyled(cx, S.pathField, .{});
@@ -372,7 +392,20 @@ pub const Pane = struct {
         self.path.input_container.meta.ownership.meta.test_id = "files.path";
         try field.appendChild(cx.allocator, self.path.node);
         self.history_button = try self.button(field, "chevron-down", "目录历史", .history, self.nav_disabled, 14);
-        _ = try self.button(path_row, "search", "打开当前输入路径", .submit_path, self.nav_disabled, 24);
+        const filter_row = try ui.box(cx, S.line(30), .{});
+        filter_row.meta.ownership.meta.test_id = "files.filter_row";
+        try self.toolbar.appendChild(cx.allocator, filter_row);
+        const filter_field = try ui.boxStyled(cx, S.pathField, .{});
+        try filter_row.appendChild(cx.allocator, filter_field);
+        try filter_field.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.search, S.theme.current().fg_2, S.icon(14)));
+        self.filter_value = try scope.createText("", .{});
+        self.filter = try ui.widgets.Input(.{ .value = self.filter_value, .placeholder = "筛选当前目录…", .growable = true, .embedded = true, .on_change = cx.on(Pane, self, filterChanged) }).mountResult(scope, cx);
+        self.filter.node.setStyleInline(cx.allocator, S.pathInput());
+        self.filter.input_container.setStyleInline(cx.allocator, S.pathInput());
+        self.filter.input_container.meta.ownership.meta.test_id = "files.filter";
+        try filter_field.appendChild(cx.allocator, self.filter.node);
+        _ = try self.button(filter_row, "plus", "新建文件夹", .new_folder, self.mkdir_disabled, 24);
+        self.context_button = try self.button(filter_row, "ellipsis", "当前文件操作", .context, null, 24);
         self.stale_notice = try label(cx, self.root, S.secondary, "上次列表 · 已过期");
         self.stale_notice.setDisplay(.none);
         self.table = try ui.boxStyled(cx, S.table, .{});
@@ -380,9 +413,11 @@ pub const Pane = struct {
         const header_clip = try ui.boxStyled(cx, S.headerClip, .{});
         try self.table.appendChild(cx.allocator, header_clip);
         self.header = try ui.box(cx, S.columns(S.min_columns), .{});
+        self.header.setStyleInline(cx.allocator, .{ .height = .{ .px = S.header_height } });
         self.header.meta.ownership.meta.test_id = "files.columns";
         try header_clip.appendChild(cx.allocator, self.header);
         const select_cell = try ui.box(cx, S.column(24), .{});
+        select_cell.setStyleInline(cx.allocator, .{ .height = .{ .px = S.header_height } });
         const select_all = try ui.widgets.Checkbox(.{ .checked = ui.split(self.all_checked, cx.on(Pane, self, selectAll)), .indeterminate = self.mixed, .box_size = @as(f32, 16), .label = "" }).mount(scope, cx);
         select_all.meta.ownership.meta.test_id = "files.select_all";
         select_all.behavior.interaction.a11y.?.label = "选择当前目录全部项目";
@@ -422,15 +457,15 @@ pub const Pane = struct {
         try self.empty.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.folder_open, S.theme.current().fg_2, S.icon(18)));
         self.empty_text = try label(cx, self.empty, S.title, "");
         try self.table.appendChild(cx.allocator, self.empty);
-        self.footer = try ui.box(cx, S.line(28), .{});
+        self.footer = try ui.boxStyled(cx, S.footer, .{});
+        self.footer.meta.ownership.meta.test_id = "files.footer";
         try self.root.appendChild(cx.allocator, self.footer);
         self.summary = try label(cx, self.footer, S.secondary, "");
         self.summary.setStyleInline(cx.allocator, S.flexible());
         self.mode = try label(cx, self.footer, S.secondary, "");
-        self.actions = try ui.box(cx, S.line(32), .{});
-        try self.root.appendChild(cx.allocator, self.actions);
+        self.actions = self.footer;
         self.status = try label(cx, self.actions, S.secondary, "");
-        self.status.setStyleInline(cx.allocator, S.flexible());
+        self.status.setStyleInline(cx.allocator, .{ .max_width = 180, .min_width = 0, .overflow = .hidden });
         _ = try self.button(self.actions, if (side == .local) "upload" else "download", if (side == .local) "上传所选" else "下载所选", .transfer, self.write_disabled, 28);
         self.error_box = try ui.boxStyled(cx, S.errorBox, .{});
         self.error_box.meta.ownership.meta.test_id = "files.error";
@@ -459,6 +494,24 @@ pub const Pane = struct {
     pub fn projection(self: *const Pane) ?PaneProjection {
         return if (self.view.source) |source| source.value.panes[@backingInt(self.side)] else null;
     }
+    /// Only row presentation is filtered. Authority, selections and stamps stay
+    /// in the original immutable projection; all row indices share this slice.
+    fn rowProjection(self: *const Pane) ?PaneProjection {
+        var p = self.projection() orelse return null;
+        p.entries = self.filtered.items;
+        return p;
+    }
+    fn filterChanged(self: *Pane, _: []const u8) void {
+        self.filter_pending = true;
+        self.view.cx.requestRedraw();
+    }
+    fn rebuildFilter(self: *Pane) !void {
+        const p = self.projection() orelse return;
+        self.filtered.clearRetainingCapacity();
+        for (p.entries) |entry| if (matchesFilter(entry, self.filter_value.peek())) {
+            try self.filtered.append(self.view.cx.allocator, entry);
+        };
+    }
     /// The draft is a form, never a filesystem Entry or a selected file. Its
     /// stable Input lives outside recycled VirtualList rows but inside the same
     /// clipped viewport; one empty virtual row reserves its scrolling position.
@@ -477,7 +530,7 @@ pub const Pane = struct {
         self.draft_result_open = result_visible;
         if (self.draft_editor) |node| node.setDisplay(if (editing) .flex else .none);
         if (self.draft_result) |node| node.setDisplay(if (result_visible) .flex else .none);
-        if (self.projection()) |p| {
+        if (self.rowProjection()) |p| {
             self.actions.setDisplay(if (result_visible or p.state == .failed or p.state == .stale) .none else .flex);
             self.error_box.setDisplay(if (!result_visible and (p.state == .failed or p.state == .stale)) .flex else .none);
             self.empty.setDisplay(if (p.entries.len == 0 and !editing) .flex else .none);
@@ -488,7 +541,16 @@ pub const Pane = struct {
         self.view.cx.requestRedraw();
     }
     pub fn locate(self: *Pane, key: []const u8) void {
-        const p = self.projection() orelse return;
+        if (self.projection()) |original| {
+            if (entryIndex(original.entries, key) == null) return;
+            if (!matchesFilter(original.entries[entryIndex(original.entries, key).?], self.filter_value.peek())) {
+                self.filter_value.set("");
+                self.rebuildFilter() catch return;
+                self.filter_pending = true;
+                ui.widgets.virtual_list.updateItemCount(self.virtual, self.filtered.items.len + @intFromBool(self.draft_open));
+            }
+        }
+        const p = self.rowProjection() orelse return;
         const at = entryIndex(p.entries, key) orelse return;
         ui.widgets.virtual_list.ensureVisible(self.virtual, self.virtualIndex(p, at));
         self.focus_requested = true;
@@ -498,7 +560,7 @@ pub const Pane = struct {
     /// focus. Use that current viewport, including the scrollbar rail padding.
     pub fn revealDraft(self: *Pane) bool {
         if (!self.draft_open) return false;
-        const p = self.projection() orelse return false;
+        const p = self.rowProjection() orelse return false;
         const height = self.data_clip.globalRect().h;
         if (height <= 0) return false;
         self.list.state.viewport_height = height;
@@ -539,17 +601,18 @@ pub const Pane = struct {
     }
     fn apply(self: *Pane, before: ?PaneProjection) !void {
         const cx = self.view.cx;
+        try self.rebuildFilter();
         const p = self.projection().?;
+        const rows = self.rowProjection().?;
         if (cx.pressed_node) |pressed| if (isDescendant(self.root, pressed)) {
             const drag_ack = if (self.view.drag_source) |source| source.side == self.side and std.meta.eql(source.stamp, p.stamp) and source.selection_revision == p.selection_revision else false;
             if (!drag_ack and (before == null or !std.meta.eql(before.?.stamp, p.stamp) or before.?.selection_revision != p.selection_revision)) cx.cancelPointerInteractions(.explicit);
         };
-        try self.title.setTextContent(cx.allocator, p.title);
+        try self.title.setTextContent(cx.allocator, if (self.side == .local) "本地文件" else "远端文件");
         try self.subtitle.setTextContent(cx.allocator, p.subtitle);
         self.subtitle.setDisplay(.none);
         self.endpoint_tip.set(p.subtitle);
-        self.badge.parent.?.setDisplay(if (self.side == .local) .none else .flex);
-        try self.badge.setTextContent(cx.allocator, p.badge);
+        try self.badge.setTextContent(cx.allocator, if (self.side == .local) p.badge else p.title);
         const path_changed = before == null or !std.meta.eql(before.?.stamp.endpoint, p.stamp.endpoint) or !std.mem.eql(u8, before.?.resolved_path, p.resolved_path);
         const editing = if (cx.focused_node) |focused| isDescendant(self.path.node, focused) else false;
         if (path_changed or (!editing and !self.path.state.imeIsComposing())) self.path_value.set(p.resolved_path);
@@ -560,11 +623,13 @@ pub const Pane = struct {
         const destination = self.view.source.?.value.panes[1 - @backingInt(self.side)];
         self.write_disabled.set(!fresh(p) or !p.can_transfer or p.selected_keys.len == 0 or !fresh(destination) or !destination.writable);
         var selectable: usize = 0;
-        for (p.entries) |entry| if (!parentEntry(entry)) {
+        var visible_selected: usize = 0;
+        for (rows.entries) |entry| if (!parentEntry(entry)) {
             selectable += 1;
+            visible_selected += @intFromBool(contains(p.selected_keys, entry.absolute_path));
         };
-        self.all_checked.set(selectable > 0 and p.selected_keys.len == selectable);
-        self.mixed.set(p.selected_keys.len > 0 and p.selected_keys.len < selectable);
+        self.all_checked.set(selectable > 0 and visible_selected == selectable);
+        self.mixed.set(visible_selected > 0 and visible_selected < selectable);
         const has_error = p.state == .failed or p.state == .stale;
         self.stale_notice.setDisplay(if (has_error and p.entries.len > 0) .flex else .none);
         if (has_error and p.entries.len > 0) {
@@ -613,26 +678,28 @@ pub const Pane = struct {
             const value = try std.fmt.bufPrint(&text, "{s}{s}", .{ ([_][]const u8{ "名称", "大小", "修改时间" })[i], if (column == i) (if (p.sort.descending) " ↓" else " ↑") else "" });
             try heading.setTextContent(cx.allocator, value);
         }
-        self.empty.setDisplay(if (p.entries.len == 0 and !self.draft_open and !has_error) .flex else .none);
-        try self.empty_text.setTextContent(cx.allocator, if (has_error) "目录读取失败" else if (p.state == .loading) "正在读取目录…" else "目录为空");
+        self.empty.setDisplay(if (rows.entries.len == 0 and !self.draft_open and !has_error) .flex else .none);
+        try self.empty_text.setTextContent(cx.allocator, if (has_error) "目录读取失败" else if (p.state == .loading) "正在读取目录…" else if (self.filter_value.peek().len > 0) "没有匹配的项目" else "目录为空");
         // Keep row nodes for selection-only acknowledgements, otherwise the
         // native double-click target would be replaced after the first click.
-        if (before == null or !sameRows(before.?, p)) ui.widgets.virtual_list.updateItemCount(self.virtual, p.entries.len + @intFromBool(self.draft_open));
+        if (before == null or !sameRows(before.?, p)) ui.widgets.virtual_list.updateItemCount(self.virtual, rows.entries.len + @intFromBool(self.draft_open));
         if (path_changed) ui.widgets.setScrollY(self.list.state, self.list.content, 0);
         self.paint.set(self.paint.peek() +% 1);
         self.root.markLayoutDirty();
     }
     fn geometry(self: *Pane) bool {
         const cx = self.view.cx;
-        const available = self.table.globalRect().w;
+        const available = self.data_clip.globalRect().w;
         const width = @max(@as(f32, 320), available);
         const compact = available < S.min_columns;
         self.size_width = if (compact) 60 else 76;
-        self.date_width = if (compact) 104 else 140;
+        self.date_width = if (compact) 0 else 140;
+        self.toolbar.setStyleInline(cx.allocator, .{ .padding = if (compact) .{ .top = 8, .right = 8, .bottom = 9, .left = 8 } else .{ .top = 14, .right = 13, .bottom = 11, .left = 13 } });
+        self.heading_buttons[2].setDisplay(if (compact) .none else .flex);
         var changed = false;
         if (@abs(width - self.column_width) > 0.01) {
             self.column_width = width;
-            self.name_width = width - (S.columns_fixed - 216) - self.size_width - self.date_width;
+            self.name_width = width - (if (compact) @as(f32, 60) else S.columns_fixed - 216) - self.size_width - self.date_width;
             self.header.setStyleInline(cx.allocator, .{ .width = .{ .px = width } });
             self.heading_buttons[0].setStyleInline(cx.allocator, .{ .width = .{ .px = self.name_width } });
             self.heading_buttons[1].setStyleInline(cx.allocator, .{ .width = .{ .px = self.size_width } });
@@ -659,14 +726,14 @@ pub const Pane = struct {
             changed = true;
         }
         if (self.draft_editor) |editor| if (self.draft_open) {
-            const top = @as(f32, @floatFromInt(self.draftIndex(self.projection().?))) * S.row_height + self.list.state.contentTranslateY();
+            const top = @as(f32, @floatFromInt(self.draftIndex(self.rowProjection().?))) * S.row_height + self.list.state.contentTranslateY();
             if (@abs(editor.style.translate_x - x) > 0.01 or @abs(editor.style.translate_y - top) > 0.01 or editor.globalRect().w != width) {
                 editor.setStyleInline(cx.allocator, .{ .width = .{ .px = width }, .translate_x = x, .translate_y = top });
                 changed = true;
             }
         };
         const body = self.list.container.globalRect();
-        const empty_y = 28 + @max(@as(f32, 0), (body.h - rail - 128) / 2);
+        const empty_y = S.header_height + @max(@as(f32, 0), (body.h - rail - 128) / 2);
         if (self.empty_y != empty_y) {
             self.empty_y = empty_y;
             self.empty.setStyleInline(cx.allocator, .{ .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = empty_y } } });
@@ -707,7 +774,10 @@ pub const Pane = struct {
         const p = self.projection() orelse return;
         var keys: std.ArrayList([]const u8) = .empty;
         defer keys.deinit(self.view.cx.allocator);
-        if (checked) for (p.entries) |entry| if (!parentEntry(entry)) {
+        for (p.selected_keys) |key| if (entryIndex(self.filtered.items, key) == null) {
+            try keys.append(self.view.cx.allocator, key);
+        };
+        if (checked) for (self.filtered.items) |entry| if (!parentEntry(entry)) {
             try keys.append(self.view.cx.allocator, entry.absolute_path);
         };
         try self.emit(.{ .selection = .{ .keys = keys.items, .anchor = if (keys.items.len > 0) keys.items[0] else null, .focused_key = p.focused_key } });
@@ -720,7 +790,7 @@ pub const Pane = struct {
         };
     }
     fn renderRow(self: *Pane, index: usize, scope: *ui.Scope, cx: *ui.Cx) !*ui.Node {
-        const p = self.projection() orelse return error.FileProjectionUnavailable;
+        const p = self.rowProjection() orelse return error.FileProjectionUnavailable;
         const draft_at = self.draftIndex(p);
         if (self.draft_open and index == draft_at) return ui.box(cx, S.columns(self.column_width), .{});
         const entry_at = index - @intFromBool(self.draft_open and index > draft_at);
@@ -754,8 +824,8 @@ pub const Pane = struct {
             multiline.wrap = .word;
             label_.setText(multiline);
         };
-        tooltip.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 28 } });
-        tooltip.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 28 }, .min_width = 0, .align_items = .center, .overflow = .hidden });
+        tooltip.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = S.row_height } });
+        tooltip.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = S.row_height }, .min_width = 0, .direction = .row, .align_items = .center, .overflow = .hidden });
         const name = try label(cx, tooltip.trigger, S.filename, entry.display_name);
         name.meta.ownership.meta.test_id = "files.row.name";
         name.setStyleInline(cx.allocator, S.flexible());
@@ -829,7 +899,7 @@ const Row = struct {
     drag_binding: ?*drag.Binding = null,
     fn current(self: *Row) ?PaneProjection {
         if (self.pane.view.pending != null) return null;
-        const p = self.pane.projection() orelse return null;
+        const p = self.pane.rowProjection() orelse return null;
         if (!std.meta.eql(self.stamp, p.stamp) or entryIndex(p.entries, self.key) == null) return null;
         return p;
     }
@@ -845,6 +915,7 @@ const Row = struct {
         if (self.columns.children.items.len >= 4) {
             self.columns.children.items[2].setStyleInline(self.pane.view.cx.allocator, .{ .width = .{ .px = self.pane.size_width } });
             const date = self.columns.children.items[3];
+            date.setDisplay(if (self.pane.date_width == 0) .none else .flex);
             date.setStyleInline(self.pane.view.cx.allocator, .{ .width = .{ .px = self.pane.date_width } });
             const entry = p.entries[entryIndex(p.entries, self.key).?];
             const full = entry.modified_label;
@@ -1074,4 +1145,14 @@ fn rowAt(node: *ui.Node, point: drag.Point) ?*ui.Node {
     if (node.meta.ownership.meta.test_id) |id| if (std.mem.eql(u8, id, "files.row") and within(node.globalRect(), point)) return node;
     for (node.children.items) |child| if (rowAt(child, point)) |result| return result;
     return null;
+}
+
+fn matchesFilter(entry: Entry, query: []const u8) bool {
+    if (query.len == 0) return true;
+    // Byte-preserving ASCII case folding also keeps non-ASCII names intact.
+    if (query.len > entry.display_name.len) return false;
+    for (0..entry.display_name.len - query.len + 1) |start| {
+        if (std.ascii.eqlIgnoreCase(entry.display_name[start..][0..query.len], query)) return true;
+    }
+    return false;
 }

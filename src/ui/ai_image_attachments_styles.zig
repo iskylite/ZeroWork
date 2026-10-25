@@ -2,7 +2,7 @@
 const ui = @import("ui");
 const shared = @import("ai_attachments_styles.zig");
 pub fn retrySlot() ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 134 }, .top = .{ .px = 2 } }, .width = .{ .px = 22 }, .height = .{ .px = 22 } };
+    return .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .padding = .{}, .flex_shrink = 0 };
 }
 pub fn previewStyle() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = shared.preview_body_height }, .flex_shrink = 0, .background = shared.theme.current().well, .overflow = .hidden };

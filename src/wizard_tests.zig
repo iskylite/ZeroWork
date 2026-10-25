@@ -30,6 +30,7 @@ const SaveFixture = struct {
         self.registry = try store.loadHosts(std.testing.io, self.tmp.dir, a, self.path);
         self.assets[0] = try mod.Draft.fromHost(self.registry.hosts[0]).dupe(a);
         self.cx = try ui.Cx.init(a, std.testing.io);
+        try self.cx.setTestFrameStep(100);
         self.cx.setViewport(1440, 900);
         self.cx.root = try ui.box(self.cx, .{ .width = .fill(), .height = .fill() }, .{});
         self.scope = try ui.Scope.init(a, null, self.cx.owner);
@@ -80,7 +81,7 @@ const SaveFixture = struct {
         activate(self.wizard.save_btn.?);
         var value = try draft.toHostConfig();
         self.transient_secret_received = value.key_passphrase != null;
-        value.password = null;
+        value = try draft.toPersistentHostConfig();
         value.key_passphrase = null;
         value.totp_secret = null;
         var transaction = try store.HostsTransaction.init(a, &self.registry);
@@ -272,7 +273,7 @@ test "wizard modal and scroll viewport fit initial short window and resized narr
     cx.layout();
 
     const modal = wizard.modal.?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 720), modal.w, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 760), modal.w, 0.5);
     try std.testing.expect(modal.y >= 15.5 and modal.y + modal.h <= 560.5);
     try std.testing.expect(wizard.step1_scroll.?.globalRect().h <= 544.5);
     const state = wizard.scrollState(.protocol).?;
@@ -296,8 +297,8 @@ test "wizard modal and scroll viewport fit initial short window and resized narr
         _ = wizard.updateViewport();
     }
     cx.layout();
-    try std.testing.expectApproxEqAbs(@as(f32, 720), wizard.modal.?.globalRect().w, 0.5);
-    try std.testing.expectApproxEqAbs(@as(f32, 692), wizard.step2_scroll.?.globalRect().w, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 760), wizard.modal.?.globalRect().w, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 720), wizard.step2_scroll.?.globalRect().w, 0.5);
     cx.setViewport(600, 420);
     for (0..3) |_| {
         cx.layout();
@@ -309,9 +310,10 @@ test "wizard modal and scroll viewport fit initial short window and resized narr
     try std.testing.expect(resized.y >= 15.5 and resized.y + resized.h <= 404.5);
 }
 
-test "copy row is conditional on real assets and remains compact after transitions" {
+test "copy modal is conditional on real assets and remains centered after transitions" {
     const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();
+    try cx.setTestFrameStep(100);
     cx.setViewport(920, 576);
     const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
     defer scope.dispose();
@@ -321,23 +323,25 @@ test "copy row is conditional on real assets and remains compact after transitio
     try root.appendChild(cx.allocator, try wizard.mount(cx, scope));
     wizard.show();
     cx.layout();
-    try std.testing.expectEqual(@as(@TypeOf(wizard.copy_bar.?.style.display), .none), wizard.copy_bar.?.style.display);
+    try std.testing.expect(!wizard.copy_open.?.peek());
+    SaveFixture.activate(findId(wizard.root.?, "wizard.copy.open").?);
+    try std.testing.expect(!wizard.copy_open.?.peek());
     const assets = [_]mod.Draft{.{ .source_owner = .{ .id = @fromBackingInt(71), .revision = 5 }, .name = "real-host", .host = "192.0.2.1", .user = "test" }};
     try wizard.setAssets(&assets);
     SaveFixture.activate(findId(wizard.root.?, "wizard.copy.open").?);
-    for (0..3) |_| {
-        cx.layout();
-        _ = wizard.updateViewport();
-    }
-    cx.layout();
-    try std.testing.expectEqual(@as(@TypeOf(wizard.copy_bar.?.style.display), .flex), wizard.copy_bar.?.style.display);
-    try std.testing.expectApproxEqAbs(@as(f32, 52), wizard.copy_bar.?.globalRect().h, 0.5);
+    for (0..4) |_| cx.layout();
+    try std.testing.expect(wizard.copy_open.?.peek());
+    try std.testing.expectApproxEqAbs(@as(f32, 440), wizard.copy_dialog.?.globalRect().w, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 73.5), wizard.copy_bar.?.globalRect().h, 0.5);
     try wizard.setAssets(&.{});
     cx.layout();
-    try std.testing.expectEqual(@as(@TypeOf(wizard.copy_bar.?.style.display), .none), wizard.copy_bar.?.style.display);
+    try std.testing.expect(!wizard.copy_open.?.peek());
     try wizard.setAssets(&assets);
-    cx.layout();
-    try std.testing.expectApproxEqAbs(@as(f32, 52), wizard.copy_bar.?.globalRect().h, 0.5);
+    SaveFixture.activate(findId(wizard.root.?, "wizard.copy.open").?);
+    for (0..4) |_| cx.layout();
+    cx.handleKeyDown(.escape, .{});
+    try std.testing.expect(!wizard.copy_open.?.peek());
+    try std.testing.expect(wizard.isVisible());
 }
 
 fn findId(node: *ui.Node, id: []const u8) ?*ui.Node {
@@ -352,7 +356,7 @@ fn findText(node: *ui.Node, content: []const u8) ?*ui.Node {
     return null;
 }
 
-test "three step wizard retains editors and probe slots inside one 720 point shell" {
+test "three step wizard retains editors and probe slots inside one V3 760 point shell" {
     var f: SaveFixture = undefined;
     try f.init(.ssh);
     defer f.deinit();
@@ -365,7 +369,7 @@ test "three step wizard retains editors and probe slots inside one 720 point she
         SaveFixture.activate(findId(f.wizard.root.?, id).?);
         f.cx.layout();
         try std.testing.expectEqual(shell, f.wizard.modal.?);
-        try std.testing.expectApproxEqAbs(@as(f32, 720), shell.globalRect().w, 0.5);
+        try std.testing.expectApproxEqAbs(@as(f32, 760), shell.globalRect().w, 0.5);
         try std.testing.expectEqual(name_editor, findId(f.wizard.root.?, "wizard.name").?);
         try std.testing.expectEqual(auth_area, f.wizard.authentication_area);
         try std.testing.expectEqual(logs_area, f.wizard.test_logs_area);
@@ -377,42 +381,45 @@ test "three step wizard retains editors and probe slots inside one 720 point she
     try std.testing.expect(f.wizard.scrollState(.confirm) != null);
 }
 
-test "wizard strict checkbox uses real independent click and keyboard behavior then review returns focus" {
+test "wizard host key policy uses native select and review returns focus" {
     var f: SaveFixture = undefined;
     try f.init(.ssh);
     defer f.deinit();
     f.wizard.loadDraft(.{ .source_owner = .{ .id = @fromBackingInt(41), .revision = 3 }, .name = "target", .host = "192.0.2.1", .user = "ops", .strict_host_key_checking = false });
     f.wizard.show();
-    SaveFixture.activate(findId(f.wizard.root.?, "wizard.advanced.toggle").?);
-    f.cx.layout();
-    const checkbox = f.wizard.strict_checkbox.?;
+    feedbackFrames(&f);
+    const policy = f.wizard.strict_checkbox.?;
     const compression_before = f.wizard.currentDraft().compression;
-    try std.testing.expect(!checkbox.behavior.interaction.a11y.?.checked.?);
+    try std.testing.expectEqualStrings("false", f.wizard.sig_strict_policy.?.peek().?);
     const scroll = f.wizard.scrolls[0].?;
     scroll.state.content_height = scroll.content.globalRect().h;
     scroll.state.viewport_height = scroll.container.globalRect().h;
-    ui.widgets.scrollIntoView(scroll.state, scroll.content, checkbox, .nearest);
-    f.cx.layout();
-    const rect = checkbox.globalRect();
-    // Click the strict label through Cx hit-testing, then use Space on its
-    // independent focus node. Neither action activates the adjacent checkbox.
-    f.cx.handleClick(rect.x + 30, rect.y + rect.h / 2);
+    ui.widgets.scrollIntoView(scroll.state, scroll.content, policy, .nearest);
+    feedbackFrames(&f);
+    f.cx.setFocus(policy);
+    f.cx.handleKeyDown(.down, .{});
+    feedbackFrames(&f);
+    f.cx.handleKeyDown(.home, .{});
+    f.cx.handleKeyDown(.@"return", .{});
+    feedbackFrames(&f);
     try std.testing.expect(f.wizard.currentDraft().strict_host_key_checking);
     try std.testing.expectEqual(compression_before, f.wizard.currentDraft().compression);
-    f.cx.setFocus(checkbox);
-    f.cx.handleKeyDown(.space, .{});
+    f.cx.setFocus(policy);
+    f.cx.handleKeyDown(.down, .{});
+    feedbackFrames(&f);
+    f.cx.handleKeyDown(.end, .{});
+    f.cx.handleKeyDown(.@"return", .{});
+    feedbackFrames(&f);
     try std.testing.expect(!f.wizard.currentDraft().strict_host_key_checking);
-    try std.testing.expectEqual(compression_before, f.wizard.currentDraft().compression);
     SaveFixture.activate(f.wizard.next1_btn.?);
     SaveFixture.activate(f.wizard.next2_btn.?);
-    try std.testing.expect(std.mem.indexOf(u8, f.wizard.summary_options.?.getText().?.content, "严格校验主机密钥：关闭") != null);
-    const identity = f.wizard.currentDraft().draft_id;
+    try std.testing.expectEqualStrings("严格验证已关闭", f.wizard.summary_values[4].?.getText().?.content);
+    const identity_ = f.wizard.currentDraft().draft_id;
     SaveFixture.activate(findId(f.wizard.root.?, "wizard.review.modify").?);
-    f.cx.layout();
+    feedbackFrames(&f);
     try std.testing.expectEqual(mod.Step.protocol, f.wizard.step);
-    try std.testing.expectEqual(identity, f.wizard.currentDraft().draft_id);
-    try std.testing.expect(f.wizard.advanced_expanded);
-    try std.testing.expect(f.cx.isFocused(checkbox));
+    try std.testing.expectEqual(identity_, f.wizard.currentDraft().draft_id);
+    try std.testing.expect(f.cx.isFocused(findId(f.wizard.root.?, "wizard.name").?));
 }
 
 test "wizard pending probe disables actual editors steps and saves while cancellation remains reachable" {
@@ -423,10 +430,11 @@ test "wizard pending probe disables actual editors steps and saves while cancell
     f.wizard.setTestResult(.pending);
     try std.testing.expect(f.wizard.locked.?.get());
     for (f.wizard.inputs.items) |input| try std.testing.expect(input.state.disabled);
-    try std.testing.expect(f.wizard.strict_checkbox.?.behavior.interaction.a11y.?.disabled);
+    try std.testing.expect(!f.wizard.strict_checkbox.?.behavior.interaction.focusable);
     try std.testing.expect(f.wizard.compression_checkbox.?.behavior.interaction.a11y.?.disabled);
     try std.testing.expect(!f.wizard.cancel_btn.?.behavior.interaction.a11y.?.disabled);
-    for ([_][]const u8{ "wizard.step.identity", "wizard.review.modify", "wizard.back", "wizard.auth.agent", "wizard.save_only", "wizard.save" }) |id| SaveFixture.activate(findId(f.wizard.root.?, id).?);
+    for ([_][]const u8{ "wizard.step.identity", "wizard.review.modify", "wizard.back", "wizard.save_only", "wizard.save" }) |id| SaveFixture.activate(findId(f.wizard.root.?, id).?);
+    try std.testing.expect(!findId(f.wizard.root.?, "wizard.auth").?.behavior.interaction.focusable);
     try std.testing.expectEqual(mod.Step.confirm, f.wizard.step);
     try std.testing.expectEqual(before.draft_id, f.wizard.currentDraft().draft_id);
     try std.testing.expectEqual(before.revision, f.wizard.currentDraft().revision);
@@ -454,7 +462,7 @@ test "wizard probe logs reject stale stamps preserve the slot and clear when edi
     try std.testing.expectEqual(area, f.wizard.test_logs_area);
     try std.testing.expectEqual(@as(@TypeOf(f.wizard.logs_scroll.?.style.display), .flex), f.wizard.logs_scroll.?.style.display);
     SaveFixture.activate(findId(f.wizard.root.?, "wizard.step.identity").?);
-    SaveFixture.activate(findId(f.wizard.root.?, "wizard.auth.agent").?);
+    try selectWizardAuth(&f, "wizard.auth.agent");
     try std.testing.expectEqualStrings("", f.wizard.test_log_text.getText().?.content);
     try std.testing.expectEqual(@as(@TypeOf(area.style.display), .none), area.style.display);
     try std.testing.expect(!f.wizard.setTestProgress(generation, before.draft_id, before.revision, "late completion"));
@@ -530,7 +538,7 @@ test "wizard copy selection preserves the draft until explicit apply then saves 
     try f.wizard.setAssets(&f.assets);
     try std.testing.expectEqualStrings("target", f.wizard.currentDraft().name);
     try std.testing.expectEqual(original_id, f.wizard.currentDraft().draft_id);
-    SaveFixture.activate(findId(f.wizard.root.?, "wizard.copy.apply").?);
+    SaveFixture.activate(findId(f.cx.root.?, "wizard.copy.apply").?);
     const copied = f.wizard.currentDraft();
     try std.testing.expect(copied.draft_id != original_id);
     try std.testing.expect(copied.source_owner == null);
@@ -603,6 +611,79 @@ test "wizard accepts real SSH defaults before mounting its read only fields" {
     try std.testing.expectEqualStrings("27 秒", findId(wizard.root.?, "wizard.ssh.keepalive").?.getText().?.content);
 }
 
+test "wizard access cards reject an empty jump and let identity return to route correction" {
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.access.direct").?);
+    try std.testing.expectEqual(@as(usize, 0), f.wizard.currentDraft().route.len);
+    try std.testing.expect(f.wizard.canSave());
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.step.route").?);
+    feedbackFrames(&f);
+    const access = findId(f.wizard.root.?, "wizard.access.jump").?.globalRect();
+    f.cx.handleMouseMove(access.x + access.w / 2, access.y + access.h / 2);
+    f.cx.handleClick(access.x + access.w / 2, access.y + access.h / 2);
+    feedbackFrames(&f);
+    f.cx.handleMouseMove(0, 0);
+    feedbackFrames(&f);
+    try std.testing.expect(f.wizard.route_choices[1].?.highlight.style.display == .flex);
+    try std.testing.expect(f.wizard.route_choices[0].?.highlight.style.display == .none);
+    try std.testing.expect(!f.wizard.canSave());
+    try std.testing.expect(f.wizard.next2_disabled.?.peek());
+    try std.testing.expect(findId(f.wizard.root.?, "wizard.route.error").?.style.display == .flex);
+    SaveFixture.activate(f.wizard.next2_btn.?);
+    try std.testing.expectEqual(mod.Step.form, f.wizard.step);
+    SaveFixture.activate(f.wizard.back_btn.?);
+    try std.testing.expectEqual(mod.Step.protocol, f.wizard.step);
+    try std.testing.expect(!f.wizard.next1_disabled.?.peek());
+    SaveFixture.activate(f.wizard.next1_btn.?);
+    try std.testing.expectEqual(mod.Step.form, f.wizard.step);
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.access.direct").?);
+    feedbackFrames(&f);
+    try std.testing.expect(!f.wizard.next2_disabled.?.peek());
+    try std.testing.expect(findId(f.wizard.root.?, "wizard.route.error").?.style.display == .none);
+    SaveFixture.activate(f.wizard.next2_btn.?);
+    try std.testing.expectEqual(mod.Step.confirm, f.wizard.step);
+}
+
+test "wizard jump picker commits registry identity through actual keyboard interaction" {
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    var replacement = [_]mod.Draft{try f.assets[0].dupe(a)};
+    try f.wizard.setAssets(&replacement);
+    f.assets[0].deinit(a);
+    f.assets = replacement;
+    try f.wizard.setAssets(&f.assets);
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.access.direct").?);
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.step.route").?);
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.access.jump").?);
+    feedbackFrames(&f);
+    const trigger = findId(f.wizard.root.?, "wizard.route.hop.0").?;
+    f.cx.setFocus(trigger);
+    f.cx.handleKeyDown(.down, .{});
+    feedbackFrames(&f);
+    f.cx.handleKeyDown(.@"return", .{});
+    feedbackFrames(&f);
+    const value = f.wizard.currentDraft();
+    try std.testing.expectEqual(@as(usize, 1), value.route.len);
+    try std.testing.expectEqual(@as(u64, 41), @backingInt(value.route[0]));
+    try std.testing.expectEqualStrings("jump", value.jump_chain[0]);
+    try std.testing.expect(!f.wizard.next2_disabled.?.peek());
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.route.add").?);
+    feedbackFrames(&f);
+    f.cx.setFocus(findId(f.wizard.root.?, "wizard.route.hop.1").?);
+    f.cx.handleKeyDown(.down, .{});
+    feedbackFrames(&f);
+    f.cx.handleKeyDown(.@"return", .{});
+    feedbackFrames(&f);
+    try std.testing.expect(f.wizard.next2_disabled.?.peek());
+    try std.testing.expect(std.mem.indexOf(u8, findId(f.wizard.root.?, "wizard.route.error").?.getText().?.content, "重复") != null);
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.route.remove.1").?);
+    try std.testing.expect(!f.wizard.next2_disabled.?.peek());
+    try std.testing.expect(findId(f.wizard.root.?, "wizard.route.error").?.style.display == .none);
+}
+
 test "SFTP wizard keeps routed draft save only until explicit direct path selection" {
     var f: SaveFixture = undefined;
     try f.init(.sftp);
@@ -637,7 +718,7 @@ test "SFTP wizard keeps routed draft save only until explicit direct path select
     try std.testing.expectEqual(@as(usize, 0), saved.route.len);
 }
 
-test "wizard review actual pointer reaches test action above fixed footer with current target" {
+test "wizard review actual pointer reaches test action in fixed footer with current target" {
     var f: SaveFixture = undefined;
     try f.init(.ssh);
     defer f.deinit();
@@ -650,9 +731,9 @@ test "wizard review actual pointer reaches test action above fixed footer with c
     const button = f.wizard.test_btn.?.globalRect();
     const footer = f.wizard.footer.?.globalRect();
     const viewport = f.wizard.scrolls[2].?.container.globalRect();
-    try std.testing.expect(button.y >= viewport.y);
-    try std.testing.expect(button.y + button.h <= viewport.y + viewport.h + 0.1);
-    try std.testing.expect(button.y + button.h <= footer.y + 0.1);
+    try std.testing.expect(button.y >= footer.y);
+    try std.testing.expect(button.y + button.h <= footer.y + footer.h + 0.1);
+    try std.testing.expect(viewport.y + viewport.h <= footer.y + 0.1);
     const preview = f.wizard.route_previews[1];
     try std.testing.expectEqualStrings("target", preview.names[9].?.getText().?.content);
     try std.testing.expectEqualStrings("deploy@target.example:2222", preview.addresses[9].?.getText().?.content);
@@ -662,7 +743,7 @@ test "wizard review actual pointer reaches test action above fixed footer with c
     try std.testing.expectEqual(@as(usize, 0), f.calls);
 }
 
-test "SFTP wizard stepper paints completed checks and only the current selection after navigation and theme change" {
+test "SFTP wizard stepper keeps plain numerals and only the current selection after navigation and theme change" {
     const theme = @import("ui/app_theme.zig");
     const previous = theme.currentName();
     defer theme.select(previous);
@@ -680,9 +761,7 @@ test "SFTP wizard stepper paints completed checks and only the current selection
     try std.testing.expectEqual(theme.current().selection, f.wizard.step_buttons[2].?.getBackground());
     for ([_][]const u8{ "wizard.step.identity.check", "wizard.step.route.check" }) |id| {
         const check = findId(f.wizard.root.?, id) orelse return error.CompletedStepCheckMissing;
-        try std.testing.expectEqual(@as(@TypeOf(check.style.display), .flex), check.style.display);
-        try std.testing.expectEqual(ui.icons.check.icon_id.?, check.getIcon().?.icon_id);
-        try std.testing.expectApproxEqAbs(@as(f32, 13), check.globalRect().w, 0.1);
+        try std.testing.expectEqual(@as(@TypeOf(check.style.display), .none), check.style.display);
     }
     const route = f.wizard.step_buttons[1].?.globalRect();
     f.cx.handleClick(route.x + route.w / 2, route.y + route.h / 2);
@@ -702,36 +781,25 @@ test "SFTP wizard stepper paints completed checks and only the current selection
     try std.testing.expectEqual(@as(usize, 0), f.calls);
 }
 
-test "SFTP wizard review uses protocol icons and collapsed summary with a synchronized disclosure" {
+test "SFTP wizard review exposes the same identity and value fields without a summary disclosure" {
     var f: SaveFixture = undefined;
     try f.init(.sftp);
     defer f.deinit();
-    for (0..4) |_| _ = f.cx.render();
-    const icon = findId(f.wizard.root.?, "wizard.protocol.icon") orelse return error.ProtocolIconMissing;
-    const summary_icon = findId(f.wizard.root.?, "wizard.review.summary.icon") orelse return error.SummaryIconMissing;
-    const title = findId(f.wizard.root.?, "wizard.review.summary.title") orelse return error.SummaryTitleMissing;
-    const caret = findId(f.wizard.root.?, "wizard.review.summary.disclosure") orelse return error.SummaryDisclosureMissing;
+    feedbackFrames(&f);
+    const icon = findId(f.wizard.root.?, "wizard.protocol.icon").?;
+    const summary_icon = findId(f.wizard.root.?, "wizard.review.summary.icon").?;
     try std.testing.expectEqual(ui.icons.folder_open.icon_id.?, icon.getIcon().?.icon_id);
     try std.testing.expectEqual(ui.icons.folder_open.icon_id.?, summary_icon.getIcon().?.icon_id);
-    try std.testing.expectEqualStrings("SFTP 文件会话", title.getText().?.content);
-    try std.testing.expectEqualStrings("target · SFTP · jump", f.wizard.summary_identity.?.getText().?.content);
-    try std.testing.expect(!f.wizard.summary_expanded);
-    try std.testing.expectEqual(@as(@TypeOf(f.wizard.summary_details.?.style.display), .none), f.wizard.summary_details.?.style.display);
-    try std.testing.expectApproxEqAbs(@as(f32, 52), f.wizard.summary_card.?.globalRect().h, 0.5);
-    try std.testing.expectEqual(ui.icons.chevron_right.icon_id.?, caret.getIcon().?.icon_id);
-    const toggle = findId(f.wizard.root.?, "wizard.review.summary.toggle").?.globalRect();
-    f.cx.handleClick(toggle.x + toggle.w / 2, toggle.y + toggle.h / 2);
-    f.cx.handleMouseUp(toggle.x + toggle.w / 2, toggle.y + toggle.h / 2);
-    try std.testing.expect(f.wizard.summary_expanded);
-    try std.testing.expectEqual(ui.icons.chevron_down.icon_id.?, caret.getIcon().?.icon_id);
+    try std.testing.expectEqualStrings("SFTP", f.wizard.summary_values[0].?.getText().?.content);
+    try std.testing.expectEqualStrings("target", f.wizard.summary_name.?.getText().?.content);
+    try std.testing.expectEqualStrings("target.example:2222", f.wizard.summary_endpoint.?.getText().?.content);
+    try std.testing.expectEqual(@as(@TypeOf(f.wizard.summary_details.?.style.display), .flex), f.wizard.summary_details.?.style.display);
+    try std.testing.expect(findId(f.wizard.root.?, "wizard.review.summary.toggle") == null);
+    // Path editing returns to the existing draft and retains its selected identity.
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.review.route.modify").?);
+    try std.testing.expectEqual(mod.Step.form, f.wizard.step);
+    try std.testing.expectEqual(@as(usize, 1), f.wizard.currentDraft().route.len);
     try std.testing.expectEqual(@as(usize, 0), f.calls);
-    f.wizard.hide();
-    f.wizard.show();
-    SaveFixture.activate(f.wizard.next1_btn.?);
-    SaveFixture.activate(f.wizard.next2_btn.?);
-    for (0..3) |_| _ = f.cx.render();
-    try std.testing.expect(!f.wizard.summary_expanded);
-    try std.testing.expectEqual(ui.icons.chevron_right.icon_id.?, caret.getIcon().?.icon_id);
 }
 
 test "SFTP wizard unavailable test text fits its prototype action and direct retry restores compact geometry" {
@@ -741,7 +809,7 @@ test "SFTP wizard unavailable test text fits its prototype action and direct ret
     for (0..4) |_| _ = f.cx.render();
     const button = f.wizard.test_btn.?;
     try std.testing.expectApproxEqAbs(@as(f32, 196), button.globalRect().w, 0.5);
-    try std.testing.expectApproxEqAbs(@as(f32, 32), button.globalRect().h, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 34), button.globalRect().h, 0.5);
     try std.testing.expect(button.behavior.interaction.a11y.?.disabled);
     const label = findText(button, "检测 SFTP · 不可用") orelse return error.SftpUnavailableLabelMissing;
     try std.testing.expect(label.globalRect().w <= button.globalRect().w);
@@ -754,8 +822,8 @@ test "SFTP wizard unavailable test text fits its prototype action and direct ret
     SaveFixture.activate(f.wizard.next1_btn.?);
     SaveFixture.activate(f.wizard.next2_btn.?);
     for (0..3) |_| _ = f.cx.render();
-    try std.testing.expectApproxEqAbs(@as(f32, 112), button.globalRect().w, 0.5);
-    try std.testing.expectApproxEqAbs(@as(f32, 30), button.globalRect().h, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 76), button.globalRect().w, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 34), button.globalRect().h, 0.5);
     try std.testing.expect(findText(button, "检测 SFTP") != null);
     f.wizard.setTestResult(.{ .fail = "只读目录验证失败" });
     try std.testing.expect(findText(button, "重新测试") != null);
@@ -832,12 +900,11 @@ test "SSH wizard review initially exposes identity row and modify returns withou
     try f.init(.ssh);
     defer f.deinit();
     for (0..4) |_| _ = f.cx.render();
-    try std.testing.expect(f.wizard.summary_expanded);
     try std.testing.expectEqualStrings("target", f.wizard.summary_name.?.getText().?.content);
-    try std.testing.expectEqualStrings("deploy@target.example:2222", f.wizard.summary_endpoint.?.getText().?.content);
+    try std.testing.expectEqualStrings("target.example:2222", f.wizard.summary_endpoint.?.getText().?.content);
     const edit = findId(f.wizard.root.?, "wizard.review.modify").?;
-    try std.testing.expectEqual(f.wizard.summary_name.?.parent, edit.parent);
-    try std.testing.expect(std.mem.indexOf(u8, f.wizard.summary_options.?.getText().?.content, "严格校验主机密钥：关闭") != null);
+    try std.testing.expectEqual(f.wizard.summary_card.?, edit.parent);
+    try std.testing.expect(std.mem.eql(u8, f.wizard.summary_values[4].?.getText().?.content, "严格验证已关闭"));
     SaveFixture.activate(edit);
     try std.testing.expectEqual(mod.Step.protocol, f.wizard.step);
     try std.testing.expectEqual(@as(usize, 1), f.wizard.currentDraft().route.len);
@@ -846,7 +913,28 @@ test "SSH wizard review initially exposes identity row and modify returns withou
 }
 
 fn feedbackFrames(f: *SaveFixture) void {
-    for (0..4) |_| _ = f.cx.render();
+    for (0..8) |_| {
+        f.cx.advanceFrameClock();
+        f.cx.layout();
+        _ = f.cx.render();
+    }
+}
+fn selectWizardAuth(f: *SaveFixture, id: []const u8) !void {
+    feedbackFrames(f);
+    const trigger = findId(f.wizard.root.?, "wizard.auth").?;
+    f.cx.setFocus(trigger);
+    f.cx.handleKeyDown(.@"return", .{});
+    feedbackFrames(f);
+    for (f.wizard.selects.items) |picker| if (picker.trigger == trigger) {
+        try std.testing.expect(picker.open.?.peek());
+        const option = findId(picker.panel, id).?;
+        const rect = option.globalRect();
+        f.cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
+        feedbackFrames(f);
+        try std.testing.expect(!picker.open.?.peek());
+        return;
+    };
+    return error.MissingAuthenticationPicker;
 }
 fn replaceWizardInput(f: *SaveFixture, id: []const u8, value: []const u8) void {
     f.cx.setFocus(findId(f.wizard.root.?, id).?);
@@ -915,13 +1003,15 @@ test "wizard Enter exposes concrete required errors and private key feedback fol
     replaceWizardInput(&f, "wizard.name", "valid");
     replaceWizardInput(&f, "wizard.host", "127.0.0.1");
     replaceWizardInput(&f, "wizard.user", "fixture");
-    SaveFixture.activate(findId(f.wizard.root.?, "wizard.auth.key").?);
+    try selectWizardAuth(&f, "wizard.auth.key");
+    replaceWizardInput(&f, "wizard.key_passphrase", "temporary-key-passphrase");
+    try std.testing.expectEqualStrings("temporary-key-passphrase", f.wizard.currentDraft().key_passphrase.?);
     f.cx.setFocus(findId(f.wizard.root.?, "wizard.key_path").?);
     f.cx.setFocus(findId(f.wizard.root.?, "wizard.name").?);
     feedbackFrames(&f);
     const key_error = findId(f.wizard.root.?, "wizard.key_path.error").?;
     try std.testing.expectEqualStrings("请选择或输入私钥文件。", key_error.getText().?.content);
-    SaveFixture.activate(findId(f.wizard.root.?, "wizard.auth.password").?);
+    try selectWizardAuth(&f, "wizard.auth.password");
     feedbackFrames(&f);
     try std.testing.expectEqual(@as(@TypeOf(key_error.style.display), .none), key_error.style.display);
     try std.testing.expect(!f.wizard.next1_disabled.?.get());
@@ -952,4 +1042,207 @@ test "wizard encoding capability rejects unsupported values instead of silently 
         try std.testing.expect(input.state.readonly);
     }
     try std.testing.expect(found);
+}
+
+test "wizard explicit password persistence writes a credential reference and rehydrates on edit" {
+    for ([_]mod.Protocol{ .ssh, .sftp }) |protocol| {
+        var f: SaveFixture = undefined;
+        try f.init(protocol);
+        defer f.deinit();
+        f.wizard.loadDraft(.{ .name = "remembered", .host = "secret.example", .user = "ops", .protocol = protocol, .password = "wizard-test-password" });
+        f.wizard.show();
+        SaveFixture.activate(findId(f.wizard.root.?, "wizard.password.remember").?);
+        try std.testing.expect(f.wizard.currentDraft().save_password);
+        SaveFixture.activate(f.wizard.next1_btn.?);
+        SaveFixture.activate(f.wizard.next2_btn.?);
+        SaveFixture.activate(f.wizard.save_only_btn.?);
+        try std.testing.expectEqual(@as(usize, 1), f.commits);
+        const saved = f.registry.hosts[f.registry.hosts.len - 1];
+        try std.testing.expect(saved.password_ref != null);
+        const encoded = try f.tmp.dir.readFileAlloc(std.testing.io, f.path, a, .limited(store.max_config_bytes));
+        defer a.free(encoded);
+        try std.testing.expect(std.mem.indexOf(u8, encoded, "wizard-test-password") == null);
+        try std.testing.expect(std.mem.indexOf(u8, encoded, "password_ref") != null);
+        var loaded = try store.loadHosts(std.testing.io, f.tmp.dir, a, f.path);
+        defer loaded.deinit();
+        const restored = loaded.hosts[loaded.hosts.len - 1];
+        try std.testing.expectEqualStrings("wizard-test-password", restored.password.?);
+        f.wizard.loadDraft(mod.Draft.fromHost(restored));
+        try std.testing.expect(f.wizard.currentDraft().save_password);
+        try std.testing.expectEqualStrings("wizard-test-password", f.wizard.currentDraft().password.?);
+        // Turning off persistence removes the ref while retaining the current
+        // draft password for the one-shot connection path.
+        SaveFixture.activate(findId(f.wizard.root.?, "wizard.password.remember").?);
+        try std.testing.expect(f.wizard.currentDraft().password != null);
+        SaveFixture.activate(f.wizard.next1_btn.?);
+        SaveFixture.activate(f.wizard.next2_btn.?);
+        SaveFixture.activate(f.wizard.save_only_btn.?);
+        try std.testing.expect(f.registry.hosts[f.registry.hosts.len - 1].password_ref == null);
+    }
+}
+
+test "wizard unchecked and cancelled passwords never enter credential storage" {
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    f.wizard.loadDraft(.{ .name = "one-shot", .host = "secret.example", .user = "ops", .password = "never-persist-this" });
+    f.wizard.show();
+    try std.testing.expect(!f.wizard.currentDraft().save_password);
+    try std.testing.expectEqualStrings("never-persist-this", (try f.wizard.currentDraft().toHostConfig()).password.?);
+    SaveFixture.activate(f.wizard.next1_btn.?);
+    SaveFixture.activate(f.wizard.next2_btn.?);
+    SaveFixture.activate(f.wizard.save_only_btn.?);
+    const saved = f.registry.hosts[f.registry.hosts.len - 1];
+    try std.testing.expect(saved.password == null and saved.password_ref == null);
+    const commits = f.commits;
+    f.wizard.loadDraft(.{ .name = "cancelled", .host = "secret.example", .user = "ops", .password = "cancel-this", .save_password = true });
+    f.wizard.show();
+    f.wizard.cancel();
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.discard.confirm").?);
+    try std.testing.expectEqual(commits, f.commits);
+}
+
+test "wizard credential storage failure keeps the draft visible without save success" {
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    var memory: store.credentials.MemoryBackend = .{ .fail_add_after = 0 };
+    defer memory.deinit();
+    const previous = store.credentials.useBackendForTesting(memory.backend());
+    defer store.credentials.restoreBackendForTesting(previous);
+    f.wizard.loadDraft(.{ .name = "denied", .host = "secret.example", .user = "ops", .password = "not-in-error-text", .save_password = true });
+    f.wizard.show();
+    SaveFixture.activate(f.wizard.next1_btn.?);
+    SaveFixture.activate(f.wizard.next2_btn.?);
+    SaveFixture.activate(f.wizard.save_only_btn.?);
+    try std.testing.expectEqual(@as(usize, 0), f.commits);
+    try std.testing.expect(f.wizard.isVisible());
+    try std.testing.expectEqual(error.CredentialStorageFailure, f.wizard.save_failure.?.cause);
+    const message = f.wizard.save_error_node.?.getText().?.content;
+    try std.testing.expect(std.mem.indexOf(u8, message, "系统钥匙串") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message, "not-in-error-text") == null);
+    try std.testing.expectEqualStrings("not-in-error-text", f.wizard.currentDraft().password.?);
+    try std.testing.expectEqual(@as(usize, 1), f.registry.hosts.len);
+}
+
+test "wizard V3 group select retains registry empty groups and replaced snapshot strings" {
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    const name = try a.dupe(u8, "Empty group");
+    try f.wizard.setGroups(&.{ name, name });
+    a.free(name);
+    try f.wizard.setGroups(&.{"Empty group"});
+    try std.testing.expectEqual(@as(usize, 2), f.wizard.group_options.?.peek().len);
+    f.wizard.loadDraft(.{ .name = "target", .host = "target.example", .user = "ops" });
+    f.wizard.show();
+    feedbackFrames(&f);
+    const group = findId(f.wizard.root.?, "wizard.group").?;
+    f.cx.setFocus(group);
+    f.cx.handleKeyDown(.down, .{});
+    feedbackFrames(&f);
+    f.cx.handleKeyDown(.end, .{});
+    f.cx.handleKeyDown(.@"return", .{});
+    feedbackFrames(&f);
+    try std.testing.expectEqualStrings("Empty group", f.wizard.currentDraft().group.?);
+    try f.wizard.setGroups(&.{});
+    try std.testing.expectEqualStrings("Empty group", f.wizard.currentDraft().group.?);
+    var grouped = f.assets;
+    grouped[0].group = "Empty group";
+    try f.wizard.setAssets(&grouped);
+    f.wizard.loadDraft(.{ .source_owner = grouped[0].source_owner, .name = "envelope", .host = "target.example", .user = "ops" });
+    try std.testing.expectEqualStrings("Empty group", f.wizard.currentDraft().group.?);
+    feedbackFrames(&f);
+    f.cx.setFocus(group);
+    f.cx.handleKeyDown(.down, .{});
+    feedbackFrames(&f);
+    f.cx.handleKeyDown(.home, .{});
+    f.cx.handleKeyDown(.@"return", .{});
+    feedbackFrames(&f);
+    try std.testing.expect(f.wizard.currentDraft().group == null);
+    try f.wizard.setAssets(&grouped);
+    try std.testing.expect(f.wizard.currentDraft().group == null);
+}
+
+test "wizard V3 multiline startup preserves order rejects overflow and remains hidden for SFTP" {
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    f.wizard.loadDraft(.{ .name = "target", .host = "target.example", .user = "ops", .startup_commands = &.{ "cd /srv", "pwd" } });
+    try std.testing.expectEqualStrings("cd /srv\npwd", f.wizard.sig_startup.?.peek());
+    const area = f.wizard.startup_textarea.?;
+    try std.testing.expect(area.input.behavior.interaction.a11y.?.multiline);
+    try std.testing.expect(area.state.setAccessibilityValue("  echo first  \n\n echo second\n"));
+    try std.testing.expectEqual(@as(usize, 2), f.wizard.currentDraft().startup_commands.len);
+    try std.testing.expectEqualStrings("echo first", f.wizard.currentDraft().startup_commands[0]);
+    try std.testing.expectEqualStrings("echo second", f.wizard.currentDraft().startup_commands[1]);
+    var overflow: std.ArrayList(u8) = .empty;
+    defer overflow.deinit(a);
+    for (0..33) |_| try overflow.appendSlice(a, "echo overflow\n");
+    try std.testing.expect(area.state.setAccessibilityValue(overflow.items));
+    try std.testing.expect(f.wizard.next1_disabled.?.peek());
+    try std.testing.expect(f.wizard.startup_error.?.peek().len != 0);
+    try std.testing.expect(area.state.setAccessibilityValue("echo recovered"));
+    try std.testing.expect(!f.wizard.next1_disabled.?.peek());
+    try std.testing.expectEqual(@as(usize, 1), f.wizard.currentDraft().startup_commands.len);
+    f.wizard.loadDraft(.{ .protocol = .sftp, .name = "files", .host = "target.example", .user = "ops" });
+    try std.testing.expect(f.wizard.commands_details.?.style.display == .none);
+}
+
+test "wizard checkbox labels keep app contrast in light theme after real toggles" {
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    theme.select(.light);
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    f.cx.setTheme(theme.widgetTheme(.light));
+    f.wizard.show();
+    feedbackFrames(&f);
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.advanced.toggle").?);
+    for ([_]*ui.Node{ f.wizard.remember_checkbox.?, f.wizard.compression_checkbox.? }) |checkbox| {
+        SaveFixture.activate(checkbox);
+        feedbackFrames(&f);
+        const label = findText(checkbox, if (checkbox == f.wizard.remember_checkbox.?) "保存密码，下次连接自动使用" else "SSH 传输压缩").?;
+        try std.testing.expectEqual(theme.current().fg_1, label.getText().?.color);
+    }
+}
+
+test "wizard frozen browser field typography and advanced relative geometry" {
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    f.wizard.show();
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.advanced.toggle").?);
+    feedbackFrames(&f);
+    const name = findId(f.wizard.root.?, "wizard.name").?;
+    try std.testing.expectApproxEqAbs(@as(f32, 32), name.globalRect().h, 0.01);
+    try std.testing.expectEqual(@as(f32, 11), name.style.padding.left);
+    try std.testing.expectEqual(@as(f32, 6), name.style.padding.top);
+    try std.testing.expectEqual(@as(f32, 1), name.style.border.width);
+    for (f.wizard.field_feedback.items) |feedback| if (feedback.input.input_container == name) {
+        try std.testing.expectEqual(@as(f32, 12), feedback.input.state.font_size);
+        try std.testing.expectEqual(@as(f32, 18), feedback.input.state.line_height);
+        try std.testing.expectEqual(@as(f32, 12), feedback.input.state.text_display_node.?.getText().?.font_size);
+        try std.testing.expectApproxEqAbs(@as(f32, 53.5), feedback.group.globalRect().h, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 16.5), feedback.group.children.items[0].globalRect().h, 0.01);
+        try std.testing.expectEqual(@as(f32, 5), feedback.group.style.gap);
+    };
+    const body = f.wizard.advanced_body.?.globalRect();
+    const summary = findId(f.wizard.root.?, "wizard.advanced.toggle").?.globalRect();
+    try std.testing.expectApproxEqAbs(@as(f32, 276.5), body.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 18), summary.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 12), body.y - summary.y - summary.h, 0.01);
+    const timeout = f.wizard.connect_timeout_fact.?;
+    try std.testing.expectEqual(@as(f32, 12), timeout.getText().?.font_size);
+    try std.testing.expectEqual(@as(f32, 1.5), timeout.getText().?.line_height);
+    try std.testing.expectApproxEqAbs(@as(f32, 348), timeout.parent.?.globalRect().w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 32), timeout.parent.?.globalRect().h, 0.01);
+    const area = f.wizard.startup_textarea.?;
+    try std.testing.expectEqual(@as(f32, 12), area.state.font_size);
+    try std.testing.expectEqual(@as(f32, 18), area.state.line_height);
+    try std.testing.expectEqual(@as(f32, 11), area.state.padding_h);
+    try std.testing.expectEqual(@as(f32, 9), area.state.padding_v);
+    try std.testing.expectApproxEqAbs(@as(f32, 120), area.input.globalRect().h, 0.01);
 }

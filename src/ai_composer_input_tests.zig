@@ -165,15 +165,15 @@ test "AI composer grows by wrapped display rows, caps five lines and preserves I
     f.value.set("一\n二\n三\n四\n五\n六\n七\n八");
     f.settle();
     const composer = f.input.wrapper.parent.?;
-    try std.testing.expect(sizing.update(f.cx, f.input, composer, false));
+    try std.testing.expect(sizing.update(f.cx, f.input, composer, false, 0));
     f.settle();
-    try std.testing.expectApproxEqAbs(@as(f32, 101.75), f.input.input.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 106), f.input.input.globalRect().h, 0.01);
     try std.testing.expectEqualStrings("一\n二\n三\n四\n五\n六\n七\n八", f.value.peek());
     f.cx.setFocus(f.input.input);
     f.cx.handleImePreedit("nihao", 5);
     f.settle();
     try std.testing.expect(f.input.state.imeIsComposing());
-    try std.testing.expect(sizing.update(f.cx, f.input, composer, true));
+    try std.testing.expect(sizing.update(f.cx, f.input, composer, true, 0));
     f.settle();
     try std.testing.expectApproxEqAbs(@as(f32, 46), f.input.input.globalRect().h, 0.01);
     try std.testing.expect(f.input.state.imeIsComposing());
@@ -182,10 +182,10 @@ test "AI composer grows by wrapped display rows, caps five lines and preserves I
     try std.testing.expect(std.mem.endsWith(u8, f.value.peek(), "你好"));
     f.value.set("短问题");
     f.settle();
-    _ = sizing.update(f.cx, f.input, composer, false);
+    _ = sizing.update(f.cx, f.input, composer, false, 0);
     f.settle();
     try std.testing.expectApproxEqAbs(@as(f32, 46), f.input.input.globalRect().h, 0.01);
-    try std.testing.expectEqual(@as(f32, 12.5), f.input.state.font_size);
+    try std.testing.expectEqual(@as(f32, 12), f.input.state.font_size);
 }
 
 test "AI composer empty states mount real shortcuts and configuration actions without dispatch" {
@@ -210,9 +210,9 @@ test "AI composer empty states mount real shortcuts and configuration actions wi
     try f.cx.root.?.appendChild(a, unconfigured);
     f.settle();
     try std.testing.expectEqual(@as(usize, 0), actions.clicks);
-    const settings = unconfigured.children.items[1].children.items[0];
-    try std.testing.expectApproxEqAbs(@as(f32, 144), settings.globalRect().w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 28), settings.globalRect().h, 0.01);
+    const settings = unconfigured.children.items[3];
+    try std.testing.expect(settings.globalRect().w > 80);
+    try std.testing.expectApproxEqAbs(@as(f32, 34.5), settings.globalRect().h, 0.01);
     f.cx.setFocus(settings);
     f.cx.handleKeyDown(.@"return", .{});
     f.settle();

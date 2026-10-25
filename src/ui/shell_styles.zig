@@ -52,52 +52,52 @@ pub fn root(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn title(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 1, .blur = 0, .color = ui.Color.WHITE.withAlpha(if (theme.currentName() == .dark) 10 else 0) }, .width = .fill(), .height = .{ .px = title_height }, .margin = .{ .bottom = gap }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 4, .padding = .{ .left = title_controls_inset, .right = title_content_inset }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
+    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 0, .blur = 0, .color = ui.Color.TRANSPARENT }, .width = .fill(), .height = .{ .px = title_height }, .margin = .{ .bottom = gap }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 4, .padding = .{ .left = title_controls_inset, .right = title_content_inset }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
 }
 pub fn body(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .direction = .row, .gap = gap, .margin = .{ .bottom = gap } };
 }
 pub fn sidebar(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 1, .blur = 0, .color = ui.Color.WHITE.withAlpha(if (theme.currentName() == .dark) 10 else 0) }, .width = .{ .px = sidebar_width }, .height = .fill(), .flex_shrink = 0, .direction = .column, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius }, .overflow = .hidden };
+    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 0, .blur = 0, .color = ui.Color.TRANSPARENT }, .width = .{ .px = sidebar_width }, .height = .fill(), .flex_shrink = 0, .direction = .column, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius }, .overflow = .hidden };
 }
 pub fn pane(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 1, .blur = 0, .color = ui.Color.WHITE.withAlpha(if (theme.currentName() == .dark) 10 else 0) }, .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .column, .background = c.terminal, .border = .{ .width = 0, .color = c.border, .radius = card_radius }, .overflow = .hidden };
+    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 0, .blur = 0, .color = ui.Color.TRANSPARENT }, .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .column, .background = c.terminal, .border = .{ .width = 0, .color = c.border, .radius = card_radius }, .overflow = .hidden };
 }
 pub fn status(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 1, .blur = 0, .color = ui.Color.WHITE.withAlpha(if (theme.currentName() == .dark) 10 else 0) }, .width = .fill(), .height = .{ .px = status_height }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 10, .right = 10 }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
+    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 0, .blur = 0, .color = ui.Color.TRANSPARENT }, .width = .fill(), .height = .{ .px = status_height }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 10, .right = 10 }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
 }
 pub fn settingsPanel(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = 860 }, .height = .{ .px = 700 }, .direction = .column, .gap = 9, .padding = .{ .left = 14, .right = 14, .top = 17, .bottom = 16 }, .background = c.overlay, .border = .{ .width = 0, .color = c.border, .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 24, .color = c.shadow } };
+    return .{ .width = .{ .px = @import("v3_geometry.zig").settings_width }, .height = .{ .px = @import("v3_geometry.zig").settings_height }, .direction = .column, .gap = 0, .padding = .{}, .background = c.overlay, .border = .{ .width = 0, .color = c.border, .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 24, .color = c.shadow } };
 }
 pub fn settingsBody(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .row, .gap = 6 };
+    return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .row, .gap = 10, .padding = .{ .left = 14, .right = 14, .bottom = 12 } };
 }
 pub fn settingsNavigation(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = 190 }, .height = .fill(), .flex_shrink = 0, .direction = .column, .padding = ui.Padding.all(10), .gap = 6, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
+    return .{ .width = .{ .px = @import("v3_geometry.zig").settings_sidebar }, .height = .fill(), .flex_shrink = 0, .direction = .column, .padding = .{ .top = 4 }, .gap = 6, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
 }
 pub fn settingsContent(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .column };
 }
 pub fn toolbarButton(allocator: std.mem.Allocator, node: *ui.Node) void {
     const c = theme.current();
-    node.setStyleInline(allocator, .{ .width = .{ .px = 30 }, .height = .{ .px = 28 }, .padding = ui.Padding.ZERO, .flex_shrink = 0, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 7 } });
+    node.setStyleInline(allocator, .{ .width = .{ .px = @import("v3_geometry.zig").icon_action }, .height = .{ .px = @import("v3_geometry.zig").icon_action }, .padding = ui.Padding.ZERO, .flex_shrink = 0, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 7 } });
 }
 
 pub fn emptyGuide(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = 520 }, .max_width = 520, .height = .{ .px = 181 }, .flex_shrink = 0, .direction = .column, .align_items = .center, .padding = ui.Padding.all(16), .gap = 16 };
+    return .{ .width = .{ .px = 520 }, .max_width = 520, .height = .{ .fit = .{} }, .flex_shrink = 0, .direction = .column, .align_items = .center, .padding = .ZERO, .gap = 13 };
 }
 pub fn emptyActions(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .height = .{ .px = 30 }, .flex_shrink = 0, .direction = .row, .gap = 8, .align_items = .center };
+    return .{ .height = .{ .px = 35 }, .margin = .{ .top = 5 }, .flex_shrink = 0, .direction = .row, .gap = 8, .align_items = .center };
 }
 
 pub fn collapsedSidebar(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 1, .blur = 0, .color = ui.Color.WHITE.withAlpha(if (theme.currentName() == .dark) 10 else 0) }, .width = .{ .px = sidebar_collapsed }, .height = .fill(), .flex_shrink = 0, .direction = .column, .align_items = .center, .gap = 4, .padding = .{ .top = 8, .bottom = 8 }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
+    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 0, .blur = 0, .color = ui.Color.TRANSPARENT }, .width = .{ .px = sidebar_collapsed }, .height = .fill(), .flex_shrink = 0, .direction = .column, .align_items = .center, .gap = 4, .padding = .{ .top = 8, .bottom = 8 }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
 }
 
 pub fn collapsedAction() ui.BoxStyle {
@@ -137,6 +137,8 @@ test "shell publishes reused registry tokens and repaints retained chrome" {
         try std.testing.expectEqual(c.app, shell.getBackground());
         try std.testing.expectEqual(c.surface_1, titlebar.getBackground());
         try std.testing.expectEqual(c.surface_1, side.getBackground());
+        try std.testing.expectEqual(@as(u8, 0), titlebar.style.shadow().?.color.a);
+        try std.testing.expectEqual(@as(u8, 0), side.style.shadow().?.color.a);
         try std.testing.expectEqual(c.fg_1, cx.tokens.tokens.color.fg_primary);
         try std.testing.expectEqual(title_id, titlebar.id);
         try std.testing.expectEqual(side_id, side.id);
@@ -146,6 +148,9 @@ test "shell publishes reused registry tokens and repaints retained chrome" {
 }
 
 test "global material publication repaints retained shell after an image becomes ready" {
+    const saved_parameters = theme.materialParameters();
+    defer _ = theme.setMaterialParameters(saved_parameters.transparency, saved_parameters.blur);
+    _ = theme.setMaterialParameters(75, 24);
     const previous = theme.currentName();
     const was_visible = theme.materialVisible();
     defer {
@@ -182,30 +187,43 @@ test "global material publication repaints retained shell after an image becomes
     try std.testing.expectEqual(title_height, nodes[0].style.height.px);
     try std.testing.expectEqual(sidebar_width, nodes[1].style.width.px);
     try std.testing.expectEqual(status_height, nodes[2].style.height.px);
-    try std.testing.expectEqual(@as(f32, 860), nodes[3].style.width.px);
-    try std.testing.expectEqual(@as(f32, 190), nodes[4].style.width.px);
+    try std.testing.expectEqual(@import("v3_geometry.zig").settings_width, nodes[3].style.width.px);
+    try std.testing.expectEqual(@import("v3_geometry.zig").settings_sidebar, nodes[4].style.width.px);
     _ = theme.setMaterialVisible(false);
     publication.publish(cx, theme.widgetTheme(.dark));
-    for (nodes) |node| try std.testing.expectEqual(@as(u8, 255), node.getBackground().a);
-    try std.testing.expectEqual(@as(u8, 255), shell.getBackground().a);
+    for (nodes, 0..) |node, index| try std.testing.expectEqual(if (index == 3) theme.current().overlay.a else theme.current().surface_1.a, node.getBackground().a);
+    try std.testing.expectEqual(@as(u8, 0), shell.getBackground().a);
 }
 
 pub fn emptyTitle(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 18, .font_weight = 500, .line_height = 26.0 / 18.0, .color = theme.current().fg_1 };
+    return .{ .font_size = 17, .font_weight = 700, .line_height = 24.0 / 17.0, .color = theme.current().fg_1 };
 }
 pub fn emptyDescription(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 13, .line_height = 20.0 / 13.0, .color = theme.current().fg_2 };
+    return .{ .font_size = 11, .line_height = 1.65, .color = theme.current().fg_2 };
+}
+pub fn emptyIcon(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .{ .px = 56 }, .height = .{ .px = 56 }, .margin = .{ .bottom = 3 }, .flex_shrink = 0, .align_items = .center, .justify = .center, .background = theme.current().selection, .border = .{ .radius = 14 } };
 }
 pub fn emptyButton(primary: bool) ui.BoxStyle {
-    var style: ui.BoxStyle = .{ .width = .{ .px = 109 }, .height = .{ .px = 30 }, .padding = .ZERO, .font_size = 12, .font_weight = 500, .background = if (primary) theme.current().accent else theme.current().surface_2, .text_color = if (primary) ui.Color.WHITE else theme.current().fg_2, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+    const c = theme.current();
+    var style: ui.BoxStyle = .{ .width = .{ .px = if (primary) 100 else 76 }, .height = .{ .px = 35 }, .padding = .{ .left = 14, .right = 14 }, .gap = 7, .font_size = 12, .font_weight = 500, .background = if (primary) c.accent else c.hover, .text_color = if (primary) ui.Color.WHITE else c.fg_1, .border = .{ .radius = 8 }, .shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .inset_shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .flex_shrink = 0 };
     if (primary) {
-        style.gradient = .{ .from = ui.Color.hex(0x6164ec), .to = ui.Color.hex(0x8457ea), .direction = .diagonal };
-        style.shadow = .{ .blur = 11, .offset_y = 3, .color = theme.current().accent.withAlpha(89) };
+        // Built-in V3 gradients; imported palettes keep their own accent.
+        const family = theme.currentName();
+        const standard = ui.Color.eql(c.accent, theme.colors(family).accent);
+        style.gradient = if (!standard) .{ .from = c.accent, .to = c.accent, .direction = .diagonal } else switch (family) {
+            .dark => .{ .from = ui.Color.hex(0x6164ec), .to = ui.Color.hex(0x8457ea), .direction = .diagonal },
+            .light => .{ .from = ui.Color.hex(0x4f46e5), .to = ui.Color.hex(0x7c3aed), .direction = .diagonal },
+            .sauber => .{ .from = ui.Color.hex(0x1345f6), .to = ui.Color.hex(0x2563eb), .direction = .diagonal },
+        };
+        style.shadow = .{ .blur = 10, .offset_y = 3, .color = c.accent.withAlpha(if (family == .dark) 89 else 82) };
+        style.inset_shadow = .{ .offset_y = 1, .blur = 0, .color = ui.Color.WHITE.withAlpha(46) };
     }
     return style;
 }
 
 fn cardShadow() @typeInfo(@FieldType(ui.BoxStyle, "shadow")).optional.child {
-    const dark = theme.currentName() == .dark;
-    return .{ .blur = if (dark) 8 else 6, .offset_y = if (dark) 2 else 1, .color = theme.current().shadow.withAlpha(if (dark) 102 else 13) };
+    // V3 shell sections have no individual elevation. The native window owns
+    // the exterior shadow; explicit zero clears any retained old shadow.
+    return .{ .blur = 0, .offset_y = 0, .color = ui.Color.TRANSPARENT };
 }

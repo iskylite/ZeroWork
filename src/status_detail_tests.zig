@@ -76,7 +76,8 @@ test "registry global theme publication preserves RGBA roles beyond three legacy
     theme.selectTokens(record.ui_tokens);
     const actual = theme.current();
     try std.testing.expectEqual(@as(u8, @intCast(record.ui_tokens.app >> 24)), actual.app.r);
-    try std.testing.expectEqual(@as(u8, @intCast(record.ui_tokens.app & 255)), actual.app.a);
+    try std.testing.expectEqual(@as(u8, 0), actual.app.a);
+    try std.testing.expectEqual(@as(u8, @intCast(record.ui_tokens.app & 255)), theme.baseColors().app.a);
     try std.testing.expectEqual(@as(u8, @intCast(record.ui_tokens.selection & 255)), actual.selection.a);
     const widgets = theme.widgetTheme(theme.currentName());
     try std.testing.expectEqual(actual.fg_1, widgets.tokens.color.fg_primary);

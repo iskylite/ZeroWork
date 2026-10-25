@@ -29,7 +29,7 @@ pub fn inlineRoot() ui.BoxStyle {
 }
 pub fn form(w: f32, h: f32, inline_form: bool) ui.BoxStyle {
     var result = panel(w, h);
-    // The dialog owns the opaque fallback and material floor in both modes.
+    // The dialog inherits the shared translucent overlay in every background mode.
     // Content must not paint another overlay over that already tinted floor.
     result.background = ui.Color.TRANSPARENT;
     if (inline_form) result.width = .fill();

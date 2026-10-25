@@ -14,6 +14,7 @@ const Info = @import("socks_info_view.zig");
 const Config = @import("socks_config_view.zig");
 const Probe = @import("../proto/ssh/socks_proxy_probe.zig");
 const applog = @import("../platform/applog.zig");
+const Desired = struct { legacy: ws.SessionId, mode: routes.listener.ForwardMode, target: routes.listener.Target };
 const Binding = struct { legacy: ws.SessionId, owner: identity.SessionHandle };
 
 pub const Host = struct {
@@ -25,6 +26,7 @@ pub const Host = struct {
     previous_auth: ?ws.ExternalAuthentication = null,
     bindings: std.ArrayList(Binding) = .empty,
     auto_attempted: std.ArrayList(identity.SessionHandle) = .empty,
+    desired_forwards: std.ArrayList(Desired) = .empty,
     chip_label: ?*ui.Node = null,
     chip: ?*ui.Node = null,
     info: ?*Info.View = null,
@@ -184,6 +186,11 @@ pub const Host = struct {
         };
     }
     fn testProxy(self: *Host) void {
+        if (self.activeSession()) |legacy| if (self.desiredForward(legacy)) |desired| if (desired.mode != .socks5) {
+            if (self.config) |view| view.setError("固定转发请连接监听端口验证目标服务");
+            self.workspace.status("固定转发请连接监听端口验证目标服务");
+            return;
+        };
         const value = self.activeSnapshot() orelse {
             if (self.config) |view| view.setError("请先开启当前会话的转发");
             return;
@@ -199,6 +206,17 @@ pub const Host = struct {
         self.probe_message_len = 0;
         self.cx.scheduleRedrawAfterNs(25 * std.time.ns_per_ms);
     }
+    fn desiredForward(self: *Host, legacy: ws.SessionId) ?Desired {
+        for (self.desired_forwards.items) |item| if (item.legacy == legacy) return item;
+        return null;
+    }
+    fn modeName(mode: routes.listener.ForwardMode) []const u8 {
+        return switch (mode) {
+            .socks5 => "SOCKS5",
+            .local => "本地转发",
+            .remote => "远端转发",
+        };
+    }
     fn showConfig(self: *Host) void {
         const view = self.config orelse return;
         const legacy = self.activeSession() orelse return;
@@ -213,7 +231,10 @@ pub const Host = struct {
         choices[0] = .{ .label = "链路末端", .index = null };
         for (hops, 0..) |hop, index| choices[index + 1] = .{ .label = if (hop.display_name.len == 0) hop.endpoint.host else hop.display_name, .index = index };
         view.setOwner(host.name, legacy);
-        view.show(.{ .port = host.socks_port, .bind = host.socks_bind, .exit = host.socks_exit, .auto_start = host.socks_auto_start, .max_connections = host.socks_max_connections }, choices[0 .. hops.len + 1]) catch |err| view.setError(@errorName(err));
+        const desired = self.desiredForward(legacy);
+        if (self.info) |info| info.hide();
+        self.info_owner = null;
+        view.show(.{ .mode = if (desired) |d| d.mode else .socks5, .target_host = if (desired) |*d| if (d.target.len > 0) d.target.name() else "127.0.0.1" else "127.0.0.1", .target_port = if (desired) |d| if (d.target.port != 0) d.target.port else 8080 else 8080, .port = host.socks_port, .bind = host.socks_bind, .exit = host.socks_exit, .auto_start = host.socks_auto_start, .max_connections = host.socks_max_connections }, choices[0 .. hops.len + 1]) catch |err| view.setError(@errorName(err));
     }
     pub fn saveConfig(raw: *anyopaque, draft: Config.Draft) void {
         const self: *Host = @ptrCast(@alignCast(raw));
@@ -221,6 +242,21 @@ pub const Host = struct {
         const legacy = self.config_session_id orelse return;
         const tab = self.workspace.sessionTab(legacy) orelse {
             view.setError("会话已关闭");
+            return;
+        };
+        const fixed_target: routes.listener.Target = if (draft.mode == .socks5) .{} else routes.listener.Target.init(draft.target_host, draft.target_port) catch {
+            view.setError("目标地址或端口无效");
+            return;
+        };
+        var desired_found = false;
+        for (self.desired_forwards.items) |*entry| if (entry.legacy == legacy) {
+            entry.mode = draft.mode;
+            entry.target = fixed_target;
+            desired_found = true;
+            break;
+        };
+        if (!desired_found) self.desired_forwards.append(self.allocator, .{ .legacy = legacy, .mode = draft.mode, .target = fixed_target }) catch {
+            view.setError("内存不足");
             return;
         };
         var host = self.configured(legacy) orelse return;
@@ -260,6 +296,10 @@ pub const Host = struct {
     }
     pub fn testConfig(raw: *anyopaque, draft: Config.Draft) void {
         const self: *Host = @ptrCast(@alignCast(raw));
+        if (draft.mode != .socks5) {
+            if (self.config) |view| view.setError("固定转发请应用配置后连接监听端口验证目标服务");
+            return;
+        }
         const value = self.activeSnapshot() orelse {
             if (self.config) |view| view.setError("请先开启当前会话的转发");
             return;
@@ -334,7 +374,13 @@ pub const Host = struct {
             .failed, .cleanup_unknown => .failed,
             .closed => if (snapshot.failure != null) .failed else .off,
         } else .off;
+        const desired = self.desiredForward(self.activeSession() orelse return);
+        const mode = if (desired) |d| d.mode else .socks5;
         info.update(.{
+            .mode = mode,
+            .configured = host.socks_enabled or desired != null,
+            .target_host = if (desired) |*d| if (d.target.len > 0) d.target.name() else "" else "",
+            .target_port = if (desired) |d| d.target.port else 0,
             .state = state,
             .session_id = self.activeSession(),
             .port = if (value) |snapshot| if (snapshot.local_port != 0) snapshot.local_port else host.socks_port else host.socks_port,
@@ -407,7 +453,8 @@ pub const Host = struct {
         self.backend.options.totp_autofill = self.workspace.app_config.ssh.totp_autofill;
         self.backend.options.timeout_ms = @as(u32, self.workspace.app_config.ssh.connect_timeout_sec) * 1000;
         self.bindings.ensureUnusedCapacity(self.allocator, 1) catch return;
-        _ = self.backend.start(owner, .{ .exit_index = host.socks_exit, .listener = .{ .requested_port = host.socks_port, .bind127 = std.mem.eql(u8, host.socks_bind, "127.0.0.1"), .exposure_confirmed = exposed, .max_connections = host.socks_max_connections } }) catch |err| {
+        const desired = self.desiredForward(legacy);
+        _ = self.backend.start(owner, .{ .exit_index = host.socks_exit, .listener = .{ .mode = if (desired) |d| d.mode else .socks5, .target = if (desired) |d| d.target else .{}, .requested_port = host.socks_port, .bind127 = std.mem.eql(u8, host.socks_bind, "127.0.0.1"), .exposure_confirmed = exposed, .max_connections = host.socks_max_connections } }) catch |err| {
             self.workspace.status(@errorName(err));
             return;
         };
@@ -423,20 +470,26 @@ pub const Host = struct {
             break;
         };
         if (!attempted) self.auto_attempted.append(self.allocator, owner) catch {};
-        self.workspace.status("正在开启 SOCKS5 转发…");
+        self.workspace.status(if (desired) |d| switch (d.mode) {
+            .socks5 => "正在开启 SOCKS5 转发…",
+            .local => "正在开启本地转发…",
+            .remote => "正在申请远端监听…",
+        } else "正在开启 SOCKS5 转发…");
         self.cx.scheduleRedrawAfterNs(20 * std.time.ns_per_ms);
     }
     pub fn refreshChip(self: *Host) void {
         const label = self.chip_label orelse return;
         var buffer: [64]u8 = undefined;
+        const mode = if (self.activeSession()) |legacy| if (self.desiredForward(legacy)) |d| d.mode else .socks5 else .socks5;
+        const name = modeName(mode);
         const text = if (self.activeSnapshot()) |value| switch (value.phase) {
-            .ready => std.fmt.bufPrint(&buffer, "🧦 SOCKS5 :{d} ● {d}", .{ value.local_port, value.stats.connections_active }) catch "🧦 SOCKS5",
-            .connecting => "🧦 SOCKS5 …",
+            .ready => std.fmt.bufPrint(&buffer, "{s} :{d} ● {d}", .{ name, value.local_port, value.stats.connections_active }) catch "🧦 SOCKS5",
+            .connecting => std.fmt.bufPrint(&buffer, "{s} …", .{name}) catch "转发 …",
             .paused => std.fmt.bufPrint(&buffer, "🧦 :{d} ◌ 已暂停", .{value.local_port}) catch "🧦 已暂停",
             .failed, .cleanup_unknown => "🧦 SOCKS5 ✕",
             .closing => "🧦 SOCKS5",
             .closed => if (value.failure != null) "🧦 SOCKS5 ✕" else "🧦 SOCKS5",
-        } else "🧦 SOCKS5";
+        } else name;
         label.setTextContent(self.allocator, text) catch return;
         label.markRenderDirty();
     }
@@ -489,7 +542,7 @@ pub const Host = struct {
         };
         if (self.activeSnapshot()) |value| {
             if (self.last_key == null or !self.last_key.?.eql(value.key) or self.last_phase == null or self.last_phase.? != value.phase) {
-                if (value.phase == .ready) self.workspace.status("SOCKS5 转发已开启") else if (value.phase == .closed) self.workspace.status(if (value.failure) |err| @errorName(err) else "SOCKS5 转发已停止");
+                if (value.phase == .ready) self.workspace.status("端口转发已开启") else if (value.phase == .closed) self.workspace.status(if (value.failure) |err| @errorName(err) else "端口转发已停止");
                 self.last_key = value.key;
                 self.last_phase = value.phase;
             }
@@ -514,6 +567,7 @@ pub const Host = struct {
         // Library. A window only releases its presentation and local probe.
         self.bindings.deinit(self.allocator);
         self.auto_attempted.deinit(self.allocator);
+        self.desired_forwards.deinit(self.allocator);
         self.allocator.destroy(self);
     }
 };

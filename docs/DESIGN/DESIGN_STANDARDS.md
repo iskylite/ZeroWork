@@ -1,5 +1,7 @@
 # ZeroWork 设计规范与通用要求
 
+> **后续 UI 原稿入口（2026-10-24 用户最新要求）**：[docs/UI_V3](../UI_V3/README.md)。先确认 V3 可交互效果稿，再实现原生 UI；Figma 为按需同步的辅助产物，不再作为设置页落地的必经步骤。下文历史原型口径仅适用于当时范围，不能覆盖较新的已确认效果稿。本轮效果稿仍待确认。
+
 > 仓库清理说明：历史原始图像、日志和快照已移除；相关证据链接统一指向脱敏状态摘要，不表示原始逐项材料仍保存在仓库。
 
 > 本文件不属于实施子版本。它是全部功能版本共同遵循的工程、视觉、交互与验收规范；功能需求、接口和落地任务分别写入对应版本正文（V0.1.1–V0.2.3），不在这里另开实施顺序。实施入口见[版本路线](README.md)。
@@ -96,8 +98,8 @@
 | surface-2 | `#1b1b1f` | `#f4f4f7` | `#ecfbe5` |
 | well / well-bd | `#0c0c0f` / `#26262c` | `#ececf0` / `#d9d9e0` | `#e2f5da` / `#c9e4bd` |
 | bg-term | `#0a0a0d` | `#fbfbfc` | `#ECFFE5`（itermcolors 原值） |
-| overlay实底（当前Figma） | `#18181c` / alpha1 | `#ffffff` / alpha1 | `#f3ffef` / alpha1 |
-| overlay（HTML玻璃参考） | `rgba(24,24,28,.94)` | `rgba(255,255,255,.96)` | `rgba(243,255,239,.96)` |
+| overlay 基色（alpha由全局T派生） | `#18181c` | `#ffffff` | `#f3ffef` |
+| 全局背景承载 | 根部单次绘制 bg-app 与可选图片 | 同左 | 同左 |
 | card-deep / card-deep-ft | `#101014` / `#0c0c10` | `#fbfbfc` / `#f3f3f6` | `#f7fff2` / `#eefbe8` |
 | hover / tab-on | `#202026` / `#1e1e23` | `#ececf1` / `#ffffff` | `#dbf0d6` / `#f8fff4` |
 | sel-bg | accent / alpha.14 | accent / alpha.09 | accent / alpha.09 |
@@ -195,15 +197,26 @@ HTML基础token见三份HTML的`:root`块；R15新增动作语义token以本表�
 | `--shadow-tab` | 活跃 tab | 0 2px 8px /35% | 0 1px 6px /7% |
 | `--shadow-float` | 临时浮层（AI 浮窗/链路弹层/⌘K/菜单） | 0 24px 64px /55% 三层 | 0 24px 60px /17% 三层 |
 
-**玻璃态的HTML参考**（`backdrop-filter: blur(28px) saturate(1.5)` + 双层渐变 `--glass-hi→lo` + 顶部 1px `--glass-spec` 高光）：
+**统一全局背景与半透明层次（2026-10-26）**
 
-这里是适用浮层的材质选项，不能机械覆盖已确认的V3连接外壳。V3 `modal.css` 的 `.modal` 使用 `--overlay` 表面与浮层投影，未设置整窗 `backdrop-filter`；`.edge` 的1.5px模糊与渐变只表达滚动边缘。验收先识别具体表面角色与实际参考，不能因连接面板没有整窗模糊就判定漏做玻璃，也不能用多层硬色矩形模拟玻璃。
+应用内只有一个全局主题背景层：根部绘制主题基色与可选图片，所有组件、卡片、内容容器和浮层按全局T派生表面，不另绘背景。T0为用户明确选择的不透明端点，T大于0时按角色系数透出根背景，不要求容器全部alpha0。该规则始终生效，与背景图是否开启无关。不能在各pane、浮层或嵌入模块重复绘制背景图片或不透明地板；前景文字、图标、输入及状态标记保持自身可读颜色，不降低整个控件树opacity。
 
-- ✅ **临时浮层可用玻璃**：AI 浮窗、AI 边条（HTML参考blur16px）、链路弹层、⌘K快速连接、@指令面板、右键菜单、HUD。
-- ❌ **常驻卡片不用玻璃**：侧栏/标题栏/状态栏保持实底`--surface-1`。当前R24图片透明度和blur只作用于app与默认终端的背景层；文字、图标、输入和其他前景opacity保持1，不向整个控件树施加透明度或模糊。
+材质只读取现有全局设置：`T=clamp(background_transparency/100,0,1)`，0为不透明、1为全透明；`B=clamp(blur_px,0,96)`。每个角色的透过率为`clamp(T×k,0,1)`，表面alpha为`1−透过率`。图片层alpha为`1−T`；图片开关只决定是否画图片，不关闭材质公式。草稿预览与已保存值使用同一公式，未新增配置字段或改变默认值。
+
+| 表面角色 | 透过率系数k | T=0.75时派生alpha（仅示例） |
+| --- | --- | --- |
+| surface-1 | .95 | .2875 |
+| surface-2 | .90 | .325 |
+| well | .80 | .40 |
+| overlay / 指令清单 | .10 | .925 |
+| hover | .75 | .4375 |
+| tab-on | .65 | .5125 |
+
+普通表面不额外模糊（B×0），根背景图使用B，临时浮层使用局部backdrop blur B×1。B=0时浮层不模糊，依靠派生alpha保证文字可读；overlay在T=1时仍有90%不透明度。只采样已经绘制的背景/下层内容，不复制背景或铺额外地板，不模糊整个前景控件树。主动作/状态/媒体和显式ANSI色块保留语义颜色，不能拿它们铺满普通容器。必须验证T默认/中间/0/1、B0/非0、无图/有图、深色/浅色与指令列表的上下边缘和组终端状态。
+
 - **原生能力以vendor 0.17源码为准**：`ui.Color`支持RGBA，`BoxStyle.background`可用alpha；通用`opacity`存在，但不能用它降低整份前景透明度来冒充背景材质。`glass.backdrop_blur`范围为0–96逻辑px，采样窗口自身`mainRT`中已经绘制的内容，可作用于下层app背景图片；公开`GlassParams`也有`backdrop_saturation/brightness`并已传至shader。这不是桌面采样，与CSS `blur(28px) saturate(1.5)`的最终视觉等价仍须同尺寸实机验收。旧文的`DrawCmd.blur(r, radius, saturate)`不是当前依赖的API，不得据此推导实现或性能保证。
-- **窗口边界**：普通窗口surface为`fully_opaque`，`WindowConfig`没有透明窗口或`NSVisualEffect`接入；图像alpha与窗口桌面透出是不同能力。桌面透出需要独立原生窗口接入，原型不得承诺已具备。blur的应用绑定、采样顺序与性能仍需实机验证。
-- **图片边界**：`ui.image`及`loadTexture`可绘制RGBA纹理，现有`ImageProps`没有Fit/Fill等适配属性；缩放、等比裁切、平铺、对齐和遮罩须由应用布局/clip与绘制逻辑接入。当前`Config.Ui`没有alpha/blur/背景路径配置，Figma Bridge也不能写原生`BACKGROUND_BLUR`，静态材质稿不代表运行时已接通。
+- **窗口边界**：根窗口surface为`fully_opaque`，`WindowConfig`没有透明窗口或`NSVisualEffect`接入；图像alpha与窗口桌面透出是不同能力。桌面透出需要独立原生窗口接入，原型不得承诺已具备。blur的应用绑定、采样顺序与性能仍需实机验证。
+- **图片边界**：`ui.image`及`loadTexture`可绘制RGBA纹理，现有`ImageProps`没有Fit/Fill等适配属性；缩放、等比裁切、平铺、对齐和遮罩须由应用布局/clip与绘制逻辑接入。背景图片的路径、适配、透明度与模糊使用项目当前配置；HTML模拟或Figma静态材质不能代替原生实机验收。
 
 ## 4. 控件、文字与坐标
 
@@ -468,7 +481,7 @@ Figma节点`bounds`相对直接父级；画板在canvas上的x/y不进入应用�
 | AI消息/工具输出/公开摘要/Markdown | VirtualList可变/测量高度、stable key/data_version/滚动补偿；Markdown不含完整嵌套表格/图片等 | 应用保存message ID+像素阅读锚、原在底部才跟随；resize重测；完整Markdown能力单独扩展，不能用重建整列替代流式局部更新 | `components/virtual_list/mod.zig:53,655`；`components/markdown/mod.zig:1` |
 | 184×44附件与单行引用/预览 | FileUpload基本路径列表/Browse/drop已有，不含来源/缩略图/读取态 | Image/Text/Button+横向ScrollArea组合；原owner/generation/路径/bytes/截断从数据层传入，系统选择与解码另接 | `components/file_upload/mod.zig:218` |
 | SFTP双pane、文件表、多选/排序/X-Y滚动 | Table有custom cell/sort/虚拟化但无完整selection/column resize；DataTable有Cmd/Shift和resize但字符串cell/分页、header排序未接；Grid有冻结行列及双轴虚拟化 | 产品FileTable用Grid+SelectionModel或VirtualList+同步header，按稳定file ID映射索引，各pane独立path/sort/selection/scroll；后端IO经插件服务 | `components/table/mod.zig:105`；`components/data_table/mod.zig:724`；`components/grid/state.zig:34`；`components/selection.zig:115` |
-| Toast、焦点与快捷键 | Notification有duration/sticky/hover pause/update；Focus/Actions有基础 | 信息3000ms、错误sticky；pane右上adapter；按focus/IME/能力/owner路由，不全局截获普通shell输入 | `components/notification/mod.zig:78`；`ui/focus.zig:1`；`ui/actions.zig:51` |
+| Toast、焦点与快捷键 | Notification有duration/sticky/hover pause/update；Focus/Actions有基础 | 全局普通4000ms、带操作8000ms、错误sticky；局部确认2000ms；统一feedback组件；按focus/IME/能力/owner路由，不全局截获普通shell输入 | `components/notification/mod.zig:78`；`ui/focus.zig:1`；`ui/actions.zig:51` |
 | AI浮条/浮窗/边角resize | portal/hit shape/drag.Binding公开；V0.1.7矩形事务、阅读恢复及八命中带未接 | 6px边/14px角、activation_distance=0、角优先、8px clamp、起始矩形+累计delta、Esc/blur rollback、desired/clamped/restore rect；不能覆盖编辑器raw handler | `ui/interaction/drag.zig:34,482,642`；`src/main.zig:3041` |
 | 新建会话、Local/SSH/SFTP插件入口 | manifest/caps模型为设计目标，当前src无统一registry；runtime/view硬编码SshWorker | 先实现V0.1.1静态注册与中性SessionCreateSpec，UI按插件terminal/files及可选服务挂载；Local PTY/exec在Local插件内部，复用同一VT/controller | `src/ui/session_runtime.zig:60`；`src/ui/terminal_view.zig:70`；`V0.1.1_FOUNDATION.md §3` |
 
@@ -546,3 +559,16 @@ UI/Cx/Node/Signal只在主线程访问，worker处理IO与计算，以不可变�
 0.2 插件接入：公共侧栏、顶栏/Tab、底栏、AI 和设置自动消费标准贡献，不由插件复制。配置界面由插件 ConnectionEditor 在宿主创建/编辑槽内组织公共控件，流程由 ConnectionController 决定，schema 是可选辅助；内容槽是完全定制工作区。连接只复用保存配置，新运行会话/转发独立创建，见 [插件宿主§2–6](V0.2.1_PLUGIN_HOST.md)。
 
 KVM 遵循 [V0.2.2§11](V0.2.2_BMC_IKVM.md)：在既有r11内容卡片内，上方44px单行图标/标题/状态及五组功能气泡，下方无内框的最大视频区域。电源/启动设备使用Select后点击执行，持续生效使用Switch，无更改禁用，浮层HUG；显示入口内区分缩放选择与全屏动作。只有视频黑色固定，其余跟随主题。业务结果调用[插件宿主§6.1统一通知](V0.2.1_PLUGIN_HOST.md#61-全局统一通知)，常规动作不增加Modal确认，真实固件二次认证仍走宿主challenge。创建/测试/连接由插件editor/controller接线，见[V0.2.2§3.3](V0.2.2_BMC_IKVM.md#33-用户操作与宿主接线)。
+
+### 2026-10-26 补充：反馈、浮层与内容密度
+
+- 提示按语义选组件：字段校验放字段下；任务进度、失败与重试放任务行；AI 压缩状态放上下文用量浮层；复制、刷新、选择完成等短确认放触发控件附近；只有跨会话事件或需要稍后处理的信息进入全局消息。一个事件只展示一次，不同时弹局部状态和全局提示。
+- 说明性内容优先使用 tooltip（悬停及键盘聚焦可达），默认只保留名称、当前值和必要动作。tooltip 不承载确认、重试等交互，不将关键错误原因仅放入 hover。
+- 全局消息共用 `shared/feedback.js` / `feedback.css`：应用右侧 20px、顶部 62px，宽 340px，最多同时展示三条，其余排队；错误不会因后续消息到来而被丢弃；普通 4 秒、含跳转动作 8 秒、错误手动关闭；悬停或聚焦暂停计时。局部轻提示 2 秒。普通消息遇到浮层重叠先延后展示，不把消息移到随机位置；隐藏期间停止计时，恢复后重新完整计时。全局错误优先排在普通消息前，并保持固定位置可见、由用户关闭；局部错误留在对应字段/任务中，不重复升级为全局错误。跨页面浮层通过共享组件的 `reportOverlay` 显式上报实际可见矩形及关闭，零尺寸容器须取可见子层。
+- 消息级别由事件语义传递，不能仅根据中文文案判断错误。消息格式为“结果/问题”短标题，可附一行必要原因和一个明确动作。无需重复显示当前页名称。输入错误需要关联字段，任务错误需要关联任务；确认对话框仅用于不可逆或重要决策。
+- 所有浮层必须保存触发控件与所属窗口。打开二级菜单前先保存触发矩形，不能在原菜单隐藏或销毁后读取。顶部工具向下、底部状态栏与 AI 输入工具向上；空间不足时翻转并限制滚动，距所属窗口至少 12px。不使用页面全局坐标直接冒充局部坐标。
+- 浮层打开、子菜单替换、滚动、窗口缩放、侧栏显隐、会话切换及 AI 拖动后都需检查。触发器消失时关闭，禁止回退到左上角或沿用旧会话坐标。菜单随几何变化关闭，详情浮层重新计算锚点。
+- 卡片使用 1px 前景色 12% 描边及 4% 轻阴影，配合已有层级底色；避免靠大色差或厚重阴影表达边界。浅色设置导航继承设置根材质，选中行仅使用 10% 强调色。
+- 传输共用 `shared/transfer-row.js` / `transfer-row.css`；标准宽度一行显示方向、名称、路径、状态、速率及管理动作，进度贴行底部。行高约 48px；空间受限时两行，禁止固定大卡片制造空白。暂停、继续/重试、查看、取消按真实状态显示；完成项保留查看。路径省略时完整值可悬停查看。
+- 按连接能力显示功能：本地 Shell 不展示 SSH 端口转发与跳板链路；SFTP 不展示终端广播；尚未就绪而可恢复的功能保留禁用态及原因，永久不适用能力直接移除。主机配置不等于会话。
+- 内置主题明确标注“不可删除”；自定义主题才提供删除。侧栏使用“显示/隐藏”，不再使用“折叠”。数据设置可展示配置路径，不提供“打开配置目录”。SSH 使用一个终端窗口图标，不附加 SSH 文字小标。

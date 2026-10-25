@@ -7,6 +7,7 @@ const host = @import("../host/notification_host.zig");
 const notifications = host.notifications;
 const S = @import("notification_styles.zig");
 const theme = @import("app_theme.zig");
+const layout = @import("notification_placement.zig");
 const Slot = struct {
     presenter: *Presenter,
     fact_id: ?u64 = null,
@@ -41,6 +42,7 @@ const Action = struct {
     }
 };
 pub const Placement = struct {
+    /// App bounds (the V3 #app), independent of sidebar/content layout.
     content: ui.ComputedRect,
     /// Already open popovers and captured-pointer areas in window coordinates.
     avoid: []const ui.ComputedRect = &.{},
@@ -69,15 +71,15 @@ pub const Presenter = struct {
                 else => "notifications.toast.2",
             };
             const header = try ui.boxStyled(cx, S.header, .{});
-            try card.appendChild(cx.allocator, header);
             var icons: [4]*ui.Node = undefined;
             const assets = [_]ui.SvgAsset{ ui.icons.info, ui.icons.circle_check, ui.icons.triangle_alert, ui.icons.circle_alert };
             const colors = [_]ui.Color{ theme.current().fg_2, theme.current().ok, theme.current().warn, theme.current().danger };
             for (&icons, 0..) |*icon, j| {
                 icon.* = try ui.iconTint(cx, assets[j], colors[j], S.icon());
-                try header.appendChild(cx.allocator, icon.*);
+                try card.appendChild(cx.allocator, icon.*);
                 icon.*.setDisplay(.none);
             }
+            try card.appendChild(cx.allocator, header);
             const title = try ui.textStyled(cx, S.title, "");
             title.setStyleInline(cx.allocator, S.textBox(cx.tokens));
             try header.appendChild(cx.allocator, title);
@@ -89,15 +91,15 @@ pub const Presenter = struct {
                 1 => "notifications.dismiss.1",
                 else => "notifications.dismiss.2",
             };
-            try header.appendChild(cx.allocator, close);
+            try card.appendChild(cx.allocator, close);
             const source = try ui.textStyled(cx, S.detail, "");
             source.setStyleInline(cx.allocator, S.textBox(cx.tokens));
-            try card.appendChild(cx.allocator, source);
+            try header.appendChild(cx.allocator, source);
             const detail = try ui.textStyled(cx, S.detail, "");
             detail.setStyleInline(cx.allocator, S.textBox(cx.tokens));
-            try card.appendChild(cx.allocator, detail);
+            try header.appendChild(cx.allocator, detail);
             const action_row = try ui.boxStyled(cx, S.actions, .{});
-            try card.appendChild(cx.allocator, action_row);
+            try header.appendChild(cx.allocator, action_row);
             slot.* = .{ .presenter = self, .root = card, .icons = icons, .title = title, .detail = detail, .source = source, .close = close, .action_row = action_row, .actions = undefined };
             card.behavior.events.on_hover = cx.on(Slot, slot, Slot.enter);
             card.behavior.events.on_leave = cx.on(Slot, slot, Slot.leave);
@@ -128,14 +130,6 @@ pub const Presenter = struct {
         const available = @max(0, placement.content.w - 2 * S.edge);
         const width = @min(S.width, available);
         self.root.setStyle(self.cx.allocator, .width, .{ .px = width });
-        var x = placement.content.x + placement.content.w - width - S.edge;
-        var y = placement.content.y + S.edge;
-        // Use last layout height, and a conservative minimum on first layout.
-        const height = @max(self.root.globalRect().h, @as(f32, @floatFromInt(count)) * 48 + @as(f32, @floatFromInt(count -| 1)) * S.gap);
-        for (placement.avoid) |avoid| if (overlap(.{ .x = x, .y = y, .w = width, .h = height }, avoid)) {
-            if (avoid.y + avoid.h + S.edge + height <= placement.content.y + placement.content.h) y = avoid.y + avoid.h + S.edge else if (avoid.x - width - S.edge >= placement.content.x + S.edge) x = avoid.x - width - S.edge else y = placement.content.y + placement.content.h - height - S.edge;
-        };
-        self.root.setStyle(self.cx.allocator, .inset, .{ .left = .{ .px = x }, .top = .{ .px = y } });
         for (&self.slots, 0..) |*slot, i| {
             if (i >= count or width <= 0) {
                 slot.root.setDisplay(.none);
@@ -167,6 +161,22 @@ pub const Presenter = struct {
             slot.source.setDisplay(if (source.len == 0) .none else .flex);
             slot.root.setDisplay(.flex);
         }
+        // Measure the currently visible slots. Text/width changes settle after
+        // layout; the existing notification timer corrects that next-frame size.
+        var height: f32 = 0;
+        for (self.slots[0..count]) |slot| {
+            const measured = slot.root.globalRect().h;
+            height += if (measured > 0) measured else 45;
+        }
+        height += @as(f32, @floatFromInt(count -| 1)) * S.gap;
+        var obstacles: [32]layout.Rect = undefined;
+        const obstacle_count = @min(obstacles.len, placement.avoid.len);
+        for (placement.avoid[0..obstacle_count], obstacles[0..obstacle_count]) |rect, *obstacle| {
+            obstacle.* = .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+        }
+        const content = placement.content;
+        const position = layout.position(.{ .x = content.x, .y = content.y, .w = content.w, .h = content.h }, width, height, obstacles[0..obstacle_count]);
+        self.root.setStyle(self.cx.allocator, .inset, .{ .left = .{ .px = position.x }, .top = .{ .px = position.y } });
         if (count != 0) self.cx.scheduleRedrawAfterNs(100 * std.time.ns_per_ms);
     }
 };
@@ -174,7 +184,4 @@ fn textNode(node: *ui.Node) ?*ui.Node {
     if (node.getText() != null) return node;
     for (node.children.items) |child| if (textNode(child)) |found| return found;
     return null;
-}
-fn overlap(a: ui.ComputedRect, b: ui.ComputedRect) bool {
-    return a.x < b.x + b.w and a.x + a.w > b.x and a.y < b.y + b.h and a.y + a.h > b.y;
 }

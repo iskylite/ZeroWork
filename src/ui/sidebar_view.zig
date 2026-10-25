@@ -620,7 +620,7 @@ pub fn hint(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, value: []const u8, pos
     return (try mountHint(cx, scope, node, value, position)).wrapper;
 }
 fn mountHint(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, value: []const u8, position: ui.widgets.PopoverPosition) !ui.widgets.popover.PopoverResult {
-    const popup = try ui.widgets.Popover(.{ .trigger = .hover, .position = position, .tier = .tooltip, .open_delay_ms = @as(f32, 450), .close_on_escape = true, .close_on_outside_click = false, .max_width = @as(f32, 320), .max_height = @as(f32, 120), .size_policy = .fit_content }).mount(scope, cx);
+    const popup = try ui.widgets.Popover(.{ .trigger = .hover, .position = position, .tier = .tooltip, .open_delay_ms = @as(f32, 450), .close_on_escape = false, .close_on_outside_click = false, .max_width = @as(f32, 320), .max_height = @as(f32, 120), .size_policy = .fit_content }).mount(scope, cx);
     popup.content.setStyleInline(cx.allocator, S.hint());
     popup.content.behavior.interaction.a11y = .{ .role = .tooltip };
     const label = try text(cx, popup.content, value, 11, 400, true);

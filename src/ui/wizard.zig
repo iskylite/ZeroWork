@@ -35,6 +35,9 @@ pub const Wizard = struct {
     protocol_options: []ui.widgets.SelectOption = &.{},
     owned_ids: std.ArrayList([]u8) = .empty,
     plugin_slot: ?*ui.Node = null,
+    modal_body: ?*ui.Node = null,
+    parent_presentation_visible: bool = true,
+    parent_barrier_color: ui.Color = ui.Color.TRANSPARENT,
     plugin_scope: ?*ui.Scope = null,
     plugin_editor: ?plugin_ui.EditorInstance = null,
     plugin_error: ?*ui.Node = null,
@@ -53,6 +56,7 @@ pub const Wizard = struct {
     root: ?*ui.Node = null,
     modal: ?*ui.Node = null,
     header: ?*ui.Node = null,
+    title: ?*ui.Node = null,
     footer: ?*ui.Node = null,
     authentication_area: *ui.Node = undefined,
     protocol_icon: ?*ui.Node = null,
@@ -72,10 +76,12 @@ pub const Wizard = struct {
         self.refreshAppearance();
     }
     pub fn reset(self: *Wizard) !void {
+        if (self.title) |title| try title.setTextContent(self.alloc, "新建连接");
         self.draft_revision = std.math.add(u64, self.draft_revision, 1) catch return error.RevisionExhausted;
         try self.mountContributedEditor(null);
     }
     pub fn loadEnvelope(self: *Wizard, value: envelope_mod.Envelope) !void {
+        if (self.title) |title| try title.setTextContent(self.alloc, if (@backingInt(value.id) == 0) "新建连接" else "编辑连接");
         const manifest = self.plugin_registry.find(value.protocol_id) orelse return error.UnknownPlugin;
         const contribution = manifest.connection orelse return error.ConnectionEditorUnavailable;
         const decode = contribution.decode orelse return error.ConnectionCodecUnavailable;
@@ -107,19 +113,20 @@ pub const Wizard = struct {
         const modal = try ui.widgets.Modal(.{ .open = ui.split(self.open.?, cx.on(Wizard, self, openChanged)), .width = S.width, .max_height = S.max_height, .background = S.theme.current().overlay, .close_on_overlay = false }).mount(scope, cx);
         self.root = modal.overlay;
         self.modal = modal.dialog;
+        self.modal_body = modal.body;
         modal.overlay.meta.ownership.meta.test_id = "wizard.overlay";
         modal.dialog.meta.ownership.meta.test_id = "wizard.dialog";
         modal.dialog.setStyleInline(self.alloc, S.panel(cx.tokens));
         modal.body.setStyleInline(self.alloc, S.modalBody());
-        const fade = try ui.boxStyled(cx, S.topFade, .{});
-        try modal.dialog.insertChildBefore(self.alloc, fade, modal.body);
-        try modal.dialog.appendChild(self.alloc, try ui.boxStyled(cx, S.grip, .{}));
         const header = try ui.box(cx, S.header(), .{});
         self.header = header;
         self.protocol_icon = try ui.iconTint(cx, ui.icons.plug, S.theme.current().accent, S.icon(18));
         self.protocol_icon.?.meta.ownership.meta.test_id = "wizard.protocol.icon";
+        self.protocol_icon.?.setDisplay(.none);
         try header.appendChild(self.alloc, self.protocol_icon.?);
-        try header.appendChild(self.alloc, try ui.text(cx, "新建连接", S.text(13, 700, false)));
+        self.title = try ui.text(cx, "新建连接", S.text(13, 700, false));
+        self.title.?.meta.ownership.meta.test_id = "wizard.title";
+        try header.appendChild(self.alloc, self.title.?);
         try header.appendChild(self.alloc, try ui.spacer(cx));
         var count: usize = 0;
         for (self.plugin_registry.manifests()) |manifest| if (manifest.connection != null) {
@@ -136,17 +143,14 @@ pub const Wizard = struct {
         }
         if (self.plugin_registry.find(self.protocol_id) == null and count != 0) self.protocol_id = self.protocol_options[0].value;
         self.sig_protocol.?.set(if (count == 0) null else self.protocol_id);
-        const select = try ui.widgets.Select(.{ .options = self.protocol_options, .value = self.sig_protocol.?, .leading_icon = ui.icons.plug, .width = 104, .disabled = self.locked.?, .on_change = cx.on(Wizard, self, protocolChanged) }).mount(scope, cx);
-        select.trigger.meta.ownership.meta.test_id = "wizard.protocol";
-        try header.appendChild(self.alloc, select.wrapper);
         const close = try ui.widgets.Button(.{ .label = "", .variant = .ghost, .a11y_label = "关闭向导", .on_click = cx.on(Wizard, self, cancel) }).mount(scope, cx);
         close.meta.ownership.meta.test_id = "wizard.close";
         try close.appendChild(self.alloc, try ui.iconTint(cx, ui.icons.x, S.theme.current().fg_2, S.icon(14)));
         try header.appendChild(self.alloc, close);
         try modal.body.appendChild(self.alloc, header);
         const body = try ui.box(cx, S.body(), .{});
-        self.plugin_slot = try ui.boxStyled(cx, S.stack, .{});
-        self.plugin_slot.?.setStyleInline(self.alloc, .{ .height = .fill(), .min_height = 0 });
+        body.setStyleInline(self.alloc, .{ .padding = .{}, .gap = 0, .flex = 1 });
+        self.plugin_slot = try ui.boxStyled(cx, S.editorSlot, .{});
         self.plugin_slot.?.meta.ownership.meta.test_id = "wizard.plugin.editor";
         self.plugin_slot.?.meta.ownership.hooks.on_cleanup = .{ .context = self, .callback = slotGone };
         try body.appendChild(self.alloc, self.plugin_slot.?);
@@ -216,7 +220,7 @@ pub const Wizard = struct {
         const scope = try self.scope.childScope();
         self.plugin_scope = scope;
         errdefer self.releaseContributedEditor();
-        self.plugin_editor = try mount_editor(connection.editor_factory.context, .{ .cx = self.cx, .scope = scope, .slot = self.plugin_slot.?, .protocol_id = manifest.id, .initial = initial, .draft_revision = self.draft_revision, .events = .{ .context = self, .changed = editorChanged, .submit = editorSubmit, .dismiss = editorDismiss, .cancelled = editorCancelled }, .editor_host = self.editor_host, .editor_id = self.draft_id, .connection_configs = self.connection_configs });
+        self.plugin_editor = try mount_editor(connection.editor_factory.context, .{ .cx = self.cx, .scope = scope, .slot = self.plugin_slot.?, .protocol_id = manifest.id, .protocol_picker = .{ .context = self, .mount = mountProtocolPicker }, .initial = initial, .draft_revision = self.draft_revision, .events = .{ .context = self, .changed = editorChanged, .submit = editorSubmit, .dismiss = editorDismiss, .cancelled = editorCancelled }, .editor_host = self.editor_host, .editor_id = self.draft_id, .connection_configs = self.connection_configs });
         try scope.onCleanup(Wizard, self, releasePluginScope);
         if (self.on_editor_mounted) |hook| try hook(self.editor_mounted_context orelse return error.EditorHookUnavailable, self.plugin_editor.?);
         if (self.plugin_error) |node| node.setDisplay(.none);
@@ -283,9 +287,32 @@ pub const Wizard = struct {
         }
         self.cx.requestRedraw();
     }
-    fn protocolChanged(self: *Wizard, selected: ?[]const u8) void {
-        self.selectContribution(selected orelse return) catch |err| self.showError(err);
+    fn mountProtocolPicker(raw: *anyopaque, cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
+        const self: *Wizard = @ptrCast(@alignCast(raw));
+        const picker = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 41 }, .direction = .row, .align_items = .center, .padding = ui.Padding.all(5), .gap = 6, .background = S.theme.current().well, .border = .{ .radius = 9 }, .flex_shrink = 0 }, .{});
+        picker.meta.ownership.meta.test_id = "wizard.protocol";
+        for (self.protocol_options, 0..) |option, index| {
+            const click = try scope.createState(ProtocolClick, .{ .wizard = self, .index = index });
+            const button = try ui.widgets.Button(.{ .label = option.label, .variant = .ghost, .disabled = self.locked.?, .on_click = cx.on(ProtocolClick, click, ProtocolClick.activate), .base_style = @as(@FieldType(ui.widgets.ControlShellConfig, "style"), .{ .width = .fill(), .flex = 1, .height = .{ .px = 31 }, .padding = .{}, .corner_radius = 7, .font_size = 11, .font_weight = 400, .text_color = if (std.mem.eql(u8, option.value, self.protocol_id)) S.theme.current().accent_ink else S.theme.current().fg_1, .background = if (std.mem.eql(u8, option.value, self.protocol_id)) S.theme.current().selection else ui.Color.TRANSPARENT, .border_width = 0 }) }).mount(scope, cx);
+            button.meta.ownership.meta.test_id = option.test_id;
+            if (button.behavior.interaction.a11y) |*access| {
+                access.selected = std.mem.eql(u8, option.value, self.protocol_id);
+                access.pressed = access.selected;
+            }
+            try picker.appendChild(self.alloc, button);
+        }
+        return picker;
     }
+    const ProtocolClick = struct {
+        wizard: *Wizard,
+        index: usize,
+        fn activate(self: *ProtocolClick) void {
+            const wizard = self.wizard;
+            const selected = wizard.protocol_options[self.index].value;
+            if (std.mem.eql(u8, selected, wizard.protocol_id)) return;
+            wizard.selectContribution(selected) catch |err| wizard.showError(err);
+        }
+    };
     fn refreshAppearance(self: *Wizard) void {
         const manifest = self.plugin_registry.find(self.protocol_id) orelse return;
         if (self.protocol_icon) |node| {
@@ -327,11 +354,40 @@ pub const Wizard = struct {
     }
     pub fn updateViewport(self: *Wizard) bool {
         const node = self.modal orelse return false;
+        // Modal's deferred style host can initialise after mount. Reapply the
+        // owned content contract once, before natural editor height escapes it.
+        var body_changed = false;
+        const parent_visible = if (self.plugin_editor) |editor| if (editor.vtable.parent_presentation_visible) |get| get(editor.context) else true else true;
+        if (self.parent_presentation_visible != parent_visible) {
+            if (self.root) |barrier| {
+                if (!parent_visible) self.parent_barrier_color = barrier.getBackground();
+                barrier.setBackground(if (parent_visible) self.parent_barrier_color else ui.Color.TRANSPARENT);
+            }
+            node.setDisplay(if (parent_visible) .flex else .none);
+            self.parent_presentation_visible = parent_visible;
+            body_changed = true;
+        }
+        if (self.modal_body) |body| if (!std.meta.eql(body.style.padding, ui.Padding.ZERO)) {
+            body.setStyleInline(self.alloc, S.modalBody());
+            body_changed = true;
+        };
         const width = @min(S.width, @max(1, self.cx.viewport.width - 32));
-        const height = @min(S.max_height, @max(1, self.cx.viewport.height - 68));
+        var preferred = S.max_height;
+        if (self.plugin_editor) |editor| if (editor.vtable.preferred_modal_height) |get| if (get(editor.context)) |value| {
+            if (std.math.isFinite(value) and value > 0) preferred = @min(value, S.max_height);
+        };
+        const compact = self.cx.viewport.width <= 860 or self.cx.viewport.height <= 480;
+        if (self.header) |header| {
+            const desired_h: f32 = if (compact) 48 else 52;
+            if (header.style.height != .px or header.style.height.px != desired_h) {
+                header.setStyleInline(self.alloc, .{ .height = .{ .px = desired_h }, .padding = .{ .left = if (compact) 18 else 20, .right = if (compact) 18 else 20, .top = if (compact) 12 else 14, .bottom = if (compact) 12 else 14 } });
+                body_changed = true;
+            }
+        }
+        const height = @min(preferred, @max(1, self.cx.viewport.height - @as(f32, if (compact) 48 else 32)));
         const changed = node.style.width != .px or node.style.width.px != width or node.style.height != .px or node.style.height.px != height;
         if (changed) node.setStyleInline(self.alloc, .{ .width = .{ .px = width }, .height = .{ .px = height } });
-        return changed;
+        return changed or body_changed;
     }
     fn viewportHook(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *Wizard = @ptrCast(@alignCast(raw));

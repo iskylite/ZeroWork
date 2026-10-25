@@ -16,32 +16,30 @@ pub fn paintSearch(cx: *ui.Cx, input: *const ui.widgets.input.InputResult) void 
 }
 
 pub const geometry = struct {
-    pub const panel_width: f32 = 860;
-    pub const panel_height: f32 = 700;
-    pub const compact_height: f32 = 412;
+    pub const panel_width = @import("../ui/v3_geometry.zig").settings_width;
+    pub const panel_height = @import("../ui/v3_geometry.zig").settings_height;
+    pub const compact_height: f32 = 432;
     pub const card_padding: f32 = 10;
-    pub const header_height: f32 = 28;
-    pub const footer_height: f32 = 40;
+    pub const header_height: f32 = 62;
+    pub const footer_height: f32 = 58;
     pub const header_gap: f32 = 6;
-    // Bridge 355:1290614/1290630/1290725: header ends at 38, viewport
-    // starts at 48, and the fixed footer is 16px below the viewport.
-    pub const viewport_gap: f32 = 10;
-    pub const footer_gap: f32 = 16;
+    // Frozen V3 settings owns a fixed page heading and footer around its scroll area.
+    pub const viewport_gap: f32 = 0;
+    pub const footer_gap: f32 = 0;
     pub const scrollbar_gutter: f32 = 16;
     pub const section_gap: f32 = 6;
-    // Figma 1398:293106 / 1398:294717: collapsed summaries belong below
-    // their title; an expanded group shows only the editable field values.
-    pub const section_spacing: f32 = 12;
-    pub const section_padding_x: f32 = 8;
-    pub const section_padding_y: f32 = 6;
-    pub const section_summary_header: f32 = 52;
-    pub const section_title_line: f32 = 18;
-    pub const section_icon: f32 = 16;
+    // Frozen V3 cards keep the description below their title in both fold states.
+    pub const section_spacing: f32 = 10;
+    pub const section_padding_x: f32 = 0;
+    pub const section_padding_y: f32 = 0;
+    pub const section_summary_header: f32 = 62;
+    pub const section_title_line: f32 = 20;
+    pub const section_icon: f32 = 18;
     pub const section_chevron: f32 = 14;
     pub const card_radius: f32 = 11;
-    pub const section_radius: f32 = 9;
+    pub const section_radius: f32 = 11;
     pub const section_header: f32 = 28;
-    pub const row_height: f32 = 36;
+    pub const row_height: f32 = 52;
     pub const builtin_row_height: f32 = 44;
     pub const icon_button: f32 = 28;
     pub const footer_button: f32 = 34;
@@ -50,9 +48,9 @@ pub const geometry = struct {
     pub const plugin_well_width: f32 = 164;
     pub const plugin_well_height: f32 = 30;
     pub const plugin_notice_icon: f32 = 16;
-    pub const control_width: f32 = 164;
-    pub const control_height: f32 = 30;
-    pub const field_gap: f32 = 28;
+    pub const control_width: f32 = 220;
+    pub const control_height: f32 = 32;
+    pub const field_gap: f32 = 20;
     pub const help_button: f32 = 22;
     pub const switch_width: f32 = 30;
     pub const switch_height: f32 = 18;
@@ -61,15 +59,17 @@ pub const geometry = struct {
 };
 
 pub fn content(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{ .left = geometry.card_padding, .right = geometry.card_padding, .top = geometry.card_padding, .bottom = geometry.card_padding }, .background = theme.current().surface_1, .border = .{ .radius = geometry.card_radius }, .min_width = 0 };
+    return .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{}, .background = theme.current().surface_1, .border = .{ .radius = geometry.card_radius }, .min_width = 0 };
 }
 pub fn header(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = geometry.header_height }, .direction = .row, .gap = geometry.header_gap, .align_items = .center, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = geometry.header_height }, .direction = .row, .gap = geometry.header_gap, .align_items = .start, .padding = .{ .left = 5, .right = 5, .top = 4, .bottom = 16 }, .flex_shrink = 0 };
 }
 pub fn footer(_: *const ui.ThemeTokens) ui.BoxStyle {
     var style = header(undefined);
     style.height = .{ .px = geometry.footer_height };
     style.gap = 8;
+    style.align_items = .center;
+    style.padding = .{ .left = 5, .right = 5, .top = 12 };
     style.margin = .{ .top = geometry.footer_gap };
     return style;
 }
@@ -77,8 +77,8 @@ pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 13, .font_weight = 600, .line_height = 20.0 / 13.0, .color = theme.current().fg_1 };
 }
 
-// Bridge 341:1031741/1031756/1031766 and matching transfer/notification/data
-// cards share 600px sections, 36px rows and 164 × 30px native controls.
+// Frozen V3 shared fields use 52px minimum rows and 220 × 32px controls;
+// the compact panel narrows controls to 210px in the owning layout hook.
 pub fn column(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = geometry.section_gap, .flex_shrink = 0, .min_width = 0 };
 }
@@ -94,7 +94,7 @@ pub fn fieldRow(t: *const ui.ThemeTokens) ui.BoxStyle {
     return style;
 }
 pub fn fieldLabel(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .row, .align_items = .center, .gap = geometry.section_gap };
+    return .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .align_items = .start, .gap = 3 };
 }
 pub fn fieldControl(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = geometry.control_width }, .height = .{ .px = geometry.control_height }, .min_width = 0, .padding = .{ .left = 10, .right = 8 }, .background = theme.current().well, .border = .{ .width = 0, .radius = 8 }, .flex_shrink = 0 };
@@ -102,13 +102,16 @@ pub fn fieldControl(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn fieldButton() ButtonStyle {
     return .{ .width = .{ .px = geometry.control_width }, .height = .{ .px = geometry.control_height }, .padding = .{ .left = 10, .right = 8 }, .background = theme.current().well, .text_color = theme.current().fg_1, .corner_radius = 8, .border_width = 0, .font_size = 11.5, .font_weight = 400, .flex_shrink = 0 };
 }
+pub fn actionControl(danger: bool) ButtonStyle {
+    return .{ .height = .{ .px = 32 }, .padding = .{ .left = 12, .right = 12 }, .background = theme.current().hover, .text_color = if (danger) theme.current().danger_ink else theme.current().fg_1, .font_size = 12, .font_weight = 500, .corner_radius = 8, .border_width = 0, .flex_shrink = 0 };
+}
 pub fn fieldHelpButton() ButtonStyle {
-    var style = button(geometry.help_button, false);
+    var style = button(24, false);
     style.background = ui.Color.TRANSPARENT;
     return style;
 }
 pub fn fieldHelp(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = geometry.help_width }, .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .gap = 6, .background = theme.current().overlay, .border = .{ .radius = 8 } };
+    return .{ .width = .{ .px = geometry.help_width }, .max_width = geometry.help_width, .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .gap = 6, .background = theme.current().overlay, .border = .{ .radius = 8 } };
 }
 pub fn tuneSelect(result: ui.widgets.SelectResult) void {
     tuneSelectText(result.content_slot);
@@ -195,7 +198,7 @@ pub fn shortcutButton(width: f32, compact: bool) ButtonStyle {
     return style;
 }
 pub fn label(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 12, .font_weight = 400, .line_height = 1.5, .color = theme.current().fg_1 };
+    return .{ .font_size = 12, .font_weight = 500, .line_height = 1.5, .color = theme.current().fg_1 };
 }
 pub fn value(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11.5, .font_weight = 400, .line_height = 17.0 / 11.5, .color = theme.current().fg_2 };
@@ -216,24 +219,27 @@ pub fn sectionState(expanded: bool) ui.BoxStyle {
     var style = section(undefined);
     style.padding = .{ .left = geometry.section_padding_x, .right = geometry.section_padding_x, .top = geometry.section_padding_y, .bottom = geometry.section_padding_y };
     style.border = .{ .radius = geometry.section_radius };
-    style.background = if (expanded) theme.current().surface_2 else ui.Color.TRANSPARENT;
-    style.gap = if (expanded) geometry.section_gap else 0;
+    _ = expanded;
+    style.background = theme.current().surface_2;
+    style.gap = 0;
     return style;
 }
 pub fn sectionHeading(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .fit = .{} }, .direction = .column, .gap = geometry.section_gap };
+    return .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .fit = .{} }, .direction = .column, .gap = 2 };
 }
 pub fn sectionTitle(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .min_width = 0, .height = .{ .px = geometry.section_title_line }, .flex_shrink = 0, .font_size = 12, .font_weight = 500 };
+    return .{ .width = .fill(), .min_width = 0, .height = .{ .px = geometry.section_title_line }, .flex_shrink = 0, .font_size = 13, .font_weight = 650 };
 }
 pub fn summaryHeader(has_summary: bool) ui.BoxStyle {
     var style = sectionHeader(undefined);
     style.height = .{ .fit = .{} };
-    style.min_height = if (has_summary) geometry.section_summary_header else geometry.section_header;
+    style.min_height = if (has_summary) geometry.section_summary_header else 60;
+    style.padding = .{ .left = 15, .right = 15, .top = 12, .bottom = 12 };
+    style.gap = 10;
     return style;
 }
 pub fn sectionIcon(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = geometry.section_icon }, .height = .{ .px = geometry.section_icon }, .flex_shrink = 0, .align_self = .start, .margin = .{ .top = geometry.section_gap } };
+    return .{ .width = .{ .px = geometry.section_icon }, .height = .{ .px = geometry.section_icon }, .flex_shrink = 0, .align_self = .center };
 }
 pub fn sectionChevron(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = geometry.section_chevron }, .height = .{ .px = geometry.section_chevron }, .flex_shrink = 0 };
@@ -242,7 +248,7 @@ pub fn sectionHeader(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = geometry.section_header }, .direction = .row, .align_items = .center, .gap = geometry.section_gap, .flex_shrink = 0 };
 }
 pub fn row(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = geometry.row_height }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = geometry.row_height, .padding = .{ .top = 8, .bottom = 8 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
 }
 pub fn notice(_: *const ui.ThemeTokens) ui.BoxStyle {
     var style = row(undefined);
@@ -345,5 +351,40 @@ pub fn pluginNoticeText(tone: PluginNoticeTone) ui.TextStyle {
 }
 
 pub fn sectionSummary(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11, .font_weight = 400, .line_height = 18.0 / 11.0, .color = theme.current().fg_2, .wrap = .word };
+    return .{ .font_size = 11, .font_weight = 400, .line_height = 16.0 / 11.0, .color = theme.current().fg_2, .wrap = .word };
+}
+
+// Frozen V3 model row and native dialog layout.
+pub fn modelListRow() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 44 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 10, .right = 10, .top = 6, .bottom = 6 }, .background = theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0, .min_width = 0 };
+}
+pub fn modelDialogHeader() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 67 }, .direction = .row, .align_items = .center, .padding = .{ .left = 20, .right = 20, .top = 16, .bottom = 10 }, .flex_shrink = 0 };
+}
+pub fn modelDialogContent() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 16, .padding = .{ .left = 20, .right = 20, .top = 8, .bottom = 18 }, .flex_shrink = 0 };
+}
+pub fn modelDialogFooter() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 60 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 20, .right = 20, .top = 12, .bottom = 16 }, .flex_shrink = 0 };
+}
+pub fn modelDialogButton(primary: bool) ButtonStyle {
+    var style = textButton();
+    style.width = .{ .px = 88 };
+    style.height = .{ .px = 32 };
+    style.background = if (primary) theme.current().accent else theme.current().well;
+    style.text_color = if (primary) ui.Color.WHITE else theme.current().fg_1;
+    return style;
+}
+pub fn modelCapabilities() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 0, .padding = ui.Padding.all(12), .background = theme.current().surface_2, .border = .{ .radius = 9 }, .flex_shrink = 0 };
+}
+pub fn modelCapabilityRow() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 53 }, .direction = .row, .align_items = .center, .flex_shrink = 0 };
+}
+
+/// Keep stock control labels on the application's theme after its style bindings settle.
+/// Interaction, focus and checked state remain owned by the native widget.
+pub fn paintControlText(node: *ui.Node) void {
+    if (node.getText()) |text| if (!@import("std").meta.eql(text.color, theme.current().fg_1)) node.setTextColor(theme.current().fg_1);
+    for (node.children.items) |child| paintControlText(child);
 }

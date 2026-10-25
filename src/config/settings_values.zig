@@ -148,10 +148,11 @@ fn setBackoff(target: *[5]u8, next: Value) WriteError!void {
         .text => |v| v,
         else => return error.InvalidType,
     };
-    if (text.len < 3 or text[0] != '[' or text[text.len - 1] != ']') return error.InvalidValue;
+    const trimmed = std.mem.trim(u8, text, " \t");
+    const body = if (trimmed.len >= 2 and trimmed[0] == '[' and trimmed[trimmed.len - 1] == ']') trimmed[1 .. trimmed.len - 1] else trimmed;
     var parsed: [5]u8 = undefined;
     var index: usize = 0;
-    var parts = std.mem.splitScalar(u8, text[1 .. text.len - 1], ',');
+    var parts = std.mem.splitScalar(u8, body, ',');
     while (parts.next()) |part| {
         if (index == parsed.len) return error.InvalidValue;
         parsed[index] = std.fmt.parseInt(u8, std.mem.trim(u8, part, " \t"), 10) catch return error.InvalidValue;
@@ -284,4 +285,14 @@ test "new settings validate before mutation and completion writes" {
     try std.testing.expectEqualStrings("127.0.0.1", value.ssh.socks_bind);
     try std.testing.expectError(error.OutOfRange, writeConfig(&value, "transfer", "max_tasks", .{ .unsigned = 0 }));
     try std.testing.expectEqual(@as(u8, 8), value.transfer.max_tasks);
+}
+
+test "settings reconnect backoff accepts prototype comma list and legacy brackets" {
+    var value = config.Config{};
+    try writeConfig(&value, "ssh", "reconnect_backoff", .{ .text = "1, 2, 4, 8, 16" });
+    try std.testing.expectEqual([5]u8{ 1, 2, 4, 8, 16 }, value.ssh.reconnect_backoff);
+    try writeConfig(&value, "ssh", "reconnect_backoff", .{ .text = "[2,3,5,8,13]" });
+    try std.testing.expectEqual([5]u8{ 2, 3, 5, 8, 13 }, value.ssh.reconnect_backoff);
+    try std.testing.expectError(error.InvalidValue, writeConfig(&value, "ssh", "reconnect_backoff", .{ .text = "1,2,3,4,256" }));
+    try std.testing.expectError(error.InvalidValue, writeConfig(&value, "ssh", "reconnect_backoff", .{ .text = "1,2" }));
 }

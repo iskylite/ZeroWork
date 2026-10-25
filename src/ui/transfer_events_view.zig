@@ -10,8 +10,9 @@ pub const View = struct {
     title: *ui.Node = undefined,
     entries: *ui.Node = undefined,
     snapshot: []const u8 = "",
+    colors: theme.Colors = undefined,
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope) !*View {
-        const self = try scope.createState(View, .{ .cx = cx, .open = try scope.createSignal(bool, false) });
+        const self = try scope.createState(View, .{ .cx = cx, .open = try scope.createSignal(bool, false), .colors = theme.current() });
         try scope.onCleanup(View, self, cleanup);
         const modal = try ui.widgets.Modal(.{ .open = self.open, .width = 520, .max_height = 242, .background = theme.current().overlay, .overlay_color = ui.Color.TRANSPARENT, .close_on_overlay = false, .on_open_change = cx.on(View, self, changed) }).mount(scope, cx);
         if (!modal.portaled) try cx.root.?.appendChild(cx.allocator, modal.overlay);
@@ -63,6 +64,11 @@ pub const View = struct {
         }
         self.dialog.setStyleInline(self.cx.allocator, S.dialog(self.cx.tokens));
         self.open.set(true);
+    }
+    pub fn retheme(self: *View) void {
+        @import("transfer_styles.zig").repaint(self.dialog, self.colors);
+        self.colors = theme.current();
+        self.dialog.setStyleInline(self.cx.allocator, S.dialog(self.cx.tokens));
     }
     pub fn close(self: *View) void {
         self.open.set(false);

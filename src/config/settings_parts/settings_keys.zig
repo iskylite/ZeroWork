@@ -9,7 +9,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const page = try controls.Page.create(cx, bound, "settings.keys");
     const query = bound.controller.search_query;
     if (binding.matches(query, "页签 分栏 新建 关闭 序号 直达 上一个 下一个 最近使用 split tab")) {
-        const section = try page.section("页签与分栏", "16 个动作", ui.icons.panels_top_left, 4, "settings.keys.tabs", null);
+        const section = try page.section("页签与分栏", "16 个动作 · 点击快捷键录制", ui.icons.keyboard, 4, "settings.keys.tabs", null);
         for (keys.rows[0..5], 0..) |row, index| try shortcutRow(cx, bound, section.body, switch (index) {
             0 => "新建 / 关闭页签",
             3 => "最近使用",
@@ -18,13 +18,22 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         }, row.actions);
     }
     if (binding.matches(query, "终端 应用 复制 粘贴 搜索 补全 采纳 快速连接 立即重连 侧栏 AI 上传 广播 terminal")) {
-        const section = try page.section("终端与应用", "11 个动作", ui.icons.terminal, 5, "settings.keys.terminal", null);
+        const section = try page.section("终端与应用", "11 个动作 · Control 与 Tab 保留给远端", ui.icons.terminal, 5, "settings.keys.terminal", null);
         for (keys.rows[5..]) |row| try shortcutRow(cx, bound, section.body, row.label, row.actions);
     }
     return page.finish();
 }
 
 fn shortcutRow(cx: *ui.Cx, bound: *binding.Binding, parent: *ui.Node, label: []const u8, actions: []const keys.Action) !void {
+    const query = bound.controller.search_query;
+    const section_id = if (parent.parent) |item| item.meta.ownership.meta.test_id orelse "" else "";
+    const section_title = if (std.mem.eql(u8, section_id, "settings.keys.tabs")) "页签与分栏" else "终端与应用";
+    var matched = binding.matches(query, label) or binding.matches(query, section_title) or binding.matches(query, "快捷键");
+    for (actions) |action| {
+        var buffer: [96]u8 = undefined;
+        if (binding.matches(query, @tagName(action)) or binding.matches(query, try chordText(bound.controller.model.value.keys.get(action), &buffer))) matched = true;
+    }
+    if (!matched) return;
     const row = try ui.boxStyled(cx, S.fieldRow, .{});
     const title = try ui.textStyled(cx, S.label, label);
     title.style.width = .fill();

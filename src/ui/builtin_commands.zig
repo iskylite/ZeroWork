@@ -32,7 +32,7 @@ pub const Command = union(enum) {
     duplicate: void,
     pin: void,
     sync: bool,
-    timestamp: bool,
+    timestamp: ?bool,
     /// @log always enters read-only replay; no export path is accepted.
     log: ?[]const u8,
     socks: Socks,
@@ -60,8 +60,9 @@ pub fn parse(line: []const u8) Command {
         return .{ .download = .{ .remote_path = remote.value } };
     }
     if (eq(name, "@ai")) return .{ .ai = args };
-    if (eq(name, "@grp")) return .{ .group = args };
+    if (eq(name, "@grp")) return .{ .group = unquote(args) orelse return invalid(name, .invalid_path) };
     if (eq(name, "@theme")) return .{ .theme = if (args.len == 0) null else unquote(args) orelse return invalid(name, .invalid_path) };
+    if (eq(name, "@ts") and args.len == 0) return .{ .timestamp = null };
     if (eq(name, "@sync") or eq(name, "@ts")) {
         const enabled = parseSwitch(args) orelse return invalid(name, .invalid_switch);
         return if (eq(name, "@sync")) .{ .sync = enabled } else .{ .timestamp = enabled };
@@ -123,7 +124,7 @@ test "parser exposes all local operations and literal escape" {
     try std.testing.expectEqual(Command.duplicate, parse("@dup"));
     try std.testing.expectEqual(Command.pin, parse("@pin"));
     try std.testing.expect(parse("@sync on").sync);
-    try std.testing.expect(!parse("@ts off").timestamp);
+    try std.testing.expect(!parse("@ts off").timestamp.?);
     try std.testing.expectEqualStrings("why did this fail", parse("@ai why did this fail").ai);
     try std.testing.expect(parse("@up").upload == null);
     try std.testing.expectEqualStrings("/tmp/My File.txt", parse("@up \"/tmp/My File.txt\"").upload.?);
@@ -159,4 +160,11 @@ test "old invented aliases and invalid parameters do not become actions" {
 
 test {
     _ = @import("command_palette.zig");
+}
+
+test "timestamp toggles without parameters and quoted group names are unwrapped" {
+    try std.testing.expect(parse("@ts").timestamp == null);
+    try std.testing.expect(parse("@ts on").timestamp.?);
+    try std.testing.expect(!parse("@ts off").timestamp.?);
+    try std.testing.expectEqualStrings("生产组 A", parse("@grp \"生产组 A\"").group);
 }

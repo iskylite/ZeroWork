@@ -123,8 +123,47 @@ pub fn sourceHint() ui.BoxStyle {
 
 pub fn topFade(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .fill(), .height = .{ .px = 72 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .gradient = .{ .from = c.well_border.withAlpha(184), .to = c.overlay.withAlpha(0) }, .border = .{ .radius = 14 }, .hit_behavior = .pass_through };
+    return .{ .width = .fill(), .height = .{ .px = 72 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .gradient = .{ .from = c.well_border.withAlpha(48), .to = c.overlay.withAlpha(0) }, .border = .{ .radius = 14 }, .hit_behavior = .pass_through };
 }
 pub fn grip(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .top = .{ .px = 7 }, .left = .{ .percent = 50 } }, .width = .{ .px = 32 }, .height = .{ .px = 3 }, .margin = .{ .left = -16 }, .background = theme.current().fg_3, .border = .{ .radius = 1.5 }, .hit_behavior = .pass_through };
+}
+
+// Frozen UI_V3/workspace .popover, .segmented and .transfer-job.
+pub const v3_card_height: f32 = 101;
+pub const v3_card_pitch: f32 = 109;
+pub fn v3Panel(global: bool) ui.BoxStyle {
+    // Transparent HTML border consumes 1px in addition to the 12px padding.
+    return .{ .width = .{ .px = if (global) 360 else 344 }, .height = .{ .px = 199 }, .direction = .column, .padding = ui.Padding.all(13), .background = theme.current().overlay, .border = .{ .radius = 11 }, .overflow = .hidden, .flex_shrink = 0, .hit_behavior = .@"opaque" };
+}
+pub fn v3EmptyState() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .row, .align_items = .center, .gap = 10, .padding = .{ .top = 8, .bottom = 8, .left = 4, .right = 4 }, .overflow = .hidden };
+}
+pub fn v3EmptyIcon() ui.BoxStyle {
+    return .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .align_items = .center, .justify = .center, .flex_shrink = 0 };
+}
+pub fn v3Segment() ui.BoxStyle {
+    var s = row(30, 3);
+    s.padding = ui.Padding.all(3);
+    s.background = theme.current().well;
+    s.border = .{ .radius = 8 };
+    return s;
+}
+pub fn v3Filter(selected: bool) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .padding = .{ .top = 4, .bottom = 4, .left = 8, .right = 8 }, .font_size = 11, .font_weight = 400, .text_color = if (selected) theme.current().accent_ink else theme.current().fg_2, .background = if (selected) theme.current().selection else ui.Color.TRANSPARENT, .border = .{ .radius = 6 }, .shadow = .{}, .align_items = .center, .justify = .center };
+}
+pub fn v3Card() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = v3_card_height }, .direction = .column, .padding = ui.Padding.all(10), .background = theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+}
+pub fn v3TextAction() ui.BoxStyle {
+    return .{ .height = .{ .px = 24 }, .padding = .{ .left = 8, .right = 8, .top = 3, .bottom = 3 }, .font_size = 11, .font_weight = 400, .text_color = theme.current().accent_ink, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 4 }, .shadow = .{}, .flex_shrink = 0 };
+}
+
+pub fn v3Footer() ui.BoxStyle {
+    var s = row(38, 8);
+    s.padding = .{ .top = 8 };
+    return s;
+}
+pub fn v3FooterButton(primary: bool) ui.BoxStyle {
+    return .{ .height = .{ .px = 30 }, .min_width = if (primary) 88 else 76, .padding = .{ .top = 6, .bottom = 6, .left = 10, .right = 10 }, .font_size = 11, .font_weight = 500, .text_color = if (primary) ui.Color.WHITE else theme.current().fg_1, .background = if (primary) theme.current().accent else theme.current().hover, .border = .{ .radius = 8 }, .shadow = .{}, .flex_shrink = 0, .align_items = .center, .justify = .center };
 }

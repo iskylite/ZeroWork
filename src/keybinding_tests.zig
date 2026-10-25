@@ -26,9 +26,9 @@ test "recording mounts with owned map and fixed mouse stays immutable" {
     var ctx: u8 = 0;
     const anchor = try ui.box(cx, .{}, .{});
     try root.appendChild(cx.allocator, anchor);
-    const mounted = try picker.mount(cx, scope, root, anchor, &map, "搜索当前终端", .{ .context = &ctx, .changed = call, .dismiss = call });
+    const mounted = try picker.mount(cx, scope, root, anchor, &map, "search", .{ .context = &ctx, .changed = call, .dismiss = call });
     try root.appendChild(cx.allocator, mounted.root);
-    try std.testing.expectError(error.FixedMouseRow, picker.mount(cx, scope, root, anchor, &map, "终端", .{ .context = &ctx, .changed = call, .dismiss = call }));
+    try std.testing.expectError(error.FixedMouseRow, picker.mount(cx, scope, root, anchor, &map, "recent_tab", .{ .context = &ctx, .changed = call, .dismiss = call }));
 }
 test "nine tab range and Control passthrough" {
     const map: keys.Map = .{};
@@ -37,10 +37,11 @@ test "nine tab range and Control passthrough" {
     try std.testing.expect(map.match(.tab, .{ .ctrl = true }) == null);
     try std.testing.expect(map.match(.c, .{ .ctrl = true }) == null);
 }
-test "Escape cancels whole multi-shortcut recording and complete row commits once" {
+test "V3 recorder Escape discards one action and explicit confirmation commits only that action" {
     const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();
-    const root = try ui.box(cx, .{}, .{});
+    cx.setViewport(860, 480);
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     cx.root = root;
     const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
     defer scope.dispose();
@@ -49,19 +50,33 @@ test "Escape cancels whole multi-shortcut recording and complete row commits onc
     var ctx: u8 = 0;
     const anchor = try ui.box(cx, .{}, .{});
     try root.appendChild(cx.allocator, anchor);
-    const recorder = try picker.mount(cx, scope, root, anchor, &map, "新建 / 关闭", .{ .context = &ctx, .changed = call, .dismiss = call });
+    const recorder = try picker.mount(cx, scope, root, anchor, &map, "new_tab", .{ .context = &ctx, .changed = call, .dismiss = call });
     try root.appendChild(cx.allocator, recorder.root);
-    const handler = recorder.root.behavior.events.on_key_down.?;
-    _ = handler(.e, .{ .super = true }, recorder.root.behavior.events.event_context);
+    cx.frame_count += 1;
+    cx.frame_time_ms += 16;
+    _ = cx.render();
+    recorder.focus();
+    cx.handleKeyDown(.e, .{ .super = true });
+    cx.handleKeyUp(.e, .{ .super = true });
     try std.testing.expectEqualDeep(original, map);
-    _ = handler(.escape, .{}, recorder.root.behavior.events.event_context);
+    cx.handleKeyDown(.escape, .{});
+    cx.handleKeyUp(.escape, .{});
     try std.testing.expectEqualDeep(original, map);
-    // A separate recording commits only after both keys have passed validation.
-    const second = try picker.mount(cx, scope, root, anchor, &map, "新建 / 关闭", .{ .context = &ctx, .changed = call, .dismiss = call });
+    try std.testing.expect(!recorder.open.peek());
+    cx.frame_count += 1;
+    cx.frame_time_ms += 16;
+    _ = cx.render();
+    // Each action has its own candidate; recording alone never commits it.
+    const second = try picker.mount(cx, scope, root, anchor, &map, "new_tab", .{ .context = &ctx, .changed = call, .dismiss = call });
     try root.appendChild(cx.allocator, second.root);
-    const handle = second.root.behavior.events.on_key_down.?;
-    _ = handle(.e, .{ .super = true }, second.root.behavior.events.event_context);
-    _ = handle(.o, .{ .super = true }, second.root.behavior.events.event_context);
-    try std.testing.expectEqual(ui.events.KeyCode.e, map.get(.new_tab).key);
-    try std.testing.expectEqual(ui.events.KeyCode.o, map.get(.close_tab).key);
+    cx.frame_count += 1;
+    cx.frame_time_ms += 16;
+    _ = cx.render();
+    second.focus();
+    cx.handleKeyDown(.e, .{ .super = true });
+    cx.handleKeyUp(.e, .{ .super = true });
+    try std.testing.expectEqualDeep(original, map);
+    second.confirm();
+    try std.testing.expectEqual(keys.KeyCode.e, map.get(.new_tab).key);
+    for (original.chords, 0..) |chord, index| if (index != @backingInt(keys.Action.new_tab)) try std.testing.expect(chord.eql(map.chords[index]));
 }

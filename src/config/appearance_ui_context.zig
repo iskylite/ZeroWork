@@ -15,6 +15,8 @@ pub const Command = union(enum) {
     draft_values_changed,
 };
 pub const FontStatus = struct {
+    /// Resolved native registry family used by the editable terminal preview.
+    family_id: u16 = 0,
     actual_family: []const u8 = "",
     fallback: bool = false,
     problem: ?[]const u8 = null,
@@ -35,6 +37,10 @@ pub const Context = struct {
     /// The native renderer may mount the prepared background thumbnail. The
     /// view does not read a file or allocate a GPU texture itself.
     mount_image: ?*const fn (*anyopaque, *ui.Cx, *ui.Scope, f32, f32) anyerror!*ui.Node = null,
+
+    /// Reuses the host's prepared material renderer for the inline V3 preview.
+    /// Width zero means follow the parent's available width.
+    mount_material_preview: ?*const fn (*anyopaque, *ui.Cx, *ui.Scope, f32, f32) anyerror!*ui.Node = null,
 
     pub fn isBusy(self: Context) bool {
         return if (self.busy) |read| read(self.context) else false;

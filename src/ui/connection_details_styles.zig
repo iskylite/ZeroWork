@@ -3,7 +3,7 @@
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
-pub const width: f32 = 560;
+pub const width: f32 = 344;
 pub const node_width: f32 = 430;
 pub const node_height: f32 = 370;
 pub const margin: f32 = 8;
@@ -12,11 +12,11 @@ pub const gap: f32 = 6;
 pub const pointer_size: f32 = 12;
 
 pub fn height(hops: usize) f32 {
-    return 288 + @as(f32, @floatFromInt(hops -| 1)) * 52;
+    return 318 + @as(f32, @floatFromInt(hops -| 1)) * 74;
 }
 pub fn panel(h: f32, viewport_width: f32) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = @min(width, @max(0, viewport_width - margin * 2)) }, .height = .{ .px = h }, .direction = .column, .padding = ui.Padding.all(12), .gap = 0, .background = c.overlay, .border = .{ .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
+    return .{ .width = .{ .px = @min(width, @max(0, viewport_width - margin * 2)) }, .height = .{ .px = h }, .direction = .column, .padding = ui.Padding.all(15), .gap = 0, .background = c.overlay, .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
 }
 pub fn wrapper() ui.BoxStyle {
     return .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 } };
@@ -45,7 +45,7 @@ pub fn info() ui.BoxStyle {
 pub fn card() ButtonStyle {
     // Button keeps its empty default content slot. The explicit cardContent
     // owns the Figma 8 px gaps so that slot adds no extra horizontal gap.
-    return .{ .width = .fill(), .height = .{ .px = 46 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 0, .padding = ui.Padding.all(8), .corner_radius = 9, .border_width = 0, .background = theme.current().surface_2, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 52 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 0, .padding = ui.Padding.all(10), .corner_radius = 8, .border_width = 0, .background = theme.current().well, .flex_shrink = 0 };
 }
 pub fn cardContent() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .row, .align_items = .center, .gap = 8, .min_width = 0 };
@@ -54,7 +54,7 @@ pub fn identity() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .flex = 1, .min_width = 0, .direction = .column, .gap = 0 };
 }
 pub fn cardIdentity() ui.BoxStyle {
-    return .{ .width = .{ .px = 400 }, .height = .{ .fit = .{} }, .min_width = 0, .flex_shrink = 1, .direction = .column, .gap = 1 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .flex = 1, .flex_shrink = 1, .direction = .column, .gap = 1 };
 }
 pub fn cardState() ui.BoxStyle {
     return .{ .width = .{ .px = 64 }, .height = .{ .px = 16 }, .flex_shrink = 0 };
@@ -115,7 +115,7 @@ pub fn pointer(left: f32) ui.BoxStyle {
 }
 pub fn fade() ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .fill(), .height = .{ .px = 72 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .gradient = .{ .from = c.well_border.withAlpha(184), .to = ui.Color.lerp(c.surface_1, c.overlay, 0.6).withAlpha(140) }, .border = .{ .radius = 14 }, .hit_behavior = .pass_through, .z_index = -1 };
+    return .{ .width = .fill(), .height = .{ .px = 72 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .gradient = .{ .from = c.well_border.withAlpha(48), .to = ui.Color.lerp(c.surface_1, c.overlay, 0.6) }, .border = .{ .radius = 14 }, .hit_behavior = .pass_through, .z_index = -1 };
 }
 pub fn nodePanel(viewport: ui.Size) ui.BoxStyle {
     return .{ .width = .{ .px = @min(node_width, @max(160, viewport.width - margin * 2)) }, .height = .{ .px = @min(node_height, @max(160, viewport.height - margin * 2)) }, .direction = .column, .gap = 0, .padding = .{}, .background = theme.current().overlay, .border = .{ .radius = 14 }, .overflow_hidden = true };
@@ -173,4 +173,32 @@ pub fn nodeFooter() ui.BoxStyle {
 }
 pub fn primary() ButtonStyle {
     return .{ .width = .{ .px = 112 }, .height = .{ .px = 34 }, .padding = .{}, .corner_radius = 8, .background = theme.current().accent, .border_width = 0, .flex_shrink = 0 };
+}
+
+// V3 chain-only styles keep the shared node detail modal on its existing recipe.
+pub fn chainHeader() ui.BoxStyle {
+    var style = header();
+    style.height = .{ .px = 26 };
+    style.gap = 8;
+    return style;
+}
+pub fn chainTitle() ui.TextStyle {
+    return text(12, 700, 20, false);
+}
+pub fn chainBody() ui.BoxStyle {
+    var style = stack();
+    style.gap = 10;
+    return style;
+}
+pub fn chainFooter() ui.BoxStyle {
+    var style = row(45);
+    style.gap = 8;
+    style.padding = .{ .top = 12, .bottom = 2 };
+    return style;
+}
+pub fn chainAction(w: f32, primary_action: bool) ButtonStyle {
+    return .{ .width = .{ .px = w }, .height = .{ .px = 30 }, .padding = .{}, .gap = 0, .font_size = 11, .text_color = if (primary_action) ui.Color.WHITE else theme.current().fg_1, .background = if (primary_action) theme.current().accent else theme.current().well, .corner_radius = 8, .border_width = 0 };
+}
+pub fn chainBadge(online: bool) ui.BoxStyle {
+    return .{ .width = .{ .px = 46 }, .height = .{ .px = 18 }, .padding = .{ .left = 3, .right = 3 }, .background = if (online) theme.current().ok.withAlpha(26) else theme.current().surface_2, .border = .{ .radius = 5 }, .flex_shrink = 0 };
 }

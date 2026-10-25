@@ -28,7 +28,7 @@ pub fn form() ui.BoxStyle {
 // 321:851447/449: 72px theme-derived topfade and centered 32×3 grip at y7.
 pub fn fade() ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .fill(), .height = .{ .px = 72 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .gradient = .{ .from = c.well_border.withAlpha(184), .to = ui.Color.lerp(c.surface_1, c.overlay, 0.6).withAlpha(140) }, .border = .{ .radius = 14 }, .hit_behavior = .pass_through };
+    return .{ .width = .fill(), .height = .{ .px = 72 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .gradient = .{ .from = c.well_border.withAlpha(48), .to = ui.Color.lerp(c.surface_1, c.overlay, 0.6) }, .border = .{ .radius = 14 }, .hit_behavior = .pass_through };
 }
 pub fn gripRow() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 3 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 7 } }, .align_items = .center, .justify = .center, .hit_behavior = .pass_through };

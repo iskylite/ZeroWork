@@ -889,3 +889,61 @@ void zw_libssh2_session_disconnect_free(LIBSSH2_SESSION *session) {
     libssh2_session_disconnect(session, "ZeroWork session closed");
     libssh2_session_free(session);
 }
+
+/* Fixed local/remote forwarding reuses the Session's existing IO owner. */
+LIBSSH2_LISTENER *zw_libssh2_forward_listen(LIBSSH2_SESSION *session, const char *host,
+    unsigned short port, int *bound_port, int queue_max) {
+    return libssh2_channel_forward_listen_ex(session, host, port, bound_port, queue_max);
+}
+LIBSSH2_CHANNEL *zw_libssh2_forward_accept(LIBSSH2_LISTENER *listener) {
+    return libssh2_channel_forward_accept(listener);
+}
+int zw_libssh2_forward_cancel(LIBSSH2_LISTENER *listener) {
+    int rc = libssh2_channel_forward_cancel(listener);
+    return rc == 0 ? 0 : rc == LIBSSH2_ERROR_EAGAIN ? 1 : -1;
+}
+static int forward_target(const char *host, unsigned short port,
+    struct sockaddr_storage *storage, socklen_t *length) {
+    memset(storage, 0, sizeof(*storage));
+    if (!strcmp(host, "localhost")) host = "127.0.0.1";
+    struct sockaddr_in *v4 = (struct sockaddr_in *)storage;
+    if (inet_pton(AF_INET, host, &v4->sin_addr) == 1) {
+        v4->sin_family = AF_INET; v4->sin_port = htons(port);
+#ifdef __APPLE__
+        v4->sin_len = sizeof(*v4);
+#endif
+        *length = sizeof(*v4); return AF_INET;
+    }
+    struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)storage;
+    if (inet_pton(AF_INET6, host, &v6->sin6_addr) == 1) {
+        v6->sin6_family = AF_INET6; v6->sin6_port = htons(port);
+#ifdef __APPLE__
+        v6->sin6_len = sizeof(*v6);
+#endif
+        *length = sizeof(*v6); return AF_INET6;
+    }
+    return -1;
+}
+int zw_ssh_forward_target_valid(const char *host) {
+    struct sockaddr_storage target; socklen_t length;
+    return forward_target(host, 1, &target, &length) >= 0;
+}
+int zw_ssh_forward_connect(const char *host, unsigned short port) {
+    struct sockaddr_storage target; socklen_t length;
+    int family = forward_target(host, port, &target, &length);
+    if (family < 0) return -1;
+    int fd = socket(family, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+    int no_sigpipe = 1;
+    if (zw_ssh_socket_set_nonblocking(fd) != 0 ||
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe)) != 0) { close(fd); return -1; }
+    if (connect(fd, (struct sockaddr *)&target, length) != 0 && errno != EINPROGRESS) { close(fd); return -1; }
+    return fd;
+}
+int zw_ssh_forward_connect_ready(int fd) {
+    struct pollfd p = { .fd = fd, .events = POLLOUT };
+    int rc = poll(&p, 1, 0);
+    if (rc <= 0) return rc < 0 && errno != EINTR ? -1 : 0;
+    int error = 0; socklen_t length = sizeof(error);
+    return getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0 && !error ? 1 : -1;
+}

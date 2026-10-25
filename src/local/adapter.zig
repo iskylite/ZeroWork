@@ -580,7 +580,7 @@ pub const LocalAdapter = struct {
         return .{ .handle = handle, .stdout = stdout, .stderr = try allocator.dupe(u8, job.stderr.items), .exit = job.exit, .cancelled = job.cancelled, .timed_out = job.timed_out, .truncated = job.truncated, .cleanup = job.cleanup, .done = job.done };
     }
 
-    const service_vtable: terminal.Service.VTable = .{ .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .export_recording = serviceExportRecording, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel };
+    const service_vtable: terminal.Service.VTable = .{ .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .export_recording = serviceExportRecording, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel };
     fn serviceTrustedSnapshot(raw: *anyopaque, binding: host.ServiceHandle, allocator: std.mem.Allocator) !?terminal.trusted_edit.Snapshot {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));
         const entry = try self.resolve(binding, .terminal, true);
@@ -618,6 +618,15 @@ pub const LocalAdapter = struct {
         if (!entry.mutex.tryLock()) return error.WorkerBusy;
         defer entry.mutex.unlock();
         if (entry.trusted) |*bridge| bridge.revoke(.integration_lost);
+    }
+    fn serviceApplicationRecord(raw: *anyopaque, binding: host.ServiceHandle, record: terminal.ApplicationRecord) !void {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, false);
+        if (!entry.handle.eql(record.owner)) return error.StaleOwner;
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        const recording = entry.recording;
+        entry.mutex.unlock();
+        if (recording) |value| try value.appendApplication(record);
     }
     fn serviceExportRecording(raw: *anyopaque, binding: host.ServiceHandle, kind: terminal.RecordingKind, io: std.Io, dir: std.Io.Dir, path: []const u8) !void {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));

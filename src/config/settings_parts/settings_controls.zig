@@ -1,4 +1,4 @@
-//! Shared native controls for the Figma settings accordion rows.
+//! Shared native controls for the frozen V3 settings cards and field rows.
 const std = @import("std");
 const ui = @import("ui");
 const binding = @import("../settings_content_view.zig");
@@ -12,7 +12,7 @@ pub const Summary = *const fn (config.Config, []u8) anyerror![]const u8;
 pub const Enabled = *const fn (config.Config) bool;
 
 fn inputPresentation(key: Key, label: []const u8) struct { label: []const u8, unit: ?[]const u8 } {
-    if (std.mem.eql(u8, key.section, "log") and std.mem.eql(u8, key.key, "retention_days")) return .{ .label = "保留时长", .unit = "天" };
+    if (std.mem.eql(u8, key.section, "log") and std.mem.eql(u8, key.key, "retention_days")) return .{ .label = "保留天数", .unit = "天" };
     if (std.mem.lastIndexOf(u8, label, "（")) |start| {
         if (std.mem.endsWith(u8, label, "）")) return .{ .label = label[0..start], .unit = label[start + "（".len .. label.len - "）".len] };
     }
@@ -20,11 +20,11 @@ fn inputPresentation(key: Key, label: []const u8) struct { label: []const u8, un
 }
 
 /// Arrange the native Accordion parts once for every settings page. The title
-/// and its collapsed summary share a flexible column; the chevron owns the tail.
+/// and its description share a flexible column in either fold state.
 pub fn sectionHeader(cx: *ui.Cx, scope: *ui.Scope, result: ui.widgets.AccordionItemResult, icon: ui.SvgAsset, expanded: bool, summary: []const u8, id: []const u8) !*ui.Node {
     result.item.setStyleInline(cx.allocator, S.sectionState(expanded));
-    result.header.setStyleInline(cx.allocator, S.summaryHeader(!expanded and summary.len != 0));
-    result.header.style.padding = .ZERO;
+    result.header.setStyleInline(cx.allocator, S.summaryHeader(summary.len != 0));
+
     result.header.removeChild(result.chevron);
     result.header.removeChild(result.title);
     try result.header.appendChild(cx.allocator, try ui.iconTintStyled(cx, icon, S.theme.current().fg_2, S.sectionIcon(undefined)));
@@ -33,9 +33,9 @@ pub fn sectionHeader(cx: *ui.Cx, scope: *ui.Scope, result: ui.widgets.AccordionI
     result.title.setStyleInline(cx.allocator, S.sectionTitle(undefined));
     if (result.title.getText()) |old| {
         var text = old;
-        text.font_size = 12;
-        text.font_weight = 500;
-        text.line_height = 1.5;
+        text.font_size = 13;
+        text.font_weight = 650;
+        text.line_height = 20.0 / 13.0;
         text.color = S.theme.current().fg_1;
         result.title.setText(text);
     }
@@ -43,7 +43,7 @@ pub fn sectionHeader(cx: *ui.Cx, scope: *ui.Scope, result: ui.widgets.AccordionI
     const summary_node = try ui.textStyled(cx, S.sectionSummary, try owned(scope, summary));
     summary_node.style.width = .fill();
     summary_node.setStyleInline(cx.allocator, .{ .min_width = 0 });
-    summary_node.setDisplay(if (!expanded and summary.len != 0) .flex else .none);
+    summary_node.setDisplay(if (summary.len != 0) .flex else .none);
     summary_node.meta.ownership.meta.test_id = try stableId(scope, id, ".summary");
     try heading.appendChild(cx.allocator, summary_node);
     result.chevron.setStyleInline(cx.allocator, S.sectionChevron(undefined));
@@ -80,12 +80,14 @@ pub const Page = struct {
     root: *ui.Node,
     fields: std.ArrayList(*Field) = .empty,
     sections: std.ArrayList(*Section) = .empty,
+    fixed_controls: std.ArrayList(*ui.Node) = .empty,
 
     pub fn create(cx: *ui.Cx, bound: *binding.Binding, id: []const u8) !*Page {
         const self = try bound.scope.allocator.create(Page);
         self.* = .{ .bound = bound, .cx = cx, .root = try ui.boxStyled(cx, S.sectionColumn, .{}) };
         try bound.scope.onCleanup(Page, self, Page.cleanup);
         self.root.meta.ownership.meta.test_id = id;
+        try cx.addAfterLayoutHook(self, Page.afterLayout);
         try bound.scope.createEffect(.{ .page = self }, struct {
             fn run(ctx: anytype) void {
                 _ = ctx.page.bound.saving.get();
@@ -96,9 +98,34 @@ pub const Page = struct {
         return self;
     }
     fn cleanup(self: *Page) void {
+        self.cx.removeAfterLayoutHook(self);
         self.fields.deinit(self.bound.scope.allocator);
         self.sections.deinit(self.bound.scope.allocator);
+        self.fixed_controls.deinit(self.bound.scope.allocator);
         self.bound.scope.allocator.destroy(self);
+    }
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *Page = @ptrCast(@alignCast(raw));
+        const width: f32 = if (self.cx.viewport.width <= 900) 210 else 220;
+        var changed = false;
+        for (self.fields.items) |field| {
+            if (field.checked != null or field.control == null) continue;
+            const outer = field.row.children.items[field.row.children.items.len - 1];
+            const inner = if (field.input_result) |input| input.input_container else field.control.?;
+            for ([_]*ui.Node{ outer, field.control.?, inner }) |node| {
+                if (node.style.width != .px or node.style.width.px != width) {
+                    node.setStyleInline(self.cx.allocator, .{ .width = .{ .px = width }, .flex_shrink = 0 });
+                    changed = true;
+                }
+            }
+        }
+        for (self.fixed_controls.items) |node| {
+            if (node.style.width != .px or node.style.width.px != width) {
+                node.setStyleInline(self.cx.allocator, .{ .width = .{ .px = width }, .flex_shrink = 0 });
+                changed = true;
+            }
+        }
+        return if (changed) .needs_layout else .done;
     }
     pub fn refresh(self: *Page) void {
         for (self.fields.items) |field| field.refresh();
@@ -110,7 +137,7 @@ pub const Page = struct {
     }
     pub fn section(self: *Page, title: []const u8, description: []const u8, icon: ui.SvgAsset, bit: u6, id: []const u8, summary: ?Summary) !*Section {
         const self_section = try self.bound.scope.allocator.create(Section);
-        self_section.* = .{ .page = self, .bit = bit, .root = undefined, .body = undefined, .header = undefined, .expanded = undefined, .summary = summary, .description = description, .summary_node = undefined };
+        self_section.* = .{ .page = self, .bit = bit, .root = undefined, .body = undefined, .header = undefined, .expanded = undefined, .summary = summary, .description = description, .title = title, .summary_node = undefined };
         try self.bound.scope.onCleanup(Section, self_section, Section.cleanup);
         const query = self.bound.controller.search_query;
         const expanded = query.len != 0 or self.bound.controller.folded_sections & (@as(u64, 1) << bit) == 0;
@@ -127,7 +154,8 @@ pub const Page = struct {
             result.header.setFocusable(false);
         }
         result.body.setStyleInline(self.cx.allocator, S.column(undefined));
-        result.body.style.padding = .ZERO;
+        result.body.style.padding = .{ .left = 16, .right = 16, .bottom = 8 };
+        result.body.style.gap = 0;
         try self.root.appendChild(self.cx.allocator, result.item);
         try self.sections.append(self.bound.scope.allocator, self_section);
         self_section.refresh();
@@ -149,13 +177,14 @@ pub const Section = struct {
     expanded: *ui.Signal(bool),
     summary: ?Summary,
     description: []const u8,
+    title: []const u8,
     summary_node: *ui.Node,
     fn cleanup(self: *Section) void {
         self.page.bound.scope.allocator.destroy(self);
     }
     fn fold(self: *Section, open: bool) void {
         const bound = self.page.bound;
-        if (bound.controller.state() == .saving) return;
+        if (bound.controller.state() == .saving or bound.controller.search_query.len != 0) return;
         self.expanded.set(open);
         const mask = @as(u64, 1) << self.bit;
         if (open) bound.controller.folded_sections &= ~mask else bound.controller.folded_sections |= mask;
@@ -166,8 +195,8 @@ pub const Section = struct {
         const text = if (self.summary) |render| render(self.page.bound.controller.model.value, &buffer) catch self.description else self.description;
         self.summary_node.setTextContent(self.page.cx.allocator, text) catch {};
         const expanded = self.expanded.peek();
-        self.summary_node.setDisplay(if (!expanded and text.len != 0) .flex else .none);
-        self.header.setStyleInline(self.page.cx.allocator, S.summaryHeader(!expanded and text.len != 0));
+        self.summary_node.setDisplay(if (text.len != 0) .flex else .none);
+        self.header.setStyleInline(self.page.cx.allocator, S.summaryHeader(text.len != 0));
         self.root.setStyleInline(self.page.cx.allocator, S.sectionState(expanded));
 
         const saving = self.page.bound.controller.state() == .saving;
@@ -177,7 +206,12 @@ pub const Section = struct {
     pub fn matches(self: *Section, terms: []const u8) bool {
         return binding.matches(self.page.bound.controller.search_query, terms);
     }
+    fn matchesField(self: *Section, label: []const u8, key: []const u8, help: []const u8) bool {
+        const query = self.page.bound.controller.search_query;
+        return binding.matches(query, self.title) or binding.matches(query, self.description) or binding.matches(query, label) or binding.matches(query, key) or binding.matches(query, help);
+    }
     pub fn input(self: *Section, key: Key, label: []const u8, help: []const u8, enabled: ?Enabled) !void {
+        if (!self.matchesField(label, key.key, help)) return;
         const presentation = inputPresentation(key, label);
         const field = try Field.create(self.page, key, presentation.label, help, enabled);
         var buffer: [512]u8 = undefined;
@@ -200,6 +234,7 @@ pub const Section = struct {
         field.refresh();
     }
     pub fn toggle(self: *Section, key: Key, label: []const u8, help: []const u8, enabled: ?Enabled) !void {
+        if (!self.matchesField(label, key.key, help)) return;
         const field = try Field.create(self.page, key, label, help, enabled);
         field.checked = try self.page.bound.scope.createSignal(bool, values.read(self.page.bound.controller.model.value, key.section, key.key).?.boolean);
         const node = try ui.widgets.Switch(.{ .checked = field.checked.?, .disabled = field.disabled, .on_change = self.page.cx.on(Field, field, Field.toggle) }).mount(self.page.bound.scope, self.page.cx);
@@ -217,12 +252,14 @@ pub const Section = struct {
         field.refresh();
     }
     pub fn select(self: *Section, key: Key, label: []const u8, help: []const u8, options: []const ui.widgets.SelectOption, enabled: ?Enabled) !void {
+        if (!self.matchesField(label, key.key, help)) return;
         const field = try Field.create(self.page, key, label, help, enabled);
         field.selected = try self.page.bound.scope.createSignal(?[]const u8, try owned(self.page.bound.scope, values.read(self.page.bound.controller.model.value, key.section, key.key).?.text));
         const result = try ui.widgets.Select(.{ .options = options, .value = field.selected.?, .width = S.geometry.control_width, .disabled = field.disabled, .on_change = self.page.cx.on(Field, field, Field.select) }).mount(self.page.bound.scope, self.page.cx);
         result.wrapper.style.width = .{ .px = S.geometry.control_width };
         result.wrapper.style.flex_shrink = 0;
         result.trigger.setStyleInline(self.page.cx.allocator, S.fieldControl(undefined));
+        if (result.trigger.parent) |trigger_owner| trigger_owner.setStyleInline(self.page.cx.allocator, .{ .width = .fill(), .min_width = 0 });
         result.trigger.meta.ownership.meta.test_id = try stableId(self.page.bound.scope, "settings.field.", key.key);
         result.content_slot.setStyleInline(self.page.cx.allocator, .{ .font_size = 11.5, .font_weight = 400 });
         field.control = result.trigger;
@@ -239,30 +276,33 @@ pub const Section = struct {
         field.refresh();
     }
     pub fn button(self: *Section, label: []const u8, value: []const u8, id: []const u8, action: binding.Action) !void {
+        if (!self.matchesField(label, id, "")) return;
         const row = try plainRow(self.page.cx, label);
         const click = try self.page.bound.scope.allocator.create(ActionClick);
         click.* = .{ .page = self.page, .action = action };
         try self.page.bound.scope.onCleanup(ActionClick, click, ActionClick.cleanup);
         const state = self.page.actionState(action);
-        const node = try ui.widgets.Button(.{ .label = try owned(self.page.bound.scope, value), .variant = .secondary, .disabled = self.page.bound.controller.state() == .saving or !state.enabled, .on_click = self.page.cx.on(ActionClick, click, ActionClick.run), .base_style = S.fieldButton(), .hover_style = S.buttonHover() }).mount(self.page.bound.scope, self.page.cx);
+        const node = try ui.widgets.Button(.{ .label = try owned(self.page.bound.scope, value), .variant = .secondary, .disabled = self.page.bound.controller.state() == .saving or !state.enabled, .on_click = self.page.cx.on(ActionClick, click, ActionClick.run), .base_style = S.actionControl(false), .hover_style = S.buttonHover() }).mount(self.page.bound.scope, self.page.cx);
         node.meta.ownership.meta.test_id = id;
         try row.appendChild(self.page.cx.allocator, node);
         try self.body.appendChild(self.page.cx.allocator, row);
     }
-    pub fn iconAction(self: *Section, label: []const u8, icon: ui.SvgAsset, id: []const u8, action: binding.Action) !void {
+    pub fn iconAction(self: *Section, label: []const u8, action_label: []const u8, icon: ui.SvgAsset, id: []const u8, action: binding.Action) !void {
+        if (!self.matchesField(label, id, action_label)) return;
         const row = try plainRow(self.page.cx, label);
         const click = try self.page.bound.scope.allocator.create(ActionClick);
         click.* = .{ .page = self.page, .action = action };
         try self.page.bound.scope.onCleanup(ActionClick, click, ActionClick.cleanup);
         const state = self.page.actionState(action);
         const tip = try ui.widgets.Tooltip(.{ .text = state.reason orelse label, .open_delay_ms = 450 }).mount(self.page.bound.scope, self.page.cx);
-        const node = try ui.widgets.Button(.{ .icon_asset = icon, .icon_only = true, .icon_size = @as(f32, 16), .a11y_label = state.reason orelse label, .variant = .secondary, .disabled = self.page.bound.controller.state() == .saving or !state.enabled, .on_click = self.page.cx.on(ActionClick, click, ActionClick.run), .base_style = S.button(S.geometry.control_height, false), .hover_style = S.buttonHover() }).mount(self.page.bound.scope, self.page.cx);
+        const node = try ui.widgets.Button(.{ .label = action_label, .icon_asset = icon, .icon_size = @as(f32, 14), .a11y_label = state.reason orelse action_label, .variant = .secondary, .disabled = self.page.bound.controller.state() == .saving or !state.enabled, .on_click = self.page.cx.on(ActionClick, click, ActionClick.run), .base_style = S.actionControl(action == .clear_logs or action == .clear_all), .hover_style = S.buttonHover() }).mount(self.page.bound.scope, self.page.cx);
         node.meta.ownership.meta.test_id = id;
         try tip.trigger.appendChild(self.page.cx.allocator, node);
         try row.appendChild(self.page.cx.allocator, tip.wrapper);
         try self.body.appendChild(self.page.cx.allocator, row);
     }
     pub fn directory(self: *Section, key: Key, label: []const u8) !void {
+        if (!self.matchesField(label, key.key, "")) return;
         const row = try plainRow(self.page.cx, label);
         const click = try self.page.bound.scope.allocator.create(DirectoryClick);
         click.* = .{ .page = self.page, .key = key };
@@ -270,13 +310,20 @@ pub const Section = struct {
         const path = values.read(self.page.bound.controller.model.value, key.section, key.key).?.text;
         const node = try ui.widgets.Button(.{ .label = try owned(self.page.bound.scope, path), .icon_asset = ui.icons.folder, .variant = .secondary, .disabled = self.page.bound.controller.state() == .saving, .on_click = self.page.cx.on(DirectoryClick, click, DirectoryClick.run), .base_style = S.fieldButton(), .hover_style = S.buttonHover() }).mount(self.page.bound.scope, self.page.cx);
         click.node = node;
+        try self.page.fixed_controls.append(self.page.bound.scope.allocator, node);
         node.meta.ownership.meta.test_id = try stableId(self.page.bound.scope, "settings.field.", key.key);
         try row.appendChild(self.page.cx.allocator, node);
         try self.body.appendChild(self.page.cx.allocator, row);
     }
     pub fn readonly(self: *Section, label: []const u8, value: []const u8) !void {
+        if (!self.matchesField(label, "", "")) return;
         const row = try plainRow(self.page.cx, label);
-        const text = try ui.textStyled(self.page.cx, S.value, value);
+        var style = S.value(undefined);
+        style.wrap = .word;
+        style.text_align = .end;
+        const text = try ui.text(self.page.cx, try owned(self.page.bound.scope, value), style);
+        text.setStyleInline(self.page.cx.allocator, .{ .width = .{ .px = 220 }, .flex_shrink = 0, .min_width = 0 });
+        try self.page.fixed_controls.append(self.page.bound.scope.allocator, text);
         try row.appendChild(self.page.cx.allocator, text);
         try self.body.appendChild(self.page.cx.allocator, row);
     }
@@ -317,7 +364,13 @@ const Field = struct {
         title.style.width = .fill();
         title.style.flex = 1;
         try labels.appendChild(page.cx.allocator, title);
-        if (help.len != 0) try labels.appendChild(page.cx.allocator, try helpButton(page, key, help));
+        if (help.len != 0) {
+            const detail = try ui.textStyled(page.cx, S.sectionSummary, try owned(page.bound.scope, help));
+            detail.style.width = .fill();
+            detail.setStyleInline(page.cx.allocator, .{ .max_width = 360 });
+            detail.meta.ownership.meta.test_id = try stableId(page.bound.scope, "settings.help.content.", key.key);
+            try labels.appendChild(page.cx.allocator, detail);
+        }
         try self.row.appendChild(page.cx.allocator, labels);
         try self.root.appendChild(page.cx.allocator, self.row);
         try self.root.appendChild(page.cx.allocator, self.error_label);
@@ -391,7 +444,7 @@ const Field = struct {
 pub fn valueText(value: config.Config, key: Key, buffer: []u8) ![]const u8 {
     if (std.mem.eql(u8, key.section, "ssh") and std.mem.eql(u8, key.key, "reconnect_backoff")) {
         const sequence = value.ssh.reconnect_backoff;
-        return std.fmt.bufPrint(buffer, "[{d},{d},{d},{d},{d}]", .{ sequence[0], sequence[1], sequence[2], sequence[3], sequence[4] });
+        return std.fmt.bufPrint(buffer, "{d}, {d}, {d}, {d}, {d}", .{ sequence[0], sequence[1], sequence[2], sequence[3], sequence[4] });
     }
     return switch (values.read(value, key.section, key.key) orelse return error.UnknownKey) {
         .text => |text| text,

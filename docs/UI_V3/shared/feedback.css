@@ -1,0 +1,7 @@
+.zw-feedback-stack{position:absolute;right:20px;top:62px;z-index:150;display:flex;flex-direction:column;gap:8px;width:340px;max-width:calc(100% - 40px);pointer-events:none}.zw-feedback{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--overlay);border:1px solid var(--line);border-radius:9px;box-shadow:var(--shadow);color:var(--fg);font:12px/18px Inter,-apple-system,sans-serif;pointer-events:auto;backdrop-filter:blur(var(--material-blur,0px))}.zw-feedback>span{flex:1;min-width:0}.zw-feedback strong{font-weight:500}.zw-feedback small{display:block;color:var(--muted);margin-top:2px;font-size:11px}.zw-feedback button{background:transparent;color:var(--muted);border:0;cursor:pointer;padding:3px;font:inherit}.zw-feedback-local{font-size:11px;padding:6px 9px}.zw-feedback-local small{max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.zw-feedback-stack[data-obscured=true]>.zw-feedback:not(.zw-feedback-local){visibility:hidden}
+
+.zw-feedback[hidden]{display:none}
+
+.zw-feedback-stack[data-obscured=true]>.zw-feedback[data-severity=error]{visibility:visible}

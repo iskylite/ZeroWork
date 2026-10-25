@@ -10,7 +10,7 @@ const ssh_channel = @import("channel.zig");
 const native = @import("generated_ssh_session");
 const clock = @import("../../platform/realtime.zig");
 
-pub const ListenerState = enum(u8) { off = 0, listening = 1, error_state = 2 };
+pub const ListenerState = enum(u8) { off = 0, listening = 1, error_state = 2, starting = 3 };
 /// 本地监听地址。默认只绑定回环地址；`any` 暴露到本机所有网卡。
 pub const BindAddress = enum { loopback, any };
 pub fn bindAddressName(address: BindAddress) []const u8 {
@@ -19,7 +19,25 @@ pub fn bindAddressName(address: BindAddress) []const u8 {
         .any => "0.0.0.0",
     };
 }
+pub const ForwardMode = enum { socks5, local, remote };
+/// Fixed targets are copied, never borrowed from UI draft memory.
+pub const Target = struct {
+    host: [256:0]u8 = @splat(0),
+    len: u16 = 0,
+    port: u16 = 0,
+    pub fn init(host: []const u8, port: u16) !Target {
+        if (host.len == 0 or host.len > 255 or port == 0 or std.mem.indexOfScalar(u8, host, 0) != null) return error.InvalidForwardTarget;
+        var result: Target = .{ .port = port, .len = @intCast(host.len) };
+        @memcpy(result.host[0..host.len], host);
+        return result;
+    }
+    pub fn name(self: *const Target) [:0]const u8 {
+        return self.host[0..self.len :0];
+    }
+};
 pub const Options = struct {
+    mode: ForwardMode = .socks5,
+    target: Target = .{},
     /// true = 127.0.0.1，false = 0.0.0.0。
     bind127: bool = true,
     /// 绑定到 0.0.0.0 时必须由明确的红色风险确认设置为 true。
@@ -92,7 +110,7 @@ const SockaddrIn = switch (builtin.os.tag) {
 const ListenSocket = struct { fd: std.posix.fd_t, port: u16 };
 
 const ClientConn = struct {
-    const Stage = enum { greeting, methods, request_header, domain_length, request_body, control, opening, stream, closing };
+    const Stage = enum { connecting_local, greeting, methods, request_header, domain_length, request_body, control, opening, stream, closing };
     const AfterControl = enum { request_header, stream, closing };
     fd: std.posix.fd_t,
     stage: Stage = .greeting,
@@ -118,6 +136,11 @@ const ClientConn = struct {
 
 pub const Socks5Listener = struct {
     allocator: std.mem.Allocator,
+    options: Options = .{},
+    remote_listener: ?*native.LIBSSH2_LISTENER = null,
+    remote_listen_pending: bool = false,
+    remote_cancel_unknown: bool = false,
+    last_failure: ?anyerror = null,
     /// Exclusive no-shell lease while running; its owner must not call libssh2
     /// until stop has joined the IO thread. The Session outlives this listener.
     session: ?*ssh_session.Session = null,
@@ -197,19 +220,32 @@ pub const Socks5Listener = struct {
         }
         if (!options.bind127 and !options.exposure_confirmed) return error.ExposureNotConfirmed;
 
+        if (options.max_connections == 0) return error.InvalidForwardLimit;
+        if (options.mode != .socks5) {
+            if (options.target.len == 0 or options.target.len > 255 or options.target.port == 0) return error.InvalidForwardTarget;
+            if (options.target.host[options.target.len] != 0 or std.mem.indexOfScalar(u8, options.target.host[0..options.target.len], 0) != null) return error.InvalidForwardTarget;
+        }
+        if (options.mode == .remote and native.zw_ssh_forward_target_valid(options.target.name().ptr) == 0) return error.RemoteTargetRequiresIp;
+        if (options.mode == .remote and self.session == null) return error.SessionNotActive;
+        self.options = options;
+        self.last_failure = null;
+        self.remote_cancel_unknown = false;
+        self.remote_listen_pending = options.mode == .remote;
         const address: BindAddress = if (options.bind127) .loopback else .any;
-        const listen = openListenSocket(options.requested_port, address) catch |err| {
-            self.state_raw.store(@backingInt(ListenerState.error_state), .release);
-            return err;
-        };
-        self.listen_fd = listen.fd;
-        self.bound_port.store(listen.port, .release);
+        if (options.mode != .remote) {
+            const listen = openListenSocket(options.requested_port, address) catch |err| {
+                self.state_raw.store(@backingInt(ListenerState.error_state), .release);
+                return err;
+            };
+            self.listen_fd = listen.fd;
+            self.bound_port.store(listen.port, .release);
+        } else self.bound_port.store(0, .release);
         self.max_connections = options.max_connections;
         self.bound_address = address;
         self.active_admissions.store(0, .release);
         self.stop_flag.store(false, .release);
 
-        self.state_raw.store(@backingInt(ListenerState.listening), .release);
+        self.state_raw.store(@backingInt(if (options.mode == .remote) ListenerState.starting else ListenerState.listening), .release);
         if (self.owner_driven) {
             self.owner_thread = std.Thread.getCurrentId();
             self.owner_paused = false;
@@ -285,7 +321,7 @@ pub const Socks5Listener = struct {
     pub fn cleanupReceipt(self: *Socks5Listener) ssh_session.ReleaseReceipt {
         if (self.owner_driven) return self.ownerReceipt();
         if (self.accept_thread != null) return .awaiting;
-        if (self.clients.items.len == 0) return .released;
+        if (self.clients.items.len == 0 and self.remote_listener == null and !self.remote_listen_pending) return .released;
         const session = self.session orelse return .unknown;
         const receipt = session.closeReceipt();
         if (receipt == .released) self.releaseAfterTransport();
@@ -306,7 +342,10 @@ pub const Socks5Listener = struct {
             _ = self.ownerStop();
             return;
         }
-        _ = self.acceptOne();
+        if (self.options.mode == .remote) {
+            self.stepRemoteListener();
+            if (self.remote_listener != null and !self.owner_paused) _ = self.acceptRemote();
+        } else _ = self.acceptOne();
         for (self.clients.items) |conn| _ = self.stepClient(conn);
         self.reapClosed();
     }
@@ -337,6 +376,10 @@ pub const Socks5Listener = struct {
         self.owner_paused = false;
         self.owner_close_unknown = false;
         native.zw_libssh2_session_nonblocking(session.handle.?);
+        if (self.options.mode == .remote) {
+            self.remote_listen_pending = true;
+            self.state_raw.store(@backingInt(ListenerState.starting), .release);
+        }
     }
     pub fn ownerStop(self: *Socks5Listener) ssh_session.ReleaseReceipt {
         self.ownerCheck() catch return .unknown;
@@ -346,6 +389,7 @@ pub const Socks5Listener = struct {
             self.listen_fd = -1;
         }
         self.bound_port.store(0, .release);
+        self.cancelRemote();
         for (self.clients.items) |conn| self.beginClose(conn);
         for (self.clients.items) |conn| _ = self.stepClose(conn);
         self.reapClosed();
@@ -354,6 +398,7 @@ pub const Socks5Listener = struct {
         return receipt;
     }
     fn ownerReceipt(self: *Socks5Listener) ssh_session.ReleaseReceipt {
+        if (self.remote_listener != null or self.remote_listen_pending) return if (self.remote_cancel_unknown) .unknown else .awaiting;
         if (self.clients.items.len == 0) return .released;
         return if (self.owner_close_unknown) .unknown else .awaiting;
     }
@@ -369,7 +414,12 @@ pub const Socks5Listener = struct {
         var polls: std.ArrayList(std.posix.pollfd) = .empty;
         defer polls.deinit(self.allocator);
         while (!self.stop_flag.load(.acquire)) {
-            var progressed = self.acceptOne();
+            var progressed = false;
+            if (self.options.mode == .remote) {
+                self.stepRemoteListener();
+                if (self.remote_listener != null) progressed = self.acceptRemote();
+                if (self.last_failure != null) break;
+            } else progressed = self.acceptOne();
             for (self.clients.items) |conn| progressed = self.stepClient(conn) or progressed;
             self.reapClosed();
             if (progressed) continue;
@@ -384,6 +434,7 @@ pub const Socks5Listener = struct {
                     .greeting, .methods, .request_header, .domain_length, .request_body => std.posix.POLL.IN,
                     .control => std.posix.POLL.OUT,
                     .stream => (if (conn.up_sent == conn.up_len) @as(i16, std.posix.POLL.IN) else 0) | (if (conn.down_sent < conn.down_len) @as(i16, std.posix.POLL.OUT) else 0),
+                    .connecting_local => std.posix.POLL.OUT,
                     .opening, .closing => 0,
                 };
                 if (events != 0) polls.append(self.allocator, .{ .fd = conn.fd, .events = events, .revents = 0 }) catch break;
@@ -392,20 +443,74 @@ pub const Socks5Listener = struct {
         }
         if (!self.stop_flag.load(.acquire)) self.state_raw.store(@backingInt(ListenerState.error_state), .release);
         // All accepted sockets and native children still belong to this owner.
+        self.cancelRemote();
         for (self.clients.items) |conn| self.beginClose(conn);
         const deadline = clock.monotonicNs() + 250 * std.time.ns_per_ms;
-        while (self.clients.items.len != 0 and clock.monotonicNs() < deadline) {
+        while ((self.clients.items.len != 0 or self.remote_listener != null or self.remote_listen_pending) and clock.monotonicNs() < deadline) {
+            self.cancelRemote();
             for (self.clients.items) |conn| _ = self.stepClose(conn);
             self.reapClosed();
             if (self.clients.items.len != 0) sleepMs(1);
         }
-        if (self.clients.items.len != 0) {
+        if (self.clients.items.len != 0 or self.remote_listener != null or self.remote_listen_pending) {
             // This listener's Session is exclusive, with no PTY/other IO owner.
             // A stuck EAGAIN context cannot be abandoned while freeing buffers.
             if (self.session) |session| {
                 if (session.closeReceipt() == .released) self.releaseAfterTransport();
             }
         }
+    }
+
+    fn stepRemoteListener(self: *Socks5Listener) void {
+        if (!self.remote_listen_pending or self.owner_paused) return;
+        const session = self.session orelse return;
+        const handle = session.handle orelse return;
+        const ticket: ssh_session.Session.OpenTicket = .{ .kind = .forward, .id = @as(u64, 0xf000000000000000) | self.options.requested_port };
+        if (!session.claimChannelOpen(ticket)) return;
+        var actual: c_int = 0;
+        const result = native.zw_libssh2_forward_listen(handle, if (self.options.bind127) "127.0.0.1" else "0.0.0.0", self.options.requested_port, &actual, @intCast(@min(self.options.max_connections, 64)));
+        if (result == null and native.zw_libssh2_session_last_error(handle) == -37) return;
+        session.finishChannelOpen(ticket);
+        self.remote_listen_pending = false;
+        if (result == null or actual <= 0 or actual > 65535) {
+            self.last_failure = error.RemoteForwardListenDenied;
+            self.state_raw.store(@backingInt(ListenerState.error_state), .release);
+            return;
+        }
+        self.remote_listener = result;
+        self.bound_port.store(@intCast(actual), .release);
+        self.state_raw.store(@backingInt(ListenerState.listening), .release);
+    }
+    fn cancelRemote(self: *Socks5Listener) void {
+        // libssh2 global-request retry context must settle before cancellation.
+        if (self.remote_listen_pending) {
+            self.owner_paused = false;
+            self.stepRemoteListener();
+            self.owner_paused = true;
+            if (self.remote_listen_pending) return;
+        }
+        if (self.remote_listener) |listener| {
+            const rc = native.zw_libssh2_forward_cancel(listener);
+            if (rc == 0) self.remote_listener = null else if (rc < 0) self.remote_cancel_unknown = true;
+        }
+    }
+    fn acceptRemote(self: *Socks5Listener) bool {
+        if (self.active_admissions.load(.acquire) >= self.max_connections) return false;
+        const listener = self.remote_listener orelse return false;
+        self.clients.ensureUnusedCapacity(self.allocator, 1) catch return false;
+        const conn = self.allocator.create(ClientConn) catch return false;
+        const raw = native.zw_libssh2_forward_accept(listener) orelse {
+            self.allocator.destroy(conn);
+            return false;
+        };
+        conn.* = .{ .fd = -1, .channel = .{ .handle = @ptrCast(raw) }, .stage = .closing, .deadline = clock.monotonicNs() + @as(i128, handshake_guard_ms) * std.time.ns_per_ms };
+        self.clients.appendAssumeCapacity(conn);
+        _ = self.stats_total.fetchAdd(1, .monotonic);
+        _ = self.stats_active.fetchAdd(1, .monotonic);
+        _ = self.active_admissions.fetchAdd(1, .monotonic);
+        conn.fd = native.zw_ssh_forward_connect(self.options.target.name().ptr, self.options.target.port);
+        if (conn.fd >= 0) conn.stage = .connecting_local else self.last_failure = error.RemoteTargetConnectFailed;
+        return true;
     }
 
     fn acceptOne(self: *Socks5Listener) bool {
@@ -425,7 +530,17 @@ pub const Socks5Listener = struct {
             return true;
         };
         conn.* = .{ .fd = fd, .deadline = clock.monotonicNs() + @as(i128, handshake_guard_ms) * std.time.ns_per_ms };
+        if (self.options.mode == .local) {
+            conn.host = self.allocator.dupeSentinel(u8, self.options.target.name(), 0) catch {
+                self.allocator.destroy(conn);
+                closeFd(fd);
+                return true;
+            };
+            conn.port = self.options.target.port;
+            conn.stage = .opening;
+        }
         self.clients.append(self.allocator, conn) catch {
+            if (conn.host) |host| self.allocator.free(host);
             self.allocator.destroy(conn);
             closeFd(fd);
             return true;
@@ -439,6 +554,18 @@ pub const Socks5Listener = struct {
     fn stepClient(self: *Socks5Listener, conn: *ClientConn) bool {
         if (conn.stage != .stream and conn.stage != .closing and clock.monotonicNs() >= conn.deadline) self.beginClose(conn);
         return switch (conn.stage) {
+            .connecting_local => blk: {
+                const ready = native.zw_ssh_forward_connect_ready(conn.fd);
+                if (ready < 0) {
+                    self.last_failure = error.RemoteTargetConnectFailed;
+                    self.beginClose(conn);
+                    break :blk true;
+                }
+                if (ready == 0) break :blk false;
+                conn.stage = .stream;
+                conn.deadline = clock.monotonicNs() + @as(i128, io_guard_ms) * std.time.ns_per_ms;
+                break :blk true;
+            },
             .greeting, .methods, .request_header, .domain_length, .request_body => self.stepHandshake(conn),
             .control => self.stepControl(conn),
             .opening => self.stepOpen(conn),
@@ -561,7 +688,7 @@ pub const Socks5Listener = struct {
         if (self.pending_open != null and self.pending_open != conn) return false;
         if (self.pending_close != null) return false;
         if (self.owner_paused and self.pending_open != conn) {
-            self.queueReply(conn, .network_unreachable, .closing);
+            if (self.options.mode == .socks5) self.queueReply(conn, .network_unreachable, .closing) else self.beginClose(conn);
             return true;
         }
         const session = self.session orelse {
@@ -574,12 +701,18 @@ pub const Socks5Listener = struct {
             if (err == error.OpenDirectTcpipFailed and native.zw_libssh2_session_last_error(session.handle.?) == -37) return false;
             self.pending_open = null;
             if (conn.stage == .closing) return true;
-            self.queueReply(conn, tunnelErrorReply(err), .closing);
+            if (self.options.mode != .socks5) self.last_failure = err;
+            if (self.options.mode == .socks5) self.queueReply(conn, tunnelErrorReply(err), .closing) else self.beginClose(conn);
             return true;
         };
         self.pending_open = null;
         conn.channel = channel;
-        if (conn.stage != .closing) self.queueReply(conn, .succeeded, .stream);
+        if (conn.stage != .closing) {
+            if (self.options.mode == .socks5) self.queueReply(conn, .succeeded, .stream) else {
+                conn.stage = .stream;
+                conn.deadline = clock.monotonicNs() + @as(i128, io_guard_ms) * std.time.ns_per_ms;
+            }
+        }
         return true;
     }
     fn stepWrite(self: *Socks5Listener, conn: *ClientConn) bool {
@@ -707,6 +840,10 @@ pub const Socks5Listener = struct {
     fn releaseAfterTransport(self: *Socks5Listener) void {
         self.pending_open = null;
         self.pending_close = null;
+        // The real Session release receipt invalidates all remote listener handles.
+        self.remote_listener = null;
+        self.remote_listen_pending = false;
+        self.remote_cancel_unknown = false;
         for (self.clients.items) |conn| {
             conn.write_pending = false;
             conn.channel = null;

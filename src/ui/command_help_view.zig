@@ -1,20 +1,25 @@
 const ui = @import("ui");
 const mock = @import("mockups/common.zig");
+const theme = @import("app_theme.zig");
 const catalog = @import("command_catalog.zig");
 const tok = mock.tok;
 const c_line5 = ui.Color.rgba(0, 0, 0, 13);
 
 pub fn mountCard(cx: *ui.Cx) !*ui.Node {
-    const card = try ui.box(cx, .{
-        .width = .{ .px = 580 },
-        .direction = .column,
-        .background = ui.Color.rgba(0xF8, 0xFF, 0xFB, 242), // rgba(248,255,251,.95)
-        .border = .{ .width = 0, .color = tok.alpha(tok.acc, 26), .radius = 12 }, // rgba(19,69,246,.1)
-        .shadow = .{ .blur = 44, .offset_y = 16, .color = ui.Color.rgba(0x0F, 0x17, 0x2A, 36) }, // rgba(15,23,42,.14)
-        .glass = .{ .backdrop_blur = 24 },
-        .z_index = 20,
-        .overflow = .hidden,
-    }, .{});
+    const card = try ui.boxStyled(cx, struct {
+        fn style(_: *const ui.ThemeTokens) ui.BoxStyle {
+            return .{
+                .width = .{ .px = 580 },
+                .direction = .column,
+                .background = theme.current().overlay,
+                .border = .{ .width = 0, .color = tok.alpha(tok.acc, 26), .radius = 12 }, // rgba(19,69,246,.1)
+                .shadow = .{ .blur = 44, .offset_y = 16, .color = ui.Color.rgba(0x0F, 0x17, 0x2A, 36) }, // rgba(15,23,42,.14)
+                .glass = theme.overlayGlass(),
+                .z_index = 20,
+                .overflow = .hidden,
+            };
+        }
+    }.style, .{});
 
     // 头部（ch：padding 13 18，高 ~46，字 13·600 + 右注 10 fg3）
     const ch = try ui.box(cx, .{

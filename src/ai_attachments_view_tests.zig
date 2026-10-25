@@ -257,7 +257,7 @@ test "AI attachments horizontal rail keeps all entries on one row and theme chan
     f.settle();
     const cards = f.view.rail.content.children.items;
     try std.testing.expectEqual(@as(usize, 4), cards.len);
-    try std.testing.expectApproxEqAbs(cards[0].globalRect().x + 190, cards[1].globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(cards[0].globalRect().x + cards[0].globalRect().w + 6, cards[1].globalRect().x, 0.1);
     try std.testing.expectApproxEqAbs(cards[0].globalRect().y, cards[3].globalRect().y, 0.1);
     try f.view.openPreview(first);
     f.settle();
@@ -270,9 +270,9 @@ test "AI attachments horizontal rail keeps all entries on one row and theme chan
         f.settle();
         const card = find(f.view.root, "ai.attachment.local_text").?;
         try std.testing.expect(ui.Color.eql(theme.current().surface_2, card.getBackground()));
-        try std.testing.expectApproxEqAbs(card.globalRect().x + 8, find(card, "ai.attachment.open").?.globalRect().x, 0.1);
+        try std.testing.expectApproxEqAbs(card.globalRect().x + 6, find(card, "ai.attachment.open").?.globalRect().x, 0.1);
         try std.testing.expectEqualStrings("captured", f.view.preview_label.getText().?.content);
-        try std.testing.expectEqual(@as(f32, 104), f.view.preview_body.container.globalRect().h);
+        try std.testing.expectApproxEqAbs(@as(f32, 41.796875), f.view.preview_body.container.globalRect().h, 0.01);
     }
 }
 
@@ -415,7 +415,7 @@ test "AI attachments switching owner dismisses a candidate view and returning re
     try std.testing.expectEqual(@as(usize, 0), f.calls);
 }
 
-test "AI attachments sent preview scope teardown releases the portal and global material before history nodes are rebuilt" {
+test "AI attachments sent preview scope teardown releases the portal while keeping the global material" {
     const previous_theme = theme.currentName();
     const previous_material = theme.materialVisible();
     defer {
@@ -447,17 +447,13 @@ test "AI attachments sent preview scope teardown releases the portal and global 
         f.settle();
         try view.openPreview(id);
         f.settle();
-        try std.testing.expectEqual(@as(usize, 1), background.surfaces.items.len);
         try std.testing.expectEqualStrings("original sent bytes", view.preview_reference.content().?.bytes);
-        const surface = find(view.preview_panel, "appearance.surface").?;
-        try std.testing.expectEqual(surface, view.preview_panel.children.items[0]);
-        try std.testing.expectEqual(ui.types.Display.flex, surface.style.display);
+        try std.testing.expect(find(view.preview_panel, "appearance.surface") == null);
         f.cx.setFocus(view.preview_primary);
         // This is the host safe-point order: release hooks/focus/portals while
         // their nodes still exist, then detach and destroy the history row.
         history_scope.dispose();
         scope_live = false;
-        try std.testing.expectEqual(@as(usize, 0), background.surfaces.items.len);
         try std.testing.expect(f.cx.focus_manager.current_focus == null);
         f.cx.detachChild(f.cx.root.?, root);
         f.cx.destroyDetached(root);

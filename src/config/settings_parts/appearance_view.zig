@@ -44,7 +44,7 @@ fn textFill(node: *ui.Node) void {
     node.style.flex = 1;
 }
 
-const Card = struct { root: *ui.Node, body: *ui.Node };
+const Card = struct { root: *ui.Node, body: *ui.Node, header: *ui.Node };
 fn card(cx: *ui.Cx, bound: *binding.Binding, title: []const u8, summary: []const u8, asset: ui.SvgAsset, bit: u6, test_id: []const u8) !Card {
     const fold = try bound.scope.allocator.create(Fold);
     fold.* = .{ .bound = bound, .bit = bit };
@@ -54,13 +54,14 @@ fn card(cx: *ui.Cx, bound: *binding.Binding, title: []const u8, summary: []const
     _ = try controls.sectionHeader(cx, bound.scope, result, asset, expanded, summary, test_id);
     result.item.meta.ownership.meta.test_id = test_id;
     result.header.meta.ownership.meta.test_id = try id(bound.scope, test_id, ".header");
-    if (disabled(bound)) {
+    if (disabled(bound) or bound.controller.search_query.len != 0) {
         result.header.behavior.events.on_event = null;
         result.header.setFocusable(false);
     }
     result.body.setStyleInline(cx.allocator, S.column(undefined));
-    result.body.style.padding = .ZERO;
-    return .{ .root = result.item, .body = result.body };
+    result.body.style.padding = .{ .left = 16, .right = 16, .bottom = 8 };
+    result.body.style.gap = 0;
+    return .{ .root = result.item, .body = result.body, .header = result.header };
 }
 const Fold = struct {
     bound: *binding.Binding,
@@ -69,7 +70,7 @@ const Fold = struct {
         self.bound.scope.allocator.destroy(self);
     }
     fn change(self: *Fold, open: bool) void {
-        if (disabled(self.bound)) return;
+        if (disabled(self.bound) or self.bound.controller.search_query.len != 0) return;
         const mask = @as(u64, 1) << self.bit;
         if (open) self.bound.controller.folded_sections &= ~mask else self.bound.controller.folded_sections |= mask;
         changed(self.bound);
@@ -172,6 +173,14 @@ fn iconButton(cx: *ui.Cx, scope: *ui.Scope, bound: *binding.Binding, kind: Click
     try tip.trigger.appendChild(cx.allocator, button);
     return tip.wrapper;
 }
+fn textAction(cx: *ui.Cx, bound: *binding.Binding, kind: Click.Kind, stable_id: []const u8, label: []const u8, tooltip: []const u8, test_id: []const u8, danger: bool, is_disabled: bool) !*ui.Node {
+    const action = try Click.create(bound.scope, bound, kind, stable_id);
+    const tip = try ui.widgets.Tooltip(.{ .text = tooltip, .open_delay_ms = 450 }).mount(bound.scope, cx);
+    const button = try ui.widgets.Button(.{ .label = label, .variant = .ghost, .disabled = is_disabled, .on_click = cx.on(Click, action, Click.activate), .base_style = .{ .height = .{ .px = 28 }, .padding = .{ .top = 5, .bottom = 5 }, .font_size = 11, .font_weight = 400, .text_color = if (danger) S.theme.current().danger_ink else S.theme.current().accent_ink }, .hover_style = S.base.buttonHover() }).mount(bound.scope, cx);
+    button.meta.ownership.meta.test_id = test_id;
+    try tip.trigger.appendChild(cx.allocator, button);
+    return tip.wrapper;
+}
 fn thumbnail(cx: *ui.Cx, record: *const themes.Record) !*ui.Node {
     const root = try ui.box(cx, S.thumbnail(rgba(record.theme.bg)), .{});
     for ([_]u32{ record.ui_tokens.accent, record.theme.ansi[2], record.theme.ansi[4], record.theme.ansi[1] }) |color| try root.appendChild(cx.allocator, try ui.box(cx, .{ .width = .{ .px = 4 }, .height = .{ .px = 16 }, .background = rgba(color), .border = .{ .radius = 1 }, .flex_shrink = 0 }, .{}));
@@ -196,31 +205,152 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
 fn themeSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const host = bound.hooks.appearance;
     const c = bound.controller;
-    if (!c.theme_library.open) if (host) |h| if (h.library_dismissed) return dismissedTheme(cx, bound, h);
-    var summary: [64]u8 = undefined;
-    const title = if (c.theme_library.open) "主题库" else "主题";
     const record = if (host) |h| h.registry.get(c.model.value.ui.theme) else null;
     const selected_name = if (record) |r| r.theme.name else c.model.value.ui.theme;
-    const section = try card(cx, bound, title, if (c.theme_library.open and host != null) try std.fmt.bufPrint(&summary, "{d} 个主题", .{host.?.registry.counts().all}) else selected_name, ui.icons.palette, 0, "settings.appearance.themes");
+    const section = try card(cx, bound, "主题", selected_name, ui.icons.palette, 0, "settings.appearance.themes");
+    section.header.setStyleInline(cx.allocator, .{ .min_height = 54, .padding = .{ .left = 15, .right = 15, .top = 8, .bottom = 8 } });
     const row = try ui.boxStyled(cx, S.materialRow, .{});
+    row.setStyleInline(cx.allocator, .{ .height = .{ .px = 30 }, .min_height = 30, .padding = .{ .top = 4 } });
     row.style.gap = 8;
     row.meta.ownership.meta.test_id = "settings.theme.current";
-    if (record) |r| try row.appendChild(cx.allocator, try thumbnail(cx, r));
-    const name = try ui.textStyled(cx, S.label, if (record) |r| r.theme.name else c.model.value.ui.theme);
+    var count_buffer: [64]u8 = undefined;
+    const name = try ui.textStyled(cx, S.note, if (host) |h| try std.fmt.bufPrint(&count_buffer, "{d} 个主题 · 左右滚动浏览", .{h.registry.counts().all}) else selected_name);
     textFill(name);
     try row.appendChild(cx.allocator, name);
-    try row.appendChild(cx.allocator, try iconButton(cx, bound.scope, bound, .open_library, "", ui.icons.palette, "打开主题库", "settings.theme.library.open", 28, host == null or disabled(bound)));
     if (!std.mem.eql(u8, c.model.value.ui.theme, c.original.value.ui.theme)) try row.appendChild(cx.allocator, try previewBadge(cx, "预览中"));
-    try row.appendChild(cx.allocator, try iconButton(cx, bound.scope, bound, .import_theme, "", ui.icons.upload, "导入 .itermcolors", "settings.theme.import", 28, host == null or disabled(bound)));
-    if (c.theme_library.open) try row.appendChild(cx.allocator, try iconButton(cx, bound.scope, bound, .close_library, "", ui.icons.x, "关闭主题库，保留草稿与查询", "settings.theme.library.close", 28, false));
+    var remove_reason: []const u8 = "删除当前主题";
+    const protected = blk: {
+        const h = host orelse break :blk true;
+        h.registry.checkRemove(c.model.value.ui.theme, h.registry.revision, .{ .saved = h.runtime.value.ui.theme, .draft = c.model.value.ui.theme }) catch |err| {
+            remove_reason = themeProblem(err);
+            break :blk true;
+        };
+        break :blk false;
+    };
+    try row.appendChild(cx.allocator, try textAction(cx, bound, .remove_theme, c.model.value.ui.theme, "删除当前主题", remove_reason, "settings.theme.remove.current", true, protected or disabled(bound)));
+    try row.appendChild(cx.allocator, try textAction(cx, bound, .import_theme, "", "导入 .itermcolors", "仅支持 iTerm2 .itermcolors 主题文件", "settings.theme.import", false, host == null or disabled(bound)));
+    if (host) |h| try section.body.appendChild(cx.allocator, try themeStrip(cx, bound, h));
     try section.body.appendChild(cx.allocator, row);
-    if (c.theme_library.open and host != null) {
-        const grid = try ThemeGrid.mount(cx, bound, host.?);
-        try section.body.appendChild(cx.allocator, grid.root);
-    } else if (record) |r| try section.body.appendChild(cx.allocator, try miniPreview(cx, r, c.model.value.ui.timestamp_gutter, c.model.value.ui.input_line_highlight, c.model.value.ui.sidebar_collapsed));
     if (c.theme_library.problem) |problem| try section.body.appendChild(cx.allocator, try notice(cx, themeProblem(problem), true));
     return section.root;
 }
+
+/// V3 keeps all theme choices in the card; legacy library state cannot replace it.
+fn themeStrip(cx: *ui.Cx, bound: *binding.Binding, host: *Context) !*ui.Node {
+    const scroll = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .rubber_band_x = false }).mount(bound.scope, cx);
+    scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 75 }, .min_width = 0, .flex_shrink = 0 });
+    scroll.container.meta.ownership.meta.test_id = "settings.theme.strip";
+    scroll.content.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 75 }, .direction = .row, .gap = 8 });
+    var selected_index: usize = 0;
+    for (host.registry.records.items, 0..) |*record, record_index| {
+        const selected = std.mem.eql(u8, bound.controller.model.value.ui.theme, record.id);
+        if (selected) selected_index = record_index;
+        const choose = try Click.create(bound.scope, bound, .select_theme, record.id);
+        const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = record.theme.name, .disabled = disabled(bound), .on_click = cx.on(Click, choose, Click.activate), .base_style = .{ .width = .{ .px = 150 }, .height = .{ .px = 75 }, .padding = ui.Padding.all(6), .background = if (selected) S.theme.current().selection else S.theme.current().well, .corner_radius = 9, .border_width = 0 }, .hover_style = S.base.buttonHover() }).mount(bound.scope, cx);
+        button.setStyleInline(cx.allocator, .{ .direction = .column, .align_items = .stretch, .justify = .start, .gap = 5, .flex_shrink = 0 });
+        button.meta.ownership.meta.test_id = try id(bound.scope, "settings.theme.", record.id);
+        if (button.behavior.interaction.a11y) |*access| {
+            access.selected = selected;
+            access.pressed = selected;
+        }
+        const preview = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 6 }, .top = .{ .px = 6 } }, .width = .{ .px = 138 }, .height = .{ .px = 42 }, .direction = .row, .padding = ui.Padding.all(6), .gap = 5, .background = rgba(record.theme.bg), .border = .{ .radius = 6 }, .flex_shrink = 0 }, .{});
+        try preview.appendChild(cx.allocator, try ui.box(cx, .{ .width = .{ .px = 20 }, .height = .fill(), .background = rgba(record.ui_tokens.surface_2), .border = .{ .radius = 4 } }, .{}));
+        const lines = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .gap = 4 }, .{});
+        for ([_]f32{ 70, 90, 48 }, [_]ui.Color{ rgba(record.ui_tokens.accent), rgba(record.theme.ansi[2]), rgba(record.theme.fg).withAlpha(110) }) |width, color| try lines.appendChild(cx.allocator, try ui.box(cx, .{ .width = .{ .percent = width }, .height = .{ .px = 4 }, .background = color, .border = .{ .radius = 1.5 } }, .{}));
+        try preview.appendChild(cx.allocator, lines);
+        try button.appendChild(cx.allocator, preview);
+        const caption = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 6 }, .top = .{ .px = 53 } }, .width = .{ .px = 138 }, .height = .{ .px = 16 }, .direction = .row, .align_items = .center, .gap = 4 }, .{});
+        const name = try ui.text(cx, record.theme.name, .{ .font_size = 11, .font_weight = 500, .color = S.theme.current().fg_1, .text_overflow = .ellipsis, .selectable = false });
+        name.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .overflow_hidden = true });
+        try caption.appendChild(cx.allocator, name);
+        if (selected) try caption.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.check, S.theme.current().accent_ink, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 } }));
+        try button.appendChild(cx.allocator, caption);
+        if (record.source_kind == .imported) {
+            var reason: []const u8 = "删除导入主题";
+            const protected = blk: {
+                host.registry.checkRemove(record.id, host.registry.revision, .{ .saved = host.runtime.value.ui.theme, .draft = bound.controller.model.value.ui.theme }) catch |err| {
+                    reason = switch (err) {
+                        error.CurrentThemeProtected => "使用中 · 请先切换并保存",
+                        error.DraftThemeProtected => "预览中 · 请先切换待选主题",
+                        else => themeProblem(err),
+                    };
+                    break :blk true;
+                };
+                break :blk false;
+            };
+            const remove = try Click.create(bound.scope, bound, .remove_theme, record.id);
+            const open = try bound.scope.createSignal(bool, false);
+            const menu = try ui.widgets.Menu(.{
+                .trigger = .manual,
+                .open = open,
+                .width = @as(f32, 210),
+                .items = &[_]ui.widgets.MenuItem{.{ .id = "remove", .label = reason, .icon_asset = ui.icons.trash, .danger = true, .disabled = protected or disabled(bound), .on_click = cx.on(Click, remove, Click.activate) }},
+            }).mount(bound.scope, cx);
+            menu.wrapper.setStyleInline(cx.allocator, .{ .width = .{ .px = 150 }, .height = .{ .px = 75 }, .flex_shrink = 0 });
+            menu.wrapper.meta.ownership.meta.test_id = try id(bound.scope, "settings.theme.menu.", record.id);
+            const trigger = try bound.scope.allocator.create(ThemeContextMenu);
+            trigger.* = .{ .scope = bound.scope, .open = open };
+            try bound.scope.onCleanup(ThemeContextMenu, trigger, ThemeContextMenu.cleanup);
+            if (button.behavior.interaction.a11y) |*access| access.has_popup = .menu;
+            button.behavior.events.on_event_capture = ThemeContextMenu.event;
+            button.behavior.events.capture_context = trigger;
+            try menu.trigger.appendChild(cx.allocator, button);
+            try scroll.content.appendChild(cx.allocator, menu.wrapper);
+        } else try scroll.content.appendChild(cx.allocator, button);
+    }
+    const reveal = try bound.scope.allocator.create(ThemeStripSelection);
+    reveal.* = .{ .cx = cx, .scope = bound.scope, .scroll = scroll, .selected_index = selected_index, .count = host.registry.records.items.len };
+    try bound.scope.onCleanup(ThemeStripSelection, reveal, ThemeStripSelection.cleanup);
+    try cx.addAfterLayoutHook(reveal, ThemeStripSelection.afterLayout);
+    return scroll.container;
+}
+
+/// Restore the selected card once after a page remount. Subsequent user scroll
+/// gestures remain in control; this hook never snaps a live strip back.
+const ThemeContextMenu = struct {
+    scope: *ui.Scope,
+    open: *ui.Signal(bool),
+    fn cleanup(self: *ThemeContextMenu) void {
+        self.scope.allocator.destroy(self);
+    }
+    fn event(e: ui.events.Event, context: ?*anyopaque) ui.events.EventResult {
+        const self: *ThemeContextMenu = @ptrCast(@alignCast(context orelse return .ignored));
+        if (e == .mouse_down and e.mouse_down.button == .right) {
+            self.open.set(true);
+            return .stop;
+        }
+        if (e == .key_down and e.key_down.key == .f10 and e.key_down.modifiers.shift and !e.key_down.modifiers.ctrl and !e.key_down.modifiers.alt and !e.key_down.modifiers.super) {
+            self.open.set(true);
+            return .stop;
+        }
+        return .ignored;
+    }
+};
+
+const ThemeStripSelection = struct {
+    cx: *ui.Cx,
+    scope: *ui.Scope,
+    scroll: ui.widgets.scroll_area.ScrollAreaResult,
+    selected_index: usize,
+    count: usize,
+    pending: bool = true,
+    fn cleanup(self: *ThemeStripSelection) void {
+        self.cx.removeAfterLayoutHook(self);
+        self.scope.allocator.destroy(self);
+    }
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *ThemeStripSelection = @ptrCast(@alignCast(raw));
+        if (!self.pending) return .done;
+        const width = self.scroll.container.globalRect().w;
+        if (width <= 0) return .done;
+        self.pending = false;
+        const selected_right = @as(f32, @floatFromInt(self.selected_index)) * 158 + 150;
+        const content_width = @as(f32, @floatFromInt(self.count)) * 158 - 8;
+        self.scroll.state.scroll_x = std.math.clamp(selected_right - width, 0, @max(0, content_width - width));
+        self.scroll.content.setStyle(self.cx.allocator, .translate_x, self.scroll.state.contentTranslateX());
+        return .done;
+    }
+};
 
 fn previewBadge(cx: *ui.Cx, label: []const u8) !*ui.Node {
     return ui.boxStyled(cx, S.previewBadge, .{try ui.text(cx, label, .{ .font_size = 10.5, .font_weight = 500, .line_height = 15.0 / 10.5, .color = S.theme.current().accent_ink })});
@@ -567,16 +697,48 @@ fn fieldRow(cx: *ui.Cx, bound: *binding.Binding, label: []const u8, help: ?[]con
     textFill(text);
     try left.appendChild(cx.allocator, text);
     if (help) |message| {
-        const tooltip = try ui.widgets.Tooltip(.{ .text = message, .open_delay_ms = 450 }).mount(bound.scope, cx);
-        const button = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.circle_help, .icon_size = @as(f32, 14), .a11y_label = message, .variant = .ghost, .base_style = S.plainButton(22, 22, false) }).mount(bound.scope, cx);
-        button.meta.ownership.meta.test_id = try id(bound.scope, "settings.help.", label);
-        try tooltip.trigger.appendChild(cx.allocator, button);
-        try left.appendChild(cx.allocator, tooltip.wrapper);
+        const detail = try ui.textStyled(cx, S.base.sectionSummary, try owned(bound.scope, message));
+        detail.style.width = .fill();
+        detail.setStyleInline(cx.allocator, .{ .max_width = 360 });
+        try left.appendChild(cx.allocator, detail);
     }
     try row.appendChild(cx.allocator, left);
     try row.appendChild(cx.allocator, control);
+    if (control.style.width == .px and control.style.width.px > 100) try Responsive.mount(cx, bound.scope, control, 220, 210);
     return row;
 }
+
+const Responsive = struct {
+    cx: *ui.Cx,
+    scope: *ui.Scope,
+    node: *ui.Node,
+    standard: f32,
+    compact: f32,
+    fn mount(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, standard: f32, compact: f32) !void {
+        const self = try scope.allocator.create(Responsive);
+        self.* = .{ .cx = cx, .scope = scope, .node = node, .standard = standard, .compact = compact };
+        try scope.onCleanup(Responsive, self, cleanup);
+        try cx.addAfterLayoutHook(self, afterLayout);
+    }
+    fn cleanup(self: *Responsive) void {
+        self.cx.removeAfterLayoutHook(self);
+        self.scope.allocator.destroy(self);
+    }
+    fn resize(self: *Responsive, node: *ui.Node, width: f32, root: bool) bool {
+        var changed_width = false;
+        const target = root or (self.standard <= 220 and if (node.meta.ownership.meta.test_id) |test_id| std.mem.startsWith(u8, test_id, "settings.field.") else false);
+        if (target and (node.style.width != .px or node.style.width.px != width)) {
+            node.setStyleInline(self.cx.allocator, .{ .width = .{ .px = width }, .flex_shrink = 0 });
+            changed_width = true;
+        }
+        for (node.children.items) |child| changed_width = self.resize(child, width, false) or changed_width;
+        return changed_width;
+    }
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *Responsive = @ptrCast(@alignCast(raw));
+        return if (self.resize(self.node, if (self.cx.viewport.width <= 900) self.compact else self.standard, true)) .needs_layout else .done;
+    }
+};
 
 const Option = struct { label: []const u8, value: []const u8 };
 fn choiceTrigger(cx: *ui.Cx, bound: *binding.Binding, label: []const u8, width: f32, height: f32) !*ui.Node {
@@ -596,8 +758,8 @@ fn chooser(cx: *ui.Cx, bound: *binding.Binding, key: binding.Key, shown: []const
     try bound.registerPopover(popover);
     popover.chrome.setStyleInline(cx.allocator, S.menu(width, padding, gap));
     popover.chrome.meta.ownership.meta.test_id = try id(bound.scope, "settings.chooser.", key.key);
-    const control_width: f32 = if (std.mem.eql(u8, key.key, "fit")) 176 else 164;
-    const button = try choiceTrigger(cx, bound, shown, control_width, if (std.mem.eql(u8, key.key, "fit")) 32 else 30);
+    const control_width: f32 = 220;
+    const button = try choiceTrigger(cx, bound, shown, control_width, 32);
     popover.wrapper.style.width = .{ .px = control_width };
     popover.wrapper.style.flex_shrink = 0;
     button.meta.ownership.meta.test_id = try id(bound.scope, "settings.field.", key.key);
@@ -616,35 +778,48 @@ fn chooser(cx: *ui.Cx, bound: *binding.Binding, key: binding.Key, shown: []const
     return popover.wrapper;
 }
 
+fn matchesFontField(query: []const u8, key: []const u8, label: []const u8, help: []const u8) bool {
+    return binding.matches(query, "字体与排版") or binding.matches(query, "终端字体、行距与光标") or binding.matches(query, key) or binding.matches(query, label) or binding.matches(query, help);
+}
 fn fontSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const c = bound.controller;
     var buffer: [256]u8 = undefined;
     const section = try card(cx, bound, "字体与排版", try std.fmt.bufPrint(&buffer, "{s} · {d} pt", .{ c.model.value.ui.font_family, c.model.value.ui.font_size }), ui.icons.type, 2, "settings.appearance.font");
-    const custom = if (bound.hooks.appearance) |h| h.custom_font_edit else false;
-    if (custom) {
-        const field = try Field.create(cx, bound, .{ .section = "ui", .key = "font_family" }, 164, 30);
-        try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "字体族", "未安装所选字体时将使用替代字体；缺失字符由系统补足。", field.input.node));
-        try section.body.appendChild(cx.allocator, field.error_box);
-        if (bound.hooks.appearance) |h| {
-            if (h.focus_custom_font) {
-                h.focus_custom_font = false;
-                cx.setFocus(field.input.input_container);
+    const query = c.search_query;
+    if (matchesFontField(query, "font_family", "字体族", "未安装的字体使用系统替代字体。")) {
+        const custom = if (bound.hooks.appearance) |h| h.custom_font_edit else false;
+        if (custom) {
+            const field = try Field.create(cx, bound, .{ .section = "ui", .key = "font_family" }, 220, 32);
+            try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "字体族", "未安装所选字体时将使用替代字体；缺失字符由系统补足。", field.input.node));
+            try section.body.appendChild(cx.allocator, field.error_box);
+            if (bound.hooks.appearance) |h| {
+                if (h.focus_custom_font) {
+                    h.focus_custom_font = false;
+                    cx.setFocus(field.input.input_container);
+                }
             }
+        } else {
+            const control = try chooser(cx, bound, .{ .section = "ui", .key = "font_family" }, c.model.value.ui.font_family, &.{ .{ .label = "JetBrains Mono", .value = "JetBrains Mono" }, .{ .label = "Menlo", .value = "Menlo" }, .{ .label = "Monaco", .value = "Monaco" }, .{ .label = "自定义字体…", .value = "custom" } }, 220, 158, 10, 6, 30);
+            try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "字体族", "未安装所选字体时将使用替代字体；缺失字符由系统补足。", control));
         }
-    } else {
-        const control = try chooser(cx, bound, .{ .section = "ui", .key = "font_family" }, c.model.value.ui.font_family, &.{ .{ .label = "JetBrains Mono", .value = "JetBrains Mono" }, .{ .label = "Menlo", .value = "Menlo" }, .{ .label = "Monaco", .value = "Monaco" }, .{ .label = "自定义字体…", .value = "custom" } }, 220, 158, 10, 6, 30);
-        try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "字体族", "未安装所选字体时将使用替代字体；缺失字符由系统补足。", control));
     }
-    const size = try Field.create(cx, bound, .{ .section = "ui", .key = "font_size" }, 164, 30);
-    try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "字体大小", null, size.input.node));
-    try section.body.appendChild(cx.allocator, size.error_box);
-    const weight = try chooser(cx, bound, .{ .section = "ui", .key = "font_weight" }, c.model.value.ui.font_weight, &.{ .{ .label = "Light", .value = "light" }, .{ .label = "Regular", .value = "regular" }, .{ .label = "Medium", .value = "medium" }, .{ .label = "Bold", .value = "bold" } }, 220, 158, 10, 6, 30);
-    try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "基准字重", "所选字体不支持此字重时，请选择其他字重后保存。", weight));
-    const line = try Field.create(cx, bound, .{ .section = "ui", .key = "line_height" }, 164, 30);
-    try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "行高倍率", null, line.input.node));
-    try section.body.appendChild(cx.allocator, line.error_box);
-    const cursor = try chooser(cx, bound, .{ .section = "ui", .key = "cursor_style" }, c.model.value.ui.cursor_style, &.{ .{ .label = "Block · 方块", .value = "block" }, .{ .label = "Bar · 竖线", .value = "bar" }, .{ .label = "Underline · 下划线", .value = "underline" } }, 220, 128, 10, 6, 32);
-    try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "光标样式", null, cursor));
+    if (matchesFontField(query, "font_size", "字体大小", "")) {
+        const size = try Field.create(cx, bound, .{ .section = "ui", .key = "font_size" }, 220, 32);
+        try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "字体大小", null, size.input.node));
+        try section.body.appendChild(cx.allocator, size.error_box);
+    }
+    if (matchesFontField(query, "font_weight", "基准字重", "所选字体不支持此字重时，请选择其他字重后保存。")) {
+        const weight_label: []const u8 = if (std.mem.eql(u8, c.model.value.ui.font_weight, "light")) "Light" else if (std.mem.eql(u8, c.model.value.ui.font_weight, "medium")) "Medium" else if (std.mem.eql(u8, c.model.value.ui.font_weight, "bold")) "Bold" else "Regular";
+        const weight = try chooser(cx, bound, .{ .section = "ui", .key = "font_weight" }, weight_label, &.{ .{ .label = "Light", .value = "light" }, .{ .label = "Regular", .value = "regular" }, .{ .label = "Medium", .value = "medium" }, .{ .label = "Bold", .value = "bold" } }, 220, 158, 10, 6, 30);
+        try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "基准字重", "所选字体不支持此字重时，请选择其他字重后保存。", weight));
+    }
+    if (matchesFontField(query, "line_height", "行高倍率", "")) {
+        const line = try Field.create(cx, bound, .{ .section = "ui", .key = "line_height" }, 220, 32);
+        try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "行高倍率", null, line.input.node));
+        try section.body.appendChild(cx.allocator, line.error_box);
+    }
+    try section.body.appendChild(cx.allocator, try cursorField(cx, bound));
+    try section.body.appendChild(cx.allocator, try fontPreview(cx, bound));
     const status = try ui.textStyled(cx, S.errorNote, "");
     status.meta.ownership.meta.test_id = "settings.font.status";
     bound.font_status_label = status;
@@ -652,6 +827,139 @@ fn fontSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     bound.refreshFooter();
     return section.root;
 }
+
+const cursor_options = [_]ui.widgets.checkbox.RadioOption{
+    .{ .value = "block", .label = "方块", .test_id = "settings.option.cursor_style.block" },
+    .{ .value = "bar", .label = "竖线", .test_id = "settings.option.cursor_style.bar" },
+    .{ .value = "underline", .label = "下划线", .test_id = "settings.option.cursor_style.underline" },
+};
+const CursorSelect = struct {
+    bound: *binding.Binding,
+    fn cleanup(self: *CursorSelect) void {
+        self.bound.scope.allocator.destroy(self);
+    }
+    fn change(self: *CursorSelect, value: []const u8) void {
+        if (disabled(self.bound)) return;
+        self.bound.controller.editKey("ui", "cursor_style", .{ .text = value }) catch return;
+        self.bound.valuesChanged();
+        changed(self.bound);
+    }
+};
+fn cursorShape(cx: *ui.Cx, value: []const u8) !*ui.Node {
+    return ui.box(cx, .{ .width = .{ .px = if (std.mem.eql(u8, value, "bar")) 2 else 9 }, .height = .{ .px = if (std.mem.eql(u8, value, "underline")) 2 else 16 }, .background = S.theme.current().accent_ink, .flex_shrink = 0, .align_self = if (std.mem.eql(u8, value, "underline")) .end else .center }, .{});
+}
+fn cursorField(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
+    const row = try ui.boxStyled(cx, S.row, .{});
+    row.style.padding.top = 12;
+    row.style.padding.bottom = 12;
+    const labels = try ui.boxStyled(cx, S.labelGroup, .{});
+    try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.label, "光标样式"));
+    try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.base.sectionSummary, "选择形状，在下方终端中查看。"));
+    try row.appendChild(cx.allocator, labels);
+    const select = try bound.scope.allocator.create(CursorSelect);
+    select.* = .{ .bound = bound };
+    try bound.scope.onCleanup(CursorSelect, select, CursorSelect.cleanup);
+    const group = try ui.widgets.RadioGroup(.{ .options = &cursor_options, .value = @as(?[]const u8, bound.controller.model.value.ui.cursor_style), .horizontal = true, .disabled = disabled(bound), .on_change = cx.on(CursorSelect, select, CursorSelect.change) }).mount(bound.scope, cx);
+    group.setStyleInline(cx.allocator, .{ .height = .{ .px = 40 }, .direction = .row, .gap = 6, .flex_shrink = 0 });
+    group.meta.ownership.meta.test_id = "settings.field.cursor_style";
+    for (group.children.items, cursor_options) |radio, option| {
+        const selected = std.mem.eql(u8, option.value, bound.controller.model.value.ui.cursor_style);
+        radio.setStyleInline(cx.allocator, .{ .width = .{ .px = 99 }, .height = .{ .px = 40 }, .padding = ui.Padding.all(8), .gap = 7, .align_items = .center, .background = if (selected) S.theme.current().selection else S.theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 });
+        // RadioGroup retains selection, focus and keyboard handling. Its fixed
+        // circle has no cursor slot, so replace only that decorative child.
+        const circle = radio.children.items[0];
+        cx.detachChild(radio, circle);
+        cx.destroyDetached(circle);
+        const label = radio.children.items[0];
+        if (label.getText()) |old| {
+            var props = old;
+            props.font_size = 11;
+            props.color = if (selected) S.theme.current().accent_ink else S.theme.current().fg_1;
+            label.setText(props);
+        }
+        const demo = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 24 }, .align_items = .center, .justify = .center, .background = S.theme.current().surface_2, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
+        try demo.appendChild(cx.allocator, try cursorShape(cx, option.value));
+        try radio.insertChildBefore(cx.allocator, demo, label);
+        if (selected) try radio.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.check, S.theme.current().accent_ink, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
+    }
+    try row.appendChild(cx.allocator, group);
+    return row;
+}
+fn fontPreview(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
+    const setting = bound.controller.model.value.ui;
+    const status: @import("../appearance_ui_context.zig").FontStatus = if (bound.hooks.appearance) |host| if (host.font_status) |read| read(host.context) else .{} else .{};
+    const family: u16 = if (@hasField(@TypeOf(status), "family_id")) status.family_id else 0;
+    const actual = if (status.actual_family.len != 0) status.actual_family else "系统等宽字体";
+    const root = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 9, .padding = .{ .left = 12, .right = 12, .top = 10, .bottom = 10 }, .margin = .{ .top = 4, .bottom = 7 }, .background = S.theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
+    root.meta.ownership.meta.test_id = "settings.font.preview";
+    const heading = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 16 }, .direction = .row, .gap = 6, .align_items = .center }, .{});
+    try heading.appendChild(cx.allocator, try icon(cx, ui.icons.terminal, S.theme.current().fg_2));
+    try heading.appendChild(cx.allocator, try ui.textStyled(cx, S.note, "终端预览"));
+    try heading.appendChild(cx.allocator, try ui.spacer(cx));
+    var buffer: [256]u8 = undefined;
+    try heading.appendChild(cx.allocator, try ui.textStyled(cx, S.note, try owned(bound.scope, try std.fmt.bufPrint(&buffer, "{s} · {d} pt", .{ actual, setting.font_size }))));
+    try root.appendChild(cx.allocator, heading);
+    if (status.fallback) {
+        var message_buffer: [512]u8 = undefined;
+        const message = try owned(bound.scope, try std.fmt.bufPrint(&message_buffer, "请求字体 {s} 当前不可用，预览使用 {s}。", .{ setting.font_family, actual }));
+        try root.appendChild(cx.allocator, try ui.text(cx, message, .{ .font_size = 11, .line_height = 17.0 / 11.0, .color = S.theme.current().warn_ink, .wrap = .word }));
+    }
+    const code = try ui.box(cx, .{ .width = .fill(), .min_height = 48, .direction = .column, .flex_shrink = 0 }, .{});
+    const line_height = @as(f32, @floatFromInt(setting.font_size)) * setting.line_height;
+    const weight: u16 = if (std.mem.eql(u8, setting.font_weight, "bold")) 700 else if (std.mem.eql(u8, setting.font_weight, "medium")) 500 else if (std.mem.eql(u8, setting.font_weight, "light")) 300 else 400;
+    const first = try ui.text(cx, "user@ZeroWork ~", .{ .font_size = @floatFromInt(setting.font_size), .font_weight = weight, .font_family = family, .use_monospace_font = family == 0, .line_height = setting.line_height, .color = S.theme.current().ok_ink });
+    try code.appendChild(cx.allocator, first);
+    const command = try ui.box(cx, .{ .height = .{ .px = line_height }, .direction = .row, .align_items = .center, .gap = 2 }, .{});
+    try command.appendChild(cx.allocator, try ui.text(cx, "$ ssh prod-web-01", .{ .font_size = @floatFromInt(setting.font_size), .font_weight = weight, .font_family = family, .use_monospace_font = family == 0, .line_height = setting.line_height, .color = S.theme.current().fg_1 }));
+    const caret = try cursorShape(cx, setting.cursor_style);
+    caret.meta.ownership.meta.test_id = "settings.font.preview.caret";
+    try CursorBlink.mount(cx, bound.scope, root, caret);
+    try command.appendChild(cx.allocator, caret);
+    try code.appendChild(cx.allocator, command);
+    try root.appendChild(cx.allocator, code);
+    return root;
+}
+
+// A single timed wakeup per half-period, removed with the settings page Scope.
+const CursorBlink = struct {
+    cx: *ui.Cx,
+    scope: *ui.Scope,
+    root: *ui.Node,
+    caret: *ui.Node,
+    epoch_ms: f64,
+    visible: bool = true,
+    fn mount(cx: *ui.Cx, scope: *ui.Scope, root: *ui.Node, caret: *ui.Node) !void {
+        const self = try scope.allocator.create(CursorBlink);
+        self.* = .{ .cx = cx, .scope = scope, .root = root, .caret = caret, .epoch_ms = cx.eventTimeMs() };
+        try scope.onCleanup(CursorBlink, self, cleanup);
+        try cx.addAfterLayoutHook(self, afterLayout);
+        cx.scheduleRedrawAfterNs(550 * std.time.ns_per_ms);
+    }
+    fn cleanup(self: *CursorBlink) void {
+        self.cx.removeAfterLayoutHook(self);
+        self.scope.allocator.destroy(self);
+    }
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *CursorBlink = @ptrCast(@alignCast(raw));
+        const preview = self.root.globalRect();
+        var ancestor: ?*ui.Node = self.root;
+        while (ancestor) |node| : (ancestor = node.parent) {
+            if (node.style.display == .none) return .done;
+            if (node.style.overflow_hidden or node.style.overflow == .hidden) {
+                const clip = node.globalRect();
+                if (preview.x >= clip.x + clip.w or preview.x + preview.w <= clip.x or preview.y >= clip.y + clip.h or preview.y + preview.h <= clip.y) return .done;
+            }
+        }
+        const elapsed = @max(@as(f64, 0), self.cx.eventTimeMs() - self.epoch_ms);
+        const visible = @mod(@floor(elapsed / 550), 2) == 0;
+        if (visible != self.visible) {
+            self.visible = visible;
+            self.caret.setOpacity(if (visible) 1 else 0);
+        }
+        self.cx.scheduleRedrawAfterNs(@intFromFloat(@max(@as(f64, 1), 550 - @mod(elapsed, 550)) * std.time.ns_per_ms));
+        return .done;
+    }
+};
 
 fn toggle(cx: *ui.Cx, bound: *binding.Binding, key: binding.Key, label: []const u8) !*ui.Node {
     const current = values.read(bound.controller.model.value, key.section, key.key).?.boolean;
@@ -668,14 +976,14 @@ fn toggle(cx: *ui.Cx, bound: *binding.Binding, key: binding.Key, label: []const 
     return button;
 }
 fn aidsSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
-    const section = try card(cx, bound, "终端与工作区", "", ui.icons.terminal, 3, "settings.appearance.aids");
+    const section = try card(cx, bound, "终端与工作区", "辅助显示与侧栏", ui.icons.terminal, 3, "settings.appearance.aids");
     for ([_]struct { label: []const u8, key: binding.Key, help: ?[]const u8 }{
         .{ .label = "时间戳侧栏", .key = .{ .section = "ui", .key = "timestamp_gutter" }, .help = "显示输出时间，不包含在复制的终端内容中。" },
         .{ .label = "应用命令补全", .key = .{ .section = "completion", .key = "enabled" }, .help = null },
         .{ .label = "输入行相对高亮", .key = .{ .section = "ui", .key = "input_line_highlight" }, .help = null },
         .{ .label = "默认折叠侧栏", .key = .{ .section = "ui", .key = "sidebar_collapsed" }, .help = "保存手动偏好；窄窗口自动折叠不会覆盖它。" },
     }) |field| {
-        const control = try ui.box(cx, .{ .width = .{ .px = 164 }, .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .justify = .end, .padding = .{ .right = 10 }, .flex_shrink = 0 }, .{});
+        const control = try ui.box(cx, .{ .width = .{ .px = 44 }, .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .justify = .end, .flex_shrink = 0 }, .{});
         try control.appendChild(cx.allocator, try toggle(cx, bound, field.key, field.label));
         try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, field.label, field.help, control));
     }
@@ -686,30 +994,23 @@ fn aidsSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
 fn materialSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const c = bound.controller;
     const background = c.model.value.ui.materials.background;
-    const root = try ui.boxStyled(cx, S.card, .{});
-    root.meta.ownership.meta.test_id = "settings.appearance.materials";
-    const header = try ui.boxStyled(cx, S.header, .{});
-    const click = try Click.create(bound.scope, bound, .toggle, "");
-    click.key = .{ .section = "ui.materials.background", .key = "enabled" };
-    const heading = try ui.widgets.Button(.{ .a11y_label = "背景图片", .variant = .ghost, .disabled = disabled(bound), .on_click = cx.on(Click, click, Click.activate), .base_style = S.menuRow(28, false) }).mount(bound.scope, cx);
-    heading.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .height = .{ .px = 28 }, .padding = .ZERO, .direction = .row, .align_items = .center, .justify = .start, .gap = 6, .background = ui.Color.TRANSPARENT });
-    try heading.appendChild(cx.allocator, try icon(cx, ui.icons.image, S.theme.current().fg_2));
-    const title = try ui.textStyled(cx, S.label, "背景图片");
-    title.style.width = .{ .px = 150 };
-    try heading.appendChild(cx.allocator, title);
-    heading.meta.ownership.meta.test_id = "settings.materials.header";
-    try header.appendChild(cx.allocator, heading);
-    try header.appendChild(cx.allocator, try toggle(cx, bound, .{ .section = "ui.materials.background", .key = "enabled" }, "开启背景图片"));
-    const chevron = try icon(cx, if (background.enabled) ui.icons.chevron_down else ui.icons.chevron_right, S.theme.current().fg_2);
-    chevron.style.width = .{ .px = 14 };
-    chevron.style.height = .{ .px = 14 };
-    try header.appendChild(cx.allocator, chevron);
-    try root.appendChild(cx.allocator, header);
-    if (!background.enabled) return root;
-    const image = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 60 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0, .min_width = 0 }, .{});
+    const summary = try std.fmt.allocPrint(bound.scope.allocator, "{s} · {s}", .{ if (background.enabled) @as([]const u8, "已开启") else "已关闭", if (background.path.len == 0) @as([]const u8, "未选择图片") else background.path });
+    defer bound.scope.allocator.free(summary);
+    const section = try card(cx, bound, "背景图片", summary, ui.icons.image, 1, "settings.appearance.materials");
+    section.header.meta.ownership.meta.test_id = "settings.materials.header";
+    const toggle_node = try toggle(cx, bound, .{ .section = "ui.materials.background", .key = "enabled" }, "开启背景图片");
+    // The enable control is a sibling of the Accordion trigger. Its click must
+    // not bubble into folding; both controls keep their stock keyboard handling.
+    section.root.setStyleInline(cx.allocator, .{ .position = .relative });
+    toggle_node.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 36 }, .top = .{ .px = 22 } } });
+    section.header.children.items[1].style.padding.right = 46;
+    try section.root.appendChild(cx.allocator, toggle_node);
+    const root = section.body;
+    if (!background.enabled) try root.appendChild(cx.allocator, try notice(cx, "背景图片已关闭。透明度和模糊仍对界面生效。", false));
+    const image = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 68 }, .direction = .row, .align_items = .center, .gap = 10, .flex_shrink = 0, .min_width = 0 }, .{});
     image.meta.ownership.meta.test_id = "settings.background.identity";
     const preview = try Click.create(bound.scope, bound, .preview_material, "");
-    const preview_button = try ui.widgets.Button(.{ .a11y_label = "背景预览", .variant = .ghost, .disabled = background.path.len == 0 or bound.hooks.appearance == null or c.background.last_good == null, .on_click = cx.on(Click, preview, Click.activate), .base_style = S.plainButton(72, 48, false) }).mount(bound.scope, cx);
+    const preview_button = try ui.widgets.Button(.{ .a11y_label = "材质预览", .variant = .ghost, .disabled = bound.hooks.appearance == null or disabled(bound), .on_click = cx.on(Click, preview, Click.activate), .base_style = S.plainButton(72, 48, false) }).mount(bound.scope, cx);
     preview_button.setStyleInline(cx.allocator, .{ .width = .{ .px = 72 }, .height = .{ .px = 48 }, .padding = .ZERO, .margin = .{ .right = 2, .bottom = 4 }, .flex_shrink = 0 });
     preview_button.meta.ownership.meta.test_id = "settings.materials.preview.open";
     // Retained last-good resources still serve failed replacements and the
@@ -750,60 +1051,71 @@ fn materialSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     status_text.meta.ownership.meta.test_id = "settings.background.state";
     try identity.appendChild(cx.allocator, status_text);
     try image.appendChild(cx.allocator, identity);
-    try image.appendChild(cx.allocator, try iconButton(cx, bound.scope, bound, .choose_image, "", ui.icons.folder_open, if (path.len == 0) "选择背景图片" else "替换背景图片", "settings.background.choose", 32, bound.hooks.appearance == null or disabled(bound)));
+    const choose = try Click.create(bound.scope, bound, .choose_image, "");
+    const choose_button = try ui.widgets.Button(.{ .label = if (path.len == 0) "选择图片" else "更换图片", .icon_asset = ui.icons.folder_open, .icon_size = @as(f32, 14), .variant = .secondary, .disabled = bound.hooks.appearance == null or disabled(bound), .on_click = cx.on(Click, choose, Click.activate), .base_style = S.control(100, 32), .hover_style = S.base.buttonHover() }).mount(bound.scope, cx);
+    choose_button.meta.ownership.meta.test_id = "settings.background.choose";
+    try image.appendChild(cx.allocator, choose_button);
     try image.appendChild(cx.allocator, try iconButton(cx, bound.scope, bound, .remove_image, "", ui.icons.trash, "移除背景图片", "settings.background.remove", 32, background.path.len == 0 or disabled(bound)));
     try root.appendChild(cx.allocator, image);
-    const fit_row = try ui.boxStyled(cx, S.materialRow, .{});
-    const fit_label = try ui.textStyled(cx, S.label, "图片适配");
-    fit_label.style.width = .{ .px = 140 };
-    fit_label.style.flex_shrink = 0;
-    try fit_row.appendChild(cx.allocator, fit_label);
     const fit = try chooser(cx, bound, .{ .section = "ui.materials.background", .key = "fit" }, switch (background.fit) {
-        .fill => "Fill",
-        .fit => "Fit",
-        .center => "Center",
-        .tile => "Tile",
-    }, &.{ .{ .label = "Fill · 填充", .value = "fill" }, .{ .label = "Fit · 适应", .value = "fit" }, .{ .label = "Center · 居中", .value = "center" }, .{ .label = "Tile · 平铺", .value = "tile" } }, 176, 148, 8, 4, 30);
-    try fit_row.appendChild(cx.allocator, fit);
-    const alignment_label = try ui.textStyled(cx, S.label, "对齐");
-    alignment_label.style.width = .{ .px = 48 };
-    alignment_label.style.flex_shrink = 0;
-    try fit_row.appendChild(cx.allocator, alignment_label);
-    try fit_row.appendChild(cx.allocator, try alignmentChooser(cx, bound));
-    try root.appendChild(cx.allocator, fit_row);
+        .fill => "填充 · Fill",
+        .fit => "适应 · Fit",
+        .center => "居中 · Center",
+        .tile => "平铺 · Tile",
+    }, &.{ .{ .label = "填充 · Fill", .value = "fill" }, .{ .label = "适应 · Fit", .value = "fit" }, .{ .label = "居中 · Center", .value = "center" }, .{ .label = "平铺 · Tile", .value = "tile" } }, 176, 148, 8, 4, 30);
+    try root.appendChild(cx.allocator, try fieldRow(cx, bound, "图片适配", null, fit));
+    try root.appendChild(cx.allocator, try fieldRow(cx, bound, "图片对齐", null, try alignmentChooser(cx, bound)));
     const sliders = try ui.boxStyled(cx, S.column, .{});
-    const transparency = try sliderRow(cx, bound, "透明度", .{ .section = "ui.materials.background", .key = "transparency" }, background.transparency, 100, 0);
-    const blur = try sliderRow(cx, bound, "模糊度", .{ .section = "ui.materials", .key = "blur_px" }, @floatFromInt(c.model.value.ui.materials.blur_px), 96, 1);
+    const transparency = try sliderRow(cx, bound, "全局透明度", .{ .section = "ui.materials.background", .key = "transparency" }, background.transparency, 100, 0);
+    const blur = try sliderRow(cx, bound, "背景与浮层模糊", .{ .section = "ui.materials", .key = "blur_px" }, @floatFromInt(c.model.value.ui.materials.blur_px), 96, 1);
     try sliders.appendChild(cx.allocator, transparency.row);
     try sliders.appendChild(cx.allocator, blur.row);
     try root.appendChild(cx.allocator, sliders);
     try root.appendChild(cx.allocator, transparency.field.error_box);
     try root.appendChild(cx.allocator, blur.field.error_box);
+    if (background.path.len != 0) try root.appendChild(cx.allocator, try materialInlinePreview(cx, bound));
+    return section.root;
+}
+
+fn materialInlinePreview(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 116 }, .position = .relative, .margin = .{ .top = 10, .bottom = 5 }, .background = S.theme.current().well, .border = .{ .radius = 8 }, .overflow = .hidden, .overflow_hidden = true, .flex_shrink = 0 }, .{});
+    root.meta.ownership.meta.test_id = "settings.background.preview";
+    if (bound.hooks.appearance) |h| if (h.mount_material_preview) |mount| {
+        const material = try mount(h.context, cx, bound.scope, 0, 116);
+        material.meta.ownership.meta.test_id = "settings.background.preview.image";
+        try root.appendChild(cx.allocator, material);
+    };
+    const title = try ui.textStyled(cx, S.note, "背景预览");
+    title.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 11 }, .top = .{ .px = 9 } } });
+    try root.appendChild(cx.allocator, title);
+    const code = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 12 }, .bottom = .{ .px = 14 } }, .direction = .column, .gap = 0 }, .{});
+    for ([_][]const u8{ "user@ZeroWork ~", "$ ssh prod-web-01" }) |line| try code.appendChild(cx.allocator, try ui.text(cx, line, .{ .font_size = 12, .use_monospace_font = true, .line_height = 20.0 / 12.0, .color = S.theme.current().fg_1 }));
+    try root.appendChild(cx.allocator, code);
+    const preview = try textAction(cx, bound, .preview_material, "", "全窗口预览", "使用整个工作区预览当前材质草稿", "settings.materials.preview.full", false, disabled(bound));
+    preview.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 11 }, .top = .{ .px = 4 } } });
+    try root.appendChild(cx.allocator, preview);
     return root;
 }
 
 fn sliderRow(cx: *ui.Cx, bound: *binding.Binding, label: []const u8, key: binding.Key, value: f32, max: f32, step: f32) !struct { row: *ui.Node, field: *Field } {
-    const row = try ui.boxStyled(cx, S.materialRow, .{});
-    const labels = try ui.box(cx, .{ .width = .{ .px = 140 }, .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
-    const name = try ui.textStyled(cx, S.label, label);
-    textFill(name);
-    try labels.appendChild(cx.allocator, name);
-    const tip = try ui.widgets.Tooltip(.{ .text = if (step == 0) "图片透明度 0–100；100 完全透明，允许小数。" else "仅模糊背景图片；0–96 的整数，不影响文字与控件。", .open_delay_ms = 450 }).mount(bound.scope, cx);
-    const help = try ui.widgets.Button(.{ .a11y_label = if (step == 0) "图片透明度说明" else "背景模糊度说明", .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.circle_help, .icon_size = @as(f32, 16), .base_style = S.plainButton(22, 22, false) }).mount(bound.scope, cx);
-    help.meta.ownership.meta.test_id = try id(bound.scope, "settings.materials.help.", key.key);
-    try tip.trigger.appendChild(cx.allocator, help);
-    try labels.appendChild(cx.allocator, tip.wrapper);
+    const row = try ui.boxStyled(cx, S.row, .{});
+    const labels = try ui.boxStyled(cx, S.labelGroup, .{});
+    try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.label, label));
+    if (step == 0) try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.base.sectionSummary, "数值越大，图片越透明。"));
     try row.appendChild(cx.allocator, labels);
+    const controls_group = try ui.box(cx, .{ .width = .{ .px = 350 }, .height = .{ .px = 32 }, .direction = .row, .gap = 12, .align_items = .center, .flex_shrink = 0 }, .{});
+    try Responsive.mount(cx, bound.scope, controls_group, 350, 250);
+    try row.appendChild(cx.allocator, controls_group);
     const signal = try bound.scope.createSignal(f32, value);
-    const number = try Field.create(cx, bound, key, 100, 32);
+    const number = try Field.create(cx, bound, key, 90, 32);
     number.slider = signal;
     const slider = try bound.scope.allocator.create(SliderEdit);
     slider.* = .{ .field = number, .integer = step != 0 };
     try bound.scope.onCleanup(SliderEdit, slider, SliderEdit.cleanup);
     const result = try ui.widgets.Slider(.{ .value = signal, .min = @as(f32, 0), .max = max, .step = step, .width = @as(f32, 328), .track_height = @as(f32, 4), .thumb_size = @as(f32, 16), .disabled = disabled(bound), .on_change = cx.on(SliderEdit, slider, SliderEdit.change), .test_id = try id(bound.scope, "settings.slider.", key.key) }).mount(bound.scope, cx);
     result.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .height = .{ .px = 32 }, .min_width = 0, .align_items = .center, .padding = .{ .left = 8, .right = 8 } });
-    try row.appendChild(cx.allocator, result.wrapper);
-    try row.appendChild(cx.allocator, number.input.node);
+    try controls_group.appendChild(cx.allocator, result.wrapper);
+    try controls_group.appendChild(cx.allocator, number.input.node);
     return .{ .row = row, .field = number };
 }
 const SliderEdit = struct {
@@ -829,12 +1141,12 @@ fn alignmentChooser(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     try bound.registerPopover(popover);
     popover.chrome.setStyleInline(cx.allocator, S.menu(120, 8, 4));
     popover.chrome.meta.ownership.meta.test_id = "settings.chooser.alignment";
-    const names = [3][3][]const u8{ .{ "左上", "上中", "右上" }, .{ "左中", "居中", "右中" }, .{ "左下", "下中", "右下" } };
+    const names = [3][3][]const u8{ .{ "左上", "顶部居中", "右上" }, .{ "左侧居中", "居中", "右侧居中" }, .{ "左下", "底部居中", "右下" } };
     const x: @import("../background_asset.zig").Horizontal = background.alignment_x;
     const y: @import("../background_asset.zig").Vertical = background.alignment_y;
     const label = names[@backingInt(y)][@backingInt(x)];
-    const trigger = try choiceTrigger(cx, bound, label, 198, 32);
-    popover.wrapper.style.width = .{ .px = 198 };
+    const trigger = try choiceTrigger(cx, bound, label, 220, 32);
+    popover.wrapper.style.width = .{ .px = 220 };
     popover.wrapper.style.flex_shrink = 0;
     trigger.meta.ownership.meta.test_id = "settings.field.alignment";
     try popover.trigger.appendChild(cx.allocator, trigger);

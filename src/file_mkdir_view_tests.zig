@@ -237,10 +237,10 @@ test "file mkdir UI real toolbar and Enter creates once refreshes and locates wi
     const remote_stamp = before.panes[1].stamp;
     const before_count = before.panes[0].entries.len;
     const field = paneNode(&f, original.owner, "files.mkdir.field");
-    try std.testing.expectApproxEqAbs(@as(f32, 278), field.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 290), field.globalRect().w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 24), field.globalRect().h, 0.1);
     const result = paneNode(&f, original.owner, "files.mkdir.result");
-    try std.testing.expectApproxEqAbs(@as(f32, 574), result.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 594), result.globalRect().w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 108), result.globalRect().h, 0.1);
     try enterName(&f, original.owner, "新目录 with spaces");
     try std.testing.expectEqual(before_count, model.projection().?.panes[0].entries.len);

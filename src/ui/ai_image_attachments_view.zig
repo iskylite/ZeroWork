@@ -176,6 +176,7 @@ pub const View = struct {
         var buffer: [160]u8 = undefined;
         const text = if (reference.content()) |content| try std.fmt.bufPrint(&buffer, "{s} {d}×{d} · {d} B", .{ @tagName(content.mime), content.width, content.height, content.bytes.len }) else if (state == .processing) "图片处理中" else "读取失败 · 可重试";
         try card.metadata.setTextContent(self.cx.allocator, text);
+        card.metadata.setDisplay(if (state == .ready) .none else .flex);
         card.remove_button.setDisplay(if (self.readonly) .none else .flex);
         card.retry_button.setDisplay(if (!self.readonly and state == .failed) .flex else .none);
         // Keep resource ownership independent of mutable draft/remove callbacks.

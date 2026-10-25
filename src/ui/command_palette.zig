@@ -203,6 +203,7 @@ pub const LineTracker = struct {
 /// 面板状态机。节点渲染在 terminal_view.zig；本结构只决定“显示哪些行、
 /// 选中哪行、采纳什么文本”。
 pub const Palette = struct {
+    local_session: bool = false,
     is_open: bool = false,
     /// '@' 之后敲入的过滤串（不含 '@' 本身；可含空格延伸出参数）。
     query: std.ArrayList(u8) = .empty,
@@ -394,6 +395,7 @@ pub const Palette = struct {
         const prev = if (self.match_count > 0 and self.selected < self.match_count) self.matches[self.selected] else null;
         var count: usize = 0;
         for (builtin.catalog, 0..) |entry, index| {
+            if (self.local_session and (std.mem.eql(u8, entry.name, "@up") or std.mem.eql(u8, entry.name, "@dl") or std.mem.eql(u8, entry.name, "@socks"))) continue;
             if (matchesQuery(entry, self.query.items)) {
                 self.matches[count] = index;
                 count += 1;
@@ -813,4 +815,19 @@ test "partial remote line kills cannot falsely start a local command" {
     tracker.clearLine();
     tracker.record(std.testing.allocator, "echo file\x1b[D\x7f");
     try std.testing.expect(!tracker.atLineStart());
+}
+
+test "local command catalog excludes remote transfer and forwarding but preserves themes" {
+    var palette: Palette = .{ .local_session = true };
+    defer palette.deinit(std.testing.allocator);
+    palette.open();
+    try std.testing.expectEqual(builtin.catalog.len - 3, palette.matchCount());
+    for (0..palette.matchCount()) |index| {
+        const entry = palette.matchAt(index);
+        try std.testing.expect(!std.mem.eql(u8, entry.name, "@up"));
+        try std.testing.expect(!std.mem.eql(u8, entry.name, "@dl"));
+        try std.testing.expect(!std.mem.eql(u8, entry.name, "@socks"));
+    }
+    _ = palette.handleChar(std.testing.allocator, "theme");
+    try std.testing.expectEqualStrings("@theme", palette.matchAt(0).name);
 }

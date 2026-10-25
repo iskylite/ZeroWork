@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {createServer} from 'node:net';
-import {mkdir,mkdtemp,open,readFile,writeFile} from 'node:fs/promises';
+import {mkdir,mkdtemp,realpath,open,readFile,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
-import {waitForServerReady,waitFor,query,clickAt,key,type_,resizeWindow,screenshot,sleep} from '../zig-out/share/zenit/harness/client.ts';
+import {waitForServerReady,waitFor,query,clickAt,key,type_,resizeWindow,screenshot,screenPos,sleep,scrollAt} from '../zig-out/share/zenit/harness/client.ts';
 const binary=resolve(process.argv[2]),out=resolve(process.argv[3]),theme=process.argv[4]??'dark';
 assert(['dark','light','sauber'].includes(theme));
 await mkdir(out,{recursive:true});
-const isolated=await mkdtemp(join(tmpdir(),'zw-wizard-discard-')),data=join(isolated,'data'),rpc=join(isolated,'rpc');
+const isolated=await realpath(await mkdtemp(join(tmpdir(),'zw-wizard-discard-'))),data=join(isolated,'data'),rpc=join(isolated,'rpc');
 await mkdir(data);await mkdir(rpc);
 await writeFile(join(data,'hosts.toml'),'');
 await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="${theme}"\nfont_family="Menlo"\nfont_size=14\n`);
@@ -26,17 +26,16 @@ const shown=(n:any)=>n.visible!==false&&n.hidden!==true&&(n.effective_opacity??1
 const flatten=(n:any):any[]=>[n,...(n.children??[]).flatMap(flatten)];
 const text=(n:any)=>flatten(n).map(x=>x.text??'').join(' ');
 async function current(id:string){
- if(id.startsWith('wizard.')&&id!=='wizard.dialog'){
-  const dialog=(await query('wizard.dialog')).find(shown);if(!dialog)return null;
-  const walk=(n:any):any[]=>!shown(n)?[]:[n,...(n.children??[]).flatMap(walk)];
-  return walk(dialog).find(n=>n.test_id===id)??null;
+ if(id==='wizard.dialog'){
+  if(!(await query('wizard.close')).some(shown))return null;
+  return {rect:await screenPos(id)};
  }
  return (await query(id)).find(shown)??null;
 }
 async function visible(id:string){return waitFor(()=>current(id));}
 async function click(id:string){let prior='';let repeats=0;const n=await waitFor(async()=>{const n=await current(id);if(!n)return null;const at=JSON.stringify(n.rect);repeats=at===prior?repeats+1:0;prior=at;await sleep(80);return repeats>=2?n:null;});assert((await clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2)).ok);}
 async function fill(id:string,value:string){await click(id);await key('a',{cmd:true});await type_(value);await waitFor(async()=>{const n=await current(id);return n&&text(n).includes(value)?true:null});}
-async function closed(){await waitFor(async()=>!(await query('wizard.dialog')).some(shown)||null);}
+async function closed(){await waitFor(async()=>!(await query('wizard.close')).some(shown)||null);}
 async function capture(name:string){await sleep(200);const dialog=await visible('wizard.dialog');await writeFile(join(out,name+'.json'),JSON.stringify(dialog,null,2));assert((await screenshot(join(out,name+'.png'))).ok);report.stages.push({name,rect:dialog.rect});}
 try{
  await waitForServerReady(30000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),child.pid);
@@ -48,15 +47,17 @@ try{
  assert.equal(connected,0);
  await click('wizard.discard.continue');
  assert.match(text(await visible('wizard.name')),/DB-Master/);
- await click('wizard.next.identity');await capture('03-route');assert.match(text(await visible('wizard.route.select')),/直连/);
+ await click('wizard.next.identity');await capture('03-route');assert.match(text(await visible('wizard.access.direct')),/从本机直接连接/);
  await click('wizard.next.route');await capture('04-review');assert.match(text(await visible('wizard.review.name')),/DB-Master/);await click('wizard.review.modify');await visible('wizard.name');await click('wizard.next.identity');await click('wizard.next.route');
  await click('wizard.close');await capture('05-discard-from-review');
- assert.equal((await visible('wizard.dialog')).rect.w,720);await click('wizard.discard.toggle');await capture('05b-discard-collapsed');await click('wizard.discard.toggle');
+ assert.equal((await visible('wizard.dialog')).rect.w,760);await click('wizard.discard.toggle');await capture('05b-discard-collapsed');await click('wizard.discard.toggle');
  await key('escape');await visible('wizard.save'); // Esc only returns to editing.
  await click('wizard.cancel');await resizeWindow(860,480);await capture('06-discard-compact');
  const compact=await visible('wizard.dialog');assert(compact.rect.x>=0&&compact.rect.y>=0&&compact.rect.x+compact.rect.w<=860&&compact.rect.y+compact.rect.h<=480);
  await click('wizard.discard.continue');await capture('07-review-compact');await resizeWindow(1440,900);
  await click('wizard.test');await waitFor(async()=>connected===1||null,15000);
+ await capture('08a-test-progress-visible');const stage=await visible('wizard.test.stage.0');assert(Math.abs(stage.rect.h-Number(process.argv[5]??54.6))<0.1);assert.match(text(stage),/DB-Master/);assert.match(text(stage),/127\.0\.0\.1/);assert(!(await current('wizard.test.hop.9')));await click('wizard.test.toggle');await visible('wizard.test.hop.9');await sleep(700);await capture('08b-test-details-expanded');const detailsArea=await visible('wizard.scroll.review');await scrollAt(detailsArea.rect.x+detailsArea.rect.w-20,detailsArea.rect.y+detailsArea.rect.h/2,0,-1400);await sleep(300);await capture('08b2-test-details-logs');const logs=await visible('wizard.test.logs.viewport');assert(logs.rect.y+logs.rect.h<=(await visible('wizard.footer')).rect.y+1);await scrollAt(detailsArea.rect.x+detailsArea.rect.w-20,detailsArea.rect.y+detailsArea.rect.h/2,0,1400);await sleep(300);await click('wizard.test.toggle');assert(!(await current('wizard.test.hop.9')));await visible('wizard.test.stage.0');await capture('08c-test-details-collapsed');report.checks.push('Real per-hop stage summary keeps endpoint and state; details expand and collapse during the same live probe');const probe=await visible('wizard.test.card'),actions=await visible('wizard.footer'),steps=await visible('wizard.steps');assert(probe.rect.y>=steps.rect.y+steps.rect.h-0.5&&probe.rect.y<actions.rect.y);
+
  await click('wizard.close');assert.match(text(await visible('wizard.discard.status')),/取消正在进行/);
  await capture('08-discard-pending-test');assert.equal(disconnected,0);
  await click('wizard.discard.continue');await visible('wizard.test');assert.equal(disconnected,0);
@@ -68,6 +69,6 @@ try{
  await click('sidebar.empty.new');await fill('wizard.name','unfinished');await key('escape');await visible('wizard.discard.confirm');
  await click('wizard.discard.confirm');await closed();
  assert.equal(connected,1);
- report.checks=['Three wizard steps shown with original inputs','720x286 discard geometry','Continue retains step and all typed fields','Escape returns from confirmation without discarding','860x480 footer reachable','Pending probe not cancelled by opening confirmation or continuing','Confirmed discard cancels exact pending probe and waits for disconnect','No host persisted by discard','Reopen has no discarded draft','Empty draft closes directly; partial input requires confirmation'];report.status='passed';
+ report.checks=[...report.checks,'Three wizard steps shown with original inputs','760x286 discard geometry','Continue retains step and all typed fields','Escape returns from confirmation without discarding','860x480 footer reachable','Pending probe not cancelled by opening confirmation or continuing','Confirmed discard cancels exact pending probe and waits for disconnect','No host persisted by discard','Reopen has no discarded draft','Empty draft closes directly; partial input requires confirmation'];report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await screenshot(join(out,'failure.png')).catch(()=>{});throw e;}
 finally{report.peer={connected,disconnected};await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));child.kill('SIGTERM');await ended;for(const s of sockets)s.destroy();await new Promise<void>(r=>peer.close(()=>r()));await log.close();}

@@ -6,7 +6,7 @@ const values = @import("settings_values.zig");
 const schema = @import("settings_schema.zig");
 const mock = @import("../ui/mockups/common.zig");
 pub const styles = @import("settings_styles.zig");
-pub const Action = enum { reset_defaults, save, import_theme, export_logs, clear_logs, clear_all, open_config_dir };
+pub const Action = enum { reset_defaults, revert, save, import_theme, export_logs, clear_logs, clear_all, open_config_dir };
 pub const ActionState = struct { enabled: bool = true, reason: ?[]const u8 = null };
 pub const Key = struct { section: []const u8, key: []const u8 };
 pub const Hooks = struct {
@@ -34,16 +34,18 @@ pub const modal_heights: [8]f32 = @splat(styles.geometry.panel_height);
 /// (or zero) height would make the scroll viewport and its footer unreachable.
 pub fn constrainedModalHeight(page_index: usize, viewport_height: f32) f32 {
     _ = page_index;
-    return @max(@as(f32, 1), @min(styles.geometry.panel_height, viewport_height - 68));
+    const available = viewport_height - 2 * @import("../ui/v3_geometry.zig").settings_inset;
+    const target = if (viewport_height <= 480) styles.geometry.compact_height else styles.geometry.panel_height;
+    return @max(@as(f32, 1), @min(target, available));
 }
 
 test "settings modal height never becomes negative in a tiny viewport" {
     try std.testing.expectEqual(@as(f32, 1), constrainedModalHeight(0, 16));
     try std.testing.expectEqual(@as(f32, 1), constrainedModalHeight(0, 32));
-    try std.testing.expectEqual(@as(f32, 32), constrainedModalHeight(0, 100));
-    try std.testing.expectEqual(@as(f32, 700), constrainedModalHeight(0, 900));
-    try std.testing.expectEqual(@as(f32, 700), constrainedModalHeight(999, 900));
-    try std.testing.expectEqual(@as(f32, 412), constrainedModalHeight(0, 480));
+    try std.testing.expectEqual(@as(f32, 68), constrainedModalHeight(0, 100));
+    try std.testing.expectEqual(@as(f32, 790), constrainedModalHeight(0, 900));
+    try std.testing.expectEqual(@as(f32, 790), constrainedModalHeight(999, 900));
+    try std.testing.expectEqual(@as(f32, 432), constrainedModalHeight(0, 480));
 }
 
 pub const rows = [_]Row{
@@ -180,11 +182,15 @@ pub fn mountPage(cx: *ui.Cx, scope: *ui.Scope, controller: *Controller, hooks: H
     const root = try ui.boxStyled(cx, styles.content, .{});
     root.meta.ownership.meta.test_id = "settings.content";
     const header = try ui.boxStyled(cx, styles.header, .{});
-    try header.appendChild(cx.allocator, try ui.spacer(cx));
+    const heading = try ui.box(cx, .{ .width = .fill(), .min_width = 0, .flex = 1, .direction = .column, .gap = 4 }, .{});
+    const searching = std.mem.trim(u8, controller.search_query, " \t\r\n").len != 0;
+    try heading.appendChild(cx.allocator, try ui.text(cx, if (searching) "搜索结果" else controller.model.page().name, .{ .font_size = 13, .font_weight = 700, .line_height = 20.0 / 13.0, .color = styles.theme.current().fg_1 }));
+    try heading.appendChild(cx.allocator, try ui.text(cx, if (searching) "在全部设置分类中查找，输入内容不会改变折叠偏好。" else controller.model.page().description, .{ .font_size = 11, .color = styles.theme.current().fg_2 }));
+    try header.appendChild(cx.allocator, heading);
     const help_text = if (controller.model.page_index == 6 and hooks.authorization_help != null) hooks.authorization_help.?(hooks.context) else controller.model.page().description;
     const help = try ui.widgets.Tooltip(.{ .text = help_text, .open_delay_ms = 450 }).mount(scope, cx);
     help.content.meta.ownership.meta.test_id = "settings.help.content";
-    const help_button = try ui.widgets.Button(.{ .icon_asset = ui.icons.circle_help, .icon_only = true, .a11y_label = "分类帮助", .variant = .ghost, .base_style = styles.button(styles.geometry.icon_button, false), .hover_style = styles.buttonHover() }).mount(scope, cx);
+    const help_button = try ui.widgets.Button(.{ .icon_asset = ui.icons.circle_help, .icon_only = true, .a11y_label = "分类帮助", .variant = .ghost, .base_style = styles.fieldHelpButton(), .hover_style = styles.buttonHover() }).mount(scope, cx);
     help_button.meta.ownership.meta.test_id = "settings.help";
     try help.trigger.appendChild(cx.allocator, help_button);
     try header.appendChild(cx.allocator, help.wrapper);
@@ -194,16 +200,15 @@ pub fn mountPage(cx: *ui.Cx, scope: *ui.Scope, controller: *Controller, hooks: H
     scroll.container.style.flex_shrink = 1;
     scroll.container.style.margin.top = styles.geometry.viewport_gap;
     scroll.container.meta.ownership.meta.test_id = "settings.viewport";
-    scroll.content.style.padding.right = styles.geometry.scrollbar_gutter;
+    scroll.content.style.padding = .{ .left = 5, .right = 5, .bottom = 12 };
     scroll.content.style.gap = styles.geometry.section_gap;
     const page = try mountBody(cx, binding);
-    if (controller.model.page_index == 4 and @import("settings_parts/settings_ai.zig").matchesProviders(controller.search_query)) if (hooks.mount_provider_action) |mount_action| {
-        try header.insertChildBefore(cx.allocator, try mount_action(hooks.context, cx, scope), help.wrapper);
-    };
     try scroll.content.appendChild(cx.allocator, page);
     try root.appendChild(cx.allocator, scroll.container);
     const footer = try ui.boxStyled(cx, styles.footer, .{});
     footer.meta.ownership.meta.test_id = "settings.footer";
+    const reset = try binding.actionButton(cx, .reset_defaults, ui.icons.rotate_ccw, "恢复默认…", "settings.reset", false);
+    try footer.appendChild(cx.allocator, reset.wrapper);
     const state_text = footerStateText(controller);
     try footer.appendChild(cx.allocator, try ui.iconTint(cx, if (controller.model.dirty or backgroundNeedsAttention(controller)) ui.icons.circle else ui.icons.check, styles.theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
     const state_label = try ui.textStyled(cx, styles.note, state_text);
@@ -211,9 +216,9 @@ pub fn mountPage(cx: *ui.Cx, scope: *ui.Scope, controller: *Controller, hooks: H
     state_label.meta.ownership.meta.test_id = "settings.footer.state";
     try footer.appendChild(cx.allocator, state_label);
     try footer.appendChild(cx.allocator, try ui.spacer(cx));
-    const reset = try binding.actionButton(cx, .reset_defaults, ui.icons.rotate_ccw, "恢复默认设置", "settings.reset", false);
-    const save = try binding.actionButton(cx, .save, ui.icons.save, "保存全部设置", "settings.save", true);
-    try footer.appendChild(cx.allocator, reset.wrapper);
+    const revert = try binding.actionButton(cx, .revert, ui.icons.rotate_ccw, "撤销更改", "settings.revert", false);
+    const save = try binding.actionButton(cx, .save, ui.icons.save, "保存更改", "settings.save", true);
+    try footer.appendChild(cx.allocator, revert.wrapper);
     try footer.appendChild(cx.allocator, save.wrapper);
     try root.appendChild(cx.allocator, footer);
     binding.refreshFooter();
@@ -237,7 +242,32 @@ fn footerStateText(controller: *const Controller) []const u8 {
 }
 
 fn mountBody(cx: *ui.Cx, binding: *Binding) !*ui.Node {
-    return switch (binding.controller.model.page_index) {
+    if (std.mem.trim(u8, binding.controller.search_query, " \t\r\n").len == 0) return mountCategory(cx, binding, binding.controller.model.page_index);
+    const results = try ui.boxStyled(cx, styles.sectionColumn, .{});
+    results.meta.ownership.meta.test_id = "settings.search.results";
+    var found_results = false;
+    for (0..8) |index| {
+        const page = try mountCategory(cx, binding, index);
+        const empty = page.children.items.len == 1 and page.children.items[0].getText() != null and std.mem.eql(u8, page.children.items[0].getText().?.content, "没有匹配的设置");
+        if (empty) page.setDisplay(.none) else found_results = true;
+        try results.appendChild(cx.allocator, page);
+    }
+    if (!found_results) try results.appendChild(cx.allocator, try ui.textStyled(cx, styles.note, "没有匹配的设置"));
+    return results;
+}
+fn mountCategory(cx: *ui.Cx, binding: *Binding, index: usize) !*ui.Node {
+    const query = binding.controller.search_query;
+    const names = [_][]const u8{ "外观与主题", "快捷键", "SSH 与网络", "文件传输", "AI 辅助", "协议插件", "通知", "数据与日志" };
+    const folds = binding.controller.folded_sections;
+    if (query.len != 0 and matches(query, names[index])) {
+        binding.controller.search_query = "";
+        binding.controller.folded_sections = 0;
+    }
+    defer {
+        binding.controller.search_query = query;
+        binding.controller.folded_sections = folds;
+    }
+    return switch (index) {
         0 => @import("settings_parts/settings.zig").mountContent(cx, binding),
         1 => @import("settings_parts/settings_keys.zig").mountContent(cx, binding),
         2 => @import("settings_parts/settings_ssh.zig").mountContent(cx, binding),
@@ -303,7 +333,9 @@ pub const Binding = struct {
     legacy_save: ?*ui.Node = null,
     cx: *ui.Cx,
     save_disabled: *ui.Signal(bool),
+    revert_disabled: *ui.Signal(bool),
     save_tint: *ui.Signal(?ui.Color),
+    save_style: *ui.Signal(styles.ButtonStyle),
     saving: *ui.Signal(bool),
     status_label: ?*ui.Node = null,
     font_status_label: ?*ui.Node = null,
@@ -314,10 +346,18 @@ pub const Binding = struct {
     fn init(cx: *ui.Cx, scope: *ui.Scope, controller: *Controller, hooks: Hooks) !*Binding {
         const self = try scope.allocator.create(Binding);
         errdefer scope.allocator.destroy(self);
-        self.* = .{ .controller = controller, .hooks = hooks, .scope = scope, .cx = cx, .save_disabled = try scope.createSignal(bool, true), .save_tint = try scope.createSignal(?ui.Color, styles.theme.current().fg_2), .saving = try scope.createSignal(bool, controller.state() == .saving) };
+        self.* = .{ .controller = controller, .hooks = hooks, .scope = scope, .cx = cx, .save_disabled = try scope.createSignal(bool, true), .revert_disabled = try scope.createSignal(bool, true), .save_tint = try scope.createSignal(?ui.Color, styles.theme.current().fg_2), .save_style = try scope.createSignal(styles.ButtonStyle, saveButtonStyle(false)), .saving = try scope.createSignal(bool, controller.state() == .saving) };
         try scope.onCleanup(Binding, self, Binding.cleanup);
         self.refreshFooter();
         return self;
+    }
+    fn saveButtonStyle(available: bool) styles.ButtonStyle {
+        var result = styles.textButton();
+        result.height = .{ .px = 32 };
+        result.padding = .{ .left = 8, .right = 8 };
+        result.background = if (available) styles.theme.current().accent else styles.theme.current().selection;
+        result.text_color = if (available) ui.Color.WHITE else styles.theme.current().fg_3;
+        return result;
     }
     fn cleanup(self: *Binding) void {
         self.ime_clients.deinit(self.scope.allocator);
@@ -385,6 +425,8 @@ pub const Binding = struct {
                 }
             }
         }
+        self.revert_disabled.set(!self.controller.model.dirty or self.controller.state() == .saving or if (self.hooks.appearance) |host| host.isBusy() else false);
+        self.save_style.set(saveButtonStyle(available));
         self.save_disabled.set(!available);
         self.save_tint.set(if (available) ui.Color.WHITE else styles.theme.current().fg_2);
         self.saving.set(self.controller.state() == .saving);
@@ -501,7 +543,12 @@ pub const Binding = struct {
         click.* = .{ .binding = self, .action = action };
         try self.scope.onCleanup(ActionClick, click, ActionClick.cleanup);
         const tip = try ui.widgets.Tooltip(.{ .text = label, .open_delay_ms = 450 }).mount(self.scope, cx);
-        const node = try ui.widgets.Button(.{ .icon_asset = icon, .icon_only = true, .icon_size = @as(f32, 16), .icon_tint = if (primary) self.save_tint else try self.scope.createSignal(?ui.Color, styles.theme.current().fg_2), .a11y_label = label, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .secondary), .disabled = if (primary) self.save_disabled else self.saving, .loading = if (primary) self.saving else try self.scope.createSignal(bool, false), .on_click = cx.on(ActionClick, click, ActionClick.activate), .base_style = styles.button(styles.geometry.footer_button, primary), .hover_style = @as(?ui.BoxStyle, if (primary) null else styles.buttonHover()) }).mount(self.scope, cx);
+        var style = styles.textButton();
+        style.height = .{ .px = 32 };
+        style.padding = .{ .left = 8, .right = 8 };
+        style.background = if (primary) styles.theme.current().accent else ui.Color.TRANSPARENT;
+        style.text_color = if (primary) ui.Color.WHITE else styles.theme.current().fg_2;
+        const node = try ui.widgets.Button(.{ .label = label, .icon_asset = if (action == .reset_defaults) null else icon, .icon_size = @as(f32, 14), .icon_tint = if (primary) self.save_tint else try self.scope.createSignal(?ui.Color, styles.theme.current().fg_2), .a11y_label = label, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .secondary), .disabled = if (primary) self.save_disabled else if (action == .revert) self.revert_disabled else self.saving, .loading = if (primary) self.saving else try self.scope.createSignal(bool, false), .on_click = cx.on(ActionClick, click, ActionClick.activate), .base_style = @as(ui.Source(styles.ButtonStyle), if (primary) .{ .signal = self.save_style } else .{ .value = style }), .hover_style = @as(?ui.BoxStyle, if (primary) null else styles.buttonHover()) }).mount(self.scope, cx);
         node.meta.ownership.meta.test_id = id;
         try tip.trigger.appendChild(cx.allocator, node);
         return .{ .wrapper = tip.wrapper, .button = node };
@@ -594,6 +641,7 @@ const ActionClick = struct {
     fn activate(self: *ActionClick) void {
         if (self.binding.controller.state() == .saving) return;
         if (self.action == .save and self.binding.save_disabled.get()) return;
+        if (self.action == .revert and self.binding.revert_disabled.get()) return;
         self.binding.hooks.action(self.binding.hooks.context, self.action);
     }
 };

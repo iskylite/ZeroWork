@@ -58,8 +58,10 @@ async function active(): Promise<number> {
 async function click(id: string) { assert((await clickTestId(id)).ok, id); }
 async function createTab(id: number) {
   await click("toolbar.new_session");
-  await waitFor(async () => (await query("session.menu.saved.1")).some(shown) || null);
-  await click("session.menu.saved.1");
+  await waitFor(async () => (await query("session.menu.quick")).some(shown) || null);
+  await click("session.menu.quick");
+  await waitFor(async () => (await query("quick.submit")).some(shown) || null);
+  await click("quick.submit");
   await waitFor(async () => await active() === id || null);
 }
 async function capture(name: string, ids: string[]) {

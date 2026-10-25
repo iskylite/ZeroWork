@@ -5,23 +5,24 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFile, mkdir, mkdtemp, open, readFile, readdir, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, realpath, open, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { waitForServerReady, waitFor, query, clickAt, key, type_, screenshot, sleep, resizeWindow, screenPos } from "../zig-out/share/zenit/harness/client.ts";
+import { waitForServerReady, waitFor, query, clickAt, key, type_, screenshot, sleep, resizeWindow, screenPos, scrollAt } from "../zig-out/share/zenit/harness/client.ts";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const args: Record<string,string> = {};
-for(let i=2;i<process.argv.length;i+=2) { assert(["--binary","--expected-sha","--out","--prepare-only"].includes(process.argv[i]) && process.argv[i+1]); args[process.argv[i]]=process.argv[i+1]; }
+for(let i=2;i<process.argv.length;i+=2) { assert(["--binary","--expected-sha","--out","--prepare-only","--theme"].includes(process.argv[i]) && process.argv[i+1]); args[process.argv[i]]=process.argv[i+1]; }
 assert(args["--out"]);
 const output=resolve(args["--out"]); await mkdir(output,{recursive:true}); assert.equal((await readdir(output)).length,0);
-const report:any={status:"prepared_not_run",checks:[],screenshots:[],input:"Synthetic public Harness only",visual_status:"not_reviewed",limits:["Physical pointer, IME, window blur, VoiceOver require separate native acceptance","Runner cleanup SIGTERM is not normal application shutdown proof","Local mixed-group paths only; SSH reconnect/offline and AI impacts require their own fixtures"]};
+const report:any={theme:args["--theme"]??"dark",status:"prepared_not_run",checks:[],screenshots:[],input:"Synthetic public Harness only",visual_status:"not_reviewed",limits:["Physical pointer, IME, window blur, VoiceOver require separate native acceptance","Runner cleanup SIGTERM is not normal application shutdown proof","Local mixed-group paths only; SSH reconnect/offline and AI impacts require their own fixtures"]};
 const save=()=>writeFile(join(output,"report.json"),JSON.stringify(report,null,2));
 if(args["--prepare-only"]==="1") { report.plan=["Create real source and receiver Local PTYs, record distinct shell PIDs, join same group", "Submit trusted @sync on and verify approval card; Escape causes no fanout", "Approve exact source/receiver and append shell PID to a shared file: exactly one row per approved shell", "Join a third real Local PTY and prove its PID never receives old approval", "@sync off must stop fanout without closing any terminal"]; await save(); process.exit(0); }
 assert(args["--binary"] && /^[a-f0-9]{64}$/.test(args["--expected-sha"]??""));
 const sourceBinary=resolve(args["--binary"]), binary=join(output,"zerowork-frozen"); await copyFile(sourceBinary,binary); await copyFile(join(dirname(sourceBinary),"zw_ipc.so"),join(output,"zw_ipc.so")); assert.equal(createHash("sha256").update(await readFile(binary)).digest("hex"),args["--expected-sha"]);
-const isolated=await mkdtemp(join(tmpdir(),"zw-group-broadcast-")), rpc=join(isolated,"rpc"),data=join(isolated,"data"); await Promise.all([mkdir(rpc),mkdir(data)]);
-await writeFile(join(data,"config.toml"),'[meta]\nconfig_revision = 1\n[ui]\ntheme = "dark"\nfont_family = "Menlo"\nfont_size = 14\n');
+assert(["dark","light"].includes(args["--theme"]??"dark"));
+const isolated=await realpath(await mkdtemp(join(tmpdir(),"zw-group-broadcast-"))), rpc=join(isolated,"rpc"),data=join(isolated,"data"); await Promise.all([mkdir(rpc),mkdir(data)]);
+await writeFile(join(data,"config.toml"),`[meta]\nconfig_revision = 1\n[ui]\ntheme = "${args["--theme"]??"dark"}"\nfont_family = "Menlo"\nfont_size = 14\n`);
 process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
 const log=await open(join(output,"app.log"),"w");
 const child=spawn(binary,[],{cwd:root,env:{...process.env,ZENIT_E2E_FILE_RPC_DIR:rpc,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:"0",ZENIT_E2E_BACKGROUND:"1",ZENIT_E2E_ISOLATE_POINTER:"1",OPENAI_API_KEY:"",ANTHROPIC_API_KEY:""},stdio:["ignore",log.fd,log.fd]});
@@ -44,7 +45,7 @@ const panes=async()=>{
  for(const tab of await tabs()) { const id=tab.test_id.split(".").at(-1); const rect=await screenPos(`groups.pane.${id}`);if(rect.w>0&&rect.h>0)result.push({test_id:`groups.pane.${id}`,rect}); }
  return result;
 };
-const capture=async(name:string)=>{await sleep(180);assert((await screenshot(join(output,`${name}.png`))).ok);const observed:any={};for(const id of ["tabs.strip","groups.workspace","groups.close.confirm","groups.close.partial","local.close.confirmation"])observed[id]=await query(id);await writeFile(join(output,`${name}.queries.json`),JSON.stringify(observed,null,2));report.screenshots.push(name);await save()};
+const capture=async(name:string)=>{await sleep(180);assert((await screenshot(join(output,`${name}.png`))).ok);const observed:any={};for(const id of ["tabs.strip","groups.workspace","groups.close.confirm","groups.close.partial","local.close.confirmation","group.broadcast.card","group.broadcast.footer","status.group.broadcast"])observed[id]=await query(id);await writeFile(join(output,`${name}.queries.json`),JSON.stringify(observed,null,2));report.screenshots.push(name);await save()};
 const check=(name:string,detail:any)=>report.checks.push({name,status:"passed",detail});
 async function joinTrustedGroup(label:string):Promise<void>{
  // Shell startup is async and user rc files may take seconds. A real shell
@@ -106,15 +107,32 @@ try {
  await focusPane(source);await trustedCommand("sync on");await visible("group.broadcast.card");await capture("01-unapproved");
  await press("escape");await hidden("group.broadcast.card");await sendMarker(source,"cancel-is-zero-fanout",[sourcePid]);
  await trustedCommand("sync on");await visible("group.broadcast.card");await click("group.broadcast.accept");
- await waitFor(async()=>flat(await visible("group.broadcast.card")).some(n=>n.text==="停止广播")||null,8000);await capture("02-approved");
+ await waitFor(async()=>flat(await visible("group.broadcast.card")).some(n=>n.text==="关闭广播")||null,8000);await capture("02-approved");
  await press("escape");await hidden("group.broadcast.card");await sendMarker(source,"approved-source-and-receiver-once",[sourcePid,receiverPid]);
+ await click("status.group.broadcast");await visible("group.broadcast.card");await resizeWindow(860,480);await sleep(350);
+ const card=await visible("group.broadcast.card"),anchor=await visible("status.group.broadcast");assert(card.rect.x>=0&&card.rect.y>=0&&card.rect.x+card.rect.w<=860&&card.rect.y+card.rect.h<=480);assert(card.rect.y+card.rect.h<=anchor.rect.y+0.5);await capture("02b-compact-anchored");
+ if((await query("sidebar.collapse")).some(shown)){await click("sidebar.collapse");await hidden("group.broadcast.card");await click("status.group.broadcast");}await sleep(200);const folded=await visible("group.broadcast.card");assert(folded.rect.x>=0&&folded.rect.y>=0&&folded.rect.x+folded.rect.w<=860&&folded.rect.y+folded.rect.h<=480);await capture("02c-compact-sidebar-folded");
+ // No hidden recipient configuration: the one captured receiver can be excluded, then selected again.
+ await click(`group.broadcast.member.${receiver}.select`);await waitFor(async()=>flat(await visible("group.broadcast.summary")).some(n=>n.text?.includes("已关闭"))||null,8000);await press("escape");await hidden("group.broadcast.card");await sendMarker(source,"deselected-receiver-excluded",[sourcePid]);
+ await click("status.group.broadcast");await click("group.broadcast.accept");await press("escape");await hidden("group.broadcast.card");await sendMarker(source,"reopened-approval-delivers-once",[sourcePid,receiverPid]);
+ await resizeWindow(1440,900);if((await query("sidebar.rail.expand")).some(shown))await click("sidebar.rail.expand");
+
  await click("toolbar.new_session");await click("session.menu.local");await joinTrustedGroup("unapproved-third");
  await waitFor(async()=>(await panes()).length===3||null,15000);
  const third=(await panes()).find(n=>![`groups.pane.${source}`,`groups.pane.${receiver}`].includes(n.test_id))!.test_id.split(".").at(-1)!;
  const thirdPid=await recordPid(third,"third");assert(![sourcePid,receiverPid].includes(thirdPid));
  await sendMarker(source,"new-member-excluded-from-old-approval",[sourcePid,receiverPid]);await capture("03-third-excluded");
+ await trustedCommand("sync off");await trustedCommand("sync on");await visible("group.broadcast.card");
+ const viewport=await visible("group.broadcast.viewport"), footerBefore=(await visible("group.broadcast.footer")).rect;
+ const thirdBefore=(await visible(`group.broadcast.member.${third}.select`)).rect;
+ assert((await scrollAt(viewport.rect.x+viewport.rect.w/2,viewport.rect.y+viewport.rect.h/2,0,-200)).ok);await sleep(200);
+ const footerAfter=(await visible("group.broadcast.footer")).rect, thirdAfter=(await visible(`group.broadcast.member.${third}.select`)).rect;
+ assert.deepEqual(footerAfter,footerBefore,"broadcast actions must stay fixed while body scrolls");assert(thirdAfter.y<thirdBefore.y,"overflow body must actually scroll");
+ await capture("04-members-scrolled");check("overflow-scroll-keeps-footer-fixed",{footer:footerAfter,member_before:thirdBefore,member_after:thirdAfter});
+ await click(`group.broadcast.member.${receiver}.select`);await click("group.broadcast.accept");await press("escape");await hidden("group.broadcast.card");await sendMarker(source,"selected-third-only",[sourcePid,thirdPid]);
+ await click("status.group.broadcast");await click(`group.broadcast.member.${receiver}.select`);await press("escape");await hidden("group.broadcast.card");await sendMarker(source,"reselected-member-next-input-once",[sourcePid,receiverPid,thirdPid]);
  await trustedCommand("sync off");await sendMarker(source,"explicit-off-stops-fanout",[sourcePid]);
  report.status="passed";
- report.limits.push("Real target-generation reconnect and zero-target running detail are covered by controller contract tests; this Local runner proves actual IO for approval/cancel/off/new-member exclusion only.");
+ report.limits.push("Real target-generation reconnect and zero-target running detail are covered by controller contract tests; this Local runner proves real shell IO for approval, cancel, member exclusion/reselection, new-member exclusion and off; minimum-window anchoring and overflow scrolling use actual native layout.");
 } catch(error) { report.status="failed";report.error=String(error);await capture("failed").catch(()=>{});process.exitCode=1 }
 finally {await save();if(child.exitCode===null)child.kill("SIGTERM");await Promise.race([ended,sleep(3000)]);await log.close()}

@@ -18,7 +18,7 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     try trigger.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("plug-zap").?, theme.current().fg_2, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 } }));
     try root.appendChild(cx.allocator, trigger);
     const view = try socks.mount(cx, scope, .{ .context = &sink, .action = ignore });
-    try root.appendChild(cx.allocator, view.root);
+    if (!view.portaled) try root.appendChild(cx.allocator, view.wrapper);
     try view.update(.{ .state = .running, .host = "Bastion-01", .exit = "Bastion-01", .session_id = 201, .port = 1080, .connections = 2, .downloaded = 48444211, .uploaded = 8493466 });
     view.showNode(trigger);
     return root;

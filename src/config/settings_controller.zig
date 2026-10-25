@@ -59,7 +59,7 @@ pub const Controller = struct {
     search_query: []const u8 = "",
     search_return_page: ?usize = null,
     scroll_offsets: [8]f32 = @splat(0),
-    folded_sections: u64 = std.math.maxInt(u64) & ~(@as(u64, 1) | (@as(u64, 1) << 4) | (@as(u64, 1) << 8) | (@as(u64, 1) << 16) | (@as(u64, 1) << 48) | (@as(u64, 1) << 57)),
+    folded_sections: u64 = std.math.maxInt(u64) & ~(@as(u64, 1) | (@as(u64, 1) << 4) | (@as(u64, 1) << 8) | (@as(u64, 1) << 16) | (@as(u64, 1) << 48) | (@as(u64, 1) << 56)),
     plugin_page: plugins.State,
     background: material.Draft,
     theme_library: themes.LibraryState,
@@ -368,13 +368,10 @@ pub const Controller = struct {
     pub fn setSearch(self: *Controller, query: []const u8) !void {
         try self.ensureEditable();
         const owned = if (query.len == 0) "" else try self.allocator.dupe(u8, query);
-        const search = @import("settings_search.zig");
         const was_empty = std.mem.trim(u8, self.search_query, " \t\r\n").len == 0;
         const is_empty = std.mem.trim(u8, query, " \t\r\n").len == 0;
         if (was_empty and !is_empty) self.search_return_page = self.model.page_index;
-        if (!is_empty and !search.pageMatches(query, self.model.page_index)) {
-            if (search.firstPage(query)) |page| self.model.selectPage(page);
-        } else if (is_empty) {
+        if (is_empty) {
             if (self.search_return_page) |page| self.model.selectPage(page);
             self.search_return_page = null;
         }

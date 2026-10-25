@@ -26,7 +26,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
     const root = try ui.boxStyled(cx, S.root, .{});
     root.meta.ownership.meta.test_id = "ai.recovery";
     const status = try ui.boxStyled(cx, S.statusRow, .{});
-    try status.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("wifi-off").?, S.warning(undefined).color, S.icon()));
+
     const problem = try ui.textStyled(cx, S.warning, state.reason);
     problem.meta.ownership.meta.test_id = "ai.recovery.reason";
     problem.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
@@ -37,7 +37,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
     try root.appendChild(cx.allocator, try ui.textStyled(cx, S.text, attempts));
     const row = try ui.boxStyled(cx, S.row, .{});
     try root.appendChild(cx.allocator, row);
-    const labels = [_][]const u8{ "重试答复", "编辑问题", "重新生成计划" };
+    const labels = [_][]const u8{ "重试", "编辑问题", "重新生成计划" };
     const ids = [_][]const u8{ "ai.recovery.answer", "ai.recovery.edit", "ai.recovery.regenerate" };
     for (std.enums.values(Action), labels, ids) |action, label, id| {
         const enabled = switch (action) {

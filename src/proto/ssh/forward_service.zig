@@ -156,7 +156,17 @@ pub const Service = struct {
         }
         if (self.listener) |listener| {
             try listener.ownerStep();
-            self.publish(if (self.transport_paused) .paused else .running, .awaiting, null);
+            if (listener.state() == .error_state and !self.transport_paused) {
+                const reason = listener.last_failure orelse error.ForwardListenFailed;
+                const receipt = listener.ownerStop();
+                if (receipt == .released) {
+                    listener.deinit();
+                    self.listener = null;
+                }
+                self.publish(.failed, receipt, reason);
+                return;
+            }
+            self.publish(if (self.transport_paused) .paused else if (listener.state() == .starting) .starting else .running, .awaiting, listener.last_failure);
         }
     }
     fn stopNative(self: *Service) void {

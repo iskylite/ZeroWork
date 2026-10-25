@@ -10,13 +10,68 @@ pub const Timeline = struct {
     limit: usize,
     selected: ?usize = null,
     history_id: ?@import("../host/identity.zig").HistoryId = null,
-    pub const Entry = struct { time_ms: i64, wire: []u8, search: ?@import("../vt/search_snapshot.zig").Document = null };
+    pub const PresentationRow = struct { layout: @import("terminal_record_geometry.zig").Layout = .{}, y: u16, id: @import("../vt/snapshot.zig").RowId, kind: u8, state: u8, timestamp: ?i64 };
+    pub const Entry = struct { time_ms: i64, wire: []u8, presentation: []PresentationRow = &.{}, search: ?@import("../vt/search_snapshot.zig").Document = null };
+    pub fn projectionStorageBytes(projection: *const @import("../vt/snapshot.zig").Projection) usize {
+        var text_bytes: usize = projection.visible_rows.len -| 1;
+        var spans: usize = 0;
+        for (projection.visible_rows) |row| {
+            const cells = projection.cells[row.cell_start..][0..row.cell_count];
+            var end = cells.len;
+            while (end > 0 and cells[end - 1].grapheme_len == 0) end -= 1;
+            for (cells[0..end]) |cell| if (cell.width != .wide_tail) {
+                spans += 1;
+                text_bytes += @max(1, cell.grapheme_len);
+            };
+        }
+        return text_frame.header_bytes + text_bytes + @min(spans, std.math.maxInt(u16)) * text_frame.span_wire_bytes + projection.visible_rows.len * @sizeOf(PresentationRow);
+    }
+    pub fn appendProjection(self: *Timeline, at: i64, projection: *const @import("../vt/snapshot.zig").Projection) !void {
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(self.allocator);
+        var spans: std.ArrayList(@import("../vt/text_projection_styled.zig").Span) = .empty;
+        defer spans.deinit(self.allocator);
+        for (projection.visible_rows, 0..) |row, index| {
+            const cells = projection.cells[row.cell_start..][0..row.cell_count];
+            var end = cells.len;
+            while (end > 0 and cells[end - 1].grapheme_len == 0) end -= 1;
+            for (cells[0..end]) |cell| {
+                if (cell.width == .wide_tail) continue;
+                const start: u32 = @intCast(text.items.len);
+                if (cell.grapheme_len == 0) try text.append(self.allocator, ' ') else try text.appendSlice(self.allocator, projection.graphemes[cell.grapheme_start..][0..cell.grapheme_len]);
+                try spans.append(self.allocator, .{ .start = start, .end = @intCast(text.items.len), .color = projectionColor(cell.foreground, projection.colors), .bg = projectionColor(cell.background, projection.colors), .bold = cell.attributes & 1 != 0, .italic = cell.attributes & 2 != 0, .underline = cell.underline != 0 });
+            }
+            if (index + 1 < projection.visible_rows.len) try text.append(self.allocator, '\n');
+        }
+        const span_count = @min(spans.items.len, std.math.maxInt(u16));
+        const wire = try self.allocator.alloc(u8, text_frame.header_bytes + span_count * text_frame.span_wire_bytes + text.items.len);
+        defer self.allocator.free(wire);
+        text_frame.encodeHeader(wire[0..text_frame.header_bytes], .{ .row = projection.cursor.row, .col = projection.cursor.col, .visible = false }, projection.cols, projection.rows, span_count, text.items.len);
+        text_frame.encodeSpans(wire[text_frame.header_bytes..][0 .. span_count * text_frame.span_wire_bytes], spans.items[0..span_count]);
+        @memcpy(wire[text_frame.header_bytes + span_count * text_frame.span_wire_bytes ..], text.items);
+        const presentation = try self.allocator.alloc(PresentationRow, projection.visible_rows.len);
+        errdefer self.allocator.free(presentation);
+        for (projection.visible_rows, presentation) |row, *saved| saved.* = .{ .layout = row.presentation, .y = row.viewport_y, .id = row.id, .kind = row.application_kind, .state = row.application_state, .timestamp = row.submitted_wallclock_ms orelse row.received_wallclock_ms };
+        try self.append(at, wire);
+        self.frames.items[self.frames.items.len - 1].presentation = presentation;
+        self.bytes += presentation.len * @sizeOf(PresentationRow);
+    }
+    fn projectionColor(color: @import("../vt/snapshot.zig").Color, colors: @import("../vt/snapshot.zig").Colors) u32 {
+        const rgb = switch (color) {
+            .default => return 0,
+            .rgb => |v| v,
+            .ansi => |v| colors.palette[v],
+            .indexed => |v| colors.palette[v],
+        };
+        return (@as(u32, rgb) << 8) | 255;
+    }
     pub fn init(allocator: std.mem.Allocator, limit: usize) Timeline {
         return .{ .allocator = allocator, .limit = limit };
     }
     pub fn deinit(self: *Timeline) void {
         for (self.frames.items) |*entry| {
             self.allocator.free(entry.wire);
+            if (entry.presentation.len > 0) self.allocator.free(entry.presentation);
             if (entry.search) |*document| document.deinit(self.allocator);
         }
         self.frames.deinit(self.allocator);
@@ -27,17 +82,23 @@ pub const Timeline = struct {
         errdefer self.allocator.free(copy);
         try self.frames.append(self.allocator, .{ .time_ms = time_ms, .wire = copy });
         self.bytes += copy.len;
-        // Preserve the selected frame during playback. When eviction reaches
-        // it, keep it until playback exits instead of silently changing time.
+        // Keep the frozen selection and newest live frame. When eviction
+        // reaches the selection, retire intermediate live frames instead of
+        // letting an open replay turn the bounded timeline into an unbounded
+        // list. At most those two frames may exceed a very small byte budget.
         while (self.bytes > self.limit and self.frames.items.len > 1) {
-            if (self.selected == 0) break;
-            const oldest = self.frames.orderedRemove(0);
+            const remove_index: usize = if (self.selected == 0) (if (self.frames.items.len > 2) 1 else break) else 0;
+            const oldest = self.frames.orderedRemove(remove_index);
             self.bytes -= oldest.wire.len;
+            self.bytes -= oldest.presentation.len * @sizeOf(PresentationRow);
+            if (oldest.presentation.len > 0) self.allocator.free(oldest.presentation);
             if (oldest.search) |document| self.bytes -= document.text.len + document.rows.len * @sizeOf(@import("../vt/search_snapshot.zig").Row) + document.spans.len * @sizeOf(@import("../vt/search_snapshot.zig").Span);
             self.allocator.free(oldest.wire);
             var removed = oldest;
             if (removed.search) |*document| document.deinit(self.allocator);
-            if (self.selected) |index| self.selected = index - 1;
+            if (self.selected) |index| if (index > remove_index) {
+                self.selected = index - 1;
+            };
         }
     }
     /// Legacy recordings contain viewport frames only. Index every retained
@@ -139,4 +200,22 @@ test "legacy history search indexes all retained frames with original frame loca
     try std.testing.expectEqual(@as(usize, 0), found.start);
     try std.testing.expectEqual(@as(usize, 7), timeline.legacyOffset(1));
     try std.testing.expectEqual(@as(usize, 1), timeline.selected.?);
+}
+
+test "builtin_records history keeps the frozen selection and bounded live tail" {
+    var timeline = Timeline.init(std.testing.allocator, 34);
+    defer timeline.deinit();
+    var wire: [text_frame.header_bytes + 1]u8 = undefined;
+    text_frame.encodeHeader(wire[0..text_frame.header_bytes], .{}, 1, 1, 0, 1);
+    wire[text_frame.header_bytes] = 'a';
+    try timeline.append(0, &wire);
+    try std.testing.expect(timeline.open());
+    for (1..100) |i| {
+        wire[text_frame.header_bytes] = 'b';
+        try timeline.append(@intCast(i), &wire);
+    }
+    try std.testing.expectEqual(@as(usize, 2), timeline.frames.items.len);
+    try std.testing.expectEqual(@as(usize, 0), timeline.selected.?);
+    try std.testing.expectEqualStrings("a", text_frame.decode(timeline.current().?.wire).?.text);
+    try std.testing.expectEqual(@as(i64, 99), timeline.latest().?.time_ms);
 }

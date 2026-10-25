@@ -21,6 +21,7 @@ const Fixture = struct {
     cancelled_key: ?P.operations.OperationKey = null,
     fn init(self: *Fixture) !void {
         self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .scope = undefined };
+        try self.cx.setTestFrameStep(100);
         self.cx.setViewport(1440, 900);
         self.cx.root = try ui.box(self.cx, .{ .width = .fill(), .height = .fill() }, .{});
         self.scope = try ui.Scope.init(a, null, self.cx.owner);
@@ -62,6 +63,7 @@ const Fixture = struct {
     }
     fn settle(self: *Fixture) void {
         for (0..8) |_| {
+            self.cx.advanceFrameClock();
             self.cx.layout();
             _ = self.wizard.updateViewport();
             _ = self.cx.render();
@@ -70,6 +72,11 @@ const Fixture = struct {
     fn click(self: *Fixture, id: []const u8) void {
         self.settle();
         const node = findId(self.wizard.root.?, id).?;
+        if (self.wizard.scrolls[2]) |scroll| {
+            // Summary is now permanently visible; reach lower log controls through the real scroll area.
+            ui.widgets.scrollIntoView(scroll.state, scroll.content, node, .nearest);
+            self.settle();
+        }
         const rect = node.globalRect();
         self.cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
         self.settle();
@@ -115,10 +122,10 @@ test "wizard hidden logs cannot intercept a subsequent file authentication point
     activate(f.wizard.next2_btn.?);
     f.settle();
     const test_button = f.wizard.test_btn.?;
-    try std.testing.expectEqual(@as(f32, 112), test_button.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 76), test_button.globalRect().w);
     for (test_button.children.items) |child| if (child.getText()) |label| {
         try std.testing.expectEqualStrings("检测 SFTP", label.content);
-        try std.testing.expectEqual(@as(f32, 112), child.globalRect().w);
+        try std.testing.expectEqual(@as(f32, 76), child.globalRect().w);
         try std.testing.expectEqual(@as(f32, 18), child.globalRect().h);
         try std.testing.expectEqual(@as(f32, 12), label.font_size);
         try std.testing.expectEqual(@as(u16, 500), label.font_weight);
@@ -180,10 +187,16 @@ test "wizard typed probe exact Cx geometry and direct success return to editable
     f.record(0, 1, .transport, .started);
     try std.testing.expect(try f.wizard.setTestSnapshot(try f.snapshot(&direct)));
     f.settle();
-    try std.testing.expectEqual(@as(f32, 720), f.wizard.modal.?.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 52), f.wizard.summary_card.?.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 320), f.wizard.review_test_card.?.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 668), f.wizard.test_logs_area.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 760), f.wizard.modal.?.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 66), f.wizard.summary_card.?.globalRect().h);
+    try std.testing.expectApproxEqAbs(@as(f32, 132.6), f.wizard.review_test_card.?.globalRect().h, 0.1);
+    try std.testing.expectEqual(@as(@TypeOf(f.wizard.review_body.?.style.display), .none), f.wizard.review_body.?.style.display);
+    try std.testing.expectApproxEqAbs(@as(f32, 54.6), f.wizard.test_stages[0].node.globalRect().h, 0.1);
+    try std.testing.expect(contains(f.wizard.test_stages[0].title, "第 1 跳 · DB"));
+    try std.testing.expect(contains(f.wizard.test_stages[0].detail, "TCP 连接中"));
+    f.click("wizard.test.toggle");
+    try std.testing.expectEqual(@as(@TypeOf(f.wizard.review_body.?.style.display), .flex), f.wizard.review_body.?.style.display);
+    try std.testing.expectEqual(@as(f32, 684), f.wizard.test_logs_area.globalRect().w);
     try std.testing.expectEqual(@as(f32, 142), f.wizard.test_logs_area.globalRect().h);
     try std.testing.expectEqual(@as(f32, 80), f.wizard.logs_scroll.?.globalRect().h);
     const card = findId(f.wizard.root.?, "wizard.test.hop.9").?;
@@ -208,7 +221,7 @@ test "wizard typed probe exact Cx geometry and direct success return to editable
     try std.testing.expect(f.wizard.isVisible());
     f.cx.setViewport(860, 480);
     f.settle();
-    try std.testing.expect(f.wizard.modal.?.globalRect().h <= 412);
+    try std.testing.expect(f.wizard.modal.?.globalRect().h <= 448);
     const footer = f.wizard.footer.?.globalRect();
     try std.testing.expect(footer.y + footer.h <= f.wizard.modal.?.globalRect().y + f.wizard.modal.?.globalRect().h + 0.5);
 }
@@ -231,6 +244,7 @@ test "wizard typed probe failure distinguishes upstream failed hop and untouched
     try std.testing.expect(contains(f.wizard.res_text.?, "B2 认证失败"));
     try std.testing.expect(f.wizard.canSave());
     const original = source.key;
+    f.click("wizard.test.toggle");
     f.click("wizard.test.hop.2");
     try std.testing.expectEqual(@as(?usize, 1), f.wizard.test_filter);
     try std.testing.expectEqualStrings("第2跳", f.wizard.test_rows[0].text[1].getText().?.content);

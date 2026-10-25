@@ -18,7 +18,7 @@ pub const Callbacks = struct {
     edit: ?*const fn (*anyopaque, OperationKey, identity.AssetOwner) anyerror!void = null,
 };
 pub const Selection = union(enum) { local, hop: usize };
-const ActionKind = enum { close, node, copy, fingerprint, logs, edit, close_node };
+const ActionKind = enum { close, node, copy, fingerprint, logs, edit, close_node, sample };
 const ChainState = struct { text: []const u8, online: bool };
 const Action = struct {
     view: *View,
@@ -44,6 +44,7 @@ const Action = struct {
                 self.view.feedback = "连接配置已变更，请重新打开";
             },
             .close_node => self.view.closeNode(),
+            .sample => self.view.pending_sample = true,
         }
         self.view.refreshFeedback();
     }
@@ -71,6 +72,7 @@ pub const View = struct {
     status_top: f32 = 0,
     sample_request: ?struct { key: OperationKey, id: u64 } = null,
     sample_failure: bool = false,
+    pending_sample: bool = false,
     feedback: []const u8 = "",
     feedback_label: ?*ui.Node = null,
     pointer: ?*ui.Node = null,
@@ -186,6 +188,23 @@ pub const View = struct {
     /// Button handlers only queue node selection. Rebuild at this safe point.
     pub fn flush(self: *View) !void {
         if (!self.visible) return;
+        if (self.pending_sample) {
+            self.pending_sample = false;
+            if (!self.expired and self.callbacks.request_sample != null and canSample(self.source.?)) {
+                self.cancelOwnSample();
+                self.sample_failure = false;
+                const id = self.callbacks.request_sample.?(self.callbacks.context, self.source.?.key, null) catch blk: {
+                    self.sample_failure = true;
+                    self.feedback = "链路采样未能启动";
+                    break :blk @as(u64, 0);
+                };
+                if (id != 0) {
+                    self.sample_request = .{ .key = self.source.?.key, .id = id };
+                    self.feedback = "已请求链路采样";
+                }
+                self.dirty = true;
+            }
+        }
         if (self.dirty) {
             self.dirty = false;
             try self.rebuild();
@@ -232,6 +251,7 @@ pub const View = struct {
     /// its now-inapplicable SSH trigger.
     pub fn dismiss(self: *View) void {
         self.cancelOwnSample();
+        self.pending_sample = false;
         self.visible = false;
         self.open.set(false);
         self.closeNode();
@@ -274,6 +294,10 @@ pub const View = struct {
     }
     fn anchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
         const self: *View = @ptrCast(@alignCast(raw));
+        if (self.visible) if (self.cx.root) |root| if (self.anchor_id) |id| if (find(root, id)) |trigger| {
+            const rect = trigger.globalRect();
+            if (trigger.isDisplayedInTree() and rect.w > 0) return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = 0 };
+        };
         return self.anchor_rect;
     }
 
@@ -285,50 +309,60 @@ pub const View = struct {
         const scope = try self.scope.childScope();
         self.content_scope = scope;
         self.chrome.setStyleInline(self.cx.allocator, S.panel(self.panelHeight(), self.cx.viewport.width));
-        try self.chrome.appendChild(self.cx.allocator, try ui.box(self.cx, S.fade(), .{}));
-        const header = try ui.box(self.cx, S.header(), .{});
-        try header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get("network").?, S.theme.current().accent, S.icon(18)));
-        _ = try label(self.cx, header, "通信链路", S.title(), S.titleBox());
-        try header.appendChild(self.cx.allocator, try self.iconAction(scope, .close, ui.icons.x, "关闭通信链路", "connection.details.close", false, null, 26, false));
+        const state: ChainState = if (self.expired) .{ .text = "已过期", .online = false } else chainStatus(snapshot.*);
+        const header = try ui.box(self.cx, S.chainHeader(), .{});
+        try header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.network, S.theme.current().accent, S.icon(14)));
+        self.source_label = try label(self.cx, header, if (snapshot.source == .@"test") "连接链路 · 最近检测" else "连接链路", S.chainTitle(), .{ .width = .fill(), .height = .{ .px = 20 }, .flex = 1, .min_width = 0 });
+        self.source_status = try label(self.cx, header, state.text, S.text(9, 400, 18, false), .{ .width = .{ .px = 40 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        self.source_status.?.setTextColor(if (state.online) S.theme.current().ok_ink else S.theme.current().fg_2);
+        try header.appendChild(self.cx.allocator, try self.iconAction(scope, .close, ui.icons.x, "关闭连接链路", "connection.details.close", false, null, 24, false));
         try self.chrome.appendChild(self.cx.allocator, header);
-        try self.chrome.appendChild(self.cx.allocator, try ui.box(self.cx, S.spacer(S.gap), .{}));
+        try self.chrome.appendChild(self.cx.allocator, try ui.box(self.cx, S.spacer(12), .{}));
         const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, self.cx);
         scroll.container.setStyleInline(self.cx.allocator, S.scroll());
-        scroll.content.setStyleInline(self.cx.allocator, S.stack());
+        scroll.content.setStyleInline(self.cx.allocator, S.chainBody());
         scroll.container.meta.ownership.meta.test_id = "connection.details.body";
         try self.chrome.appendChild(self.cx.allocator, scroll.container);
-        const state: ChainState = if (self.expired) .{ .text = "已过期", .online = false } else chainStatus(snapshot.*);
-        const source = try self.info(scroll.content, ui.icons.get("network").?, if (snapshot.source == .@"test") "最近检测" else "当前连接", state.text, state.online);
-        source.root.setStyle(self.cx.allocator, .max_width, 332);
-        self.source_label = source.primary;
-        self.source_status = source.trailing;
         self.rows = @splat(null);
         self.row_names = @splat(null);
         self.row_status = @splat(null);
         self.row_count = snapshot.hop_count + 1;
-        try self.card(scope, scroll.content, .local, 0, "本机", "本地 SSH 客户端", false, "");
+        const nodes = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 0, .flex_shrink = 0 }, .{});
+        try self.card(scope, nodes, .local, 0, "本机", "macOS · SSH 客户端", true, "就绪");
         for (snapshot.hops[0..snapshot.hop_count], 0..) |hop, i| {
+            const connector = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 22 }, .padding = .{ .left = 18 }, .direction = .row, .align_items = .center, .flex_shrink = 0 }, .{});
+            _ = try label(self.cx, connector, "↓ SSH 隧道", S.text(9, 400, 14, false), S.labelBox(14));
+            try nodes.appendChild(self.cx.allocator, connector);
             var endpoint_buffer: [1400]u8 = undefined;
-            try self.card(scope, scroll.content, .{ .hop = i }, i + 1, displayName(&hop), try endpoint(&endpoint_buffer, hop.endpoint), !self.expired and hopOnline(snapshot.source, hop.status), if (self.expired) "已过期" else statusText(snapshot.source, hop.status));
+            try self.card(scope, nodes, .{ .hop = i }, i + 1, displayName(&hop), try endpoint(&endpoint_buffer, hop.endpoint), !self.expired and hopOnline(snapshot.source, hop.status), if (self.expired) "已过期" else statusText(snapshot.source, hop.status));
         }
+        try scroll.content.appendChild(self.cx.allocator, nodes);
         const target = &snapshot.hops[snapshot.hop_count - 1];
-        var algorithms: [384]u8 = undefined;
-        var methods: [192]u8 = undefined;
-        _ = try self.info(scroll.content, ui.icons.get("key-round").?, try algorithmText(&algorithms, target.metadata), try authText(&methods, target.metadata.accepted_auth_methods), false);
         var rtt: [96]u8 = undefined;
         const sample = if (self.expired) null else usableTarget(snapshot.*);
         const rtt_row = try self.info(scroll.content, ui.icons.activity, "端到端延迟", try self.sampleLabel(&rtt, target.*, sample), false);
         self.rtt_label = rtt_row.trailing;
-        try self.chrome.appendChild(self.cx.allocator, try ui.box(self.cx, S.spacer(S.gap), .{}));
-        const footer = try ui.box(self.cx, S.footer(), .{});
-        try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .copy, ui.icons.copy, "复制链路", "connection.details.copy", self.callbacks.copy == null, null, 28, true));
-        try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .logs, ui.icons.get("list").?, "连接日志", "connection.details.logs", self.callbacks.logs == null, null, 28, true));
-        self.feedback_label = try label(self.cx, footer, self.feedback, S.infoText(false), S.infoLabel());
-        try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .edit, ui.icons.get("pencil").?, "编辑主机", "connection.details.edit", self.callbacks.edit == null or target.endpoint.asset_owner == null, target.endpoint.asset_owner, 28, true));
+        self.feedback_label = try label(self.cx, scroll.content, self.feedback, S.text(10, 400, 18, false), S.labelBox(18));
+        self.feedback_label.?.meta.ownership.meta.test_id = "connection.details.feedback";
+        try self.chrome.appendChild(self.cx.allocator, try ui.box(self.cx, S.spacer(14), .{}));
+        const footer = try ui.box(self.cx, S.chainFooter(), .{});
+        footer.meta.ownership.meta.test_id = "connection.details.footer";
+        try footer.appendChild(self.cx.allocator, try self.textAction(scope, .edit, "编辑连接路径", "connection.details.edit", self.callbacks.edit == null or target.endpoint.asset_owner == null, target.endpoint.asset_owner, 96, false));
+        try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .copy, ui.icons.copy, "复制链路", "connection.details.copy", self.callbacks.copy == null, null, 24, true));
+        try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .logs, ui.icons.get("list").?, "连接日志", "connection.details.logs", self.callbacks.logs == null, null, 24, true));
+        try footer.appendChild(self.cx.allocator, try ui.spacer(self.cx));
+        try footer.appendChild(self.cx.allocator, try self.textAction(scope, .sample, "测试全链路", "connection.details.sample", self.expired or self.callbacks.request_sample == null or !canSample(snapshot.*), null, 90, true));
         try self.chrome.appendChild(self.cx.allocator, footer);
         self.pointer = try ui.iconTint(self.cx, ui.icons.chevron_down, S.theme.current().fg_2, S.icon(S.pointer_size));
+        self.pointer.?.setDisplay(.none);
         try self.chrome.appendChild(self.cx.allocator, self.pointer.?);
-        self.positionPointer();
+    }
+    fn textAction(self: *View, scope: *ui.Scope, kind: ActionKind, name: []const u8, test_id: []const u8, disabled: bool, owner: ?identity.AssetOwner, width: f32, primary_action: bool) !*ui.Node {
+        const context = try self.action(scope, kind);
+        context.asset_owner = owner;
+        const button = try ui.widgets.Button(.{ .label = name, .variant = @as(ui.widgets.ButtonVariant, if (primary_action) .primary else .secondary), .base_style = S.chainAction(width, primary_action), .hover_style = .{ .background = if (primary_action) S.theme.current().accent else S.theme.current().hover }, .disabled = disabled, .on_click = self.cx.on(Action, context, Action.click) }).mount(scope, self.cx);
+        button.meta.ownership.meta.test_id = test_id;
+        return button;
     }
 
     fn card(self: *View, scope: *ui.Scope, parent: *ui.Node, selection: Selection, index: usize, name: []const u8, address: []const u8, online: bool, state: []const u8) !void {
@@ -343,12 +377,11 @@ pub const View = struct {
         };
         try content.appendChild(self.cx.allocator, try ui.iconTint(self.cx, asset, if (selection == .local) S.theme.current().fg_2 else S.theme.current().accent, S.icon(16)));
         const identity_box = try ui.box(self.cx, S.cardIdentity(), .{});
-        self.row_names[index] = try label(self.cx, identity_box, name, S.name(), S.labelBox(18));
-        _ = try label(self.cx, identity_box, address, S.endpoint(), S.labelBox(17));
+        self.row_names[index] = try label(self.cx, identity_box, name, S.text(11, 700, 16, false), S.labelBox(16));
+        _ = try label(self.cx, identity_box, address, S.text(9, 400, 14, true), S.labelBox(14));
         try content.appendChild(self.cx.allocator, identity_box);
-        try content.appendChild(self.cx.allocator, try ui.spacer(self.cx));
-        const state_node = if (online) try ui.iconTint(self.cx, ui.icons.check, S.theme.current().ok, S.icon(14)) else try label(self.cx, content, state, S.infoText(true), S.cardState());
-        if (online) try content.appendChild(self.cx.allocator, state_node);
+        const state_node = try label(self.cx, content, state, .{ .font_size = 8, .line_height = 2.25, .text_align = .center, .color = if (online) S.theme.current().ok_ink else S.theme.current().fg_2 }, S.chainBadge(online));
+        try content.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.chevron_right, S.theme.current().fg_2, S.icon(12)));
         self.row_status[index] = state_node;
         try button.appendChild(self.cx.allocator, content);
         try parent.appendChild(self.cx.allocator, button);

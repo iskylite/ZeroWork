@@ -114,6 +114,7 @@ const HostItem = struct {
     meta: *ui.Node,
     selected: ?bool = null,
     online: ?bool = null,
+    sessions: ?usize = null,
     last_focus: bool = false,
     dismissing: bool = false,
     last_pointer: ?[2]f32 = null,
@@ -233,7 +234,15 @@ const HostItem = struct {
             self.selected = selected;
         }
         const online = if (view.workspace.registry.indexOf(self.owner.id)) |index| view.workspace.hostOnline(index) else false;
-        if (!force and self.online != null and self.online.? == online) return;
+        var sessions: usize = 0;
+        if (view.workspace.registry.indexOf(self.owner.id)) |index| {
+            const host_id = view.workspace.identities.hostAt(index);
+            for (view.workspace.tabs.items) |tab| if (tab.host_id == host_id and !tab.archived) {
+                sessions += 1;
+            };
+        }
+        if (!force and self.online != null and self.online.? == online and self.sessions == sessions) return;
+        self.sessions = sessions;
         self.online = online;
         self.tint.set(if (online) theme.current().ok else theme.current().fg_3);
         var route: std.Io.Writer.Allocating = .init(view.cx.allocator);
@@ -253,7 +262,7 @@ const HostItem = struct {
                 try route.writer.writeAll(name);
             }
         } else try route.writer.writeAll("直连");
-        try route.writer.print(" · {s} {s}", .{ if (host.protocol == .sftp) "SFTP" else "SSH", if (online) "在线" else "离线" });
+        try route.writer.print(" · {s} {s} · {d} 个会话", .{ if (host.protocol == .sftp) "SFTP" else "SSH", if (online) "在线" else "离线", sessions });
         try self.meta.setTextContent(view.cx.allocator, route.writer.buffered());
     }
     fn dismiss(self: *HostItem) void {

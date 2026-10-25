@@ -35,21 +35,56 @@ var applied_colors: ?Colors = null;
 var applied_widgets: ui.ThemeTokens = undefined;
 var material_visible: bool = false;
 
-/// Global material role alphas. The window compositor owns image opacity and
-/// blur once; these tints preserve control/elevation boundaries over that same
-/// image. Foreground, primary actions, borders and selection remain unchanged.
-/// 2026-10-18 user feedback extends materials to all application components.
-pub const material_alpha = struct {
-    pub const surface_1: u8 = 24;
-    pub const surface_2: u8 = 32;
-    pub const well: u8 = 48;
-    pub const overlay: u8 = 208;
-    pub const hover: u8 = 80;
-    pub const tab_on: u8 = 96;
+var material_transparency: f32 = 0;
+var material_blur: f32 = 0;
+
+/// Ratios of the global transparency, not independent surface opacity values.
+/// Overlay transmits at most 10% so text remains readable even with blur off.
+pub const material_ratio = struct {
+    pub const surface_1: f32 = 0.95;
+    pub const surface_2: f32 = 0.90;
+    pub const well: f32 = 0.80;
+    pub const overlay: f32 = 0.10;
+    pub const hover: f32 = 0.75;
+    pub const tab_on: f32 = 0.65;
 };
 
-/// Set from the host's actual visible image/preview, never just a saved path.
-/// A change requires the same theme publication/repaint as palette selection.
+pub fn setMaterialParameters(transparency: f32, blur: f32) bool {
+    const next_t = if (std.math.isFinite(transparency)) std.math.clamp(transparency, 0, 100) else 0;
+    const next_b = if (std.math.isFinite(blur)) std.math.clamp(blur, 0, 96) else 0;
+    if (material_transparency == next_t and material_blur == next_b) return false;
+    material_transparency = next_t;
+    material_blur = next_b;
+    refreshWidgets();
+    return true;
+}
+pub fn materialParameters() struct { transparency: f32, blur: f32 } {
+    return .{ .transparency = material_transparency, .blur = material_blur };
+}
+pub fn materialAlpha(comptime role: []const u8) u8 {
+    return @intFromFloat(@round(255 * (1 - material_transparency / 100 * @field(material_ratio, role))));
+}
+pub fn overlayGlass() ui.GlassParams {
+    return .{ .backdrop_blur = material_blur, .capture_current_target = false, .glass_intensity = 0, .specular_opacity = 0, .refraction_level = 0, .warp_gain = 0 };
+}
+
+test "global material parameters derive role ratios with readable overlay at endpoints" {
+    const saved = materialParameters();
+    defer _ = setMaterialParameters(saved.transparency, saved.blur);
+    for ([_]f32{ 0, 25, 75, 100 }) |percent| {
+        _ = setMaterialParameters(percent, percent * 0.5);
+        try std.testing.expectEqual(@as(u8, @intFromFloat(@round(255 * (1 - percent / 100 * 0.10)))), current().overlay.a);
+        try std.testing.expect(current().overlay.a >= 230);
+        try std.testing.expectEqual(percent * 0.5, overlayGlass().backdrop_blur);
+        try std.testing.expectEqual(current().overlay, widgetTheme(currentName()).tokens.color.tooltip_bg);
+    }
+    _ = setMaterialParameters(75, 0);
+    try std.testing.expectEqual(@as(f32, 0), overlayGlass().backdrop_blur);
+    try std.testing.expectEqual(@as(u8, 236), current().overlay.a);
+}
+
+/// Tracks actual image visibility for host/preview bookkeeping only. It never
+/// switches containers between opaque and translucent presentation.
 pub fn setMaterialVisible(visible: bool) bool {
     if (material_visible == visible) return false;
     material_visible = visible;
@@ -80,19 +115,28 @@ pub fn fromName(name: []const u8) Name {
 pub fn select(name: Name) void {
     selected = name;
     applied_colors = null;
-    if (material_visible) refreshWidgets();
+    refreshWidgets();
 }
+/// Appearance family used by native recipes. The actual selected theme ID
+/// remains in RuntimeConfig; a registry palette can change without select().
 pub fn currentName() Name {
+    if (applied_colors) |value| {
+        if (std.meta.eql(value, colors(.sauber))) return .sauber;
+        const luminance = @as(u32, value.app.r) * 299 + @as(u32, value.app.g) * 587 + @as(u32, value.app.b) * 114;
+        return if (luminance < 128000) .dark else .light;
+    }
     return selected;
 }
 pub fn current() Colors {
-    var value = baseColors();
-    if (!material_visible) return value;
+    return surfaceColors(baseColors());
+}
+fn surfaceColors(base: Colors) Colors {
+    var value = base;
     value.app.a = 0;
     value.terminal.a = 0;
     inline for (.{ "surface_1", "surface_2", "well", "overlay", "hover", "tab_on" }) |field| {
         const color = &@field(value, field);
-        color.a = @min(color.a, @field(material_alpha, field));
+        color.a = materialAlpha(field);
     }
     return value;
 }
@@ -187,24 +231,46 @@ pub fn colors(name: Name) Colors {
     };
 }
 
+test "registry token publication updates native appearance family without changing palette" {
+    const previous = currentName();
+    const was_visible = materialVisible();
+    defer {
+        select(previous);
+        _ = setMaterialVisible(was_visible);
+    }
+    _ = setMaterialVisible(false);
+    select(.dark);
+    var registry = try @import("../config/theme_registry.zig").Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    for ([_][]const u8{ "light", "sauber", "nord", "dark", "light" }, [_]Name{ .light, .sauber, .dark, .dark, .light }) |id, family| {
+        const tokens = registry.get(id).?.ui_tokens;
+        selectTokens(tokens);
+        try std.testing.expectEqual(family, currentName());
+        try std.testing.expectEqual(ui.Color.rgba(@intCast(tokens.app >> 24), @intCast((tokens.app >> 16) & 255), @intCast((tokens.app >> 8) & 255), @intCast(tokens.app & 255)), baseColors().app);
+    }
+    var imported = registry.get("light").?.ui_tokens;
+    imported.app = 0xffeeccff;
+    imported.accent = 0xa23010ff;
+    selectTokens(imported);
+    try std.testing.expectEqual(Name.light, currentName());
+    _ = setMaterialVisible(true);
+    try std.testing.expectEqual(Name.light, currentName());
+    try std.testing.expectEqual(ui.Color.rgba(0xa2, 0x30, 0x10, 255), baseColors().accent);
+}
+
 fn hex(value: u24) ui.Color {
     return ui.Color.hex(value);
 }
 
-const dark_widgets = widgetTokens(.dark);
-const light_widgets = widgetTokens(.light);
-const sauber_widgets = widgetTokens(.sauber);
+var named_widgets: [3]ui.ThemeTokens = undefined;
 pub fn widgetTheme(name: Name) *const ui.ThemeTokens {
-    if (applied_colors != null or material_visible) return &applied_widgets;
-    return switch (name) {
-        .dark => &dark_widgets,
-        .light => &light_widgets,
-        .sauber => &sauber_widgets,
-    };
+    if (applied_colors != null) return &applied_widgets;
+    named_widgets[@backingInt(name)] = widgetTokens(name);
+    return &named_widgets[@backingInt(name)];
 }
 
-fn widgetTokens(comptime name: Name) ui.ThemeTokens {
-    var value = widgetTokensFrom(colors(name), name == .dark);
+fn widgetTokens(name: Name) ui.ThemeTokens {
+    var value = widgetTokensFrom(surfaceColors(colors(name)), name == .dark);
     value.name = @tagName(name);
     return value;
 }
@@ -252,7 +318,7 @@ fn widgetTokensFrom(c: Colors, dark: bool) ui.ThemeTokens {
     return value;
 }
 
-test "global material projects every palette without weakening action or foreground colors" {
+test "global surface tints do not depend on whether an image is visible" {
     const previous = currentName();
     const was_visible = materialVisible();
     defer {
@@ -260,45 +326,40 @@ test "global material projects every palette without weakening action or foregro
         _ = setMaterialVisible(was_visible);
     }
     for (std.enums.values(Name)) |name| {
-        _ = setMaterialVisible(false);
         select(name);
-        const original = current();
-        try std.testing.expect(setMaterialVisible(true));
-        try std.testing.expect(!setMaterialVisible(true));
-        const visible = current();
-        try std.testing.expectEqual(@as(u8, 0), visible.app.a);
-        try std.testing.expectEqual(@as(u8, 0), visible.terminal.a);
+        const base = baseColors();
+        _ = setMaterialVisible(false);
+        const no_image = current();
+        _ = setMaterialVisible(true);
+        try std.testing.expectEqual(no_image, current());
+        try std.testing.expectEqual(base, baseColors());
+        try std.testing.expectEqual(@as(u8, 0), no_image.app.a);
+        try std.testing.expectEqual(@as(u8, 0), no_image.terminal.a);
         inline for (.{ "surface_1", "surface_2", "well", "overlay", "hover", "tab_on" }) |field| {
-            var expected = @field(original, field);
-            expected.a = @field(material_alpha, field);
-            try std.testing.expectEqual(expected, @field(visible, field));
+            var expected = @field(base, field);
+            expected.a = materialAlpha(field);
+            try std.testing.expectEqual(expected, @field(no_image, field));
         }
         inline for (.{ "fg_1", "fg_2", "fg_3", "accent", "accent_ink", "selection", "border", "well_border" }) |field| {
-            try std.testing.expectEqual(@field(original, field), @field(visible, field));
+            try std.testing.expectEqual(@field(base, field), @field(no_image, field));
         }
         const widget = widgetTheme(name).tokens.color;
-        try std.testing.expectEqual(visible.surface_1, widget.bg_primary);
-        try std.testing.expectEqual(visible.well, widget.input_bg);
-        try std.testing.expectEqual(visible.overlay, widget.tooltip_bg);
-        try std.testing.expectEqual(original.accent, widget.button_primary_bg);
-        try std.testing.expectEqual(ui.Color.WHITE, widget.button_primary_fg);
-        try std.testing.expectEqual(original, baseColors());
-        try std.testing.expect(setMaterialVisible(false));
-        try std.testing.expectEqual(original, current());
+        try std.testing.expectEqual(no_image.surface_1, widget.bg_primary);
+        try std.testing.expectEqual(no_image.well, widget.input_bg);
+        try std.testing.expectEqual(no_image.overlay, widget.tooltip_bg);
+        try std.testing.expectEqual(base.accent, widget.button_primary_bg);
     }
-
     var registry = try @import("../config/theme_registry.zig").Registry.init(std.testing.allocator);
     defer registry.deinit();
     var imported = registry.get("nord").?.ui_tokens;
     imported.surface_1 = 0x12345608;
     imported.overlay = 0x234567ff;
     selectTokens(imported);
-    const original = current();
-    _ = setMaterialVisible(true);
-    try std.testing.expectEqual(original, baseColors());
-    try std.testing.expectEqual(original.surface_1, current().surface_1);
-    try std.testing.expectEqual(ui.Color.rgba(0x23, 0x45, 0x67, material_alpha.overlay), current().overlay);
-    try std.testing.expectEqual(original.accent, widgetTheme(currentName()).tokens.color.button_primary_bg);
+    const imported_base = baseColors();
     _ = setMaterialVisible(false);
-    try std.testing.expectEqual(original, current());
+    try std.testing.expectEqual(ui.Color.rgba(0x12, 0x34, 0x56, materialAlpha("surface_1")), current().surface_1);
+    try std.testing.expectEqual(ui.Color.rgba(0x23, 0x45, 0x67, materialAlpha("overlay")), current().overlay);
+    try std.testing.expectEqual(imported_base.accent, widgetTheme(currentName()).tokens.color.button_primary_bg);
+    _ = setMaterialVisible(true);
+    try std.testing.expectEqual(imported_base, baseColors());
 }

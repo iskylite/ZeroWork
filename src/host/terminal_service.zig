@@ -30,6 +30,17 @@ pub const Read = union(enum) { bytes: usize, would_block, eof };
 pub const Write = union(enum) { bytes: usize, would_block };
 pub const Geometry = struct { revision: u64, cols: u16, rows: u16 };
 pub const RecordingKind = enum { txt, cast };
+/// Separate application record event; never a transport/VT output segment.
+pub const ApplicationRecord = struct {
+    id: u64,
+    owner: identity.SessionHandle,
+    timestamp_ms: i64,
+    /// Native retained-screen position captured when this separate event is published.
+    anchor_row: ?u32 = null,
+    command: []const u8,
+    output: []const u8,
+    state: enum { pending, success, failure },
+};
 
 pub const Transport = struct {
     context: *anyopaque,
@@ -146,6 +157,7 @@ pub const Service = struct {
         scroll: *const fn (*anyopaque, session.ServiceHandle, Scroll) anyerror!void,
         read_lines: *const fn (*anyopaque, session.ServiceHandle, LineLimits, std.mem.Allocator) anyerror!Lines,
         theme: *const fn (*anyopaque, session.ServiceHandle, Theme) anyerror!void,
+        application_record: ?*const fn (*anyopaque, session.ServiceHandle, ApplicationRecord) anyerror!void = null,
         export_recording: ?*const fn (*anyopaque, session.ServiceHandle, RecordingKind, std.Io, std.Io.Dir, []const u8) anyerror!void = null,
         trusted_snapshot: ?*const fn (*anyopaque, session.ServiceHandle, std.mem.Allocator) anyerror!?trusted_edit.Snapshot = null,
         trusted_request: ?*const fn (*anyopaque, session.ServiceHandle, trusted_edit.Request) anyerror!void = null,
@@ -229,6 +241,10 @@ pub const Service = struct {
     pub fn setTheme(self: Service, theme: Theme) !void {
         if (theme.revision == 0) return error.InvalidTheme;
         return self.vtable.theme(self.context, self.binding, theme);
+    }
+    pub fn recordApplication(self: Service, record: ApplicationRecord) !void {
+        const call = self.vtable.application_record orelse return;
+        return call(self.context, self.binding, record);
     }
     pub fn exportRecording(self: Service, kind: RecordingKind, io: std.Io, dir: std.Io.Dir, path: []const u8) !void {
         const export_recording = self.vtable.export_recording orelse return error.RecordingUnavailable;

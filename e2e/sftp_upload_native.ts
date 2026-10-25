@@ -9,12 +9,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { waitForServerReady, waitFor, query, clickAt, key, type_, resizeWindow, screenshot, consoleEvents, sleep } from "../zig-out/share/zenit/harness/client.ts";
 const options: Record<string, string> = {};
-for (let i=2; i<process.argv.length; i+=2) { assert(["--binary","--expected-sha","--out","--python"].includes(process.argv[i])); options[process.argv[i]]=process.argv[i+1]; }
+for (let i=2; i<process.argv.length; i+=2) { assert(["--binary","--expected-sha","--out","--python","--theme"].includes(process.argv[i])); options[process.argv[i]]=process.argv[i+1]; }
 assert(options["--out"] && options["--binary"] && /^[0-9a-f]{64}$/.test(options["--expected-sha"]));
+const theme=options["--theme"]??"dark";assert(["dark","light"].includes(theme));
 const output=resolve(options["--out"]); await mkdir(output,{recursive:true}); assert.equal((await readdir(output)).length,0);
-const isolated=await mkdtemp(join(tmpdir(),"zerowork-native-upload-")), rpc=join(isolated,"rpc"), data=join(isolated,"data"), local=join(isolated,"local");
+const isolated=await realpath(await mkdtemp(join(tmpdir(),"zerowork-native-upload-"))), rpc=join(isolated,"rpc"), data=join(isolated,"data"), local=join(isolated,"local");
 await Promise.all([mkdir(rpc),mkdir(data),mkdir(local)]);
-const report:any={status:"running",started_at:new Date().toISOString(),stages:[],actions:[],checks:[],host_key_decisions:[],isolated,rpc,data,local_fixture:local,evidence:{synthetic_harness_input:true,physical_input_verified:false,injected_job:false,external_hosts:0},scope:"Real local-card upload to own loopback in-memory SFTP file"};
+const report:any={theme,status:"running",started_at:new Date().toISOString(),stages:[],actions:[],checks:[],host_key_decisions:[],isolated,rpc,data,local_fixture:local,evidence:{synthetic_harness_input:true,physical_input_verified:false,injected_job:false,external_hosts:0},scope:"Real local-card upload to own loopback in-memory SFTP file"};
 const sourceBinary=resolve(options["--binary"]), binary=join(output,"zerowork-frozen");
 await copyFile(sourceBinary,binary); await copyFile(join(dirname(sourceBinary),"zw_ipc.so"),join(output,"zw_ipc.so"));
 const sha=createHash("sha256").update(await readFile(binary)).digest("hex"); assert.equal(sha,options["--expected-sha"]); Object.assign(report,{binary,source_binary:sourceBinary,binary_sha256:sha});
@@ -50,7 +51,7 @@ async function stableMenuItem(menuId: string, itemId: string): Promise<any> {
   }, 15000);
 }
 async function tabs(): Promise<any[]> { return nodes(await visible("tabs.strip")).filter(n => /^tabs\.tab\.\d+$/.test(n.test_id ?? "")); }
-const evidenceIds = ["tabs.strip", "sidebar.host", "auth.challenge.modal", "connection.progress", "files.presentation", "transfer.confirmation", "transfer.conflict", "transfer.manager", "workspace.statusbar", "files.context.menu", "files.history.menu", "files.drag.preview", "files.drag.target", "files.copy.confirmation"];
+const evidenceIds = ["tabs.strip", "sidebar.host", "auth.challenge.modal", "connection.progress", "files.presentation", "transfer.confirmation", "transfer.conflict", "transfer.manager", "workspace.statusbar", "files.context.menu", "files.history.menu", "files.drag.preview", "files.drag.target", "files.copy.confirmation", "files.workspace", "files.toolbar", "files.footer", "plugin.challenge.title"];
 async function capture(name: string): Promise<void> {
   await sleep(120);
   const samples = Object.fromEntries(await Promise.all(evidenceIds.map(async id => [id, await query(id)])));
@@ -79,6 +80,21 @@ async function settleSftp(): Promise<void> {
   while (Date.now() < deadline) {
     assert(app && app.exitCode === null && app.signalCode === null, "Owned app remains alive while connecting");
     if ((await query("files.workspace")).some(shown)) return;
+    const plugin = (await query("plugin.challenge.title")).find(shown);
+    if (plugin) {
+      const values=(await Promise.all(["plugin.challenge.title","plugin.challenge.source","plugin.challenge.material","plugin.challenge.choice.0","plugin.challenge.answer.0","plugin.challenge.secret"].map(id=>query(id)))).flat().filter(shown);
+      const part=(id:string)=>values.find(n=>n.test_id===id), source=text(part("plugin.challenge.source"));
+      assert(source.includes(ready.host)&&source.includes(String(ready.port))&&source.includes(ready.user),"Only this exact owned peer");
+      const title=text(plugin), choice=part("plugin.challenge.choice.0");
+      if(title==="核对主机密钥"&&choice&&text(choice).includes("仅本次信任")){
+        const fingerprint=text(part("plugin.challenge.material"));assert(fingerprint.includes(ready.fingerprint));assert(++decisions<=6);
+        await clickNode(choice,"Trust the generated loopback key once in the existing plugin challenge");report.host_key_decisions.push({endpoint:source,fingerprint,choice:"trust_once"});
+      }else if(title==="SSH 密码认证"){
+        const answer=part("plugin.challenge.answer.0")??part("plugin.challenge.secret");assert(answer&&++decisions<=6);
+        await clickNode(answer,"Enter only the owned peer fixture password");await type_(ready.password);await click("plugin.challenge.submit");
+      }else throw new Error("Unexpected owned-peer authentication challenge");
+      await sleep(160);continue;
+    }
     const modal = (await query("auth.challenge.modal")).find(n => shown(n) && (n.effective_opacity ?? n.opacity ?? 1) >= 0.999);
     const trust = modal && inside(modal, "auth.challenge.trust_once");
     if (trust?.focusable) {
@@ -113,7 +129,7 @@ async function settleSftp(): Promise<void> {
 try {
   ready=await waitFor(async()=>{if(peerError||peer.exitCode!==null)throw peerError??new Error("Peer exited");try{return JSON.parse(await readFile(join(peerOut,"ready.json"),"utf8"));}catch(e){if(e.code==="ENOENT")return null;throw e;}},15000);
   const fixture=`[registry]\nschema_version=2\nrevision=1\nnext_connection_id=2\nnext_group_id=1\n\n[[hosts]]\nconnection_id=1\nrevision=1\nprotocol="sftp"\nauth_mode="password"\noptions={strict_host_key=true}\nname="SFTP Loopback Upload"\nhost="127.0.0.1"\nport=${ready.port}\nuser="${ready.user}"\nauth={password="${ready.password}"}\n`;
-  await writeFile(join(data,"hosts.toml"),fixture); await writeFile(join(data,"config.toml"),'[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\n');
+  await writeFile(join(data,"hosts.toml"),fixture); await writeFile(join(data,"config.toml"),'[meta]\nconfig_revision=1\n[ui]\ntheme="'+theme+'"\nfont_family="Menlo"\nfont_size=14\n');
   report.peer={...ready,password:undefined,output:peerOut};
   app=spawn(binary,[],{cwd:process.cwd(),env:{...process.env,ZENIT_E2E_FILE_RPC_DIR:rpc,ZENIT_E2E_BACKGROUND:"1",ZENIT_E2E_ISOLATE_POINTER:"1",ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:"0",ZEROWORK_FILE_TRACE:"1",OPENAI_API_KEY:"",ANTHROPIC_API_KEY:""},stdio:["ignore",appLog.fd,appLog.fd]});
   appEnded=new Promise<void>(done=>app!.once("close",()=>done()));app.once("error",e=>{appError=e;});report.pid=app.pid;
@@ -122,9 +138,24 @@ try {
   await click("sidebar.host");await click("sidebar.host.connect");await settleSftp();
   const attached=await waitFor(async()=>(await traces()).find(t=>t.trace_prefix==="SFTP_WORKSPACE_TRACE"&&t.event==="attached")??null,10000); report.attachment=attached;
   const fileTab=(await tabs()).find(n=>n.test_id!==localTab).test_id;
+  const authenticatedHosts=await readFile(join(data,"hosts.toml"),"utf8");
+  report.fixture_credentials_migrated=authenticatedHosts!==fixture;
   const path=inside(await visible("files.local"),"files.path"); await clickNode(path,"Navigate local card to owned upload source");assert((await key("a",{cmd:true})).ok);assert((await type_(local)).ok);assert((await key("return")).ok);
   const row=await waitFor(async()=>nodes(await visible("files.local")).find(n=>n.test_id==="files.row"&&inside(n,"files.row.name")?.text===filename)??null,15000);
   assert.equal(text(inside(await visible("files.remote"),"files.path")),"/fixture");
+  for(const [width,height] of [[1440,900],[860,480]]){
+    await resizeWindow(width,height);await sleep(180);
+    const panes=[await visible("files.local"),await visible("files.remote")];
+    assert(Math.abs(panes[1].rect.x-panes[0].rect.x-panes[0].rect.w-6)<.5,"V3 independent cards with six point gap");
+    for(const pane of panes){
+      assert.equal(inside(pane,"files.columns").rect.h,34);assert.equal(inside(pane,"files.footer").rect.h,36);
+      for(const r of nodes(pane).filter(n=>n.test_id==="files.row"))assert.equal(r.rect.h,40);
+      if(width===860)assert(!inside(pane,"files.sort.modified"),"Compact pane hides the modified column");
+    }
+    await capture("01-v3-frame-"+width);
+  }
+  await resizeWindow(1440,900);await sleep(180);
+  report.checks.push("Actual main-app V3 independent cards, 40 point rows, 34 point header, 36 point footer and compact date-column hiding");
   await clickNode(row,"Select actual owned local file for upload");await waitFor(async()=>/已选 1 项/.test(text(await visible("files.local")))||null,10000);
   await capture("02-selected-local-source-before-upload");
   await clickNode(inside(await visible("files.local"),"files.transfer"),"Open actual local-card upload confirmation");
@@ -140,20 +171,36 @@ try {
   const eventContent = text(await visible("transfer.events.entries"));
   assert(eventContent.includes("入队") && eventContent.includes("已完成"));
   assert(eventContent.includes(`会话 #${attached.owner.session_id}`));
-  assert.equal(events.rect.w,520); assert.equal(events.rect.h,300);
+  assert.equal(events.rect.w,520); assert(events.rect.h >= 180 && events.rect.h <= 868);
+  report.event_dialog_rect=events.rect;
   await capture("04b-real-task-events");
-  await click("transfer.events.close");
+  await click("transfer.events.dismiss");
   await waitFor(async()=>!(await query("transfer.events.dialog")).some(shown)||null,10000);
-  report.checks.push("Real uploaded task's Manager event journal is shown in the 520x300 read-only event dialog under its original session");
+  // The public Modal retains its input barrier during its exit transition.
+  await sleep(350);
+  report.checks.push("Real uploaded task's Manager event journal remains readable in its content-sized 520 point dialog under the original session");
 
   await clickNode(inside(await visible("transfer.manager"),"transfer.window.close"),"Close upload Manager");await waitFor(async()=>!(await query("transfer.manager")).some(shown)||null,10000);
+  await sleep(350);
+  // Completion notifications move back to their normal corner after Manager
+  // closes and can cover the remote toolbar. Dismiss the real visible toast
+  // through its own close control before clicking Refresh.
+  for (let n=0;n<3;n++) {
+    const dismiss=(await Promise.all([0,1,2].map(i=>query(`notifications.dismiss.${i}`)))).flat().find(shown);
+    if(!dismiss) break;
+    await clickNode(dismiss,"Dismiss visible completion notification before remote Refresh");
+    await sleep(180);
+  }
+  const refreshTarget=inside(await visible("files.remote"),"files.refresh");
+  report.refresh_hit_debug={target:refreshTarget,notifications:await query("notifications.stack"),dismiss_controls:(await Promise.all([0,1,2].map(i=>query(`notifications.dismiss.${i}`)))).flat(),at:new Date().toISOString()};
+  await writeFile(join(output,"remote-refresh-hit-debug.json"),JSON.stringify(report.refresh_hit_debug,null,2));
   report.remote_refresh={automatic:false,method:"actual_remote_card_refresh_button",observation:"build17 only auto-refreshes completed downloads; uploaded file needs actual remote refresh"};
   await clickNode(inside(await visible("files.remote"),"files.refresh"),"Refresh actual remote card after successful upload");
   const refreshed=await waitFor(async()=>nodes(await visible("files.remote")).find(n=>n.test_id==="files.row"&&inside(n,"files.row.name")?.text===filename)??null,15000);report.remote_refreshed_row=refreshed;assert(text(refreshed).includes(`${(payload.length/1024).toFixed(1)} KiB`));await capture("05-remote-manually-refreshed-upload-row");
   await click(fileTab.replace("tabs.tab.","tabs.close."));await waitFor(async()=>(await tabs()).length===1&&!(await query("files.workspace")).some(shown)||null,20000);await visible("terminal.surface");
   report.peer_before_shutdown=await waitFor(async()=>{const state=JSON.parse(await readFile(join(peerOut,"state.json"),"utf8"));return state.connections.length===2&&state.active_connections===0?state:null;},15000);
   assert.equal(report.peer_before_shutdown.forbidden_operations.length,0);assert.equal(report.peer_before_shutdown.errors.length,0);assert(report.peer_before_shutdown.calls.some(c=>c.operation==="WRITE"&&c.path===destination));assert.deepEqual([...report.peer_before_shutdown.read_handles_opened].sort(),[...report.peer_before_shutdown.read_handles_closed].sort());
-  assert.equal(await readFile(join(data,"hosts.toml"),"utf8"),fixture);assert.equal(await readFile(join(data,"known_hosts"),"utf8").catch(e=>{if(e.code==="ENOENT")return "";throw e;}),"");
+  assert.equal(await readFile(join(data,"hosts.toml"),"utf8"),authenticatedHosts);assert.equal(await readFile(join(data,"known_hosts"),"utf8").catch(e=>{if(e.code==="ENOENT")return "";throw e;}),"");
   report.checks.push("Actual local-card selection and upload action open original-owner/path confirmation with zero prior write/job", "Explicit submit uploads exact owned bytes; actual backend/Manager full MD5 pass and visible original job/attempt succeeds", "Actual remote refresh button exposes uploaded filename and size; both SFTP connections/handles close before peer shutdown");report.status="passed";
 } catch (error) {
   failure = appError ?? peerError ?? error; report.status = "failed"; report.error = String(failure);

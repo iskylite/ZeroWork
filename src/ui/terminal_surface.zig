@@ -8,10 +8,12 @@ const identity = @import("../host/identity.zig");
 const vt = @import("../vt/snapshot.zig");
 const TextSlot = @import("../vt/text_slot.zig").TextSlot;
 const S = @import("terminal_styles.zig");
+const records_style = @import("builtin_records_styles.zig");
 const input = @import("terminal_surface_input.zig");
 const blink_half_period_ms = 550;
 
 pub const Options = struct {
+    grouped: bool = false,
     font_size: f32 = S.body_size,
     row_height: f32 = S.body_height,
     cell_width: f32,
@@ -31,6 +33,10 @@ const Row = struct {
     test_id: []u8,
     time: *ui.Node,
     selected: *ui.Node,
+    marker: *ui.Node,
+    status_icon: *ui.Node,
+    article: *ui.Node,
+    layout: @import("terminal_record_geometry.zig").Layout = .{},
     glyphs: std.ArrayList(Glyph) = .empty,
     hash: u64 = 0,
 };
@@ -51,6 +57,7 @@ pub const Surface = struct {
     host: *ui.Node,
     root: *ui.Node,
     service: terminal.Service,
+    composite: @import("terminal_document.zig").Document,
     owner: identity.SessionHandle,
     menu_handler: ?MenuHandler = null,
     shell_observer: ?struct {
@@ -63,6 +70,7 @@ pub const Surface = struct {
         context: *anyopaque,
         key: *const fn (*anyopaque, ui.events.KeyCode, ui.events.Modifiers) bool,
         text: *const fn (*anyopaque, []const u8) bool,
+        event: ?*const fn (*anyopaque, ui.events.Event) ?ui.events.EventResult = null,
     } = null,
     trusted_outcome: ?terminal.trusted_edit.Outcome = null,
     trusted_pending: ?u64 = null,
@@ -99,6 +107,7 @@ pub const Surface = struct {
     preedit_node: *ui.Node,
     preedit: []u8 = &.{},
     preedit_cursor: u32 = 0,
+    command_caret_cells: u32 = 0,
     document: std.ArrayList(u8) = .empty,
     caret_byte: u32 = 0,
     selection: ?terminal.Selection = null,
@@ -131,6 +140,7 @@ pub const Surface = struct {
         errdefer cx.destroyDetached(root);
         root.meta.ownership.meta.test_id = "terminal.surface";
         const caret = try leaf(cx, options.cursor);
+        caret.meta.ownership.meta.test_id = "terminal.surface.caret";
         (try caret.style.ensureExtFallible(cx.allocator)).z_index = 5;
         try root.appendChild(cx.allocator, caret);
         const preedit = try ui.text(cx, "", .{ .font_size = options.font_size, .font_family = options.family_id, .use_monospace_font = options.family_id == 0, .selectable = false });
@@ -138,7 +148,7 @@ pub const Surface = struct {
         (try preedit.style.ensureExtFallible(cx.allocator)).z_index = 6;
         preedit.setDisplay(.none);
         try root.appendChild(cx.allocator, preedit);
-        const message_root = try ui.box(cx, S.errorMessage(0, 0, options.row_height, options.background), .{});
+        const message_root = try ui.box(cx, S.errorMessage(0, 0, 0, options.row_height, options.background), .{});
         message_root.meta.ownership.meta.test_id = "terminal.message";
         message_root.behavior.interaction.a11y = .{ .role = .status, .live = "polite" };
         try root.appendChild(cx.allocator, message_root);
@@ -148,7 +158,8 @@ pub const Surface = struct {
         try message_root.appendChild(cx.allocator, message);
         message_root.setDisplay(.none);
         message.setDisplay(.none);
-        self.* = .{ .cx = cx, .host = host, .root = root, .service = service, .owner = owner, .options = owned_options, .caret = caret, .preedit_node = preedit, .message = message, .message_root = message_root };
+        self.* = .{ .cx = cx, .host = host, .root = root, .service = service, .owner = owner, .options = owned_options, .composite = @import("terminal_document.zig").Document.init(cx.allocator, service, owner), .caret = caret, .preedit_node = preedit, .message = message, .message_root = message_root };
+        self.service = self.composite.service();
         try host.appendChild(cx.allocator, root);
         return self;
     }
@@ -174,6 +185,7 @@ pub const Surface = struct {
         self.host.behavior.events.on_scroll = null;
         self.host.on_capture_lost = null;
         self.clearSelection();
+        self.composite.deinit();
         if (self.dragging) self.cx.releasePointerCapture();
         self.cancelPaste();
         if (self.paste_requested) |bytes| self.cx.allocator.free(bytes);
@@ -194,6 +206,9 @@ pub const Surface = struct {
         self.cx.allocator.destroy(self);
     }
     pub fn configure(self: *Surface, options: Options) void {
+        if (self.composite.setColors(records_style.colors())) self.force_snapshot = true;
+        if (self.composite.setCellWidth(options.cell_width)) self.force_snapshot = true;
+        if (self.composite.setRowHeight(options.row_height)) self.force_snapshot = true;
         var next = options;
         next.family_name = self.options.family_name;
         if (std.meta.eql(self.options, next) and std.mem.eql(u8, options.family_name, next.family_name)) return;
@@ -219,6 +234,7 @@ pub const Surface = struct {
         self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
     }
     pub fn refresh(self: *Surface, expected: identity.SessionHandle, active: bool) !bool {
+        if (!self.composite.flushRecording()) self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
         if (!self.owner.eql(expected)) return error.StaleOwner;
         // A retained, exited pane has no worker/clock tick to wake it. Keep
         // polling only until this request appears in an actual owned frame.
@@ -290,7 +306,7 @@ pub const Surface = struct {
         if (changed) update: {
             const next = self.service.snapshot(self.cx.allocator) catch |err| {
                 self.force_snapshot = true;
-                if (err == error.WorkerBusy or err == error.SnapshotUnavailable) {
+                if (err == error.WorkerBusy or err == error.SnapshotUnavailable or err == error.StaleProjection) {
                     self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
                     return false;
                 }
@@ -383,11 +399,11 @@ pub const Surface = struct {
         return changed;
     }
     fn resize(self: *Surface) !void {
-        if (self.snapshot.?.read_only or !self.active) return;
+        if (self.snapshot.?.read_only or (!self.active and !self.visibleGrouped())) return;
         const rect = self.root.rectFromWorldOrFallback();
-        if (rect.w <= 2 * S.inset or rect.h <= 2 * S.inset or self.options.cell_width <= 0 or self.options.row_height <= 0) return;
-        const cols: u16 = @intFromFloat(std.math.clamp(@floor((rect.w - 2 * S.inset - self.bodyX()) / self.options.cell_width), 1, 65535));
-        const rows: u16 = @intFromFloat(std.math.clamp(@floor((rect.h - 2 * S.inset) / self.options.row_height), 1, 65535));
+        if (rect.w <= self.contentPadding().left + self.contentPadding().right or rect.h <= self.contentPadding().top + self.contentPadding().bottom or self.options.cell_width <= 0 or self.options.row_height <= 0) return;
+        const cols: u16 = @intFromFloat(std.math.clamp(@floor((rect.w - self.contentPadding().left - self.contentPadding().right - self.bodyX()) / self.options.cell_width), 1, 65535));
+        const rows: u16 = @intFromFloat(std.math.clamp(@floor((rect.h - self.contentPadding().top - self.contentPadding().bottom) / self.options.row_height), 1, 65535));
         if (cols == self.requested_cols and rows == self.requested_rows) return;
         self.service.resize(.{ .revision = self.next_geometry, .cols = cols, .rows = rows }) catch |err| {
             if (err == error.WorkerBusy) return;
@@ -397,13 +413,27 @@ pub const Surface = struct {
         self.requested_cols = cols;
         self.requested_rows = rows;
     }
+    fn visibleGrouped(self: *const Surface) bool {
+        if (!self.options.grouped) return false;
+        var current: ?*ui.Node = self.root;
+        while (current) |node| : (current = node.parent) {
+            if (node.style.display == .none) return false;
+            if (node == self.cx.root) return true;
+        }
+        return false;
+    }
+    pub fn contentPadding(self: *const Surface) ui.Padding {
+        return S.contentPadding(self.options.grouped);
+    }
     pub fn bodyX(self: *const Surface) f32 {
         return if (self.options.timestamps) S.gutter else 0;
     }
     fn render(self: *Surface, now_ms: i64) !void {
         const projection = &self.snapshot.?.projection;
-        if (self.displayed_theme) |theme| self.root.setBackground(if (projection.colors.background != @as(u24, @truncate(theme.background >> 8))) ui.Color.hex(projection.colors.background) else ui.Color.TRANSPARENT);
-        const row_width = @max(0, self.root.rectFromWorldOrFallback().w - 2 * S.inset);
+        // OSC default-background changes affect cell color resolution, while the
+        // terminal canvas always exposes the shared application background.
+        self.root.setBackground(ui.Color.TRANSPARENT);
+        const row_width = @max(0, self.root.rectFromWorldOrFallback().w - self.contentPadding().left - self.contentPadding().right);
         while (self.rows.items.len < projection.rows) {
             try self.rows.ensureUnusedCapacity(self.cx.allocator, 1);
             const test_id = try std.fmt.allocPrint(self.cx.allocator, "terminal.surface.row.{d}", .{self.rows.items.len});
@@ -411,13 +441,25 @@ pub const Surface = struct {
             const root = try ui.boxStyled(self.cx, S.row, .{});
             errdefer self.cx.destroyDetached(root);
             root.meta.ownership.meta.test_id = test_id;
+            const article = try ui.box(self.cx, .{ .position = .absolute, .border = .{ .radius = 8 }, .hit_behavior = .pass_through }, .{});
+            article.meta.ownership.meta.test_id = "terminal.command.article";
+            try root.appendChild(self.cx.allocator, article);
             const time = try ui.textStyled(self.cx, S.timestamp, "");
             try root.appendChild(self.cx.allocator, time);
+            const marker = try ui.textStyled(self.cx, records_style.markerText, "ZeroWork");
+            marker.setStyleInline(self.cx.allocator, records_style.markerBox(self.cx.tokens));
+            marker.meta.ownership.meta.test_id = "terminal.command.source";
+            marker.setDisplay(.none);
+            try root.appendChild(self.cx.allocator, marker);
+            const status_icon = try ui.textStyled(self.cx, records_style.resultText, "");
+            status_icon.meta.ownership.meta.test_id = "terminal.command.state";
+            status_icon.setDisplay(.none);
+            try root.appendChild(self.cx.allocator, status_icon);
             const selected = try leaf(self.cx, S.selection(self.cx.tokens));
             (try selected.style.ensureExtFallible(self.cx.allocator)).z_index = 4;
             try root.appendChild(self.cx.allocator, selected);
             try self.root.appendChild(self.cx.allocator, root);
-            self.rows.appendAssumeCapacity(.{ .root = root, .test_id = test_id, .time = time, .selected = selected });
+            self.rows.appendAssumeCapacity(.{ .root = root, .test_id = test_id, .time = time, .selected = selected, .marker = marker, .status_icon = status_icon, .article = article });
         }
         while (self.rows.items.len > projection.rows) {
             var row = self.rows.pop().?;
@@ -428,12 +470,45 @@ pub const Surface = struct {
         }
         for (projection.visible_rows) |value| {
             const row = &self.rows.items[value.viewport_y];
+            row.root.meta.ownership.meta.test_id = switch (value.application_kind) {
+                1 => "terminal.command.record",
+                2, 3, 4 => "terminal.command.output",
+                else => row.test_id,
+            };
             if (self.displayed_theme) |theme| row.selected.setBackground(rgba(theme.selection));
-            try absolute(self.cx, row.root, S.inset, S.inset + @as(f32, @floatFromInt(value.viewport_y)) * self.options.row_height, row_width, self.options.row_height);
+            row.layout = value.presentation;
+            const row_y = self.presentationY(value.viewport_y);
+            try absolute(self.cx, row.root, self.contentPadding().left, self.contentPadding().top + row_y, row_width, self.options.row_height);
+            const first_article = value.application_record_id != 0 and (value.viewport_y == 0 or projection.visible_rows[value.viewport_y - 1].application_record_id != value.application_record_id);
+            row.article.setDisplay(if (first_article) .flex else .none);
+            if (first_article) {
+                row.article.setBackground(records_style.tint(if (value.application_state == 2) 3 else value.application_kind));
+                try absolute(self.cx, row.article, -@import("terminal_record_geometry.zig").padding_inline, value.presentation.article_y - row_y, row_width + 2 * @import("terminal_record_geometry.zig").padding_inline, value.presentation.article_height);
+            }
             const current = !self.snapshot.?.read_only and projection.cursor.visible and value.viewport_y == projection.cursor.row;
-            row.root.setBackground(if (current and self.options.highlight) S.inputHighlight(self.cx.tokens) else ui.Color.TRANSPARENT);
+            row.root.setBackground(if (value.application_record_id == 0 and current and self.options.highlight) S.inputHighlight(self.cx.tokens) else ui.Color.TRANSPARENT);
             const stamp = if (current and self.focused) now_ms else value.submitted_wallclock_ms orelse value.received_wallclock_ms;
             try self.renderTime(row, stamp);
+            row.marker.setDisplay(if (value.application_kind == 1 and value.id[1] == 0 and projection.cols > self.composite.command_inset_cells + 5) .flex else .none);
+            if (value.application_kind == 1) {
+                row.marker.setBackground(@import("app_theme.zig").current().accent.withAlpha(31));
+                var marker_props = row.marker.getText().?;
+                marker_props.color = @import("app_theme.zig").current().accent_ink;
+                row.marker.setText(marker_props);
+                records_style.place(self.cx, row.marker, self.bodyX(), 2, records_style.marker_width, records_style.marker_height);
+            }
+            row.status_icon.setDisplay(if (value.application_kind >= 2 and value.id[1] == (1 << 32)) .flex else .none);
+            if (value.application_kind >= 2) {
+                try row.status_icon.setTextContent(self.cx.allocator, switch (value.application_kind) {
+                    2 => "✓",
+                    3 => "!",
+                    else => "…",
+                });
+                var props = row.status_icon.getText().?;
+                props.color = records_style.resultColor(value.application_kind);
+                row.status_icon.setText(props);
+                records_style.place(self.cx, row.status_icon, self.bodyX(), 0, records_style.result_icon_width, self.options.row_height);
+            }
             const cells = projection.cells[value.cell_start .. value.cell_start + value.cell_count];
             var hash = std.hash.Wyhash.init(0);
             hash.update(std.mem.asBytes(&value.id));
@@ -445,6 +520,7 @@ pub const Surface = struct {
                     hash.update(std.mem.asBytes(&self.focused));
                 }
             }
+            std.hash.autoHash(&hash, @as(u32, @bitCast(value.presentation.shift_x)));
             std.hash.autoHash(&hash, projection.colors);
             std.hash.autoHash(&hash, projection.modes.reverse_colors);
             std.hash.autoHash(&hash, .{ @as(u32, @bitCast(self.options.font_size)), @as(u32, @bitCast(self.options.row_height)), @as(u32, @bitCast(self.options.cell_width)), self.options.family_id, self.options.weight, self.options.foreground, self.options.background, self.options.timestamps });
@@ -471,6 +547,10 @@ pub const Surface = struct {
             row.time.setText(props);
         }
         try absolute(self.cx, row.time, S.timestamp_x, S.timestamp_y, S.timestamp_width, S.timestamp_height);
+    }
+    pub fn presentationY(self: *const Surface, index: usize) f32 {
+        if (self.snapshot) |snap| if (index < snap.projection.visible_rows.len) return @import("terminal_record_geometry.zig").rowY(snap.projection.visible_rows[index].presentation, index, self.options.row_height);
+        return @as(f32, @floatFromInt(index)) * self.options.row_height;
     }
     fn renderGlyphs(self: *Surface, row: *Row, cells: []const vt.Cell, projection: *const vt.Projection) !void {
         var used: usize = 0;
@@ -526,7 +606,7 @@ pub const Surface = struct {
             published = true;
             glyph.node.setBackground(if (cell.background == .default and cell.attributes & (1 << 4) == 0 and !projection.modes.reverse_colors) ui.Color.TRANSPARENT else bg);
             glyph.node.setDisplay(.flex);
-            const x = self.bodyX() + @as(f32, @floatFromInt(col)) * self.options.cell_width;
+            const x = self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(col)) * self.options.cell_width;
             const width = self.options.cell_width * @as(f32, if (cell.width == .wide_lead) 2 else 1);
             try absolute(self.cx, glyph.node, x, 0, width, self.options.row_height);
             glyph.overline.setDisplay(if (cell.attributes & (1 << 8) != 0) .flex else .none);
@@ -552,14 +632,21 @@ pub const Surface = struct {
             if (glyph.double_underline) |line| line.setDisplay(.none);
         }
     }
+    pub fn setCommandCaret(self: *Surface, cells: u32) void {
+        if (self.command_caret_cells == cells) return;
+        self.command_caret_cells = cells;
+        if (self.snapshot != null) self.renderCaret() catch {};
+        self.renderPreedit() catch {};
+        self.cx.requestRedraw();
+    }
     fn renderCaret(self: *Surface) !void {
         const value = &self.snapshot.?;
         const cursor = value.projection.cursor;
         const show = !value.read_only and self.active and cursor.visible and cursor.row < value.projection.rows and (self.reduced_motion or !self.focused or self.blink or !value.projection.modes.cursor_blinking);
         self.caret.setDisplay(if (show) .flex else .none);
         if (!show) return;
-        var x = S.inset + self.bodyX() + @as(f32, @floatFromInt(cursor.col)) * self.options.cell_width;
-        var y = S.inset + @as(f32, @floatFromInt(cursor.row)) * self.options.row_height;
+        var x = self.contentPadding().left + self.bodyX() + @as(f32, @floatFromInt(cursor.col + self.command_caret_cells)) * self.options.cell_width;
+        var y = self.contentPadding().top + self.presentationY(cursor.row);
         var width = self.options.cell_width;
         var height = self.options.row_height;
         if (self.preedit.len != 0) x += self.measured(self.preedit[0..self.preedit_cursor]);
@@ -609,8 +696,8 @@ pub const Surface = struct {
         props.spans_owned = true;
         self.preedit_node.setText(props);
         published = true;
-        self.preedit_node.setBackground(self.options.background);
-        try absolute(self.cx, self.preedit_node, S.inset + self.bodyX() + @as(f32, @floatFromInt(cursor.col)) * self.options.cell_width, S.inset + @as(f32, @floatFromInt(cursor.row)) * self.options.row_height, @max(self.options.cell_width, self.measured(self.preedit)), self.options.row_height);
+        self.preedit_node.setBackground(self.options.background.withAlpha(@min(self.options.background.a, 64)));
+        try absolute(self.cx, self.preedit_node, self.contentPadding().left + self.bodyX() + @as(f32, @floatFromInt(cursor.col + self.command_caret_cells)) * self.options.cell_width, self.contentPadding().top + self.presentationY(cursor.row), @max(self.options.cell_width, self.measured(self.preedit)), self.options.row_height);
     }
     pub fn queueText(self: *Surface, bytes: []const u8) !void {
         if (bytes.len == 0) return;
@@ -722,7 +809,7 @@ pub const Surface = struct {
         };
         self.error_until_ms = self.cx.frame_time_ms + 3000;
         const rect = self.root.rectFromWorldOrFallback();
-        self.message_root.setStyleInline(self.cx.allocator, S.errorMessage(@max(0, rect.w - 2 * S.inset), @max(S.inset, rect.h - self.options.row_height - S.inset), self.options.row_height, self.options.background));
+        self.message_root.setStyleInline(self.cx.allocator, S.errorMessage(self.contentPadding().left, @max(0, rect.w - self.contentPadding().left - self.contentPadding().right), @max(self.contentPadding().top, rect.h - self.options.row_height - self.contentPadding().bottom), self.options.row_height, self.options.background));
         self.message.setStyleInline(self.cx.allocator, .{ .height = .{ .px = self.options.row_height } });
         var props = self.message.getText().?;
         props.font_size = 11;
@@ -781,6 +868,7 @@ pub const Surface = struct {
     }
     fn onEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
         const self: *Surface = @ptrCast(@alignCast(raw orelse return .ignored));
+        if (self.enhancement) |handler| if (handler.event) |callback| if (callback(handler.context, event)) |result| return result;
         switch (event) {
             .key_down, .key_up, .text_input, .ime_preedit, .ime_commit => {
                 if (self.cx.focus_manager.getFocused() != self.host) return .ignored;
@@ -836,7 +924,7 @@ pub const Surface = struct {
     fn rangeAtPoint(raw: *anyopaque, x: f32, y: f32, start: *u32, end: *u32) bool {
         return input.rangeAtPoint(@ptrCast(@alignCast(raw)), x, y, start, end);
     }
-    fn clearSelection(self: *Surface) void {
+    pub fn clearSelection(self: *Surface) void {
         input.clearSelection(self);
     }
     fn cancelPaste(self: *Surface) void {

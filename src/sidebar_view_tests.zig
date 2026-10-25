@@ -6,6 +6,38 @@ test "sidebar native declarations" {
     std.testing.refAllDecls(V);
 }
 
+test "sidebar informational hover does not consume Escape before an open command menu" {
+    const h = try H.init();
+    defer h.deinit();
+    const anchor = try ui.box(h.cx, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 } }, .{});
+    try h.root.appendChild(h.cx.allocator, anchor);
+    const help = try ui.widgets.Button(.{ .label = "Help" }).mount(h.scope, h.cx);
+    const hint = try V.hint(h.cx, h.scope, help, "展开侧栏", .right);
+    try h.root.appendChild(h.cx.allocator, hint);
+    var callbacks: usize = 0;
+    const Callback = struct {
+        fn run(raw: *anyopaque) void {
+            @as(*usize, @ptrCast(@alignCast(raw))).* += 1;
+        }
+    };
+    const menu = try @import("ui/session_menu.zig").View.mount(h.cx, h.scope, .{ .context = &callbacks, .quick = Callback.run, .new_profile = Callback.run });
+    try h.root.appendChild(h.cx.allocator, menu.root);
+    try menu.show(anchor);
+    h.frames();
+    hint.behavior.events.on_hover.?.invoke();
+    for (0..5) |_| h.frames();
+    // The real tooltip layer must exist above the menu for this regression.
+    var tooltip_visible = false;
+    for (h.cx.overlay_stack.layers) |entry| if (entry) |layer| {
+        if (!layer.suspended and layer.state == .visible and layer.config.tier == .tooltip) tooltip_visible = true;
+    };
+    try std.testing.expect(tooltip_visible);
+    h.cx.handleKeyDown(.escape, .{});
+    h.frames();
+    try std.testing.expect(!menu.isOpen());
+    try std.testing.expectEqual(@as(usize, 0), callbacks);
+}
+
 test "background SOCKS sidebar badge preserves row geometry route actions and connection dot" {
     T.select(.dark);
     defer T.select(.dark);
@@ -242,6 +274,9 @@ test "sidebar native late callbacks reenable new group without remount" {
     try std.testing.expectEqual(@as(usize, 1), c.new_group);
 }
 test "sidebar native retained chrome and rows follow three themes and global material" {
+    const saved_parameters = T.materialParameters();
+    defer _ = T.setMaterialParameters(saved_parameters.transparency, saved_parameters.blur);
+    _ = T.setMaterialParameters(75, 24);
     const original = T.currentName();
     const material = T.materialVisible();
     defer {
@@ -419,13 +454,13 @@ test "sidebar native workspace actual groups search captured assets and collapse
     h.cx.setFocus(null);
     h.frames();
     const publication = try h.cx.bindState(@import("ui/shell_styles.zig").ThemePublication, .{});
-    const selected_colors = [_]ui.Color{ ui.Color.hex(0x4f46e5), ui.Color.hex(0x1345f6), ui.Color.hex(0x6164ec) };
+    const selected_colors = [_]ui.Color{ ui.Color.hex(0x4f46e5).withAlpha(64), ui.Color.hex(0x1345f6).withAlpha(64), ui.Color.hex(0x6164ec).withAlpha(64) };
     for ([_]T.Name{ .light, .sauber, .dark }, selected_colors) |name, expected| {
-        // Match AppNav.refreshAppearance: publish registry tokens while the
-        // startup preset name remains unchanged.
+        // Match AppNav.refreshAppearance: publish the active registry palette
+        // and its inferred theme family to the retained rail.
         T.selectTokens(@import("config/theme_registry.zig").builtinTokens(@tagName(name)));
         publication.publish(h.cx, T.widgetTheme(T.currentName()));
-        try std.testing.expectEqual(previous_theme, T.currentName());
+        try std.testing.expectEqual(name, T.currentName());
         try rail.refresh();
         h.frames();
         try std.testing.expectEqual(icon_node_id, first_icon.id);
@@ -587,10 +622,10 @@ test "sidebar icons share Tab selection and track live online changes in three t
     }
 }
 
-test "sidebar selected rail follows all theme prototype solid surfaces" {
+test "sidebar selected rail preserves theme hues as translucent surfaces" {
     defer T.select(.dark);
     const names = [_]@import("ui/app_theme.zig").Name{ .dark, .light, .sauber };
-    const selected = [_]ui.Color{ ui.Color.hex(0x6164ec), ui.Color.hex(0x4f46e5), ui.Color.hex(0x1345f6) };
+    const selected = [_]ui.Color{ ui.Color.hex(0x6164ec).withAlpha(64), ui.Color.hex(0x4f46e5).withAlpha(64), ui.Color.hex(0x1345f6).withAlpha(64) };
     for (names, selected) |name, expected| {
         T.select(name);
         const style = V.styles.railHost(true);
@@ -608,13 +643,13 @@ test "sidebar selected rail follows all theme prototype solid surfaces" {
     var custom = @import("config/theme_registry.zig").builtinTokens("dark");
     custom.surface_1 = 0x202030ff;
     T.selectTokens(custom);
-    try std.testing.expectEqual(T.current().accent, V.styles.railHost(true).background.?);
+    try std.testing.expectEqual(T.current().accent.withAlpha(64), V.styles.railHost(true).background.?);
     custom.accent = 0xabcdefFF;
     T.selectTokens(custom);
-    try std.testing.expectEqual(ui.Color.hex(0xabcdef), V.styles.railHost(true).background.?);
+    try std.testing.expectEqual(ui.Color.hex(0xabcdef).withAlpha(64), V.styles.railHost(true).background.?);
     T.selectTokens(@import("config/theme_registry.zig").builtinTokens("dark"));
     const old_material = T.materialVisible();
     defer _ = T.setMaterialVisible(old_material);
     _ = T.setMaterialVisible(true);
-    try std.testing.expectEqual(ui.Color.hex(0x6164ec), V.styles.railHost(true).background.?);
+    try std.testing.expectEqual(ui.Color.hex(0x6164ec).withAlpha(64), V.styles.railHost(true).background.?);
 }

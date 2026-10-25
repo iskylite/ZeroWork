@@ -6,7 +6,7 @@
 //! is available through the visible confirmation button only.
 const std = @import("std");
 const ui = @import("ui");
-const mock = @import("mockups/common.zig");
+const theme = @import("app_theme.zig");
 
 pub const Hooks = struct {
     context: *anyopaque,
@@ -20,6 +20,9 @@ pub const View = struct {
     hooks: Hooks,
     root: *ui.Node,
     card: *ui.Node,
+    frame: *ui.Node = undefined,
+    open: *ui.Signal(bool) = undefined,
+    portaled: bool = false,
     body: ui.widgets.ScrollAreaResult,
     bind_text: *ui.Node,
     confirm_button: *ui.Node,
@@ -41,35 +44,26 @@ pub const View = struct {
         };
         try scope.onCleanup(View, self, cleanup);
 
-        self.root = try ui.box(cx, .{
-            .position = .absolute,
-            .inset = .{ .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 }, .left = .{ .px = 0 } },
-            .width = .fill(),
-            .height = .fill(),
-            .display = .none,
-            .z_index = 360,
-            .align_items = .center,
-            .justify = .center,
-            .background = ui.Color.rgba(15, 23, 42, 112),
-        }, .{});
-        self.card = try ui.box(cx, .{
-            .width = .{ .px = 430 },
-            .direction = .column,
-            .padding = ui.Padding.all(20),
-            .background = ui.Color.WHITE,
-            .border = .{ .width = 0, .color = mock.tok.alpha(mock.tok.red, 64), .radius = 12 },
-            .shadow = .{ .blur = 30, .offset_y = 12, .color = ui.Color.rgba(15, 23, 42, 64) },
-            .flex_shrink = 0,
-        }, .{});
+        self.open = try scope.createSignal(bool, false);
+        const modal = try ui.widgets.Modal(.{ .open = self.open, .width = 430, .max_height = 450, .background = theme.current().overlay, .close_on_overlay = false, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, modalChanged) }).mount(scope, cx);
+        self.root = modal.overlay;
+        self.root.setDisplay(.none);
+        self.card = modal.dialog;
+        self.frame = modal.body;
+        self.portaled = modal.portaled;
+        self.root.meta.ownership.meta.test_id = "forward.exposure";
+        self.card.meta.ownership.meta.test_id = "forward.exposure.card";
+        self.card.setStyleInline(cx.allocator, .{ .width = .{ .px = 430 }, .direction = .column, .background = theme.current().overlay, .border = .{ .radius = 14 } });
+        self.frame.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .column, .gap = 0 });
+        self.frame.setStyleInline(cx.allocator, .{ .padding = ui.Padding.all(20) });
         self.card.behavior.interaction.focusable = true;
         self.card.behavior.events.on_key_down = onKeyDown;
         self.card.behavior.events.key_context = @ptrCast(self);
-        try self.root.appendChild(cx.allocator, self.card);
 
         const heading = try ui.text(cx, "确认开放局域网访问", .{
             .font_size = 15,
             .font_weight = 700,
-            .color = mock.tok.red,
+            .color = theme.current().danger_ink,
             .wrap = .word,
         });
         self.body = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
@@ -77,18 +71,18 @@ pub const View = struct {
         self.body.container.style.height = .{ .fit = .{} };
         self.body.content.style.width = .fill();
         self.body.content.style.flex_shrink = 0;
-        try self.card.appendChild(cx.allocator, self.body.container);
+        try self.frame.appendChild(cx.allocator, self.body.container);
         try self.body.content.appendChild(cx.allocator, heading);
-        const intro = try ui.text(cx, "SOCKS5 将绑定到 0.0.0.0。局域网内的其他设备可以访问此代理。", .{
+        const intro = try ui.text(cx, "转发将绑定到 0.0.0.0。局域网内的其他设备可以访问此监听端口。", .{
             .font_size = 12,
-            .color = mock.tok.fg2,
+            .color = theme.current().fg_2,
             .wrap = .word,
             .line_height = 1.45,
         });
         intro.style.margin = .{ .top = 8, .bottom = 0, .left = 0, .right = 0 };
         try self.body.content.appendChild(cx.allocator, intro);
 
-        self.bind_text = try ui.text(cx, "绑定地址：0.0.0.0", .{ .font_size = 11.5, .color = mock.tok.fg, .use_monospace_font = true });
+        self.bind_text = try ui.text(cx, "绑定地址：0.0.0.0", .{ .font_size = 11.5, .color = theme.current().fg_1, .use_monospace_font = true });
         try self.body.content.appendChild(cx.allocator, self.bind_text);
 
         const foot = try ui.box(cx, .{
@@ -99,11 +93,9 @@ pub const View = struct {
             .margin = .{ .top = 16, .bottom = 0, .left = 0, .right = 0 },
             .flex_shrink = 0,
         }, .{});
-        const cancel = try button(self, foot, "取消", false);
-        cancel.behavior.events.on_click = cx.on(View, self, onCancelClick);
+        _ = try button(self, foot, "取消", false);
         self.confirm_button = try button(self, foot, "确认开放", true);
-        self.confirm_button.behavior.events.on_click = cx.on(View, self, onConfirmClick);
-        try self.body.content.appendChild(cx.allocator, foot);
+        try self.frame.appendChild(cx.allocator, foot);
         try cx.addAfterLayoutHook(self, afterLayout);
         return self;
     }
@@ -116,13 +108,18 @@ pub const View = struct {
         const label = try std.fmt.bufPrint(&buf, "绑定地址：{s}", .{bind});
         try self.bind_text.setTextContent(self.cx.allocator, label);
         self.visible = true;
+        self.open.set(true);
         self.focus_pending = true;
         self.root.setDisplay(.flex);
         self.cx.requestRedraw();
     }
 
+    fn modalChanged(self: *View, value: bool) void {
+        if (!value and self.visible) self.cancelNow();
+    }
     pub fn hide(self: *View) void {
         self.visible = false;
+        self.open.set(false);
         self.root.setDisplay(.none);
         self.cx.requestRedraw();
     }
@@ -153,21 +150,31 @@ pub const View = struct {
 
     pub fn updateGeometry(self: *View) bool {
         if (!self.visible) return false;
-        const bounds = if (self.root.parent) |p| p.globalRect() else ui.ComputedRect{ .x = 0, .y = 0, .w = self.cx.viewport.width, .h = self.cx.viewport.height };
+        const bounds: ui.ComputedRect = .{ .x = 0, .y = 0, .w = self.cx.viewport.width, .h = self.cx.viewport.height };
         const width = @max(@as(f32, 1), @min(@as(f32, 430), bounds.w - 32));
         const natural = self.body.content.globalRect().h;
-        const body_h = @max(@as(f32, 1), @min(natural, bounds.h - 74));
+        const body_h = @max(@as(f32, 1), @min(natural, bounds.h - 122));
         var changed = false;
+        if (self.frame.style.padding.left != 20) {
+            self.frame.setStyleInline(self.cx.allocator, .{ .padding = ui.Padding.all(20) });
+            changed = true;
+        }
+        const total = body_h + 90;
+        if (self.card.style.height != .px or @abs(self.card.style.height.px - total) > 0.5) {
+            self.card.setStyleInline(self.cx.allocator, .{ .height = .{ .px = total } });
+            changed = true;
+        }
         if (self.card.style.width != .px or @abs(self.card.style.width.px - width) > 0.5) {
-            self.card.style.width = .{ .px = width };
+            self.card.setStyleInline(self.cx.allocator, .{ .width = .{ .px = width } });
             changed = true;
         }
         if (self.body.container.style.height != .px or @abs(self.body.container.style.height.px - body_h) > 0.5) {
-            self.body.container.style.height = .{ .px = body_h };
+            self.body.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = body_h } });
             changed = true;
         }
         if (changed) {
             self.card.markLayoutDirty();
+            self.cx.requestRedraw();
             return true;
         }
         if (self.focus_pending) {
@@ -184,20 +191,19 @@ pub const View = struct {
     }
 };
 
-fn button(self: *View, parent: *ui.Node, label: []const u8, danger: bool) !*ui.Node {
-    const n = try ui.box(self.cx, .{
-        .height = .{ .px = 34 },
-        .padding = .{ .left = 18, .right = 18 },
-        .direction = .row,
-        .align_items = .center,
-        .justify = .center,
-        .background = if (danger) mock.tok.red else mock.tok.btn_sec_bg,
-        .border = .{ .width = if (danger) 0 else 1, .color = if (danger) mock.tok.red else mock.tok.setbd, .radius = 8 },
-        .flex_shrink = 0,
-    }, .{});
-    try n.appendChild(self.cx.allocator, try ui.text(self.cx, label, .{ .font_size = 12, .font_weight = if (danger) 600 else 400, .color = if (danger) ui.Color.WHITE else mock.tok.fg2 }));
-    try parent.appendChild(self.cx.allocator, n);
-    return n;
+fn button(self: *View, parent: *ui.Node, label: []const u8, comptime danger: bool) !*ui.Node {
+    const node = try ui.widgets.Button(.{ .label = label, .variant = @as(ui.widgets.ButtonVariant, if (danger) .danger else .secondary), .base_style = .{ .width = .{ .px = 112 }, .height = .{ .px = 34 }, .background = if (danger) theme.current().danger_ink else theme.current().well, .text_color = if (danger) ui.Color.WHITE else theme.current().fg_1, .font_size = 12, .corner_radius = 8, .border_width = 0 }, .on_click = self.cx.on(View, self, if (danger) View.onConfirmClick else View.onCancelClick), .on_event = if (danger) pointerOnly else null }).mount(self.scope, self.cx);
+    node.meta.ownership.meta.test_id = if (danger) "forward.exposure.confirm" else "forward.exposure.cancel";
+    try parent.appendChild(self.cx.allocator, node);
+    return node;
+}
+fn pointerOnly(event: ui.events.Event, _: ?*anyopaque) ui.events.EventResult {
+    switch (event) {
+        .key_down => |key| if (key.key == .@"return" or key.key == .space) return .stop,
+        .key_up => |key| if (key.key == .@"return" or key.key == .space) return .stop,
+        else => {},
+    }
+    return .ignored;
 }
 
 fn onKeyDown(key: ui.events.KeyCode, _: ui.events.Modifiers, raw: ?*anyopaque) ui.events.EventResult {

@@ -2,7 +2,7 @@ const std = @import("std");
 const ui = @import("ui");
 const S = @import("ui/ai_assistant_styles.zig");
 
-test "AI user messages align with the Figma conversation content before its scrollbar gutter" {
+test "AI user messages align to V3 content with overlay scrollbars" {
     for ([_]f32{ 520, 600, 1100 }) |width| {
         const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
         defer cx.deinit();
@@ -10,7 +10,7 @@ test "AI user messages align with the Figma conversation content before its scro
         cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
         const conversation = try ui.box(cx, S.conversation(cx.tokens), .{});
         try cx.root.?.appendChild(cx.allocator, conversation);
-        const content_width = width - 40;
+        const content_width = width - 28;
         for ([_][]const u8{ "简短问题", "This is a long user prompt which must wrap within the seventy five percent bubble limit and remain aligned to the right edge rather than falling back to the left because of its unwrapped intrinsic width. This also represents a restored conversation message." }) |prompt| {
             const row = try ui.box(cx, S.messageRow(true), .{});
             try conversation.appendChild(cx.allocator, row);
@@ -21,9 +21,9 @@ test "AI user messages align with the Figma conversation content before its scro
             const bounds = bubble.globalRect();
             const parent = row.globalRect();
             try std.testing.expectApproxEqAbs(width - 28, parent.w, 0.1);
-            try std.testing.expectApproxEqAbs(width - 26, bounds.x + bounds.w, 0.1);
+            try std.testing.expectApproxEqAbs(width - 14, bounds.x + bounds.w, 0.1);
             try std.testing.expect(bounds.w > 0 and bounds.w <= content_width * 0.75 + 0.1);
-            try std.testing.expectApproxEqAbs(parent.x + parent.w - 12, bounds.x + bounds.w, 0.1);
+            try std.testing.expectApproxEqAbs(parent.x + parent.w, bounds.x + bounds.w, 0.1);
         }
         const reply_row = try ui.box(cx, S.messageRow(false), .{});
         try conversation.appendChild(cx.allocator, reply_row);

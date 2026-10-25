@@ -12,7 +12,7 @@ pub const Fact = struct {
         return self.handle.eql(other.handle) and self.membership_revision == other.membership_revision and self.capability_revision == other.capability_revision;
     }
 };
-pub const Target = struct { fact: Fact, last_event: u64 = 0, result: enum { skipped, accepted, failed } = .skipped };
+pub const Target = struct { fact: Fact, selected: bool = true, last_event: u64 = 0, result: enum { skipped, accepted, failed } = .skipped };
 pub const Approval = struct {
     group_id: u32,
     group_revision: u64,
@@ -25,8 +25,8 @@ pub const Approval = struct {
     pub fn approve(self: *Approval, revision: u64, facts: []const Fact) !void {
         if (self.enabled) return;
         if (revision != self.group_revision or !valid(self.source, facts)) return error.StaleApproval;
-        for (self.targets) |target| if (!valid(target.fact, facts)) return error.StaleApproval;
-        if (self.targets.len == 0) return error.NoRecipients;
+        for (self.targets) |target| if (target.selected and !valid(target.fact, facts)) return error.StaleApproval;
+        if (self.effective(facts) == 0) return error.NoRecipients;
         self.enabled = true;
     }
     pub fn valid(fact: Fact, facts: []const Fact) bool {
@@ -35,10 +35,20 @@ pub const Approval = struct {
     }
     pub fn effective(self: *const Approval, facts: []const Fact) usize {
         var count: usize = 0;
-        for (self.targets) |target| if (valid(target.fact, facts)) {
+        for (self.targets) |target| if (target.selected and valid(target.fact, facts)) {
             count += 1;
         };
         return count;
+    }
+    /// Selection only narrows the captured recipient set. New generations or members
+    /// cannot enter an existing approval through the presentation layer.
+    pub fn select(self: *Approval, owner: Handle, selected: bool, facts: []const Fact) !void {
+        for (self.targets) |*target| if (target.fact.handle.eql(owner)) {
+            if (selected and !valid(target.fact, facts)) return error.StaleApproval;
+            target.selected = selected;
+            return;
+        };
+        return error.UnknownRecipient;
     }
     pub fn dispatch(self: *Approval, source: Fact, event: u64, facts: []const Fact, context: *anyopaque, send: *const fn (*anyopaque, Handle) anyerror!void) !void {
         if (!self.enabled or event == 0) return;
@@ -48,7 +58,7 @@ pub const Approval = struct {
             if (event <= target.last_event) continue;
             target.last_event = event;
             target.result = .skipped;
-            if (!valid(target.fact, facts)) continue;
+            if (!target.selected or !valid(target.fact, facts)) continue;
             send(context, target.fact.handle) catch |err| {
                 target.result = .failed;
                 if (failure == null) failure = err;
@@ -129,4 +139,34 @@ test "recipient failure does not suppress healthy targets and skipped events nev
     var replacement = source;
     replacement.handle.generation += 1;
     try std.testing.expectError(error.StaleSource, approval.dispatch(replacement, 2, &facts, &fake, Fake.send));
+}
+
+test "recipient selection never replays input or admits a new generation" {
+    const a: Fact = .{ .handle = .{ .session_id = @fromBackingInt(1) }, .membership_revision = 1 };
+    const b: Fact = .{ .handle = .{ .session_id = @fromBackingInt(2) }, .membership_revision = 2 };
+    const c: Fact = .{ .handle = .{ .session_id = @fromBackingInt(3) }, .membership_revision = 3 };
+    var approval = try prepare(std.testing.allocator, 1, 1, a, &.{ a, b, c });
+    defer approval.deinit(std.testing.allocator);
+    try approval.select(b.handle, false, &.{ a, b, c });
+    try approval.approve(1, &.{ a, b, c });
+    const Sent = struct {
+        count: usize = 0,
+        fn send(raw: *anyopaque, owner: Handle) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expectEqual(c.handle.session_id, owner.session_id);
+            self.count += 1;
+        }
+    };
+    var sent: Sent = .{};
+    try approval.dispatch(a, 1, &.{ a, b, c }, &sent, Sent.send);
+    try std.testing.expectEqual(@as(usize, 1), sent.count);
+    try approval.select(b.handle, true, &.{ a, b, c });
+    try approval.dispatch(a, 1, &.{ a, b, c }, &sent, Sent.send);
+    try std.testing.expectEqual(@as(usize, 1), sent.count);
+    var replacement = b;
+    replacement.handle.generation += 1;
+    try std.testing.expectError(error.UnknownRecipient, approval.select(replacement.handle, true, &.{ a, replacement, c }));
+    try std.testing.expectError(error.StaleApproval, approval.select(b.handle, true, &.{ a, replacement, c }));
+    try approval.select(c.handle, false, &.{ a, replacement, c });
+    try std.testing.expectEqual(@as(usize, 0), approval.effective(&.{ a, replacement, c }));
 }

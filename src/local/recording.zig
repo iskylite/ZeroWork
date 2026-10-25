@@ -177,6 +177,15 @@ pub const Recording = struct {
         self.wakeup.notify();
     }
 
+    pub fn appendApplication(self: *Recording, record: @import("../host/terminal_service.zig").ApplicationRecord) !void {
+        if (!self.owner.eql(record.owner)) return error.StaleOwner;
+        self.lock();
+        const offset = self.output_bytes;
+        const stopped = self.stop or self.closed;
+        self.mutex.unlock();
+        if (stopped) return error.RecordingClosed;
+        try self.timeline.appendApplicationAt(record, offset, @intCast(@import("native.zig").zw_local_monotonic_ms()));
+    }
     pub fn resizeApplied(self: *Recording, owner: identity.SessionHandle, cols: u16, rows: u16, now_ms: i64) void {
         if (!self.owner.eql(owner)) return;
         defer self.wakeup.notify();

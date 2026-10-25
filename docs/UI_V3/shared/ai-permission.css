@@ -1,0 +1,14 @@
+/* Source permission body is 320px inside a 344px popover, rows 32px,
+   marker14 / glyph16 / gap6 / padding6. Long source prose is in tooltips. */
+.v3-ai-permission{display:flex;flex-direction:column;gap:6px;width:320px;max-width:100%;min-width:0;overflow:visible}
+.v3-ai-permission-option{display:grid;grid-template-columns:14px 16px minmax(0,1fr);align-items:center;gap:6px;flex:none;width:100%;height:32px;min-height:32px;padding:6px;border:0;border-radius:7px;background:var(--card,#1b1b1f);color:var(--fg,#f4f4f5);font:500 12px/18px Inter,system-ui,sans-serif;text-align:left;cursor:pointer}
+.v3-ai-permission-option.selected{background:var(--sel,#24233a)}
+.v3-ai-permission-option:hover{background:var(--hover,#26262c)}
+.v3-ai-permission-option:focus-visible,.v3-ai-permission-help:focus-visible{outline:2px solid var(--accent,#6366f1);outline-offset:1px}
+.v3-ai-permission-marker{display:grid;place-items:center;width:14px;height:14px;color:var(--muted,#a1a1aa)}
+.v3-ai-permission-option.selected .v3-ai-permission-marker{color:var(--accent,#6366f1)}
+.v3-ai-permission-glyph{display:grid;place-items:center;width:16px;height:16px;color:var(--muted,#a1a1aa)}
+.v3-ai-permission svg{display:block;width:100%;height:100%;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.v3-ai-permission-scope{display:flex;align-items:center;gap:6px;min-height:22px;color:var(--muted,#a1a1aa);font:400 11px/16px Inter,system-ui,sans-serif}
+.v3-ai-permission-help{display:grid;place-items:center;flex:none;width:22px;height:22px;min-height:22px;padding:4px;border:0;border-radius:5px;background:transparent;color:inherit;cursor:help}
+.v3-ai-permission-help:hover{background:var(--hover,#26262c)}

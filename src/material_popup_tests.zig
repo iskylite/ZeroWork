@@ -24,7 +24,10 @@ fn contains(rect: ui.ComputedRect, x: f32, y: f32) bool {
     return x > rect.x and y > rect.y and x < rect.x + rect.w and y < rect.y + rect.h;
 }
 
-test "production AI permission popover projects the material into the final paint stream" {
+test "production AI permission popover reveals the single global material in the final paint stream" {
+    const saved_parameters = theme.materialParameters();
+    defer _ = theme.setMaterialParameters(saved_parameters.transparency, saved_parameters.blur);
+    _ = theme.setMaterialParameters(75, 24);
     const old_name = theme.currentName();
     const old_material = theme.materialVisible();
     defer {
@@ -66,21 +69,15 @@ test "production AI permission popover projects the material into the final pain
     const items = frame(cx);
     const popup = view.popups[1];
     try std.testing.expect(popup.widget.open.?.peek());
-    const surface = popup.widget.chrome.children.items[0];
-    try std.testing.expect(layers.isSurface(surface));
-    const plane = surface.children.items[0];
-    const images = plane.children.items[1];
-    const tint = plane.children.items[4];
-    try std.testing.expectEqual(@as(u8, 208), popup.widget.chrome.getBackground().a);
-    try std.testing.expectEqual(popup.widget.chrome.getBackground(), tint.getBackground());
-    try std.testing.expect(surface.style.display == .flex);
+    for (popup.widget.chrome.children.items) |child| try std.testing.expect(!layers.isSurface(child));
+    try std.testing.expectEqual(theme.current().overlay, popup.widget.chrome.getBackground());
     const rect = popup.widget.chrome.globalRect();
     var projected: usize = 0;
     var image_order: ?usize = null;
     var after_image_fills: usize = 0;
     var opaque_after_image: usize = 0;
     for (items, 0..) |item, index| switch (item) {
-        .image_quad => |q| if (q.header.node_id == images.children.items[0].id) {
+        .image_quad => |q| if (q.texture_id == 777) {
             projected += 1;
             image_order = index;
         },
@@ -129,21 +126,16 @@ test "production bottom More retains global material through row rebuild and reo
     try source.update(.{ .id = 777, .width = 2, .height = 2 }, .{ .background = .{ .enabled = true, .path = "/fixture", .fit = .fill, .transparency = 35 } }, 1440, 900);
     try view.update(.{ .owner = .{ .session = .{ .session_id = @fromBackingInt(1) } }, .owner_kind = .local, .source_revision = 1, .identity_label = "本地 · zsh", .encoding = .utf8, .grid = .{ .cols = 80, .rows = 24, .revision = 1 } });
     _ = frame(cx);
-    const surface = view.chrome.children.items[0];
-    try std.testing.expect(layers.isSurface(surface));
+    for (view.chrome.children.items) |child| try std.testing.expect(!layers.isSurface(child));
     for (0..3) |_| {
         try view.show(.more, trigger, 860, false);
         const items = frame(cx);
         try std.testing.expect(view.open.peek());
-        try std.testing.expectEqual(surface, view.chrome.children.items[0]);
         try std.testing.expectEqual(theme.current().overlay, view.chrome.getBackground());
-        const plane = surface.children.items[0];
-        try std.testing.expectEqual(theme.current().overlay, plane.children.items[4].getBackground());
-        const projected = plane.children.items[1].children.items[0];
         var images: usize = 0;
         var title = false;
         for (items) |item| switch (item) {
-            .image_quad => |quad| if (quad.header.node_id == projected.id) {
+            .image_quad => |quad| if (quad.texture_id == 777) {
                 images += 1;
             },
             .text_run => |run| if (std.mem.eql(u8, run.content, "更多状态")) {
@@ -184,7 +176,7 @@ test "production auth content inherits modal and inline material across retheme 
         cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
         const source = try layers.View.mount(cx, scope);
         try cx.root.?.appendChild(a, source.root);
-        // The connection dialog owns the inline form's existing material.
+        // The connection dialog and inline form reveal the same global layer.
         const parent = try ui.box(cx, .{ .width = .{ .px = 620 }, .height = .{ .px = 620 }, .background = theme.current().overlay }, .{});
         try cx.root.?.appendChild(a, parent);
         try source.isolate(scope, parent);
@@ -209,8 +201,7 @@ test "production auth content inherits modal and inline material across retheme 
         const input = view.fields[0].input.state;
         const form = view.form.?;
         const chrome = if (view.modal) |modal| modal.dialog else parent;
-        const surface = chrome.children.items[0];
-        try std.testing.expect(layers.isSurface(surface));
+        for (chrome.children.items) |child| try std.testing.expect(!layers.isSurface(child));
         for ([_]bool{ false, true, false }) |enabled| {
             for ([_]theme.Name{ .dark, .light }) |name| {
                 theme.select(name);
@@ -227,27 +218,21 @@ test "production auth content inherits modal and inline material across retheme 
                 try std.testing.expectEqual(ui.widgets.input.InputType.password, input.input_type);
                 try std.testing.expect(!view.submit_disabled.peek());
                 try std.testing.expectEqual(theme.current().well, view.fields[0].input.input_container.getBackground());
-                const plane = surface.children.items[0];
                 var projected: usize = 0;
-                var opaque_fallback = false;
+                var opaque_chrome = false;
                 for (items) |item| switch (item) {
                     .image_quad => |q| {
-                        for (plane.children.items[1].children.items) |image| {
-                            if (q.header.node_id == image.id) projected += 1;
-                        }
+                        if (q.texture_id == 777) projected += 1;
                     },
                     .fill_rect => |fill| {
                         // A content-sized fill would cover the inherited image.
                         try std.testing.expect(fill.header.node_id != form.id);
-                        if (fill.header.node_id == chrome.id and fill.color.a == 255) opaque_fallback = true;
+                        if (fill.header.node_id == chrome.id and fill.color.a == 255) opaque_chrome = true;
                     },
                     else => {},
                 };
                 try std.testing.expectEqual(if (enabled) @as(usize, 1) else 0, projected);
-                if (enabled) {
-                    try std.testing.expectEqual(@as(u8, 255), plane.children.items[0].getBackground().a);
-                    try std.testing.expectEqual(theme.current().overlay, plane.children.items[4].getBackground());
-                } else try std.testing.expect(opaque_fallback);
+                try std.testing.expect(!opaque_chrome);
             }
         }
     }

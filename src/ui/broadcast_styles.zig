@@ -1,25 +1,45 @@
 const ui = @import("ui");
-const theme = @import("app_theme.zig");
-// Live Bridge 358:1395890: 360×248, r14, padding12, header28, content154, actions30.
+pub const theme = @import("app_theme.zig");
+pub const width: f32 = 344;
+pub const maximum_height: f32 = 360;
+pub const fixed_height: f32 = 108;
 pub fn panel() ui.BoxStyle {
-    return .{ .width = .{ .px = 360 }, .height = .{ .px = 248 }, .direction = .column, .padding = ui.Padding.all(12), .gap = 6, .background = theme.current().overlay, .border = .{ .radius = 14 }, .z_index = 90, .display = .none, .hit_behavior = .@"opaque" };
+    return .{ .position = .absolute, .width = .{ .px = width }, .height = .{ .px = maximum_height }, .direction = .column, .padding = ui.Padding.all(14), .gap = 10, .background = theme.current().overlay, .border = .{ .radius = 14 }, .hit_behavior = .@"opaque" };
 }
 pub fn row() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
+}
+pub fn header() ui.BoxStyle {
+    var style = row();
+    style.height = .{ .px = 28 };
+    return style;
+}
+pub fn body() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 10, .flex_shrink = 0 };
+}
+pub fn member() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 52 }, .direction = .row, .align_items = .center, .gap = 9, .padding = ui.Padding.all(10), .background = theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn text(strong: bool) ui.TextStyle {
-    return .{ .font_size = if (strong) 13 else 11, .font_weight = if (strong) 500 else 400, .color = if (strong) theme.current().fg_1 else theme.current().fg_2, .wrap = .word };
+    return .{ .font_size = if (strong) 12 else 10, .font_weight = if (strong) 500 else 400, .line_height = if (strong) 1.5 else 1.6, .color = if (strong) theme.current().fg_1 else theme.current().fg_2, .text_overflow = .ellipsis };
+}
+pub fn note() ui.TextStyle {
+    var style = text(false);
+    style.wrap = .word;
+    style.text_overflow = .clip;
+    return style;
+}
+pub fn control(primary: bool) @FieldType(ui.widgets.ControlShellConfig, "style") {
+    return .{ .width = .{ .px = 88 }, .height = .{ .px = 32 }, .padding = .{}, .background = if (primary) theme.current().accent else theme.current().well, .text_color = if (primary) ui.Color.WHITE else theme.current().fg_1, .font_size = 11, .corner_radius = 8, .border_width = 0 };
 }
 
-// Figma primary button label is white; keep body and secondary roles unchanged.
-pub fn primaryButtonText() ui.TextStyle {
-    var value = text(false);
-    value.color = ui.Color.rgb(255, 255, 255);
-    return value;
+pub fn close() @FieldType(ui.widgets.ControlShellConfig, "style") {
+    var style = control(false);
+    style.width = .{ .px = 22 };
+    style.height = .{ .px = 22 };
+    style.background = ui.Color.TRANSPARENT;
+    return style;
 }
-
-pub fn header() ui.BoxStyle {
-    var value = row();
-    value.height = .{ .px = 28 };
-    return value;
+pub fn controlHover(primary: bool) @FieldType(ui.widgets.ControlShellConfig, "style") {
+    return .{ .background = if (primary) theme.current().accent else theme.current().hover, .text_color = if (primary) ui.Color.WHITE else theme.current().fg_1 };
 }

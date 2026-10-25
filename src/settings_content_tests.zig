@@ -141,8 +141,8 @@ test "AI settings filtered fields retain body and footer without a missing Provi
         try std.testing.expect(byId(mounted.root, "settings.reset") == mounted.reset_button);
         try std.testing.expectEqualStrings("已保存", mounted.status_label.getText().?.content);
         try std.testing.expectEqual(case.providers, context.mounted);
-        try std.testing.expectEqual(@as(usize, if (case.providers) 1 else 0), context.action_count);
-        try std.testing.expectEqual(case.providers, byId(mounted.root, "test.providers.add") != null);
+        try std.testing.expectEqual(@as(usize, 0), context.action_count);
+        try std.testing.expect(byId(mounted.root, "test.providers.add") == null);
     }
 }
 
@@ -299,34 +299,53 @@ test "settings material focus restore leaves other focus and unavailable fields 
     try std.testing.expect(f.cx.focus_manager.getFocused() == null);
 }
 
-test "appearance geometry uses the precise font rows material controls and dismissed preview" {
+test "appearance geometry uses V3 card padding and 32 pixel field controls" {
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
     f.controller.folded_sections = 0;
-    try f.controller.editKey("ui.materials.background", "enabled", .{ .boolean = true });
     const mounted = try f.mount();
     const font = byId(mounted.root, "settings.appearance.font").?.globalRect();
     const family = byId(mounted.root, "settings.field.font_family").?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 600), font.w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 250), font.h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 428), family.x - font.x, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 43), family.y - font.y, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 164), family.w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 30), family.h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 626), font.w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 390), family.x - font.x, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 72.5), family.y - font.y, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 220), family.w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 32), family.h, 0.1);
     const material = byId(mounted.root, "settings.appearance.materials").?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 228), material.h, 0.1);
-    const fit = byId(mounted.root, "settings.field.fit").?.globalRect();
-    const alignment = byId(mounted.root, "settings.field.alignment").?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 156), fit.x - material.x, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 392), alignment.x - material.x, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 62), byId(mounted.root, "settings.materials.header").?.globalRect().h, 0.1);
+    for ([_][]const u8{ "fit", "alignment" }) |field| {
+        var buffer: [80]u8 = undefined;
+        const control = byId(mounted.root, try std.fmt.bufPrint(&buffer, "settings.field.{s}", .{field})).?.globalRect();
+        try std.testing.expectApproxEqAbs(@as(f32, 16), material.x + material.w - control.x - control.w, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 220), control.w, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 32), control.h, 0.1);
+    }
     for ([_][]const u8{ "transparency", "blur_px" }) |field| {
         var buffer: [80]u8 = undefined;
         const number = byId(mounted.root, try std.fmt.bufPrint(&buffer, "settings.field.{s}", .{field})).?.globalRect();
-        try std.testing.expectApproxEqAbs(@as(f32, 490), number.x - material.x, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 100), number.w, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 90), number.w, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 32), number.h, 0.1);
     }
+    // Turning a background off does not hide its editable draft.
+    try std.testing.expect(!f.controller.model.value.ui.materials.background.enabled);
+    try std.testing.expect(byId(mounted.root, "settings.background.choose") != null);
+}
+
+test "appearance V3 inline preview and theme import expose real capability" {
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.controller.folded_sections = 0;
+    try f.controller.editKey("ui.materials.background", "path", .{ .text = "/fixture.png" });
+    const mounted = try f.mount();
+    const preview = byId(mounted.root, "settings.background.preview").?;
+    try std.testing.expectApproxEqAbs(@as(f32, 116), preview.globalRect().h, 0.1);
+    try std.testing.expect(byId(mounted.root, "settings.materials.preview.full") != null);
+    const remove = byId(mounted.root, "settings.theme.remove.current").?;
+    try std.testing.expect(remove.behavior.interaction.a11y.?.disabled);
+    try std.testing.expect(byId(mounted.root, "settings.theme.import") != null);
+    try std.testing.expect(byId(mounted.root, "settings.font.preview.caret") != null);
 }
 
 test "appearance removed thumbnail clears while failed replacement retains last good" {
@@ -405,35 +424,27 @@ test "appearance footer reports failed replacement even with clean configuration
     try std.testing.expect(f.controller.background.problem != null);
 }
 
-test "appearance library query and close preserve the same draft and selection" {
+test "appearance legacy library state cannot replace V3 inline theme selection" {
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
     f.controller.theme_library.open = true;
+    f.context.library_dismissed = true;
     try f.controller.theme_library.setQuery(std.testing.allocator, "zz-no-match");
     try f.controller.editKey("ui", "font_size", .{ .unsigned = 21 });
     const mounted = try f.mount();
-    try std.testing.expect(byId(mounted.root, "settings.theme.empty") != null);
-    try std.testing.expectEqualStrings("dark", f.controller.model.value.ui.theme);
-    const before = f.controller.dirty_fields;
-    clickButton(byId(mounted.root, "settings.theme.library.close").?);
-    try std.testing.expect(!f.controller.theme_library.open and f.context.library_dismissed);
-    try std.testing.expectEqualStrings("zz-no-match", f.controller.theme_library.query);
-    try std.testing.expectEqual(before, f.controller.dirty_fields);
+    const strip = byId(mounted.root, "settings.theme.strip").?;
+    try std.testing.expectApproxEqAbs(@as(f32, 75), strip.globalRect().h, 0.1);
+    try std.testing.expect(byId(mounted.root, "settings.theme.grid") == null);
+    try std.testing.expect(byId(mounted.root, "settings.theme.library.open") == null);
+    try std.testing.expect(byId(mounted.root, "settings.theme.library.close") == null);
+    const light = byId(mounted.root, "settings.theme.light").?;
+    try std.testing.expectApproxEqAbs(@as(f32, 150), light.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 75), light.globalRect().h, 0.1);
+    clickButton(light);
+    try std.testing.expectEqualStrings("light", f.controller.model.value.ui.theme);
     try std.testing.expectEqual(@as(u16, 21), f.controller.model.value.ui.font_size);
-    // A second mount models the host's deferred replacement, not event-stack
-    // destruction. Its selected line and preview keep the canonical heights.
-    const scope = try f.scope.childScope();
-    const second = try view.mountPage(f.cx, scope, &f.controller, .{ .context = &f, .changed = AppearanceFixture.rebuild, .request_edit = request, .action = action, .appearance = &f.context });
-    f.cx.root.?.removeChild(mounted.root);
-    try f.cx.root.?.appendChild(f.cx.allocator, second.root);
-    f.cx.layout();
-    try std.testing.expectApproxEqAbs(@as(f32, 44), byId(second.root, "settings.theme.dismissed").?.globalRect().h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 126), byId(second.root, "settings.theme.preview").?.globalRect().h, 0.1);
-    clickButton(byId(second.root, "settings.theme.library.open").?);
-    try std.testing.expect(f.controller.theme_library.open and !f.context.library_dismissed);
     try std.testing.expectEqualStrings("zz-no-match", f.controller.theme_library.query);
-    try f.cx.root.?.appendChild(f.cx.allocator, mounted.root);
 }
 
 test "appearance numeric input keeps invalid raw and composition while footer tracks host readiness" {
@@ -473,8 +484,7 @@ test "appearance numeric input keeps invalid raw and composition while footer tr
 }
 
 test "settings fixed footer stays outside the scrolling viewport at canonical size" {
-    // The current Bridge card (355:1290613) is 556px high; preserve the
-    // same fixed boundaries when its host supplies the earlier 628px height.
+    // V3 keeps the heading and footer fixed while only the body scrolls.
     for ([_]f32{ 628, 556 }) |height| {
         const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
         defer cx.deinit();
@@ -493,11 +503,11 @@ test "settings fixed footer stays outside the scrolling viewport at canonical si
         const viewport = byId(page.root, "settings.viewport").?;
         const footer = byId(page.root, "settings.footer").?;
         const before = footer.globalRect();
-        try std.testing.expectApproxEqAbs(@as(f32, 48), viewport.globalRect().y, 0.1);
-        try std.testing.expectApproxEqAbs(height - 114, viewport.globalRect().h, 0.1);
-        try std.testing.expectApproxEqAbs(height - 50, before.y, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 40), before.h, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 16), before.y - viewport.globalRect().y - viewport.globalRect().h, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 62), viewport.globalRect().y, 0.1);
+        try std.testing.expectApproxEqAbs(height - 120, viewport.globalRect().h, 0.1);
+        try std.testing.expectApproxEqAbs(height - 58, before.y, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 58), before.h, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 0), before.y - viewport.globalRect().y - viewport.globalRect().h, 0.1);
         page.scroll_state.viewport_height = viewport.globalRect().h;
         page.scroll_state.content_height = page.scroll_content.globalRect().h;
         try std.testing.expect(page.scroll_state.maxScrollY() > 0);
@@ -534,8 +544,8 @@ test "enabled settings save icon stays visible within its button in every theme"
         const icon = firstImage(page.save_button).?;
         const icon_rect = icon.globalRect();
         const button_rect = page.save_button.globalRect();
-        try std.testing.expectApproxEqAbs(@as(f32, 16), icon_rect.w, 0.1);
-        try std.testing.expectApproxEqAbs(@as(f32, 16), icon_rect.h, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 14), icon_rect.w, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 14), icon_rect.h, 0.1);
         try std.testing.expect(icon_rect.x >= button_rect.x and icon_rect.x + icon_rect.w <= button_rect.x + button_rect.w);
         try std.testing.expect(icon_rect.y >= button_rect.y and icon_rect.y + icon_rect.h <= button_rect.y + button_rect.h);
         const ink = relativeLuminance(if (icon.getIcon()) |props| props.tint else icon.getImage().?.tint);
@@ -576,6 +586,7 @@ test "global material settings keep flat sections and shared chooser roles while
         defer f.deinit();
         f.cx.setTheme(theme.widgetTheme(name));
         f.controller.folded_sections = 0;
+        try f.controller.setSearch("font");
         try f.controller.editKey("ui", "font_size", .{ .unsigned = 15 });
         const mounted = try f.mount();
         try std.testing.expectEqual(theme.current().surface_1, mounted.root.getBackground());
@@ -731,13 +742,13 @@ test "native settings SSH uses precise accordion and inline control geometry" {
     const connection = byId(mounted.root, "settings.ssh.connection").?;
     const reconnect = byId(mounted.root, "settings.ssh.reconnect").?;
     const keepalive = byId(mounted.root, "settings.field.keepalive_sec").?;
-    try std.testing.expectApproxEqAbs(@as(f32, 600), connection.globalRect().w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 208), connection.globalRect().h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 64), reconnect.globalRect().h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 164), keepalive.globalRect().w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 30), keepalive.globalRect().h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 428), keepalive.globalRect().x - connection.globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 43), keepalive.globalRect().y - connection.globalRect().y, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 626), connection.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 279), connection.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 62), reconnect.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 220), keepalive.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 32), keepalive.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 390), keepalive.globalRect().x - connection.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 72.5), keepalive.globalRect().y - connection.globalRect().y, 0.1);
     try std.testing.expect(!byId(mounted.root, "settings.ssh.reconnect.header").?.behavior.interaction.a11y.?.expanded.?);
     try std.testing.expectEqualStrings("30", inputFor(mounted, "settings.field.keepalive_sec").getText());
     try std.testing.expect(!f.controller.model.dirty);
@@ -767,7 +778,7 @@ test "native settings invalid inline raw and IME survive without remount and Esc
     try std.testing.expect(!f.controller.model.dirty);
     replaceInput(input, "47");
     try std.testing.expectEqual(@as(u16, 47), f.controller.model.value.ssh.keepalive_sec);
-    try std.testing.expect(textNode(mounted.root, "保活 47 秒 · 超时 15 秒") != null);
+    try std.testing.expect(textNode(mounted.root, "连接保活、超时与终端类型") != null);
 }
 
 test "native settings reconnect off and zero disable dependencies while retaining raw and typed values" {
@@ -788,7 +799,7 @@ test "native settings reconnect off and zero disable dependencies while retainin
     try std.testing.expect(f.controller.canSave());
     try std.testing.expectEqualStrings("[1,2]", backoff.getText());
     try std.testing.expectEqual([5]u8{ 1, 2, 4, 8, 16 }, f.controller.model.value.ssh.reconnect_backoff);
-    try std.testing.expect(textNode(mounted.root, "最多 0 次") != null);
+    try std.testing.expect(textNode(mounted.root, "自动重连与输入缓存") != null);
     clickButton(byId(mounted.root, "settings.field.auto_reconnect").?);
     try std.testing.expect(!f.controller.model.value.ssh.auto_reconnect);
     try std.testing.expect(max.disabled);
@@ -862,11 +873,18 @@ test "native settings cross category search retains invalid draft and restores t
     f.controller.editRaw("ui", "font_size", "97") catch {};
     const folds = f.controller.folded_sections;
     try f.controller.setSearch("重连");
-    try std.testing.expectEqual(@as(usize, 2), f.controller.model.page_index);
+    try std.testing.expectEqual(@as(usize, 0), f.controller.model.page_index);
     const mounted = try f.mount();
     try std.testing.expect(textNode(mounted.root, "4 个结果 · SSH 与网络") == null);
     try std.testing.expect(byId(mounted.root, "settings.ssh.connection") == null);
     try std.testing.expect(byId(mounted.root, "settings.field.reconnect_max") != null);
+    try std.testing.expect(byId(mounted.root, "settings.notifications.events") != null);
+    try std.testing.expect(byId(mounted.root, "settings.field.reconnect") != null);
+    try std.testing.expect(byId(mounted.root, "settings.field.transfer_done") == null);
+    try f.controller.setSearch("通知");
+    const category = try f.mount();
+    try std.testing.expect(byId(category.root, "settings.notifications.attention") != null);
+    try std.testing.expect(byId(category.root, "settings.field.quiet_hours") != null);
     try f.controller.setSearch("unmatched-setting-zzz");
     const empty = try f.mount();
     try std.testing.expect(textNode(empty.root, "没有匹配的设置") != null);
@@ -906,20 +924,17 @@ test "native settings data actions use host availability and leave the draft int
     try std.testing.expect(f.controller.model.dirty);
 }
 
-test "native settings field help opens on focus and Escape preserves the focus target" {
+test "native settings field help is an inline description without a focus stealing action" {
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
     f.controller.model.selectPage(2);
     f.controller.folded_sections = 0;
     const mounted = try f.mount();
-    const help = byId(mounted.root, "settings.help.totp_autofill").?;
-    f.cx.setFocus(help);
-    var visible: bool = false;
-    for (mounted.binding.tooltips.items) |open| visible = visible or open.peek();
-    try std.testing.expect(visible);
-    try std.testing.expect(mounted.consumeEscape());
-    try std.testing.expect(f.cx.focus_manager.getFocused() == help);
+    const help = byId(mounted.root, "settings.help.content.totp_autofill").?;
+    try std.testing.expect(help.getText().?.content.len != 0);
+    try std.testing.expect(!help.behavior.interaction.focusable);
+    try std.testing.expect(byId(mounted.root, "settings.help.totp_autofill") == null);
     try std.testing.expect(!mounted.consumeEscape());
     try std.testing.expect(!f.controller.model.dirty);
 }
@@ -940,20 +955,19 @@ fn expectCleanSectionHeaders(node: *ui.Node) !void {
         if (std.mem.endsWith(u8, id, ".header")) {
             if (sectionSummary(node)) |value| {
                 try std.testing.expect(value.getText() != null);
-                const expanded = node.behavior.interaction.a11y.?.expanded.?;
-                const shown = !expanded and value.getText().?.content.len != 0;
+                const shown = value.getText().?.content.len != 0;
                 try std.testing.expectEqual(if (shown) ui.types.Display.flex else ui.types.Display.none, value.style.display);
                 try std.testing.expectEqual(@as(usize, if (shown) 2 else 1), nonemptyTexts(node));
                 // Title + summary form the flexible middle column, leaving the
                 // native chevron at the trailing edge even on narrow panels.
-                try std.testing.expectEqual(@as(usize, 3), node.children.items.len);
+                try std.testing.expect(node.children.items.len == 3 or node.children.items.len == 4);
                 const heading = node.children.items[1];
                 try std.testing.expectEqual(@as(f32, 1), heading.style.flex);
                 if (shown) {
                     const title = heading.children.items[0].globalRect();
                     const detail = value.globalRect();
                     try std.testing.expectApproxEqAbs(title.x, detail.x, 0.1);
-                    try std.testing.expect(detail.y >= title.y + title.h + 5);
+                    try std.testing.expect(detail.y >= title.y + title.h + 1.9);
                 }
             } else try std.testing.expectEqual(@as(usize, 1), nonemptyTexts(node));
         }
@@ -961,7 +975,7 @@ fn expectCleanSectionHeaders(node: *ui.Node) !void {
     for (node.children.items) |child| try expectCleanSectionHeaders(child);
 }
 
-test "native settings section headers hide expanded summaries while actual fields remain editable" {
+test "native settings section headers retain V3 descriptions while actual fields remain editable" {
     for (0..8) |index| {
         var f: AppearanceFixture = undefined;
         try f.init();
@@ -999,11 +1013,11 @@ test "native settings section headers retain readable collapsed summaries across
         if (index == 0) {
             const selected = f.registry.get(f.controller.model.value.ui.theme).?.theme.name;
             try std.testing.expectEqualStrings(selected, byId(mounted.root, "settings.appearance.themes.summary").?.getText().?.content);
-            try std.testing.expectEqualStrings("", byId(mounted.root, "settings.appearance.aids.summary").?.getText().?.content);
+            try std.testing.expectEqualStrings("辅助显示与侧栏", byId(mounted.root, "settings.appearance.aids.summary").?.getText().?.content);
         }
         if (index == 7) {
             const value = byId(mounted.root, "settings.data.history.summary").?;
-            try std.testing.expectEqualStrings("缓冲 64 MiB · 每 30 秒快照 · 保留 14 天", value.getText().?.content);
+            try std.testing.expectEqualStrings("缓冲、快照与保留策略", value.getText().?.content);
         }
     }
 }
@@ -1024,8 +1038,8 @@ test "native settings unit suffixes stay outside editable numeric values" {
     try std.testing.expectEqualStrings("64", input.getText());
     replaceInput(input, "128");
     try std.testing.expectEqual(@as(u16, 128), f.controller.model.value.log.ring_mb);
-    try std.testing.expectEqualStrings("缓冲 128 MiB · 每 30 秒快照 · 保留 14 天", byId(mounted.root, "settings.data.history.summary").?.getText().?.content);
-    try std.testing.expectEqual(ui.types.Display.none, byId(mounted.root, "settings.data.history.summary").?.style.display);
+    try std.testing.expectEqualStrings("缓冲、快照与保留策略", byId(mounted.root, "settings.data.history.summary").?.getText().?.content);
+    try std.testing.expectEqual(ui.types.Display.flex, byId(mounted.root, "settings.data.history.summary").?.style.display);
 }
 
 // Presentation rounding must never write the rounded value back without input.

@@ -148,11 +148,10 @@ pub fn railHost(selected: bool) ui.BoxStyle {
     var value = railAction(32);
     if (selected) {
         // Figma 231 selected rail: Dark #6164ec, Light/Sauber accent.
-        // The selected surface is solid; status remains the icon tint.
-        // Global publication changes the active palette without changing the
-        // startup preset name. Only the complete default Dark palette has the
-        // prototype's #6164ec exception; custom palettes retain their accent.
-        value.background = if (std.meta.eql(theme.baseColors(), theme.colors(.dark))) ui.Color.hex(0x6164ec) else theme.current().accent;
+        // The selected surface is a light tint; status remains the icon tint.
+        // Only the complete default Dark palette has the prototype's
+        // #6164ec exception; custom palettes retain their own accent hue.
+        value.background = (if (std.meta.eql(theme.baseColors(), theme.colors(.dark))) ui.Color.hex(0x6164ec) else theme.current().accent).withAlpha(64);
     }
     return value;
 }

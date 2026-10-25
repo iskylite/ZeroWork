@@ -7,6 +7,8 @@ const Controller = @import("settings_controller.zig").Controller;
 const draft = @import("settings_ai_draft.zig");
 const controls = @import("settings_parts/settings_controls.zig");
 const S = @import("settings_styles.zig");
+const ModelEditor = @import("ai_model_editor.zig").Editor;
+const DeleteDialog = @import("provider_delete_dialog.zig");
 
 pub const Hooks = struct {
     context: ?*anyopaque = null,
@@ -24,6 +26,7 @@ pub const ProviderView = struct {
     disabled: *ui.Signal(bool),
     fields: std.ArrayList(*Field) = .empty,
     badges: std.ArrayList(Badge) = .empty,
+    titles: std.ArrayList(Badge) = .empty,
     tips: std.ArrayList(*ui.Signal(bool)) = .empty,
     selects: std.ArrayList(*ui.Signal(bool)) = .empty,
     buttons: std.ArrayList(*ButtonState) = .empty,
@@ -34,6 +37,10 @@ pub const ProviderView = struct {
     error_text: []const u8 = "",
     error_node: ?*ui.Node = null,
     header_tip: ?*ui.Signal(bool) = null,
+    model_editor: ?*ModelEditor = null,
+    delete_dialog: ?*DeleteDialog.Dialog = null,
+    delete_request: ?struct { provider: usize, model: ?usize } = null,
+    edit_request: ?struct { provider: usize, model: ?usize } = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, controller: *Controller) !*ProviderView {
         return mountWithHooks(cx, scope, controller, .{});
@@ -51,6 +58,7 @@ pub const ProviderView = struct {
         self.cx.removeAfterLayoutHook(self);
         self.fields.deinit(self.scope.allocator);
         self.badges.deinit(self.scope.allocator);
+        self.titles.deinit(self.scope.allocator);
         self.tips.deinit(self.scope.allocator);
         self.selects.deinit(self.scope.allocator);
         self.buttons.deinit(self.scope.allocator);
@@ -65,10 +73,13 @@ pub const ProviderView = struct {
         self.disabled.set(self.controller.state() == .saving);
         for (self.buttons.items) |button| button.refresh();
         for (self.fields.items) |field| field.refresh();
+        for (self.titles.items) |title| if (title.index < self.controller.model.value.ai.provider_count) {
+            title.node.setTextContent(self.cx.allocator, displayName(self.controller.model.value.ai.providers[title.index])) catch {};
+        };
         for (self.badges.items) |badge| {
+            if (badge.index >= self.controller.model.value.ai.provider_count) continue;
             const p = self.controller.model.value.ai.providers[badge.index];
-            const changed = badge.index >= self.controller.original.value.ai.provider_count or !@import("settings_schema.zig").same(p, self.controller.original.value.ai.providers[badge.index]);
-            badge.node.setTextContent(self.cx.allocator, if (changed) "待保存" else if (p.enabled and draft.eligible(p)) "已配置" else "禁用") catch {};
+            badge.node.setTextContent(self.cx.allocator, if (p.enabled) "已启用" else if (draft.eligible(p)) "已停用" else "待配置") catch {};
         }
         if (self.error_node) |node| {
             node.setTextContent(self.cx.allocator, self.error_text) catch {};
@@ -82,6 +93,42 @@ pub const ProviderView = struct {
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *ProviderView = @ptrCast(@alignCast(raw));
+        if (self.delete_dialog) |dialog| {
+            if (dialog.done) {
+                self.delete_dialog = null;
+                dialog.destroy();
+                return .needs_layout;
+            }
+            dialog.resize();
+        }
+        if (self.delete_request) |target| {
+            self.delete_request = null;
+            const ai = self.controller.model.value.ai;
+            if (target.provider < ai.provider_count) {
+                const p = ai.providers[target.provider];
+                const dialog = DeleteDialog.Dialog.mount(self.cx, self.scope, .{ .provider = target.provider, .model = target.model, .provider_name = draft.providerName(p), .model_id = if (target.model) |j| if (j < p.model_count) p.models[j].id else "" else "" }, .{ .context = self, .accept = acceptDelete }) catch return .done;
+                self.delete_dialog = dialog;
+                if (!dialog.modal.portaled) self.root.appendChild(self.cx.allocator, dialog.modal.overlay) catch {};
+                return .needs_layout;
+            }
+        }
+        if (self.model_editor) |editor| {
+            if (editor.done) {
+                self.model_editor = null;
+                editor.destroy();
+                return .needs_layout;
+            }
+            editor.resize();
+        }
+        if (self.edit_request) |request| {
+            self.edit_request = null;
+            const p = self.controller.model.value.ai.providers[request.provider];
+            const model: config.AiModel = if (request.model) |j| p.models[j] else .{ .default = p.model_count == 0 };
+            const editor = ModelEditor.mount(self.cx, self.scope, request.provider, request.model, draft.providerName(p), model, .{ .context = self, .commit = commitModel }) catch return .done;
+            self.model_editor = editor;
+            if (!editor.modal.portaled) self.root.appendChild(self.cx.allocator, editor.modal.overlay) catch {};
+            return .needs_layout;
+        }
         if (self.pending) {
             self.pending = false;
             self.rebuild() catch return .done;
@@ -115,6 +162,13 @@ pub const ProviderView = struct {
     }
     /// Parent capture calls this before closing Settings; composition keeps native Escape.
     pub fn consumeEscape(self: *ProviderView) bool {
+        if (self.delete_dialog) |dialog| {
+            dialog.cancel();
+            return true;
+        }
+        if (self.model_editor) |editor| {
+            return editor.consumeEscape();
+        }
         if (self.header_tip) |open| if (open.peek()) {
             open.set(false);
             return true;
@@ -136,12 +190,15 @@ pub const ProviderView = struct {
         };
         return false;
     }
+    pub fn hasModelEditor(self: *const ProviderView) bool {
+        return self.model_editor != null or self.edit_request != null or self.delete_dialog != null or self.delete_request != null;
+    }
     pub fn isComposing(self: *const ProviderView) bool {
+        if (self.model_editor) |editor| if (editor.isComposing()) return true;
         for (self.fields.items) |field| if (field.input.state.imeIsComposing()) return true;
         return false;
     }
-    /// The Figma additional-Provider state has no entry drawn in its baseline.
-    /// Its missing entry is placed beside category help without adding a content row.
+    /// Shared add action used by the V3 Provider card header.
     pub fn mountAddProviderAction(self: *ProviderView, scope: *ui.Scope, cx: *ui.Cx) !*ui.Node {
         const action_scope = try scope.childScope();
         const open = try action_scope.createSignal(bool, false);
@@ -150,7 +207,7 @@ pub const ProviderView = struct {
         const action_click = try action_scope.allocator.create(Click);
         action_click.* = .{ .view = self, .action = .add_provider, .provider = 0, .model = 0 };
         try action_scope.onCleanup(Click, action_click, Click.cleanup);
-        const button = try ui.widgets.Button(.{ .icon_asset = ui.icons.plus, .icon_only = true, .icon_size = @as(f32, 16), .a11y_label = "添加服务商", .disabled = self.disabled, .on_click = cx.on(Click, action_click, Click.run), .base_style = S.button(S.geometry.icon_button, false), .hover_style = S.buttonHover() }).mount(action_scope, cx);
+        const button = try ui.widgets.Button(.{ .label = "新增服务提供方", .icon_asset = ui.icons.plus, .icon_size = @as(f32, 14), .a11y_label = "新增服务提供方", .disabled = self.disabled, .on_click = cx.on(Click, action_click, Click.run), .base_style = S.actionControl(false), .hover_style = S.buttonHover() }).mount(action_scope, cx);
         button.meta.ownership.meta.test_id = "settings.ai.add_provider";
         const focus = try action_scope.allocator.create(TipFocus);
         focus.* = .{ .view = self, .open = open };
@@ -167,9 +224,11 @@ pub const ProviderView = struct {
         for (self.root.children.items) |child| self.cx.invalidateReferencesTo(child);
         self.fields.clearRetainingCapacity();
         self.badges.clearRetainingCapacity();
+        self.titles.clearRetainingCapacity();
         self.tips.clearRetainingCapacity();
         self.selects.clearRetainingCapacity();
         self.buttons.clearRetainingCapacity();
+        self.header_tip = null;
         if (self.render_scope) |old| old.dispose();
         self.render_scope = null;
         while (self.root.children.items.len > 0) {
@@ -179,12 +238,38 @@ pub const ProviderView = struct {
         }
         self.render_scope = try self.scope.childScope();
         const count = self.controller.model.value.ai.provider_count;
-        if (self.controller.ai_fields.new_provider) |index| {
-            if (index < count) try self.root.appendChild(self.cx.allocator, try self.providerCard(index));
-            const previous = try self.accordion(.existing, 0, 0, "已有 Provider", self.controller.ai_fields.existing_open, 28, true);
-            for (0..count) |i| if (i != index) try previous.body.appendChild(self.cx.allocator, try self.providerCard(i));
-            try self.root.appendChild(self.cx.allocator, previous.item);
-        } else for (0..count) |i| try self.root.appendChild(self.cx.allocator, try self.providerCard(i));
+        self.root.setStyleInline(self.cx.allocator, .{ .background = S.theme.current().surface_2, .border = .{ .radius = 11 }, .gap = 0, .min_width = 0 });
+        const heading = try ui.box(self.cx, .{ .width = .fill(), .min_height = 70, .direction = .row, .padding = .{ .left = 16, .right = 16, .top = 15, .bottom = 14 }, .gap = 10, .align_items = .center, .flex_shrink = 0, .min_width = 0 }, .{});
+        const description = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .direction = .column, .gap = 3, .min_width = 0 }, .{});
+        const title = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .gap = 7, .align_items = .center }, .{});
+        try title.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.sparkles, S.theme.current().accent_ink, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
+        try title.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.title, "服务提供方"));
+        try description.appendChild(self.cx.allocator, title);
+        try description.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, "一个条目对应一个 Provider；API 协议是它的连接属性。"));
+        try heading.appendChild(self.cx.allocator, description);
+        try heading.appendChild(self.cx.allocator, try self.mountAddProviderAction(self.render_scope.?, self.cx));
+        try self.root.appendChild(self.cx.allocator, heading);
+        const list = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(self.render_scope.?, self.cx);
+        list.container.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .max_height = 450, .padding = .{ .left = 10, .right = 10, .bottom = 10 }, .min_width = 0, .flex_shrink = 0 });
+        list.container.meta.ownership.meta.test_id = "settings.ai.provider_list";
+        list.content.setStyleInline(self.cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 6, .min_width = 0, .flex_shrink = 0 });
+        for (0..count) |i| try list.content.appendChild(self.cx.allocator, try self.providerCard(i));
+        try self.root.appendChild(self.cx.allocator, list.container);
+        if (count == 0) {
+            const empty = try ui.box(self.cx, .{ .width = .fill(), .direction = .column, .align_items = .center, .padding = .{ .left = 20, .right = 20, .top = 32, .bottom = 32 }, .gap = 0, .flex_shrink = 0 }, .{});
+            empty.meta.ownership.meta.test_id = "settings.ai.providers.empty";
+            try empty.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.sparkles, S.theme.current().fg_2, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .margin = .{ .bottom = 3 } }));
+            const empty_title = try ui.text(self.cx, "添加你的第一个服务提供方", .{ .font_size = 12, .font_weight = 600, .line_height = 20.0 / 12.0, .color = S.theme.current().fg_1 });
+            empty_title.setStyleInline(self.cx.allocator, .{ .margin = .{ .top = 8, .bottom = 5 } });
+            try empty.appendChild(self.cx.allocator, empty_title);
+            try empty.appendChild(self.cx.allocator, try ui.text(self.cx, "支持 Anthropic、OpenAI 兼容接口与 Ollama。", .{ .font_size = 12, .line_height = 1.5, .color = S.theme.current().fg_2 }));
+            const add_click = try self.click(.add_provider, 0, 0);
+            const add = try ui.widgets.Button(.{ .label = "新增服务提供方", .disabled = self.disabled, .on_click = self.cx.on(Click, add_click, Click.run), .base_style = S.actionControl(false), .hover_style = S.buttonHover() }).mount(self.render_scope.?, self.cx);
+            add.meta.ownership.meta.test_id = "settings.ai.providers.empty.add";
+            add.setStyleInline(self.cx.allocator, .{ .margin = .{ .top = 15 } });
+            try empty.appendChild(self.cx.allocator, add);
+            try self.root.appendChild(self.cx.allocator, empty);
+        }
         self.error_node = try ui.textStyled(self.cx, S.errorNote, self.error_text);
         self.error_node.?.meta.ownership.meta.test_id = "settings.ai.provider_error";
         try self.root.appendChild(self.cx.allocator, self.error_node.?);
@@ -193,135 +278,249 @@ pub const ProviderView = struct {
     fn providerCard(self: *ProviderView, i: usize) !*ui.Node {
         const p = self.controller.model.value.ai.providers[i];
         const open = self.controller.ai_fields.provider_open.get(i) orelse (i == 0);
-        const result = try self.accordion(.provider, i, 0, draft.providerName(p), open, 30, true);
+        const result = try self.accordion(.provider, i, 0, displayName(p), open, 64, false);
         result.item.meta.ownership.meta.test_id = try self.id(i, null, "card");
-        result.header.style.gap = 6;
-        result.title.setDisplay(.none);
-        result.chevron.style.width = .{ .px = 14 };
-        result.chevron.style.height = .{ .px = 14 };
-        if (open) {
-            const name_input = try self.input(.{ .provider = i, .field = .name }, "Provider 名称", 244, 30);
-            try result.header.appendChild(self.cx.allocator, name_input);
-        } else {
-            const title = try ui.textStyled(self.cx, S.label, displayName(p));
-            title.style.width = .{ .px = 244 };
-            title.style.flex_shrink = 1;
-            try result.header.appendChild(self.cx.allocator, title);
+        result.item.setStyleInline(self.cx.allocator, .{ .position = .relative, .background = providerBackground(open), .border = .{ .radius = 8 }, .gap = 0, .flex_shrink = 0, .min_width = 0 });
+        result.header.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 64 }, .padding = .{ .left = 12, .right = 112, .top = 12, .bottom = 12 }, .gap = 9, .min_width = 0 });
+        result.header.removeChild(result.title);
+        result.header.removeChild(result.chevron);
+        result.chevron.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+        try result.header.appendChild(self.cx.allocator, result.chevron);
+        const logo = try ui.box(self.cx, .{ .width = .{ .px = 30 }, .height = .{ .px = 30 }, .align_items = .center, .justify = .center, .background = S.theme.current().selection, .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
+        try logo.appendChild(self.cx.allocator, try ui.text(self.cx, switch (p.kind) {
+            .anthropic => "A",
+            .ollama => "O",
+            .openai_compat => "AI",
+        }, .{ .font_size = 11, .font_weight = 600, .color = S.theme.current().accent_ink }));
+        try result.header.appendChild(self.cx.allocator, logo);
+        const heading = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 3 }, .{});
+        if (result.title.getText()) |old| {
+            var text = old;
+            text.font_size = 12;
+            text.font_weight = 600;
+            text.line_height = 18.0 / 12.0;
+            text.text_overflow = .ellipsis;
+            result.title.setText(text);
         }
-        try result.header.appendChild(self.cx.allocator, try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .min_width = 0 }, .{}));
-        try result.header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, if (p.enabled and draft.eligible(p)) ui.icons.circle_check else ui.icons.circle_slash, S.theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
-        const status = try ui.textStyled(self.cx, S.note, "");
-        status.style.width = .{ .px = 68 };
-        status.style.flex_shrink = 0;
-        try self.badges.append(self.scope.allocator, .{ .index = i, .node = status });
-        try result.header.appendChild(self.cx.allocator, status);
-        const is_default = std.mem.eql(u8, self.controller.model.value.ai.default_provider, draft.providerName(p));
-        try result.header.appendChild(self.cx.allocator, try self.iconButton(.default_provider, i, 0, ui.icons.star, if (is_default) "当前默认 Provider" else if (!self.savedEligible(i, null)) "保存有效配置后可设为默认 Provider" else "设为默认 Provider", 28, is_default, is_default or !self.savedEligible(i, null)));
-        const connection_open = self.controller.ai_fields.connection_open.get(i) orelse false;
-        const connection = try self.accordion(.connection, i, 0, "连接配置", connection_open, 28, true);
-        connection.item.meta.ownership.meta.test_id = try self.id(i, null, "connection");
-        try connection.header.insertChildBefore(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.plug, S.theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }), connection.title);
-        connection.title.style.width = .{ .px = 216 };
-        connection.title.style.flex = 0;
-        try connection.header.insertChildBefore(self.cx.allocator, try ui.boxStyled(self.cx, S.pluginHeaderSpacer, .{}), connection.chevron);
-        const type_row = try row(self.cx, 32);
-        try type_row.appendChild(self.cx.allocator, try self.label("协议", 100));
-        const kind = try self.selectKind(i, p.kind);
-        try type_row.appendChild(self.cx.allocator, kind);
-        try connection.body.appendChild(self.cx.allocator, type_row);
-        try connection.body.appendChild(self.cx.allocator, try self.connectionField(i, .endpoint, "Endpoint", "https://…"));
-        try connection.body.appendChild(self.cx.allocator, try self.connectionField(i, .api_key, "API Key", if (p.kind == .ollama) "可选" else "填写 API Key"));
-        const storage = try row(self.cx, 28);
-        try storage.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.lock_keyhole, S.theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
-        try storage.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, "API Key 存储于 macOS 钥匙串"));
-        try connection.body.appendChild(self.cx.allocator, storage);
-        try result.body.appendChild(self.cx.allocator, connection.item);
-        for (p.models[0..p.model_count], 0..) |_, j| try result.body.appendChild(self.cx.allocator, try self.modelCard(i, j));
-        const actions = try row(self.cx, 28);
-        try actions.appendChild(self.cx.allocator, try self.iconButton(.add_model, i, 0, ui.icons.plus, "新增模型", 24, false, false));
-        try actions.appendChild(self.cx.allocator, try ui.box(self.cx, .{ .width = .fill(), .flex = 1 }, .{}));
-        if (self.controller.ai_fields.new_provider == i) try actions.appendChild(self.cx.allocator, try self.iconButton(.cancel_provider, i, 0, ui.icons.x, "取消新增 Provider", 24, false, false)) else if (i >= 3) try actions.appendChild(self.cx.allocator, try self.iconButton(.delete_provider, i, 0, ui.icons.trash_2, "删除 Provider 前须选择默认替代项", 24, false, is_default)) else try actions.appendChild(self.cx.allocator, try self.tooltipOnly(ui.icons.circle_help, "删除最后或默认模型前，请先选择已有合法的替代项。", 24));
+        result.title.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .overflow_hidden = true });
+        try self.titles.append(self.scope.allocator, .{ .index = i, .node = result.title });
+        try heading.appendChild(self.cx.allocator, result.title);
+        var summary_buffer: [96]u8 = undefined;
+        const protocol = switch (p.kind) {
+            .anthropic => "Anthropic",
+            .openai_compat => "OpenAI 兼容",
+            .ollama => "Ollama",
+        };
+        const summary = if (p.model_count == 0) try std.fmt.bufPrint(&summary_buffer, "{s} · 尚未添加模型", .{protocol}) else try std.fmt.bufPrint(&summary_buffer, "{s} · {d} 个模型", .{ protocol, p.model_count });
+        try heading.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, try controls.owned(self.render_scope.?, summary)));
+        try result.header.appendChild(self.cx.allocator, heading);
+        const badge = try ui.text(self.cx, "", .{ .font_size = 10, .line_height = 16.0 / 10.0, .color = if (p.enabled) S.theme.current().ok_ink else S.theme.current().fg_2 });
+        badge.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 52 }, .top = .{ .px = 21 } }, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = if (p.enabled) S.theme.current().ok_ink.withAlpha(26) else S.theme.current().hover, .border = .{ .radius = 5 } });
+        badge.meta.ownership.meta.test_id = try self.id(i, null, "status");
+        try self.badges.append(self.scope.allocator, .{ .index = i, .node = badge });
+        try result.item.appendChild(self.cx.allocator, badge);
+        const toggle_click = try self.click(.toggle_provider, i, 0);
+        const toggle = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "启用服务提供方", .disabled = self.disabled, .on_click = self.cx.on(Click, toggle_click, Click.run), .base_style = .{ .width = .{ .px = 30 }, .height = .{ .px = 18 }, .padding = ui.Padding.all(2), .background = if (p.enabled) S.theme.current().accent else S.theme.current().hover, .corner_radius = 9, .border_width = 0 } }).mount(self.render_scope.?, self.cx);
+        toggle.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 12 }, .top = .{ .px = 23 } }, .direction = .row, .align_items = .center, .justify = if (p.enabled) .end else .start });
+        if (toggle.behavior.interaction.a11y) |*a11y| {
+            a11y.role = .switch_role;
+            a11y.checked = p.enabled;
+        }
+        toggle.meta.ownership.meta.test_id = try self.id(i, null, "enabled");
+        try toggle.appendChild(self.cx.allocator, try ui.box(self.cx, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .background = ui.Color.WHITE, .border = .{ .radius = 7 }, .flex_shrink = 0, .hit_behavior = .pass_through }, .{}));
+        try result.item.appendChild(self.cx.allocator, toggle);
+        result.body.setStyleInline(self.cx.allocator, .{ .width = .fill(), .direction = .column, .padding = .{ .left = 14, .right = 14, .top = 8, .bottom = 10 }, .gap = 0, .min_width = 0 });
+        const fields = try ui.box(self.cx, .{ .width = .fill(), .direction = .column, .gap = 12, .padding = .{ .bottom = 15 }, .min_width = 0, .flex_shrink = 0 }, .{});
+        const pair = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .align_items = .start, .gap = 14, .min_width = 0, .flex_shrink = 0 }, .{});
+        try pair.appendChild(self.cx.allocator, try self.connectionField(i, .name, "服务提供方名称 *", "例如：团队模型服务"));
+        const kind_field = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 6 }, .{});
+        try kind_field.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.label, "API 协议"));
+        try kind_field.appendChild(self.cx.allocator, try self.selectKind(i, p.kind));
+        try pair.appendChild(self.cx.allocator, kind_field);
+        try fields.appendChild(self.cx.allocator, pair);
+        try fields.appendChild(self.cx.allocator, try self.connectionField(i, .endpoint, "API 地址 *", "https://api.example.com/v1"));
+        try fields.appendChild(self.cx.allocator, try self.connectionField(i, .api_key, if (@import("../ai/provider_config.zig").allowsNoAuth(p.kind, p.endpoint)) "API Key（可选）" else "API Key *", "输入 API Key"));
+        try result.body.appendChild(self.cx.allocator, fields);
+        const models_heading = try row(self.cx, 44);
+        const models_title = try ui.textStyled(self.cx, S.label, try controls.owned(self.render_scope.?, try std.fmt.bufPrint(&summary_buffer, "模型  {d}", .{p.model_count})));
+        try models_heading.appendChild(self.cx.allocator, models_title);
+        try models_heading.appendChild(self.cx.allocator, try ui.spacer(self.cx));
+        try models_heading.appendChild(self.cx.allocator, try self.textAction(.add_model, i, "添加模型", ui.icons.plus, false));
+        try result.body.appendChild(self.cx.allocator, models_heading);
+        if (p.model_count == 0) {
+            const empty = try ui.box(self.cx, .{ .width = .fill(), .min_height = 70, .padding = .{ .left = 12, .right = 12, .top = 16, .bottom = 16 }, .direction = .row, .align_items = .center, .gap = 12, .background = S.theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
+            try empty.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.box, S.theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
+            const message = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .direction = .column, .gap = 3 }, .{});
+            try message.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.label, "尚未添加模型"));
+            try message.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, "手动输入模型 ID，并配置容量与能力。"));
+            try empty.appendChild(self.cx.allocator, message);
+            try result.body.appendChild(self.cx.allocator, empty);
+        } else {
+            const models = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(self.render_scope.?, self.cx);
+            models.container.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .max_height = 190, .flex_shrink = 0, .min_width = 0 });
+            models.content.setStyleInline(self.cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 4, .flex_shrink = 0, .min_width = 0 });
+            models.container.meta.ownership.meta.test_id = try self.id(i, null, "models");
+            for (p.models[0..p.model_count], 0..) |_, j| try models.content.appendChild(self.cx.allocator, try self.modelCard(i, j));
+            try result.body.appendChild(self.cx.allocator, models.container);
+        }
+        const actions = try row(self.cx, 35);
+        actions.style.padding.top = 10;
+        try actions.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, if (p.enabled) "" else "配置完成后，使用卡片右上角开关启用。"));
+        try actions.appendChild(self.cx.allocator, try ui.spacer(self.cx));
+        try actions.appendChild(self.cx.allocator, try self.textAction(if (self.controller.ai_fields.new_provider == i) .cancel_provider else .delete_provider, i, if (self.controller.ai_fields.new_provider == i) "取消新增" else "删除服务提供方", null, true));
         try result.body.appendChild(self.cx.allocator, actions);
         return result.item;
     }
     fn connectionField(self: *ProviderView, i: usize, field: draft.Field, title: []const u8, placeholder: []const u8) !*ui.Node {
-        const r = try row(self.cx, 32);
-        r.style.height = .{ .fit = .{} };
-        try r.appendChild(self.cx.allocator, try self.label(title, 100));
-        try r.appendChild(self.cx.allocator, try self.input(.{ .provider = i, .field = field }, placeholder, 0, 32));
+        const r = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 6, .flex_shrink = 0 }, .{});
+        const label_row = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .gap = 8 }, .{});
+        try label_row.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.label, title));
+        if (field == .api_key) {
+            try label_row.appendChild(self.cx.allocator, try ui.spacer(self.cx));
+            try label_row.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, "API Key 存储于 macOS 钥匙串"));
+        }
+        try r.appendChild(self.cx.allocator, label_row);
+        const input_wrapper = try self.input(.{ .provider = i, .field = field }, placeholder, 0, 32);
+        if (field == .api_key) {
+            const key_field = self.fields.items[self.fields.items.len - 1];
+            input_wrapper.setStyleInline(self.cx.allocator, .{ .position = .relative });
+            key_field.input.input_container.style.padding.right = 36;
+            const eye = try ui.widgets.Button(.{ .icon_only = true, .a11y_label = "显示 API Key", .variant = .ghost, .disabled = self.disabled, .on_click = self.cx.on(Field, key_field, Field.reveal), .base_style = .{ .width = .{ .px = 25 }, .height = .{ .px = 26 }, .padding = ui.Padding.ZERO, .background = ui.Color.TRANSPARENT, .border_width = 0, .corner_radius = 7 }, .hover_style = S.buttonHover() }).mount(self.render_scope.?, self.cx);
+            eye.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 4 }, .top = .{ .px = 3 } } });
+            eye.meta.ownership.meta.test_id = try self.id(i, null, "reveal_key");
+            const icon = try ui.iconTint(self.cx, ui.icons.get("eye").?, S.theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
+            try eye.appendChild(self.cx.allocator, icon);
+            key_field.eye = eye;
+            key_field.eye_icon = icon;
+            try input_wrapper.appendChild(self.cx.allocator, eye);
+        }
+        try r.appendChild(self.cx.allocator, input_wrapper);
         return r;
+    }
+    fn textAction(self: *ProviderView, action: Action, i: usize, caption: []const u8, icon: ?ui.SvgAsset, danger: bool) !*ui.Node {
+        const action_click = try self.click(action, i, 0);
+        var style = S.actionControl(danger);
+        style.font_size = 11;
+        style.height = .{ .px = if (action == .delete_provider or action == .cancel_provider) @as(f32, 25) else @as(f32, 28) };
+        if (action == .delete_provider or action == .cancel_provider) {
+            style.padding = .{ .left = 6, .right = 6, .top = 5, .bottom = 5 };
+            style.font_weight = 400;
+        }
+        const state = try self.render_scope.?.allocator.create(ButtonState);
+        state.* = .{ .view = self, .action = action, .provider = i, .model = 0, .fallback_blocked = false, .disabled = try self.render_scope.?.createSignal(bool, false) };
+        try self.render_scope.?.onCleanup(ButtonState, state, ButtonState.cleanup);
+        try self.buttons.append(self.scope.allocator, state);
+        state.refresh();
+        const button = try ui.widgets.Button(.{ .label = caption, .icon_asset = icon, .icon_size = @as(f32, 14), .disabled = state.disabled, .on_click = self.cx.on(Click, action_click, Click.run), .base_style = style, .hover_style = S.buttonHover() }).mount(self.render_scope.?, self.cx);
+        button.meta.ownership.meta.test_id = try self.id(i, null, @tagName(action));
+        return button;
     }
     fn modelCard(self: *ProviderView, i: usize, j: usize) !*ui.Node {
         const model = self.controller.model.value.ai.providers[i].models[j];
-        const open = self.controller.ai_fields.model_open.get(draft.modelKey(i, j)) orelse false;
-        const result = try self.accordion(.model, i, j, if (model.id.len == 0) "新模型" else model.id, open, 32, false);
-        result.item.meta.ownership.meta.test_id = try self.id(i, j, "card");
-        result.header.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 32 }, .direction = .row, .gap = 6, .align_items = .center, .padding = .{ .left = 8, .right = 8 }, .background = S.theme.current().well, .border = .{ .radius = 7 }, .flex_shrink = 0 });
-        result.title.style.width = .{ .px = 216 };
-        result.title.style.flex = 0;
+        const root = try ui.box(self.cx, S.modelListRow(), .{});
+        root.meta.ownership.meta.test_id = try self.id(i, j, "card");
+        const model_name = try controls.owned(self.render_scope.?, model.id);
+        const edit = try self.click(.edit_model, i, j);
+        var name_style = S.textButton();
+        name_style.width = .fill();
+        name_style.flex = 0;
+        name_style.min_width = 56;
+        name_style.padding = .{};
+        name_style.justify = .start;
+        name_style.background = ui.Color.TRANSPARENT;
+        const name = try ui.widgets.Button(.{ .variant = .ghost, .hover_style = S.buttonHover(), .label = model_name, .a11y_label = model_name, .disabled = self.disabled, .on_click = self.cx.on(Click, edit, Click.run), .base_style = name_style }).mount(self.render_scope.?, self.cx);
+        name.meta.ownership.meta.test_id = try self.id(i, j, "header");
+        for (name.children.items) |child| child.setDisplay(.none);
+        const name_text = try ui.text(self.cx, model_name, .{ .font_size = 12, .font_weight = 500, .color = S.theme.current().fg_1, .line_height = 1.5, .text_overflow = .ellipsis });
+        name_text.meta.ownership.meta.test_id = try self.id(i, j, "name.text");
+        name_text.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 18 }, .min_width = 0 });
+        try name.appendChild(self.cx.allocator, name_text);
+        const name_tip = try self.tooltip(model_name);
+        name_tip.content.meta.ownership.meta.test_id = try self.id(i, j, "name.tooltip");
+        name_tip.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .fit = .{} }, .flex = 0, .min_width = 56, .max_width = 224, .overflow_hidden = true });
+        try ModelNameClamp.mount(self.cx, self.render_scope.?, root, name_tip.wrapper, model_name);
+        name_tip.trigger.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0 });
+        try name_tip.trigger.appendChild(self.cx.allocator, name);
+        try self.bindTipFocus(name, name_tip.open.?);
+        try root.appendChild(self.cx.allocator, name_tip.wrapper);
         var buffer: [32]u8 = undefined;
-        const window = try ui.textStyled(self.cx, S.note, try contextText(model.context_window, &buffer));
-        window.style.width = .{ .px = 88 };
-        try result.header.appendChild(self.cx.allocator, window);
-        try result.header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.brain, if (model.reasoning) S.theme.current().accent else S.theme.current().fg_3, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
-        try result.header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.image, if (model.vision) S.theme.current().accent else S.theme.current().fg_3, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
-        if (!open) try result.header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.star, if (model.default) S.theme.current().accent else S.theme.current().fg_3, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
-        const is_new = if (self.controller.ai_fields.new_model) |new| new.provider == i and new.model == j else false;
-        try result.header.appendChild(self.cx.allocator, try self.iconButton(if (is_new) .cancel_model else .delete_model, i, j, if (is_new) ui.icons.x else ui.icons.trash_2, if (is_new) "取消新增模型" else "删除模型前须选择默认替代项", 24, false, !is_new and self.modelProtected(i, j)));
-        const headers = try row(self.cx, 16);
-        for ([_][]const u8{ "模型 ID", "上下文 · tokens", "推理", "识图", "默认", "" }, [_]f32{ 236, 110, 54, 54, 54, 24 }) |text, width| try headers.appendChild(self.cx.allocator, try self.label(text, width));
-        try result.body.appendChild(self.cx.allocator, headers);
-        const r = try row(self.cx, 32);
-        r.style.height = .{ .fit = .{} };
-        try r.appendChild(self.cx.allocator, try self.input(.{ .provider = i, .model = j, .field = .model_id }, "完整模型 ID", 236, 32));
-        try r.appendChild(self.cx.allocator, try self.input(.{ .provider = i, .model = j, .field = .context_window }, "正整数", 110, 32));
-        const labels = [_][]const u8{ "切换推理能力", "识图能力；保存后用于后续请求，不能替代实际适配器支持", "设为默认模型" };
-        const icons = [_]ui.SvgAsset{ ui.icons.brain, ui.icons.image, ui.icons.star };
-        const actions = [_]Action{ .reasoning, .vision, .default_model };
-        const selected = [_]bool{ model.reasoning, model.vision, model.default };
-        for (actions, icons, labels, selected) |action, icon, help, active| {
-            const cell = try ui.box(self.cx, .{ .width = .{ .px = 54 }, .height = .{ .px = 32 }, .align_items = .center, .justify = .center, .flex_shrink = 0 }, .{});
-            try cell.appendChild(self.cx.allocator, try self.iconButton(action, i, j, icon, help, 32, active, action == .default_model and (active or !self.savedEligible(i, j))));
-            try r.appendChild(self.cx.allocator, cell);
+        const context_tip = try self.tooltip(try numberText(model.context_window, &buffer));
+        var count_buffer: [32]u8 = undefined;
+        var meta_buffer: [128]u8 = undefined;
+        const meta = try std.fmt.bufPrint(&meta_buffer, "{s} tokens{s}{s}", .{ try numberText(model.context_window, &count_buffer), if (model.reasoning) " · 推理" else "", if (model.vision) " · 识图" else "" });
+        const window = try ui.text(self.cx, try controls.owned(self.render_scope.?, meta), .{ .font_size = 11, .line_height = 16.0 / 11.0, .color = S.theme.current().fg_2, .text_overflow = .ellipsis });
+        window.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0, .flex = 1 });
+        context_tip.wrapper.setStyleInline(self.cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+        context_tip.trigger.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0 });
+        try context_tip.trigger.appendChild(self.cx.allocator, window);
+        try root.appendChild(self.cx.allocator, context_tip.wrapper);
+        try root.appendChild(self.cx.allocator, try self.iconButton(.default_model, i, j, ui.icons.star, if (model.default) "默认模型" else "设为默认模型", 28, model.default, model.default or !self.savedEligible(i, j)));
+        try root.appendChild(self.cx.allocator, try self.iconButton(.edit_model, i, j, ui.icons.pencil, "编辑模型", 24, false, false));
+        try root.appendChild(self.cx.allocator, try self.iconButton(.delete_model, i, j, ui.icons.trash_2, "删除模型前须选择默认替代项", 24, false, self.modelProtected(i, j)));
+        return root;
+    }
+    fn commitModel(raw: *anyopaque, i: usize, index: ?usize, model: config.AiModel) !void {
+        const self: *ProviderView = @ptrCast(@alignCast(raw));
+        if (self.disabled.peek()) return error.SettingsSaving;
+        var owned = try runtime.Snapshot.init(self.scope.allocator, self.controller.model.value);
+        defer owned.deinit();
+        const p = &owned.value.ai.providers[i];
+        const j = index orelse p.model_count;
+        if (index == null) {
+            const next = try owned.arena.allocator().alloc(config.AiModel, p.model_count + 1);
+            @memcpy(next[0..p.model_count], p.models[0..p.model_count]);
+            next[j] = model;
+            p.models = next;
+            p.model_count += 1;
+        } else p.models[j] = model;
+        try draft.assign(&owned.value.ai, .{ .provider = i, .model = j, .field = .model_id }, model.id);
+        if (model.context_window == 0) return error.InvalidContextWindow;
+        if (!draft.modelValid(model)) return error.LastEffortRequired;
+        if (model.default) for (p.models[0..p.model_count], 0..) |*other, k| {
+            other.default = k == j;
+        };
+        var defaults: usize = 0;
+        for (p.models[0..p.model_count]) |other| if (other.default) {
+            defaults += 1;
+        };
+        if (defaults != 1) return error.DefaultProtected;
+        try self.controller.editProviders(owned.value.ai);
+        self.error_text = "";
+        self.schedule();
+    }
+    fn acceptDelete(raw: *anyopaque, dialog: *DeleteDialog.Dialog) bool {
+        const self: *ProviderView = @ptrCast(@alignCast(raw));
+        const target = dialog.target;
+        const ai = self.controller.model.value.ai;
+        if (target.provider >= ai.provider_count or !std.mem.eql(u8, target.provider_name, draft.providerName(ai.providers[target.provider]))) {
+            dialog.fail("配置已改变，请关闭后重新选择。");
+            return false;
         }
-        try result.body.appendChild(self.cx.allocator, r);
-        const efforts = try row(self.cx, 28);
-        try efforts.appendChild(self.cx.allocator, try self.label("effort 能力", 80));
-        for ([_][]const u8{ "low", "medium", "high", "xhigh", "max" }, 0..) |name, k| {
-            const action_click = try self.click(@fromBackingInt(@intCast(@backingInt(Action.effort0) + k)), i, j);
-            var style = S.textButton();
-            style.width = .{ .px = 94 };
-            style.background = if (model.efforts[k]) S.theme.current().selection else S.theme.current().well;
-            style.text_color = if (model.efforts[k]) S.theme.current().accent else S.theme.current().fg_2;
-            const button = try ui.widgets.Button(.{ .label = name, .a11y_label = name, .disabled = self.disabled, .on_click = self.cx.on(Click, action_click, Click.run), .base_style = style, .hover_style = S.buttonHover() }).mount(self.render_scope.?, self.cx);
-            button.meta.ownership.meta.test_id = try self.id(i, j, name);
-            if (button.behavior.interaction.a11y) |*a| {
-                a.role = .checkbox;
-                a.checked = model.efforts[k];
-            }
-            try efforts.appendChild(self.cx.allocator, button);
+        const p = ai.providers[target.provider];
+        if (target.model) |j| if (j >= p.model_count or !std.mem.eql(u8, target.model_id, p.models[j].id)) {
+            dialog.fail("模型已改变，请关闭后重新选择。");
+            return false;
+        };
+        const before = if (target.model != null) p.model_count else ai.provider_count;
+        var action_click = Click{ .view = self, .action = if (target.model != null) .delete_model else .delete_provider, .provider = target.provider, .model = target.model orelse 0, .confirmed = true };
+        action_click.run();
+        const after = if (target.model != null) self.controller.model.value.ai.providers[target.provider].model_count else self.controller.model.value.ai.provider_count;
+        if (after == before) {
+            dialog.fail(if (self.error_text.len != 0) self.error_text else "当前配置不能删除，请先选择合法替代项。");
+            return false;
         }
-        try result.body.appendChild(self.cx.allocator, efforts);
-        return result.item;
+        return true;
     }
     fn savedEligible(self: *ProviderView, i: usize, j: ?usize) bool {
-        const saved = self.controller.original.value.ai;
-        const current = self.controller.model.value.ai;
-        if (j == null and i < current.provider_count and current.providers[i].enabled and draft.eligible(current.providers[i])) {
-            var has_saved_default = false;
-            for (saved.providers[0..saved.provider_count]) |provider| if (provider.enabled and draft.eligible(provider) and std.mem.eql(u8, draft.providerName(provider), saved.default_provider)) {
-                has_saved_default = true;
-            };
-            // Initial configuration needs an explicit default before its first Save.
-            if (!has_saved_default) return true;
-        }
-        if (i >= saved.provider_count or i >= current.provider_count or !saved.providers[i].enabled or !draft.eligible(saved.providers[i]) or !current.providers[i].enabled or !draft.eligible(current.providers[i])) return false;
-        if (j) |index| return index < saved.providers[i].model_count and index < current.providers[i].model_count and std.mem.eql(u8, saved.providers[i].models[index].id, current.providers[i].models[index].id);
-        return true;
+        const ai = self.controller.model.value.ai;
+        if (i >= ai.provider_count) return false;
+        const p = ai.providers[i];
+        if (j) |index| return index < p.model_count and draft.modelValid(p.models[index]);
+        return p.enabled and draft.eligible(p);
     }
     fn modelProtected(self: *ProviderView, i: usize, j: usize) bool {
         const p = self.controller.model.value.ai.providers[i];
-        return p.model_count <= 1 or p.models[j].default;
+        return (p.enabled and p.model_count <= 1) or (p.model_count > 1 and p.models[j].default);
     }
     fn input(self: *ProviderView, address: draft.Address, placeholder: []const u8, width: f32, height: f32) !*ui.Node {
         const scope = self.render_scope.?;
@@ -340,6 +539,9 @@ pub const ProviderView = struct {
         field.input.input_container.meta.ownership.meta.test_id = try self.id(address.provider, if (address.field == .model_id or address.field == .context_window) address.model else null, @tagName(address.field));
         field.input.input_container.behavior.interaction.a11y = .{ .role = .textbox, .label = placeholder };
         S.tuneInput(&field.input);
+        field.input.state.font_size = 12;
+        field.input.state.line_height = 18;
+        if (field.input.state.text_display_node) |display| tuneProviderText(display);
         const wrapper = try ui.boxStyled(self.cx, S.column, .{});
         wrapper.behavior.events.on_event = Field.event;
         wrapper.behavior.events.event_context = field;
@@ -366,12 +568,14 @@ pub const ProviderView = struct {
     fn selectKind(self: *ProviderView, i: usize, kind: config.ProviderKind) !*ui.Node {
         const action_click = try self.click(.kind, i, 0);
         const value = try self.render_scope.?.createSignal(?[]const u8, @tagName(kind));
-        const select = try ui.widgets.Select(.{ .value = ui.split(value, self.cx.on(Click, action_click, Click.kind)), .width = @as(f32, 454), .disabled = self.disabled, .options = &[_]ui.widgets.SelectOption{ .{ .value = "anthropic", .label = "Anthropic Messages" }, .{ .value = "openai_compat", .label = "OpenAI 兼容" }, .{ .value = "ollama", .label = "Ollama" } } }).mount(self.render_scope.?, self.cx);
+        const select = try ui.widgets.Select(.{ .value = ui.split(value, self.cx.on(Click, action_click, Click.kind)), .width = @as(f32, 1), .disabled = self.disabled, .options = &[_]ui.widgets.SelectOption{ .{ .value = "anthropic", .label = "Anthropic" }, .{ .value = "openai_compat", .label = "OpenAI 兼容" }, .{ .value = "ollama", .label = "Ollama" } } }).mount(self.render_scope.?, self.cx);
         select.trigger.setStyleInline(self.cx.allocator, S.providerInput(0, 32));
         select.wrapper.style.width = .fill();
         select.wrapper.style.flex = 1;
+        if (select.trigger.parent) |trigger_owner| trigger_owner.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1 });
         select.trigger.meta.ownership.meta.test_id = try self.id(i, null, "kind");
         S.tuneSelect(select);
+        tuneProviderText(select.content_slot);
         if (select.open) |open| try self.selects.append(self.scope.allocator, open);
         return select.wrapper;
     }
@@ -431,9 +635,19 @@ pub const ProviderView = struct {
             }
         }.run);
         const disabled = state.disabled;
-        const button = try ui.widgets.Button(.{ .icon_asset = icon, .icon_only = true, .icon_size = @as(f32, 16), .a11y_label = help, .disabled = disabled, .on_click = self.cx.on(Click, action_click, Click.run), .base_style = style, .hover_style = S.buttonHover() }).mount(scope, self.cx);
+        const is_default = action == .default_model;
+        if (is_default) {
+            style.width = .{ .px = if (active) 49 else 25 };
+            style.height = .{ .px = 26 };
+            style.font_size = 10;
+            style.font_weight = 400;
+            style.padding = .{ .left = 6, .right = 6 };
+            style.gap = 4;
+            style.background = ui.Color.TRANSPARENT;
+        }
+        const button = try ui.widgets.Button(.{ .label = if (is_default and active) "默认" else "", .icon_asset = icon, .icon_only = !is_default or !active, .icon_size = @as(f32, 14), .a11y_label = help, .disabled = disabled, .on_click = self.cx.on(Click, action_click, Click.run), .base_style = style, .hover_style = S.buttonHover() }).mount(scope, self.cx);
         button.meta.ownership.meta.test_id = try self.id(i, switch (action) {
-            .reasoning, .vision, .default_model, .delete_model, .cancel_model => j,
+            .reasoning, .vision, .default_model, .delete_model, .cancel_model, .edit_model => j,
             else => null,
         }, @tagName(action));
         try tip.trigger.appendChild(self.cx.allocator, button);
@@ -449,14 +663,14 @@ pub const ProviderView = struct {
     }
     fn tooltip(self: *ProviderView, text: []const u8) !ui.widgets.TooltipResult {
         const open = try self.render_scope.?.createSignal(bool, false);
-        const tip = try ui.widgets.Tooltip(.{ .text = text, .open = open, .position = .top, .open_delay_ms = 450, .background = S.theme.current().overlay, .text_color = S.theme.current().fg_1, .font_size = 10.5 }).mount(self.render_scope.?, self.cx);
+        const tip = try ui.widgets.Tooltip(.{ .text = try controls.owned(self.render_scope.?, text), .open = open, .position = .top, .open_delay_ms = 450, .background = S.theme.current().overlay, .text_color = S.theme.current().fg_1, .font_size = 10.5 }).mount(self.render_scope.?, self.cx);
         tip.content.setStyleInline(self.cx.allocator, S.fieldHelp(undefined));
         for (tip.content.children.items) |tip_label| if (tip_label.getText()) |old| {
             var props = old;
             props.wrap = .word;
             props.line_height = 16.0 / 10.5;
             tip_label.setText(props);
-            tip_label.style.width = .fill();
+            tip_label.setStyleInline(self.cx.allocator, .{ .width = .fill(), .max_width = S.geometry.help_width - 20, .min_width = 0 });
         };
         try self.tips.append(self.scope.allocator, open);
         return tip;
@@ -503,8 +717,8 @@ const ButtonState = struct {
         const blocked = switch (self.action) {
             .default_provider => self.provider >= ai.provider_count or std.mem.eql(u8, ai.default_provider, draft.providerName(ai.providers[self.provider])) or !self.view.savedEligible(self.provider, null),
             .default_model => self.provider >= ai.provider_count or self.model >= ai.providers[self.provider].model_count or ai.providers[self.provider].models[self.model].default or !self.view.savedEligible(self.provider, self.model),
-            .delete_model => self.provider >= ai.provider_count or self.view.modelProtected(self.provider, self.model),
-            .delete_provider => self.provider >= ai.provider_count or std.mem.eql(u8, ai.default_provider, draft.providerName(ai.providers[self.provider])),
+            .delete_model => self.provider >= ai.provider_count or self.model >= ai.providers[self.provider].model_count or self.view.modelProtected(self.provider, self.model),
+            .delete_provider => self.provider >= ai.provider_count or (ai.providers[self.provider].enabled and std.mem.eql(u8, ai.default_provider, draft.providerName(ai.providers[self.provider]))),
             else => self.fallback_blocked,
         };
         self.disabled.set(self.view.disabled.peek() or blocked);
@@ -516,6 +730,19 @@ const Field = struct {
     text: *ui.Signal([]const u8),
     input: ui.widgets.input.InputResult,
     error_node: *ui.Node,
+    revealed: bool = false,
+    eye: ?*ui.Node = null,
+    eye_icon: ?*ui.Node = null,
+    fn reveal(self: *Field) void {
+        if (self.view.disabled.peek()) return;
+        self.revealed = !self.revealed;
+        self.input.state.input_type = if (self.revealed) .text else .password;
+        self.input.state.dirty = true;
+        const asset = ui.icons.get(if (self.revealed) "eye-off" else "eye").?;
+        if (self.eye_icon) |icon| if (asset.icon_id) |id| if (asset.pickRep(14)) |rep| icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = S.theme.current().fg_2 });
+        if (self.eye) |eye| eye.behavior.interaction.a11y = .{ .role = .button, .label = if (self.revealed) "隐藏 API Key" else "显示 API Key" };
+        self.view.cx.requestRedraw();
+    }
     fn cleanup(self: *Field) void {
         self.view.scope.allocator.destroy(self);
     }
@@ -584,12 +811,13 @@ const Fold = struct {
         if (self.kind != .existing) self.view.schedule();
     }
 };
-const Action = enum { add_provider, cancel_provider, delete_provider, add_model, cancel_model, delete_model, default_provider, default_model, reasoning, vision, effort0, effort1, effort2, effort3, effort4, kind };
+const Action = enum { toggle_provider, edit_model, add_provider, cancel_provider, delete_provider, add_model, cancel_model, delete_model, default_provider, default_model, reasoning, vision, effort0, effort1, effort2, effort3, effort4, kind };
 const Click = struct {
     view: *ProviderView,
     action: Action,
     provider: usize,
     model: usize,
+    confirmed: bool = false,
     fn cleanup(self: *Click) void {
         self.view.scope.allocator.destroy(self);
     }
@@ -600,13 +828,26 @@ const Click = struct {
         defer owned.deinit();
         const p = &owned.value.ai.providers[self.provider];
         p.kind = selected_kind;
-        p.enabled = draft.eligible(p.*);
         self.view.controller.editProviders(owned.value.ai) catch return;
         self.view.schedule();
     }
     fn run(self: *Click) void {
         const v = self.view;
         if (v.disabled.peek()) return;
+        if ((self.action == .delete_provider or self.action == .delete_model) and !self.confirmed) {
+            if (v.hasModelEditor()) return;
+            v.delete_request = .{ .provider = self.provider, .model = if (self.action == .delete_model) self.model else null };
+            v.root.markLayoutDirty();
+            v.cx.requestRedraw();
+            return;
+        }
+        if (self.action == .edit_model or self.action == .add_model) {
+            if (v.model_editor != null or v.edit_request != null) return;
+            v.edit_request = .{ .provider = self.provider, .model = if (self.action == .edit_model) self.model else null };
+            v.root.markLayoutDirty();
+            v.cx.requestRedraw();
+            return;
+        }
         var owned = runtime.Snapshot.init(v.scope.allocator, v.controller.model.value) catch return;
         defer owned.deinit();
         const allocator = owned.arena.allocator();
@@ -629,7 +870,7 @@ const Click = struct {
             },
             .cancel_provider, .delete_provider => {
                 if (self.provider >= ai.provider_count) return;
-                if (self.action == .delete_provider and std.mem.eql(u8, ai.default_provider, draft.providerName(ai.providers[self.provider]))) {
+                if (self.action == .delete_provider and ai.providers[self.provider].enabled and std.mem.eql(u8, ai.default_provider, draft.providerName(ai.providers[self.provider]))) {
                     v.error_text = draft.problemText(error.DefaultProtected);
                     v.notify();
                     return;
@@ -673,10 +914,26 @@ const Click = struct {
                         std.mem.copyForwards(config.AiModel, p.models[self.model..], p.models[self.model + 1 .. p.model_count]);
                         p.model_count -= 1;
                         p.models = p.models[0..p.model_count];
-                        p.enabled = draft.eligible(p.*);
                         v.controller.editProviders(ai.*) catch return;
                         v.controller.ai_fields.removeModel(v.scope.allocator, self.provider, self.model);
                         v.controller.refreshDirty();
+                    },
+                    .toggle_provider => {
+                        if (!p.enabled) for (v.controller.ai_fields.fields.items) |raw| {
+                            if (raw.address.provider == self.provider and raw.problem != null) {
+                                v.error_text = draft.problemText(raw.problem.?);
+                                v.controller.ai_fields.provider_open.put(v.scope.allocator, self.provider, true) catch {};
+                                v.schedule();
+                                return;
+                            }
+                        };
+                        draft.setEnabled(ai, self.provider, !p.enabled) catch |err| {
+                            v.error_text = draft.problemText(err);
+                            v.controller.ai_fields.provider_open.put(v.scope.allocator, self.provider, true) catch {};
+                            v.schedule();
+                            return;
+                        };
+                        v.controller.editProviders(ai.*) catch return;
                     },
                     .default_provider => {
                         if (!v.savedEligible(self.provider, null)) return;
@@ -713,7 +970,6 @@ const Click = struct {
                             v.notify();
                             return;
                         }
-                        p.enabled = draft.eligible(p.*);
                         v.controller.editProviders(ai.*) catch return;
                     },
                     else => return,
@@ -742,7 +998,51 @@ const TipFocus = struct {
 fn row(cx: *ui.Cx, height: f32) !*ui.Node {
     return ui.box(cx, .{ .width = .fill(), .height = .{ .px = height }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0, .min_width = 0 }, .{});
 }
+fn tuneProviderText(node: *ui.Node) void {
+    if (node.getText()) |old| {
+        var text = old;
+        text.font_size = 12;
+        text.font_weight = 400;
+        text.line_height = 1.5;
+        text.color = S.theme.current().fg_1;
+        node.setText(text);
+    }
+    for (node.children.items) |child| tuneProviderText(child);
+}
+
+const ModelNameClamp = struct {
+    cx: *ui.Cx,
+    scope: *ui.Scope,
+    row_node: *ui.Node,
+    name_node: *ui.Node,
+    natural_width: f32,
+    fn mount(cx: *ui.Cx, scope: *ui.Scope, row_node: *ui.Node, name_node: *ui.Node, text: []const u8) !void {
+        const self = try scope.allocator.create(ModelNameClamp);
+        self.* = .{ .cx = cx, .scope = scope, .row_node = row_node, .name_node = name_node, .natural_width = @max(56, @ceil(cx.text.measureTextWidth(text, 12, 500, false)) + 2) };
+        try scope.onCleanup(ModelNameClamp, self, cleanup);
+        try cx.addAfterLayoutHook(self, layout);
+    }
+    fn cleanup(self: *ModelNameClamp) void {
+        self.cx.removeAfterLayoutHook(self);
+        self.scope.allocator.destroy(self);
+    }
+    fn layout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *ModelNameClamp = @ptrCast(@alignCast(raw));
+        const width = @min(self.natural_width, @max(56, (self.row_node.globalRect().w - 20) * 0.4));
+        if (self.name_node.style.width == .px and @abs(self.name_node.style.width.px - width) < 0.1) return .done;
+        self.name_node.setStyleInline(self.cx.allocator, .{ .width = .{ .px = width }, .max_width = width });
+        return .needs_layout;
+    }
+};
+
+fn providerBackground(open: bool) ui.Color {
+    const c = S.theme.current();
+    if (!open) return c.well;
+    return ui.Color.rgba(@intCast((@as(u16, c.well.r) * 62 + @as(u16, c.surface_2.r) * 38) / 100), @intCast((@as(u16, c.well.g) * 62 + @as(u16, c.surface_2.g) * 38) / 100), @intCast((@as(u16, c.well.b) * 62 + @as(u16, c.surface_2.b) * 38) / 100), 255);
+}
+
 fn displayName(p: config.AiProvider) []const u8 {
+    if (p.name.len == 0) return "新服务提供方";
     return if (p.name.len != 0 and !std.mem.eql(u8, p.name, @tagName(p.kind))) p.name else switch (p.kind) {
         .anthropic => "Anthropic",
         .openai_compat => "OpenAI 兼容",

@@ -23,7 +23,7 @@ test "exposure confirmation mounts hidden, owns bind and confirms only by action
     cx.root = root;
     var sink = Sink{};
     const view = try view_mod.View.mount(cx, scope, .{ .context = @ptrCast(&sink), .confirm = confirm, .cancel = cancel });
-    try root.appendChild(cx.allocator, view.root);
+    if (!view.portaled) try root.appendChild(cx.allocator, view.root);
     try std.testing.expect(view.root.style.display == .none);
     var bind = "0.0.0.0".*;
     try view.show(&bind);
@@ -41,6 +41,10 @@ test "exposure confirmation mounts hidden, owns bind and confirms only by action
     try std.testing.expectEqual(ui.events.EventResult.stop, key(.escape, .{}, view.card.behavior.events.key_context));
     try std.testing.expectEqual(@as(usize, 1), sink.cancels);
     try view.show("0.0.0.0");
+    cx.setFocus(view.confirm_button);
+    cx.handleKeyDown(.@"return", .{});
+    cx.handleKeyDown(.space, .{});
+    try std.testing.expectEqual(@as(usize, 0), sink.confirms);
     const click = view.confirm_button.behavior.events.on_click.?;
     click.callback(click.context);
     try std.testing.expectEqual(@as(usize, 1), sink.confirms);
@@ -57,7 +61,7 @@ test "short viewport constrains confirmation body" {
     cx.root = root;
     var sink = Sink{};
     const view = try view_mod.View.mount(cx, scope, .{ .context = @ptrCast(&sink), .confirm = confirm, .cancel = cancel });
-    try root.appendChild(cx.allocator, view.root);
+    if (!view.portaled) try root.appendChild(cx.allocator, view.root);
     try view.show("0.0.0.0");
     cx.layout();
     _ = view.updateGeometry();

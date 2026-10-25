@@ -35,6 +35,7 @@ pub const Runtime = struct {
         sourceVersion: *const fn (*anyopaque) u64,
         captureAiSelection: *const fn (*anyopaque, std.mem.Allocator, identity.SessionHandle, @import("../vt/engine.zig").Selection, u64) anyerror!@import("ai_terminal_selection.zig").Captured,
         semanticSequence: *const fn (*anyopaque) u64,
+        documentSource: ?*const fn (*anyopaque) anyerror!terminal.Service = null,
         copyProjection: *const fn (*anyopaque, std.mem.Allocator) anyerror!@import("../vt/snapshot.zig").Projection,
         hasJoined: *const fn (*anyopaque) bool,
         isStopping: *const fn (*anyopaque) bool,
@@ -46,6 +47,7 @@ pub const Runtime = struct {
         searchViewportOffset: *const fn (*anyopaque) u64,
         locateSearchRow: *const fn (*anyopaque, usize) void,
         copySelection: *const fn (*anyopaque, @import("../vt/engine.zig").Selection, std.mem.Allocator) anyerror![]u8,
+        encodeKey: ?*const fn (*anyopaque, terminal.KeyEvent, std.mem.Allocator) anyerror![]u8 = null,
         pushInputFrom: *const fn (*anyopaque, []const u8, @import("../vt/reconnect_replay.zig").Source) anyerror!void,
         allowsBufferedOrdinaryInput: *const fn (*anyopaque) bool,
         discardBufferedInput: *const fn (*anyopaque) void,
@@ -72,6 +74,10 @@ pub const Runtime = struct {
     }
     pub fn threadPtr(self: *Runtime) *Runtime {
         return self;
+    }
+    pub fn encodeKey(self: *Runtime, event: terminal.KeyEvent, allocator: std.mem.Allocator) ![]u8 {
+        if (self.torn_down) return error.SessionClosed;
+        return (self.vtable.encodeKey orelse return error.UnsupportedService)(self.context, event, allocator);
     }
     pub fn mountTerminal(self: *Runtime, view: *@import("../ui/terminal_view.zig").TerminalViewNode, status: *@import("ui").Node) !void {
         if (self.torn_down) return error.SessionClosed;
@@ -150,6 +156,10 @@ pub const Runtime = struct {
     pub fn exportTimeline(self: *Runtime, io: std.Io, dir: std.Io.Dir, path: []const u8) anyerror!void {
         if (self.torn_down) return error.SessionClosed;
         return self.vtable.exportTimeline(self.context, io, dir, path);
+    }
+    pub fn documentSource(self: *Runtime) !terminal.Service {
+        if (self.torn_down) return error.SessionClosed;
+        return (self.vtable.documentSource orelse return error.UnsupportedService)(self.context);
     }
     pub fn sourceVersion(self: *Runtime) u64 {
         return self.vtable.sourceVersion(self.context);
