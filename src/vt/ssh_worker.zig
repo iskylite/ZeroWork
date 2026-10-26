@@ -86,6 +86,9 @@ pub const SshWorker = struct {
     library: *const Library,
     options: Options,
     session: Session,
+    detected_os: std.atomic.Value(@import("../proto/ssh/remote_os.zig").Kind),
+    os_probe_finished: std.atomic.Value(bool),
+    os_probe: ?@import("../ai/execbridge.zig").ExecHandle = null,
     exec_bridge: SshExecBridge,
     shared_transfer: ?*SharedTransfer = null,
     // Facades stay at stable addresses across the actual Session/Route moves.
@@ -175,6 +178,9 @@ pub const SshWorker = struct {
         worker.shell_exit_code = null;
         worker.session = session;
         worker.exec_bridge = SshExecBridge.init(&worker.session, allocator);
+        worker.detected_os = .init(.unknown);
+        worker.os_probe = null;
+        worker.os_probe_finished = .init(false);
         worker.shared_transfer = try SharedTransfer.init(allocator, &worker.session);
         errdefer worker.shared_transfer.?.deinitLocal() catch {};
         worker.forward_services = @splat(null);
@@ -235,6 +241,9 @@ pub const SshWorker = struct {
         if (worker.jump_route) |value| value.bindForwards(worker.forward_services[0..worker.forward_count]);
         // Opening the shell channel is not the same as prompt readiness.
         // step waits for a 500ms quiet interval before injecting setup.
+        // A separate bounded exec request shares the existing IO owner.
+        worker.os_probe = worker.exec_bridge.diagnostic(@import("../proto/ssh/remote_os.zig").command, .{ .timeout_ms = 3000, .capture_cap = 8192 }) catch null;
+        if (worker.os_probe == null) worker.os_probe_finished.store(true, .release);
         return worker;
     }
 
@@ -283,6 +292,18 @@ pub const SshWorker = struct {
         allocator.destroy(self);
     }
 
+    fn pollOsProbe(self: *SshWorker) void {
+        const handle = self.os_probe orelse return;
+        if (SshExecBridge.pollHandle(handle)) |result| {
+            self.os_probe_finished.store(true, .release);
+            if (result.status == .completed) {
+                const kind = @import("../proto/ssh/remote_os.zig").parse(result.stdout);
+                if (kind != .unknown) self.detected_os.store(kind, .release);
+            }
+            if ((self.exec_bridge.closeCall(handle) catch .awaiting) == .released) self.os_probe = null;
+        }
+    }
+
     pub fn step(self: *SshWorker, timeout_ms: u32) !void {
         for (self.forward_services[0..self.forward_count]) |service| if (service) |value| if (value.parentCloseRequested()) return error.ForwardParentClosing;
         if (!self.loop_active) return error.WorkerStopped;
@@ -313,6 +334,7 @@ pub const SshWorker = struct {
         if (self.io.closed) return self.finishShellStep();
         try self.session.stepRtt(realtime.monotonicNs());
         try self.exec_bridge.step();
+        self.pollOsProbe();
         if (self.shared_transfer) |shared| try shared.step();
         if (self.targetForward()) |service| try service.step(&self.session);
         try self.enqueueStartupIfReady(realtime.monotonicNs(), @max(self.shell_opened_ns, self.io.last_output_ns));
@@ -519,6 +541,9 @@ pub const SshWorker = struct {
         // transport. A fresh real host binding is required for new submissions.
         if (self.shared_transfer) |shared| try shared.prepareReplacement();
         try self.exec_bridge.transportReplaced(replacement);
+        if (self.os_probe) |old| _ = self.exec_bridge.closeCall(old) catch .unknown;
+        self.os_probe = self.exec_bridge.diagnostic(@import("../proto/ssh/remote_os.zig").command, .{ .timeout_ms = 3000, .capture_cap = 8192 }) catch null;
+        self.os_probe_finished.store(self.os_probe == null, .release);
         if (self.shared_transfer) |shared| shared.transportReplaced();
         self.jump_route = replacement_route;
         self.loop = replacement_loop;

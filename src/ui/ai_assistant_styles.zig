@@ -50,13 +50,10 @@ pub fn userBubbleMaxWidth(content_width: f32) f32 {
     return @max(0, content_width) * 0.75;
 }
 pub fn userBubble(content_width: f32) ui.BoxStyle {
-    // Preserve the theme hue as a light content tint over the global background.
-    const color = switch (theme.currentName()) {
-        .dark => ui.Color.hex(0x6164ec),
-        .light => ui.Color.hex(0x4f46e5),
-        .sauber => ui.Color.hex(0x1345f6),
-    };
-    return .{ .max_width = userBubbleMaxWidth(content_width), .padding = .{ .left = 13, .right = 13, .top = 9, .bottom = 9 }, .background = color.withAlpha(64), .border = .{ .width = 0, .radius = 12 }, .corner_radii = .{ .each = .{ 12, 12, 4, 12 } } };
+    // HTML .ap-user-bubble uses this opaque fixed gradient in every theme.
+    // Zenit's public Gradient supports directions rather than CSS angles;
+    // diagonal is the closest available native direction to CSS 115deg.
+    return .{ .max_width = userBubbleMaxWidth(content_width), .padding = .{ .left = 13, .right = 13, .top = 9, .bottom = 9 }, .background = ui.Color.hex(0x5550c5), .gradient = .{ .from = ui.Color.hex(0x5550c5), .to = ui.Color.hex(0x7163e9), .direction = .diagonal }, .border = .{ .width = 0, .radius = 12 }, .corner_radii = .{ .each = .{ 12, 12, 4, 12 } } };
 }
 pub fn messageRow(user: bool) ui.BoxStyle {
     // Align the measured, max-width-clamped bubble on the cross axis. Row

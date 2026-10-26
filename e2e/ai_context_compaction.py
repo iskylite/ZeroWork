@@ -21,11 +21,16 @@ class Model(http.server.BaseHTTPRequestHandler):
             text = 'NEXT_REQUEST_ACCEPTED'
         else:
             assert not body.get('tools'), 'summary requests must have no tools'
+            assert [m['role'] for m in body['messages']] == ['system', 'user'], 'historical roles must be quoted data, not active turns'
+            encoded = body['messages'][1]['content']
+            if isinstance(encoded, list): encoded = next(x['text'] for x in encoded if x.get('type') == 'text')
+            assert json.loads(encoded)['historical_transcript'], 'summary must receive the complete quoted transcript'
             assert 'OLD_RAW_CONTEXT' in json.dumps(body['messages'])
             assert 'RECENT_FIRST' not in json.dumps(body['messages'])
         if self.path == '/failure':
             self.send_response(400); self.end_headers(); return
         if self.path == '/empty': text = ''
+        if self.path == '/acknowledgement': text = '已记录。'
         if self.path == '/larger': text = 'NO_REDUCTION ' * 200
         if self.path in ['/cancel', '/owner', '/conversation', '/revision', '/generation', '/transcript', '/busy']: time.sleep(.08)
         content = 'data: ' + json.dumps({'choices':[{'delta':{'content':text}}]}) + '\n\ndata: [DONE]\n\n'

@@ -111,6 +111,9 @@ pub const View = struct {
     open: *ui.Signal(bool),
     source: ?Owned = null,
     visible: bool = false,
+    compact: bool = false,
+    header: *ui.Node = undefined,
+    body: *ui.Node = undefined,
     logs_expanded: bool = false,
     filter: ?usize = null,
     following: bool = true,
@@ -213,7 +216,9 @@ pub const View = struct {
         // The panel supplies its own header/body insets.
         modal.body.setStyle(cx.allocator, .padding, ui.Padding{});
         if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
-        const header = try ui.box(cx, S.header(), .{});
+        self.compact = cx.viewport.width <= 860 or cx.viewport.height <= 480;
+        const header = try ui.box(cx, S.attemptHeader(self.compact), .{});
+        self.header = header;
         self.header_icon = try ui.iconTint(cx, ui.icons.get("network").?, S.theme.current().accent, S.icon(18));
         try header.appendChild(cx.allocator, self.header_icon);
         self.title = try self.appendLabel(header, "连接进度", S.text(13, 700, false));
@@ -221,7 +226,8 @@ pub const View = struct {
         self.header_action = try ui.box(cx, S.iconButton(22), .{});
         try header.appendChild(cx.allocator, self.header_action);
         try modal.body.appendChild(cx.allocator, header);
-        const body = try ui.box(cx, S.body(), .{});
+        const body = try ui.box(cx, S.body(self.compact), .{});
+        self.body = body;
         try modal.body.appendChild(cx.allocator, body);
         self.body_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
         self.body_scroll.container.setStyleInline(cx.allocator, S.scroll());
@@ -242,7 +248,7 @@ pub const View = struct {
         try chip.appendChild(cx.allocator, self.attempt);
         try identity_row.appendChild(cx.allocator, chip);
         try content.appendChild(cx.allocator, identity_row);
-        self.chain_scroll = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .rubber_band_x = false }).mount(scope, cx);
+        self.chain_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
         self.chain_scroll.container.setStyleInline(cx.allocator, S.chainScroll());
         self.chain_scroll.container.meta.ownership.meta.test_id = "connection.progress.chain";
         try content.appendChild(cx.allocator, self.chain_scroll.container);
@@ -296,9 +302,9 @@ pub const View = struct {
         log_style.text_overflow = .clip;
         self.logs_text = try self.appendLabel(self.logs_scroll.content, "", log_style);
         try content.appendChild(cx.allocator, self.logs_scroll.container);
-        self.footer = try ui.box(cx, S.row(34), .{});
+        self.footer = try ui.box(cx, S.footer(self.compact), .{});
         self.footer.meta.ownership.meta.test_id = "connection.progress.actions";
-        try body.appendChild(cx.allocator, self.footer);
+        try modal.body.appendChild(cx.allocator, self.footer);
         try cx.addAfterLayoutHook(self, afterLayout);
         return self;
     }
@@ -367,6 +373,7 @@ pub const View = struct {
         self.title.setTextColor(c.fg_1);
         self.endpoint.setTextColor(c.fg_1);
         self.identity_chip.setStyleInline(self.cx.allocator, S.chip());
+        self.footer.setStyleInline(self.cx.allocator, S.footer(self.compact));
         self.attempt.setTextColor(c.fg_2);
         self.toggle_button.setStyleInline(self.cx.allocator, S.button(140, 30, false));
         self.toggle_label.setTextColor(c.fg_1);
@@ -529,6 +536,7 @@ pub const View = struct {
         self.chain_scope = scope;
         const source = &self.source.?.value;
         self.slot_count = source.hops.len + 1;
+        self.chain_scroll.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = @as(f32, @floatFromInt(self.slot_count)) * 54 - 12 } });
         self.chain_scroll.content.setStyleInline(self.cx.allocator, S.chain(self.slot_count, @min(S.width, self.cx.viewport.width - 16) - 32));
         for (0..self.slot_count) |index| {
             if (index != 0) {
@@ -537,6 +545,7 @@ pub const View = struct {
                 try connector.appendChild(self.cx.allocator, icon);
                 const connector_label = try self.appendLabel(connector, if (index == 1) "TCP" else "隧道", S.connectorText());
                 self.connectors[index - 1] = .{ .icon = icon, .label = connector_label };
+                connector.setDisplay(.none);
                 try self.chain_scroll.content.appendChild(self.cx.allocator, connector);
             }
             const slot = &self.slots[index];
@@ -546,11 +555,15 @@ pub const View = struct {
             slot.node.setStyleInline(self.cx.allocator, S.card(false));
             slot.node.meta.ownership.meta.test_id = try std.fmt.bufPrint(&slot.id, "connection.progress.hop.{d}", .{index});
             slot.name = try self.cardLabel(slot.node, 18, S.text(12, 500, false));
+            slot.name.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 130 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
             slot.endpoint = try self.cardLabel(slot.node, 14, S.text(9.5, 400, true));
             slot.user = try self.cardLabel(slot.node, 14, S.text(10, 400, false));
+            slot.user.setDisplay(.none);
             var status_style = S.text(10, 400, false);
             status_style.line_height = 1.6;
             slot.status = try self.cardLabel(slot.node, 16, status_style);
+            slot.status.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 130 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+            slot.endpoint.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0, .flex = 1 });
             try self.chain_scroll.content.appendChild(self.cx.allocator, slot.node);
         }
     }
@@ -563,7 +576,7 @@ pub const View = struct {
             if (slot.hop) |hop| {
                 const item = source.hops[hop];
                 try slot.name.setTextContent(self.cx.allocator, item.name);
-                try slot.endpoint.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "{s}:{d}", .{ item.host, item.port }));
+                try slot.endpoint.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "{s}@{s}:{d}", .{ item.user, item.host, item.port }));
                 try slot.user.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "身份  {s}", .{item.user}));
                 const latest = self.latestEvent(hop);
                 var label: []const u8 = if (source.state == .retrying) "等待整链重建" else "等待上游";
@@ -589,7 +602,7 @@ pub const View = struct {
                 slot.status.setTextColor(color);
             } else {
                 try slot.name.setTextContent(self.cx.allocator, "Local");
-                try slot.endpoint.setTextContent(self.cx.allocator, "本机");
+                try slot.endpoint.setTextContent(self.cx.allocator, "连接来源 · 本机进程");
                 try slot.user.setTextContent(self.cx.allocator, "连接来源  本机进程");
                 try slot.status.setTextContent(self.cx.allocator, if (source.local_ready) "已就绪" else "准备中");
                 slot.status.setTextColor(if (source.local_ready) S.theme.current().ok else S.theme.current().fg_3);
@@ -777,22 +790,32 @@ pub const View = struct {
         const source = if (self.source) |*source| &source.value else return;
         const natural = self.body_scroll.content.globalRect().h;
         const fallback = if (self.currentFailure() != null or source.state == .failed) S.failed_height else S.normal_height;
-        const height = @min(if (natural > 0) natural + 100 else fallback, @max(100, self.cx.viewport.height - 16));
-        if (self.dialog.style.height != .px or self.dialog.style.height.px != height) self.dialog.setStyleInline(self.cx.allocator, S.panel(height, self.cx.viewport.width));
+        const height = @min(if (natural > 0) natural + (if (self.compact) @as(f32, 114) else 134) else fallback, @max(100, self.cx.viewport.height - 16));
+        const panel = S.panel(height, self.cx.viewport.width);
+        if (!std.meta.eql(self.dialog.style.width, panel.width.?) or !std.meta.eql(self.dialog.style.height, panel.height.?)) self.dialog.setStyleInline(self.cx.allocator, panel);
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
         if (!self.visible) return .done;
+        const compact = self.cx.viewport.width <= 860 or self.cx.viewport.height <= 480;
+        if (compact != self.compact) {
+            self.compact = compact;
+            self.header.setStyleInline(self.cx.allocator, S.attemptHeader(compact));
+            self.body.setStyleInline(self.cx.allocator, S.body(compact));
+            self.footer.setStyleInline(self.cx.allocator, S.footer(compact));
+            return .needs_layout;
+        }
         // Native widget style replay can restore Modal's default 16px inset
         // after mount. Normalize the public slot before accepting its layout.
         if (!std.meta.eql(self.modal_body.style.padding, ui.Padding{})) {
             self.modal_body.setStyle(self.cx.allocator, .padding, ui.Padding{});
             return .needs_layout;
         }
+        const before_width = self.dialog.style.width;
         const before = self.dialog.style.height;
         self.resize();
         if (self.logs_expanded) self.syncLogScroll();
-        return if (std.meta.eql(before, self.dialog.style.height)) .done else .needs_layout;
+        return if (std.meta.eql(before_width, self.dialog.style.width) and std.meta.eql(before, self.dialog.style.height)) .done else .needs_layout;
     }
     fn latestEvent(self: *const View, hop: ?usize) ?progress.Journal.Entry {
         const journal = &self.source.?.value.journal;

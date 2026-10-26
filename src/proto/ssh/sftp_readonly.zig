@@ -164,6 +164,7 @@ pub const Service = struct {
     thread: ?std.Thread = null,
     // Only the worker reads/writes this value or anything reachable from it.
     session: ?ssh.Session = null,
+    detected_os: std.atomic.Value(@import("remote_os.zig").Kind) = .init(.unknown),
 
     /// On success takes Connector.ctx ownership. On failure the caller retains
     /// it. The supplied allocator is used only on the calling/control thread;
@@ -295,7 +296,19 @@ pub const Service = struct {
                 self.event(.ready, .released);
             }
         }
+        // No shell is opened. Metadata uses a bounded independent exec
+        // channel on this same IO owner; SFTP requests retain their own lane.
+        var os_bridge = @import("exec_bridge.zig").SshExecBridge.init(session, std.heap.c_allocator);
+        defer os_bridge.deinitLocal();
+        var os_probe = os_bridge.diagnostic(@import("remote_os.zig").command, .{ .timeout_ms = 3000, .capture_cap = 8192 }) catch null;
         while (!self.closing.load(.acquire)) {
+            if (os_probe) |handle| {
+                os_bridge.step() catch {};
+                if (@import("exec_bridge.zig").SshExecBridge.pollHandle(handle)) |result| {
+                    if (result.status == .completed) self.detected_os.store(@import("remote_os.zig").parse(result.stdout), .release);
+                    if ((os_bridge.closeCall(handle) catch .awaiting) == .released) os_probe = null;
+                }
+            }
             self.mutex.lock();
             var next: ?*Work = null;
             for (self.works.items) |work| if (!work.active and !work.finished) {

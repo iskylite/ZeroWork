@@ -100,7 +100,7 @@ pub fn fieldControl(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = geometry.control_width }, .height = .{ .px = geometry.control_height }, .min_width = 0, .padding = .{ .left = 10, .right = 8 }, .background = theme.current().well, .border = .{ .width = 0, .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn fieldButton() ButtonStyle {
-    return .{ .width = .{ .px = geometry.control_width }, .height = .{ .px = geometry.control_height }, .padding = .{ .left = 10, .right = 8 }, .background = theme.current().well, .text_color = theme.current().fg_1, .corner_radius = 8, .border_width = 0, .font_size = 11.5, .font_weight = 400, .flex_shrink = 0 };
+    return .{ .width = .{ .px = geometry.control_width }, .height = .{ .px = geometry.control_height }, .padding = .{ .left = 10, .right = 8 }, .background = theme.current().well, .text_color = theme.current().fg_1, .corner_radius = 8, .border_width = 0, .font_size = 12, .font_weight = 400, .flex_shrink = 0 };
 }
 pub fn actionControl(danger: bool) ButtonStyle {
     return .{ .height = .{ .px = 32 }, .padding = .{ .left = 12, .right = 12 }, .background = theme.current().hover, .text_color = if (danger) theme.current().danger_ink else theme.current().fg_1, .font_size = 12, .font_weight = 500, .corner_radius = 8, .border_width = 0, .flex_shrink = 0 };
@@ -119,22 +119,22 @@ pub fn tuneSelect(result: ui.widgets.SelectResult) void {
 fn tuneSelectText(node: *ui.Node) void {
     if (node.getText()) |old| {
         var text = old;
-        text.font_size = 11.5;
+        text.font_size = 12;
         text.font_weight = 400;
-        text.line_height = 17.0 / 11.5;
+        text.line_height = 18.0 / 12.0;
         text.color = theme.current().fg_1;
         node.setText(text);
     }
     for (node.children.items) |child| tuneSelectText(child);
 }
 pub fn tuneInput(input: *ui.widgets.input.InputResult) void {
-    input.state.font_size = 11.5;
-    input.state.line_height = 17;
+    input.state.font_size = 12;
+    input.state.line_height = 18;
     input.state.dirty = true;
     if (input.state.text_display_node) |node| if (node.getText()) |old| {
         var text = old;
-        text.font_size = 11.5;
-        text.line_height = 17.0 / 11.5;
+        text.font_size = 12;
+        text.line_height = 18.0 / 12.0;
         text.color = theme.current().fg_1;
         node.setText(text);
     };
@@ -204,7 +204,7 @@ pub fn value(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11.5, .font_weight = 400, .line_height = 17.0 / 11.5, .color = theme.current().fg_2 };
 }
 pub fn note(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 10.5, .font_weight = 400, .line_height = 16.0 / 10.5, .color = theme.current().fg_2 };
+    return .{ .font_size = 11, .font_weight = 400, .line_height = 16.0 / 11.0, .color = theme.current().fg_2 };
 }
 pub fn errorNote(t: *const ui.ThemeTokens) ui.TextStyle {
     var style = note(t);
@@ -217,10 +217,12 @@ pub fn section(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn sectionState(expanded: bool) ui.BoxStyle {
     var style = section(undefined);
-    style.padding = .{ .left = geometry.section_padding_x, .right = geometry.section_padding_x, .top = geometry.section_padding_y, .bottom = geometry.section_padding_y };
-    style.border = .{ .radius = geometry.section_radius };
+    style.padding = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 };
+    style.border = .{ .width = 1, .color = theme.current().fg_1.withAlpha(31), .radius = geometry.section_radius };
+    style.shadow = .{ .blur = 3, .offset_y = 1, .color = theme.current().fg_1.withAlpha(10) };
     _ = expanded;
     style.background = theme.current().surface_2;
+    style.overflow_hidden = true;
     style.gap = 0;
     return style;
 }
@@ -232,6 +234,9 @@ pub fn sectionTitle(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn summaryHeader(has_summary: bool) ui.BoxStyle {
     var style = sectionHeader(undefined);
+    style.background = theme.current().surface_1;
+    style.border = .{ .radius = 11 };
+    style.overflow_hidden = true;
     style.height = .{ .fit = .{} };
     style.min_height = if (has_summary) geometry.section_summary_header else 60;
     style.padding = .{ .left = 15, .right = 15, .top = 12, .bottom = 12 };
@@ -257,7 +262,7 @@ pub fn notice(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn button(size: f32, primary: bool) ButtonStyle {
     const colors = theme.current();
-    return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .ZERO, .background = if (primary) colors.accent else colors.surface_2, .text_color = if (primary) ui.Color.WHITE else colors.fg_2, .corner_radius = if (primary) 8 else 7, .border_width = 0 };
+    return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .ZERO, .background = if (primary) colors.action_accent else colors.surface_2, .text_color = if (primary) theme.actionForeground(theme.current().action_accent) else colors.fg_2, .corner_radius = if (primary) 8 else 7, .border_width = 0 };
 }
 pub fn textButton() ButtonStyle {
     return .{ .height = .{ .px = geometry.section_header }, .padding = .{ .left = 8, .right = 8 }, .background = theme.current().surface_2, .text_color = theme.current().fg_2, .corner_radius = 7, .border_width = 0, .font_size = 11.5, .font_weight = 400 };
@@ -331,21 +336,12 @@ pub fn pluginNoticeIconColor(tone: PluginNoticeTone) ui.Color {
 }
 pub fn pluginNoticeText(tone: PluginNoticeTone) ui.TextStyle {
     var style = note(undefined);
-    // These notice inks are the actual per-theme Figma text roles; their
-    // contrast differs from the adjacent icon's stronger status color.
+    const c = theme.current();
     style.color = switch (tone) {
-        .neutral => switch (theme.currentName()) {
-            .dark => ui.Color.hex(0xa1a1aa),
-            .light => ui.Color.hex(0x52525b),
-            .sauber => ui.Color.hex(0x425b4b),
-        },
-        .danger => if (theme.currentName() == .dark) ui.Color.hex(0xff8585) else ui.Color.hex(0xa72c2c),
-        .warning => if (theme.currentName() == .dark) ui.Color.hex(0xfbbf24) else ui.Color.hex(0x865609),
-        .accent => switch (theme.currentName()) {
-            .dark => ui.Color.hex(0xa5a7ff),
-            .light => ui.Color.hex(0x4235bd),
-            .sauber => ui.Color.hex(0x1345b8),
-        },
+        .neutral => c.fg_2,
+        .danger => c.danger_ink,
+        .warning => c.warn_ink,
+        .accent => c.accent_ink,
     };
     return style;
 }
@@ -371,8 +367,8 @@ pub fn modelDialogButton(primary: bool) ButtonStyle {
     var style = textButton();
     style.width = .{ .px = 88 };
     style.height = .{ .px = 32 };
-    style.background = if (primary) theme.current().accent else theme.current().well;
-    style.text_color = if (primary) ui.Color.WHITE else theme.current().fg_1;
+    style.background = if (primary) theme.current().action_accent else theme.current().well;
+    style.text_color = if (primary) theme.actionForeground(theme.current().action_accent) else theme.current().fg_1;
     return style;
 }
 pub fn modelCapabilities() ui.BoxStyle {

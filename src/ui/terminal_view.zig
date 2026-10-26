@@ -2040,16 +2040,20 @@ pub const TerminalViewNode = struct {
         // pane can be smaller than that. Keep the floating card inside its
         // content viewport instead of letting the fixed width spill past the
         // pane edge (which also made the right side unclickable).
-        if (content.w <= 0 or content.h <= 0) {
+        if (content.w <= 16 or content.h <= 16) {
             hideOverlay(self.palette_panel, &self.palette_cache);
             return;
         }
-        const panel_width = @min(palette_width, content.w);
+        const panel_width = @min(palette_width, content.w - 16);
         const matching_height = @max(0, @as(f32, @floatFromInt(self.palette.matchCount())) * overlay_styles.catalogue_row_pitch - overlay_styles.catalogue_row_gap);
         // Presentation rows include application command records, unlike raw VT
         // row * pitch. Both the input and its popup must use this same mapping.
         const cursor_y = self.metrics.origin_y - root_rect.y + self.presentationRowY(self.frame_cursor.row);
-        const placement = popupPlacement(content.y - root_rect.y, content.y + content.h - root_rect.y, cursor_y, self.metrics.cell_height, overlay_styles.catalogue_chrome_height + @min(overlay_styles.catalogue_viewport_height, matching_height));
+        if (cursor_y < content.y - root_rect.y or cursor_y + self.metrics.cell_height > content.y + content.h - root_rect.y) {
+            self.closeCommandPalette();
+            return;
+        }
+        const placement = popupPlacement(content.y - root_rect.y + 8, content.y + content.h - root_rect.y - 8, cursor_y, self.metrics.cell_height, overlay_styles.catalogue_chrome_height + @min(overlay_styles.catalogue_viewport_height, matching_height));
         const panel_height = placement.height;
         if (panel_height <= overlay_styles.catalogue_chrome_height) {
             hideOverlay(self.palette_panel, &self.palette_cache);
@@ -2064,8 +2068,8 @@ pub const TerminalViewNode = struct {
         }
         const y = placement.y;
         var x = self.metrics.origin_x - root_rect.x + @as(f32, @floatFromInt(self.frame_cursor.col)) * self.metrics.cell_width;
-        const content_left = content.x - root_rect.x;
-        const content_right = content.x + content.w - root_rect.x;
+        const content_left = content.x - root_rect.x + 8;
+        const content_right = content.x + content.w - root_rect.x - 8;
         x = std.math.clamp(x, content_left, content_right - panel_width);
         placeOverlay(self.palette_panel, &self.palette_cache, x, y, panel_width, panel_height);
     }
@@ -4479,7 +4483,7 @@ test "Figma command catalogue mounts exact card rows and viewport" {
     cx.handleMouseUp(second.x + 10, second.y + 15);
     try std.testing.expect(!view.palette.isOpen());
     try std.testing.expect(view.local_editor.active);
-    try std.testing.expectEqualStrings("@dl", view.local_editor.text.items);
+    try std.testing.expectEqualStrings("@dl ", view.local_editor.text.items);
 }
 
 test "command card keeps all matches scrollable and fits short pane" {
@@ -4920,6 +4924,8 @@ test "SSH middle click uses the installed owner and never writes terminal input"
     var worker: @import("../vt/ssh_worker.zig").SshWorker = undefined;
     worker.input = try @import("../vt/input_queue.zig").InputQueue.init(allocator, 128);
     defer worker.input.deinit(allocator);
+    worker.replay = try @import("../vt/reconnect_replay.zig").Replay.init(allocator, 128);
+    defer worker.replay.deinit();
     var native_runtime: @import("session_runtime.zig").SessionRuntime = undefined;
     native_runtime.torn_down = false;
     native_runtime.worker = &worker;

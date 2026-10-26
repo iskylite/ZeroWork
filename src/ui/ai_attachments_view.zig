@@ -510,6 +510,10 @@ pub const View = struct {
         const changed = self.pending_update;
         if (changed) {
             const old_candidate = if (self.candidate) |value| value.ticket else null;
+            // A sent projection changes the available actions even when the
+            // immutable ticket is unchanged. Do not leave a candidate modal
+            // above the newly read-only chip with its former attach action.
+            if (self.pending_readonly != self.readonly) self.dismiss();
             if (self.preview_ticket) |ticket| {
                 if (self.preview_kind == .history) {
                     if (self.pending == null or !self.pending.?.owner.eql(ticket.owner)) self.dismiss();

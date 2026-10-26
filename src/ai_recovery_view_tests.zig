@@ -26,6 +26,12 @@ test "recovery buttons keep captured group and turn and disable IO actions durin
     const root = try V.mount(cx, scope, .{ .ticket = .{ .owner = .{ .group = 7 }, .turn = 83 }, .reason = "ToolOutcomeUnknown", .retries = 0, .max_retries = 3, .retry_enabled = false, .regenerate_enabled = false, .cooldown_seconds = 2 }, .{ .context = &probe, .enqueue = Probe.enqueue });
     try cx.root.?.appendChild(cx.allocator, root);
     cx.layout();
+    const retry = find(root, "ai.recovery.answer").?;
+    const retry_label = retry.children.items[retry.children.items.len - 1];
+    const retry_rect = retry.globalRect();
+    const label_rect = retry_label.globalRect();
+    try std.testing.expect(label_rect.x >= retry_rect.x);
+    try std.testing.expect(label_rect.x + label_rect.w <= retry_rect.x + retry_rect.w);
     const edit = find(root, "ai.recovery.edit").?;
     const rect = edit.globalRect();
     cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);

@@ -9,6 +9,7 @@ pub const Model = struct {
     collapsed: bool = false,
     user_collapsed: ?bool = null,
     committed_collapsed: ?bool = null,
+    session_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) Model {
         return .{ .allocator = allocator };
@@ -35,20 +36,31 @@ pub const Model = struct {
         self.user_collapsed = self.collapsed;
     }
     pub fn width(self: Model) f32 {
-        return if (self.collapsed) 48 else 224;
+        return if (self.collapsed) 0 else 224;
     }
 
-    pub fn updateForWindow(self: *Model, window_width: f32) void {
-        self.collapsed = self.user_collapsed orelse (window_width < 1100);
+    /// A session boundary resets the default. While sessions remain open,
+    /// Command-B keeps the user's explicit choice across resize/tab changes.
+    pub fn setSessionCount(self: *Model, count: usize) bool {
+        const before = self.collapsed;
+        if ((self.session_count == 0) != (count == 0)) {
+            self.user_collapsed = null;
+            self.collapsed = count != 0;
+        }
+        self.session_count = count;
+        return before != self.collapsed;
     }
 
-    /// Consume committed settings only. The default false retains automatic
-    /// responsive layout until a manual choice is made; an actual saved change
-    /// then shares the same override as the sidebar controls.
+    pub fn updateForWindow(self: *Model, _: f32) void {
+        self.collapsed = self.user_collapsed orelse (self.session_count != 0);
+    }
+
+    /// Startup follows the session default. A later explicit settings Save
+    /// shares the same current-window choice as the sidebar controls.
     pub fn applyCommittedPreference(self: *Model, value: bool, window_width: f32) void {
         if (self.committed_collapsed) |previous| {
             if (previous != value) self.user_collapsed = value;
-        } else if (value) self.user_collapsed = true;
+        }
         self.committed_collapsed = value;
         self.updateForWindow(window_width);
     }
@@ -71,48 +83,28 @@ test "sidebar searches assets by name host and group" {
     try std.testing.expectEqual(@as(usize, 1), (try model.search("10.0.0.4")).len);
     try std.testing.expectEqual(@as(usize, 1), (try model.search("QA")).len);
     model.toggleCollapsed();
-    try std.testing.expectEqual(@as(f32, 48), model.width());
-    model.user_collapsed = null;
-    model.updateForWindow(1200);
-    try std.testing.expectEqual(@as(f32, 224), model.width());
-    model.updateForWindow(800);
-    try std.testing.expectEqual(@as(f32, 48), model.width());
+    try std.testing.expectEqual(@as(f32, 0), model.width());
 }
 
-test "explicit sidebar preference wins over automatic resize" {
+test "sidebar session boundaries reset defaults and resize preserves explicit choice" {
     var model = Model.init(std.testing.allocator);
     defer model.deinit();
-    model.updateForWindow(1099);
+    model.applyCommittedPreference(true, 860);
+    try std.testing.expect(!model.collapsed);
+    try std.testing.expect(model.setSessionCount(1));
     try std.testing.expect(model.collapsed);
     model.toggleCollapsed();
     model.updateForWindow(860);
     try std.testing.expect(!model.collapsed);
-    model.toggleCollapsed();
-    model.updateForWindow(1440);
-    try std.testing.expect(model.collapsed);
-}
-
-test "committed sidebar preference applies at startup and Save without replacing a manual choice on resize" {
-    var model = Model.init(std.testing.allocator);
-    defer model.deinit();
-    model.applyCommittedPreference(false, 860);
-    try std.testing.expect(model.collapsed);
-    try std.testing.expectEqual(@as(?bool, null), model.user_collapsed);
-    model.applyCommittedPreference(false, 1440);
-    try std.testing.expect(!model.collapsed);
-    model.applyCommittedPreference(true, 1440);
-    try std.testing.expect(model.collapsed);
-    model.applyCommittedPreference(false, 860);
+    try std.testing.expect(!model.setSessionCount(2));
     try std.testing.expect(!model.collapsed);
     model.toggleCollapsed();
-    model.applyCommittedPreference(false, 1440);
+    try std.testing.expect(model.setSessionCount(0));
+    try std.testing.expect(!model.collapsed);
+    model.updateForWindow(860);
+    try std.testing.expectEqual(@as(f32, 224), model.width());
+    try std.testing.expect(model.setSessionCount(1));
     try std.testing.expect(model.collapsed);
-    try std.testing.expectEqual(@as(?bool, false), model.committed_collapsed);
-
-    var restored = Model.init(std.testing.allocator);
-    defer restored.deinit();
-    restored.applyCommittedPreference(true, 1440);
-    try std.testing.expect(restored.collapsed);
-    restored.applyCommittedPreference(true, 860);
-    try std.testing.expect(restored.collapsed);
+    model.applyCommittedPreference(false, 1440);
+    try std.testing.expect(!model.collapsed);
 }

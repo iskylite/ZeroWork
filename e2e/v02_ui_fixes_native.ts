@@ -1,0 +1,50 @@
+/** Isolated native Metal acceptance of the v0.2 compact UI corrections. */
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {createHash} from 'node:crypto';
+import {mkdir,mkdtemp,open,readFile,writeFile,rm,chmod,copyFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join,resolve} from 'node:path';
+import {request,waitForServerReady,waitFor,query,clickAt,key,type_,resizeWindow,screenshot,sleep,scrollAt,focused} from '../vendor/zenit/e2e/client.ts';
+const opts:Record<string,string>={};for(let i=2;i<process.argv.length;i+=2){assert(['--binary','--sha','--out','--scope'].includes(process.argv[i])&&process.argv[i+1]);opts[process.argv[i]]=process.argv[i+1];}
+const scope=opts['--scope']??'full';assert(['full','sidebar','settings'].includes(scope));const binary=resolve(opts['--binary']),out=resolve(opts['--out']);await mkdir(out,{recursive:true});
+assert.equal(createHash('sha256').update(await readFile(binary)).digest('hex'),opts['--sha']);
+const report:any={status:'running',scope,binary,sha256:opts['--sha'],runs:[],limits:['Real Metal window pixels; public synthetic Harness input, no physical keyboard/IME claim.','Display-only saved host fixtures; no asset connection or AI requests.']};
+const shown=(n:any)=>n?.rect&&n.visible!==false&&n.hidden!==true&&(n.effective_opacity??1)>0&&n.rect.w>0&&n.rect.h>0;
+function flat(n:any):any[]{return[n,...(n.children??[]).flatMap(flat)];}
+const near=(a:number,b:number,label:string)=>assert(Math.abs(a-b)<=0.6,`${label}: ${a} != ${b}`);
+let failure:any;
+runs: for(const theme of ['dark','light','sauber'])for(const empty of (scope==='settings'?[false]:[true,false])){
+ const iso=await mkdtemp(join(tmpdir(),'zw-ui-fixes-'));await chmod(iso,0o700);const rpc=join(iso,'rpc'),data=join(iso,'data');await mkdir(rpc,{mode:0o700});await mkdir(data,{mode:0o700});
+ await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="${theme}"\nfont_family="Menlo"\nfont_size=14\n`,{mode:0o600});
+ if(!empty)await copyFile('docs/DESIGN/evidence/2026-10-24-v02-ui-fixes/quick-connect/fixture-hosts.toml',join(data,'hosts.toml'));
+ process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;const label=`${theme}-${empty?'empty':'saved'}`,log=await open(join(out,label+'.app.log'),'w');
+ const app=spawn(binary,[],{env:{...process.env,ZENIT_E2E_FILE_RPC_DIR:rpc,ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1',ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',OPENAI_API_KEY:'',ANTHROPIC_API_KEY:''},stdio:['ignore',log.fd,log.fd]});
+ const ended=new Promise<void>(done=>app.once('close',()=>done()));const rec:any={theme,empty,pid:app.pid,status:'running',captures:[],checks:[]};report.runs.push(rec);
+ async function visible(id:string){return waitFor(async()=>(await query(id)).find(shown)??null,12000);}
+ async function click(id:string){const n=await visible(id);assert((await clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2)).ok);await sleep(100);}
+ async function absent(id:string){await waitFor(async()=>!(await query(id)).some(shown)||null,10000);}
+ async function set(id:string,value:string){await click(id);await key('a',{cmd:true});assert((await type_(value)).ok);await sleep(150);}
+ async function capture(name:string,ids:string[]){await sleep(200);const tree=Object.fromEntries(await Promise.all(ids.map(async id=>[id,await query(id)])));await writeFile(join(out,name+'.json'),JSON.stringify(tree,null,2));assert((await screenshot(join(out,name+'.png'))).ok);rec.captures.push(name);console.log(name);}
+ async function sidebar(){const root=await visible('workspace.sidebar'),button=await visible(empty?'sidebar.empty.new':'sidebar.footer.new');const frames=(await query('sidebar.footer.frame')).filter(shown),frame=frames.find((n:any)=>Math.abs(n.rect.y-button.rect.y)<1);assert(frame);near(button.rect.h,34,'sidebar button height');near(frame.rect.h,34,'sidebar frame height');for(const k of ['x','y','w','h'])near(frame.rect[k],button.rect[k],`frame ${k}`);near(root.rect.y+root.rect.h-button.rect.y-button.rect.h,empty?2:8,'sidebar bottom');rec.checks.push({sidebar:{root:root.rect,button:button.rect,frame:frame.rect}});}
+ async function settings(size:string){
+  await click('toolbar.settings');await click('settings.nav.ai');const content=await visible('settings.content'),vp=await visible('settings.viewport'),footer=await visible('settings.footer');near(vp.rect.y-content.rect.y,48,'settings viewport top');near(footer.rect.h,40,'settings footer height');near(footer.rect.y-vp.rect.y-vp.rect.h,16,'settings footer gap');
+  await capture(`${theme}-settings-ai-${size}-top`,['settings.content','settings.viewport','settings.footer']);
+  const beforeScroll=(await visible('settings.viewport')).children?.[0]?.rect;await scrollAt(vp.rect.x+vp.rect.w/2,vp.rect.y+vp.rect.h/2,0,-1500);await sleep(250);if(size==='860'){const afterScroll=(await visible('settings.viewport')).children?.[0]?.rect;assert(beforeScroll&&afterScroll&&afterScroll.y<beforeScroll.y,'Settings body actually scrolls');rec.checks.push({scroll_before:beforeScroll,scroll_after:afterScroll});}assert.deepEqual((await visible('settings.footer')).rect,footer.rect);await capture(`${theme}-settings-ai-${size}-scrolled`,['settings.content','settings.viewport','settings.footer']);
+  await click('settings.nav.appearance');const section=await visible('settings.appearance.font.header');await click('settings.appearance.font.header');await visible('settings.field.font_family');await capture(`${theme}-settings-font-${size}`,['settings.appearance.font','settings.appearance.font.header','settings.field.font_family','settings.footer']);
+  if(size==='1440'){await click('settings.field.font_family');await visible('settings.chooser.font_family');await capture(`${theme}-settings-font-chooser`,['settings.chooser.font_family']);await key('escape');}
+  await key('escape');await absent('settings.panel');rec.checks.push({settings_size:size,viewport:vp.rect,footer:footer.rect,font_header:section.rect});
+ }
+ async function quick(size:string,keyboard:boolean){
+  if(keyboard)await key('k',{cmd:true});else await click('toolbar.quick_connect');await visible('quick.connect');await set('quick.query','Production');
+  let panel=await visible('quick.connect'),input=await visible('quick.query');near(panel.rect.w,520,'quick saved width');near(panel.rect.h,306,'quick saved height');near(input.rect.w,488,'quick input width');near(input.rect.h,40,'quick input height');near(input.rect.x-panel.rect.x,16,'quick input x');near(input.rect.y-panel.rect.y,56,'quick input y');await absent('quick.clear');assert.equal((await query('quick.saved.row')).filter(shown).length,3);
+  await capture(`${theme}-quick-saved-${size}`,['quick.connect','quick.query','quick.clear','quick.saved.row','quick.save','quick.submit']);
+  await set('quick.query','no-such-host');panel=await visible('quick.connect');const clear=await visible('quick.clear'),submit=await visible('quick.submit');near(panel.rect.h,255,'quick no-match height');near(clear.rect.w,24,'clear width');near(clear.rect.h,24,'clear height');near(clear.rect.x-panel.rect.x,464,'clear x');near(clear.rect.y-panel.rect.y,64,'clear y');near(submit.rect.w,144,'submit width');near(submit.rect.h,34,'submit height');near(submit.rect.x-panel.rect.x,360,'submit x');near(submit.rect.y-panel.rect.y,203,'submit y');await absent('quick.save');
+  const root=await visible('workspace.shell');assert(panel.rect.x>=0&&panel.rect.y>=0&&panel.rect.x+panel.rect.w<=root.rect.w&&panel.rect.y+panel.rect.h<=root.rect.h);
+  await capture(`${theme}-quick-no-match-${size}`,['quick.connect','quick.query','quick.clear','quick.save','quick.submit']);await click('quick.clear');await waitFor(async()=>(await query('quick.saved.row')).filter(shown).length===3||null);const focus=await focused(),queryNode=await visible('quick.query');assert(flat(queryNode).some(n=>n.id===focus.id),'Clear returns focus to query');await absent('quick.clear');await key('escape');await absent('quick.connect');rec.checks.push({quick_size:size,clear_focus:focus});
+ }
+ try{await waitForServerReady();rec.rpc_owner=JSON.parse(await readFile(join(rpc,'owner.json'),'utf8'));assert.equal(Number(rec.rpc_owner.pid),app.pid);await resizeWindow(1440,900);if(scope!=='settings'){await sidebar();await capture(label+'-sidebar-1440',['workspace.sidebar','sidebar.empty.new','sidebar.footer.new','sidebar.footer.frame']);}if(!empty&&scope!=='sidebar'){await settings('1440');if(scope==='full')await quick('1440',false);}await resizeWindow(860,480);await waitFor(async()=>(await visible('workspace.shell')).rect.w===860||null);if(scope!=='settings'){if((await query('workspace.sidebar')).some(shown))await sidebar();await capture(label+'-sidebar-860',['workspace.sidebar','sidebar.empty.new','sidebar.footer.new','sidebar.footer.frame']);}if(!empty&&scope!=='sidebar'){await settings('860');if(scope==='full')await quick('860',true);}const state=await request('POST','/zerowork/windows',{action:'snapshot'});assert.equal(state.windows.length,1);assert((await request('POST','/zerowork/windows',{action:'close',window:state.windows[0].window})).ok);await Promise.race([ended,sleep(10000)]);assert.equal(app.exitCode,0);assert.equal(app.signalCode,null);rec.normal_close=true;rec.status='passed_pending_pixel_review';}
+ catch(e){failure=e;rec.status='failed';rec.error=String(e);try{await capture(label+'-failure',['workspace.shell','settings.panel','quick.connect']);}catch{}}
+ finally{if(app.exitCode===null&&app.signalCode===null){rec.forced_cleanup=true;app.kill('SIGTERM');await Promise.race([ended,sleep(2000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await ended;}}await log.close();rec.exit={code:app.exitCode,signal:app.signalCode};await rm(iso,{recursive:true,force:true});await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));}
+ if(failure)break runs;
+}report.status=failure?'failed':'passed_pending_pixel_review';await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));if(failure)throw failure;

@@ -8,10 +8,10 @@ pub const columns_fixed: f32 = 282;
 pub const path_font: f32 = 11.5;
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 pub fn root(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .direction = .row, .gap = 6, .min_width = 0, .min_height = 0, .background = theme.current().app };
+    return .{ .width = .fill(), .height = .fill(), .direction = .row, .gap = 6, .padding = .{ .top = 24 }, .min_width = 0, .min_height = 0, .background = theme.current().app };
 }
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .column, .gap = 0, .padding = .ZERO, .background = theme.current().terminal, .border = .{ .radius = 11 }, .overflow = .hidden, .overflow_hidden = true };
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .column, .gap = 0, .padding = ui.Padding.all(1), .background = theme.current().surface_1, .border = .{ .radius = 11, .width = 1, .color = theme.current().border }, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn toolbar(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0, .direction = .column, .gap = 10, .padding = .{ .top = 14, .right = 13, .bottom = 11, .left = 13 }, .border = .{ .width = 0, .side_widths = .{ 0, 0, 1, 0 }, .color = theme.current().border } };
@@ -37,7 +37,13 @@ pub fn secondary(_: *const ui.ThemeTokens) ui.TextStyle {
 }
 pub fn numeric(t: *const ui.ThemeTokens) ui.TextStyle {
     var value = secondary(t);
-    value.text_align = .end;
+    value.font_size = 12;
+    value.use_monospace_font = true;
+    return value;
+}
+pub fn modified(t: *const ui.ThemeTokens) ui.TextStyle {
+    var value = secondary(t);
+    value.use_monospace_font = true;
     return value;
 }
 pub fn subtitle(_: *const ui.ThemeTokens) ui.TextStyle {
@@ -59,22 +65,22 @@ pub fn pathInput() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 30 }, .flex = 1, .min_width = 0, .padding = .{}, .border = .{ .width = 0 }, .background = ui.Color.TRANSPARENT };
 }
 pub fn table(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .min_width = 0, .direction = .column, .background = theme.current().terminal, .border = .{ .radius = 0 }, .overflow = .hidden, .overflow_hidden = true };
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .min_width = 0, .direction = .column, .background = theme.current().surface_1, .border = .{ .radius = 0 }, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn headerClip(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = header_height }, .flex_shrink = 0, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn columns(width: f32) ui.BoxStyle {
-    return .{ .width = .{ .px = width }, .height = .{ .px = row_height }, .flex_shrink = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 14, .right = 10 }, .gap = 6 };
+    return .{ .width = .{ .px = width }, .height = .{ .px = row_height }, .flex_shrink = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 14, .right = 0 }, .gap = 0 };
 }
 pub fn column(width: f32) ui.BoxStyle {
     return .{ .width = .{ .px = width }, .height = .{ .px = row_height }, .flex_shrink = 0, .min_width = 0, .direction = .row, .align_items = .center, .gap = 6, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn sortButton(width: f32) ButtonStyle {
-    return .{ .width = .{ .px = width }, .height = .{ .px = header_height }, .padding = .{}, .gap = 0, .flex_shrink = 0, .background = ui.Color.TRANSPARENT };
+    return .{ .width = .{ .px = width }, .height = .{ .px = header_height }, .padding = .{ .left = 7, .right = 7 }, .gap = 0, .flex_shrink = 0, .background = ui.Color.TRANSPARENT };
 }
 pub fn fileRow(width: f32, selected: bool, focused: bool) ButtonStyle {
-    return .{ .width = .{ .px = width }, .height = .{ .px = row_height }, .padding = .{}, .gap = 0, .flex_shrink = 0, .corner_radius = 6, .background = if (selected or focused) theme.current().selection else ui.Color.TRANSPARENT, .border_width = 0 };
+    return .{ .width = .{ .px = width }, .height = .{ .px = row_height }, .padding = .{}, .gap = 0, .flex_shrink = 0, .corner_radius = 0, .background = if (selected or focused) theme.current().selection else ui.Color.TRANSPARENT, .border = .{ .width = 0, .side_widths = .{ 0, 0, 1, 0 }, .color = theme.current().border } };
 }
 pub fn viewport() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .min_width = 0 };
@@ -107,7 +113,7 @@ fn remap(color: ui.Color, previous: theme.Colors) ui.Color {
 
 /// Bridge 342:1084206: target-card drag preview, 574×74, padding8/gap4/r9.
 pub fn dragPreview(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 74 }, .flex_shrink = 0, .direction = .column, .gap = 4, .padding = ui.Padding.all(8), .background = theme.current().surface_2, .border = .{ .radius = 9 } };
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .right = .{ .px = 8 }, .bottom = .{ .px = 40 } }, .height = .{ .px = 74 }, .flex_shrink = 0, .direction = .column, .gap = 4, .padding = ui.Padding.all(8), .background = theme.current().surface_2, .border = .{ .radius = 9 }, .hit_behavior = .pass_through };
 }
 
 /// V2 Bridge 342:1091861, target-card frozen transfer draft.

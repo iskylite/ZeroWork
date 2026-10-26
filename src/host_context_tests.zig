@@ -32,7 +32,7 @@ test "unified notification updates accepted unknown query success in place and i
     try std.testing.expectEqual(@as(u64, 4), coordinator.recordFor(first.fact_id).?.event.event_revision);
     try std.testing.expectEqual(@as(usize, 1), coordinator.presentation_count);
 }
-test "notification queue max32 max3 visible and dismissal does not clear unknown fact" {
+test "notification queue retains all facts with max3 visible and dismissal does not clear unknown fact" {
     var coordinator = try notifications.Coordinator.init(std.testing.allocator, .{}, .{});
     defer coordinator.deinit();
     try coordinator.registerDefinition(.{ .id = "fixture.result", .category = .operation_result });
@@ -40,7 +40,7 @@ test "notification queue max32 max3 visible and dismissal does not clear unknown
     unknown.phase = .outcome_unknown;
     const first = try coordinator.publishNotification(unknown, .{ .local_minute = 0, .monotonic_ms = 0 });
     for (2..38) |i| _ = try coordinator.publishNotification(event(i), .{ .local_minute = 0, .monotonic_ms = 0 });
-    try std.testing.expectEqual(@as(usize, 32), coordinator.presentation_count);
+    try std.testing.expectEqual(@as(usize, 37), coordinator.presentation_count);
     var visible: [3]*const notifications.NotificationRecord = undefined;
     try std.testing.expectEqual(@as(usize, 3), coordinator.visibleNotifications(1, 0, true, &visible));
     coordinator.dismissNotification(first.fact_id);
@@ -93,7 +93,7 @@ test "notification timers and hover pause are independent across windows" {
     try std.testing.expectEqual(@as(usize, 0), coordinator.visibleNotifications(2, 5000, false, &visible));
     try std.testing.expectEqual(@as(usize, 1), coordinator.visibleNotifications(1, 5000, true, &visible));
     try std.testing.expectEqual(first.fact_id, visible[0].fact_id);
-    try std.testing.expectEqual(@as(u64, 3000), visible[0].remaining_ms);
+    try std.testing.expectEqual(@as(u64, 4000), visible[0].remaining_ms);
 }
 
 test "notification definitions validate stable names namespace version and channels" {
@@ -142,4 +142,28 @@ test "unified system notification updates only after verified result and consume
     _ = try coordinator.publishNotification(value, .{ .local_minute = 0, .monotonic_ms = 2 });
     try std.testing.expectEqual(@as(usize, 1), driver.sends);
     try std.testing.expectEqual(notifications.Disposition.scheduled, coordinator.recordFor(publication.fact_id).?.system.disposition);
+}
+
+test "notification queued feedback does not expire before its first visible slot and actions get eight seconds" {
+    var coordinator = try notifications.Coordinator.init(std.testing.allocator, .{}, .{});
+    defer coordinator.deinit();
+    try coordinator.registerDefinition(.{ .id = "fixture.result", .category = .operation_result });
+    var ids: [4]u64 = undefined;
+    for (&ids, 1..) |*id, operation| id.* = (try coordinator.publishNotification(event(operation), .{ .local_minute = 0, .monotonic_ms = 0 })).fact_id;
+    var visible: [3]*const notifications.NotificationRecord = undefined;
+    try std.testing.expectEqual(@as(usize, 3), coordinator.visibleNotifications(1, 0, true, &visible));
+    try std.testing.expectEqual(@as(usize, 1), coordinator.visibleNotifications(1, 4000, true, &visible));
+    try std.testing.expectEqual(ids[3], visible[0].fact_id);
+    try std.testing.expectEqual(@as(u64, 4000), visible[0].remaining_ms);
+    coordinator.pauseNotification(ids[3], true);
+    _ = coordinator.visibleNotifications(1, 9000, true, &visible);
+    try std.testing.expectEqual(@as(u64, 4000), visible[0].remaining_ms);
+    coordinator.pauseNotification(ids[3], false);
+    _ = coordinator.visibleNotifications(1, 12999, true, &visible);
+    try std.testing.expectEqual(@as(u64, 1), visible[0].remaining_ms);
+    try std.testing.expectEqual(@as(usize, 0), coordinator.visibleNotifications(1, 13000, true, &visible));
+    var actionable = event(5);
+    actionable.actions = &.{.{ .kind = .safe_query, .action_id = 1, .label = "查看" }};
+    const action = try coordinator.publishNotification(actionable, .{ .local_minute = 0, .monotonic_ms = 14000 });
+    try std.testing.expectEqual(@as(u64, 8000), coordinator.recordFor(action.fact_id).?.remaining_ms);
 }

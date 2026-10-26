@@ -505,6 +505,7 @@ pub const RemoteEditor = struct {
     cx: *ui.Cx = undefined,
     scope: *ui.Scope = undefined,
     jump_values: [8]?*ui.Signal(?[]const u8) = @splat(null),
+    jump_options: [8]?*ui.Signal([]const ui.widgets.SelectOption) = @splat(null),
     jump_text: [8]?*ui.Signal([]const u8) = @splat(null),
     socks_exit_text: ?*ui.Signal([]const u8) = null,
     jump_rows: [8]?*ui.Node = @splat(null),
@@ -518,6 +519,9 @@ pub const RemoteEditor = struct {
     exit_labels: [8][128]u8 = undefined,
     topology_chain: ?*ui.Node = null,
     jump_count: usize = 0,
+    // Direct access hides the route without discarding its in-progress draft.
+    dormant_jump_count: usize = 0,
+    dormant_socks_exit: ?usize = null,
     jumps: [8][]const u8 = undefined,
     route_ids: [8]identity.ConnectionId = undefined,
     command_values: [32]?*ui.Signal([]const u8) = @splat(null),
@@ -642,6 +646,7 @@ pub const RemoteEditor = struct {
         self.alloc = cx.allocator;
         self.cx = cx;
         self.scope = scope;
+        self.painted_colors = S.theme.current();
         const feedback_guard = try scope.childScope();
         try feedback_guard.onCleanup(RemoteEditor, self, releaseFieldFeedback);
         if (self.draft_id == 0) self.draft_id = try allocateDraftId();
@@ -656,6 +661,7 @@ pub const RemoteEditor = struct {
         self.sig_terminal = try scope.createText("xterm-256color", .{});
         self.sig_scrollback = try scope.createText("50000", .{});
         for (&self.jump_values) |*v| v.* = try scope.createSignal(?[]const u8, null);
+        for (&self.jump_options) |*v| v.* = try scope.createList(ui.widgets.SelectOption, &.{});
         for (&self.jump_text) |*v| v.* = try scope.createText("", .{});
         for (&self.command_values) |*v| v.* = try scope.createText("", .{});
         self.sig_name = try scope.createText("", .{});
@@ -871,6 +877,12 @@ pub const RemoteEditor = struct {
         for (self.selects.items) |select| {
             paintSelectTypography(select.trigger);
             paintSelectTypography(select.panel);
+            paintSelectMenu(select);
+            // Select's reactive label restores its mount-time palette after
+            // loadDraft/value updates. Reapply the live role to that owned
+            // content only, preserving placeholder and option semantics.
+            const selected = if (select.value) |value| value.peek() != null else false;
+            paintSelectContent(select.content_slot, if (selected) S.theme.current().fg_2 else S.theme.current().fg_3);
         }
         if (self.startup_textarea) |area| paintSelectTypography(area.input);
         for (self.inputs.items) |input| if (input.state.text_display_node) |text| paintSelectTypography(text);
@@ -1084,6 +1096,8 @@ pub const RemoteEditor = struct {
         // update that host unless the user explicitly picks another source
         // from the copy row after this load.
         self.copied_from_existing = false;
+        self.dormant_jump_count = 0;
+        self.dormant_socks_exit = null;
         self.validation_focus_group = null;
         for (self.field_feedback.items) |feedback| {
             feedback.touched = false;
@@ -1216,6 +1230,22 @@ pub const RemoteEditor = struct {
             };
             list.set(values[0..count]);
         }
+        if (self.asset_options) |all_options| {
+            const entries = self.alloc.dupe(ui.widgets.SelectOption, all_options.get()) catch return;
+            defer self.alloc.free(entries);
+            for (self.jump_options, 0..) |options, row_index| {
+                for (entries) |*entry| {
+                    entry.disabled = false;
+                    for (self.jump_values[0..self.jump_count], 0..) |selected, selected_index| {
+                        if (selected_index == row_index) continue;
+                        if (selected.?.get()) |value| if (std.mem.eql(u8, value, entry.value)) {
+                            entry.disabled = true;
+                        };
+                    }
+                }
+                if (options) |value| value.set(entries);
+            }
+        }
         for (self.jump_rows, 0..) |row, i| if (row) |node| node.setDisplay(if (i < self.jump_count) .flex else .none);
         for (self.command_rows, 0..) |row, i| if (row) |node| node.setDisplay(if (i < self.command_count and self.startup_enabled) .flex else .none);
         var choices: [9]ui.widgets.SelectOption = undefined;
@@ -1223,7 +1253,7 @@ pub const RemoteEditor = struct {
         var choice_count: usize = 1;
         const indices = [_][]const u8{ "0", "1", "2", "3", "4", "5", "6", "7" };
         for (0..8) |i| {
-            if (self.jump_actions[i]) |actions| actions.setDisplay(if (self.editing_order) .flex else .none);
+            if (self.jump_actions[i]) |actions| actions.setDisplay(if (i < self.jump_count) .flex else .none);
             if (self.jump_arrows[i]) |arrow| arrow.setDisplay(if (i < self.jump_count) .flex else .none);
             if (self.jump_arrow_labels[i]) |label| label.setTextContent(self.alloc, if (i + 1 == self.jump_count) "Direct-TCPIP" else "SSH Tunnel") catch {};
             const selected = self.jump_values[i].?.get();
@@ -1279,7 +1309,7 @@ pub const RemoteEditor = struct {
     }
     fn refreshEditorActions(self: *RemoteEditor) void {
         const locked = self.isLocked();
-        if (self.jump_add_disabled) |value| value.set(locked or self.jump_count >= 8);
+        if (self.jump_add_disabled) |value| value.set(locked or self.jump_count >= @min(8, self.assets.len));
         for (self.editor_actions.items) |action_| action_.disabled.set(locked or switch (action_.kind) {
             .jump_up => action_.index == 0 or action_.index >= self.jump_count,
             .jump_down => action_.index + 1 >= self.jump_count,
@@ -1289,13 +1319,27 @@ pub const RemoteEditor = struct {
     }
     fn onAccessDirect(self: *RemoteEditor) void {
         if (self.isLocked() or self.jump_count == 0) return;
+        self.dormant_jump_count = self.jump_count;
+        self.dormant_socks_exit = if (self.sig_socks_exit.?.get()) |value| std.fmt.parseInt(usize, value, 10) catch null else null;
         self.jump_count = 0;
-        for (0..8) |i| self.setJump(i, null);
         self.refreshEditorRows();
         self.onFieldChange("");
     }
     fn onAccessJump(self: *RemoteEditor) void {
         if (self.isLocked() or self.jump_count != 0) return;
+        if (self.dormant_jump_count > 0) {
+            self.jump_count = self.dormant_jump_count;
+            self.dormant_jump_count = 0;
+            self.refreshEditorRows();
+            if (self.dormant_socks_exit) |index| {
+                var buffer: [20]u8 = undefined;
+                self.socks_exit_text.?.set(std.fmt.bufPrint(&buffer, "{d}", .{index}) catch "");
+                self.sig_socks_exit.?.set(self.socks_exit_text.?.get());
+            }
+            self.dormant_socks_exit = null;
+            self.onFieldChange("");
+            return;
+        }
         self.onAddJump();
     }
     fn onOrder(self: *RemoteEditor) void {
@@ -1304,7 +1348,7 @@ pub const RemoteEditor = struct {
         self.refreshEditorRows();
     }
     fn onAddJump(self: *RemoteEditor) void {
-        if (self.isLocked() or self.jump_count == 8) return;
+        if (self.isLocked() or self.jump_count >= @min(8, self.assets.len)) return;
         self.jump_count += 1;
         self.editing_order = true;
         self.refreshEditorRows();
@@ -2354,7 +2398,10 @@ pub const RemoteEditor = struct {
             const label: []const u8 = if (pending) (if (self.test_cancel_sent or (source != null and source.?.cancelled)) "正在取消" else "取消测试") else if (unavailable) "检测 SFTP · 不可用" else if (self.test_kind != .none) "重新测试" else if (self.protocol == .sftp) "检测 SFTP" else "测试连接";
             button.width = if (unavailable) S.unavailable_test_width else S.test_action_width;
             button.height = 34;
-            const style = S.button(button.width, button.height, false);
+            var style = S.button(button.width, button.height, false);
+            const is_disabled = if (button.disabled) |disabled| disabled.peek() else false;
+            style.opacity = if (is_disabled) 0.4 else 1;
+            if (is_disabled and button.primary) style.gradient = .{ .from = style.background.?, .to = style.background.?, .direction = .diagonal };
             button.style.set(style);
             button.node.setStyleInline(self.alloc, style);
             if (button.label) |node| try node.setTextContent(self.alloc, label);
@@ -2495,12 +2542,16 @@ pub const RemoteEditor = struct {
         for (self.buttons.items) |button| {
             var style = if (button.width == 0) S.disclosure() else S.button(button.width, button.height, button.primary);
             if (button.node == self.discard_confirm) {
-                style.background = S.theme.current().danger;
-                button.node.setStyleInline(self.alloc, .{ .background = S.theme.current().danger });
+                style.background = S.theme.current().action_danger;
+                style.gradient = .{ .from = S.theme.current().action_danger, .to = S.theme.current().action_danger, .direction = .diagonal };
             }
             const review_link = if (button.node.meta.ownership.meta.test_id) |id| std.mem.eql(u8, id, "wizard.review.modify") or std.mem.eql(u8, id, "wizard.review.route.modify") else false;
             if (button.quiet or review_link) style.background = ui.Color.TRANSPARENT;
+            const is_disabled = if (button.disabled) |disabled| disabled.peek() else false;
+            style.opacity = if (is_disabled) 0.4 else 1;
+            if (is_disabled and button.primary) style.gradient = .{ .from = style.background.?, .to = style.background.?, .direction = .diagonal };
             button.style.set(style);
+            button.node.setStyleInline(self.alloc, style);
             if (button.label) |label| label.setTextColor(if (review_link) S.theme.current().accent else if (button.width == 0) S.theme.current().fg_1 else S.action(button.primary).color);
             if (button.icon) |icon| _ = icon.setTint(S.theme.current().fg_2);
         }
@@ -2510,13 +2561,30 @@ pub const RemoteEditor = struct {
         for (self.field_feedback.items) |feedback| feedback.repaint();
     }
 
+    fn retintText(node: *ui.Node, before: S.theme.Colors, after: S.theme.Colors) void {
+        if (node.getText()) |text| {
+            inline for (.{ "fg_1", "fg_2", "fg_3", "accent_ink", "accent", "danger_ink", "danger", "warn_ink", "warn", "ok_ink", "ok" }) |role| {
+                if (std.meta.eql(text.color, @field(before, role))) {
+                    node.setTextColor(@field(after, role));
+                    break;
+                }
+            }
+        }
+        for (node.children.items) |child| retintText(child, before, after);
+    }
     fn retheme(self: *RemoteEditor) void {
-        self.painted_colors = S.theme.current();
+        const colors = S.theme.current();
+        if (self.painted_colors) |before| {
+            if (self.modal) |node| retintText(node, before, colors);
+            if (self.copy_dialog) |node| retintText(node, before, colors);
+        }
+        self.painted_colors = colors;
+        if (self.stepper) |stepper| stepper.setBackground(S.theme.current().well);
         if (self.footer) |footer| footer.setBackground(S.theme.current().surface_2);
         if (self.discard_footer) |footer| footer.setBackground(S.theme.current().surface_2);
         self.modal.?.setBackground(S.theme.current().overlay);
         if (self.route_empty_hint) |node| node.setTextColor(S.theme.current().danger_ink);
-        for (self.jump_rows) |node| if (node) |row| row.setBackground(S.theme.current().well);
+        for (self.jump_rows) |node| if (node) |row| row.setBackground(ui.Color.TRANSPARENT);
         for (self.editor_actions.items) |action_| if (action_.icon) |icon| {
             _ = icon.setTint(S.theme.current().fg_3);
         };
@@ -2582,7 +2650,7 @@ pub const RemoteEditor = struct {
 
 // View nodes are retained for all three steps. Changing a step never replaces
 // an editor or a draft signal; SDK slots/results are the only widget access.
-const ButtonPaint = struct { node: *ui.Node, label: ?*ui.Node, icon: ?*ui.Node, style: *ui.Signal(ui.BoxStyle), width: f32, height: f32, primary: bool, quiet: bool = false };
+const ButtonPaint = struct { node: *ui.Node, label: ?*ui.Node, icon: ?*ui.Node, style: *ui.Signal(ui.BoxStyle), width: f32, height: f32, primary: bool, disabled: ?*ui.Signal(bool) = null, quiet: bool = false };
 const RoutePreview = struct {
     row: ?*ui.Node = null,
     nodes: [10]?*ui.Node = @splat(null),
@@ -2649,7 +2717,7 @@ fn action(w: *RemoteEditor, parent: *ui.Node, label: []const u8, id: []const u8,
         if (test_action) label_node.?.setStyleInline(w.alloc, S.testActionLabel());
         try node.appendChild(w.alloc, label_node.?);
     }
-    try w.buttons.append(w.alloc, .{ .node = node, .label = label_node, .icon = icon_node, .style = base, .width = width, .height = height, .primary = primary, .quiet = std.mem.eql(u8, id, "wizard.close") });
+    try w.buttons.append(w.alloc, .{ .node = node, .label = label_node, .icon = icon_node, .style = base, .width = width, .height = height, .primary = primary, .disabled = disabled, .quiet = std.mem.eql(u8, id, "wizard.close") });
     try parent.appendChild(w.alloc, node);
     return node;
 }
@@ -2666,7 +2734,7 @@ fn disclosure(w: *RemoteEditor, parent: *ui.Node, label: []const u8, id: []const
     try content.appendChild(w.alloc, chevron);
     try content.appendChild(w.alloc, title);
     try node.appendChild(w.alloc, content);
-    try w.buttons.append(w.alloc, .{ .node = node, .label = title, .icon = null, .style = base, .width = 0, .height = 18, .primary = false, .quiet = true });
+    try w.buttons.append(w.alloc, .{ .node = node, .label = title, .icon = null, .style = base, .width = 0, .height = 18, .primary = false, .disabled = w.locked, .quiet = true });
     try row.appendChild(w.alloc, node);
     try parent.appendChild(w.alloc, row);
     return row;
@@ -2759,8 +2827,8 @@ const FieldFeedback = struct {
         self.repaint();
     }
     fn resize(self: *FieldFeedback, invalid: bool) void {
-        self.group.setStyleInline(self.wizard.alloc, .{ .height = .{ .px = if (invalid) 73.5 else 53.5 } });
-        self.input.node.setStyleInline(self.wizard.alloc, .{ .height = .{ .px = if (invalid) 52 else 32 }, .flex_shrink = 0 });
+        self.group.setStyleInline(self.wizard.alloc, .{ .height = .{ .px = if (invalid) 75.5 else 55.5 } });
+        self.input.node.setStyleInline(self.wizard.alloc, .{ .height = .{ .px = if (invalid) 54 else 34 }, .flex_shrink = 0 });
     }
     fn repaint(self: *FieldFeedback) void {
         if (self.error_node) |node| node.setTextColor(S.theme.current().danger_ink);
@@ -2774,7 +2842,7 @@ fn field(w: *RemoteEditor, parent: *ui.Node, label: []const u8, value: *ui.Signa
     try group.appendChild(w.alloc, title);
     const feedback = try FieldFeedback.prepare(w, id);
     const input = try ui.widgets.Input(.{ .error_msg = if (feedback) |f| ui.Source([]const u8){ .signal = f.message } else ui.Source([]const u8){ .value = "" }, .value = value, .readonly = std.mem.eql(u8, id, "wizard.encoding"), .placeholder = placeholder, .input_type = @as(ui.widgets.input.InputType, if (secret) .password else .text), .disabled = w.locked.?, .on_change = w.cx.on(RemoteEditor, w, RemoteEditor.onFieldChange), .on_submit = w.cx.on(RemoteEditor, w, RemoteEditor.onFieldSubmit) }).mountResult(w.scope, w.cx);
-    input.node.setStyleInline(w.alloc, .{ .width = .fill(), .height = .{ .px = 32 }, .min_width = 0, .flex_shrink = 1 });
+    input.node.setStyleInline(w.alloc, .{ .width = .fill(), .height = .{ .px = 34 }, .min_width = 0, .flex_shrink = 1 });
     input.input_container.setStyleInline(w.alloc, S.input());
     input.input_container.meta.ownership.meta.test_id = id;
     input.state.font_size = 12;
@@ -2818,14 +2886,14 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     const cx = w.cx;
     const root = try ui.boxStyled(cx, S.formSection, .{});
     if (w.protocol_picker) |picker| try root.appendChild(w.alloc, try picker.mount(picker.context, cx, w.scope));
-    const card = try ui.boxStyled(cx, S.formSection, .{});
+    const card = try ui.boxStyled(cx, S.identitySection, .{});
     w.identity_card = card;
     card.meta.ownership.meta.test_id = "wizard.identity.card";
     const head = try ui.box(cx, S.row(30), .{});
     try head.appendChild(w.alloc, try ui.text(cx, "连接信息", S.text(12, 700, false)));
     w.copy_trigger = try action(w, head, "从已有主机复制", "wizard.copy.open", 116, 28, false, w.copy_open_disabled, RemoteEditor.onCopyToggle, null);
     try card.appendChild(w.alloc, head);
-    const details = try ui.boxStyled(cx, S.formSection, .{});
+    const details = try ui.boxStyled(cx, S.identityFields, .{});
     w.identity_body = details;
     const copy_modal = try ui.widgets.Modal(.{ .open = ui.split(w.copy_open.?, cx.on(RemoteEditor, w, RemoteEditor.onCopyOpenChanged)), .width = 440, .max_height = 320, .background = S.theme.current().overlay }).mount(w.scope, cx);
     w.copy_dialog = copy_modal.dialog;
@@ -2899,7 +2967,7 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     const key_row = try ui.box(cx, S.fieldRow(), .{});
     const key_feedback = (try FieldFeedback.prepare(w, "wizard.key_path")).?;
     const key_input = try ui.widgets.Input(.{ .error_msg = key_feedback.message, .value = w.sig_key_path.?, .placeholder = "~/.ssh/id_ed25519", .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onFieldChange), .on_submit = cx.on(RemoteEditor, w, RemoteEditor.onFieldSubmit) }).mountResult(w.scope, cx);
-    key_input.node.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 32 } });
+    key_input.node.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 34 } });
     key_input.input_container.setStyleInline(w.alloc, S.input());
     key_input.input_container.meta.ownership.meta.test_id = "wizard.key_path";
     key_input.state.font_size = 12;
@@ -2916,9 +2984,10 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     try auth_body.appendChild(w.alloc, key);
     const pw = try ui.boxStyled(cx, S.stack, .{});
     w.cred_pw_row = pw;
+    pw.setStyleInline(w.alloc, .{ .gap = 8 });
     _ = try field(w, pw, "密码", w.sig_password.?, "可留空，连接时再输入", "wizard.password", null, true);
-    const remember = try ui.widgets.Checkbox(.{ .checked = w.sig_save_password.?, .label = "保存密码，下次连接自动使用", .box_size = @as(f32, 16), .label_font_size = @as(f32, 11), .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onSavePasswordChanged) }).mount(w.scope, cx);
-    remember.setStyleInline(w.alloc, .{ .width = .fill(), .height = .{ .px = 24 }, .gap = 6, .flex_shrink = 0 });
+    const remember = try ui.widgets.Checkbox(.{ .checked = w.sig_save_password.?, .label = "保存密码，下次连接自动使用", .box_size = @as(f32, 14), .label_font_size = @as(f32, 11), .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onSavePasswordChanged) }).mount(w.scope, cx);
+    remember.setStyleInline(w.alloc, .{ .width = .fill(), .height = .{ .px = 24 }, .gap = 8, .flex_shrink = 0 });
     remember.meta.ownership.meta.test_id = "wizard.password.remember";
     w.remember_checkbox = remember;
     paintCheckboxLabels(remember);
@@ -2932,20 +3001,6 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     try auth_card.appendChild(w.alloc, auth_body);
     try root.appendChild(w.alloc, auth_card);
 
-    const policy_field = try ui.box(cx, S.field(null), .{});
-    try policy_field.appendChild(w.alloc, try fieldLabel(cx, "主机密钥策略"));
-    const policy_options = [_]ui.widgets.SelectOption{
-        .{ .value = "true", .label = "严格验证主机密钥（推荐）", .test_id = "wizard.strict.enabled" },
-        .{ .value = "false", .label = "关闭严格验证（测试环境）", .test_id = "wizard.strict.disabled" },
-    };
-    const policy = try ui.widgets.Select(.{ .options = &policy_options, .value = w.sig_strict_policy.?, .width = S.width - 48, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onStrictPolicyChanged) }).mount(w.scope, cx);
-    skinSelect(w, policy, 32, 12);
-    policy.wrapper.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0 });
-    policy.trigger.meta.ownership.meta.test_id = "wizard.strict_host_key";
-    w.strict_checkbox = policy.trigger;
-    try policy_field.appendChild(w.alloc, policy.wrapper);
-    try root.appendChild(w.alloc, policy_field);
-
     const advanced = try ui.boxStyled(cx, S.advancedSection, .{});
     w.step2_advanced = advanced;
     advanced.meta.ownership.meta.test_id = "wizard.advanced.card";
@@ -2953,6 +3008,20 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     const advanced_body = try ui.boxStyled(cx, S.formSection, .{});
     w.advanced_body = advanced_body;
     advanced_body.meta.ownership.meta.test_id = "wizard.advanced.body";
+    const policy_field = try ui.box(cx, S.field(null), .{});
+    try policy_field.appendChild(w.alloc, try fieldLabel(cx, "主机密钥策略"));
+    const policy_options = [_]ui.widgets.SelectOption{
+        .{ .value = "true", .label = "严格验证主机密钥（推荐）", .test_id = "wizard.strict.enabled" },
+        .{ .value = "false", .label = "关闭严格验证（测试环境）", .test_id = "wizard.strict.disabled" },
+    };
+    const policy = try ui.widgets.Select(.{ .options = &policy_options, .value = w.sig_strict_policy.?, .width = S.width - 48, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onStrictPolicyChanged) }).mount(w.scope, cx);
+    skinSelect(w, policy, 34, 12);
+    policy.wrapper.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0 });
+    policy.trigger.meta.ownership.meta.test_id = "wizard.strict_host_key";
+    w.strict_checkbox = policy.trigger;
+    try policy_field.appendChild(w.alloc, policy.wrapper);
+    try advanced_body.appendChild(w.alloc, policy_field);
+
     const defaults = try ui.box(cx, S.fieldRow(), .{});
     w.connect_timeout_fact = try readonlyField(w, defaults, "连接超时（全局默认）", "—");
     w.connect_timeout_fact.?.meta.ownership.meta.test_id = "wizard.ssh.connect_timeout";
@@ -2961,8 +3030,8 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     try advanced_body.appendChild(w.alloc, defaults);
     const encoding = try ui.box(cx, S.fieldRow(), .{});
     _ = try field(w, encoding, "字符编码", w.sig_encoding.?, "UTF-8", "wizard.encoding", null, false);
-    const compression = try ui.widgets.Checkbox(.{ .checked = w.sig_compression.?, .label = "SSH 传输压缩", .box_size = @as(f32, 16), .label_font_size = @as(f32, 11), .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onCompressionChanged) }).mount(w.scope, cx);
-    compression.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 53.5 }, .gap = 8, .flex = 1, .flex_shrink = 0 });
+    const compression = try ui.widgets.Checkbox(.{ .checked = w.sig_compression.?, .label = "SSH 传输压缩", .box_size = @as(f32, 14), .label_font_size = @as(f32, 11), .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onCompressionChanged) }).mount(w.scope, cx);
+    compression.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 55.5 }, .gap = 8, .flex = 1, .flex_shrink = 0 });
     compression.meta.ownership.meta.test_id = "wizard.compression";
     w.compression_checkbox = compression;
     paintCheckboxLabels(compression);
@@ -3032,15 +3101,22 @@ fn mountRoute(w: *RemoteEditor) !*ui.Node {
     for (0..8) |i| {
         const jump_row = try ui.box(w.cx, S.routeHop(), .{});
         var label: [40]u8 = undefined;
-        const number = try ui.text(w.cx, try std.fmt.bufPrint(&label, "{d}", .{i + 1}), S.text(11, 500, false));
-        number.setStyleInline(w.alloc, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
-        try jump_row.appendChild(w.alloc, number);
-        const picker = try ui.widgets.Select(.{ .options = w.asset_options.?, .placeholder = "选择 SSH 主机", .value = w.jump_values[i].?, .width = 566, .disabled = w.locked.?, .on_change = w.cx.on(RemoteEditor, w, RemoteEditor.onSelection) }).mount(w.scope, w.cx);
-        skinSelect(w, picker, 32, 12);
+        const number_slot = try ui.box(w.cx, .{ .width = .{ .px = 24 }, .height = .{ .px = 22 }, .justify = .center, .align_items = .center, .flex_shrink = 0 }, .{});
+        var number_style = S.text(11, 500, false);
+        number_style.text_align = .center;
+        number_style.line_height = 2;
+        number_style.color = S.theme.current().accent;
+        const number = try ui.text(w.cx, try std.fmt.bufPrint(&label, "{d}", .{i + 1}), number_style);
+        number.setStyleInline(w.alloc, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0, .background = S.theme.current().selection, .border = .{ .radius = 11 } });
+        try number_slot.appendChild(w.alloc, number);
+        try jump_row.appendChild(w.alloc, number_slot);
+        const picker = try ui.widgets.Select(.{ .options = w.jump_options[i].?, .placeholder = "选择 SSH 主机", .value = w.jump_values[i].?, .width = 566, .disabled = w.locked.?, .on_change = w.cx.on(RemoteEditor, w, RemoteEditor.onSelection) }).mount(w.scope, w.cx);
+        skinSelect(w, picker, 34, 12);
+        picker.wrapper.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .flex = 1 });
         var id: [48]u8 = undefined;
         picker.trigger.meta.ownership.meta.test_id = try ownedId(w, &id, "wizard.route.hop.{d}", i);
         try jump_row.appendChild(w.alloc, picker.wrapper);
-        const actions = try ui.box(w.cx, .{ .width = .{ .px = 96 }, .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
+        const actions = try ui.box(w.cx, .{ .width = .{ .px = 100 }, .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
         try actions.appendChild(w.alloc, try editorAction(w, w.cx, "上移", i, .jump_up));
         try actions.appendChild(w.alloc, try editorAction(w, w.cx, "下移", i, .jump_down));
         try actions.appendChild(w.alloc, try editorAction(w, w.cx, "删除", i, .jump_remove));
@@ -3342,6 +3418,36 @@ fn paintSelectTypography(node: *ui.Node) void {
     for (node.children.items) |child| paintSelectTypography(child);
 }
 
+fn paintSelectContent(node: *ui.Node, color: ui.Color) void {
+    if (node.getText()) |text| {
+        if (!std.meta.eql(text.color, color)) node.setTextColor(color);
+    }
+    for (node.children.items) |child| paintSelectContent(child, color);
+}
+
+// Read the Select's public derived state; keep its controlled event/selection
+// pipeline intact while the host supplies the live V3 surface roles.
+fn paintSelectMenu(select: ui.widgets.SelectResult) void {
+    const colors = S.theme.current();
+    const state = ui.widgets.select.stateOf(select);
+    select.chrome.setBackground(colors.overlay);
+    select.trigger.setBorderColor(ui.Color.TRANSPARENT);
+    _ = select.chevron_down.setTint(colors.fg_2);
+    _ = select.chevron_up.setTint(colors.fg_2);
+    for (state.option_nodes, 0..) |row, i| {
+        const sized = switch (row.style.height) {
+            .px => |height| height == 32,
+            else => false,
+        };
+        if (!sized) row.setStyleInline(state.allocator, .{ .height = .{ .px = 32 }, .padding = .{ .top = 7, .bottom = 7, .left = 9, .right = 9 }, .border = .{ .radius = 7 }, .flex_shrink = 0 });
+        const selected = state.isSelected(i);
+        const highlighted = if (state.highlighted_index) |index| index == i else state.shown_open and selected;
+        row.setBackground(if (highlighted) colors.hover else if (selected) colors.selection else ui.Color.TRANSPARENT);
+        paintSelectContent(row, if (state.options[i].disabled) colors.fg_3 else if (selected) colors.accent_ink else colors.fg_1);
+        _ = state.check_nodes[i].setTint(colors.accent_ink);
+    }
+}
+
 fn paintCheckboxLabels(node: *ui.Node) void {
     if (node.getText()) |old| {
         var props = old;
@@ -3362,6 +3468,11 @@ fn skinSelect(w: *RemoteEditor, result: ui.widgets.SelectResult, height: f32, si
     // Select owns a separate Popover trigger wrapper with the initial pixel
     // width. Let that wrapper follow its responsive field as well.
     if (result.trigger.parent) |trigger_wrapper| trigger_wrapper.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0 });
+    // HTML preview: 5px panel inset, contiguous 32px rows, radius10/7.
+    result.chrome.setStyleInline(w.alloc, .{ .padding = ui.Padding.all(5), .gap = 0, .border = .{ .radius = 10, .width = 0 } });
+    result.panel.setStyleInline(w.alloc, .{ .gap = 0 });
+    const state = ui.widgets.select.stateOf(result);
+    for (state.option_nodes) |row| row.setStyleInline(w.alloc, .{ .height = .{ .px = 32 }, .padding = .{ .top = 7, .bottom = 7, .left = 9, .right = 9 }, .border = .{ .radius = 7 }, .flex_shrink = 0 });
     w.selects.append(w.alloc, result) catch {};
 }
 fn ownedId(w: *RemoteEditor, buf: []u8, comptime format: []const u8, value: usize) ![]const u8 {
@@ -3541,8 +3652,10 @@ fn editorAction(self: *RemoteEditor, cx: *ui.Cx, label: []const u8, index: usize
     state.* = .{ .wizard = self, .index = index, .kind = kind, .disabled = try self.scope.createSignal(bool, false) };
     try self.scope.onCleanup(EditorAction, state, EditorAction.cleanup);
     try self.editor_actions.append(self.alloc, state);
-    const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = label, .disabled = state.disabled, .base_style = S.button(28, 28, false), .on_click = cx.on(EditorAction, state, EditorAction.click) }).mount(self.scope, cx);
-    node.setStyleInline(self.alloc, S.button(28, 28, false));
+    var action_style = S.button(28, 28, false);
+    action_style.background = ui.Color.TRANSPARENT;
+    const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = label, .disabled = state.disabled, .base_style = action_style, .on_click = cx.on(EditorAction, state, EditorAction.click) }).mount(self.scope, cx);
+    node.setStyleInline(self.alloc, action_style);
     const icon = switch (kind) {
         .jump_up => ui.icons.chevron_up,
         .jump_down => ui.icons.chevron_down,
@@ -3691,7 +3804,7 @@ test "reordering jumps preserves SOCKS exit identity" {
     const assets = [_]Draft{ .{ .source_owner = .{ .id = @fromBackingInt(1) }, .name = "a", .host = "a", .user = "u" }, .{ .source_owner = .{ .id = @fromBackingInt(2) }, .name = "b", .host = "b", .user = "u" } };
     try wizard.setAssets(&assets);
     wizard.loadDraft(.{ .name = "target", .host = "host", .user = "u", .route = &.{ @fromBackingInt(1), @fromBackingInt(2) }, .socks_exit = 0 });
-    var edit_action: EditorAction = .{ .wizard = &wizard, .index = 0, .kind = .jump_down };
+    var edit_action: EditorAction = .{ .wizard = &wizard, .index = 0, .kind = .jump_down, .disabled = try scope.createSignal(bool, false) };
     edit_action.click();
     try std.testing.expectEqualStrings("b", wizard.currentDraft().jump_chain[0]);
     try std.testing.expectEqual(@as(?usize, 1), wizard.currentDraft().socks_exit);

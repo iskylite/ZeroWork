@@ -48,7 +48,12 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
         const click = try scope.createState(Click, .{ .actions = actions, .envelope = .{ .ticket = state.ticket, .action = action } });
         var cooldown: [64]u8 = undefined;
         const action_label = if (action == .answer and state.cooldown_seconds != 0) try std.fmt.bufPrint(&cooldown, "重试答复 · {d}s", .{state.cooldown_seconds}) else label;
-        const button = try ui.widgets.Button(.{ .label = if (action == .answer) action_label else if (action == .regenerate) "新计划" else "", .icon_only = action == .edit, .icon_asset = if (action == .edit) ui.icons.pencil else if (action == .regenerate) ui.icons.rotate_cw else null, .icon_size = @as(f32, 14), .a11y_label = label, .variant = @as(ui.widgets.button.ButtonVariant, if (action == .answer) .primary else .secondary), .disabled = !enabled, .base_style = S.action(action == .answer, action == .edit, enabled), .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+        var button_style = S.action(action == .answer, action == .edit, enabled);
+        if (action == .answer and state.cooldown_seconds != 0) {
+            button_style.width = .{ .fit = .{} };
+            button_style.min_width = 53;
+        }
+        const button = try ui.widgets.Button(.{ .label = if (action == .answer) action_label else if (action == .regenerate) "新计划" else "", .icon_only = action == .edit, .icon_asset = if (action == .edit) ui.icons.pencil else if (action == .regenerate) ui.icons.rotate_cw else null, .icon_size = @as(f32, 14), .a11y_label = label, .variant = @as(ui.widgets.button.ButtonVariant, if (action == .answer) .primary else .secondary), .disabled = !enabled, .base_style = button_style, .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
         button.meta.ownership.meta.test_id = id;
         if (action == .regenerate) {
             const notice = try ui.boxStyled(cx, S.statusRow, .{});

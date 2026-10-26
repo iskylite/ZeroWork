@@ -7,7 +7,7 @@ const std = @import("std");
 const ui = @import("ui");
 const transfer = @import("../transfer/manager.zig");
 
-// ── 设计 token（值与 mockups/common.zig 一致，本地定义避免依赖 mockup 基建） ──
+// ── 设计 token（值与 design_tokens.zig 一致，本地定义避免依赖 mockup 基建） ──
 
 const T = @import("app_theme.zig");
 const S = @import("transfer_styles.zig");

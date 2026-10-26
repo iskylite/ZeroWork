@@ -30,7 +30,7 @@ pub fn note() ui.TextStyle {
     return style;
 }
 pub fn control(primary: bool) @FieldType(ui.widgets.ControlShellConfig, "style") {
-    return .{ .width = .{ .px = 88 }, .height = .{ .px = 32 }, .padding = .{}, .background = if (primary) theme.current().accent else theme.current().well, .text_color = if (primary) ui.Color.WHITE else theme.current().fg_1, .font_size = 11, .corner_radius = 8, .border_width = 0 };
+    return .{ .width = .{ .px = 88 }, .height = .{ .px = 32 }, .padding = .{}, .background = if (primary) theme.current().action_accent else theme.current().well, .text_color = if (primary) theme.actionForeground(theme.current().action_accent) else theme.current().fg_1, .font_size = 11, .corner_radius = 8, .border_width = 0 };
 }
 
 pub fn close() @FieldType(ui.widgets.ControlShellConfig, "style") {
@@ -41,5 +41,5 @@ pub fn close() @FieldType(ui.widgets.ControlShellConfig, "style") {
     return style;
 }
 pub fn controlHover(primary: bool) @FieldType(ui.widgets.ControlShellConfig, "style") {
-    return .{ .background = if (primary) theme.current().accent else theme.current().hover, .text_color = if (primary) ui.Color.WHITE else theme.current().fg_1 };
+    return .{ .background = if (primary) theme.current().action_accent else theme.current().hover, .text_color = if (primary) theme.actionForeground(theme.current().action_accent) else theme.current().fg_1 };
 }

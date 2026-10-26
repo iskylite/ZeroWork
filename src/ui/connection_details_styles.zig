@@ -172,7 +172,7 @@ pub fn nodeFooter() ui.BoxStyle {
     return result;
 }
 pub fn primary() ButtonStyle {
-    return .{ .width = .{ .px = 112 }, .height = .{ .px = 34 }, .padding = .{}, .corner_radius = 8, .background = theme.current().accent, .border_width = 0, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 112 }, .height = .{ .px = 34 }, .padding = .{}, .corner_radius = 8, .background = theme.current().action_accent, .border_width = 0, .flex_shrink = 0 };
 }
 
 // V3 chain-only styles keep the shared node detail modal on its existing recipe.
@@ -197,7 +197,7 @@ pub fn chainFooter() ui.BoxStyle {
     return style;
 }
 pub fn chainAction(w: f32, primary_action: bool) ButtonStyle {
-    return .{ .width = .{ .px = w }, .height = .{ .px = 30 }, .padding = .{}, .gap = 0, .font_size = 11, .text_color = if (primary_action) ui.Color.WHITE else theme.current().fg_1, .background = if (primary_action) theme.current().accent else theme.current().well, .corner_radius = 8, .border_width = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = 30 }, .padding = .{}, .gap = 0, .font_size = 11, .text_color = if (primary_action) theme.actionForeground(theme.current().action_accent) else theme.current().fg_1, .background = if (primary_action) theme.current().action_accent else theme.current().well, .corner_radius = 8, .border_width = 0 };
 }
 pub fn chainBadge(online: bool) ui.BoxStyle {
     return .{ .width = .{ .px = 46 }, .height = .{ .px = 18 }, .padding = .{ .left = 3, .right = 3 }, .background = if (online) theme.current().ok.withAlpha(26) else theme.current().surface_2, .border = .{ .radius = 5 }, .flex_shrink = 0 };

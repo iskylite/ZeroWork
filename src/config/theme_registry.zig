@@ -1,6 +1,7 @@
 //! Stable global theme identities, owned import drafts and independent metadata.
 const std = @import("std");
 const importer = @import("imported_theme.zig");
+const presets = @import("theme_presets.zig");
 
 pub const max_import_bytes = 2 * 1024 * 1024;
 pub const default_id = "dark";
@@ -8,6 +9,11 @@ pub const reset_id = "sauber";
 pub const Source = enum { builtin, imported };
 pub const Filter = enum { all, favorites, imported };
 pub const UiTokens = struct {
+    // Filled-action roles are independent of link/icon accents. Zero derives
+    // compatible colours for imported and legacy palettes.
+    action_accent: u32 = 0,
+    action_accent_2: u32 = 0,
+    action_danger: u32 = 0,
     app: u32,
     surface_1: u32,
     surface_2: u32,
@@ -170,10 +176,10 @@ pub const Registry = struct {
     pub fn init(allocator: std.mem.Allocator) !Registry {
         var self: Registry = .{ .allocator = allocator };
         errdefer self.deinit();
-        for ([_][]const u8{ "dark", "light", "sauber", "catppuccin-mocha", "dracula", "dark-pro", "solarized-dark", "nord" }) |id| {
+        for (presets.ids ++ [_][]const u8{ "catppuccin-mocha", "dracula", "dark-pro", "solarized-dark", "nord" }) |id| {
             const preset = builtinTheme(id);
             var colors = builtinTokens(id);
-            if (!std.mem.eql(u8, id, "dark") and !std.mem.eql(u8, id, "light") and !std.mem.eql(u8, id, "sauber")) {
+            if (presets.tokens(UiTokens, id) == null) {
                 colors.app = preset.bg;
                 colors.terminal = preset.bg;
                 colors.fg_1 = preset.fg;
@@ -421,16 +427,21 @@ fn importedTokens(theme: importer.Theme) UiTokens {
     result.fg_1 = theme.fg;
     result.accent = theme.ansi[4];
     result.accent_ink = theme.ansi[12];
+    result.action_accent = theme.ansi[4];
+    result.action_accent_2 = theme.ansi[4];
+    result.action_danger = result.danger;
     if (theme.selection) |selection| result.selection = selection;
     return result;
 }
 
 pub fn builtinTokens(id: []const u8) UiTokens {
+    if (presets.tokens(UiTokens, id)) |colors| return colors;
     if (std.mem.eql(u8, id, "sauber")) return .{ .app = 0xd9eccfff, .surface_1 = 0xf2fdecff, .surface_2 = 0xecfbe5ff, .well = 0xe2f5daff, .well_border = 0xc9e4bdff, .terminal = 0xecffe5ff, .overlay = 0xf3ffefff, .hover = 0xdbf0d6ff, .tab_on = 0xf8fff4ff, .fg_1 = 0x0f172aff, .fg_2 = 0x46604fff, .fg_3 = 0x8aa396ff, .accent = 0x1345f6ff, .accent_ink = 0x1345f6ff, .ok = 0x10b981ff, .ok_ink = 0x0a714fff, .warn = 0xd49a0cff, .warn_ink = 0x7f5c07ff, .danger = 0xdc4c3fff, .danger_ink = 0xad3c32ff, .selection = 0x1345f617, .border = 0xc9e4bdff, .shadow = 0x14462324 };
     if (std.mem.eql(u8, id, "light")) return .{ .app = 0xe6e6eaff, .surface_1 = 0xfbfbfcff, .surface_2 = 0xf4f4f7ff, .well = 0xececf0ff, .well_border = 0xd9d9e0ff, .terminal = 0xfbfbfcff, .overlay = 0xffffffff, .hover = 0xececf1ff, .tab_on = 0xffffffff, .fg_1 = 0x18181bff, .fg_2 = 0x52525bff, .fg_3 = 0xa1a1aaff, .accent = 0x4f46e5ff, .accent_ink = 0x4f46e5ff, .ok = 0x16a34aff, .ok_ink = 0x107435ff, .warn = 0xd97706ff, .warn_ink = 0x985304ff, .danger = 0xdc2626ff, .danger_ink = 0xc32222ff, .selection = 0x4f46e517, .border = 0xd9d9e0ff, .shadow = 0x0f172a24 };
     return .{ .app = 0x060608ff, .surface_1 = 0x131316ff, .surface_2 = 0x1b1b1fff, .well = 0x0c0c0fff, .well_border = 0x26262cff, .terminal = 0x0a0a0dff, .overlay = 0x18181cff, .hover = 0x202026ff, .tab_on = 0x1e1e23ff, .fg_1 = 0xf4f4f5ff, .fg_2 = 0xa1a1aaff, .fg_3 = 0x5b5b64ff, .accent = 0x6366f1ff, .accent_ink = 0x8c8ef5ff, .ok = 0x22c55eff, .ok_ink = 0x22c55eff, .warn = 0xf59e0bff, .warn_ink = 0xf59e0bff, .danger = 0xef4444ff, .danger_ink = 0xf36e6eff, .selection = 0x6366f124, .border = 0x26262cff, .shadow = 0x0000005c };
 }
 fn builtinAnsi(id: []const u8) [16]u32 {
+    if (!std.mem.eql(u8, id, "sauber") and !std.mem.eql(u8, id, "dark") and !std.mem.eql(u8, id, "light")) if (presets.ansi(UiTokens, id)) |colors| return colors;
     if (std.mem.eql(u8, id, "sauber")) return .{ 0x0f172aff, 0xdc4c3fff, 0x10b981ff, 0xd49a0cff, 0x2563ebff, 0xc241e0ff, 0x06b6d4ff, 0xd6e2f0ff, 0x64748bff, 0xdd7975ff, 0x3fcd76ff, 0xc6bb00ff, 0xa7abf2ff, 0xe17ee1ff, 0x048b8fff, 0xa4801cff };
     // Existing VT engine default palette, used where the prototypes specify
     // semantic inks but do not define a complete raw ANSI palette.
@@ -449,6 +460,10 @@ fn builtinTheme(id: []const u8) importer.Theme {
         result.fg = 0x1345f6ff;
         result.cursor = 0x000000ff;
         result.selection = 0xb3d7ffff;
+    }
+    if (presets.tokens(UiTokens, id) != null and !std.mem.eql(u8, id, "dark") and !std.mem.eql(u8, id, "light") and !std.mem.eql(u8, id, "sauber")) {
+        result.name = presets.name(id);
+        result.cursor = colors.accent_ink;
     }
     // Preserve the terminal palettes that the existing implementation exposes;
     // the registry is now their global identity/lookup owner.
@@ -506,7 +521,7 @@ fn testSource(allocator: std.mem.Allocator, red: []const u8) ![]u8 {
 test "registry keeps builtins and legacy aliases as real stable identities" {
     var registry = try Registry.init(std.testing.allocator);
     defer registry.deinit();
-    try std.testing.expectEqual(@as(usize, 8), registry.counts().all);
+    try std.testing.expectEqual(@as(usize, 17), registry.counts().all);
     try std.testing.expectEqualStrings("catppuccin-mocha", registry.get("CATPPUCCIN_MOCHA").?.id);
     try std.testing.expectEqual(@as(u32, 0x282a36ff), registry.get("dracula").?.theme.bg);
     try std.testing.expectEqual(@as(u32, 0x000000ff), registry.get("sauber").?.theme.cursor);
@@ -576,4 +591,18 @@ test "favorites persist independently and failed replacement leaves marker uncha
     try reloaded.loadFavorites(std.testing.io, tmp.dir, "themes/favorites.json");
     try std.testing.expect(reloaded.get("dark").?.favorite);
     try std.testing.expectEqual(@as(usize, 1), reloaded.counts().favorites);
+}
+
+test "V3 presets have complete semantic tokens opaque ANSI and protected identities" {
+    var registry = try Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    for (presets.ids) |id| {
+        const record = registry.get(id).?;
+        try std.testing.expectEqualDeep(builtinTokens(id), record.ui_tokens);
+        try std.testing.expectEqual(@as(u32, 255), record.ui_tokens.app & 255);
+        for (record.theme.ansi) |color| try std.testing.expectEqual(@as(u32, 255), color & 255);
+        try std.testing.expectError(error.BuiltinThemeProtected, registry.checkRemove(id, registry.revision, .{ .saved = "dark", .draft = "dark" }));
+        try std.testing.expect(importer.builtinId(id) != null);
+    }
+    try std.testing.expect(registry.get("forest").?.ui_tokens.app != registry.get("ocean").?.ui_tokens.app);
 }

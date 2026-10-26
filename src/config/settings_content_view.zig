@@ -4,9 +4,9 @@ const ui = @import("ui");
 const Controller = @import("settings_controller.zig").Controller;
 const values = @import("settings_values.zig");
 const schema = @import("settings_schema.zig");
-const mock = @import("../ui/mockups/common.zig");
+const design = @import("../ui/design_tokens.zig");
 pub const styles = @import("settings_styles.zig");
-pub const Action = enum { reset_defaults, revert, save, import_theme, export_logs, clear_logs, clear_all, open_config_dir };
+pub const Action = enum { reset_defaults, revert, save, import_theme, export_logs, clear_logs, clear_all, open_config_dir, credential_help };
 pub const ActionState = struct { enabled: bool = true, reason: ?[]const u8 = null };
 pub const Key = struct { section: []const u8, key: []const u8 };
 pub const Hooks = struct {
@@ -354,9 +354,15 @@ pub const Binding = struct {
     fn saveButtonStyle(available: bool) styles.ButtonStyle {
         var result = styles.textButton();
         result.height = .{ .px = 32 };
-        result.padding = .{ .left = 8, .right = 8 };
-        result.background = if (available) styles.theme.current().accent else styles.theme.current().selection;
-        result.text_color = if (available) ui.Color.WHITE else styles.theme.current().fg_3;
+        result.padding = .{ .left = 12, .right = 12 };
+        result.width = .{ .px = 92 };
+        result.font_size = 12;
+        result.font_weight = 500;
+        result.gap = 6;
+        result.background = styles.theme.current().action_accent;
+        result.gradient = .{ .from = if (available) styles.theme.current().action_accent else ui.Color.hex(0x7c73fa), .to = if (available) styles.theme.current().action_accent_2 else styles.theme.current().action_accent, .direction = .diagonal };
+        result.text_color = styles.theme.actionForeground(styles.theme.current().action_accent);
+        result.opacity = if (available) 1 else 0.4;
         return result;
     }
     fn cleanup(self: *Binding) void {
@@ -428,7 +434,7 @@ pub const Binding = struct {
         self.revert_disabled.set(!self.controller.model.dirty or self.controller.state() == .saving or if (self.hooks.appearance) |host| host.isBusy() else false);
         self.save_style.set(saveButtonStyle(available));
         self.save_disabled.set(!available);
-        self.save_tint.set(if (available) ui.Color.WHITE else styles.theme.current().fg_2);
+        self.save_tint.set(styles.theme.actionForeground(styles.theme.current().action_accent));
         self.saving.set(self.controller.state() == .saving);
         var message = footerStateText(self.controller);
         // Native permission callbacks outlive a field refresh and can rebuild
@@ -471,7 +477,7 @@ pub const Binding = struct {
                 switch (current) {
                     .boolean => |enabled| {
                         const track = findToggle(shell) orelse shell;
-                        track.setBackground(if (enabled) mock.tok.acc else mock.tok.off_dot);
+                        track.setBackground(if (enabled) design.tok.acc else design.tok.off_dot);
                         track.style.justify = if (enabled) .end else .start;
                     },
                     else => {
@@ -487,7 +493,7 @@ pub const Binding = struct {
             }
             if (value == null) {
                 if (findToggle(shell)) |track| {
-                    track.setBackground(mock.tok.off_dot);
+                    track.setBackground(design.tok.off_dot);
                     track.style.justify = .start;
                 } else if (firstText(shell)) |leaf| {
                     try leaf.setTextContent(cx.allocator, "—");
@@ -546,10 +552,17 @@ pub const Binding = struct {
         var style = styles.textButton();
         style.height = .{ .px = 32 };
         style.padding = .{ .left = 8, .right = 8 };
-        style.background = if (primary) styles.theme.current().accent else ui.Color.TRANSPARENT;
-        style.text_color = if (primary) ui.Color.WHITE else styles.theme.current().fg_2;
-        const node = try ui.widgets.Button(.{ .label = label, .icon_asset = if (action == .reset_defaults) null else icon, .icon_size = @as(f32, 14), .icon_tint = if (primary) self.save_tint else try self.scope.createSignal(?ui.Color, styles.theme.current().fg_2), .a11y_label = label, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .secondary), .disabled = if (primary) self.save_disabled else if (action == .revert) self.revert_disabled else self.saving, .loading = if (primary) self.saving else try self.scope.createSignal(bool, false), .on_click = cx.on(ActionClick, click, ActionClick.activate), .base_style = @as(ui.Source(styles.ButtonStyle), if (primary) .{ .signal = self.save_style } else .{ .value = style }), .hover_style = @as(?ui.BoxStyle, if (primary) null else styles.buttonHover()) }).mount(self.scope, cx);
+        style.background = if (primary) styles.theme.current().action_accent else ui.Color.TRANSPARENT;
+        style.text_color = if (primary) styles.theme.actionForeground(styles.theme.current().action_accent) else styles.theme.current().fg_2;
+        const node = try ui.widgets.Button(.{ .label = label, .icon_asset = if (action == .reset_defaults) null else icon, .icon_size = @as(f32, 14), .icon_tint = if (primary) self.save_tint else try self.scope.createSignal(?ui.Color, styles.theme.current().fg_2), .a11y_label = label, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .secondary), .disabled = if (primary) self.save_disabled else if (action == .revert) self.revert_disabled else self.saving, .loading = if (primary) self.saving else try self.scope.createSignal(bool, false), .on_click = cx.on(ActionClick, click, ActionClick.activate), .base_style = @as(ui.Source(styles.ButtonStyle), if (primary) .{ .signal = self.save_style } else .{ .value = style }), .hover_style = @as(?ui.BoxStyle, if (primary) .{ .background = styles.theme.current().action_accent } else styles.buttonHover()), .pressed_style = @as(?ui.BoxStyle, if (primary) .{ .background = styles.theme.current().action_accent } else null) }).mount(self.scope, cx);
         node.meta.ownership.meta.test_id = id;
+        if (primary) try self.scope.createEffect(.{ .bound = self, .node = node }, struct {
+            fn run(args: anytype) void {
+                const disabled = args.bound.save_disabled.get();
+                const theme = styles.theme.current();
+                args.node.setStyleInline(args.bound.cx.allocator, .{ .background = theme.action_accent, .gradient = .{ .from = if (disabled) ui.Color.hex(0x7c73fa) else theme.action_accent, .to = if (disabled) theme.action_accent else theme.action_accent_2, .direction = .diagonal }, .opacity = if (disabled) @as(f32, 0.4) else @as(f32, 1) });
+            }
+        }.run);
         try tip.trigger.appendChild(cx.allocator, node);
         return .{ .wrapper = tip.wrapper, .button = node };
     }

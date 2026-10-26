@@ -403,3 +403,26 @@ test "connection progress view log follow pauses on scroll new rows stay pending
     try std.testing.expectEqual(@as(f32, 458), f.view.dialog.globalRect().h);
     try std.testing.expectApproxEqAbs(f.view.dialog.globalRect().y + f.view.dialog.globalRect().h - 12, f.view.footer.globalRect().y + 34, 0.01);
 }
+
+test "connection progress viewport width changes preserve reachable actions at unchanged height" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.record(0, 1, .transport, .started);
+    try f.show(f.snapshot(&direct));
+    f.cx.advanceFrameClock();
+    _ = f.cx.render();
+    const before_height = f.view.dialog.globalRect().h;
+    f.cx.setViewport(700, 900);
+    f.cx.advanceFrameClock();
+    _ = f.cx.render();
+    try std.testing.expect(f.view.dialog.globalRect().w <= 684);
+    try std.testing.expect(f.view.dialog.globalRect().h <= before_height);
+    f.cx.setViewport(620, 900);
+    f.cx.advanceFrameClock();
+    _ = f.cx.render();
+    try std.testing.expect(f.view.dialog.globalRect().w <= 604);
+    const panel = f.view.dialog.globalRect();
+    const cancel = f.view.cancel_button.?.globalRect();
+    try std.testing.expect(cancel.x >= panel.x and cancel.x + cancel.w <= panel.x + panel.w);
+}

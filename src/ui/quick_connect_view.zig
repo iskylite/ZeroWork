@@ -16,6 +16,7 @@ pub const SavedAsset = struct {
     group: ?[]const u8 = null,
     hops: usize = 0,
     protocol: hosts.Protocol = .ssh,
+    os: @import("session_icon.zig").Os = .unknown,
 };
 pub const Callbacks = struct {
     context: *anyopaque,
@@ -160,7 +161,7 @@ pub const View = struct {
         self.host_input = try self.field(field_row, "目标地址", "quick.host", self.host_value, 330);
         self.port_input = try self.field(field_row, "端口", "quick.port", self.port_value, 146);
         self.user_input = try self.field(self.temporary_area, "登录用户", "quick.user", self.user_value, null);
-        self.hint = try label(cx, self.body, "上下选择 · Enter 打开新会话 · Esc 关闭", 10.5, 400, true);
+        self.hint = try label(cx, self.body, "点击即连接 · 上下选择后 Enter · Esc 关闭", 10.5, 400, true);
         self.hint.setStyleInline(cx.allocator, S.line(16));
         const gap = try ui.box(cx, S.line(2), .{});
         try self.body.appendChild(cx.allocator, gap);
@@ -348,7 +349,7 @@ pub const View = struct {
             const caption = try std.fmt.allocPrint(self.cx.allocator, "已保存的主机 · {d} 个结果", .{self.matches.items.len});
             defer self.cx.allocator.free(caption);
             try self.result_label.setTextContent(self.cx.allocator, caption);
-            try self.hint.setTextContent(self.cx.allocator, "上下选择 · Enter 打开新会话 · Esc 关闭");
+            try self.hint.setTextContent(self.cx.allocator, "点击即连接 · 上下选择后 Enter · Esc 关闭");
             self.primary_label.set("连接所选主机");
             self.secondary_label.set("新建主机配置");
             self.disabled.set(self.selected == null);
@@ -418,7 +419,9 @@ pub const View = struct {
             try self.scroll.content.appendChild(self.cx.allocator, node);
             const content = try ui.box(self.cx, S.rowContent(), .{});
             try node.appendChild(self.cx.allocator, content);
-            try content.appendChild(self.cx.allocator, try ui.iconTint(self.cx, if (asset.protocol == .sftp) ui.icons.folder_open else ui.icons.server, S.theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 }));
+            const icon = try ui.iconTint(self.cx, @import("session_icon.zig").forOs(asset.os) orelse (if (asset.protocol == .sftp) ui.icons.folder_open else ui.icons.server), S.theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
+            icon.meta.ownership.meta.test_id = "quick.saved.icon";
+            try content.appendChild(self.cx.allocator, icon);
             const name = try label(self.cx, content, asset.name, 11, 500, false);
             name.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 108 }, .flex_shrink = 0 });
             const endpoint = try std.fmt.allocPrint(self.cx.allocator, "{s}@{s}:{d}", .{ asset.user, asset.host, asset.port });
@@ -514,7 +517,7 @@ const Row = struct {
         if (!self.view.isOpen() or self.view.dirty or self.view.generation != self.generation) return;
         for (self.view.matches.items) |index| if (std.meta.eql(self.owner, self.view.source.?.assets[index].owner)) {
             self.view.selected = self.owner;
-            self.view.invalidate();
+            self.view.activate();
             return;
         };
     }

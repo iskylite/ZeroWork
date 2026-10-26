@@ -14,6 +14,17 @@ const Actions = @import("file_actions_view.zig");
 const Copy = @import("file_copy_view.zig");
 const Mkdir = @import("file_mkdir_view.zig");
 const S = @import("file_workspace_styles.zig");
+const promises = @import("../platform/file_promises.zig");
+extern fn mkdtemp([*:0]u8) ?[*:0]u8;
+pub const ExportStatus = enum { pending, succeeded, failed, cancelled };
+pub const ExportCallbacks = struct {
+    context: ?*anyopaque = null,
+    start: ?*const fn (?*anyopaque, controller.FrozenTransfer) anyerror!u64 = null,
+    poll: ?*const fn (?*anyopaque, u64) ExportStatus = null,
+    cancel: ?*const fn (?*anyopaque, u64) void = null,
+};
+const PromisedDownload = struct { job: u64, index: u32, staging: []const u8, path: [:0]const u8 };
+const Export = struct { arena: std.heap.ArenaAllocator, token: u64, intent: controller.FrozenTransfer, jobs: std.ArrayList(PromisedDownload) = .empty, completed: usize = 0, released: bool = false };
 
 pub const Options = struct {
     app: *Application,
@@ -22,6 +33,7 @@ pub const Options = struct {
     callbacks: controller.Callbacks = .{},
     remote_writable: bool = false,
     confirm_transfer: ?Copy.Submit = null,
+    exports: ExportCallbacks = .{},
     transfer_config: ?*const @import("../config/config.zig").Config = null,
 };
 const Entry = struct {
@@ -44,11 +56,109 @@ const Entry = struct {
     retry_disabled: [2]?*ui.Signal(bool) = .{ null, null },
     paint_colors: S.theme.Colors,
     last_revision: u64 = 0,
+    exports: std.ArrayList(Export) = .empty,
     scope_disposed: bool = false,
     rollback: bool = false,
     release_requested: bool = false,
     released: bool = false,
 
+    fn beginExport(raw: ?*anyopaque, request: View.ExternalExport) !bool {
+        const self: *Entry = @ptrCast(@alignCast(raw orelse return error.FilePresentationUnavailable));
+        if (!self.model_live or self.model.closing or self.scope_disposed or self.host.options.exports.start == null or self.host.options.exports.poll == null) return error.FileTransferUnavailable;
+        const projection = self.model.projection() orelse return error.FileProjectionUnavailable;
+        const source = projection.panes[1];
+        const local = projection.panes[0];
+        if (!std.meta.eql(source.stamp, request.source) or source.selection_revision != request.selection_revision or !self.owner.eql(request.source.owner)) return error.StaleFileSelection;
+        if (request.paths.len == 0 or request.paths.len != source.selected_keys.len) return error.StaleFileSelection;
+        var arena = std.heap.ArenaAllocator.init(self.host.allocator);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+        const paths = try a.alloc([]const u8, request.paths.len);
+        const names = try a.alloc([*:0]const u8, request.paths.len);
+        for (request.paths, 0..) |path, i| {
+            var found = false;
+            for (source.entries) |entry| if (std.mem.eql(u8, entry.absolute_path, path) and entry.kind == .file) {
+                found = true;
+                break;
+            };
+            if (!found) return error.OnlyRegularFilesCanBeDraggedOut;
+            if (!std.mem.eql(u8, path, source.selected_keys[i])) return error.StaleFileSelection;
+            paths[i] = try a.dupe(u8, path);
+            names[i] = try a.dupeSentinel(u8, std.fs.path.basename(path), 0);
+        }
+        try self.exports.ensureUnusedCapacity(self.host.allocator, 1);
+        const source_directory = try a.dupe(u8, source.resolved_path);
+        const token = promises.begin(self.host.cx().native_window_id, names, request.x, request.y);
+        if (token == 0) return error.NativeFileDragUnavailable;
+        self.exports.appendAssumeCapacity(.{ .arena = arena, .token = token, .intent = .{
+            .owner = self.owner,
+            .source = .{ .stamp = source.stamp, .endpoint = .{ .sftp = self.model.options.remote.endpoint }, .selection_revision = source.selection_revision, .directory = source_directory },
+            .destination = .{ .stamp = local.stamp, .endpoint = .{ .local_fs = self.model.options.local.endpoint }, .selection_revision = local.selection_revision, .directory = "" },
+            .paths = paths,
+        } });
+        return true;
+    }
+    fn pollExports(self: *Entry) !bool {
+        var at: usize = 0;
+        while (at < self.exports.items.len) {
+            const export_ = &self.exports.items[at];
+            const a = export_.arena.allocator();
+            const closing = !self.model_live or self.model.closing or self.scope_disposed;
+            if (!export_.released and (closing or promises.status(export_.token) == 2)) {
+                promises.release(export_.token);
+                export_.released = true;
+                if (self.host.options.exports.cancel) |cancel| for (export_.jobs.items) |job| cancel(self.host.options.exports.context, job.job);
+            }
+            if (!export_.released) while (true) {
+                var index: u32 = 0;
+                var destination: [8192]u8 = undefined;
+                const ready = promises.poll(export_.token, &index, &destination);
+                if (ready <= 0) break;
+                if (index >= export_.intent.paths.len) {
+                    _ = promises.complete(export_.token, index, null);
+                    export_.completed += 1;
+                    continue;
+                }
+                var scratch = "/tmp/zerowork-finder-XXXXXX".* ++ .{0};
+                const staging = mkdtemp(&scratch) orelse {
+                    _ = promises.complete(export_.token, index, null);
+                    export_.completed += 1;
+                    continue;
+                };
+                const directory = try a.dupe(u8, std.mem.span(staging));
+                const staged_path = try std.fs.path.joinZ(a, &.{ directory, std.fs.path.basename(export_.intent.paths[index]) });
+                var intent = export_.intent;
+                intent.destination.directory = directory;
+                intent.paths = export_.intent.paths[index .. index + 1];
+                const job = self.host.options.exports.start.?(self.host.options.exports.context, intent) catch {
+                    _ = promises.complete(export_.token, index, null);
+                    export_.completed += 1;
+                    std.Io.Dir.cwd().deleteTree(self.host.options.app.workspace.io, directory) catch {};
+                    continue;
+                };
+                try export_.jobs.append(a, .{ .job = job, .index = index, .staging = directory, .path = staged_path });
+            };
+            var j: usize = 0;
+            while (j < export_.jobs.items.len) {
+                const job = export_.jobs.items[j];
+                const state = self.host.options.exports.poll.?(self.host.options.exports.context, job.job);
+                if (state == .pending) {
+                    j += 1;
+                    continue;
+                }
+                if (!export_.released) _ = promises.complete(export_.token, job.index, if (state == .succeeded) job.path.ptr else null);
+                std.Io.Dir.cwd().deleteTree(self.host.options.app.workspace.io, job.staging) catch {};
+                _ = export_.jobs.orderedRemove(j);
+                export_.completed += 1;
+            }
+            if (export_.jobs.items.len == 0 and (export_.released or export_.completed == export_.intent.paths.len)) {
+                if (!export_.released) promises.release(export_.token);
+                export_.arena.deinit();
+                _ = self.exports.orderedRemove(at);
+            } else at += 1;
+        }
+        return self.exports.items.len > 0;
+    }
     fn scopeDropped(self: *Entry) void {
         // Workspace owns an adopted scope and destroys its nodes exactly once.
         // The controller stays alive until its accepted requests really drain.
@@ -222,6 +332,7 @@ pub const Presentation = struct {
         defer self.ticking = false;
         var active = false;
         for (self.entries.items) |entry| {
+            active = try entry.pollExports() or active;
             if (entry.released) continue;
             if (entry.model_live) {
                 const state = self.options.app.sessions.queryState(entry.owner);
@@ -262,7 +373,11 @@ pub const Presentation = struct {
     }
     pub fn deinit(self: *Presentation) error{Busy}!void {
         for (self.entries.items) |entry| if (!entry.released or entry.model_live or !entry.scope_disposed) return error.Busy;
-        for (self.entries.items) |entry| self.allocator.destroy(entry);
+        for (self.entries.items) |entry| if (entry.exports.items.len > 0) return error.Busy;
+        for (self.entries.items) |entry| {
+            entry.exports.deinit(self.allocator);
+            self.allocator.destroy(entry);
+        }
         self.entries.deinit(self.allocator);
         self.arena.deinit();
         self.allocator.destroy(self);
@@ -275,6 +390,23 @@ pub const Presentation = struct {
     pub fn contentFor(self: *Presentation, owner: identity.SessionHandle) ?*ui.Node {
         const entry = self.find(owner) orelse return null;
         return if (!entry.scope_disposed and !entry.released) entry.root else null;
+    }
+    pub fn transferScopeFor(self: *Presentation, owner: identity.SessionHandle) ?*ui.Scope {
+        const entry = self.find(owner) orelse return null;
+        if (entry.scope_disposed or entry.released) return null;
+        return if (entry.view) |view| view.scope else null;
+    }
+    pub fn transferSlotFor(self: *Presentation, owner: identity.SessionHandle, side: View.Side) ?*ui.Node {
+        const entry = self.find(owner) orelse return null;
+        if (entry.scope_disposed or entry.released) return null;
+        return if (entry.view) |view| view.transferSlot(side) else null;
+    }
+    /// The file workspace reserves a 24-point strip slot above both cards.
+    pub fn assistantBounds(self: *Presentation, owner: identity.SessionHandle) ?ui.ComputedRect {
+        const entry = self.find(owner) orelse return null;
+        if (entry.scope_disposed or entry.released) return null;
+        const root = entry.root orelse return null;
+        return if (entry.view) |view| view.root.globalRect() else root.globalRect();
     }
     /// The app's global theme/material change updates loading and ready views.
     pub fn retheme(self: *Presentation) void {
@@ -358,6 +490,8 @@ pub const Presentation = struct {
             try entry.loading.?.appendChild(self.allocator, card);
         }
         entry.view = try View.View.mount(self.cx(), scope, entry.model.viewCallbacks());
+        entry.view.?.callbacks.export_context = entry;
+        entry.view.?.callbacks.export_files = Entry.beginExport;
         try root.appendChild(self.allocator, entry.view.?.root);
         for (entry.view.?.panes, 0..) |pane, i| {
             entry.copy_views[i] = try Copy.View.mount(self.cx(), scope, pane, entry, Entry.confirmTransfer);

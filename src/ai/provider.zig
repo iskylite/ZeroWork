@@ -1,5 +1,5 @@
 const std = @import("std");
-pub const Effort = enum { low, medium, high, xhigh, max };
+pub const Effort = enum { low, medium, high, xhigh, max, none, ultra };
 pub const Role = enum { user, assistant, tool };
 pub const Tool = @import("tool_scope.zig").Tool;
 pub const max_tool_definitions = 16;

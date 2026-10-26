@@ -119,7 +119,7 @@ pub const Coordinator = struct {
     attention: std.ArrayList(Attention) = .empty,
     definitions: std.ArrayList(OwnedDefinition) = .empty,
     notification_records: std.ArrayList(NotificationRecord) = .empty,
-    presentation_queue: [32]u64 = undefined,
+    presentation_queue: [256]u64 = undefined,
     presentation_count: usize = 0,
     next_fact: u64 = 1,
 
@@ -278,6 +278,7 @@ pub const Coordinator = struct {
     }
     pub fn pauseNotification(self: *Coordinator, fact_id: u64, paused: bool) void {
         for (self.notification_records.items) |*record| if (record.fact_id == fact_id) {
+            if (record.paused and !paused and !record.persistent()) record.remaining_ms = if (record.event.actions.len > 0) 8000 else 4000;
             record.paused = paused;
             return;
         };
@@ -314,9 +315,10 @@ pub const Coordinator = struct {
                 i += 1;
                 continue;
             }
+            const has_slot = focused and visible < output.len;
             if (!record.persistent()) {
                 const elapsed = now_ms -| record.last_tick_ms;
-                if (!record.paused or !focused) record.remaining_ms -|= elapsed;
+                if (record.presentation == .visible and has_slot and !record.paused) record.remaining_ms -|= elapsed;
                 record.last_tick_ms = now_ms;
                 if (record.remaining_ms == 0) {
                     record.presentation = .expired;
@@ -324,11 +326,12 @@ pub const Coordinator = struct {
                     continue;
                 }
             } else record.last_tick_ms = now_ms;
-            if (record.event.owner.window_id == window_id and focused and visible < output.len) {
+            if (has_slot) {
                 record.presentation = .visible;
                 output[visible] = record;
                 visible += 1;
             }
+            if (!has_slot) record.presentation = .queued;
             i += 1;
         }
         return visible;
@@ -350,7 +353,17 @@ pub const Coordinator = struct {
             };
             self.dequeue(removed);
         }
-        self.presentation_queue[self.presentation_count] = fact_id;
+        var insertion = self.presentation_count;
+        if (self.recordFor(fact_id)) |incoming| if (incoming.persistent()) {
+            for (self.presentation_queue[0..self.presentation_count], 0..) |id, index| {
+                if (self.recordFor(id)) |record| if (!record.persistent()) {
+                    insertion = index;
+                    break;
+                };
+            }
+        };
+        std.mem.copyBackwards(u64, self.presentation_queue[insertion + 1 .. self.presentation_count + 1], self.presentation_queue[insertion..self.presentation_count]);
+        self.presentation_queue[insertion] = fact_id;
         self.presentation_count += 1;
     }
     fn dequeue(self: *Coordinator, fact_id: u64) void {
@@ -562,7 +575,7 @@ pub const NotificationRecord = struct {
     system: Receipt = .{ .disposition = .not_applicable },
     presentation: Presentation = .queued,
     published_ms: u64,
-    remaining_ms: u64 = 3000,
+    remaining_ms: u64 = 4000,
     last_tick_ms: u64,
     paused: bool = false,
     owner_ended: bool = false,
@@ -599,5 +612,5 @@ fn copyNotification(allocator: std.mem.Allocator, event: NotificationEvent, fact
         actions[i].label = try owned.dupe(u8, action.label);
     }
     copy.actions = actions;
-    return .{ .arena = arena, .fact_id = fact_id, .event = copy, .published_ms = now_ms, .last_tick_ms = now_ms };
+    return .{ .arena = arena, .fact_id = fact_id, .event = copy, .published_ms = now_ms, .last_tick_ms = now_ms, .remaining_ms = if (event.actions.len > 0) 8000 else 4000 };
 }

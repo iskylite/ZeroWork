@@ -52,6 +52,7 @@ pub fn writeConfig(value: *config.Config, section: []const u8, key: []const u8, 
     }
     if (std.mem.eql(u8, section, "ui")) {
         if (std.mem.eql(u8, key, "theme")) return setText(&value.ui.theme, next);
+        if (std.mem.eql(u8, key, "icon_background")) return setEnum(config.IconBackground, &value.ui.icon_background, next);
         if (std.mem.eql(u8, key, "font_weight")) return setText(&value.ui.font_weight, next);
         if (std.mem.eql(u8, key, "cursor_style")) return setText(&value.ui.cursor_style, next);
         if (std.mem.eql(u8, key, "input_line_highlight")) return setBool(&value.ui.input_line_highlight, next);
@@ -176,6 +177,7 @@ pub fn read(value: config.Config, section: []const u8, key: []const u8) ?Value {
     if (std.mem.eql(u8, section, "completion") and std.mem.eql(u8, key, "enabled")) return .{ .boolean = value.completion.enabled };
     if (std.mem.eql(u8, section, "ui")) {
         if (std.mem.eql(u8, key, "theme")) return .{ .text = value.ui.theme };
+        if (std.mem.eql(u8, key, "icon_background")) return .{ .text = @tagName(value.ui.icon_background) };
         if (std.mem.eql(u8, key, "font_weight")) return .{ .text = value.ui.font_weight };
         if (std.mem.eql(u8, key, "cursor_style")) return .{ .text = value.ui.cursor_style };
         if (std.mem.eql(u8, key, "input_line_highlight")) return .{ .boolean = value.ui.input_line_highlight };
@@ -295,4 +297,12 @@ test "settings reconnect backoff accepts prototype comma list and legacy bracket
     try std.testing.expectEqual([5]u8{ 2, 3, 5, 8, 13 }, value.ssh.reconnect_backoff);
     try std.testing.expectError(error.InvalidValue, writeConfig(&value, "ssh", "reconnect_backoff", .{ .text = "1,2,3,4,256" }));
     try std.testing.expectError(error.InvalidValue, writeConfig(&value, "ssh", "reconnect_backoff", .{ .text = "1,2" }));
+}
+
+test "icon background accepts only supported choices" {
+    var value: config.Config = .{};
+    try writeConfig(&value, "ui", "icon_background", .{ .text = "light" });
+    try std.testing.expectEqual(config.IconBackground.light, value.ui.icon_background);
+    try std.testing.expectError(error.InvalidValue, writeConfig(&value, "ui", "icon_background", .{ .text = "auto" }));
+    try std.testing.expectEqual(config.IconBackground.light, value.ui.icon_background);
 }

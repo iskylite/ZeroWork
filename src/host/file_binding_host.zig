@@ -359,6 +359,19 @@ pub const FileBindingHost = struct {
         return error.UnknownOperation;
     }
 
+    pub fn osDetection(self: *FileBindingHost, owner: identity.SessionHandle) ?struct { kind: @import("../proto/ssh/remote_os.zig").Kind, source: sessions.SessionCreateSpec } {
+        for (self.bindings.items) |binding| if (binding.owner.eql(owner) and !binding.closing) {
+            const backend = binding.service orelse continue;
+            const service = switch (backend) {
+                .dedicated => |value| value,
+                .shared => continue,
+            };
+            const kind = service.detected_os.load(.acquire);
+            if (kind != .unknown) return .{ .kind = kind, .source = binding.source.value };
+        };
+        return null;
+    }
+
     pub fn state(self: *FileBindingHost, handle: sessions.ServiceHandle) ?State {
         for (self.bindings.items) |binding| if (binding.handles.directory.eql(handle) or binding.handles.file_read.eql(handle)) return .{
             .owner = binding.owner,

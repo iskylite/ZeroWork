@@ -39,23 +39,23 @@ pub fn iconButton(radius: f32) ui.BoxStyle {
 // R25 fixed chip slots keep native Button focus and click behavior while
 // matching the declared dot, icon, label and chevron positions.
 pub fn chipIcon(kind: Kind) ui.BoxStyle {
-    const size: f32 = if (kind == .permission or kind == .usage or kind == .effort) 14 else 10;
-    return slot(if (kind == .effort) 8 else 10, (24 - size) / 2, size, size);
+    const size: f32 = if (kind == .usage) 8 else if (kind == .permission) 12 else if (kind == .effort) 14 else 10;
+    return slot(8, (24 - size) / 2, size, size);
 }
 pub fn chipLabel(kind: Kind) ui.BoxStyle {
     return switch (kind) {
-        .permission => slot(30, 4, 60, 16),
+        .permission => slot(24, 5, 50, 14),
         .model => slot(22, 4, 108, 16),
-        .usage => slot(28, 4, 30, 16),
+        .usage => slot(20, 5, 30, 14),
         .effort => slot(26, 4, 32, 16),
         else => unreachable,
     };
 }
 pub fn chipChevron(kind: Kind) ui.BoxStyle {
-    return slot(if (kind == .permission) 94 else if (kind == .effort) 62 else 170, 7, 10, 10);
+    return if (kind == .permission) slot(78, 6, 12, 12) else slot(if (kind == .effort) 62 else 170, 7, 10, 10);
 }
 pub fn modelVision() ui.BoxStyle {
-    return slot(8, 5, 14, 14);
+    return .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 };
 }
 fn slot(x: f32, y: f32, slot_width: f32, slot_height: f32) ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = x }, .top = .{ .px = y } }, .width = .{ .px = slot_width }, .height = .{ .px = slot_height }, .flex_shrink = 0, .min_width = 0 };
@@ -200,24 +200,26 @@ pub fn tuneInput(input: *ui.widgets.input.InputResult) void {
     };
 }
 
+pub fn naturalChip() ui.BoxStyle {
+    var result = chip(0, 8);
+    result.width = .{ .fit = .{} };
+    return result;
+}
 pub fn compactModelWidth(model_width: f32, effort_width: f32, vision: bool) f32 {
-    return 40 + visionSpace(vision) + model_width + effort_width;
+    return 32 + (if (vision) @as(f32, 16) else 0) + model_width + (if (effort_width > 0) effort_width + 4 else 0);
 }
-fn visionSpace(vision: bool) f32 {
-    return if (vision) 18 else 0;
+pub fn compactModelLabel(_: f32, _: bool) ui.BoxStyle {
+    return .{ .position = .relative, .inset = .{}, .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .max_width = 100, .flex_shrink = 0 };
 }
-pub fn compactModelLabel(label_width: f32, vision: bool) ui.BoxStyle {
-    return slot(8 + visionSpace(vision), 4, label_width, 16);
+pub fn compactEffortLabel(_: f32, _: f32, _: bool) ui.BoxStyle {
+    return .{ .position = .relative, .inset = .{}, .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .flex_shrink = 0 };
 }
-pub fn compactEffortLabel(model_width: f32, effort_width: f32, vision: bool) ui.BoxStyle {
-    return slot(14 + visionSpace(vision) + model_width, 4, effort_width, 16);
-}
-pub fn compactModelChevron(model_width: f32, effort_width: f32, vision: bool) ui.BoxStyle {
-    return slot(20 + visionSpace(vision) + model_width + effort_width, 7, 10, 10);
+pub fn compactModelChevron(_: f32, _: f32, _: bool) ui.BoxStyle {
+    return .{ .position = .relative, .inset = .{}, .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 };
 }
 
 pub fn visionTarget() ui.BoxStyle {
-    return .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 };
 }
 
 pub fn modelMarker() ui.BoxStyle {

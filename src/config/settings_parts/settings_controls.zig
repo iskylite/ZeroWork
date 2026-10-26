@@ -308,11 +308,34 @@ pub const Section = struct {
         click.* = .{ .page = self.page, .key = key };
         try self.page.bound.scope.onCleanup(DirectoryClick, click, DirectoryClick.cleanup);
         const path = values.read(self.page.bound.controller.model.value, key.section, key.key).?.text;
-        const node = try ui.widgets.Button(.{ .label = try owned(self.page.bound.scope, path), .icon_asset = ui.icons.folder, .variant = .secondary, .disabled = self.page.bound.controller.state() == .saving, .on_click = self.page.cx.on(DirectoryClick, click, DirectoryClick.run), .base_style = S.fieldButton(), .hover_style = S.buttonHover() }).mount(self.page.bound.scope, self.page.cx);
+        const full_path = try owned(self.page.bound.scope, path);
+        const open = try self.page.bound.scope.createSignal(bool, false);
+        const tip = try ui.widgets.Tooltip(.{ .text = full_path, .open = open, .width = @as(f32, S.geometry.help_width), .wrap = .char, .open_delay_ms = 450 }).mount(self.page.bound.scope, self.page.cx);
+        var style = S.fieldButton();
+        style.gap = 0;
+        style.min_width = 0;
+        const node = try ui.widgets.Button(.{ .a11y_label = full_path, .variant = .secondary, .disabled = self.page.bound.controller.state() == .saving, .on_click = self.page.cx.on(DirectoryClick, click, DirectoryClick.run), .base_style = style, .hover_style = S.buttonHover() }).mount(self.page.bound.scope, self.page.cx);
+        // Own this content slot: dynamic paths need a constrained ellipsis label,
+        // while the field and folder icon retain stable alignment and hit bounds.
+        const content = try ui.box(self.page.cx, .{ .width = .fill(), .min_width = 0, .flex = 1, .direction = .row, .align_items = .center, .gap = 6 }, .{});
+        try content.appendChild(self.page.cx.allocator, try ui.iconTint(self.page.cx, ui.icons.folder, S.theme.current().fg_1, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 }));
+        const label_node = try ui.text(self.page.cx, full_path, .{ .font_size = 12, .line_height = 1.5, .color = S.theme.current().fg_1, .text_overflow = .ellipsis });
+        label_node.setStyleInline(self.page.cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+        label_node.meta.ownership.meta.test_id = "settings.directory.label";
+        try content.appendChild(self.page.cx.allocator, label_node);
+        try node.appendChild(self.page.cx.allocator, content);
+        try tip.trigger.appendChild(self.page.cx.allocator, node);
+        tip.content.meta.ownership.meta.test_id = "settings.directory.tooltip";
+        const focus = try self.page.bound.scope.allocator.create(Help);
+        focus.* = .{ .page = self.page, .open = open };
+        try self.page.bound.scope.onCleanup(Help, focus, Help.cleanup);
+        node.behavior.events.on_focus = .{ .callback = Help.focus, .context = focus };
+        node.behavior.events.on_blur = .{ .callback = Help.blur, .context = focus };
+        try self.page.bound.registerTooltip(open);
         click.node = node;
         try self.page.fixed_controls.append(self.page.bound.scope.allocator, node);
         node.meta.ownership.meta.test_id = try stableId(self.page.bound.scope, "settings.field.", key.key);
-        try row.appendChild(self.page.cx.allocator, node);
+        try row.appendChild(self.page.cx.allocator, tip.wrapper);
         try self.body.appendChild(self.page.cx.allocator, row);
     }
     pub fn readonly(self: *Section, label: []const u8, value: []const u8) !void {

@@ -22,6 +22,7 @@ const tab_layout = @import("tab_strip_layout.zig");
 const tab_styles = @import("workspace_tab_styles.zig");
 const app_theme = @import("app_theme.zig");
 const tab_picker = @import("tab_picker.zig");
+const tab_color_picker = @import("tab_color_picker.zig");
 const host_actions = @import("../host/actions.zig");
 const keybindings = @import("../config/keybindings.zig");
 const terminal_service = @import("../host/terminal_service.zig");
@@ -102,6 +103,8 @@ pub const removed_host_index = std.math.maxInt(usize);
 
 /// One open session tab: UI nodes + live runtime (null until connected).
 pub const SessionTab = struct {
+    group_broadcast_enabled: bool = false,
+    tab_color: ?u32 = null,
     id: SessionId,
     tab_id: identity.TabId,
     content_owner: identity.ContentOwner,
@@ -121,8 +124,10 @@ pub const SessionTab = struct {
     archived: bool = false,
     closing: bool = false,
     local: bool = false,
+    detected_os: session_icon.Os = .unknown,
     local_scope: ?*ui.Scope = null,
     file_scope: ?*ui.Scope = null,
+    transfer_trays: [2]?*@import("transfer_manager_view.zig").Panel = .{ null, null },
     plugin_renderer: ?plugin_ui.RendererInstance = null,
     plugin_protocol_id: []const u8 = "",
     local_bound: bool = false,
@@ -180,7 +185,6 @@ const TabNode = struct {
     icon: *ui.Node,
     type_icon: *ui.Node,
     label: *ui.Node,
-    status_dot: *ui.Node,
     close: *ui.Node,
     tab_id: identity.TabId,
     tab_index: usize,
@@ -317,7 +321,7 @@ fn cursorStyle(name: []const u8) TerminalViewNode.CursorStyle {
     return .block;
 }
 
-pub const GroupAction = enum { pin, leave, close_member, broadcast, split_side, split_stack, stop_broadcast, stop_group_ai };
+pub const GroupAction = enum { pin, leave, close_member, toggle_broadcast, broadcast, split_side, split_stack, stop_broadcast, stop_group_ai };
 
 pub const Workspace = struct {
     plugins: plugin_registry.Registry = .{},
@@ -369,6 +373,7 @@ pub const Workspace = struct {
     drag_binding: ?*ui.interaction.drag.Binding = null,
     drag_pointer_x: f32 = 0,
     picker_view: ?*tab_picker.View = null,
+    color_picker: ?*tab_color_picker.View = null,
     picker_anchor: ?*ui.Node = null,
     picker_focus_return: ?identity.TabId = null,
     rename_scope: ?*ui.Scope = null,
@@ -394,6 +399,7 @@ pub const Workspace = struct {
     /// Set only by a rendered group workspace. Membership alone never makes
     /// an independently opened session tab a group-owned AI conversation.
     active_group_view: ?u32 = null,
+
     group_roster: ?*group_model.Roster = null,
     group_views: std.ArrayList(*group_view.View) = .empty,
     group_action_context: ?*anyopaque = null,
@@ -960,7 +966,8 @@ pub const Workspace = struct {
                 defer self.allocator.free(detail);
                 const row = try sidebar_view.HostRow.mount(self.cx, scope, .{
                     .name = host.name,
-                    .icon = session_icon.forPlugin(self.plugins, host.protocolId(), false),
+                    .kind = if (host.protocol == .sftp) .file else .terminal,
+                    .icon = session_icon.forConnection(self.plugins, host.protocolId(), @import("session_os_cache.zig").load(self.allocator, self.io, self.hosts_path, host), false),
                     .detail = detail,
                     .route = route,
                     .hops = if (host.route.len > 0) host.route.len else host.jump_chain.len,
@@ -1002,9 +1009,7 @@ pub const Workspace = struct {
         return cell.workspace.identities.hostIndex(cell.host_id orelse return null);
     }
     fn onSidebarSelect(raw: *anyopaque) void {
-        const cell: *ClickCtx = @ptrCast(@alignCast(raw));
-        cell.workspace.selected_host = sidebarIndex(cell) orelse return;
-        cell.workspace.refreshSelection();
+        onSidebarConnect(raw);
     }
     fn onSidebarConnect(raw: *anyopaque) void {
         const cell: *ClickCtx = @ptrCast(@alignCast(raw));
@@ -1060,24 +1065,41 @@ pub const Workspace = struct {
         self.cx.requestRedraw();
     }
 
+    /// The menu passes its captured TabId, never the current active session.
+    pub fn showTabColor(self: *Workspace, id: identity.TabId) void {
+        const index = self.tabIndexById(id) orelse return;
+        if (self.tabs.items[index].closing) return;
+        const anchor = for (self.tab_nodes.items) |cell| {
+            if (cell.tab_id == id) break cell.node;
+        } else return;
+        if (self.color_picker == null) {
+            const view = tab_color_picker.View.mount(self.cx, self.scope, .{ .context = self, .commit = commitTabColor }) catch return;
+            view.root.style.width = .{ .px = 0 };
+            view.root.style.height = .{ .px = 0 };
+            self.tab_bar.appendChild(self.allocator, view.root) catch return;
+            self.color_picker = view;
+        }
+        self.color_picker.?.show(@backingInt(id), anchor);
+    }
+
+    fn commitTabColor(raw: *anyopaque, owner: u64, color: u32) bool {
+        const self: *Workspace = @ptrCast(@alignCast(raw));
+        const index = self.tabIndexById(@fromBackingInt(owner)) orelse return false;
+        const tab = self.tabs.items[index];
+        if (tab.closing) return false;
+        tab.tab_color = color;
+        self.rebuildTabBar() catch return false;
+        return true;
+    }
+
     pub fn setNotificationAttentionBridge(self: *Workspace, bridge: NotificationAttentionBridge) void {
         self.notification_attention_bridge = bridge;
         self.refreshNotificationAttention();
     }
 
-    /// Figma defines this 6px dot as connection status. Preserve its background
-    /// and geometry; the host-approved unread state adds only an inner border.
-    /// Reading/acknowledging output remains the host's owner-bound decision.
-    pub fn refreshNotificationAttention(self: *Workspace) void {
-        for (self.tab_nodes.items) |cell| {
-            const index = self.model.indexOf(cell.tab_id) orelse continue;
-            const owner = self.model.tabs.items[index].owner;
-            const attention = if (self.notification_attention_bridge.has_dot) |has_dot| has_dot(self.notification_attention_bridge.context, owner) else false;
-            const width: f32 = if (attention) tab_styles.attention_border_width else 0;
-            if (cell.status_dot.style.border.width != width) cell.status_dot.setBorderWidth(width);
-            cell.status_dot.setBorderColor(if (attention) self.palette.accent else cell.status_dot.getBackground());
-        }
-    }
+    /// Tab titles have no trailing notification marker. Host read tracking
+    /// remains independent of the tab's connection icon and custom title color.
+    pub fn refreshNotificationAttention(_: *Workspace) void {}
 
     fn installTabModel(self: *Workspace, tab: *SessionTab) !void {
         try self.model.append(tab.tab_id, tab.content_owner, tab.titleSlice());
@@ -1107,13 +1129,13 @@ pub const Workspace = struct {
         const count = self.model.visibleCount();
         try self.strip_advances.resize(self.allocator, count);
         try self.strip_widths.resize(self.allocator, count);
-        const family = if (self.font_family_resolver) |resolve| resolve("Inter") else 0;
+        const family = if (self.font_family_resolver) |resolve| resolve("Inter Variable") else 0;
         for (self.strip_advances.items, 0..) |*advance, ordinal| {
             const tab = &self.model.tabs.items[self.model.visibleAt(ordinal).?];
             // Match the visual line used by native Text's ellipsis check.
             // Round outward so adding/removing the 76px chrome cannot round
             // a fractional title width down and spuriously truncate it.
-            const line = self.cx.text.visualLine(.{ .text = tab.name(), .font_family = "system", .font_family_id = family, .font_size = tab_styles.title_font, .font_weight = tab_styles.title_weight }) catch {
+            const line = self.cx.text.visualLine(.{ .text = tab.name(), .font_family = if (family != 0) "Inter Variable" else "system", .font_family_id = family, .font_size = tab_styles.title_font, .font_weight = tab_styles.title_weight }) catch {
                 advance.* = @ceil(self.cx.text.measureTextWidth(tab.name(), tab_styles.title_font, tab_styles.title_weight, false));
                 continue;
             };
@@ -1191,7 +1213,7 @@ pub const Workspace = struct {
         drag_gap.setDisplay(.none);
         try viewport.appendChild(self.allocator, drag_gap);
         self.drag_gap = drag_gap;
-        const family = if (self.font_family_resolver) |resolve| resolve("Inter") else 0;
+        const family = if (self.font_family_resolver) |resolve| resolve("Inter Variable") else 0;
         for (0..self.model.visibleCount()) |ordinal| {
             const index = self.model.visibleAt(ordinal).?;
             const model_tab = &self.model.tabs.items[index];
@@ -1237,7 +1259,8 @@ pub const Workspace = struct {
             tab_box.behavior.events.on_focus = .{ .callback = tabFocus, .context = select_ctx };
             tab_box.behavior.events.on_blur = .{ .callback = tabLeave, .context = select_ctx };
             const icon_slot = try ui.box(self.cx, tab_styles.iconSlot(), .{});
-            const type_icon = try ui.iconTint(self.cx, if (group_id != null) ui.icons.copy else if (tab.?.plugin_protocol_id.len != 0) session_icon.forPlugin(self.plugins, tab.?.plugin_protocol_id, tab.?.archived) else if (tab.?.host_snapshot) |saved| session_icon.forPlugin(self.plugins, saved.value.protocolId(), tab.?.archived) else session_icon.forTab(tab.?.local, tab.?.archived, tab.?.terminal != null), app_theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
+            const connection_color = if (group_id != null) app_theme.current().fg_2 else if (tab.?.failed) self.palette.red else if (tab.?.plugin_renderer != null) (if (tab.?.content_ready) self.palette.green else self.palette.fg_muted) else if (tab.?.terminal == null) (if (tab.?.file_ready) self.palette.green else self.palette.fg_muted) else if (tab.?.terminal.?.tombstone.state != .active) self.palette.fg_muted else if (tab.?.runtime != null or (tab.?.local and tab.?.local_state == .running)) self.palette.green else self.palette.fg_muted;
+            const type_icon = try ui.iconTint(self.cx, if (group_id != null) ui.icons.get("panels-top-left").? else if (tab.?.local) (session_icon.forOs(@import("../proto/ssh/remote_os.zig").local()) orelse session_icon.resolve(.terminal)) else if (tab.?.plugin_protocol_id.len != 0) session_icon.forConnection(self.plugins, tab.?.plugin_protocol_id, self.tabOs(tab.?), tab.?.archived) else if (tab.?.host_snapshot) |saved| session_icon.forConnection(self.plugins, saved.value.protocolId(), self.tabOs(tab.?), tab.?.archived) else session_icon.forTab(tab.?.local, tab.?.archived, tab.?.terminal != null), connection_color, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
             try icon_slot.appendChild(self.cx.allocator, type_icon);
             const number = try ui.text(self.cx, "", .{ .font_size = 10, .font_weight = 500, .color = app_theme.current().fg_2, .selectable = false });
             number.meta.ownership.meta.test_id = "tabs.ordinal";
@@ -1247,14 +1270,11 @@ pub const Workspace = struct {
             try tab_box.appendChild(self.cx.allocator, icon_slot);
             var label_style = tab_styles.title();
             label_style.font_family = family;
-            label_style.color = if (active) app_theme.current().fg_1 else app_theme.current().fg_2;
+            label_style.color = if (group_id == null and tab.?.tab_color != null) ui.Color.hex(@intCast(tab.?.tab_color.?)) else if (active) app_theme.current().fg_1 else app_theme.current().fg_2;
             const title = try ui.text(self.cx, self.model.tabs.items[index].name(), label_style);
-            title.setStyleInline(self.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 30 }, .top = .{ .px = (tab_styles.height - 18) / 2 } }, .width = .{ .px = width - 76 }, .height = .{ .px = 18 }, .overflow_hidden = true });
+            title.meta.ownership.meta.test_id = "tabs.title";
+            title.setStyleInline(self.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 30 }, .top = .{ .px = (tab_styles.height - 18) / 2 } }, .width = .{ .px = width - 62 }, .height = .{ .px = 18 }, .overflow_hidden = true });
             try tab_box.appendChild(self.cx.allocator, title);
-            const status_dot = try dot(self.cx, 6, if (group_id) |id| self.groupTabStatusColor(id) else if (tab.?.failed) self.palette.red else if (tab.?.plugin_renderer != null) (if (tab.?.content_ready) self.palette.green else self.palette.fg_muted) else if (tab.?.terminal == null) (if (tab.?.file_ready) self.palette.green else self.palette.fg_muted) else if (tab.?.terminal.?.tombstone.state != .active) self.palette.fg_muted else if (tab.?.runtime != null or (tab.?.local and tab.?.local_state == .running)) self.palette.green else self.palette.fg_muted);
-            status_dot.meta.ownership.meta.test_id = "tabs.connection_status";
-            status_dot.setStyleInline(self.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = width - 40 }, .top = .{ .px = (tab_styles.height - 6) / 2 } } });
-            try tab_box.appendChild(self.cx.allocator, status_dot);
             const close_ctx = try self.newTabClickCtx(index);
             const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = if (group_id != null) "关闭组内全部会话" else "关闭页签", .base_style = tab_styles.close(width), .on_click = ui.Cx.simpleHandler(onCloseTabTrampoline, close_ctx) }).mount(scope, self.cx);
             // Button's recipe resolves chrome but does not forward positioning.
@@ -1276,7 +1296,7 @@ pub const Workspace = struct {
             try content.appendChild(self.cx.allocator, holder);
             const drag = try ui.interaction.drag.Binding.attach(scope, self.cx, holder, .{ .axis = .horizontal, .activation_distance = 5 }, onTabDrag, select_ctx);
             select_ctx.drag_binding = drag;
-            try self.tab_nodes.append(self.allocator, .{ .node = tab_box, .holder = holder, .icon = number, .type_icon = type_icon, .label = title, .status_dot = status_dot, .close = close, .tab_id = model_tab.id, .tab_index = index, .select_ctx = select_ctx, .close_ctx = close_ctx });
+            try self.tab_nodes.append(self.allocator, .{ .node = tab_box, .holder = holder, .icon = number, .type_icon = type_icon, .label = title, .close = close, .tab_id = model_tab.id, .tab_index = index, .select_ctx = select_ctx, .close_ctx = close_ctx });
         }
         if (overflow) {
             _ = try self.stripControl(scope, row, ui.icons.chevron_right, "向右滚动页签", "tabs.scroll_right", 24, !self.strip_geometry.can_scroll_right, scrollRight);
@@ -1293,6 +1313,13 @@ pub const Workspace = struct {
         self.refreshCommandIcons();
         self.refreshNotificationAttention();
         self.cx.requestRedraw();
+    }
+
+    fn tabOs(self: *Workspace, tab: *SessionTab) session_icon.Os {
+        if (tab.detected_os != .unknown) return tab.detected_os;
+        if (tab.host_snapshot) |saved| return @import("session_os_cache.zig").load(self.allocator, self.io, self.hosts_path, saved.value);
+        if (tab.host_index < self.registry.hosts.len) return @import("session_os_cache.zig").load(self.allocator, self.io, self.hosts_path, self.registry.hosts[tab.host_index]);
+        return .unknown;
     }
 
     fn stripControl(self: *Workspace, scope: *ui.Scope, parent: *ui.Node, icon: ui.SvgAsset, label: []const u8, test_id: []const u8, width: f32, disabled: bool, comptime callback: fn (*Workspace) void) !*ui.Node {
@@ -1646,6 +1673,23 @@ pub const Workspace = struct {
         return null;
     }
 
+    pub fn groupAssistantBounds(self: *Workspace, id: u32) ?ui.ComputedRect {
+        const view = self.groupView(id) orelse return null;
+        const root = view.root orelse return null;
+        var bounds = root.globalRect();
+        const bottom = bounds.y + bounds.h;
+        var top = bottom;
+        for (view.panes.items) |pane| {
+            if (pane.node.children.items.len == 0) continue;
+            const header = pane.node.children.items[0].globalRect();
+            if (header.w > 0 and header.h > 0) top = @min(top, header.y + header.h);
+        }
+        if (top >= bottom) return null;
+        bounds.y = @max(bounds.y, top);
+        bounds.h = @max(0, bottom - bounds.y);
+        return bounds;
+    }
+
     fn groupTabColor(self: *Workspace, id: u32) ?ui.Color {
         const roster = self.group_roster orelse return null;
         const group = roster.findById(id) orelse return null;
@@ -1857,7 +1901,10 @@ pub const Workspace = struct {
                 .mouse_down => {
                     const index = self.workspace.tabIndex(self.session) orelse return .ignored;
                     self.workspace.active_tab = index;
-                    if (self.workspace.groupView(self.group)) |view| view.focused = self.session;
+                    if (self.workspace.groupView(self.group)) |view| {
+                        view.focused = self.session;
+                        for (view.panes.items) |pane| pane.node.setBorderColor(if (pane.session == self.session) app_theme.current().action_accent.withAlpha(112) else app_theme.current().border);
+                    }
                 },
                 .key_down => |key| if (key.key == .escape) {
                     self.cancel();
@@ -1868,6 +1915,14 @@ pub const Workspace = struct {
             return .ignored;
         }
     };
+
+    pub fn setGroupMemberBroadcast(self: *Workspace, session: u64, enabled: bool) void {
+        const tab = self.sessionTab(session) orelse return;
+        if (tab.group_broadcast_enabled == enabled) return;
+        tab.group_broadcast_enabled = enabled;
+        self.group_present_pending = true;
+        self.cx.requestRedraw();
+    }
 
     fn groupCell(self: *Workspace, scope: *ui.Scope, id: u32, session: u64, action: GroupAction) !*GroupCell {
         return scope.createState(GroupCell, .{ .workspace = self, .group = id, .session = session, .action = action });
@@ -1893,7 +1948,10 @@ pub const Workspace = struct {
         const scope = try self.scope.childScope();
         view.scope = scope;
         view.panes.clearRetainingCapacity();
-        const root = try ui.box(self.cx, group_styles.root(view.layout == .stacked), .{});
+        var root_style = group_styles.root(view.layout == .stacked);
+        root_style.gap = 4;
+        root_style.padding = ui.Padding.all(4);
+        const root = try ui.box(self.cx, root_style, .{});
         root.meta.ownership.meta.test_id = "groups.workspace";
         view.root = root;
         for (self.tabs.items) |tab| tab.root.setDisplay(.none);
@@ -1908,31 +1966,60 @@ pub const Workspace = struct {
             const tab = self.sessionTab(member.pane_id) orelse continue;
             if (tab.terminal == null or tab.archived) continue;
             tab.terminal.?.setGrouped(true);
-            const pane = try ui.box(self.cx, group_styles.pane(), .{});
+            var pane_style = group_styles.pane();
+            pane_style.border = .{ .width = 1, .color = app_theme.current().border, .radius = 8 };
+            pane_style.padding = ui.Padding.all(1);
+            const pane = try ui.box(self.cx, pane_style, .{});
             const cell = try self.groupCell(scope, view.id, tab.id, .pin);
             pane.meta.ownership.meta.test_id = try std.fmt.bufPrint(&cell.test_id, "groups.pane.{d}", .{tab.id});
             try view.panes.append(self.allocator, .{ .session = tab.id, .node = pane });
             pane.behavior.events.capture_context = cell;
             pane.behavior.events.on_event_capture = GroupCell.event;
-            const header = try ui.box(self.cx, group_styles.header(), .{});
-            const grip = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.grip_vertical, .icon_size = @as(f32, 14), .a11y_label = "拖动排序成员", .base_style = group_styles.control() }).mount(scope, self.cx);
+            var header_style = group_styles.header();
+            header_style.height = .{ .px = 36 };
+            header_style.margin = .{};
+            header_style.padding = .{ .left = 11, .right = 11, .top = 5, .bottom = 5 };
+            header_style.gap = 8;
+            header_style.background = app_theme.current().surface_1.withAlpha(179);
+            const header = try ui.box(self.cx, header_style, .{});
+            header.meta.ownership.meta.test_id = "groups.pane.header";
+            var grip_style = group_styles.control();
+            grip_style.width = .{ .px = 13 };
+            const grip = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.grip_vertical, .icon_size = @as(f32, 13), .a11y_label = "拖动排序成员", .base_style = grip_style }).mount(scope, self.cx);
             _ = try ui.interaction.drag.Binding.attach(scope, self.cx, grip, .{ .axis = .both, .activation_distance = 5 }, GroupCell.drag, cell);
             try header.appendChild(self.allocator, grip);
-            const identity_text = if (tab.local) try std.fmt.allocPrint(self.allocator, "本机 · zsh · #{d}", .{tab.id}) else if (tab.host_snapshot) |snapshot| try std.fmt.allocPrint(self.allocator, "{s} · {s}@{s}:{d} · #{d}", .{ tab.titleSlice(), snapshot.value.user, snapshot.value.host, snapshot.value.port, tab.id }) else try std.fmt.allocPrint(self.allocator, "{s} · #{d}", .{ tab.titleSlice(), tab.id });
+            const identity_text = if (tab.local) try std.fmt.allocPrint(self.allocator, "Local Terminal · #{d}", .{tab.id}) else if (tab.host_snapshot) |snapshot| try std.fmt.allocPrint(self.allocator, "{s} · {s}@{s}:{d} · #{d}", .{ tab.titleSlice(), snapshot.value.user, snapshot.value.host, snapshot.value.port, tab.id }) else try std.fmt.allocPrint(self.allocator, "{s} · #{d}", .{ tab.titleSlice(), tab.id });
             defer self.allocator.free(identity_text);
-            const label = try ui.text(self.cx, identity_text, group_styles.label());
+            var member_label_style = group_styles.label();
+            member_label_style.font_size = 11;
+            const label = try ui.text(self.cx, identity_text, member_label_style);
             label.meta.ownership.meta.test_id = "groups.pane.title";
             label.setStyleInline(self.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 1, .overflow_hidden = true });
             try header.appendChild(self.allocator, label);
             const online = !tab.failed and !tab.closing and (if (tab.local) tab.local_state == .running else tab.runtime != null and tab.terminal.?.tombstone.state == .active);
-            const status_label = try ui.text(self.cx, if (online) "在线" else if (tab.closing) "关闭中" else "离线 / 连接中", group_styles.label());
+            const status_dot = try ui.box(self.cx, .{ .width = .{ .px = 6 }, .height = .{ .px = 6 }, .background = if (online) app_theme.current().ok else app_theme.current().danger, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
+            status_dot.meta.ownership.meta.test_id = "groups.pane.status_dot";
+            try header.appendChild(self.allocator, status_dot);
+            var status_style = group_styles.label();
+            status_style.font_size = 11;
+            const status_label = try ui.text(self.cx, if (online) "在线" else if (tab.closing) "关闭中" else "离线 / 连接中", status_style);
             status_label.meta.ownership.meta.test_id = "groups.pane.status";
             status_label.setStyleInline(self.allocator, .{ .flex_shrink = 0 });
             try header.appendChild(self.allocator, status_label);
+            const broadcasting = tab.group_broadcast_enabled;
+            const broadcast_cell = try self.groupCell(scope, view.id, tab.id, .toggle_broadcast);
+            var broadcast_style = group_styles.control();
+            broadcast_style.width = .{ .px = 24 };
+            broadcast_style.height = .{ .px = 24 };
+            broadcast_style.background = if (broadcasting) app_theme.current().selection else ui.Color.TRANSPARENT;
+            const broadcast_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.radio, .icon_size = @as(f32, 14), .icon_tint = if (broadcasting) app_theme.current().accent else app_theme.current().fg_2, .disabled = !online, .a11y_label = if (!online) "广播 · 连接未就绪" else if (broadcasting) "广播 · 已开启" else "广播 · 已关闭", .base_style = broadcast_style, .on_click = self.cx.on(GroupCell, broadcast_cell, GroupCell.act) }).mount(scope, self.cx);
+            broadcast_button.meta.ownership.meta.test_id = try std.fmt.bufPrint(&broadcast_cell.test_id, "groups.broadcast.{d}", .{tab.id});
+            if (broadcast_button.behavior.interaction.a11y) |*a11y| a11y.pressed = broadcasting;
+            try header.appendChild(self.allocator, try sidebar_view.hint(self.cx, scope, broadcast_button, if (!online) "连接未就绪" else if (broadcasting) "广播已开启" else "广播已关闭", .bottom));
             try self.groupControl(scope, header, view.id, tab.id, .pin, ui.icons.pin, if (group.pinned_pane == tab.id) "取消置顶" else "置顶成员", "groups.pin");
-            var menu_items: [8]ui.widgets.MenuItem = undefined;
-            const menu_actions = [_]GroupAction{ .leave, .split_side, .split_stack, .broadcast, .stop_broadcast, .close_member };
-            const menu_labels = [_][]const u8{ "移出组，保留会话", "新建左右分栏", "新建上下分栏", "输入广播…", "停止输入广播", "断开并关闭会话" };
+            var menu_items: [6]ui.widgets.MenuItem = undefined;
+            const menu_actions = [_]GroupAction{ .leave, .split_side, .split_stack, .close_member };
+            const menu_labels = [_][]const u8{ "移出组，保留会话", "新建左右分栏", "新建上下分栏", "断开并关闭会话" };
             for (menu_actions, menu_labels, 0..) |action, action_label, action_index| {
                 const action_cell = try self.groupCell(scope, view.id, tab.id, action);
                 menu_items[action_index] = .{ .label = action_label, .on_click = self.cx.on(GroupCell, action_cell, GroupCell.act) };
@@ -1959,6 +2046,7 @@ pub const Workspace = struct {
             visible += 1;
             if (view.focused == null or self.sessionTab(view.focused.?) == null) view.focused = tab.id;
         }
+        for (view.panes.items) |pane| pane.node.setBorderColor(if (pane.session == view.focused) app_theme.current().action_accent.withAlpha(112) else app_theme.current().border);
         if (visible == 1 and view.panes.items.len == 1) {
             const waiting = try ui.text(self.cx, "等待其他终端加入", group_styles.label());
             waiting.setStyleInline(self.allocator, .{ .width = .fill(), .height = .{ .px = 30 }, .flex_shrink = 0, .padding = .{ .left = 12 } });
@@ -2026,6 +2114,7 @@ pub const Workspace = struct {
                     std.hash.autoHash(&hash, tab.failed);
                     std.hash.autoHash(&hash, tab.closing);
                     std.hash.autoHash(&hash, tab.local_state);
+                    std.hash.autoHash(&hash, tab.group_broadcast_enabled);
                     if (tab.terminal) |terminal| std.hash.autoHash(&hash, terminal.tombstone.state);
                 }
             }
@@ -2594,6 +2683,7 @@ pub const Workspace = struct {
         tab.local_scope = null;
         if (tab.plugin_renderer) |renderer| renderer.vtable.unmount(renderer.context);
         tab.plugin_renderer = null;
+        tab.transfer_trays = .{ null, null };
         if (tab.file_scope) |scope| scope.dispose();
         tab.file_scope = null;
         self.cx.destroyDetached(tab.root);
@@ -3287,19 +3377,9 @@ pub const Workspace = struct {
     /// Opens (or focuses) a session tab for the host. The terminal surface and
     /// tab appear immediately with a "连接中" state; the SSH connection then
     /// proceeds on a background thread and finishes back on the UI thread.
-    /// Asset double-click/quick-connect selects an existing active session.
-    /// Explicit @new and menu creation use newSession/newSessionFromTab.
+    /// Saved connections are configurations, not running sessions. Every
+    /// activation creates a new session with its own immutable snapshot.
     pub fn openSession(self: *Workspace, index: usize) !void {
-        if (index >= self.registry.hosts.len) return error.InvalidHost;
-        try self.identities.appendHosts(self.allocator, self.registry.hosts.len);
-        const id = self.hostId(index).?;
-        for (self.tabs.items, 0..) |tab, tab_index| {
-            const active_content = if (tab.terminal) |*terminal| terminal.tombstone.state == .active else tab.file_ready;
-            if (tab.host_id == id and !tab.failed and active_content) {
-                self.selectTab(tab_index);
-                return;
-            }
-        }
         try self.newSession(index);
     }
 
@@ -3386,7 +3466,7 @@ pub const Workspace = struct {
         terminal.root.setStyleInline(self.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0 });
         const ticket = self.identities.newTicket();
         tab.* = .{ .id = ticket.session_id, .tab_id = try tab_ids.allocate(), .content_owner = .{ .session = handle }, .generation = handle.generation, .host_id = 0, .host_index = removed_host_index, .host_snapshot = null, .root = pane, .terminal = terminal, .local = true, .local_scope = local_scope };
-        tab.setTitle("本地 · zsh");
+        tab.setTitle("Local Terminal");
         try self.mountLocalBanner(tab);
         try pane.appendChild(self.allocator, terminal.root);
         terminal_attached = true;
@@ -3419,6 +3499,7 @@ pub const Workspace = struct {
         if (tab.root.parent) |parent| self.cx.detachChild(parent, tab.root);
         tab.plugin_renderer.?.vtable.unmount(tab.plugin_renderer.?.context);
         tab.plugin_renderer = null;
+        tab.transfer_trays = .{ null, null };
         if (tab.file_scope) |scope| scope.dispose();
         tab.file_scope = null;
         self.cx.destroyDetached(tab.root);
@@ -3610,10 +3691,10 @@ pub const Workspace = struct {
         if (tab.local_retry) |node| node.setDisplay(if (state == .failed) .flex else .none);
         if (tab.local_new) |node| node.setDisplay(if (state == .exited) .flex else .none);
         if (changed) {
-            const title = if (state == .failed) "本地 · zsh · 启动失败" else if (state == .exited) "本地 · zsh · 已退出" else "本地 · zsh";
+            const title = if (state == .failed) "Local Terminal · 启动失败" else if (state == .exited) "Local Terminal · 已退出" else "Local Terminal";
             const index = self.model.indexOf(tab.tab_id) orelse return;
             const current = self.model.tabs.items[index].name();
-            if (std.mem.eql(u8, current, "本地 · zsh") or std.mem.eql(u8, current, "本地 · zsh · 启动失败") or std.mem.eql(u8, current, "本地 · zsh · 已退出")) {
+            if (std.mem.eql(u8, current, "Local Terminal") or std.mem.eql(u8, current, "Local Terminal · 启动失败") or std.mem.eql(u8, current, "Local Terminal · 已退出")) {
                 // Startup readiness changes the status, but an unchanged
                 // default title must not invalidate an in-flight rename.
                 if (!std.mem.eql(u8, current, title)) {
@@ -4098,7 +4179,38 @@ pub const Workspace = struct {
     /// UI safe point; the Workspace hook also calls the same idempotent drain.
     pub fn pollConnectionResults(self: *Workspace) void {
         self.drainResults();
+        self.pollSessionOs();
         self.drainCloseReceipts();
+    }
+
+    /// Called on the UI owner, after worker publication. Never touches SSH IO.
+    pub fn pollSessionOs(self: *Workspace) void {
+        for (self.tabs.items) |tab| {
+            if (tab.local or tab.closing) continue;
+            const runtime = tab.runtime orelse continue;
+            const detection = runtime.osDetection();
+            if (detection.pending) self.cx.scheduleRedrawAfterNs(100 * std.time.ns_per_ms);
+            const kind = detection.kind;
+            if (kind == .unknown or kind == tab.detected_os) continue;
+            self.updateSessionOs(tab.content_owner.session, kind, if (tab.host_snapshot) |saved| saved.value else null);
+        }
+    }
+
+    pub fn updateSessionOs(self: *Workspace, owner: identity.SessionHandle, kind: session_icon.Os, original: ?hosts_mod.HostConfig) void {
+        if (kind == .unknown) return;
+        for (self.tabs.items) |tab| {
+            if (tab.content_owner != .session or !tab.content_owner.session.eql(owner) or tab.closing or tab.detected_os == kind) continue;
+            tab.detected_os = kind;
+            if (original) |host| {
+                @import("session_os_cache.zig").save(self.allocator, self.io, self.hosts_path, host, kind);
+                for (self.host_rows.items) |row| {
+                    const current = self.registry.hosts[row.host_index];
+                    if (current.connection_id == host.connection_id and std.mem.eql(u8, current.host, host.host) and current.port == host.port and std.mem.eql(u8, current.user, host.user)) session_icon.setNode(row.view.dot, kind);
+                }
+            }
+            for (self.tab_nodes.items) |node| if (node.tab_id == tab.tab_id) session_icon.setNode(node.type_icon, kind);
+            self.cx.requestRedraw();
+        }
     }
 
     fn drainCloseReceipts(self: *Workspace) void {
@@ -4146,6 +4258,7 @@ pub const Workspace = struct {
             workspace.pollHostKeyConfirm();
             for (workspace.host_rows.items) |row| row.view.setOnline(workspace.hostOnline(row.host_index));
             workspace.drainResults();
+            workspace.pollSessionOs();
             // Hidden Local panes must keep consuming their own TextSlot so a
             // bounded producer can progress. Only the active pane gets a live
             // input clock; TerminalView additionally checks actual focus.
@@ -4326,7 +4439,7 @@ test "first tab resizes an already laid out empty title strip" {
     const tab_id: identity.TabId = @fromBackingInt(1);
     const owner: identity.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(91) } };
     var tab: SessionTab = .{ .id = 91, .tab_id = tab_id, .content_owner = owner, .host_id = 1, .host_index = 0, .host_snapshot = undefined, .root = root, .terminal = undefined };
-    tab.setTitle("本地 · zsh");
+    tab.setTitle("Local Terminal");
     try workspace.model.append(tab_id, owner, tab.titleSlice());
     try workspace.tabs.append(allocator, &tab);
     try workspace.renderTabBar();
@@ -4340,10 +4453,10 @@ test "first tab resizes an already laid out empty title strip" {
     const tab_rect = workspace.tab_nodes.items[0].node.globalRect();
     const title_rect = workspace.tab_nodes.items[0].label.globalRect();
     try std.testing.expect(title_rect.w >= @as(f32, 52.676));
-    try std.testing.expect(title_rect.w < @as(f32, 53.676));
     try std.testing.expectEqual(tab_styles.title_font, workspace.tab_nodes.items[0].label.getText().?.font_size);
     try std.testing.expectEqual(tab_styles.title_weight, workspace.tab_nodes.items[0].label.getText().?.font_weight);
     const close_rect = workspace.tab_nodes.items[0].close.globalRect();
+    try std.testing.expect(title_rect.x + title_rect.w <= close_rect.x - 6);
     try std.testing.expectApproxEqAbs(tab_rect.x + tab_rect.w - 26, close_rect.x, 0.01);
     try std.testing.expectApproxEqAbs(tab_rect.y + (tab_styles.height - 20) / 2, close_rect.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 20), close_rect.w, 0.01);
@@ -4735,6 +4848,8 @@ test "cancelled initial connection retires placeholder after cleanup without rep
     workspace.shutting_down = false;
     workspace.active_tab = 0;
     workspace.status_node = null;
+    workspace.command_output = null;
+    workspace.status_feedback = null;
     workspace.session_bridge = .{};
     try tab.terminal.?.setOutput(cx, "正在连接…");
     workspace.drainResults();
@@ -5170,7 +5285,7 @@ test "SSH middle menu bridge preserves the clicked handle across active changes 
     try std.testing.expectEqual(@as(usize, 1), sink.calls);
 }
 
-test "notification tab attention preserves status geometry and follows exact owner policy and read facts" {
+test "notification output never adds tab dots and preserves icon and title colors" {
     const allocator = std.testing.allocator;
     const cx = try ui.Cx.init(allocator, std.testing.io);
     defer cx.deinit();
@@ -5218,16 +5333,16 @@ test "notification tab attention preserves status geometry and follows exact own
     workspace.sessionTab(first).?.local_state = .exited;
     try std.testing.expectEqualStrings("离线", Workspace.pickerStatus(workspace, first_tab_id));
     workspace.sessionTab(first).?.local_state = .running;
+    workspace.sessionTab(first).?.tab_color = 0x67b88b;
     try workspace.renderTabBar();
     cx.layout();
-    const first_dot = workspace.tab_nodes.items[0].status_dot;
-    const second_dot = workspace.tab_nodes.items[1].status_dot;
-    const original_first = first_dot.globalRect();
-    const original_second = second_dot.globalRect();
-    try std.testing.expectEqual(workspace.palette.green, first_dot.getBackground());
-    try std.testing.expectEqual(workspace.palette.red, second_dot.getBackground());
+    try std.testing.expectEqual(ui.Color.hex(0x67b88b), workspace.tab_nodes.items[0].label.getText().?.color);
+    try std.testing.expectEqual(workspace.palette.green, workspace.tab_nodes.items[0].type_icon.getIcon().?.tint);
+    try std.testing.expectEqual(workspace.palette.red, workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
+    const first_child_count = workspace.tab_nodes.items[0].node.children.items.len;
+    const second_child_count = workspace.tab_nodes.items[1].node.children.items.len;
     const notifications = @import("../host/notification_coordinator.zig");
-    var preferences: config_mod.Notify = .{};
+    const preferences: config_mod.Notify = .{};
     var coordinator = try notifications.Coordinator.init(allocator, preferences, .{});
     defer coordinator.deinit();
     const Bridge = struct {
@@ -5240,49 +5355,23 @@ test "notification tab attention preserves status geometry and follows exact own
     _ = try coordinator.observeOutput(.{ .session = second_owner }, 3);
     workspace.setNotificationAttentionBridge(.{ .context = &coordinator, .has_dot = Bridge.hasDot });
     cx.layout();
-    try std.testing.expectEqual(tab_styles.attention_border_width, first_dot.style.border.width);
-    try std.testing.expectEqual(tab_styles.attention_border_width, second_dot.style.border.width);
-    try std.testing.expectEqual(workspace.palette.accent, first_dot.style.border.color);
-    try std.testing.expectEqual(workspace.palette.green, first_dot.getBackground());
-    try std.testing.expectEqual(workspace.palette.red, second_dot.getBackground());
-    try std.testing.expectEqual(original_first, first_dot.globalRect());
-    try std.testing.expectEqual(original_second, second_dot.globalRect());
-    try std.testing.expectApproxEqAbs(@as(f32, 6), original_first.w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 6), original_first.h, 0.01);
-    const tab_rect = workspace.tab_nodes.items[0].node.globalRect();
-    try std.testing.expectApproxEqAbs(tab_rect.x + tab_rect.w - 40, original_first.x, 0.01);
-    try std.testing.expectApproxEqAbs(tab_rect.y + (tab_styles.height - 6) / 2, original_first.y, 0.01);
-
-    preferences.tab_dot = false;
-    _ = try coordinator.updatePolicy(preferences);
-    workspace.refreshNotificationAttention();
-    try std.testing.expectEqual(@as(f32, 0), first_dot.style.border.width);
-    try std.testing.expectEqual(@as(f32, 0), second_dot.style.border.width);
-    try std.testing.expectEqual(first_dot.getBackground(), first_dot.style.border.color);
-    try std.testing.expectEqual(second_dot.getBackground(), second_dot.style.border.color);
-    preferences.tab_dot = true;
-    _ = try coordinator.updatePolicy(preferences);
-    workspace.refreshNotificationAttention();
-    try std.testing.expectEqual(tab_styles.attention_border_width, first_dot.style.border.width);
-    try std.testing.expect(!coordinator.markRead(.{ .session = first_owner }, 7, false));
+    try std.testing.expect(coordinator.hasDot(.{ .session = first_owner }));
+    try std.testing.expect(coordinator.hasDot(.{ .session = second_owner }));
+    try std.testing.expectEqual(first_child_count, workspace.tab_nodes.items[0].node.children.items.len);
+    try std.testing.expectEqual(second_child_count, workspace.tab_nodes.items[1].node.children.items.len);
+    for (workspace.tab_nodes.items) |cell| {
+        for (cell.node.children.items) |child| {
+            const id = child.meta.ownership.meta.test_id orelse continue;
+            try std.testing.expect(!std.mem.eql(u8, id, "tabs.unread_attention"));
+            try std.testing.expect(!std.mem.eql(u8, id, "tabs.connection_status"));
+        }
+    }
+    try std.testing.expectEqual(ui.Color.hex(0x67b88b), workspace.tab_nodes.items[0].label.getText().?.color);
+    try std.testing.expectEqual(workspace.palette.green, workspace.tab_nodes.items[0].type_icon.getIcon().?.tint);
+    try std.testing.expectEqual(workspace.palette.red, workspace.tab_nodes.items[1].type_icon.getIcon().?.tint);
     try std.testing.expect(coordinator.markRead(.{ .session = second_owner }, 3, true));
     workspace.refreshNotificationAttention();
-    try std.testing.expectEqual(tab_styles.attention_border_width, first_dot.style.border.width);
-    try std.testing.expectEqual(@as(f32, 0), second_dot.style.border.width);
-    try std.testing.expectEqual(workspace.palette.red, second_dot.getBackground());
-
-    const next_owner = try first_owner.nextGeneration();
-    try workspace.bindSessionOwner(first, next_owner);
-    workspace.refreshNotificationAttention();
-    try std.testing.expect(coordinator.hasDot(.{ .session = first_owner }));
-    try std.testing.expectEqual(@as(f32, 0), first_dot.style.border.width);
-    _ = try coordinator.observeOutput(.{ .session = next_owner }, 1);
-    workspace.refreshNotificationAttention();
-    try std.testing.expectEqual(tab_styles.attention_border_width, first_dot.style.border.width);
-    workspace.setNotificationAttentionBridge(.{});
-    try std.testing.expectEqual(@as(f32, 0), first_dot.style.border.width);
-    try std.testing.expectEqual(workspace.palette.green, first_dot.getBackground());
-    try std.testing.expect(coordinator.hasDot(.{ .session = next_owner }));
+    try std.testing.expect(!coordinator.hasDot(.{ .session = second_owner }));
 }
 
 test "Local rename survives same title startup but rejects real title or owner changes" {
@@ -5355,7 +5444,7 @@ test "Local rename survives same title startup but rejects real title or owner c
     Helpers.frames(cx);
     Helpers.save(workspace);
     try std.testing.expectEqualStrings("chosen title", workspace.sessionTab(second).?.titleSlice());
-    try std.testing.expectEqualStrings("本地 · zsh", workspace.sessionTab(first).?.titleSlice());
+    try std.testing.expectEqualStrings("Local Terminal", workspace.sessionTab(first).?.titleSlice());
     try std.testing.expectEqual(captured_revision + 1, workspace.model.tabs.items[1].revision);
     Helpers.frames(cx);
     try std.testing.expect(workspace.rename_request == null);

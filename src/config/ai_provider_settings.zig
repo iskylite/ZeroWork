@@ -8,6 +8,7 @@ const draft = @import("settings_ai_draft.zig");
 const controls = @import("settings_parts/settings_controls.zig");
 const S = @import("settings_styles.zig");
 const ModelEditor = @import("ai_model_editor.zig").Editor;
+const Discovery = @import("../ai/model_discovery.zig").Service;
 const DeleteDialog = @import("provider_delete_dialog.zig");
 
 pub const Hooks = struct {
@@ -38,6 +39,14 @@ pub const ProviderView = struct {
     error_node: ?*ui.Node = null,
     header_tip: ?*ui.Signal(bool) = null,
     model_editor: ?*ModelEditor = null,
+    discovery: Discovery = .{},
+    model_test: Discovery = .{},
+    model_test_owner: ?*ModelEditor = null,
+    catalog_provider: ?usize = null,
+    catalog_signature: u64 = 0,
+    catalog_revision: u64 = 0,
+    catalog_message: []const u8 = "",
+
     delete_dialog: ?*DeleteDialog.Dialog = null,
     delete_request: ?struct { provider: usize, model: ?usize } = null,
     edit_request: ?struct { provider: usize, model: ?usize } = null,
@@ -56,6 +65,8 @@ pub const ProviderView = struct {
     }
     fn cleanup(self: *ProviderView) void {
         self.cx.removeAfterLayoutHook(self);
+        self.discovery.deinit();
+        self.model_test.deinit();
         self.fields.deinit(self.scope.allocator);
         self.badges.deinit(self.scope.allocator);
         self.titles.deinit(self.scope.allocator);
@@ -93,6 +104,24 @@ pub const ProviderView = struct {
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *ProviderView = @ptrCast(@alignCast(raw));
+        if (self.model_test.busy()) {
+            if (self.model_test.finishRequest()) {
+                if (self.model_editor) |editor| if (self.model_test_owner == editor) editor.updateTest(if (self.model_test.request_error) |err| if (err == error.Cancelled) "测试已取消" else "请求失败，请检查模型与访问权限。" else "模型请求已完成。", false);
+                self.model_test_owner = null;
+            } else self.cx.scheduleRedrawAfterNs(33 * 1000000);
+        }
+        if (self.discovery.busy()) {
+            if (self.discovery.finishRequest()) {
+                const valid = if (self.catalog_provider) |i| i < self.controller.model.value.ai.provider_count and self.catalog_signature == connectionSignature(self.controller.model.value.ai.providers[i]) else false;
+                self.catalog_message = if (!valid) "连接配置已变化，请重新获取模型清单。" else if (self.discovery.request_error) |err| switch (err) {
+                    error.Cancelled => "已取消获取；可重新获取或手动添加模型。",
+                    error.InvalidCatalog => "接口未提供有效模型清单，可手动添加模型。",
+                    else => "获取模型清单失败，请检查 API 地址与访问权限后重试；也可手动添加。",
+                } else if (self.catalogModels().len == 0) "接口未返回模型，可重新获取或手动添加。" else "模型清单已获取，添加模型时可下拉选择。";
+                if (self.model_editor) |editor| editor.updateCatalog(self.catalogFor(editor.provider), self.catalog_message, false) catch {};
+                self.pending = true;
+            } else self.cx.scheduleRedrawAfterNs(33 * 1000000);
+        }
         if (self.delete_dialog) |dialog| {
             if (dialog.done) {
                 self.delete_dialog = null;
@@ -114,6 +143,10 @@ pub const ProviderView = struct {
         }
         if (self.model_editor) |editor| {
             if (editor.done) {
+                if (self.model_test_owner == editor) {
+                    self.model_test.cancelRequest();
+                    self.model_test_owner = null;
+                }
                 self.model_editor = null;
                 editor.destroy();
                 return .needs_layout;
@@ -123,8 +156,8 @@ pub const ProviderView = struct {
         if (self.edit_request) |request| {
             self.edit_request = null;
             const p = self.controller.model.value.ai.providers[request.provider];
-            const model: config.AiModel = if (request.model) |j| p.models[j] else .{ .default = p.model_count == 0 };
-            const editor = ModelEditor.mount(self.cx, self.scope, request.provider, request.model, draft.providerName(p), model, .{ .context = self, .commit = commitModel }) catch return .done;
+            const model: config.AiModel = if (request.model) |j| p.models[j] else .{ .default = p.model_count == 0, .context_window = 0, .efforts = @splat(false) };
+            const editor = ModelEditor.mount(self.cx, self.scope, request.provider, request.model, draft.providerName(p), model, self.catalogFor(request.provider), .{ .context = self, .commit = commitModel, .metadata = candidateMetadata, .fetch_models = fetchEditorModels, .test_model = testEditorModel }) catch return .done;
             self.model_editor = editor;
             if (!editor.modal.portaled) self.root.appendChild(self.cx.allocator, editor.modal.overlay) catch {};
             return .needs_layout;
@@ -245,7 +278,7 @@ pub const ProviderView = struct {
         try title.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.sparkles, S.theme.current().accent_ink, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
         try title.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.title, "服务提供方"));
         try description.appendChild(self.cx.allocator, title);
-        try description.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, "一个条目对应一个 Provider；API 协议是它的连接属性。"));
+        try description.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, "配置模型服务的连接信息和可用模型。"));
         try heading.appendChild(self.cx.allocator, description);
         try heading.appendChild(self.cx.allocator, try self.mountAddProviderAction(self.render_scope.?, self.cx));
         try self.root.appendChild(self.cx.allocator, heading);
@@ -274,6 +307,72 @@ pub const ProviderView = struct {
         self.error_node.?.meta.ownership.meta.test_id = "settings.ai.provider_error";
         try self.root.appendChild(self.cx.allocator, self.error_node.?);
         self.refresh();
+    }
+    fn connectionSignature(p: config.AiProvider) u64 {
+        var h = std.hash.Wyhash.init(0);
+        h.update(p.name);
+        h.update(p.endpoint);
+        h.update(p.api_key);
+        std.hash.autoHash(&h, p.kind);
+        return h.final();
+    }
+    fn testEditorModel(raw: *anyopaque, provider: usize, model: config.AiModel) void {
+        const self: *ProviderView = @ptrCast(@alignCast(raw));
+        const editor = self.model_editor orelse return;
+        if (self.model_test.busy()) {
+            self.model_test.cancelRequest();
+            return;
+        }
+        if (provider >= self.controller.model.value.ai.provider_count) return;
+        self.model_test.testModel(self.controller.model.value.ai.providers[provider], model) catch {
+            editor.updateTest("无法开始测试，请检查配置。", false);
+            return;
+        };
+        self.model_test_owner = editor;
+        editor.updateTest("测试中…", true);
+        self.cx.scheduleRedrawAfterNs(33 * 1000000);
+    }
+    fn fetchEditorModels(raw: *anyopaque, provider: usize) void {
+        const self: *ProviderView = @ptrCast(@alignCast(raw));
+        self.fetchModels(provider);
+        if (self.model_editor) |editor| editor.updateCatalog(&.{}, self.catalog_message, self.discovery.busy()) catch {};
+    }
+    fn candidateMetadata(raw: *anyopaque, model_id: []const u8) ?@import("../ai/model_discovery.zig").ModelMetadata {
+        const self: *ProviderView = @ptrCast(@alignCast(raw));
+        return self.discovery.modelMetadata(model_id);
+    }
+    fn catalogModels(self: *const ProviderView) []const config.AiModel {
+        const ai = self.discovery.effective(.{}, self.catalog_revision);
+        return if (ai.provider_count > 0) ai.providers[0].models[0..ai.providers[0].model_count] else &.{};
+    }
+    fn catalogFor(self: *const ProviderView, i: usize) []const config.AiModel {
+        if (self.catalog_provider != i or i >= self.controller.model.value.ai.provider_count or self.catalog_signature != connectionSignature(self.controller.model.value.ai.providers[i])) return &.{};
+        return self.catalogModels();
+    }
+    fn fetchModels(self: *ProviderView, i: usize) void {
+        if (self.discovery.busy()) {
+            self.discovery.cancelRequest();
+            self.catalog_message = "正在取消获取…";
+            self.schedule();
+            return;
+        }
+        if (i >= self.controller.model.value.ai.provider_count) return;
+        const p = self.controller.model.value.ai.providers[i];
+        if (!draft.endpointValid(p.endpoint)) {
+            self.error_text = "请先填写有效的 API 地址。";
+            self.notify();
+            return;
+        }
+        self.catalog_provider = i;
+        self.catalog_signature = connectionSignature(p);
+        self.catalog_revision +|= 1;
+        self.discovery.request(p, self.catalog_revision) catch {
+            self.error_text = "无法开始获取模型清单，请重试。";
+            self.notify();
+            return;
+        };
+        self.catalog_message = "正在获取模型清单…";
+        self.schedule();
     }
     fn providerCard(self: *ProviderView, i: usize) !*ui.Node {
         const p = self.controller.model.value.ai.providers[i];
@@ -345,15 +444,26 @@ pub const ProviderView = struct {
         const models_title = try ui.textStyled(self.cx, S.label, try controls.owned(self.render_scope.?, try std.fmt.bufPrint(&summary_buffer, "模型  {d}", .{p.model_count})));
         try models_heading.appendChild(self.cx.allocator, models_title);
         try models_heading.appendChild(self.cx.allocator, try ui.spacer(self.cx));
+        try models_heading.appendChild(self.cx.allocator, try self.textAction(.fetch_models, i, if (self.discovery.busy() and self.catalog_provider == i) "取消获取" else "获取模型清单", null, false));
         try models_heading.appendChild(self.cx.allocator, try self.textAction(.add_model, i, "添加模型", ui.icons.plus, false));
         try result.body.appendChild(self.cx.allocator, models_heading);
+        if (self.catalog_provider == i and self.catalog_message.len != 0) {
+            const message = try ui.textStyled(self.cx, S.note, self.catalog_message);
+            message.meta.ownership.meta.test_id = try self.id(i, null, "catalog_status");
+            try result.body.appendChild(self.cx.allocator, message);
+        }
         if (p.model_count == 0) {
             const empty = try ui.box(self.cx, .{ .width = .fill(), .min_height = 70, .padding = .{ .left = 12, .right = 12, .top = 16, .bottom = 16 }, .direction = .row, .align_items = .center, .gap = 12, .background = S.theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
             try empty.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.box, S.theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
             const message = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .direction = .column, .gap = 3 }, .{});
             try message.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.label, "尚未添加模型"));
-            try message.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, "手动输入模型 ID，并配置容量与能力。"));
+            try message.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, "获取模型清单后选择，也可手动输入模型。"));
             try empty.appendChild(self.cx.allocator, message);
+            const first = try self.textAction(.add_model, i, "添加第一个模型 →", null, false);
+            first.meta.ownership.meta.test_id = try self.id(i, null, "first_model");
+            first.setStyleInline(self.cx.allocator, .{ .background = ui.Color.TRANSPARENT });
+            for (first.children.items) |child| if (child.getText() != null) child.setTextColor(S.theme.current().accent_ink);
+            try empty.appendChild(self.cx.allocator, first);
             try result.body.appendChild(self.cx.allocator, empty);
         } else {
             const models = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(self.render_scope.?, self.cx);
@@ -715,6 +825,7 @@ const ButtonState = struct {
     fn refresh(self: *ButtonState) void {
         const ai = self.view.controller.model.value.ai;
         const blocked = switch (self.action) {
+            .fetch_models => self.view.discovery.busy() and self.view.catalog_provider != self.provider,
             .default_provider => self.provider >= ai.provider_count or std.mem.eql(u8, ai.default_provider, draft.providerName(ai.providers[self.provider])) or !self.view.savedEligible(self.provider, null),
             .default_model => self.provider >= ai.provider_count or self.model >= ai.providers[self.provider].model_count or ai.providers[self.provider].models[self.model].default or !self.view.savedEligible(self.provider, self.model),
             .delete_model => self.provider >= ai.provider_count or self.model >= ai.providers[self.provider].model_count or self.view.modelProtected(self.provider, self.model),
@@ -811,7 +922,7 @@ const Fold = struct {
         if (self.kind != .existing) self.view.schedule();
     }
 };
-const Action = enum { toggle_provider, edit_model, add_provider, cancel_provider, delete_provider, add_model, cancel_model, delete_model, default_provider, default_model, reasoning, vision, effort0, effort1, effort2, effort3, effort4, kind };
+const Action = enum { fetch_models, toggle_provider, edit_model, add_provider, cancel_provider, delete_provider, add_model, cancel_model, delete_model, default_provider, default_model, reasoning, vision, effort0, effort1, effort2, effort3, effort4, kind };
 const Click = struct {
     view: *ProviderView,
     action: Action,
@@ -834,6 +945,10 @@ const Click = struct {
     fn run(self: *Click) void {
         const v = self.view;
         if (v.disabled.peek()) return;
+        if (self.action == .fetch_models) {
+            v.fetchModels(self.provider);
+            return;
+        }
         if ((self.action == .delete_provider or self.action == .delete_model) and !self.confirmed) {
             if (v.hasModelEditor()) return;
             v.delete_request = .{ .provider = self.provider, .model = if (self.action == .delete_model) self.model else null };

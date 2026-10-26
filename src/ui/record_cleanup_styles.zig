@@ -2,7 +2,7 @@
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 pub fn dialog(has_receipt: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = 440 }, .height = .{ .px = if (has_receipt) 166 else 146 }, .padding = .ZERO, .background = theme.current().overlay, .border = .{ .width = 0, .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = theme.current().shadow } };
+    return .{ .width = .{ .px = 440 }, .height = .{ .px = if (has_receipt) 172 else 146 }, .padding = .ZERO, .background = theme.current().overlay, .border = .{ .width = 0, .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = theme.current().shadow } };
 }
 pub fn body() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{ .left = 12, .right = 12, .top = 12, .bottom = 12 }, .gap = 8 };
@@ -11,23 +11,17 @@ pub fn row(height: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = height }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6 };
 }
 pub fn stack(has_receipt: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = if (has_receipt) 64 else 44 }, .flex_shrink = 0, .direction = .column, .gap = 4 };
+    return .{ .width = .fill(), .height = .{ .px = if (has_receipt) 70 else 44 }, .flex_shrink = 0, .direction = .column, .gap = 4 };
 }
 pub fn close() ui.BoxStyle {
     return .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .padding = .ZERO, .background = theme.current().surface_2, .border = .{ .width = 0, .radius = 7 }, .flex_shrink = 0 };
 }
 pub fn button(primary: bool, destructive: bool) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = 96 }, .height = .{ .px = 34 }, .padding = .ZERO, .background = if (destructive) danger() else if (primary) c.accent else c.surface_2, .border = .{ .width = 0, .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 96 }, .height = .{ .px = 34 }, .padding = .ZERO, .background = if (destructive) danger() else if (primary) c.action_accent else c.surface_2, .border = .{ .width = 0, .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn danger() ui.Color {
-    const base = theme.baseColors();
-    if (!ui.Color.eql(base.danger, theme.colors(theme.currentName()).danger)) return base.danger;
-    return switch (theme.currentName()) {
-        .dark => ui.Color.rgb(0xd5, 0x3d, 0x3d),
-        .light => ui.Color.rgb(0xdc, 0x26, 0x26),
-        .sauber => ui.Color.rgb(0xcd, 0x47, 0x3b),
-    };
+    return theme.current().action_danger;
 }
 pub fn warning() ui.Color {
     const base = theme.baseColors();

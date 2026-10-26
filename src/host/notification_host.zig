@@ -11,6 +11,7 @@ pub const Window = struct {
     owns: *const fn (*anyopaque, notifications.Target) bool,
     activate: *const fn (*anyopaque, notifications.Target) bool,
     feedback: *const fn (*anyopaque, []const u8) void,
+    transfer_presented: ?*const fn (*anyopaque, u64) bool = null,
 };
 pub const AiCompletion = struct {
     result: enum { succeeded, failed, cancelled, unverified },
@@ -213,7 +214,7 @@ pub const Host = struct {
                 .ai_ready => "host.ai_ready",
             };
             const previous = self.coordinator.factFor(.{ .definition_id = definition_id, .owner = .{ .window_id = @backingInt(window.id), .content = event.owner }, .operation_id = event.operation_id, .attempt_id = event.attempt_or_turn_id, .event_revision = 1, .phase = .accepted, .title = event.summary });
-            _ = try self.coordinator.publishNotification(.{
+            const presentation = try self.coordinator.publishNotification(.{
                 .definition_id = definition_id,
                 .owner = .{ .window_id = @backingInt(window.id), .content = event.owner },
                 .operation_id = event.operation_id,
@@ -235,6 +236,9 @@ pub const Host = struct {
                 },
                 .title = event.summary,
             }, clock);
+            if (event.kind == .transfer_done) if (window.value.transfer_presented) |is_presented| {
+                if (is_presented(window.value.context, event.operation_id)) self.coordinator.dismissNotification(presentation.fact_id);
+            };
             break;
         };
         if (@import("../platform/runtime_mode.zig").automation) {
@@ -279,8 +283,13 @@ pub const Host = struct {
     /// Brief host feedback shares the ordinary notification presenter. It does
     /// not mark background attention or request a system notification.
     pub fn publishFeedback(self: *Host, window_id: WindowId, owner: ContentOwner, summary: []const u8) !void {
+        return self.publishFeedbackSeverity(window_id, owner, summary, .info);
+    }
+    /// Callers with structured failure results preserve that severity instead
+    /// of reducing errors to ordinary timed feedback.
+    pub fn publishFeedbackSeverity(self: *Host, window_id: WindowId, owner: ContentOwner, summary: []const u8, severity: notifications.Severity) !void {
         if (self.next_feedback == 0) return error.NotificationEventIdentityExhausted;
-        _ = try self.publish(.{ .definition_id = "host.feedback", .owner = .{ .window_id = @backingInt(window_id), .content = owner }, .operation_id = self.next_feedback, .event_revision = 1, .phase = .succeeded, .severity = .success, .title = summary, .system_enabled = false });
+        _ = try self.publish(.{ .definition_id = "host.feedback", .owner = .{ .window_id = @backingInt(window_id), .content = owner }, .operation_id = self.next_feedback, .event_revision = 1, .phase = if (severity == .failure) .failed else .succeeded, .severity = severity, .title = summary, .system_enabled = false });
         self.next_feedback = if (self.next_feedback == std.math.maxInt(u64)) 0 else self.next_feedback + 1;
     }
     pub fn setWindowFocus(self: *Host, window_id: WindowId, focused: bool) void {

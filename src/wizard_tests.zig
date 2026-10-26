@@ -615,6 +615,11 @@ test "wizard access cards reject an empty jump and let identity return to route 
     var f: SaveFixture = undefined;
     try f.init(.ssh);
     defer f.deinit();
+    // This case starts with a direct draft; a loaded route is intentionally
+    // retained when the access mode is toggled and is covered separately.
+    f.wizard.loadDraft(.{ .name = "target", .host = "target.example", .user = "deploy", .protocol = .ssh });
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.step.identity").?);
+    SaveFixture.activate(f.wizard.next1_btn.?);
     SaveFixture.activate(findId(f.wizard.root.?, "wizard.access.direct").?);
     try std.testing.expectEqual(@as(usize, 0), f.wizard.currentDraft().route.len);
     try std.testing.expect(f.wizard.canSave());
@@ -670,16 +675,10 @@ test "wizard jump picker commits registry identity through actual keyboard inter
     try std.testing.expectEqual(@as(u64, 41), @backingInt(value.route[0]));
     try std.testing.expectEqualStrings("jump", value.jump_chain[0]);
     try std.testing.expect(!f.wizard.next2_disabled.?.peek());
+    try std.testing.expect(f.wizard.jump_add_disabled.?.peek());
     SaveFixture.activate(findId(f.wizard.root.?, "wizard.route.add").?);
     feedbackFrames(&f);
-    f.cx.setFocus(findId(f.wizard.root.?, "wizard.route.hop.1").?);
-    f.cx.handleKeyDown(.down, .{});
-    feedbackFrames(&f);
-    f.cx.handleKeyDown(.@"return", .{});
-    feedbackFrames(&f);
-    try std.testing.expect(f.wizard.next2_disabled.?.peek());
-    try std.testing.expect(std.mem.indexOf(u8, findId(f.wizard.root.?, "wizard.route.error").?.getText().?.content, "重复") != null);
-    SaveFixture.activate(findId(f.wizard.root.?, "wizard.route.remove.1").?);
+    try std.testing.expectEqual(@as(usize, 1), f.wizard.jump_count);
     try std.testing.expect(!f.wizard.next2_disabled.?.peek());
     try std.testing.expect(findId(f.wizard.root.?, "wizard.route.error").?.style.display == .none);
 }
@@ -1209,7 +1208,7 @@ test "wizard checkbox labels keep app contrast in light theme after real toggles
     }
 }
 
-test "wizard frozen browser field typography and advanced relative geometry" {
+test "wizard revised browser field typography and advanced host policy geometry" {
     var f: SaveFixture = undefined;
     try f.init(.ssh);
     defer f.deinit();
@@ -1217,7 +1216,7 @@ test "wizard frozen browser field typography and advanced relative geometry" {
     SaveFixture.activate(findId(f.wizard.root.?, "wizard.advanced.toggle").?);
     feedbackFrames(&f);
     const name = findId(f.wizard.root.?, "wizard.name").?;
-    try std.testing.expectApproxEqAbs(@as(f32, 32), name.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 34), name.globalRect().h, 0.01);
     try std.testing.expectEqual(@as(f32, 11), name.style.padding.left);
     try std.testing.expectEqual(@as(f32, 6), name.style.padding.top);
     try std.testing.expectEqual(@as(f32, 1), name.style.border.width);
@@ -1225,24 +1224,60 @@ test "wizard frozen browser field typography and advanced relative geometry" {
         try std.testing.expectEqual(@as(f32, 12), feedback.input.state.font_size);
         try std.testing.expectEqual(@as(f32, 18), feedback.input.state.line_height);
         try std.testing.expectEqual(@as(f32, 12), feedback.input.state.text_display_node.?.getText().?.font_size);
-        try std.testing.expectApproxEqAbs(@as(f32, 53.5), feedback.group.globalRect().h, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 55.5), feedback.group.globalRect().h, 0.01);
         try std.testing.expectApproxEqAbs(@as(f32, 16.5), feedback.group.children.items[0].globalRect().h, 0.01);
         try std.testing.expectEqual(@as(f32, 5), feedback.group.style.gap);
     };
     const body = f.wizard.advanced_body.?.globalRect();
     const summary = findId(f.wizard.root.?, "wizard.advanced.toggle").?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 276.5), body.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 350), body.h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 18), summary.h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 12), body.y - summary.y - summary.h, 0.01);
     const timeout = f.wizard.connect_timeout_fact.?;
     try std.testing.expectEqual(@as(f32, 12), timeout.getText().?.font_size);
     try std.testing.expectEqual(@as(f32, 1.5), timeout.getText().?.line_height);
     try std.testing.expectApproxEqAbs(@as(f32, 348), timeout.parent.?.globalRect().w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 32), timeout.parent.?.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 34), timeout.parent.?.globalRect().h, 0.01);
     const area = f.wizard.startup_textarea.?;
     try std.testing.expectEqual(@as(f32, 12), area.state.font_size);
     try std.testing.expectEqual(@as(f32, 18), area.state.line_height);
     try std.testing.expectEqual(@as(f32, 11), area.state.padding_h);
     try std.testing.expectEqual(@as(f32, 9), area.state.padding_v);
     try std.testing.expectApproxEqAbs(@as(f32, 120), area.input.globalRect().h, 0.01);
+}
+
+test "wizard route choices disable identities selected by other hops" {
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    var second = f.assets[0];
+    second.name = "second jump";
+    second.source_owner = .{ .id = @fromBackingInt(42), .revision = 1 };
+    const assets = [_]mod.Draft{ f.assets[0], second };
+    try f.wizard.setAssets(&assets);
+    f.wizard.loadDraft(.{ .name = "target", .host = "target.example", .user = "ops", .route = &.{ @fromBackingInt(41), @fromBackingInt(42) } });
+    feedbackFrames(&f);
+    const first_options = f.wizard.jump_options[0].?.peek();
+    const second_options = f.wizard.jump_options[1].?.peek();
+    try std.testing.expect(!first_options[0].disabled and first_options[1].disabled);
+    try std.testing.expect(second_options[0].disabled and !second_options[1].disabled);
+    try std.testing.expect(f.wizard.jump_add_disabled.?.peek());
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.route.remove.1").?);
+    feedbackFrames(&f);
+    try std.testing.expect(!f.wizard.jump_add_disabled.?.peek());
+    try std.testing.expect(!f.wizard.jump_options[0].?.peek()[1].disabled);
+}
+
+
+test "wizard access mode restores a loaded route without changing its saved identity" {
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    const route_id = f.wizard.currentDraft().route[0];
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.access.direct").?);
+    try std.testing.expectEqual(@as(usize, 0), f.wizard.currentDraft().route.len);
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.access.jump").?);
+    try std.testing.expectEqual(@as(usize, 1), f.wizard.currentDraft().route.len);
+    try std.testing.expectEqual(route_id, f.wizard.currentDraft().route[0]);
+    try std.testing.expect(f.wizard.canSave());
 }

@@ -1,5 +1,4 @@
 //! Exact Bridge readback: 603:313848 / 603:313874, 480×294 / 480×248.
-const std = @import("std");
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 pub fn dialog(partial: bool) ui.BoxStyle {
@@ -30,7 +29,7 @@ pub fn actions(partial: bool) ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 12 }, .top = .{ .px = if (partial) 202 else 250 } }, .width = .{ .px = 456 }, .height = .{ .px = if (partial) 34 else 32 }, .direction = .row, .align_items = .center, .justify = .end, .gap = 6 };
 }
 pub fn button(partial: bool, primary: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = if (primary) (if (partial) @as(f32, 156) else 150) else (if (partial) @as(f32, 104) else 88) }, .height = .{ .px = if (partial and primary) 34 else 32 }, .translate_y = if (partial and !primary) 1 else 0, .padding = .{}, .flex_shrink = 0, .background = if (primary) (if (partial) theme.current().accent else danger()) else theme.current().surface_2, .border = .{ .radius = 8 } };
+    return .{ .width = .{ .px = if (primary) (if (partial) @as(f32, 156) else 150) else (if (partial) @as(f32, 104) else 88) }, .height = .{ .px = if (partial and primary) 34 else 32 }, .translate_y = if (partial and !primary) 1 else 0, .padding = .{}, .flex_shrink = 0, .background = if (primary) (if (partial) theme.current().action_accent else danger()) else theme.current().surface_2, .border = .{ .radius = 8 } };
 }
 
 pub fn scrollContent() ui.BoxStyle {
@@ -40,13 +39,5 @@ pub fn notice() ui.BoxStyle {
     return .{ .width = .fill(), .flex_shrink = 0, .margin = .{ .bottom = 6 } };
 }
 pub fn danger() ui.Color {
-    // Registry publications update actual tokens without changing the startup
-    // name. Match the two prototype overrides against the current base roles;
-    // imported themes retain their own danger color.
-    const current = theme.baseColors();
-    const dark = theme.colors(.dark);
-    const sauber = theme.colors(.sauber);
-    if (std.meta.eql(current.overlay, dark.overlay) and std.meta.eql(current.danger, dark.danger)) return ui.Color.rgb(0xd5, 0x3d, 0x3d);
-    if (std.meta.eql(current.overlay, sauber.overlay) and std.meta.eql(current.danger, sauber.danger)) return ui.Color.rgb(0xcd, 0x47, 0x3b);
-    return current.danger;
+    return theme.current().action_danger;
 }

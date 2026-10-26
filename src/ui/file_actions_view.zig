@@ -5,6 +5,7 @@ const ui = @import("ui");
 const Files = @import("file_workspace_view.zig");
 const Controller = @import("../host/file_workspace_controller.zig");
 const S = @import("file_actions_styles.zig");
+const receipts = @import("notification_presenter.zig");
 const Frozen = struct { arena: std.heap.ArenaAllocator, envelope: Files.Envelope, directory: []const u8, destination: Files.Stamp, target: []const u8, history: []const Controller.HistoryEntry };
 pub const View = struct {
     cx: *ui.Cx,
@@ -131,8 +132,10 @@ pub const View = struct {
         menu: *View,
         kind: Kind,
         path: ?[]const u8,
+        node: ?*ui.Node = null,
         fn click(self: *Action) void {
             const menu = self.menu;
+            const clicked_rect = if (self.node) |node| node.globalRect() else menu.pane.context_button.globalRect();
             const frozen = menu.frozen orelse return;
             var envelope = frozen.envelope;
             envelope.action = switch (self.kind) {
@@ -154,6 +157,7 @@ pub const View = struct {
                 menu.fail(err);
                 return;
             };
+            if (self.kind == .copy) receipts.acknowledgeAt(menu.cx, clicked_rect, "路径已复制") catch {};
             menu.open.set(false);
             menu.cx.requestRedraw();
         }
@@ -162,6 +166,7 @@ pub const View = struct {
         const scope = self.rows_scope.?;
         const action = try scope.createState(Action, .{ .menu = self, .kind = kind, .path = path });
         const button = try ui.widgets.Button(.{ .label = label, .variant = .ghost, .disabled = disabled, .base_style = S.row(), .hover_style = S.hover(), .on_click = self.cx.on(Action, action, Action.click) }).mount(scope, self.cx);
+        action.node = button;
         button.meta.ownership.meta.test_id = id;
         button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (self.history) 320 else 240 }, .flex_shrink = 0 });
         try self.rows.appendChild(self.cx.allocator, button);

@@ -140,6 +140,7 @@ test "wizard hidden logs cannot intercept a subsequent file authentication point
     complete.cleanup = .released;
     try std.testing.expect(try f.wizard.setTestSnapshot(complete));
     f.settle();
+    f.click("wizard.test.toggle");
     try std.testing.expect(f.wizard.logs_scroll.?.globalRect().h > 0);
     f.wizard.hide();
     f.settle();
@@ -302,6 +303,7 @@ test "wizard typed probe owns strings rejects old revision and preserves paused 
     @memset(&name, 'x');
     try std.testing.expectEqualStrings("Frozen", f.wizard.test_source.?.value.hops[0].name);
     f.settle();
+    f.click("wizard.test.toggle");
     const scroll = f.wizard.test_scroll.?;
     ui.widgets.setScrollY(scroll.state, scroll.content, scroll.state.maxScrollY());
     f.wizard.test_last_scroll = scroll.state.scroll_y;

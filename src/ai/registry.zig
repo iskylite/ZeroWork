@@ -19,14 +19,18 @@ pub fn effortName(kind: Kind, effort: provider.Effort) []const u8 {
     return switch (kind) {
         .anthropic => switch (effort) {
             .low => "0",
+            .none => "none",
             .medium => "2000",
             .high => "8000",
             .xhigh, .max => "32000",
+            .ultra => "ultra",
         },
         .openai_compat => switch (effort) {
             .low => "low",
             .medium => "medium",
             .high, .xhigh, .max => "high",
+            .none => "none",
+            .ultra => "ultra",
         },
         .ollama => "prompt-only",
     };

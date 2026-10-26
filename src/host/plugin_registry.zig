@@ -1,7 +1,7 @@
 const std = @import("std");
 
 pub const host_api_version: u32 = 2;
-pub const plugin_version = "0.2.1";
+pub const plugin_version = "0.2.0";
 /// Compatibility IDs for the three legacy engine adapters only. Public IDs are strings.
 pub const LegacyPluginId = enum { local, ssh, sftp, external };
 pub const PluginId = LegacyPluginId;

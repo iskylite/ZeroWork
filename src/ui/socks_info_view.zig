@@ -98,10 +98,11 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     self.exit = try text(self, "—", 9, 400, .secondary, false);
     self.route = try text(self, "", 9, 400, .muted, false);
     self.address = try text(self, "", 11, 500, .primary, true);
-    self.address.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 32 }, .flex_shrink = 0 });
+    self.address.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 32, .min_width = 0, .flex_shrink = 0 });
     if (self.address.getText()) |old| {
         var style = old;
         style.wrap = .char;
+        style.text_overflow = .clip;
         self.address.setText(style);
     }
     self.bind_note = try text(self, "", 10, 400, .muted, false);
@@ -121,10 +122,11 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     try self.rule.appendChild(cx.allocator, self.protocol);
     try self.body.content.appendChild(cx.allocator, self.rule);
     self.message = try text(self, "", 10.5, 400, .secondary, false);
-    self.message.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 32 }, .margin = .{ .top = 8 }, .flex_shrink = 0 });
+    self.message.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 32, .min_width = 0, .margin = .{ .top = 8 }, .flex_shrink = 0 });
     if (self.message.getText()) |old| {
         var style = old;
         style.wrap = .word;
+        style.text_overflow = .clip;
         self.message.setText(style);
     }
     self.message.setDisplay(.none);

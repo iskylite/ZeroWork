@@ -883,3 +883,14 @@ fn writeAnthropicImage(writer: *std.Io.Writer, reference: @import("image_attachm
     try writeBase64(writer, image.bytes);
     try writer.writeAll("\"}}");
 }
+
+test "explicit gateway none and ultra effort names survive serialization" {
+    const a = std.testing.allocator;
+    for ([_]provider.Effort{ .none, .ultra }) |effort| {
+        const body = try requestBody(a, .openai_compat, .{ .model = "declared-gateway-model", .system = "", .messages = &.{}, .native_effort = true, .effort = effort }, 8192);
+        defer a.free(body);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, body, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqualStrings(@tagName(effort), parsed.value.object.get("reasoning_effort").?.string);
+    }
+}

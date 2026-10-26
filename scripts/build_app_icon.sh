@@ -1,5 +1,5 @@
 #!/bin/sh
-# Rebuild the macOS icon from the unmodified Figma export.
+# Rebuild the default transparent macOS icon from AppIcon.png.
 set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/zerowork-icon.XXXXXX")

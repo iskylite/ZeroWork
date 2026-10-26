@@ -13,7 +13,10 @@ pub fn Binding(comptime Host: type) type {
             if (request.spec == .plugin) return @import("envelope_binding.zig").Binding(Host).createRemoteEnvelope(self, request, adapterCreate);
             if (request.purpose == .socks_background) return (self.domain.backgrounds orelse return error.BackgroundHostUnavailable).queue(request);
             if (self.pending_source == null) for (self.mappings.items) |*mapping| {
-                if (!self.supportsIntegration(mapping.handle, "transport_loss") or mapping.handle.session_id != request.handle.session_id) continue;
+                // SessionHost has already advanced the generation before
+                // invoking this factory. The mapping still owns the previous
+                // generation until retrySshSession succeeds.
+                if (mapping.handle.session_id != request.handle.session_id or !self.supportsIntegration(request.handle, "transport_loss")) continue;
                 // The successor owns the same tab and Runtime, not another pane.
                 try self.workspace.retrySshSession(mapping.legacy_id, request.key);
                 const tab = self.workspace.sessionTab(mapping.legacy_id) orelse return error.StaleSession;

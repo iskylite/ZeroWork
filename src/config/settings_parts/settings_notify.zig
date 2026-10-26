@@ -13,6 +13,21 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try section.toggle(.{ .section = "notify", .key = "reconnect" }, "断线与重连", "", null);
         try section.toggle(.{ .section = "notify", .key = "ai_ready" }, "AI 回答就绪", "", null);
         try section.toggle(.{ .section = "notify", .key = "bell" }, "终端 Bell 声音", "", null);
+        const permission_panel = try ui.box(cx, .{ .width = .fill(), .direction = .column, .padding = .{ .left = 10, .right = 10, .bottom = 8 }, .margin = .{ .top = 8, .bottom = 8 }, .background = controls.S.theme.current().well, .border = .{ .radius = 8 } }, .{});
+        const row = try ui.boxStyled(cx, controls.S.fieldRow, .{});
+        row.meta.ownership.meta.test_id = "settings.notifications.permission";
+        const labels = try ui.boxStyled(cx, controls.S.fieldLabel, .{});
+        try labels.appendChild(cx.allocator, try ui.textStyled(cx, controls.S.label, "系统通知权限"));
+        const help = if (bound.hooks.authorization_help) |read| read(bound.hooks.context) else "当前无法使用系统通知。";
+        try labels.appendChild(cx.allocator, try ui.textStyled(cx, controls.S.note, help));
+        try row.appendChild(cx.allocator, labels);
+        const tip = try ui.widgets.Tooltip(.{ .text = "当前版本尚未提供测试通知", .open_delay_ms = 450 }).mount(bound.scope, cx);
+        const button = try ui.widgets.Button(.{ .label = "测试通知", .disabled = true, .a11y_label = "当前版本尚未提供测试通知", .variant = .secondary, .base_style = controls.S.actionControl(false) }).mount(bound.scope, cx);
+        button.meta.ownership.meta.test_id = "settings.notifications.test";
+        try tip.trigger.appendChild(cx.allocator, button);
+        try row.appendChild(cx.allocator, tip.wrapper);
+        try permission_panel.appendChild(cx.allocator, row);
+        try section.body.appendChild(cx.allocator, permission_panel);
     }
     if (binding.matches(query, "注意标记 勿扰 非活跃 标签 圆点 时段 tab_dot quiet_hours")) {
         const section = try page.section("注意标记与勿扰", "标签圆点与勿扰时段", ui.icons.moon, 49, "settings.notifications.attention", null);

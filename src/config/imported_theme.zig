@@ -23,7 +23,7 @@ pub const ParseError = error{ InvalidPlist, MissingColors, InvalidComponent, The
 
 /// Canonical identities retain all previously accepted built-in references.
 pub fn builtinId(name: []const u8) ?[]const u8 {
-    for ([_][]const u8{ "dark", "light", "sauber", "catppuccin-mocha", "dracula", "dark-pro", "solarized-dark", "nord" }) |id|
+    for (@import("theme_presets.zig").ids ++ [_][]const u8{ "catppuccin-mocha", "dracula", "dark-pro", "solarized-dark", "nord" }) |id|
         if (std.ascii.eqlIgnoreCase(name, id)) return id;
     if (std.ascii.eqlIgnoreCase(name, "sauber-light")) return "sauber";
     if (std.ascii.eqlIgnoreCase(name, "catppuccin_mocha")) return "catppuccin-mocha";

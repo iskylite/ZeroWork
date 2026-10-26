@@ -68,9 +68,11 @@ pub fn effortLabel(value: Effort) []const u8 {
         .high => "高",
         .xhigh => "较高",
         .max => "最高",
+        .none => "关闭",
+        .ultra => "超高",
     };
 }
-const Model = struct { key: ModelKey, enabled: bool, context_window: u32, reasoning: bool, toggle: bool, thinking_default: ?bool, vision: bool, efforts: [5]bool };
+const Model = struct { key: ModelKey, enabled: bool, context_window: u32, context_discovered: bool, reasoning: bool, toggle: bool, thinking_default: ?bool, vision: bool, efforts: [7]bool };
 const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, permission: PermissionMode, effort: ?Effort, thinking: ?bool, attachments: AttachmentState, usage: ?Usage, editable: bool, config_hash: u64 };
 const Owned = struct {
     arena: std.heap.ArenaAllocator,
@@ -106,14 +108,15 @@ const Owned = struct {
     fn appendModel(a: std.mem.Allocator, models: *std.ArrayList(Model), hash: *std.hash.Wyhash, id: []const u8, kind: config.ProviderKind, endpoint: []const u8, enabled: bool, value: config.AiModel) !void {
         const key: ModelKey = .{ .provider_id = id, .model_id = value.id };
         for (models.items) |previous| if (previous.key.eql(key)) return error.DuplicateModel;
-        const efforts = if (kind == .openai_compat or value.reasoning_discovered) value.efforts else @as([5]bool, @splat(false));
-        try models.append(a, .{ .key = try cloneKey(a, key), .enabled = enabled and std.mem.trim(u8, value.id, " \t\r\n").len != 0 and value.context_window != 0, .context_window = value.context_window, .reasoning = value.reasoning, .thinking_default = value.thinking_default, .toggle = value.reasoning_toggle and (value.reasoning_adaptive or @import("../ai/provider_config.zig").toggleProtocol(kind, endpoint, value.id) != .none), .vision = value.vision, .efforts = efforts });
+        const efforts = if (kind == .openai_compat or value.reasoning_discovered) value.efforts else @as([7]bool, @splat(false));
+        try models.append(a, .{ .key = try cloneKey(a, key), .enabled = enabled and std.mem.trim(u8, value.id, " \t\r\n").len != 0 and value.context_window != 0, .context_window = value.context_window, .context_discovered = value.context_discovered, .reasoning = value.reasoning, .thinking_default = value.thinking_default, .toggle = value.reasoning_toggle and (value.reasoning_adaptive or @import("../ai/provider_config.zig").toggleProtocol(kind, endpoint, value.id) != .none), .vision = value.vision, .efforts = efforts });
         hash.update(id);
         hash.update(&.{0});
         hash.update(value.id);
         hash.update(&.{ 0, @intFromBool(enabled), @intFromBool(value.reasoning), @intFromBool(value.vision), @intFromBool(value.reasoning_toggle), @intFromBool(value.reasoning_discovered), @intFromBool(value.reasoning_adaptive) });
         hash.update(&.{if (value.thinking_default) |v| (if (v) @as(u8, 1) else 2) else 0});
         hash.update(std.mem.asBytes(&value.context_window));
+        hash.update(std.mem.asBytes(&value.context_discovered));
         for (efforts) |supported| hash.update(&.{@intFromBool(supported)});
     }
     fn deinit(self: *Owned) void {
@@ -172,6 +175,8 @@ pub const View = struct {
     clear_pending: bool = false,
     filtered: std.ArrayList(usize) = .empty,
     model_rows: std.ArrayList(struct { index: usize, header: bool }) = .empty,
+    collapsed_providers: std.ArrayList([]u8) = .empty,
+    pending_provider: ?usize = null,
     model_card: *ui.Node = undefined,
     model_title: *ui.Node = undefined,
     model_close: *ui.Node = undefined,
@@ -186,14 +191,14 @@ pub const View = struct {
     permission_styles: [2]*ui.Signal(ui.BoxStyle) = undefined,
     permission_checks: [2]*ui.Node = undefined,
     slider_value: *ui.Signal(f32),
-    reasoning_choices: [6]ReasoningChoice = undefined,
+    reasoning_choices: [8]ReasoningChoice = undefined,
     reasoning_count: usize = 0,
     slider: ui.widgets.slider.SliderResult = undefined,
-    slider_markers: [6]*ui.Node = undefined,
+    slider_markers: [8]*ui.Node = undefined,
     slider_thumb: *ui.Node = undefined,
     slider_track: *ui.Node = undefined,
     effort_name: *ui.Node = undefined,
-    effort_ticks: [6]*ui.Node = undefined,
+    effort_ticks: [8]*ui.Node = undefined,
     attachment_rows: [4]*ui.Node = undefined,
     attachment_disabled: [4]*ui.Signal(bool) = undefined,
     usage_body: *ui.Node = undefined,
@@ -222,10 +227,10 @@ pub const View = struct {
             self.disabled[index] = try scope.createSignal(bool, true);
             const base = switch (index) {
                 0 => S.iconButton(8),
-                1 => S.chip(112, 8),
+                1 => S.chip(98, 8),
                 2 => S.chip(190, 8),
                 3 => S.chip(80, 7),
-                else => S.chip(68, 8),
+                else => S.chip(48, 8),
             };
             self.button_styles[index] = try scope.createSignal(ui.BoxStyle, base);
             const toggle_context = try scope.createState(Toggle, .{ .view = self, .kind = @fromBackingInt(@intCast(index)) });
@@ -241,7 +246,8 @@ pub const View = struct {
             self.buttons[index] = button;
             const size: f32 = switch (index) {
                 0, 4 => 14,
-                1, 3 => 14,
+                1 => 12,
+                3 => 14,
                 2 => 10,
                 else => 16,
             };
@@ -253,11 +259,11 @@ pub const View = struct {
                 self.model_vision_hint.wrapper.setStyleInline(cx.allocator, S.modelVision());
                 self.model_vision_hint.trigger.setStyleInline(cx.allocator, S.visionTarget());
                 self.model_vision_hint.content.meta.ownership.meta.test_id = "ai.composer.model.vision.tooltip";
-                self.model_vision = try ui.iconTint(cx, ui.icons.get("image").?, S.theme.current().fg_3, S.icon(14));
+                self.model_vision = try ui.iconTint(cx, ui.icons.get("image").?, S.theme.current().fg_3, S.icon(12));
                 self.model_vision.meta.ownership.meta.test_id = "ai.composer.model.vision";
                 try self.model_vision_hint.trigger.appendChild(cx.allocator, self.model_vision);
                 try button.appendChild(cx.allocator, self.model_vision_hint.wrapper);
-                self.model_text_icon = try ui.iconTint(cx, ui.icons.get("brain").?, S.theme.current().fg_3, S.icon(14));
+                self.model_text_icon = try ui.iconTint(cx, ui.icons.get("brain").?, S.theme.current().fg_3, S.icon(12));
                 self.model_text_icon.setStyleInline(cx.allocator, S.modelVision());
                 self.model_text_icon.meta.ownership.meta.test_id = "ai.composer.model.text";
                 self.model_text_icon.behavior.interaction.a11y = .{ .role = .img, .label = "仅文本输入" };
@@ -265,7 +271,7 @@ pub const View = struct {
                 try button.appendChild(cx.allocator, self.model_text_icon);
             }
             if (index == 1 or index == 2 or index == 3 or index == 4) {
-                const text = try self.label(button, if (index == 1) "执行权限" else if (index == 2) "未配置模型" else if (index == 3) "推理设置" else "—", S.text(10, 600, 16, true), S.chipLabel(@fromBackingInt(@intCast(index))));
+                const text = try self.label(button, if (index == 1) "执行权限" else if (index == 2) "未配置模型" else if (index == 3) "推理设置" else "—", S.text(10, 400, 14, true), S.chipLabel(@fromBackingInt(@intCast(index))));
                 self.labels[index] = text;
             }
             if (index == 1 or index == 2 or index == 3) {
@@ -283,7 +289,7 @@ pub const View = struct {
         self.buttons[3].setDisplay(.none);
         cx.detachChild(self.buttons[3], self.labels[3].?);
         self.labels[3].?.setStyleInline(cx.allocator, S.combinedEffortLabel());
-        try self.buttons[2].appendChild(cx.allocator, self.labels[3].?);
+        try self.buttons[2].insertChildBefore(cx.allocator, self.labels[3].?, self.chevrons[1]);
         try self.root.appendChild(cx.allocator, try ui.spacer(cx));
         self.trailing = try ui.box(cx, S.trailing(), .{});
         self.trailing.meta.ownership.meta.test_id = "ai.composer.trailing";
@@ -424,8 +430,11 @@ pub const View = struct {
         const entry = self.model_rows.items[filtered_index];
         const model = source.models[entry.index];
         if (entry.header) {
-            const row = try ui.box(cx, S.groupLabel(), .{});
+            const state = try scope.createState(ProviderGroup, .{ .view = self, .index = entry.index });
+            const row = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = model.key.provider_id, .base_style = S.groupLabel(), .on_click = cx.on(ProviderGroup, state, ProviderGroup.toggle) }).mount(scope, cx);
             row.meta.ownership.meta.test_id = "ai.model.provider";
+            const collapsed = self.providerCollapsed(model.key.provider_id);
+            try row.appendChild(cx.allocator, try ui.iconTint(cx, if (collapsed) ui.icons.chevron_right else ui.icons.chevron_down, S.theme.current().fg_2, S.icon(12)));
             _ = try self.label(row, model.key.provider_id, S.text(10, 400, 12, true), S.flexibleLabel(12));
             return row;
         }
@@ -439,7 +448,7 @@ pub const View = struct {
             if (levels.written().len != 0) try levels.writer.writeAll(" / ");
             try levels.writer.writeAll(effortLabel(@fromBackingInt(@intCast(effort_index))));
         };
-        const full_name = try std.fmt.allocPrint(scope.allocator, "{s}\n{s} · {s}\n上下文 {d} tokens · {s}\n{s} · 工具能力未声明\n{s}{s}", .{ id.peek(), provider_id.peek(), id.peek(), model.context_window, if (model.enabled) "可用" else "Provider 未配置或已禁用", if (model.vision) "支持图片输入" else "仅文本输入", if (model.reasoning) "推理档位：" else "无推理档位", levels.written() });
+        const full_name = try std.fmt.allocPrint(scope.allocator, "{s}\n{s} · {s}\n{s}上下文 {d} tokens · {s}\n{s} · 工具能力未声明\n{s}{s}", .{ id.peek(), provider_id.peek(), id.peek(), if (model.context_discovered) "已发现" else "配置", model.context_window, if (model.enabled) "可用" else "Provider 未配置或已禁用", if (model.vision) "支持图片输入" else "仅文本输入", if (model.reasoning) "推理档位：" else "无推理档位", levels.written() });
         defer scope.allocator.free(full_name);
         const description = try scope.createText(full_name, .{});
         // Tooltip has no fixed-width contract in this zenit revision. Its
@@ -475,7 +484,7 @@ pub const View = struct {
         const name = try self.label(button, id.peek(), S.text(11, 400, 13, false), S.flexibleLabel(13));
         name.setTextColor(if (model.enabled) S.theme.current().fg_1 else S.theme.current().fg_3);
         var context_buffer: [32]u8 = undefined;
-        const context_text = if (model.context_window >= 1000000) try std.fmt.bufPrint(&context_buffer, "{d}M", .{model.context_window / 1000000}) else try std.fmt.bufPrint(&context_buffer, "{d}k", .{model.context_window / 1000});
+        const context_text = if (model.context_window >= 1000000) try std.fmt.bufPrint(&context_buffer, "{s}{d}M", .{ if (model.context_discovered) "" else "配置", model.context_window / 1000000 }) else try std.fmt.bufPrint(&context_buffer, "{s}{d}k", .{ if (model.context_discovered) "" else "配置", model.context_window / 1000 });
         const context_width = @max(@ceil(cx.text.measureTextWidth(context_text, 10, 400, true)) + 2, @as(f32, @floatFromInt(context_text.len)) * 6.5);
         const context_label = try self.label(button, context_text, S.text(10, 400, 13, false), S.label(context_width, 13));
         if (context_label.getText()) |text| {
@@ -521,7 +530,7 @@ pub const View = struct {
         self.effort_name = try self.label(parent, "不支持推理设置", S.text(10, 400, 16.5, true), S.flexibleLabel(16.5));
         const area = try ui.box(self.cx, S.sliderArea(), .{});
         self.effort_area = area;
-        self.slider = try ui.widgets.Slider(.{ .label_text = "推理档位", .min = 0, .max = 4, .step = 1, .width = 308, .track_height = 3, .thumb_size = 12, .value = ui.split(self.slider_value, self.cx.on(View, self, effortProposed)), .disabled = self.disabled[@backingInt(S.Kind.effort)], .test_id = "ai.effort.slider.track" }).mount(self.scope, self.cx);
+        self.slider = try ui.widgets.Slider(.{ .label_text = "推理档位", .min = 0, .max = 4, .step = 0, .width = 308, .track_height = 3, .thumb_size = 12, .value = ui.split(self.slider_value, self.cx.on(View, self, effortProposed)), .disabled = self.disabled[@backingInt(S.Kind.effort)], .test_id = "ai.effort.slider.track" }).mount(self.scope, self.cx);
         self.slider.wrapper.setStyleInline(self.cx.allocator, S.slider());
         self.slider.wrapper.meta.ownership.meta.test_id = "ai.effort.slider";
         self.slider.wrapper.behavior.events.capture_context = self;
@@ -533,15 +542,15 @@ pub const View = struct {
         self.slider_thumb = track_area.children.items[1];
         self.slider_track.setBackground(S.theme.current().well);
         self.slider_thumb.setStyleInline(self.cx.allocator, S.sliderThumb());
-        for (0..6) |index| {
-            const tick = try ui.box(self.cx, S.sliderTick(index, 6), .{});
+        for (0..8) |index| {
+            const tick = try ui.box(self.cx, S.sliderTick(index, 8), .{});
             self.slider_markers[index] = tick;
             tick.meta.ownership.meta.test_id = "ai.effort.marker";
             try track_area.insertChildBefore(self.cx.allocator, tick, self.slider_thumb);
         }
         try area.appendChild(self.cx.allocator, self.slider.wrapper);
         const ticks = try ui.box(self.cx, S.ticks(), .{});
-        for (0..6) |index| self.effort_ticks[index] = try self.label(ticks, "", S.text(9, 400, 12, true), S.label(32, 12));
+        for (0..8) |index| self.effort_ticks[index] = try self.label(ticks, "", S.text(9, 400, 12, true), S.label(32, 12));
         try area.appendChild(self.cx.allocator, ticks);
         try parent.appendChild(self.cx.allocator, area);
     }
@@ -580,6 +589,10 @@ pub const View = struct {
         return false;
     }
     pub fn flush(self: *View) !void {
+        if (self.pending_provider) |index| {
+            self.pending_provider = null;
+            try self.toggleProvider(index);
+        }
         var changed = false;
         if (self.clear_pending) {
             self.clear_pending = false;
@@ -758,6 +771,32 @@ pub const View = struct {
         self.chooseReasoning(@intCast(next));
         return .stop;
     }
+    const ProviderGroup = struct {
+        view: *View,
+        index: usize,
+        fn toggle(self: *ProviderGroup) void {
+            self.view.pending_provider = self.index;
+            self.view.cx.requestRedraw();
+        }
+    };
+    fn providerCollapsed(self: *View, id: []const u8) bool {
+        for (self.collapsed_providers.items) |value| if (std.mem.eql(u8, value, id)) return true;
+        return false;
+    }
+    fn toggleProvider(self: *View, index: usize) !void {
+        const source = if (self.source) |*value| &value.value else return;
+        if (index >= source.models.len) return;
+        const id = source.models[index].key.provider_id;
+        for (self.collapsed_providers.items, 0..) |value, i| if (std.mem.eql(u8, value, id)) {
+            self.cx.allocator.free(self.collapsed_providers.orderedRemove(i));
+            try self.filterModels();
+            return;
+        };
+        const copy = try self.cx.allocator.dupe(u8, id);
+        errdefer self.cx.allocator.free(copy);
+        try self.collapsed_providers.append(self.cx.allocator, copy);
+        try self.filterModels();
+    }
     fn filterModels(self: *View) !void {
         self.filtered.clearRetainingCapacity();
         if (self.source) |*source| for (source.value.models, 0..) |_, index| {
@@ -768,7 +807,7 @@ pub const View = struct {
         if (self.source) |source| for (self.filtered.items) |index| {
             const id = source.value.models[index].key.provider_id;
             if (previous == null or !std.mem.eql(u8, previous.?, id)) try self.model_rows.append(self.cx.allocator, .{ .index = index, .header = true });
-            try self.model_rows.append(self.cx.allocator, .{ .index = index, .header = false });
+            if (!self.providerCollapsed(id)) try self.model_rows.append(self.cx.allocator, .{ .index = index, .header = false });
             previous = id;
         };
         self.model_count.set(self.model_rows.items.len);
@@ -815,7 +854,7 @@ pub const View = struct {
                 self.reasoning_choices[self.reasoning_count] = .off;
                 self.reasoning_count += 1;
             }
-            for (model.efforts, 0..) |supported, index| if (supported) {
+            for ([_]usize{ 5, 0, 1, 2, 3, 4, 6 }) |index| if (model.efforts[index]) {
                 self.reasoning_choices[self.reasoning_count] = .{ .effort = @fromBackingInt(@intCast(index)) };
                 self.reasoning_count += 1;
             };
@@ -835,10 +874,10 @@ pub const View = struct {
         for (0..5) |index| {
             self.button_styles[index].set(switch (index) {
                 0 => S.iconButton(8),
-                1 => S.chip(112, 8),
+                1 => S.chip(98, 8),
                 2 => S.chip(190, 8),
                 3 => S.chip(80, 7),
-                else => S.chip(68, 8),
+                else => S.chip(48, 8),
             });
             _ = self.icons[index].setTint(if (self.disabled[index].peek()) colors.fg_3 else colors.fg_2);
             if (self.labels[index]) |label_node| label_node.setTextColor(if (self.disabled[index].peek()) colors.fg_3 else colors.fg_2);
@@ -855,7 +894,7 @@ pub const View = struct {
         const permission = if (source) |value| permissionLabel(value.permission) else "执行权限";
         try self.labels[1].?.setTextContent(self.cx.allocator, permission);
         if (self.buttons[1].behavior.interaction.a11y) |*attrs| attrs.label = self.labels[1].?.getText().?.content;
-        setAsset(self.icons[1], if (source != null and source.?.permission == .auto) "shield-check" else "hand", 14, if (editable) colors.fg_2 else colors.fg_3);
+        setAsset(self.icons[1], if (source != null and source.?.permission == .auto) "shield-check" else "hand", 12, if (editable) colors.fg_2 else colors.fg_3);
         try self.labels[2].?.setTextContent(self.cx.allocator, if (current) |item| item.key.model_id else if (source) |value| if (value.current) |key| key.model_id else "未配置模型" else "未配置模型");
         if (self.buttons[2].behavior.interaction.a11y) |*attrs| attrs.label = self.labels[2].?.getText().?.content;
         for (0..2) |index| {
@@ -873,14 +912,14 @@ pub const View = struct {
         var effort_heading: [96]u8 = undefined;
         try self.effort_name.setTextContent(self.cx.allocator, if (!self.disabled[3].peek()) try std.fmt.bufPrint(&effort_heading, "推理强度 {s}", .{effort_text}) else if (current != null and current.?.enabled and current.?.reasoning and !current.?.toggle and !any_effort) "未开放思考开关或推理档位" else effort_text);
         try self.labels[3].?.setTextContent(self.cx.allocator, effort_text);
-        const model_width = @max(24, @min(100, 2 + @ceil(self.cx.text.measureTextWidth(self.labels[2].?.getText().?.content, 10, 600, false))));
+        const model_width = @max(24, @min(100, self.cx.text.measureTextWidth(self.labels[2].?.getText().?.content, 10, 400, false)));
         const show_effort = current != null and current.?.reasoning;
         self.labels[3].?.setDisplay(if (show_effort) .flex else .none);
-        const effort_width = if (show_effort) @max(10, @ceil(self.cx.text.measureTextWidth(effort_text, 10, 600, false))) else 0;
+        const effort_width = if (show_effort) @max(10, self.cx.text.measureTextWidth(effort_text, 10, 400, false)) else 0;
         self.labels[2].?.setStyleInline(self.cx.allocator, S.compactModelLabel(model_width, has_modality));
         self.labels[3].?.setStyleInline(self.cx.allocator, S.compactEffortLabel(model_width, effort_width, has_modality));
         self.chevrons[1].setStyleInline(self.cx.allocator, S.compactModelChevron(model_width, effort_width, has_modality));
-        self.button_styles[2].set(S.chip(S.compactModelWidth(model_width, effort_width, has_modality), 8));
+        self.button_styles[2].set(S.naturalChip());
         var selected_choice: usize = 0;
         for (self.reasoning_choices[0..self.reasoning_count], 0..) |choice, index| {
             const selected = switch (choice) {
@@ -891,7 +930,7 @@ pub const View = struct {
             if (selected) selected_choice = index;
         }
         self.slider_value.set(if (self.reasoning_count > 1) @as(f32, @floatFromInt(selected_choice)) * 4 / @as(f32, @floatFromInt(self.reasoning_count - 1)) else 0);
-        for (0..6) |index| {
+        for (0..8) |index| {
             const visible = index < self.reasoning_count;
             self.effort_ticks[index].setDisplay(if (visible) .flex else .none);
             self.slider_markers[index].setDisplay(if (visible) .flex else .none);
@@ -913,6 +952,9 @@ pub const View = struct {
         var buffer: [64]u8 = undefined;
         const usage = if (source) |value| value.usage else null;
         try self.labels[4].?.setTextContent(self.cx.allocator, if (usage) |value| try percentText(&buffer, value) else "—");
+        self.labels[4].?.setStyleInline(self.cx.allocator, .{ .position = .relative, .inset = .{}, .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .flex_shrink = 0 });
+        self.ring.setStyleInline(self.cx.allocator, .{ .position = .relative, .inset = .{}, .width = .{ .px = 8 }, .height = .{ .px = 8 }, .flex_shrink = 0 });
+        self.button_styles[4].set(S.naturalChip());
         self.ring.markRenderDirty();
     }
     fn refreshUsage(self: *View) !void {
@@ -1039,7 +1081,9 @@ pub const View = struct {
         return .done;
     }
     fn label(self: *View, parent: *ui.Node, text_value: []const u8, style: ui.TextStyle, box: ui.BoxStyle) !*ui.Node {
-        const node = try ui.text(self.cx, "", style);
+        var label_style = style;
+        label_style.text_overflow = .clip;
+        const node = try ui.text(self.cx, "", label_style);
         try node.setTextContent(self.cx.allocator, text_value);
         node.setStyleInline(self.cx.allocator, box);
         try parent.appendChild(self.cx.allocator, node);
@@ -1049,11 +1093,11 @@ pub const View = struct {
         const self: *View = @ptrCast(@alignCast(raw orelse return));
         const dl = ctx.display_list orelse return;
         const header = ctx.display_header orelse return;
-        try dl.append(.{ .arc = .{ .header = header, .cx = 7, .cy = 7, .outer_radius = 7, .stroke_width = 2, .start_angle = 0, .end_angle = std.math.tau, .color = S.theme.current().fg_3 } });
+        try dl.append(.{ .arc = .{ .header = header, .cx = 4, .cy = 4, .outer_radius = 4, .stroke_width = 1, .start_angle = 0, .end_angle = std.math.tau, .color = S.theme.current().fg_3 } });
         const source = if (self.source) |source| source.value else return;
         const usage = source.usage orelse return;
         const ratio = @min(1, @as(f32, @floatFromInt(usage.used_tokens)) / @as(f32, @floatFromInt(usage.limit_tokens)));
-        if (ratio > 0) try dl.append(.{ .arc = .{ .header = header, .cx = 7, .cy = 7, .outer_radius = 7, .stroke_width = 2, .start_angle = -std.math.pi / 2.0, .end_angle = -std.math.pi / 2.0 + std.math.tau * ratio, .color = S.theme.current().accent } });
+        if (ratio > 0) try dl.append(.{ .arc = .{ .header = header, .cx = 4, .cy = 4, .outer_radius = 4, .stroke_width = 1, .start_angle = -std.math.pi / 2.0, .end_angle = -std.math.pi / 2.0 + std.math.tau * ratio, .color = S.theme.current().accent } });
     }
     fn release(self: *View) void {
         self.cx.removeAfterLayoutHook(self);
@@ -1061,6 +1105,8 @@ pub const View = struct {
         if (self.pending) |*pending| pending.deinit();
         self.filtered.deinit(self.cx.allocator);
         self.model_rows.deinit(self.cx.allocator);
+        for (self.collapsed_providers.items) |id| self.cx.allocator.free(id);
+        self.collapsed_providers.deinit(self.cx.allocator);
     }
     fn releaseFocus(self: *View) void {
         const focused = self.cx.focus_manager.current_focus orelse return;

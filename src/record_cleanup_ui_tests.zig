@@ -135,7 +135,8 @@ test "record cleanup modal retained theme and background publication preserves c
     const id = view.dialog.id;
     f.apply(.light, false);
     try std.testing.expectEqual(theme.current().overlay, view.dialog.getBackground());
-    try std.testing.expectEqual(theme.current().surface_2, view.cancel.getBackground());
+    // Cancel retains keyboard focus, whose focus-visible paint overrides its base background.
+    try std.testing.expectEqual(theme.current().surface_2, view.cancel_style.peek().background.?);
     try std.testing.expectEqual(theme.current().fg_1, view.detail.getText().?.color);
     f.apply(.sauber, true);
     try std.testing.expectEqual(theme.current().overlay, view.dialog.getBackground());
@@ -165,6 +166,30 @@ test "record cleanup modal retained theme and background publication preserves c
     f.publish.publish(f.cx, theme.widgetTheme(.dark));
     f.frame();
     try std.testing.expectEqual(custom.overlay, view.dialog.getBackground());
-    try std.testing.expectEqual(custom.danger, view.primary.getBackground());
+    try std.testing.expectEqual(custom.action_danger, backgroundTarget(view.primary));
     try std.testing.expectEqual(custom.danger_ink, view.headline.getText().?.color);
+}
+
+test "record cleanup failure headline and receipt stay inside the content stack" {
+    const f = try Fixture.init();
+    defer f.deinit();
+    var receipt: Receipt = .{};
+    const view = try cleanup_view.View.mount(f.cx, f.scope, .{ .context = &receipt, .action = Receipt.handle });
+    try view.showConfirmation();
+    try view.update(.{ .total = 3, .deleted = 2, .failed = 1 }, error.AccessDenied, true);
+    f.frame();
+    const stack = view.content_stack.globalRect();
+    const receipt_rect = view.receipt.globalRect();
+    try std.testing.expect(receipt_rect.y + receipt_rect.h <= stack.y + stack.h + 0.1);
+    const headline_layout = view.headline.layoutTextLayout().?;
+    try std.testing.expect(headline_layout.total_height <= view.headline.globalRect().h + 0.1);
+    const actions = view.primary.globalRect();
+    try std.testing.expect(receipt_rect.y + receipt_rect.h <= actions.y);
+}
+
+fn backgroundTarget(node: *ui.Node) ui.Color {
+    if (node.frame_state.frame_local.runtime.transitions) |transitions| {
+        if (transitions.find(.background)) |slot| if (slot.active) return slot.to_color;
+    }
+    return node.getBackground();
 }

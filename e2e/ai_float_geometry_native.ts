@@ -1,0 +1,23 @@
+/** Native content-edge entry, all resize handles, reset and popup edge placement. */
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {mkdir,mkdtemp,open,realpath,writeFile} from 'node:fs/promises';
+import {join,resolve} from 'node:path';
+const prefix=process.env.ZW_AI_TEST_PREFIX??'/tmp/zw-ai-v3-prefix',h=await import(join(prefix,'share/zenit/harness/client.ts'));
+const out=resolve(process.argv[2]??'/tmp/zw-ai-float');await mkdir(out,{recursive:true});
+const iso=await realpath(await mkdtemp('/tmp/zw-ai-float-')),data=join(iso,'data'),rpc=join(iso,'rpc');await mkdir(data);await mkdir(rpc);
+await writeFile(join(data,'config.toml'),'[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\n[ai]\ndefault_provider="local"\n[[ai.providers]]\nid="local"\nkind="openai_compat"\nendpoint="http://127.0.0.1:1/v1/chat/completions"\nenabled=true\n[[ai.providers.models]]\nname="geometry-text"\ncontext_window=32768\ndefault=true\n');
+process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;const log=await open(join(out,'app.log'),'w');const app=spawn(join(prefix,'bin/zerowork'),[],{env:{...process.env,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',log.fd,log.fd]});
+const shown=(n:any)=>n&&n.hidden!==true&&n.visible!==false&&(n.effective_opacity??1)>0&&n.rect?.w>0&&n.rect?.h>0;
+const visible=async(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,10000);
+const report:any={status:'running',checks:[],pid:app.pid,rpc};
+const click=async(id:string)=>{report.lastAction=id;await visible(id);const result=await h.clickTestId(id);if(!result.ok){report.clickFailure={result,nodes:await h.query(id)};throw new Error(id+': '+JSON.stringify(result))}};
+const cap=async(name:string)=>{await h.sleep(120);await h.screenshot(join(out,name+'.png'));await writeFile(join(out,name+'.json'),JSON.stringify({panel:await h.query('ai.panel'),strip:await h.query('ai.strip')},null,2))};
+const reset=async()=>{const n=await visible('ai.float.drag');assert((await h.clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2,2)).ok);await h.waitFor(async()=>{const p=await visible('ai.panel');return p.rect.w===600&&p.rect.h===456?p:null},5000)};
+try{
+ await h.waitForServerReady();await h.resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');await click('ai.strip');await visible('ai.panel');await click('ai.collapse');await cap('01-collapsed');await click('ai.strip');await visible('ai.panel');report.checks.push('Full 88×24 entry center opens, collapses and reopens');
+ for(const edge of ['n','s','w','e','nw','ne','sw','se']){await reset();const before=await visible('ai.panel'),n=await visible('ai.float.resize.'+edge),x=n.rect.x+n.rect.w/2,y=n.rect.y+n.rect.h/2,dx=edge.includes('w')?-24:edge.includes('e')?24:0,dy=edge.includes('n')?-16:edge.includes('s')?16:0;await h.mouseMove(x,y);await h.mouseDown(x,y);await h.mouseMove(x+dx,y+dy);await h.mouseUp(x+dx,y+dy);await h.waitFor(async()=>{const p=await visible('ai.panel');return Math.abs(p.rect.w-before.rect.w)>1||Math.abs(p.rect.h-before.rect.h)>1?p:null},5000);await cap('resize-'+edge)}await reset();report.checks.push('All eight resize directions change geometry; double-click grip restores 600×456');
+ for(const [edge,dx,dy] of [['left',-900,0],['right',900,0],['top',0,-600],['bottom',0,600]] as any[]){await reset();const n=await visible('ai.float.drag'),x=n.rect.x+n.rect.w/2,y=n.rect.y+n.rect.h/2;await h.mouseMove(x,y);await h.mouseDown(x,y);await h.mouseMove(x+dx,y+dy);await h.mouseUp(x+dx,y+dy);for(const name of ['model','usage']){await click('ai.composer.'+name);const p=await visible('ai.'+name+'.menu'),a=await visible('ai.composer.'+name);assert(p.rect.x>=8&&p.rect.y>=8&&p.rect.x+p.rect.w<=1432&&p.rect.y+p.rect.h<=892);assert(p.rect.y+p.rect.h<=a.rect.y+1||p.rect.y>=a.rect.y+a.rect.h-1);await cap('edge-'+edge+'-'+name);await h.key('escape')}}await reset();report.checks.push('Four pane edges × model and usage popovers remain bounded and clear of anchors');
+ await h.resizeWindow(860,480);await cap('compact');report.status='passed';
+}catch(e){report.status='failed';report.error=String(e);process.exitCode=1;await cap('failure').catch(()=>{})}
+finally{app.kill('SIGTERM');await new Promise(r=>app.once('close',r));await log.close();await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report))}

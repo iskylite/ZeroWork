@@ -194,6 +194,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const root = try ui.boxStyled(cx, S.base.sectionColumn, .{});
     root.meta.ownership.meta.test_id = "settings.appearance";
     const query = bound.controller.search_query;
+    if (query.len == 0 or binding.matches(query, "应用图标 透明背景 黑底 白底 Dock icon_background")) try root.appendChild(cx.allocator, try appIconSection(cx, bound));
     if (query.len == 0 or binding.matches(query, "外观 主题 theme 主题库")) try root.appendChild(cx.allocator, try themeSection(cx, bound));
     if (query.len == 0 or binding.matches(query, "背景 图片 材质 模糊 透明度 fit 对齐 blur_px background enabled path alignment_x alignment_y transparency")) try root.appendChild(cx.allocator, try materialSection(cx, bound));
     if (query.len == 0 or binding.matches(query, "字体 字号 行高 光标 font cursor font_family font_size font_weight line_height cursor_style")) try root.appendChild(cx.allocator, try fontSection(cx, bound));
@@ -227,7 +228,8 @@ fn themeSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         };
         break :blk false;
     };
-    try row.appendChild(cx.allocator, try textAction(cx, bound, .remove_theme, c.model.value.ui.theme, "删除当前主题", remove_reason, "settings.theme.remove.current", true, protected or disabled(bound)));
+    const current_builtin = if (record) |current_record| current_record.source_kind == .builtin else false;
+    try row.appendChild(cx.allocator, try textAction(cx, bound, .remove_theme, c.model.value.ui.theme, if (current_builtin) "内置主题不可删除" else "删除当前主题", remove_reason, "settings.theme.remove.current", !current_builtin, protected or disabled(bound)));
     try row.appendChild(cx.allocator, try textAction(cx, bound, .import_theme, "", "导入 .itermcolors", "仅支持 iTerm2 .itermcolors 主题文件", "settings.theme.import", false, host == null or disabled(bound)));
     if (host) |h| try section.body.appendChild(cx.allocator, try themeStrip(cx, bound, h));
     try section.body.appendChild(cx.allocator, row);
@@ -379,7 +381,7 @@ fn themeProblem(problem: anyerror) []const u8 {
         error.MissingColors => "导入失败 · 缺少 ANSI 0–15 或必要颜色",
         error.ThemeTooLarge, error.StreamTooLong => "导入失败 · 文件超过 2 MiB",
         error.InvalidPlist, error.InvalidComponent => "导入失败 · 主题格式或颜色无效",
-        error.BuiltinThemeProtected => "内置主题不可移除",
+        error.BuiltinThemeProtected => "内置主题不可删除",
         error.CurrentThemeProtected => "先选择其他主题并保存，再移除此主题",
         error.DraftThemeProtected => "先切换待选主题，再移除此主题",
         error.FileNotFound => "文件已移动或不存在，原草稿已保留",
@@ -860,27 +862,25 @@ fn cursorField(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     select.* = .{ .bound = bound };
     try bound.scope.onCleanup(CursorSelect, select, CursorSelect.cleanup);
     const group = try ui.widgets.RadioGroup(.{ .options = &cursor_options, .value = @as(?[]const u8, bound.controller.model.value.ui.cursor_style), .horizontal = true, .disabled = disabled(bound), .on_change = cx.on(CursorSelect, select, CursorSelect.change) }).mount(bound.scope, cx);
-    group.setStyleInline(cx.allocator, .{ .height = .{ .px = 40 }, .direction = .row, .gap = 6, .flex_shrink = 0 });
+    group.setStyleInline(cx.allocator, .{ .height = .{ .px = 40 }, .direction = .row, .gap = 20, .align_items = .center, .flex_shrink = 0 });
     group.meta.ownership.meta.test_id = "settings.field.cursor_style";
     for (group.children.items, cursor_options) |radio, option| {
         const selected = std.mem.eql(u8, option.value, bound.controller.model.value.ui.cursor_style);
-        radio.setStyleInline(cx.allocator, .{ .width = .{ .px = 99 }, .height = .{ .px = 40 }, .padding = ui.Padding.all(8), .gap = 7, .align_items = .center, .background = if (selected) S.theme.current().selection else S.theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 });
-        // RadioGroup retains selection, focus and keyboard handling. Its fixed
-        // circle has no cursor slot, so replace only that decorative child.
+        radio.setStyleInline(cx.allocator, .{ .height = .{ .px = 40 }, .gap = 7, .align_items = .center, .flex_shrink = 0 });
+        // Preserve the widget-owned circle: selection effects still refer to it.
+        // The cursor sample communicates shape, while the circle communicates choice.
         const circle = radio.children.items[0];
-        cx.detachChild(radio, circle);
-        cx.destroyDetached(circle);
-        const label = radio.children.items[0];
+        circle.setStyleInline(cx.allocator, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .background = if (selected) S.theme.current().accent_ink else ui.Color.TRANSPARENT, .border = .{ .width = 1.5, .color = if (selected) S.theme.current().accent_ink else S.theme.current().fg_2, .radius = 9 } });
+        const label = radio.children.items[1];
         if (label.getText()) |old| {
             var props = old;
             props.font_size = 11;
-            props.color = if (selected) S.theme.current().accent_ink else S.theme.current().fg_1;
+            props.color = S.theme.current().fg_1;
             label.setText(props);
         }
         const demo = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 24 }, .align_items = .center, .justify = .center, .background = S.theme.current().surface_2, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
         try demo.appendChild(cx.allocator, try cursorShape(cx, option.value));
         try radio.insertChildBefore(cx.allocator, demo, label);
-        if (selected) try radio.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.check, S.theme.current().accent_ink, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
     }
     try row.appendChild(cx.allocator, group);
     return row;
@@ -981,7 +981,7 @@ fn aidsSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         .{ .label = "时间戳侧栏", .key = .{ .section = "ui", .key = "timestamp_gutter" }, .help = "显示输出时间，不包含在复制的终端内容中。" },
         .{ .label = "应用命令补全", .key = .{ .section = "completion", .key = "enabled" }, .help = null },
         .{ .label = "输入行相对高亮", .key = .{ .section = "ui", .key = "input_line_highlight" }, .help = null },
-        .{ .label = "默认折叠侧栏", .key = .{ .section = "ui", .key = "sidebar_collapsed" }, .help = "保存手动偏好；窄窗口自动折叠不会覆盖它。" },
+        .{ .label = "默认隐藏侧栏", .key = .{ .section = "ui", .key = "sidebar_collapsed" }, .help = "保存侧栏显示偏好；⌘B 随时显示或隐藏。" },
     }) |field| {
         const control = try ui.box(cx, .{ .width = .{ .px = 44 }, .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .justify = .end, .flex_shrink = 0 }, .{});
         try control.appendChild(cx.allocator, try toggle(cx, bound, field.key, field.label));
@@ -1198,8 +1198,55 @@ pub fn mountMaterialPreviewActions(cx: *ui.Cx, scope: *ui.Scope, bound: *binding
     try root.appendChild(cx.allocator, try iconButton(cx, scope, bound, .restore_material, "", ui.icons.rotate_ccw, "恢复已保存的背景", "settings.materials.preview.restore", 32, disabled(bound)));
     try root.appendChild(cx.allocator, try iconButton(cx, scope, bound, .return_material, "", ui.icons.arrow_left, "返回设置", "settings.materials.preview.return", 32, false));
     const save = try bound.actionButton(cx, .save, ui.icons.save, "保存全部设置", "settings.materials.preview.save", true);
-    save.button.style.width = .{ .px = 32 };
+    save.button.style.width = .{ .px = 128 };
+    save.button.style.flex_shrink = 0;
     save.button.style.height = .{ .px = 32 };
     try root.appendChild(cx.allocator, save.wrapper);
     return root;
+}
+
+const app_icon_options = [_]ui.widgets.checkbox.RadioOption{
+    .{ .value = "transparent", .label = "透明背景", .test_id = "settings.option.icon_background.transparent" },
+    .{ .value = "dark", .label = "黑底", .test_id = "settings.option.icon_background.dark" },
+    .{ .value = "light", .label = "白底", .test_id = "settings.option.icon_background.light" },
+};
+const AppIconSelect = struct {
+    bound: *binding.Binding,
+    fn cleanup(self: *AppIconSelect) void {
+        self.bound.scope.allocator.destroy(self);
+    }
+    fn change(self: *AppIconSelect, value: []const u8) void {
+        if (disabled(self.bound)) return;
+        self.bound.controller.editKey("ui", "icon_background", .{ .text = value }) catch return;
+        self.bound.valuesChanged();
+        changed(self.bound);
+    }
+};
+fn appIconSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
+    const section = try card(cx, bound, "应用图标", "Dock 图标底色 · 保存后生效", ui.icons.terminal, 3, "settings.appearance.app_icon");
+    const row = try ui.boxStyled(cx, S.row, .{});
+    row.style.padding.top = 12;
+    row.style.padding.bottom = 12;
+    const labels = try ui.boxStyled(cx, S.labelGroup, .{});
+    try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.label, "图标背景"));
+
+    try row.appendChild(cx.allocator, labels);
+    const select = try bound.scope.allocator.create(AppIconSelect);
+    select.* = .{ .bound = bound };
+    try bound.scope.onCleanup(AppIconSelect, select, AppIconSelect.cleanup);
+    const group = try ui.widgets.RadioGroup(.{ .options = &app_icon_options, .value = @as(?[]const u8, @tagName(bound.controller.model.value.ui.icon_background)), .horizontal = true, .disabled = disabled(bound), .on_change = cx.on(AppIconSelect, select, AppIconSelect.change) }).mount(bound.scope, cx);
+    group.meta.ownership.meta.test_id = "settings.field.icon_background";
+    group.setStyleInline(cx.allocator, .{ .height = .{ .px = 40 }, .direction = .row, .gap = 24, .align_items = .center, .flex_shrink = 0 });
+    // Keep a single radio-circle treatment, with no button surface.
+    for (group.children.items, app_icon_options) |radio, option| {
+        const selected = std.mem.eql(u8, option.value, @tagName(bound.controller.model.value.ui.icon_background));
+        radio.setStyleInline(cx.allocator, .{ .height = .{ .px = 40 }, .gap = 8, .align_items = .center, .flex_shrink = 0 });
+        radio.children.items[0].setStyleInline(cx.allocator, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .background = if (selected) S.theme.current().accent_ink else ui.Color.TRANSPARENT, .border = .{ .width = 1.5, .color = if (selected) S.theme.current().accent_ink else S.theme.current().fg_2, .radius = 9 } });
+    }
+    try row.appendChild(cx.allocator, group);
+    try section.body.appendChild(cx.allocator, row);
+    const help = try ui.text(cx, "保存后切换 Dock，重启后保留。Finder 与启动台使用默认透明图标。", .{ .wrap = .word, .font_size = 11, .line_height = 18.0 / 11.0, .color = S.theme.current().fg_2 });
+    help.setStyleInline(cx.allocator, .{ .width = .fill(), .margin = .{ .bottom = 8 } });
+    try section.body.appendChild(cx.allocator, help);
+    return section.root;
 }

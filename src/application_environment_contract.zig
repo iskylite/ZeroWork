@@ -36,6 +36,10 @@ pub fn main() !void {
         !std.mem.eql(u8, selected.auth.value().?, "saved-fixture-key") or
         selected.context_window != 32768) return error.EnvironmentChangedProvider;
     saved[0].api_key = "";
+    // The explicit loopback gateway policy permits no-auth. This must not
+    // acquire an implicit credential from the process environment.
+    if ((try providers.fromSettings(ai)).auth != .none) return error.UnexpectedImplicitCredential;
+    saved[0].endpoint = "https://example.test/v1/chat/completions";
     if (providers.fromSettings(ai)) |_| return error.UnexpectedImplicitCredential else |err| {
         if (err != error.MissingApiKey) return err;
     }

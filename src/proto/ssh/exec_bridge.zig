@@ -48,7 +48,18 @@ pub const SshExecBridge = struct {
         self.binding = binding;
     }
 
+    /// Provider-only read-only metadata request. Its reserved call ID never
+    /// consumes caller IDs (AI sessions commonly start their own IDs at one).
+    pub fn diagnostic(self: *SshExecBridge, command: []const u8, opts: bridge.ExecOpts) !bridge.ExecHandle {
+        var internal = opts;
+        internal.call_id = std.math.maxInt(u64);
+        return self.submit(command, internal, true);
+    }
     pub fn exec(self: *SshExecBridge, command: []const u8, opts: bridge.ExecOpts) !bridge.ExecHandle {
+        if (opts.call_id == std.math.maxInt(u64)) return error.InvalidCallId;
+        return self.submit(command, opts, false);
+    }
+    fn submit(self: *SshExecBridge, command: []const u8, opts: bridge.ExecOpts, diagnostic_call: bool) !bridge.ExecHandle {
         if (command.len == 0) return error.EmptyCommand;
         if (command.len > std.math.maxInt(u16) - 1 or std.mem.indexOfScalar(u8, command, 0) != null) return error.InvalidCommand;
         if (opts.capture_cap == 0 or opts.capture_cap > max_capture) return error.InvalidCaptureLimit;
@@ -75,7 +86,7 @@ pub const SshExecBridge = struct {
                 return .{ .ptr = item };
             }
         };
-        if (self.exhausted or call_id < self.next_call_id) return error.StaleCallId;
+        if (!diagnostic_call and (self.exhausted or call_id < self.next_call_id)) return error.StaleCallId;
         var empty: ?usize = null;
         for (self.commands, 0..) |slot, index| if (slot == null) {
             empty = index;
@@ -86,7 +97,9 @@ pub const SshExecBridge = struct {
         errdefer self.allocator.destroy(item);
         item.* = try Command.init(self, call_id, key, binding, command, opts);
         self.commands[index] = item;
-        if (call_id == std.math.maxInt(u64)) self.exhausted = true else self.next_call_id = call_id + 1;
+        if (!diagnostic_call) {
+            if (call_id == std.math.maxInt(u64) - 1) self.exhausted = true else self.next_call_id = call_id + 1;
+        }
         return .{ .ptr = item };
     }
 
@@ -509,4 +522,14 @@ test "exec options preserve timeout capture and safe explicit cwd" {
     const text = try commandAtCwd(std.testing.allocator, "/tmp/a'b\n$(touch nope)", "printf ok");
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("cd '/tmp/a'\\''b\n$(touch nope)' && printf ok", text);
+}
+
+test "OS diagnostic does not consume caller exec call IDs" {
+    var session: Session = .{ .state = .active };
+    var mailbox = SshExecBridge.init(&session, std.testing.allocator);
+    defer mailbox.deinitLocal();
+    _ = try mailbox.diagnostic(@import("remote_os.zig").command, .{ .capture_cap = 8192, .timeout_ms = 3000 });
+    try std.testing.expectEqual(@as(u64, 1), mailbox.next_call_id);
+    _ = try mailbox.exec("printf first-user-command", .{ .call_id = 1 });
+    try std.testing.expectEqual(@as(u64, 2), mailbox.next_call_id);
 }

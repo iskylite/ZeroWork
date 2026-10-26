@@ -36,7 +36,7 @@ pub fn impact(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 10, .line_height = 13.0 / 10.0, .color = theme.current().warn_ink, .wrap = .word };
 }
 pub fn iconButton(primary: bool) ButtonStyle {
-    return .{ .width = .{ .px = if (primary) 66 else 36 }, .height = .{ .px = 26.5 }, .padding = .{ .left = 8, .right = 8, .top = 5, .bottom = 5 }, .gap = 0, .font_size = 10, .font_weight = 500, .flex_shrink = 0, .corner_radius = 8, .background = if (primary) theme.current().accent else theme.current().hover };
+    return .{ .width = .{ .px = if (primary) 66 else 36 }, .height = .{ .px = 26.5 }, .padding = .{ .left = 8, .right = 8, .top = 5, .bottom = 5 }, .gap = 0, .font_size = 10, .font_weight = 500, .flex_shrink = 0, .corner_radius = 8, .background = if (primary) theme.current().action_accent else theme.current().hover };
 }
 pub fn disclosureButton() ButtonStyle {
     return .{ .width = .{ .px = 17 }, .height = .{ .px = 17 }, .padding = .{}, .gap = 0, .flex_shrink = 0, .corner_radius = 6, .background = ui.Color.TRANSPARENT };
@@ -59,7 +59,7 @@ pub fn groupFooter(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 34 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 12, .right = 10, .top = 3, .bottom = 3 }, .background = theme.current().well };
 }
 pub fn groupButton(primary: bool) ButtonStyle {
-    return .{ .width = .{ .px = if (primary) 100 else 80 }, .height = .{ .px = 28 }, .padding = .{}, .gap = 0, .flex_shrink = 0, .corner_radius = 8, .font_size = 12, .font_weight = 500, .background = if (primary) theme.current().accent else theme.current().surface_2 };
+    return .{ .width = .{ .px = if (primary) 100 else 80 }, .height = .{ .px = 28 }, .padding = .{}, .gap = 0, .flex_shrink = 0, .corner_radius = 8, .font_size = 12, .font_weight = 500, .background = if (primary) theme.current().action_accent else theme.current().surface_2 };
 }
 
 // Figma 415:1897823: standard group decisions keep 26px icon controls.

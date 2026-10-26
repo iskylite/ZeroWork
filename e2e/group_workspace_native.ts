@@ -38,7 +38,7 @@ const type=async(text:string)=>{report.last_action={kind:"type",text,at:new Date
 const menuItem=async(label:string)=>{
  const menu=await visible("groups.member_menu");const n=flat(menu).find(n=>n.text===label);assert(n,`Missing member menu item ${label}`);await clickNode(n);
 };
-const tabs=async()=>{const strip=(await query("tabs.strip")).find(shown);return strip?flat(strip).filter(n=>/^tabs\.tab\.\d+$/.test(n.test_id??"")):[]};
+const tabs=async()=>{const strip=(await query("tabs.strip")).find(shown);return strip?flat(strip).filter(n=>/^tabs\.tab\.\d+$/.test(n.test_id??"")&&!flat(n).some(c=>c.test_id==="groups.close")):[]};
 const panes=async()=>flat(await visible("groups.workspace")).filter(n=>/^groups\.pane\.\d+$/.test(n.test_id??""));
 const capture=async(name:string)=>{await sleep(180);assert((await screenshot(join(output,`${name}.png`))).ok);const observed:any={};for(const id of ["tabs.strip","groups.workspace","groups.close.confirm","groups.close.partial","local.close.confirmation"])observed[id]=await query(id);await writeFile(join(output,`${name}.queries.json`),JSON.stringify(observed,null,2));report.screenshots.push(name);await save()};
 const check=(name:string,detail:any)=>report.checks.push({name,status:"passed",detail});

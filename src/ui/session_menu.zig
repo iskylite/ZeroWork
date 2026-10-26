@@ -1,16 +1,19 @@
-//! V3 + menu: creation commands only. Saved asset search uses the existing quick-connect view.
+//! The tab + menu opens local and saved sessions directly.
 const std = @import("std");
 const ui = @import("ui");
 const S = @import("session_menu_styles.zig");
+const identity = @import("../host/identity.zig");
+pub const Saved = struct { owner: identity.AssetOwner, name: []const u8, icon: ui.SvgAsset };
 
 pub const Callbacks = struct {
     context: *anyopaque,
     new_profile: *const fn (*anyopaque) void,
     quick: *const fn (*anyopaque) void,
     local: ?*const fn (*anyopaque) void = null,
+    saved: ?*const fn (*anyopaque, identity.AssetOwner) void = null,
 };
 const Action = enum(usize) { local, quick, new_profile };
-const labels = [_][]const u8{ "本地终端 · zsh", "SSH / SFTP 快捷连接", "新建已保存连接" };
+const labels = [_][]const u8{ "Local Terminal", "SSH / SFTP 快捷连接", "新建已保存连接" };
 const ids = [_][]const u8{ "session.menu.local", "session.menu.quick", "session.menu.new_profile" };
 
 pub const View = struct {
@@ -30,6 +33,12 @@ pub const View = struct {
     labels: [3]*ui.Node = undefined,
     icons: [3]*ui.Node = undefined,
     separator: *ui.Node = undefined,
+    saved_area: *ui.Node = undefined,
+    saved_content: *ui.Node = undefined,
+    saved_scroll: *ui.widgets.scroll_area.ScrollState = undefined,
+    saved_scope: ?*ui.Scope = null,
+    saved_rows: std.ArrayList(SavedRow) = .empty,
+    selected_saved: ?usize = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
         const self = try cx.allocator.create(View);
@@ -47,8 +56,17 @@ pub const View = struct {
         self.chrome.behavior.interaction.a11y = .{ .role = .menu, .label = "新建会话" };
         self.chrome.behavior.events.capture_context = self;
         self.chrome.behavior.events.on_event_capture = onEvent;
-        const icons = [_]ui.SvgAsset{ ui.icons.terminal, @import("quick_connect_icon.zig").asset, ui.icons.plus };
+        const icons = [_]ui.SvgAsset{ @import("session_icon.zig").resolve(.local), @import("quick_connect_icon.zig").asset, ui.icons.plus };
         for (labels, 0..) |label, index| {
+            if (index == 1) {
+                const area = try ui.widgets.ScrollArea(.{}).mount(self.scope, cx);
+                area.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 33 }, .max_height = 264, .flex_shrink = 0 });
+                area.content.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column });
+                self.saved_scroll = area.state;
+                self.saved_area = area.container;
+                self.saved_content = area.content;
+                try popup.content.appendChild(cx.allocator, area.container);
+            }
             if (index == 2) {
                 const divider = try ui.box(cx, S.separator(), .{});
                 self.separator = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 1 }, .background = S.theme.current().border, .flex_shrink = 0 }, .{});
@@ -72,6 +90,7 @@ pub const View = struct {
             try node.appendChild(cx.allocator, content);
             try popup.content.appendChild(cx.allocator, node);
         }
+        try self.setSaved(&.{});
         try cx.addAfterLayoutHook(self, afterLayout);
         return self;
     }
@@ -79,6 +98,7 @@ pub const View = struct {
         self.anchor_id = anchor.id;
         self.selected = if (self.callbacks.local != null) .local else .quick;
         self.chosen = false;
+        self.selected_saved = null;
         self.retheme();
         self.open.set(true);
         self.cx.setFocus(self.buttons[@backingInt(self.selected)]);
@@ -97,14 +117,25 @@ pub const View = struct {
         switch (key) {
             .escape => self.hide(),
             .up, .down => {
-                const current = @backingInt(self.selected);
-                var next = if (key == .down) (current + 1) % 3 else (current + 2) % 3;
-                if (next == 0 and self.callbacks.local == null) next = if (key == .down) 1 else 2;
-                self.selected = @fromBackingInt(@intCast(next));
+                const total = self.saved_rows.items.len + 3;
+                const current = if (self.selected_saved) |i| i + 1 else switch (self.selected) {
+                    .local => @as(usize, 0),
+                    .quick => total - 2,
+                    .new_profile => total - 1,
+                };
+                var next = if (key == .down) (current + 1) % total else (current + total - 1) % total;
+                if (next == 0 and self.callbacks.local == null) next = if (key == .down) 1 else total - 1;
+                self.selected_saved = if (next > 0 and next <= self.saved_rows.items.len) next - 1 else null;
+                if (self.selected_saved) |i| {
+                    self.cx.setFocus(self.saved_rows.items[i].button);
+                    ui.widgets.scroll_area.scrollIntoView(self.saved_scroll, self.saved_content, self.saved_rows.items[i].button, .nearest);
+                } else {
+                    self.selected = if (next == 0) .local else if (next == total - 2) .quick else .new_profile;
+                    self.cx.setFocus(self.buttons[@backingInt(self.selected)]);
+                }
                 self.paintSelection();
-                self.cx.setFocus(self.buttons[next]);
             },
-            .@"return", .space => self.activate(self.selected),
+            .@"return", .space => if (self.selected_saved) |i| self.activateSaved(self.saved_rows.items[i].owner) else self.activate(self.selected),
             else => return .ignored,
         }
         return .stop;
@@ -120,10 +151,57 @@ pub const View = struct {
         }
     }
     fn paintSelection(self: *View) void {
+        for (self.saved_rows.items, 0..) |row, index| row.button.setBackground(if (self.selected_saved == index) S.theme.current().selection else ui.Color.TRANSPARENT);
         for (self.highlights, 0..) |highlight, index| {
             highlight.setBackground(S.theme.current().selection);
-            highlight.setDisplay(if (index == @backingInt(self.selected)) .flex else .none);
+            highlight.setDisplay(if (self.selected_saved == null and index == @backingInt(self.selected)) .flex else .none);
         }
+    }
+    pub fn setSaved(self: *View, entries: []const Saved) !void {
+        // Called before opening, never from one of the rows being replaced.
+        self.selected_saved = null;
+        while (self.saved_content.children.items.len > 0) {
+            const child = self.saved_content.children.items[self.saved_content.children.items.len - 1];
+            self.cx.detachChild(self.saved_content, child);
+            self.cx.freeNode(child);
+        }
+        if (self.saved_scope) |scope| scope.dispose();
+        self.saved_scope = try self.scope.childScope();
+        const scope = self.saved_scope.?;
+        self.saved_rows.clearRetainingCapacity();
+        self.saved_scroll.scroll_y = 0;
+        self.saved_content.setStyle(self.cx.allocator, .translate_y, 0);
+        for (entries) |entry| {
+            const action = try scope.createState(SavedAction, .{ .view = self, .owner = entry.owner });
+            const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = entry.name, .base_style = S.row(), .hover_style = self.hover_style, .on_click = self.cx.on(SavedAction, action, SavedAction.choose) }).mount(scope, self.cx);
+            button.setStyleInline(self.cx.allocator, S.row());
+            button.meta.ownership.meta.test_id = "session.menu.saved";
+            if (button.behavior.interaction.a11y) |*a| a.role = .menuitem;
+            const content = try ui.box(self.cx, S.rowContent(), .{});
+            const icon = try ui.iconTint(self.cx, entry.icon, S.theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
+            const label = try ui.text(self.cx, entry.name, S.label());
+            try label.setTextContent(self.cx.allocator, entry.name);
+            label.setStyleInline(self.cx.allocator, .{ .min_width = 0, .flex = 1 });
+            try content.appendChild(self.cx.allocator, icon);
+            try content.appendChild(self.cx.allocator, label);
+            try button.appendChild(self.cx.allocator, content);
+            try self.saved_content.appendChild(self.cx.allocator, button);
+            try self.saved_rows.append(self.cx.allocator, .{ .owner = entry.owner, .button = button, .label = label, .icon = icon });
+        }
+        if (entries.len == 0) {
+            const label = try ui.text(self.cx, "暂无已保存连接", S.label());
+            label.meta.ownership.meta.test_id = "session.menu.empty";
+            label.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 33 }, .padding = .{ .left = 10, .top = 9 } });
+            try self.saved_content.appendChild(self.cx.allocator, label);
+        }
+        self.saved_area.setStyle(self.cx.allocator, .height, .{ .px = @as(f32, @floatFromInt(@min(@max(entries.len, 1), 8))) * 33 });
+    }
+    fn activateSaved(self: *View, owner: identity.AssetOwner) void {
+        if (!self.isOpen() or self.chosen) return;
+        const callback = self.callbacks.saved orelse return;
+        self.chosen = true;
+        self.hide();
+        callback(self.callbacks.context, owner);
     }
     fn retheme(self: *View) void {
         const colors = S.theme.current();
@@ -133,6 +211,10 @@ pub const View = struct {
         for (self.labels, self.icons) |label, icon| {
             label.setTextColor(colors.fg_1);
             _ = icon.setTint(colors.fg_2);
+        }
+        for (self.saved_rows.items) |row| {
+            row.label.setTextColor(colors.fg_1);
+            _ = row.icon.setTint(colors.fg_2);
         }
         self.paintSelection();
         self.paint_revision = self.cx.theme_version;
@@ -164,7 +246,16 @@ pub const View = struct {
     }
     fn cleanup(self: *View) void {
         self.cx.removeAfterLayoutHook(self);
+        self.saved_rows.deinit(self.cx.allocator);
         self.cx.allocator.destroy(self);
+    }
+};
+const SavedRow = struct { owner: identity.AssetOwner, button: *ui.Node, label: *ui.Node, icon: *ui.Node };
+const SavedAction = struct {
+    view: *View,
+    owner: identity.AssetOwner,
+    fn choose(self: *SavedAction) void {
+        self.view.activateSaved(self.owner);
     }
 };
 const Row = struct {
@@ -275,6 +366,56 @@ test "new session menu skips unavailable local command and clamps compact menu" 
     }
     const r = view.chrome.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 210), r.w, 0.5);
-    try std.testing.expectApproxEqAbs(@as(f32, 120), r.h, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 153), r.h, 0.5);
     try std.testing.expect(r.x >= 8 and r.x + r.w <= 852.5);
+}
+
+test "saved session menu refreshes rows and captures stable owner" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const anchor = try ui.box(cx, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 } }, .{});
+    try cx.root.?.appendChild(cx.allocator, anchor);
+    const Capture = struct {
+        owner: ?identity.AssetOwner = null,
+        fn connect(raw: *anyopaque, owner: identity.AssetOwner) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.owner = owner;
+        }
+        fn noop(_: *anyopaque) void {}
+    };
+    var capture: Capture = .{};
+    const view = try View.mount(cx, scope, .{ .context = &capture, .local = Capture.noop, .quick = Capture.noop, .new_profile = Capture.noop, .saved = Capture.connect });
+    try cx.root.?.appendChild(cx.allocator, view.root);
+    const owner: identity.AssetOwner = .{ .id = @fromBackingInt(42), .revision = 7 };
+    try view.setSaved(&.{.{ .owner = owner, .name = "Saved SSH", .icon = ui.icons.terminal }});
+    try view.show(anchor);
+    _ = view.handleKey(.down);
+    try std.testing.expectEqual(@as(?usize, 0), view.selected_saved);
+    _ = view.handleKey(.@"return");
+    try std.testing.expectEqualDeep(owner, capture.owner.?);
+    try std.testing.expect(!view.isOpen());
+    try view.setSaved(&.{.{ .owner = .{ .id = @fromBackingInt(99), .revision = 2 }, .name = "Changed config", .icon = ui.icons.folder }});
+    try std.testing.expectEqualStrings("Changed config", view.saved_rows.items[0].label.getText().?.content);
+    var many: [12]Saved = undefined;
+    for (&many) |*entry| entry.* = .{ .owner = owner, .name = "Saved row", .icon = ui.icons.terminal };
+    try view.setSaved(&many);
+    try view.show(anchor);
+    try cx.setTestFrameStep(100);
+    for (0..8) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expectApproxEqAbs(@as(f32, 264), view.saved_area.globalRect().h, 0.5);
+    try std.testing.expect(view.chrome.globalRect().y + view.chrome.globalRect().h <= 472.5);
+    view.hide();
+    try view.setSaved(&.{});
+    try std.testing.expectEqual(@as(usize, 0), view.saved_rows.items.len);
+    try view.show(anchor);
+    _ = view.handleKey(.down);
+    try std.testing.expectEqual(Action.quick, view.selected);
 }

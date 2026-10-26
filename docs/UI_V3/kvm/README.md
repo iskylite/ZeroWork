@@ -29,7 +29,7 @@
 
 ## 参考与限制
 
-- 核心参考 `docs/DESIGN/V0.2.2_BMC_IKVM.md` §3、§8、§9、§11；后续AI参考 `docs/DESIGN/V0.2.3_KVM_AI_CONTROL.md`。Figma线上节点本任务实际读取 `1066:217241`（启动/Dark）；根任务统存 `../verification/figma-reference.json` 其他节点证据。
+- 核心参考 `docs/DESIGN/V0.3_BMC_IKVM.md` §3、§8、§9、§11；后续AI参考 `docs/DESIGN/V0.2.3_KVM_AI_CONTROL.md`。Figma线上节点本任务实际读取 `1066:217241`（启动/Dark）；根任务统存 `../verification/figma-reference.json` 其他节点证据。
 - KVM工具栏五组透明入口：控制、按键、显示、电源、启动；电源296px、启动312px气泡、padding12/gap12/radius12，输入32px/radius8；所有浮层锚点相对APP计算并clamp，底栏气泡向上展开。
 - 沿用现有V3 tokens、17px/1.7线性SVG、系统中文字体；已统一常驻图标为SVG。没有使用截图代替交互。
 - AI标准窗600×456，最小窗600×354；默认相对当前内容区居中定位并约束在APP内8px，随侧栏与窗口变化重算。固定审批152px，固定输入90px，历史区受控滚动；头部与owner沿公共工作区结构，不另设右侧栏。

@@ -25,14 +25,11 @@ export async function verifyNotificationAvoidance(out:string,name:string,options
  const presenter=(await query('notifications.presenter')).find(shown)!;
  const close=flat(card).find(n=>n.test_id==='transfer.window.close'&&shown(n));
  assert(close,'actual manager close control');
- const candidates=[{x:options.width-presenter.rect.w-12,y:58},{x:12,y:58},{x:options.width-presenter.rect.w-12,y:options.height-presenter.rect.h-44},{x:12,y:options.height-presenter.rect.h-44}];
- const free=candidates.find(p=>separated({...p,w:presenter.rect.w,h:presenter.rect.h},card.rect));
- if(free)assert(separated(presenter.rect,card.rect),'toast stack clears detail card by 8px');
- const expected=free??candidates[1];
- assert(Math.abs(presenter.rect.x-expected.x)<1&&Math.abs(presenter.rect.y-expected.y)<1,'first V3 free corner uses measured stack size');
+ const expected={x:options.width-presenter.rect.w-20,y:62};
+ assert(Math.abs(presenter.rect.x-expected.x)<1&&Math.abs(presenter.rect.y-expected.y)<1,'V3 feedback retains fixed app-relative origin');
  assert(presenter.rect.x>=8&&presenter.rect.x+presenter.rect.w<=options.width-8,'toast within app horizontal bounds');
  assert(presenter.rect.y>=8&&presenter.rect.y+presenter.rect.h<=options.height-8,'toast within app vertical bounds');
- const evidence:any={name,fallback:!free,card:card.rect,toast:toast.rect,presenter:presenter.rect,close:close.rect,width:options.width,height:options.height,clearance:8,synthetic_harness_input:true};
+ const evidence:any={name,fixed_origin:true,card:card.rect,toast:toast.rect,presenter:presenter.rect,close:close.rect,width:options.width,height:options.height,clearance:8,synthetic_harness_input:true};
  assert((await screenshot(join(out,name+'.png'))).ok);
  if(options.close){
   const x=close.rect.x+close.rect.w/2,y=close.rect.y+close.rect.h/2;

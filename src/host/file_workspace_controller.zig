@@ -346,7 +346,52 @@ pub const Controller = struct {
         try self.submit(side, if (side == .local) self.options.local.initial_path else self.options.remote.initial_path, .refresh);
     }
     pub fn viewCallbacks(self: *Controller) View.Callbacks {
-        return .{ .context = self, .action = onAction };
+        return .{ .context = self, .action = onAction, .external_upload = onExternalUpload, .current_stamp = currentViewStamp };
+    }
+    fn currentViewStamp(raw: *anyopaque, side: Side) View.Stamp {
+        const self: *Controller = @ptrCast(@alignCast(raw));
+        var stamp = self.projectPane(side).stamp;
+        stamp.directory_revision = self.panes[index(side)].next_directory_revision;
+        return stamp;
+    }
+    fn onExternalUpload(raw: *anyopaque, request: View.ExternalUpload) !void {
+        const self: *Controller = @ptrCast(@alignCast(raw));
+        try self.externalUpload(request);
+    }
+    /// Finder supplies explicit local source paths; it does not select or
+    /// navigate the local pane. Freeze both endpoints and the original target.
+    pub fn externalUpload(self: *Controller, request: View.ExternalUpload) !void {
+        if (self.closing) return error.FileWorkspaceClosing;
+        const callback = self.options.callbacks.transfer orelse return error.UnsupportedFileAction;
+        const source = self.projectPane(.local);
+        const destination = self.projectPane(.remote);
+        if (!fresh(source.state) or !fresh(destination.state) or !destination.writable or !self.endpointLive(.local) or !self.endpointLive(.remote)) return error.FileTransferUnavailable;
+        if (!std.meta.eql(request.destination, destination.stamp)) return error.StaleTransferDestination;
+        if (request.target_entry) |target| {
+            const at = entryIndex(destination.entries, target) orelse return error.StaleTransferDestination;
+            if (destination.entries[at].kind != .directory or !std.mem.eql(u8, request.directory, target)) return error.InvalidTransferDirectory;
+        } else if (!std.mem.eql(u8, request.directory, destination.resolved_path)) return error.StaleTransferDestination;
+        if (request.paths.len == 0 or request.paths.len > 1024) return error.InvalidFileSelection;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+        var paths: std.ArrayList([]const u8) = .empty;
+        for (request.paths) |value| {
+            try path(value);
+            if (!absolute(value)) return error.AbsolutePathRequired;
+            var duplicate = false;
+            for (paths.items) |previous| if (std.mem.eql(u8, previous, value)) {
+                duplicate = true;
+                break;
+            };
+            if (!duplicate) try paths.append(a, try a.dupe(u8, value));
+        }
+        try callback(self.options.callbacks.context, .{
+            .owner = self.options.owner,
+            .source = .{ .stamp = source.stamp, .endpoint = self.endpoint(.local), .selection_revision = source.selection_revision, .directory = try a.dupe(u8, source.resolved_path) },
+            .destination = .{ .stamp = destination.stamp, .endpoint = self.endpoint(.remote), .selection_revision = destination.selection_revision, .directory = try a.dupe(u8, request.directory) },
+            .paths = paths.items,
+        });
     }
     fn onAction(raw: *anyopaque, envelope: View.Envelope) !void {
         const self: *Controller = @ptrCast(@alignCast(raw));

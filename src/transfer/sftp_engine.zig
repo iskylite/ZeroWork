@@ -1950,6 +1950,13 @@ pub const SftpEngine = struct {
                     rt.resume_validation = false;
                     file.offset = 0;
                     file.resume_offset = 0;
+                    // A lost transport can retain an incomplete chunk without
+                    // a trustworthy target stamp. Fresh preflight restarts the
+                    // window, so discard the old window's chunk cursor too.
+                    file.chunk = null;
+                    file.chunk_done = 0;
+                    file.buffered = false;
+                    file.skipped = 0;
                     file.window = try transfer_window.Window.init(file.size, try window_policy.chunkBytes(job.spec.chunk_kb), job.spec.window_chunks);
                     rt.phase = .target_stat;
                 }
@@ -2215,7 +2222,11 @@ pub const SftpEngine = struct {
         } else {
             const current = try FileStamp.remote(try job.remote_metadata.stat(job.remote_metadata.context, job.session.?, file.remote_path.?));
             const original = file.target_stamp orelse return error.PrefixChanged;
-            if (!current.same(original) or current.size != @max(file.offset, rt.prefix_length)) return error.PrefixChanged;
+            // libssh2 may have sent a trailing packet before pause returned
+            // its final write count. Accept only the captured target stamp;
+            // the complete remote prefix is compared against the source
+            // before any resumed write, including these unreported bytes.
+            if (!current.same(original) or current.size < @max(file.offset, rt.prefix_length)) return error.PrefixChanged;
             rt.prefix_length = current.size;
         }
         if (rt.prefix_length > file.size) return error.PrefixChanged;
@@ -4250,6 +4261,97 @@ test "sftp engine safe resume downloads and uploads partial first chunk using ex
         } else try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(std.testing.io, temp.?, .{}));
         try std.testing.expect(!peer.caller_io.load(.acquire));
     }
+}
+
+test "sftp engine upload resume validates captured bytes ahead of acknowledged write offset" {
+    for ([_]bool{ false, true }) |tampered| {
+        var local = std.testing.tmpDir(.{});
+        defer local.cleanup();
+        var remote = std.testing.tmpDir(.{});
+        defer remote.cleanup();
+        const directory = try local.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(directory);
+        const bytes = resumeBytes();
+        try local.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = &bytes });
+        var peer: ResumePeer = .{ .dir = remote.dir };
+        const engine = try SftpEngine.init(std.testing.allocator);
+        defer {
+            peer.unblock();
+            engine.deinit();
+        }
+        var session: ssh_session.Session = .{};
+        engine.attachSession(&session);
+        peer.bind(engine);
+        const first = try engine.open(.{ .direction = .upload, .sources = &.{"a"}, .remote_dir = "/remote", .local_dir = directory });
+        const paused = try pauseResumePeer(engine, &peer, first);
+        const saved = &paused.checkpoint.?;
+        const acknowledged = saved.file.offset;
+        const ahead = acknowledged + 256;
+        const file = try remote.dir.openFile(std.testing.io, "a", .{ .mode = .read_write });
+        try file.writePositionalAll(std.testing.io, bytes[@intCast(acknowledged)..@intCast(ahead)], acknowledged);
+        if (tampered) try file.writePositionalAll(std.testing.io, "TAMPER", acknowledged + 10);
+        saved.file.target_stamp = try FileStamp.remote(ResumePeer.attrs(try file.stat(std.testing.io)));
+        file.close(std.testing.io);
+        const writes = peer.writes.load(.acquire);
+        _ = try engine.resumeJob(first);
+        try awaitWorker(&engine.owner_done);
+        const resumed = engine.jobs.items[1];
+        try std.testing.expectEqual(manager.JobCleanup.released, SftpEngine.cleanupOf(resumed));
+        if (tampered) {
+            try std.testing.expectEqual(manager.EngineState.paused, engineStateOf(resumed.state.load(.acquire)));
+            try std.testing.expectEqual(manager.Failure.conflict, resumed.failure.get().?);
+            try std.testing.expectEqual(writes, peer.writes.load(.acquire));
+            engine.cancel(resumed.id);
+            try awaitWorker(&engine.owner_done);
+        } else {
+            try std.testing.expectEqual(manager.EngineState.succeeded, engineStateOf(resumed.state.load(.acquire)));
+            try expectFileBytes(remote.dir, "a", &bytes);
+        }
+    }
+}
+
+test "sftp engine upload resume fresh preflight clears interrupted chunk after lost target stamp" {
+    var local = std.testing.tmpDir(.{});
+    defer local.cleanup();
+    var remote = std.testing.tmpDir(.{});
+    defer remote.cleanup();
+    const directory = try local.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(directory);
+    const bytes = resumeBytes();
+    try local.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = &bytes });
+    var peer: ResumePeer = .{ .dir = remote.dir };
+    const engine = try SftpEngine.init(std.testing.allocator);
+    defer {
+        peer.unblock();
+        engine.deinit();
+    }
+    var session: ssh_session.Session = .{};
+    engine.attachSession(&session);
+    peer.bind(engine);
+    const spec: JobSpec = .{ .direction = .upload, .sources = &.{"a"}, .remote_dir = "/remote", .local_dir = directory };
+    const first = try engine.open(spec);
+    const paused = try pauseResumePeer(engine, &peer, first);
+    try std.testing.expect(paused.checkpoint.?.file.chunk != null);
+    try std.testing.expect(paused.checkpoint.?.file.chunk_done > 0);
+    // A broken connection cannot supply a trustworthy final target stat.
+    paused.checkpoint.?.file.target_stamp = null;
+    var checkpoint = try engine.exportPaused(first);
+    defer {
+        _ = checkpoint.cancel(std.testing.io);
+        checkpoint.deinit() catch {};
+    }
+    try remote.dir.deleteFile(std.testing.io, "a");
+    var fresh_peer: ResumePeer = .{ .dir = remote.dir, .block_at = null };
+    const fresh = try SftpEngine.init(std.testing.allocator);
+    defer fresh.deinit();
+    var fresh_session: ssh_session.Session = .{};
+    fresh.attachSession(&fresh_session);
+    fresh_peer.bind(fresh);
+    _ = try fresh.importPaused(&checkpoint, spec);
+    try awaitWorker(&fresh.owner_done);
+    try std.testing.expectEqual(manager.EngineState.succeeded, engineStateOf(fresh.jobs.items[0].state.load(.acquire)));
+    try std.testing.expectEqual(manager.JobCleanup.released, SftpEngine.cleanupOf(fresh.jobs.items[0]));
+    try expectFileBytes(remote.dir, "a", &bytes);
 }
 
 test "sftp engine resume rejects source or complete prefix tampering and retains cancellable original data" {

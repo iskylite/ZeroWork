@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, open, readFile, writeFile, rm, cp, chmod } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, writeFile, rm, cp, chmod, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { waitForServerReady, waitFor, tree, query, clickTestId, key, type_, resizeWindow, screenshot, sleep } from "../zig-out/share/zenit/harness/client.ts";
@@ -18,7 +18,7 @@ for (let i = 0; i < args.length; i += 2) {
 assert(options["--out"], "--out is required");
 const output = resolve(options["--out"]);
 const binary = resolve(options["--binary"] ?? "zig-out/bin/zerowork");
-const isolated = await mkdtemp(join(tmpdir(), "zerowork-local-ui-"));
+const isolated = await mkdtemp(join(await realpath(tmpdir()), "zerowork-local-ui-"));
 const rpc = join(isolated, "rpc"), data = join(isolated, "data");
 await Promise.all([mkdir(output, { recursive: true }), mkdir(rpc), mkdir(data)]);
 if (options["--hosts-fixture"]) await cp(resolve(options["--hosts-fixture"]), join(data, "hosts.toml"));

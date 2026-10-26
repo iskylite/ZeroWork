@@ -63,7 +63,7 @@ pub const FilePlugin = struct {
     tick: *const fn (*anyopaque, *session.SessionHost) anyerror!bool,
     shutdown: *const fn (*anyopaque) CloseReceipt,
 };
-const FileCreateSource = struct { handle: identity.SessionHandle, key: OperationKey, source: SourceSnapshot };
+const FileCreateSource = struct { handle: identity.SessionHandle, key: OperationKey, source: SourceSnapshot, failure_reported: bool = false };
 const CloseTarget = @import("workspace_model.zig").CloseTarget;
 const WindowClose = struct {
     ticket: windows.Close,
@@ -206,7 +206,11 @@ pub const Domain = struct {
             defer event.deinit();
             if (event.value.key.owner != .session) continue;
             const source = self.ownerForHandle(event.value.key.owner.session) orelse continue;
-            const mapping = source.findHandle(event.value.key.owner.session) orelse continue;
+            const mapping = source.findHandle(event.value.key.owner.session) orelse {
+                if (event.value.kind == .failed) if (event.value.failure) |failure|
+                    source.publishFileCreateFailure(event.value.key, failure);
+                continue;
+            };
             if (!mapping.create_operation.eql(event.value.key)) continue;
             if (event.value.failure) |failure| if (event.value.kind == .failed) mapping.recordFailure(failure.safe_message);
         }
@@ -337,6 +341,12 @@ pub const ApplicationHost = struct {
     last_rejection: ?commands.Rejection = null,
     file_plugin: ?FilePlugin = null,
     file_sources: std.ArrayList(FileCreateSource) = .empty,
+    /// A failed create has no tab to own the usual workspace feedback channel.
+    /// Delivered once on the original window, with the exact frozen owner.
+    file_failure: ?struct {
+        context: *anyopaque,
+        publish: *const fn (*anyopaque, identity.SessionHandle, []const u8) void,
+    } = null,
     plugin_attempts: std.ArrayList(session.Accepted) = .empty,
     background_previous_auth: ?workspace_mod.ExternalAuthentication = null,
 
@@ -1073,6 +1083,22 @@ pub const ApplicationHost = struct {
         }
         if (pending) self.workspace.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
         return pending;
+    }
+
+    fn publishFileCreateFailure(self: *ApplicationHost, key: OperationKey, failure: @import("../host/operation.zig").Failure) void {
+        if (key.owner != .session) return;
+        const state = self.sessions.queryState(key.owner.session) orelse return;
+        if (!state.create_operation.eql(key) or state.lifecycle != .failed) return;
+        for (self.file_sources.items) |*source| {
+            if (!source.handle.eql(key.owner.session) or !source.key.eql(key) or source.failure_reported) continue;
+            source.failure_reported = true;
+            const message = if (std.mem.eql(u8, failure.code, "ProxyJumpTransportUnavailable"))
+                "连接失败：独立 SFTP 会话暂不支持跳板链（ProxyJumpTransportUnavailable）"
+            else
+                failure.safe_message;
+            if (self.file_failure) |feedback| feedback.publish(feedback.context, source.handle, message);
+            return;
+        }
     }
 
     fn fileCreatesReleased(self: *ApplicationHost) bool {
@@ -2295,4 +2321,50 @@ test "production creation entries obey removed and replacement Registry contribu
         try std.testing.expectEqual(@as(usize, 0), workspace.tabs.items.len);
         try std.testing.expectEqual(@as(usize, 0), workspace.connect_jobs.items.len);
     }
+}
+
+test "file create failure without a tab reaches original window once" {
+    const Feedback = struct {
+        calls: usize = 0,
+        owner: ?identity.SessionHandle = null,
+        fn publish(raw: *anyopaque, owner: identity.SessionHandle, message: []const u8) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            self.owner = owner;
+            std.testing.expectEqualStrings("连接失败：独立 SFTP 会话暂不支持跳板链（ProxyJumpTransportUnavailable）", message) catch @panic("incorrect failure");
+        }
+        fn tick(_: *anyopaque, _: *session.SessionHost) !bool {
+            return false;
+        }
+        fn shutdown(_: *anyopaque) CloseReceipt {
+            return .released;
+        }
+    };
+    var feedback: Feedback = .{};
+    var workspace: workspace_mod.Workspace = undefined;
+    workspace.model = .{ .allocator = std.testing.allocator, .window = @fromBackingInt(0), .workspace = @fromBackingInt(0) };
+    defer workspace.model.deinit();
+    workspace.session_bridge = .{};
+    workspace.close_bridge = .{};
+    workspace.window_close_bridge = .{};
+    workspace.shutting_down = false;
+    var global: config.Config = .{};
+    workspace.app_config = &global;
+    workspace.registry.hosts = &.{};
+    const adapter: session.Adapter = .{ .registration = .{ .plugin_id = .sftp, .workspace_kind = .file, .services = plugins.requiredServices(.sftp) }, .context = &feedback, .vtable = &.{ .create = ReceiptTestAdapter.create, .cancel = ReceiptTestAdapter.cancel, .close = ReceiptTestAdapter.close, .release_stale = ReceiptTestAdapter.stale } };
+    const app = try ApplicationHost.initWithFilePlugin(std.testing.allocator, &workspace, .{ .adapter = adapter, .context = &feedback, .tick = Feedback.tick, .shutdown = Feedback.shutdown });
+    defer app.deinit();
+    app.file_failure = .{ .context = &feedback, .publish = Feedback.publish };
+    const accepted = try app.create(.{ .connection_id = @fromBackingInt(19), .revision = 7, .protocol = .sftp, .name = "Route Files", .host = "test.invalid", .user = "operator" }, 91, 4, "");
+    try std.testing.expectEqual(@as(usize, 0), app.mappings.items.len);
+    const failure: @import("../host/operation.zig").Failure = .{ .domain = .plugin, .code = "ProxyJumpTransportUnavailable", .cleanup = .released, .safe_message = "SFTP 文件会话启动失败" };
+    try std.testing.expect(try app.sessions.failed(accepted.handle, accepted.operation, failure));
+    app.domain.drainJournal();
+    try std.testing.expectEqual(@as(usize, 1), feedback.calls);
+    try std.testing.expect(feedback.owner.?.eql(accepted.handle));
+    app.publishFileCreateFailure(accepted.operation, failure);
+    var stale = accepted.operation;
+    stale.operation_id += 1;
+    app.publishFileCreateFailure(stale, failure);
+    try std.testing.expectEqual(@as(usize, 1), feedback.calls);
 }

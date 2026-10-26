@@ -1,3 +1,7 @@
+<p align="center">
+  <a href="assets/macos/README.md"><img src="assets/macos/AppIcon.png" width="160" height="160" alt="ZeroWork Logo"></a>
+</p>
+
 # ZeroWork
 
 [简体中文](README.zh-CN.md)
@@ -6,7 +10,7 @@ ZeroWork is an Apple Silicon macOS SSH terminal specified in [docs/SPEC/OVERALL_
 
 ## Current baseline
 
-The current version is **0.2.1 (plugin host API 2)**. **Only the Figma prototype is confirmed aligned with V3; the App has not yet been synchronized with the full V3 design.** See the [current sanitized baseline](docs/DEVELOPMENT/V0.2.1_STATUS.md). The implementation and compatibility boundaries are recorded in [V0.2.1 implementation](docs/DEVELOPMENT/V0.2.1_IMPLEMENTATION.md); candidate-specific results, real SSH/AI evidence, and environment limitations are in [V0.2.1 live acceptance](docs/DEVELOPMENT/V0.2.1_LIVE_ACCEPTANCE.md).
+The current version is **0.2 (plugin host API 2)**. **Only the Figma prototype is confirmed aligned with V3; the App has not yet been synchronized with the full V3 design.** See the [current sanitized baseline](docs/DEVELOPMENT/V0.2_STATUS.md). The implementation and compatibility boundaries are recorded in [V0.2 implementation](docs/DEVELOPMENT/V0.2_IMPLEMENTATION.md); candidate-specific results, real SSH/AI evidence, and environment limitations are in [V0.2 live acceptance](docs/DEVELOPMENT/V0.2_LIVE_ACCEPTANCE.md).
 
 - Zig 0.17.0 project baseline (managed with local zvm), locked to arm64 macOS 14+
 - P0 configuration model and strict subset TOML loader

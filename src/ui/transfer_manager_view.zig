@@ -19,7 +19,7 @@ pub const Callbacks = struct {
     owner: ?*const fn (*anyopaque, backend.JobId) ?identity.SessionHandle = null,
 };
 pub const Statistics = struct { window_chunks: u8, chunk_kb: u16, today_bytes: ?u64 = null };
-pub const Presentation = enum { window, global_popover, session_popover };
+pub const Presentation = enum { window, global_popover, session_popover, session_tray };
 pub const Options = struct { presentation: Presentation = .window, fill_window: bool = false };
 pub const Target = struct { job: backend.JobId, attempt: u32, owner: ?identity.SessionHandle };
 pub const TaskAction = enum { pause, resume_transfer, cancel, retry, reveal, new_draft, resolve_conflict };
@@ -212,6 +212,15 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, manager: *backend.Manager, callbacks:
     panel.callbacks = callbacks;
     return panel;
 }
+/// Host appends root below its dual-pane file workspace and sets selected_scope
+/// to the original owner, refreshes, then calls show(). The panel never derives authority from focus.
+pub fn mountSessionTray(cx: *ui.Cx, scope: *ui.Scope, manager: *backend.Manager, callbacks: Callbacks) !*Panel {
+    const panel = try mountProjection(cx, scope, .{ .presentation = .session_tray }, .{ .context = callbacks.context, .open_manager = callbacks.open_manager });
+    panel.root.meta.ownership.meta.test_id = "transfer.session.tray";
+    panel.manager = manager;
+    panel.callbacks = callbacks;
+    return panel;
+}
 /// The titlebar entry uses the global layout inside the current window.
 /// Its close button only hides this view; it owns no native window or jobs.
 pub fn mountGlobalPopover(cx: *ui.Cx, scope: *ui.Scope, manager: *backend.Manager, callbacks: Callbacks) !*Panel {
@@ -340,6 +349,8 @@ pub const Panel = struct {
     selected_scope: Scope = .all,
     scope_choice: ?usize = null,
     filter: Filter = .all,
+    direction_filter: ?backend.Direction = null,
+    tray_requested_show: bool = false,
     counts: Counts = .{},
     expanded: ?Target = null,
     events_open: bool = false,
@@ -388,22 +399,23 @@ pub const Panel = struct {
         const p = try cx.allocator.create(Panel);
         p.* = .{ .cx = cx, .scope = scope, .root = undefined, .options = options, .hooks = hooks, .window_disabled = try scope.createSignal(bool, hooks.window == null), .paint_colors = S.theme.current(), .head = undefined, .heading_title = undefined, .foot = undefined, .scope_row = undefined, .counts_row = undefined, .counts_labels = undefined, .title_badge = undefined, .notice = undefined, .footer_label = undefined, .footer_rate = undefined, .empty = undefined, .failure = undefined, .search = try scope.createText("", .{}), .search_node = undefined, .filters_node = undefined, .batch_row = undefined, .batch_label = undefined, .list = undefined, .virtual = undefined };
         try scope.onCleanup(Panel, p, cleanup);
-        const window = options.presentation != .session_popover;
+        const tray = options.presentation == .session_tray;
+        const window = options.presentation == .window or options.presentation == .global_popover;
         const native_window = options.presentation == .window;
-        p.root = try ui.box(cx, if (native_window) S.panel(window) else S.v3Panel(window), .{});
+        p.root = try ui.box(cx, if (tray) S.sessionTray() else if (native_window) S.panel(window) else S.v3Panel(window), .{});
         p.root.meta.ownership.meta.test_id = "transfer.manager";
-        if (!native_window) p.root.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .top = .{ .px = 46 }, .right = .{ .px = 14 } }, .z_index = 50 });
+        if (!native_window and !tray) p.root.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .top = .{ .px = 46 }, .right = .{ .px = 14 } }, .z_index = 50 });
         p.root.setDisplay(.none);
-        p.head = try ui.box(cx, S.row(if (native_window) 30 else 26, if (native_window) 6 else 8), .{});
+        p.head = try ui.box(cx, S.row(if (native_window) 30 else if (tray) 28.5 else 26, if (native_window) 6 else 8), .{});
         p.head.meta.ownership.meta.test_id = "transfer.header";
-        if (!native_window) p.head.setStyleInline(cx.allocator, .{ .padding = .{ .top = 2 } });
+        if (!native_window and !tray) p.head.setStyleInline(cx.allocator, .{ .padding = .{ .top = 2 } });
         try p.root.appendChild(cx.allocator, p.head);
         if (native_window) {
             try p.root.insertChildBefore(cx.allocator, try ui.boxStyled(cx, S.topFade, .{}), p.head);
             try p.root.appendChild(cx.allocator, try ui.boxStyled(cx, S.grip, .{}));
         }
-        try p.head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("arrow-down-up").?, S.theme.current().accent_ink, S.icon(if (native_window) 18 else 17)));
-        const heading_title = try p.label(p.head, if (native_window) "传输任务" else if (window) "全局传输管理器" else "文件传输", 13, 700, false);
+        if (!tray) try p.head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("arrow-down-up").?, S.theme.current().accent_ink, S.icon(if (native_window) 18 else 17)));
+        const heading_title = try p.label(p.head, if (native_window) "传输任务" else if (window) "全局传输管理器" else if (tray) "当前会话传输" else "文件传输", if (tray) 12 else 13, 700, false);
         p.heading_title = heading_title;
         heading_title.meta.ownership.meta.test_id = "transfer.header.title";
         if (!native_window) if (heading_title.getText()) |old| {
@@ -420,8 +432,10 @@ pub const Panel = struct {
             _ = try p.button(p.head, scope, "最小化传输窗口", "transfer.window.minimize", "minus", .{ .panel = p, .kind = .window, .window = .minimize }, p.window_disabled, 22);
             _ = try p.button(p.head, scope, "缩放传输窗口", "transfer.window.zoom", "maximize-2", .{ .panel = p, .kind = .window, .window = .zoom }, p.window_disabled, 22);
         }
-        _ = try p.button(p.head, scope, if (native_window) "收起传输" else "关闭浮卡", "transfer.window.close", "x", .{ .panel = p, .kind = .window, .window = .close }, false, if (native_window) 22 else 24);
-        try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(if (native_window) 9 else 8), .{}));
+        if (tray) {
+            try p.v3TaskAction(p.head, scope, "全局传输管理", "transfer.open.all", .{ .panel = p, .kind = .all_tasks }, hooks.open_manager == null);
+        } else _ = try p.button(p.head, scope, if (native_window) "收起传输" else "关闭浮卡", "transfer.window.close", "x", .{ .panel = p, .kind = .window, .window = .close }, false, if (native_window) 22 else 24);
+        try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(if (native_window) 9 else if (tray) 6 else 8), .{}));
         if (!native_window and window) {
             const segments = try ui.box(cx, S.v3Segment(), .{});
             segments.meta.ownership.meta.test_id = "transfer.filters";
@@ -634,6 +648,7 @@ pub const Panel = struct {
         var v3_completed: usize = 0;
         for (source.value.rows, 0..) |task_, i| {
             if (!belongs(self.selected_scope, task_.target.owner)) continue;
+            if (self.direction_filter) |direction| if (task_.direction != direction) continue;
             const kind = category(task_.phase);
             const active = task_.phase == .queued or task_.phase == .retry_wait or task_.phase == .running or task_.phase == .verifying;
             if (active) v3_active += 1;
@@ -703,7 +718,7 @@ pub const Panel = struct {
             self.scope_row.setDisplay(.none);
             self.search_node.setDisplay(.none);
             self.filters_node.setDisplay(.none);
-            if (self.options.presentation == .global_popover) self.foot.setDisplay(.none);
+            if (self.options.presentation == .global_popover or self.options.presentation == .session_tray) self.foot.setDisplay(.none);
             self.footer_label.setDisplay(.none);
             self.footer_rate.setDisplay(.none);
             const total_count = self.counts.active + self.counts.waiting + self.counts.paused + self.counts.failed + self.counts.ended;
@@ -722,10 +737,14 @@ pub const Panel = struct {
                 button_.setStyleInline(self.cx.allocator, S.v3Filter(self.filter == filter_));
             };
         }
+        if (self.options.presentation == .session_tray) {
+            try self.heading_title.setTextContent(self.cx.allocator, if (self.direction_filter) |direction| (if (direction == .upload) "上传传输" else "下载传输") else "当前会话传输");
+            self.root.setDisplay(if (self.tray_requested_show and self.visible.items.len > 0) .flex else .none);
+        }
         try self.format(self.batch_label, "已选择 {d} 项", .{self.selection.items.len});
         self.empty_container.setDisplay(if (self.visible.items.len == 0) .flex else .none);
         self.list.container.setDisplay(if (self.visible.items.len == 0) .none else .flex);
-        try self.empty.setTextContent(self.cx.allocator, if (self.options.presentation == .global_popover) "没有传输任务" else if (self.options.presentation == .session_popover) "当前没有传输任务" else if (self.filter != .all or query.len > 0) "没有符合筛选的任务" else switch (self.selected_scope) {
+        try self.empty.setTextContent(self.cx.allocator, if (self.options.presentation == .global_popover) "没有传输任务" else if (self.options.presentation == .session_popover or self.options.presentation == .session_tray) "当前没有传输任务" else if (self.filter != .all or query.len > 0) "没有符合筛选的任务" else switch (self.selected_scope) {
             .all => "暂无传输任务",
             .session => "本会话暂无传输任务",
             .sessions => "所选组暂无传输任务",
@@ -904,34 +923,29 @@ pub const Panel = struct {
         const card = try ui.box(cx, card_style, .{});
         card.meta.ownership.meta.test_id = "transfer.task";
         try root.appendChild(cx.allocator, card);
-        const head = try ui.box(cx, S.row(20, 8), .{});
+        const head = try ui.box(cx, S.row(24, 6), .{});
         head.meta.ownership.meta.test_id = "transfer.task.head";
         try card.appendChild(cx.allocator, head);
         const color = if (task_.phase == .succeeded) S.theme.current().ok_ink else S.theme.current().fg_2;
         try head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (task_.direction == .upload) "upload" else "download").?, S.theme.current().accent_ink, S.icon(15)));
         // The existing native detail state is entered through the file title.
-        // Its control adds no extra action or height to the frozen collapsed card.
+        // Its control adds no extra action or height to the compact row.
         const detail_control = try scope.createState(Control, .{ .panel = self, .target = task_.target, .kind = .detail });
         const name_label = try scope.createText(task_.name, .{});
-        const name_button = try ui.widgets.Button(.{ .label = name_label, .variant = .ghost, .a11y_label = name_label, .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 20 }, .flex = 1, .min_width = 0, .padding = .ZERO, .font_size = 12, .font_weight = 600, .text_color = S.theme.current().fg_1, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 0 }, .shadow = .{}, .justify = .start }, .on_click = cx.on(Control, detail_control, Control.run) }).mount(scope, cx);
+        const name_tip = try ui.widgets.Tooltip(.{ .text = name_label, .open_delay_ms = @as(f32, 450) }).mount(scope, cx);
+        name_tip.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 24 } });
+        name_tip.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_width = 0 });
+        try head.appendChild(cx.allocator, name_tip.wrapper);
+        const name_button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = name_label, .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 24 }, .flex = 1, .min_width = 0, .padding = .ZERO, .font_size = 12, .font_weight = 600, .text_color = S.theme.current().fg_1, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 0 }, .shadow = .{}, .justify = .start }, .on_click = cx.on(Control, detail_control, Control.run) }).mount(scope, cx);
         name_button.meta.ownership.meta.test_id = "transfer.task.expand";
-        try head.appendChild(cx.allocator, name_button);
-        const name = firstTextNode(name_button) orelse return error.MissingTaskName;
-        if (name.parent) |parent| if (parent != name_button) parent.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_width = 0, .justify = .start, .align_items = .center });
+        try name_tip.trigger.appendChild(cx.allocator, name_button);
+        const name = try ui.text(cx, task_.name, .{ .font_size = 12, .font_weight = 600, .color = S.theme.current().fg_1, .line_height = 16.0 / 12.0, .text_overflow = .ellipsis });
         name.meta.ownership.meta.test_id = "transfer.task.name";
-        name.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0 });
-        if (name.getText()) |old| {
-            var props = old;
-            props.font_size = 12;
-            props.font_weight = 600;
-            props.color = S.theme.current().fg_1;
-            props.line_height = 16.0 / 12.0;
-            props.text_overflow = .ellipsis;
-            name.setText(props);
-        }
+        name.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0, .flex_shrink = 1 });
+        try name_button.appendChild(cx.allocator, name);
         const badge = try ui.box(cx, .{ .height = .{ .px = 18 }, .padding = .{ .left = 5, .right = 5, .top = 2, .bottom = 2 }, .background = S.theme.current().well, .border = .{ .radius = 5 }, .flex_shrink = 0 }, .{});
         badge.meta.ownership.meta.test_id = "transfer.task.status";
-        const status = try self.label(badge, if (task_.phase == .failed) "失败" else phaseLabel(task_.phase), 10, 400, true);
+        const status = try self.label(badge, if (task_.phase == .failed) "失败" else if (task_.phase == .conflict) "同名冲突" else phaseLabel(task_.phase), 10, 400, true);
         status.setTextColor(color);
         status.setStyleInline(cx.allocator, .{ .height = .{ .px = 14 }, .flex_shrink = 0 });
         if (status.getText()) |old| {
@@ -940,27 +954,31 @@ pub const Panel = struct {
             status.setText(props);
         }
         try head.appendChild(cx.allocator, badge);
-        try card.appendChild(cx.allocator, try ui.box(cx, S.gap(8), .{}));
-        var track_style = S.track();
-        track_style.height = .{ .px = 3 };
-        track_style.background = S.theme.current().hover;
-        track_style.border = .{ .radius = 2 };
-        track_style.overflow = .hidden;
-        const track = try ui.box(cx, track_style, .{});
-        track.meta.ownership.meta.test_id = "transfer.task.progress";
-        try card.appendChild(cx.allocator, track);
-        const fraction: f64 = if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
-        var fill_style = S.fill(@floatCast(fraction), S.theme.current().accent);
-        fill_style.border = .{ .radius = 2 };
-        try track.appendChild(cx.allocator, try ui.box(cx, fill_style, .{}));
-        try card.appendChild(cx.allocator, try ui.box(cx, S.gap(6), .{}));
-        const meta = try ui.box(cx, S.row(14, 8), .{});
+        const meta = try ui.box(cx, S.row(24, 8), .{});
+        meta.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
         meta.meta.ownership.meta.test_id = "transfer.task.meta";
-        try card.appendChild(cx.allocator, meta);
-        const path = try self.label(meta, "", 10, 400, true);
+        try head.appendChild(cx.allocator, meta);
+        const location_text = try scope.createText("", .{});
+        const tip = try ui.widgets.Tooltip(.{ .text = location_text, .open_delay_ms = @as(f32, 450) }).mount(scope, cx);
+        tip.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 14 } });
+        tip.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_width = 0, .overflow = .hidden });
+        try meta.appendChild(cx.allocator, tip.wrapper);
+        const path = try self.label(tip.trigger, "", 10, 400, true);
         const destination = if (task_.direction == .upload) task_.remote_path else task_.local_path;
         const directory = std.fs.path.dirname(destination) orelse destination;
-        try self.format(path, "{s} · {s}", .{ task_.owner_label, directory });
+        const location = try std.fmt.allocPrint(cx.allocator, "{s} · {s}", .{ task_.owner_label, directory });
+        defer cx.allocator.free(location);
+        try path.setTextContent(cx.allocator, if (v3HasError(task_)) task_.status_detail else location);
+        if (v3HasError(task_)) {
+            tip.trigger.meta.ownership.meta.test_id = "transfer.task.error";
+            path.setTextColor(S.theme.current().danger);
+        }
+        if (v3HasError(task_)) {
+            const diagnostic = try std.fmt.allocPrint(cx.allocator, "{s}\n{s}", .{ location, task_.status_detail });
+            defer cx.allocator.free(diagnostic);
+            location_text.set(diagnostic);
+        } else location_text.set(location);
+        path.meta.ownership.meta.test_id = "transfer.task.location";
         path.setStyleInline(cx.allocator, S.flexibleLabel());
         if (path.getText()) |old| {
             var props = old;
@@ -979,24 +997,9 @@ pub const Panel = struct {
             props.line_height = 1.4;
             rate.setText(props);
         }
-        if (v3HasError(task_)) {
-            try card.appendChild(cx.allocator, try ui.box(cx, S.gap(6), .{}));
-            const failure = try self.label(card, task_.status_detail, 11, 400, true);
-            failure.meta.ownership.meta.test_id = "transfer.task.error";
-            failure.setTextColor(S.theme.current().danger);
-            failure.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .flex_shrink = 0 });
-            if (failure.getText()) |old| {
-                var props = old;
-                props.line_height = 16.0 / 11.0;
-                props.text_overflow = .ellipsis;
-                failure.setText(props);
-            }
-        }
-        try card.appendChild(cx.allocator, try ui.box(cx, S.gap(6), .{}));
-        const actions = try ui.box(cx, S.row(24, 8), .{});
+        const actions = try ui.box(cx, .{ .height = .{ .px = 24 }, .direction = .row, .gap = 4, .align_items = .center, .flex_shrink = 0 }, .{});
         actions.meta.ownership.meta.test_id = "transfer.task.actions";
-        try card.appendChild(cx.allocator, actions);
-        try actions.appendChild(cx.allocator, try ui.spacer(cx));
+        try head.appendChild(cx.allocator, actions);
         const primary: ?TaskAction = switch (task_.phase) {
             .queued, .retry_wait, .running => .pause,
             .paused => .resume_transfer,
@@ -1006,13 +1009,28 @@ pub const Panel = struct {
             else => null,
         };
         if (primary) |action_| try self.v3TaskAction(actions, scope, switch (action_) {
-            .reveal => "查看位置",
+            .reveal => "查看",
             .pause => "暂停",
             .resume_transfer => "继续",
             .retry => "重试",
+            .resolve_conflict => "处理",
             else => actionLabel(action_, task_.direction),
         }, "transfer.task.primary", .{ .panel = self, .target = task_.target, .action = action_ }, !self.actionAvailable(task_.target) or (action_ == .resume_transfer and !task_.can_resume) or (action_ == .reveal and !self.canReveal(task_.target)));
-        if (allows(task_.phase, .cancel)) try self.v3TaskAction(actions, scope, "取消任务", "transfer.task.cancel", .{ .panel = self, .target = task_.target, .action = .cancel }, !self.actionAvailable(task_.target));
+        if (allows(task_.phase, .cancel)) try self.v3TaskAction(actions, scope, "取消", "transfer.task.cancel", .{ .panel = self, .target = task_.target, .action = .cancel }, !self.actionAvailable(task_.target));
+        var track_style = S.track();
+        track_style.height = .{ .px = 2 };
+        track_style.position = .absolute;
+        track_style.inset = .{ .left = .{ .px = 0 }, .bottom = .{ .px = 0 } };
+        track_style.background = S.theme.current().hover;
+        track_style.border = .{ .radius = 0 };
+        track_style.overflow = .hidden;
+        const track = try ui.box(cx, track_style, .{});
+        track.meta.ownership.meta.test_id = "transfer.task.progress";
+        try card.appendChild(cx.allocator, track);
+        const fraction: f64 = if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
+        var fill_style = S.fill(@floatCast(fraction), S.theme.current().accent);
+        fill_style.border = .{ .radius = 0 };
+        try track.appendChild(cx.allocator, try ui.box(cx, fill_style, .{}));
         if (expanded) try self.renderDetail(root, scope, task_);
         return root;
     }
@@ -1048,7 +1066,7 @@ pub const Panel = struct {
         const p: *Panel = @ptrCast(@alignCast(raw.?));
         if (p.source == null or index >= p.visible.items.len) return S.row_pitch;
         const expanded = p.expanded != null and same(p.expanded.?, p.source.?.value.rows[p.visible.items[index]].target);
-        if (p.options.presentation != .window) return v3TaskHeight(p.source.?.value.rows[p.visible.items[index]]) + (if (index + 1 < p.visible.items.len) @as(f32, 8) else 0) + (if (expanded) @as(f32, 153) else 0);
+        if (p.options.presentation != .window) return v3TaskHeight(p.source.?.value.rows[p.visible.items[index]]) + (if (index + 1 < p.visible.items.len) @as(f32, 6) else 0) + (if (expanded) @as(f32, 153) else 0);
         return if (expanded) S.detail_height + 2 else S.row_pitch;
     }
     fn itemLabel(index: usize, buffer: []u8, raw: ?*anyopaque) []const u8 {
@@ -1148,22 +1166,30 @@ pub const Panel = struct {
         self.filter = std.meta.stringToEnum(Filter, value orelse "all") orelse .all;
         self.invalidate();
     }
+    pub fn setDirectionFilter(self: *Panel, direction: ?backend.Direction) void {
+        self.direction_filter = direction;
+        self.dirty = true;
+        self.cx.requestRedraw();
+    }
     pub fn setFilter(self: *Panel, filter: Filter) void {
         self.filter = filter;
         self.invalidate();
     }
     pub fn show(self: *Panel) void {
-        self.root.setDisplay(.flex);
+        self.tray_requested_show = true;
+        self.root.setDisplay(if (self.options.presentation == .session_tray and self.visible.items.len == 0) .none else .flex);
         self.cx.requestRedraw();
     }
     /// Context switches must not return focus to the previous session's trigger.
     pub fn dismiss(self: *Panel) void {
+        self.tray_requested_show = false;
         if (self.event_view) |view| view.close();
         self.cx.invalidateReferencesTo(self.root);
         self.root.setDisplay(.none);
         self.cx.requestRedraw();
     }
     pub fn hide(self: *Panel) void {
+        self.tray_requested_show = false;
         if (self.event_view) |view| view.close();
         if (self.options.presentation != .window) {
             self.cx.invalidateReferencesTo(self.root);
@@ -1185,7 +1211,7 @@ pub const Panel = struct {
         if (self.event_view) |view| view.retheme();
         S.repaint(self.root, self.paint_colors);
         self.paint_colors = S.theme.current();
-        self.root.setStyleInline(self.cx.allocator, if (self.options.presentation == .window) S.panel(true) else S.v3Panel(self.options.presentation == .global_popover));
+        self.root.setStyleInline(self.cx.allocator, if (self.options.presentation == .session_tray) S.sessionTray() else if (self.options.presentation == .window) S.panel(true) else S.v3Panel(self.options.presentation == .global_popover));
         self.scopes_dirty = true;
         self.invalidate();
     }
@@ -1206,7 +1232,8 @@ pub const Panel = struct {
             const session = manager.sessionId(p.job) orelse 0;
             const original = manager.sourceName(i) orelse "";
             const name = spec.rename orelse std.fs.path.basename(original);
-            row.* = .{ .target = .{ .job = p.job, .attempt = p.attempt, .owner = if (self.callbacks.?.owner) |resolve| resolve(self.callbacks.?.context, p.job) else if (session == 0) null else .{ .session_id = @fromBackingInt(session) } }, .direction = spec.direction, .name = name, .owner_label = if (session == 0) "归属未知" else try std.fmt.allocPrint(a, "会话 #{d}", .{session}), .local_path = if (spec.direction == .upload) original else try std.fs.path.join(a, &.{ spec.local_dir, name }), .remote_path = if (spec.direction == .download) original else try std.fs.path.join(a, &.{ spec.remote_dir, name }), .phase = if (p.job_cleanup == .unknown) .cleanup_unknown else if (p.state == .failed and p.failure == .checksum) .checksum_failed else std.meta.stringToEnum(Phase, @tagName(p.state)).?, .done_bytes = p.done_bytes, .total_bytes = if (p.total_bytes == 0 and p.state != .succeeded) null else p.total_bytes, .speed_bps = p.speed_bps, .status_detail = if (p.failure) |failure| failureLabel(failure) else "", .route = if (self.callbacks.?.metadata) |call| call(self.callbacks.?.context, p.job) else "", .options = try std.fmt.allocPrint(a, "断点续传 {s} · MD5 {s}", .{ if (spec.resume_transfer) "开" else "关", if (spec.md5_check) "开" else "关" }) };
+            const display_name = if (spec.sources.len > 1) try std.fmt.allocPrint(a, "{s} 等{d}个文件", .{ name, spec.sources.len }) else name;
+            row.* = .{ .target = .{ .job = p.job, .attempt = p.attempt, .owner = if (self.callbacks.?.owner) |resolve| resolve(self.callbacks.?.context, p.job) else if (session == 0) null else .{ .session_id = @fromBackingInt(session) } }, .direction = spec.direction, .name = display_name, .owner_label = if (session == 0) "归属未知" else try std.fmt.allocPrint(a, "会话 #{d}", .{session}), .local_path = if (spec.direction == .upload) original else try std.fs.path.join(a, &.{ spec.local_dir, name }), .remote_path = if (spec.direction == .download) original else try std.fs.path.join(a, &.{ spec.remote_dir, name }), .phase = if (p.job_cleanup == .unknown) .cleanup_unknown else if (p.state == .failed and p.failure == .checksum) .checksum_failed else std.meta.stringToEnum(Phase, @tagName(p.state)).?, .done_bytes = p.done_bytes, .total_bytes = if (p.total_bytes == 0 and p.state != .succeeded) null else p.total_bytes, .speed_bps = p.speed_bps, .status_detail = if (p.failure) |failure| failureLabel(failure) else "", .route = if (self.callbacks.?.metadata) |call| call(self.callbacks.?.context, p.job) else "", .options = try std.fmt.allocPrint(a, "断点续传 {s} · MD5 {s}", .{ if (spec.resume_transfer) "开" else "关", if (spec.md5_check) "开" else "关" }) };
             if (p.state == .running) if (p.verification) |verification| {
                 row.phase = .verifying;
                 row.speed_bps = 0;
@@ -1253,14 +1280,43 @@ pub const Panel = struct {
             if (!exists) try choices.append(a, .{ .label = row.owner_label, .scope = .{ .session = owner } });
         };
         if (self.callbacks.?.scope_choices) |extra| try choices.appendSlice(a, try extra(self.callbacks.?.context, a));
-        var selected: Scope = if (self.options.presentation == .session_popover) self.selected_scope else .all;
-        var scope_label: []const u8 = if (self.options.presentation == .session_popover) (if (self.selected_scope == .sessions) "当前组" else "当前会话") else "全部会话";
+        var selected: Scope = if (self.options.presentation == .session_popover or self.options.presentation == .session_tray) self.selected_scope else .all;
+        var scope_label: []const u8 = if (self.options.presentation == .session_popover or self.options.presentation == .session_tray) (if (self.selected_scope == .sessions) "当前组" else "当前会话") else "全部会话";
         for (choices.items) |choice| if (scopeEql(choice.scope, self.selected_scope)) {
             selected = choice.scope;
             scope_label = choice.label;
             break;
         };
         try self.update(.{ .revision = self.revision + 1, .rows = rows, .choices = choices.items, .scope = selected, .scope_label = scope_label });
+    }
+    /// True only for a mounted task row intersecting this list's viewport.
+    /// Consult current manager state too: a completion can precede snapshot paint.
+    pub fn presents(self: *const Panel, job: backend.JobId) bool {
+        const source = self.source orelse return false;
+        const clip = self.list.container.globalRect();
+        if (clip.w <= 0 or clip.h <= 0) return false;
+        for (self.virtual.pool_bindings, 0..) |binding, slot| {
+            const visible_index = binding orelse continue;
+            if (visible_index >= self.visible.items.len) continue;
+            const task_ = source.value.rows[self.visible.items[visible_index]];
+            if (task_.target.job != job or !belongs(self.selected_scope, task_.target.owner)) continue;
+            if (self.direction_filter) |direction| if (task_.direction != direction) continue;
+            var phase = task_.phase;
+            if (self.manager) |manager| if (manager.progress(job)) |progress| {
+                phase = if (progress.job_cleanup == .unknown) .cleanup_unknown else if (progress.state == .failed and progress.failure == .checksum) .checksum_failed else std.meta.stringToEnum(Phase, @tagName(progress.state)).?;
+            };
+            const active = phase == .queued or phase == .retry_wait or phase == .running or phase == .verifying;
+            if (self.options.presentation != .window and self.filter == .active) {
+                if (!active) continue;
+            } else if (self.options.presentation != .window and self.filter == .ended) {
+                if (phase != .succeeded) continue;
+            } else if (self.filter != .all and self.filter != category(phase)) continue;
+            const search_text = self.search.peek();
+            if (search_text.len > 0 and !contains(task_.name, search_text) and !contains(task_.local_path, search_text) and !contains(task_.remote_path, search_text) and !contains(task_.owner_label, search_text)) continue;
+            const rect = self.virtual.pool_nodes[slot].globalRect();
+            if (rect.w > 0 and rect.h > 0 and rect.x < clip.x + clip.w and rect.x + rect.w > clip.x and rect.y < clip.y + clip.h and rect.y + rect.h > clip.y) return true;
+        }
+        return false;
     }
     fn v3Measure(self: *Panel, value: []const u8, size: f32, weight: u16) f32 {
         return ui.Cx.measureTextWidthCallback(self.cx, value.ptr, value.len, size, weight, false);
@@ -1270,7 +1326,7 @@ pub const Panel = struct {
         var result: f32 = 360;
         for (self.visible.items) |i| {
             const task_ = source.value.rows[i];
-            const head_width = self.v3Measure(task_.name, 12, 600) + self.v3Measure(if (task_.phase == .failed) "失败" else phaseLabel(task_.phase), 10, 400) + 87;
+            const head_width = self.v3Measure(task_.name, 12, 600) + self.v3Measure(if (task_.phase == .failed) "失败" else if (task_.phase == .conflict) "同名冲突" else phaseLabel(task_.phase), 10, 400) + 87;
             const destination = if (task_.direction == .upload) task_.remote_path else task_.local_path;
             const directory = std.fs.path.dirname(destination) orelse destination;
             var rate_buffer: [96]u8 = undefined;
@@ -1279,9 +1335,9 @@ pub const Panel = struct {
             const meta_width = self.v3Measure(task_.owner_label, 10, 400) + self.v3Measure(" · ", 10, 400) + self.v3Measure(directory, 10, 400) + self.v3Measure(rate, 10, 400) + 54;
             result = @max(result, @max(head_width, meta_width));
             if (v3HasError(task_)) result = @max(result, self.v3Measure(task_.status_detail, 11, 400) + 46);
-            if (result >= 460) return 460;
+            if (result >= 760) return 760;
         }
-        return @min(@as(f32, 460), @ceil(result));
+        return std.math.clamp(@ceil(result + 260), @as(f32, 620), @as(f32, 760));
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const p: *Panel = @ptrCast(@alignCast(raw));
@@ -1307,8 +1363,21 @@ pub const Panel = struct {
             p.root.setStyleInline(p.cx.allocator, .{ .width = .{ .px = width }, .height = .{ .px = height } });
             return .needs_layout;
         }
+        if (p.options.presentation == .session_tray) {
+            var task_height: f32 = 0;
+            for (p.visible.items, 0..) |_, i| task_height += itemHeight(i, p);
+            // Keep file rows usable at the minimum window height; extra
+            // transfer rows stay in this list's native scroll viewport.
+            // Header/insets and list gap preserve one complete compact row.
+            const minimum: f32 = if (p.visible.items.len == 0) 104.5 else 104;
+            const maximum = @min(@as(f32, 190), @max(minimum, bounds.h * 0.32));
+            const height = std.math.clamp(50 + task_height, minimum, maximum);
+            if (p.root.style.height == .px and p.root.style.height.px == height) return .done;
+            p.root.setStyleInline(p.cx.allocator, .{ .width = .fill(), .height = .{ .px = height }, .padding = .{ .top = 9, .right = 12, .bottom = 8, .left = 12 } });
+            return .needs_layout;
+        }
         const global = p.options.presentation == .global_popover;
-        const desired_width: f32 = if (p.visible.items.len == 0) 320 else if (global) p.v3ContentWidth() else 344;
+        const desired_width: f32 = if (p.visible.items.len == 0) 420 else p.v3ContentWidth();
         const width = @max(@as(f32, 1), @min(desired_width, bounds.w - 24));
         var list_height: f32 = 0;
         for (p.visible.items, 0..) |_, i| list_height += itemHeight(i, p);
@@ -1357,7 +1426,8 @@ fn v3HasError(task_: Task) bool {
     return (task_.phase == .failed or task_.phase == .checksum_failed) and task_.status_detail.len > 0;
 }
 fn v3TaskHeight(task_: Task) f32 {
-    return S.v3_card_height + (if (v3HasError(task_)) @as(f32, 22) else 0);
+    _ = task_;
+    return S.v3_card_height;
 }
 fn contains(haystack: []const u8, needle: []const u8) bool {
     return std.ascii.findIgnoreCase(haystack, needle) != null;

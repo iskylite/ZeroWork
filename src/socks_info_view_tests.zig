@@ -81,3 +81,37 @@ test "socks card follows the live trigger through resize without leaving the win
     try std.testing.expect(second.x != first.x);
     try std.testing.expect(second.x >= 7.5 and second.x + second.w <= 1592.5);
 }
+
+test "socks card long endpoint and failure use scrollable content above fixed actions" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    var sink = Sink{};
+    const view = try view_mod.mount(cx, scope, .{ .context = &sink, .action = action });
+    if (!view.portaled) try cx.root.?.appendChild(cx.allocator, view.wrapper);
+    try view.update(.{
+        .mode = .local,
+        .state = .failed,
+        .target_host = "very-long-target-host-for-production-forwarding-diagnostics.example.internal.with-additional-routing-segments.example.internal",
+        .target_port = 443,
+        .error_text = "连接失败，请检查目标主机配置和当前链路。\n第一条诊断记录：此处保留完整错误原因。\n第二条诊断记录：此处保留下一步操作建议。\n第三条诊断记录：请重新连接后显式重试。",
+    });
+    view.show(.{ .x = 720, .y = 440, .w = 80, .h = 20 });
+    try cx.setTestFrameStep(100);
+    for (0..12) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+        _ = view.updateGeometry();
+    }
+    try std.testing.expect(view.address.globalRect().h > 32);
+    try std.testing.expect(view.message.globalRect().h >= 64);
+    const card = view.root.globalRect();
+    const footer = view.footer.globalRect();
+    try std.testing.expect(footer.y >= view.body.container.globalRect().y + view.body.container.globalRect().h - 0.5);
+    try std.testing.expect(footer.y + footer.h <= card.y + card.h + 0.5);
+    try std.testing.expect(card.y >= 7.5 and card.y + card.h <= 472.5);
+}

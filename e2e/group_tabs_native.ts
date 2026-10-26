@@ -21,7 +21,7 @@ const save=()=>writeFile(join(output,"report.json"),JSON.stringify(report,null,2
 if(args["--prepare-only"]==="1") { report.plan=["Create real Local and join group through trusted @grp", "Create another independent Local and verify unified mixed tab order", "Keyboard ordinal, previous/next and MRU include group", "Mixed drag Escape rollback and commit preserve real source shell PID", "Create twelve real presentation entries and verify overflow ordinals stay absolute", "Picker filters and activates the real group owner; no-match Enter and Escape preserve active group"]; await save(); process.exit(0); }
 assert(args["--binary"] && /^[a-f0-9]{64}$/.test(args["--expected-sha"]??""));
 const sourceBinary=resolve(args["--binary"]), binary=join(output,"zerowork-frozen"); await copyFile(sourceBinary,binary); await copyFile(join(dirname(sourceBinary),"zw_ipc.so"),join(output,"zw_ipc.so")); assert.equal(createHash("sha256").update(await readFile(binary)).digest("hex"),args["--expected-sha"]);
-const isolated=await mkdtemp(join(tmpdir(),"zw-group-tabs-")), rpc=join(isolated,"rpc"),data=join(isolated,"data"); await Promise.all([mkdir(rpc),mkdir(data)]);
+const isolated=await mkdtemp(join("/private/tmp","zw-group-tabs-")), rpc=join(isolated,"rpc"),data=join(isolated,"data"); await Promise.all([mkdir(rpc),mkdir(data)]);
 const shellConfig=join(isolated,"shell-config");await mkdir(shellConfig);await writeFile(join(shellConfig,".zshrc"),"bindkey -e\nPS1='ZeroWork-acceptance%# '\n");
 await writeFile(join(data,"config.toml"),'[meta]\nconfig_revision = 1\n[ui]\ntheme = "dark"\nfont_family = "Menlo"\nfont_size = 14\n');
 process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;

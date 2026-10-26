@@ -3,6 +3,7 @@ const std = @import("std");
 pub const Page = struct { name: []const u8, config_section: []const u8, description: []const u8 };
 pub const ConfigKey = struct { page: []const u8, section: []const u8, key: []const u8 };
 pub const keys = [_]ConfigKey{
+    .{ .page = "外观与主题", .section = "ui", .key = "icon_background" },
     .{ .page = "外观与主题", .section = "ui", .key = "theme" },
     .{ .page = "外观与主题", .section = "ui", .key = "font_family" },
     .{ .page = "外观与主题", .section = "ui", .key = "font_size" },
@@ -82,7 +83,7 @@ pub const pages = [_]Page{
     .{ .name = "快捷键", .config_section = "ui", .description = "逐项录制应用快捷键；Tab 与 Control 保留给远端" },
     .{ .name = "SSH 与网络", .config_section = "ssh", .description = "连接、重连与认证默认值；保存后用于后续连接" },
     .{ .name = "文件传输", .config_section = "transfer", .description = "连接隔离、传输引擎与下载默认值；运行任务保留原设置" },
-    .{ .name = "AI 辅助", .config_section = "ai", .description = "模型与权限默认值；助手始终作用于原会话" },
+    .{ .name = "AI 辅助", .config_section = "ai", .description = "配置服务提供方、模型与权限；助手始终作用于原会话。" },
     .{ .name = "协议插件", .config_section = "plugins", .description = "查看内置协议服务" },
     .{ .name = "通知", .config_section = "notify", .description = "事件通知、标签提醒与勿扰时段" },
     .{ .name = "数据与日志", .config_section = "log", .description = "本地配置、会话记录、日志导出与清理" },

@@ -53,7 +53,7 @@ test "compaction real HTTP publishes memory and next model request contains only
     try client.chat(config("http://127.0.0.1:18987/next"), .{ .model = "compaction-fixture", .system = "Real assistant system", .messages = next.items }, sink, undefined);
 }
 test "compaction real HTTP failure cancellation stale owner conversation generation and transcript preserve history" {
-    const scenarios = [_][]const u8{ "failure", "cancel", "owner", "conversation", "revision", "generation", "transcript", "busy", "empty", "larger", "budget" };
+    const scenarios = [_][]const u8{ "failure", "cancel", "owner", "conversation", "revision", "generation", "transcript", "busy", "empty", "acknowledgement", "larger", "budget" };
     for (scenarios) |scenario| {
         var h = try history();
         defer h.deinit();

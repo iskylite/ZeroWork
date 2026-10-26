@@ -114,7 +114,7 @@ pub fn close() ui.BoxStyle {
 }
 pub fn button(w: f32, h: f32, primary: bool, danger: bool) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .background = if (danger) c.danger else if (primary) c.accent else c.surface_2, .border = .{ .radius = 8 }, .align_items = .center, .justify = .center, .flex_shrink = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .background = if (danger) c.action_danger else if (primary) c.action_accent else c.surface_2, .border = .{ .radius = 8 }, .align_items = .center, .justify = .center, .flex_shrink = 0 };
 }
 pub fn actionColor(primary: bool, disabled: bool) ui.Color {
     return if (disabled) theme.current().fg_3 else if (primary) theme.widgetTheme(theme.currentName()).tokens.color.button_primary_fg else theme.current().fg_2;

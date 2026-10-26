@@ -81,13 +81,13 @@ pub fn label(min: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = min, .min_width = 0, .flex_shrink = 0 };
 }
 pub fn button(w: f32, h: f32, primary: bool, danger: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .gap = 0, .corner_radius = 8, .border_width = 0, .background = if (danger) theme.current().danger else if (primary) theme.current().accent else theme.current().surface_2, .font_size = 12, .font_weight = 500, .text_color = if (primary) theme.widgetTheme(theme.currentName()).tokens.color.button_primary_fg else theme.current().fg_2, .flex_shrink = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .gap = 0, .corner_radius = 8, .border_width = 0, .background = if (danger) theme.current().action_danger else if (primary) theme.current().action_accent else theme.current().surface_2, .font_size = 12, .font_weight = 500, .text_color = if (primary) theme.widgetTheme(theme.currentName()).tokens.color.button_primary_fg else theme.current().fg_2, .flex_shrink = 0 };
 }
 // The prototype mutes fill and label to 40%, keeping the primary hue. Button's
 // generic disabled recipe substitutes a neutral fill; this state is the local
 // persistent inline layer over that recipe, removed again when enabled.
 pub fn disabledPrimary(danger: bool) ui.BoxStyle {
-    return .{ .background = if (danger) theme.current().danger else theme.current().accent, .opacity = 0.4 };
+    return .{ .background = if (danger) theme.current().action_danger else theme.current().action_accent, .opacity = 0.4 };
 }
 pub fn iconButton(size: f32) ui.BoxStyle {
     var style = button(size, size, false, false);

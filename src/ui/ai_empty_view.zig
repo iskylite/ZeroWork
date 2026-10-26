@@ -34,14 +34,18 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !
         const button = try ui.widgets.Button(.{ .label = label, .block = configured, .variant = @as(ui.widgets.button.ButtonVariant, if (!configured and i == 0) .primary else .secondary), .base_style = S.action(configured, !configured and i == 0), .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
         button.meta.ownership.meta.test_id = id;
         if (configured) {
-            // Shared V3 starter: icon, left-aligned label and the fill-draft arrow.
+            // Shared V3 starter: icon, left-aligned label and the source help icon.
             for (button.children.items) |child| child.setDisplay(.none);
             button.setStyleInline(cx.allocator, .{ .width = .fill(), .no_cross_stretch = false, .justify = .start, .gap = 6 });
             try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (i == 0) "terminal" else "file-text").?, S.ink(), .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 }));
-            const label_node = try ui.text(cx, label, S.label());
-            label_node.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
+            var starter_text = S.label();
+            starter_text.font_size = 11.5;
+            starter_text.font_weight = 500;
+            starter_text.line_height = 16.0 / 11.5;
+            const label_node = try ui.text(cx, label, starter_text);
+            label_node.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .margin = .{ .right = 12 } });
             try button.appendChild(cx.allocator, label_node);
-            try button.appendChild(cx.allocator, try ui.text(cx, "↖", S.label()));
+            try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("info").?, S.muted(), .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
             const hint = try ui.widgets.Tooltip(.{ .text = if (i == 0) "填入问题，发送后分析所选文字或最近输出。" else "选择日志文件，预览后附加到问题。" }).mount(scope, cx);
             hint.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
             hint.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 30 }, .min_width = 0 });
@@ -51,15 +55,39 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !
     }
     if (configured) if (actions.history) |run| {
         const click = try scope.createState(Click, .{ .context = actions.context, .run = run });
-        const recent = try ui.widgets.Button(.{ .variant = .ghost, .block = true, .a11y_label = "最近记录 · 全部连接的 AI 会话", .base_style = S.recent(), .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+        const recent = try ui.widgets.Button(.{ .variant = .ghost, .block = true, .a11y_label = "最近记录 · 全部连接的 AI 会话", .base_style = S.recent(), .hover_style = .{ .background = ui.Color.hex(0x101014) }, .pressed_style = .{ .background = ui.Color.hex(0x101014) }, .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
         recent.meta.ownership.meta.test_id = "ai.empty.recent";
         for (recent.children.items) |child| child.setDisplay(.none);
-        recent.setStyleInline(cx.allocator, .{ .justify = .start, .gap = 8 });
-        try recent.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("circle-check").?, S.success(), .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 }));
-        try recent.appendChild(cx.allocator, try ui.text(cx, "›", S.label()));
+        recent.setStyleInline(cx.allocator, .{ .justify = .start, .gap = 6 });
+        const toggle = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0, .align_items = .center, .justify = .center }, .{});
+        try recent.appendChild(cx.allocator, toggle);
+        const status_icon = try ui.iconTint(cx, @import("file_workspace_title_icons.zig").status_check, S.success(), .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
+        status_icon.meta.ownership.meta.test_id = "ai.empty.recent.status";
+        try toggle.appendChild(cx.allocator, status_icon);
+        var chevron_style = S.label();
+        chevron_style.font_size = 18;
+        chevron_style.line_height = 22.0 / 18.0;
+        chevron_style.color = S.muted();
+        chevron_style.text_align = .center;
+        const chevron = try ui.text(cx, "›", chevron_style);
+        chevron.setStyleInline(cx.allocator, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0 });
+        chevron.meta.ownership.meta.test_id = "ai.empty.recent.disclosure";
+        chevron.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .top = .{ .px = 0 }, .left = .{ .px = 0 } }, .opacity = 0 });
+        try toggle.appendChild(cx.allocator, chevron);
+        const hovered = try ui.hooks.useHover(scope, recent);
+        const focus = try ui.hooks.useFocusState(scope, cx, recent);
+        try scope.createEffect(.{ .cx = cx, .hovered = hovered, .focused = focus.visible, .status = status_icon, .disclosure = chevron }, struct {
+            fn paint(ctx: anytype) void {
+                const show = ctx.hovered.get() or ctx.focused.get();
+                ctx.status.setStyleInline(ctx.cx.allocator, .{ .opacity = if (show) 0 else 1 });
+                ctx.disclosure.setStyleInline(ctx.cx.allocator, .{ .opacity = if (show) 1 else 0 });
+            }
+        }.paint);
         var strong = S.label();
         strong.font_weight = 600;
-        try recent.appendChild(cx.allocator, try ui.text(cx, "最近记录", strong));
+        const recent_title = try ui.text(cx, "最近记录", strong);
+        recent_title.setStyleInline(cx.allocator, .{ .width = .{ .px = 84 }, .flex_shrink = 0 });
+        try recent.appendChild(cx.allocator, recent_title);
         var muted = S.label();
         muted.color = S.muted();
         try recent.appendChild(cx.allocator, try ui.text(cx, "全部连接的 AI 会话", muted));

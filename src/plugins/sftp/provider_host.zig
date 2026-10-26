@@ -27,9 +27,13 @@ const host_key = @import("../../ui/host_key_confirmation.zig");
 const LocalBindingId = enum(u64) { _ };
 var local_bindings: identity.Allocator(LocalBindingId) = .{};
 
+pub const ExportStatus = presentation.ExportStatus;
 pub const TransferHandler = struct {
     context: *anyopaque,
     submit: *const fn (*anyopaque, controller.FrozenTransfer, sessions.ServiceHandle) anyerror!void,
+    export_start: ?*const fn (*anyopaque, controller.FrozenTransfer, sessions.ServiceHandle) anyerror!u64 = null,
+    export_poll: ?*const fn (*anyopaque, u64) ExportStatus = null,
+    export_cancel: ?*const fn (*anyopaque, u64) void = null,
     confirm: ?*const fn (*anyopaque, controller.FrozenTransfer, sessions.ServiceHandle, @import("../../ui/file_copy_view.zig").Options) anyerror!void = null,
 };
 
@@ -97,6 +101,7 @@ pub const Host = struct {
             .remote_writable = true,
             .confirm_transfer = confirmTransfer,
             .transfer_config = self.workspace.app_config,
+            .exports = .{ .context = self, .start = exportStart, .poll = exportPoll, .cancel = exportCancel },
         });
         self.workspace.external_auth = .{ .context = self, .pending = pendingAuth, .submit = submitAuth, .cancel = cancelAuth, .host = authHost, .totp = authTotp, .parent = authParent, .host_key = authHostKey };
     }
@@ -166,6 +171,16 @@ pub const Host = struct {
         };
         if (self.presentation) |view| active = try view.safeTick() or active;
         if (self.authentication) |host| active = try host.collect() or active;
+        if (self.file_host) |host| for (self.workspace.tabs.items) |tab| {
+            if (tab.content_owner != .session or tab.runtime != null or tab.local or tab.closing) continue;
+            if (host.osDetection(tab.content_owner.session)) |value| {
+                const original: ?hosts.HostConfig = switch (value.source) {
+                    .saved => |saved| .{ .connection_id = saved.connection_id, .revision = saved.config_revision, .protocol = .sftp, .name = "", .host = saved.immutable_config.endpoint.host, .port = saved.immutable_config.endpoint.port, .user = saved.immutable_config.endpoint.user },
+                    else => null,
+                };
+                self.workspace.updateSessionOs(tab.content_owner.session, value.kind, original);
+            }
+        };
         if (self.shutting_down) _ = self.shutdownStep();
         return active or (self.shutting_down and !self.released);
     }
@@ -290,6 +305,27 @@ pub const Host = struct {
         if (!domain.bindingIsLive(binding)) return error.StaleBinding;
         const handler = self.transfer_handler orelse return error.TransferUnavailable;
         try handler.submit(handler.context, intent, binding);
+    }
+    fn exportStart(raw: ?*anyopaque, intent: controller.FrozenTransfer) !u64 {
+        const self: *Host = @ptrCast(@alignCast(raw orelse return error.FileHostNotBound));
+        const domain = self.app.?.sessions;
+        const binding = switch (domain.queryService(intent.owner, .transfer)) {
+            .available => |handle| handle,
+            else => return error.TransferUnavailable,
+        };
+        if (!domain.bindingIsLive(binding)) return error.StaleBinding;
+        const handler = self.transfer_handler orelse return error.TransferUnavailable;
+        return (handler.export_start orelse return error.TransferUnavailable)(handler.context, intent, binding);
+    }
+    fn exportCancel(raw: ?*anyopaque, job: u64) void {
+        const self: *Host = @ptrCast(@alignCast(raw orelse return));
+        const handler = self.transfer_handler orelse return;
+        if (handler.export_cancel) |call| call(handler.context, job);
+    }
+    fn exportPoll(raw: ?*anyopaque, job: u64) ExportStatus {
+        const self: *Host = @ptrCast(@alignCast(raw orelse return .failed));
+        const handler = self.transfer_handler orelse return .failed;
+        return if (handler.export_poll) |call| call(handler.context, job) else .failed;
     }
     fn confirmTransfer(raw: ?*anyopaque, intent: controller.FrozenTransfer, options: @import("../../ui/file_copy_view.zig").Options) !void {
         const self: *Host = @ptrCast(@alignCast(raw orelse return error.FileHostNotBound));

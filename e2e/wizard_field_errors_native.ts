@@ -45,7 +45,7 @@ try{
  assert.match(text(await visible('wizard.port.error')),/1–65535/);assert.match(text(await visible('wizard.port')),/\+22/);
  for(const id of ['name','host','user','port']){
   const input=await visible(`wizard.${id}`),error=await visible(`wizard.${id}.error`);
-  assert.equal(input.rect.h,32);assert.equal(error.rect.h,16);assert.equal(error.rect.y-input.rect.y-input.rect.h,4);
+  assert.equal(input.rect.h,34);assert.equal(error.rect.h,16);assert.equal(error.rect.y-input.rect.y-input.rect.h,4);
  }
  await capture('02-errors-after-blur');
  await fill('wizard.name','DB-Validation');assert(!(await current('wizard.name.error')));
@@ -60,7 +60,7 @@ try{
  await visible('wizard.name.error');await visible('wizard.host.error');await visible('wizard.user.error');await visible('wizard.step.identity.check');await capture('06-errors-compact');
  const dialog=await visible('wizard.dialog'),footer=await visible('wizard.footer');assert(footer.rect.y+footer.rect.h<=480);
  const err=await visible('wizard.name.error');assert(err.rect.y>=dialog.rect.y&&err.rect.y+err.rect.h<=footer.rect.y);
- await fill('wizard.name','Recovered');await fill('wizard.host','127.0.0.1');await fill('wizard.user','fixture');await key('return');
+ await fill('wizard.name','Recovered');await fill('wizard.host','127.0.0.1');const compactScroll=await visible('wizard.scroll.identity');await scrollAt(compactScroll.rect.x+compactScroll.rect.w-20,compactScroll.rect.y+compactScroll.rect.h/2,0,-280);await sleep(200);await fill('wizard.user','fixture');await key('return');
  await visible('wizard.access.direct');await capture('07-route-compact');
  assert.equal((await readFile(join(data,'hosts.toml'),'utf8')).trim(),'');
  report.checks=['No errors before interaction','Blur shows only concrete touched-field errors','Invalid raw +22 retained','Typing valid values clears errors immediately','Private-key error only applies to key authentication','Corrected fields navigate to actual review','Enter reveals required errors and focuses first invalid field','860x480 error text and footer reachable','New draft clears old errors','No hosts saved and no network requests'];report.status='passed';

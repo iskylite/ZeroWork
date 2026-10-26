@@ -122,6 +122,11 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_notifications.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.linkFramework("UserNotifications", .{});
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_data_alert.m"), .flags = &.{"-fobjc-arc"} });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/app_icon.m"), .flags = &.{"-fobjc-arc"} });
+    exe.root_module.addAnonymousImport("app_icon_assets", .{ .root_source_file = b.path("assets/macos/icons.zig") });
+    exe.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/ui_fonts.m"), .flags = &.{} });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_file_promises.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
     zenit.installHarnessClient(b, zenit_dep);
     exe.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
@@ -138,9 +143,7 @@ pub fn build(b: *std.Build) void {
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(zsh_bridge_file, .bin, "zw_ipc.so").step);
 
     // ── Mockup 预览（设计稿实机比对基建） ───────────────────────────
-    // `zig build mockup -Dmockup=<name>` 构建单页设计稿预览程序。
-    // src/mockup_main.zig 在 comptime 按名字剪枝 @import，因此一个
-    // mockup 的编译错误不会波及其他 mockup（子智能体并行开发互斥）。
+    // Build only the selected native design preview, outside production sources.
     const mockup_name = b.option([]const u8, "mockup", "Mockup preview name (docs/SPEC/html/mockup-<name>.html)") orelse "";
     if (mockup_name.len > 0) {
         // 视图文件名 = mockup 名（'-'→'_'，与 stub 生成规则一致）。
@@ -148,7 +151,7 @@ pub fn build(b: *std.Build) void {
         for (file_zig_name) |*c| {
             if (c.* == '-') c.* = '_';
         }
-        const view_path = b.fmt("src/ui/mockups/{s}.zig", .{file_zig_name});
+        const view_path = b.fmt("tools/mockups/{s}.zig", .{file_zig_name});
         // 隔离关键：视图文件由 build 层装配为独立模块 —— 每次构建的
         // import 图只包含被选中的这一个 mockup，其他子智能体文件的
         // 语法错误不会波及本次构建（Zig @import 是 AstGen 急切解析，
@@ -159,12 +162,19 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         });
         view_module.addImport("ui", zenit_dep.module("ui"));
+        const design_tokens = b.createModule(.{
+            .root_source_file = b.path("src/ui/design_tokens.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        design_tokens.addImport("ui", zenit_dep.module("ui"));
+        view_module.addImport("design_tokens", design_tokens);
         const mockup_options = b.addOptions();
         mockup_options.addOption([]const u8, "mockup", mockup_name);
         const mockup_exe = b.addExecutable(.{
             .name = b.fmt("mockup-{s}", .{mockup_name}),
             .root_module = b.createModule(.{
-                .root_source_file = b.path("src/mockup_main.zig"),
+                .root_source_file = b.path("tools/mockups/runner.zig"),
                 .target = target,
                 .optimize = optimize,
             }),
@@ -213,6 +223,17 @@ pub fn build(b: *std.Build) void {
     conflict_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
     conflict_preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
     b.step("transfer-conflict-preview", "Build isolated native transfer conflict acceptance fixture").dependOn(&b.addInstallArtifact(conflict_preview, .{}).step);
+
+    const transfer_controls_preview = b.addExecutable(.{ .name = "transfer-controls-preview", .root_module = b.createModule(.{ .root_source_file = b.path("src/transfer_controls_preview_runner.zig"), .target = target, .optimize = optimize }) });
+    const transfer_controls_options = b.addOptions();
+    transfer_controls_options.addOption([]const u8, "presentation", b.option([]const u8, "transfer-preview-presentation", "global_popover, session_popover or session_tray") orelse "global_popover");
+    transfer_controls_preview.root_module.addOptions("preview_options", transfer_controls_options);
+    zenit.attach(zenit_dep, transfer_controls_preview);
+    transfer_controls_preview.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+    transfer_controls_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
+    transfer_controls_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+    transfer_controls_preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
+    b.step("transfer-controls-preview", "Build shared single-line transfer row and close-control acceptance fixture").dependOn(&b.addInstallArtifact(transfer_controls_preview, .{}).step);
 
     const run = b.addRunArtifact(exe);
     run.step.dependOn(b.getInstallStep());
@@ -323,6 +344,17 @@ pub fn build(b: *std.Build) void {
         } else local_tests_step.dependOn(&b.addRunArtifact(local_tests).step);
     }
 
+    const notification_preview = b.addExecutable(.{ .name = "notification-preview", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/notification_preview_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    zenit.attach(zenit_dep, notification_preview);
+    notification_preview.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+    notification_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
+    notification_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+    b.step("test-notification-preview", "Build isolated native notification acceptance fixture").dependOn(&b.addInstallArtifact(notification_preview, .{}).step);
+
     const font_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/appearance_font_tests.zig"),
         .target = target,
@@ -337,6 +369,29 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     }) });
+    appearance_tests.root_module.addImport("ui", zenit_dep.module("ui"));
+    appearance_tests.root_module.addImport("zenit_app", zenit_dep.module("zenit_app"));
+    appearance_tests.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
+    // Production terminal event tests instantiate the real input path without
+    // opening an SSH connection. Supply the same native ABI as the app.
+    appearance_tests.root_module.addImport("generated_ghostty_vt", ghostty_translate.createModule());
+    appearance_tests.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
+    appearance_tests.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
+    appearance_tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
+    appearance_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
+    appearance_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+    appearance_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
+    appearance_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c" }, .flags = &.{"-std=c11"} });
+    appearance_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
+    appearance_tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
+    appearance_tests.root_module.linkSystemLibrary("ssh2", .{});
+    appearance_tests.root_module.linkSystemLibrary("mbedcrypto", .{});
+    appearance_tests.root_module.linkSystemLibrary("z", .{});
+
+    addCoreTextBridgeForTest(zenit_dep, appearance_tests);
+    appearance_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
+    appearance_tests.root_module.linkFramework("Metal", .{});
+    appearance_tests.root_module.linkFramework("QuartzCore", .{});
     appearance_tests.root_module.link_libc = true;
     for ([_][]const u8{ "CoreFoundation", "ImageIO", "CoreGraphics" }) |framework| {
         appearance_tests.root_module.linkFramework(framework, .{});

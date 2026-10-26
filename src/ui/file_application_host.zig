@@ -3,3 +3,5 @@
 const provider = @import("../plugins/sftp/provider_host.zig");
 pub const Host = provider.Host;
 pub const TransferHandler = provider.TransferHandler;
+
+pub const ExportStatus = provider.ExportStatus;

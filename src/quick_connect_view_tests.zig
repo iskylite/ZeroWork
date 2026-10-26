@@ -126,6 +126,19 @@ fn find(node: *ui.Node, id: []const u8) ?*ui.Node {
     for (node.children.items) |child| if (find(child, id)) |result| return result;
     return null;
 }
+test "quick connect saved row click opens captured connection without a second submit" {
+    var probe: Probe = .{};
+    const h = try H.init(&probe);
+    defer h.deinit();
+    const row = h.view.scroll.content.children.items[1];
+    h.click(row);
+    try std.testing.expectEqual(@as(usize, 1), probe.saved_count);
+    try std.testing.expectEqual(owner_b, probe.owner.?);
+    try std.testing.expect(!h.view.isOpen());
+    h.key(.@"return");
+    try std.testing.expectEqual(@as(usize, 1), probe.saved_count);
+}
+
 test "quick connect native saved prototype geometry and keyboard submit use captured owner" {
     var probe: Probe = .{};
     const h = try H.init(&probe);
@@ -278,9 +291,11 @@ test "quick connect native snapshots copy labels and reject stale row while regi
 test "quick connect native theme material changes preserve active draft and selection" {
     const previous = T.currentName();
     const previous_material = T.materialVisible();
+    const previous_parameters = T.materialParameters();
     defer {
         T.select(previous);
         _ = T.setMaterialVisible(previous_material);
+        _ = T.setMaterialParameters(previous_parameters.transparency, previous_parameters.blur);
     }
     var probe: Probe = .{};
     const h = try H.init(&probe);
@@ -292,6 +307,7 @@ test "quick connect native theme material changes preserve active draft and sele
     inline for (.{ T.Name.dark, T.Name.light, T.Name.sauber }) |name| {
         T.select(name);
         _ = T.setMaterialVisible(true);
+        _ = T.setMaterialParameters(50, 32);
         publication.publish(h.cx, T.widgetTheme(name));
         h.frames();
         try std.testing.expectEqual(chrome_id, view.chrome.id);

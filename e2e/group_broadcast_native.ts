@@ -21,11 +21,12 @@ if(args["--prepare-only"]==="1") { report.plan=["Create real source and receiver
 assert(args["--binary"] && /^[a-f0-9]{64}$/.test(args["--expected-sha"]??""));
 const sourceBinary=resolve(args["--binary"]), binary=join(output,"zerowork-frozen"); await copyFile(sourceBinary,binary); await copyFile(join(dirname(sourceBinary),"zw_ipc.so"),join(output,"zw_ipc.so")); assert.equal(createHash("sha256").update(await readFile(binary)).digest("hex"),args["--expected-sha"]);
 assert(["dark","light"].includes(args["--theme"]??"dark"));
-const isolated=await realpath(await mkdtemp(join(tmpdir(),"zw-group-broadcast-"))), rpc=join(isolated,"rpc"),data=join(isolated,"data"); await Promise.all([mkdir(rpc),mkdir(data)]);
+const isolated=await realpath(await mkdtemp(join(process.env.ZW_BROADCAST_DEFAULT_SHELL?tmpdir():"/private/tmp","zw-group-broadcast-"))), rpc=join(isolated,"rpc"),data=join(isolated,"data"); await Promise.all([mkdir(rpc),mkdir(data)]);
 await writeFile(join(data,"config.toml"),`[meta]\nconfig_revision = 1\n[ui]\ntheme = "${args["--theme"]??"dark"}"\nfont_family = "Menlo"\nfont_size = 14\n`);
 process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
+const shellConfig=join(isolated,"shell-config");await mkdir(shellConfig);await writeFile(join(shellConfig,".zshrc"),"bindkey -e\nPS1='ZeroWork-broadcast%# '\n");
 const log=await open(join(output,"app.log"),"w");
-const child=spawn(binary,[],{cwd:root,env:{...process.env,ZENIT_E2E_FILE_RPC_DIR:rpc,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:"0",ZENIT_E2E_BACKGROUND:"1",ZENIT_E2E_ISOLATE_POINTER:"1",OPENAI_API_KEY:"",ANTHROPIC_API_KEY:""},stdio:["ignore",log.fd,log.fd]});
+const child=spawn(binary,[],{cwd:root,env:{...process.env,...(process.env.ZW_BROADCAST_DEFAULT_SHELL?{}:{ZDOTDIR:shellConfig}),ZENIT_E2E_FILE_RPC_DIR:rpc,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:"0",ZENIT_E2E_BACKGROUND:"1",ZENIT_E2E_ISOLATE_POINTER:"1",OPENAI_API_KEY:"",ANTHROPIC_API_KEY:""},stdio:["ignore",log.fd,log.fd]});
 const ended=new Promise<void>(done=>child.once("close",()=>done()));
 Object.assign(report,{status:"running",pid:child.pid,binary,sha256:args["--expected-sha"],isolated});
 const shown=(n:any)=>n?.rect && !n.hidden && n.visible!==false && n.rect.w>0 && n.rect.h>0 && (n.effective_opacity??1)>0;
@@ -90,7 +91,7 @@ async function recordPid(id:string,label:string):Promise<string>{
  return await waitFor(async()=>{const value=await fileValue(path);return /^\d+$/.test(value)?value:null},10000);
 }
 async function sendMarker(source:string,label:string,expected:string[]):Promise<void>{
- const path=join(isolated,`broadcast-${label}.txt`);await focusPane(source);await type(`printf '%s\\n' "$$" >> ${JSON.stringify(path)}`);await press("return");
+ const path=join(isolated,`broadcast-${label}.txt`);await focusPane(source);await type(`printf '%s\\n' "$$" >> ${JSON.stringify(path)}`);await sleep(180);await press("return");
  await waitFor(async()=>{const lines=(await fileValue(path)).trim().split("\n").filter(Boolean);return lines.length>=expected.length?lines:null},10000);
  await sleep(350);const lines=(await fileValue(path)).trim().split("\n").filter(Boolean);
  assert.deepEqual(lines.sort(),[...expected].sort(),`${label}: exactly once per approved real shell; no source double-send or unapproved target`);

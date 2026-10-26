@@ -8,12 +8,14 @@ const OperationKey = @import("operation.zig").OperationKey;
 pub const ReleaseReceipt = @import("../proto/ssh/session.zig").ReleaseReceipt;
 pub const ArchiveRequest = struct { session_id: u64, retention_days: u16 };
 pub const NotificationPublication = struct { text_generation: u64, output_sequence: u64, at_tail: bool };
+pub const OsDetection = struct { kind: @import("../proto/ssh/remote_os.zig").Kind = .unknown, pending: bool = false };
 pub const Runtime = struct {
     context: *anyopaque,
     vtable: *const VTable,
     torn_down: bool = false,
     released: bool = false,
     pub const VTable = struct {
+        osDetection: ?*const fn (*anyopaque) OsDetection = null,
         releaseStep: *const fn (*anyopaque, ?ArchiveRequest) ReleaseReceipt,
         cleanupReleased: *const fn (*anyopaque) bool,
         reconnectSnapshot: *const fn (*anyopaque) ?@import("../vt/reconnect.zig").Control.Snapshot,
@@ -53,6 +55,10 @@ pub const Runtime = struct {
         discardBufferedInput: *const fn (*anyopaque) void,
         notificationPublication: *const fn (*anyopaque, identity.SessionHandle) anyerror!?NotificationPublication,
     };
+    pub fn osDetection(self: *Runtime) OsDetection {
+        if (self.torn_down) return .{};
+        return if (self.vtable.osDetection) |invoke| invoke(self.context) else .{};
+    }
     pub fn releaseStep(self: *Runtime, archive: ?ArchiveRequest) ReleaseReceipt {
         if (self.released) return .released;
         self.torn_down = true;

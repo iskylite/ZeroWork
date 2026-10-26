@@ -152,13 +152,14 @@ test "file workspace V3 independent cards and fixed header footer use measured g
     defer f.deinit();
     for (f.view.panes) |pane| {
         try std.testing.expectEqual(@as(f32, 594), pane.root.globalRect().w);
-        try std.testing.expectEqual(@as(f32, 794), pane.root.globalRect().h);
-        try std.testing.expectEqual(@as(f32, 594), pane.table.globalRect().w);
-        try std.testing.expectEqual(@as(f32, 623), pane.table.globalRect().h);
+        try std.testing.expectEqual(@as(f32, 770), pane.root.globalRect().h);
+        try std.testing.expectEqual(@as(f32, 592), pane.table.globalRect().w);
+        try std.testing.expectEqual(@as(f32, 597), pane.table.globalRect().h);
         try std.testing.expectEqual(@as(f32, 34), pane.header.globalRect().h);
-        try std.testing.expectEqual(@as(f32, 758), pane.footer.globalRect().y);
-        try std.testing.expectEqual(@as(f32, 758), pane.actions.globalRect().y);
-        try std.testing.expectEqual(@as(f32, 312), pane.name_width);
+        try std.testing.expectEqual(@as(f32, 757), pane.footer.globalRect().y);
+        try std.testing.expectEqual(@as(f32, 757), pane.actions.globalRect().y);
+        try std.testing.expect(pane.name_width > 0 and pane.size_width > 0 and pane.date_width > 0);
+        try std.testing.expectApproxEqAbs(pane.column_width - 34, pane.name_width + pane.size_width + pane.date_width, 0.01);
     }
     try std.testing.expect(f.row(.local, entries[2].absolute_path).globalRect().h == 40);
     const aligned = f.row(.local, entries[2].absolute_path);
@@ -168,7 +169,7 @@ test "file workspace V3 independent cards and fixed header footer use measured g
     try std.testing.expectEqual(@as(f32, 13), f.view.panes[0].title.getText().?.font_size);
     try std.testing.expectEqual(@as(u16, 700), f.view.panes[0].title.getText().?.font_weight);
     try std.testing.expectApproxEqAbs(aligned.globalRect().y + 20, filename.y + filename.h / 2, 0.5);
-    try std.testing.expectEqual(f.view.panes[0].heading_buttons[0].globalRect().x + 22, find(aligned, "files.row.name").?.globalRect().x);
+    try std.testing.expectEqual(f.view.panes[0].heading_buttons[0].globalRect().x + 26, find(aligned, "files.row.name").?.globalRect().x);
     try std.testing.expectEqual(f.view.panes[0].heading_buttons[1].globalRect().x, find(aligned, "files.row.size").?.globalRect().x);
     try std.testing.expectEqualStrings("0 B", find(f.row(.local, entries[3].absolute_path), "files.row.size").?.getText().?.content);
     try std.testing.expectEqualStrings("未知", find(f.row(.local, entries[4].absolute_path), "files.row.size").?.getText().?.content);
@@ -195,10 +196,10 @@ test "file workspace narrow columns fit with independent vertical scrolling and 
     const left = f.view.panes[0];
     const right = f.view.panes[1];
     try std.testing.expectEqual(@as(f32, 392), left.root.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 211), left.table.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 272), left.name_width);
-    try std.testing.expectEqual(@as(f32, 392), left.column_width);
-    try std.testing.expectEqual(@as(f32, 177), left.list.state.viewport_height);
+    try std.testing.expectEqual(@as(f32, 185), left.table.globalRect().h);
+    try std.testing.expectApproxEqAbs(left.column_width - 34, left.name_width + left.size_width, 0.01);
+    try std.testing.expectEqual(@as(f32, 390), left.column_width);
+    try std.testing.expectEqual(@as(f32, 151), left.list.state.viewport_height);
     const footer = left.footer.globalRect();
     const path = left.path.node.globalRect();
     const header = left.header.globalRect();
@@ -272,7 +273,7 @@ test "file workspace compact horizontal rail truly clips row paint and hit testi
     const clip = pane.list.content.parent.?;
     try std.testing.expect(clip != pane.list.container);
     try std.testing.expect(clip.style.overflow_hidden);
-    try std.testing.expectEqual(@as(f32, 165), clip.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 139), clip.globalRect().h);
     try std.testing.expectEqual(body.y + body.h - 12, clip.globalRect().y + clip.globalRect().h);
     const y = body.y + body.h - 6;
     f.cx.handleMouseDown(body.x + 80, y, .{});
@@ -379,10 +380,10 @@ test "file workspace failed refresh preserves rows path and scroll and disables 
     try std.testing.expect(remote.footer.style.display == .none);
     const failure = remote.error_box.globalRect();
     const pane = remote.root.globalRect();
-    try std.testing.expectEqual(@as(f32, 163), table.h);
+    try std.testing.expectEqual(@as(f32, 137), table.h);
     try std.testing.expectEqual(stale.y + stale.h, table.y);
     try std.testing.expectEqual(table.y + table.h, failure.y);
-    try std.testing.expectEqual(pane.y + pane.h, failure.y + failure.h);
+    try std.testing.expectEqual(pane.y + pane.h - 1, failure.y + failure.h);
     try std.testing.expect(f.node(.local, "files.transfer").behavior.interaction.a11y.?.disabled);
     try std.testing.expect(f.node(.remote, "files.new_folder").behavior.interaction.a11y.?.disabled);
     const calls = f.calls;
@@ -452,8 +453,8 @@ test "file workspace global theme material updates every card without replacing 
     f.view.retheme();
     f.settle();
     for (f.view.panes) |pane| {
-        try std.testing.expectEqual(theme.current().terminal, pane.root.getBackground());
-        try std.testing.expectEqual(theme.current().terminal, pane.table.getBackground());
+        try std.testing.expectEqual(theme.current().surface_1, pane.root.getBackground());
+        try std.testing.expectEqual(theme.current().surface_1, pane.table.getBackground());
         try std.testing.expectEqual(theme.current().fg_1, pane.title.getText().?.color);
         try std.testing.expectEqual(@as(f32, 11.5), pane.path.state.text_display_node.?.getText().?.font_size);
     }

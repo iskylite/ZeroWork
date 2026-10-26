@@ -25,7 +25,7 @@ pub fn input() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 10, .right = 10 }, .background = theme.current().well, .border = .{ .radius = 8, .width = 0, .color = theme.current().well_border }, .flex_shrink = 0 };
 }
 pub fn action(primary: bool, w: f32) ui.BoxStyle {
-    return .{ .width = .{ .px = w }, .height = .{ .px = 30 }, .padding = .{}, .background = if (primary) theme.current().accent else theme.current().surface_2, .border = .{ .radius = 8 }, .text_color = if (primary) ui.Color.WHITE else theme.current().fg_2, .font_size = 12, .font_weight = 500, .flex_shrink = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = 30 }, .padding = .{}, .background = if (primary) theme.current().action_accent else theme.current().surface_2, .border = .{ .radius = 8 }, .text_color = if (primary) theme.actionForeground(theme.current().action_accent) else theme.current().fg_2, .font_size = 12, .font_weight = 500, .flex_shrink = 0 };
 }
 pub fn text(size: f32, weight: u16, secondary: bool) ui.TextStyle {
     return .{ .font_size = size, .font_weight = weight, .line_height = (if (size == 13) @as(f32, 20) else @as(f32, 16)) / size, .color = if (secondary) theme.current().fg_2 else theme.current().fg_1, .selectable = false, .text_overflow = .ellipsis };

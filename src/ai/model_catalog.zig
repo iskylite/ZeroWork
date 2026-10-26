@@ -8,11 +8,11 @@ pub const Capability = struct {
     control_known: bool = false,
     thinking_default: ?bool = null,
     adaptive: bool = false,
-    efforts: [5]bool = @splat(false),
+    efforts: [7]bool = @splat(false),
     context: ?u32 = null,
     vision: ?bool = null,
     pub fn hasControl(self: Capability) bool {
-        return self.toggle or !std.mem.eql(bool, &self.efforts, &@as([5]bool, @splat(false)));
+        return self.toggle or !std.mem.eql(bool, &self.efforts, &@as([7]bool, @splat(false)));
     }
 };
 pub const Entry = struct { provider: []const u8, id: []const u8, api: []const u8 = "", canonical: bool = false, capability: Capability };
@@ -122,7 +122,7 @@ pub fn metadata(v: std.json.Value) Capability {
                 if (value == .bool) {
                     if (value.bool) on = true else off = true;
                 }
-                if (value == .string) inline for (.{ "low", "medium", "high", "xhigh", "max" }, 0..) |label, i| {
+                if (value == .string) inline for (.{ "low", "medium", "high", "xhigh", "max", "none", "ultra" }, 0..) |label, i| {
                     if (std.mem.eql(u8, value.string, label)) c.efforts[i] = true;
                 };
             }
@@ -142,7 +142,7 @@ pub fn metadata(v: std.json.Value) Capability {
         }
         if (field(caps, "effort")) |effort| {
             c.control_known = true;
-            inline for (.{ "low", "medium", "high", "xhigh", "max" }, 0..) |label, i| {
+            inline for (.{ "low", "medium", "high", "xhigh", "max", "none", "ultra" }, 0..) |label, i| {
                 if (field(effort, label)) |level| c.efforts[i] = boolean(field(level, "supported")) orelse false;
             }
         }
@@ -163,13 +163,25 @@ pub fn metadata(v: std.json.Value) Capability {
         if (std.mem.eql(u8, kind, "effort")) if (field(option, "values")) |values| {
             if (values == .array) for (values.array.items) |value| {
                 const name = string(value) orelse continue;
-                inline for (.{ "low", "medium", "high", "xhigh", "max" }, 0..) |label, i| if (std.mem.eql(u8, name, label)) {
+                inline for (.{ "low", "medium", "high", "xhigh", "max", "none", "ultra" }, 0..) |label, i| if (std.mem.eql(u8, name, label)) {
                     c.efforts[i] = true;
                 };
-                if (std.mem.eql(u8, name, "none")) c.toggle = true;
             };
         };
     };
+    // OpenAI-compatible gateways expose either string levels or records. Read
+    // only declared levels; unknown future names must not enable another level.
+    inline for (.{ "reasoning_levels", "supported_reasoning_levels" }) |key| {
+        if (field(v, key)) |levels| if (levels == .array) {
+            c.control_known = true;
+            for (levels.array.items) |level| {
+                const name = string(level) orelse string(field(level, "effort")) orelse continue;
+                inline for (.{ "low", "medium", "high", "xhigh", "max", "none", "ultra" }, 0..) |label, i| {
+                    if (std.mem.eql(u8, name, label)) c.efforts[i] = true;
+                }
+            }
+        };
+    }
     return c;
 }
 /// Preserve custom reverse-proxy base paths; remove only known protocol suffixes.
@@ -238,4 +250,29 @@ test "model catalog uses provider-specific model endpoints and preserves custom 
         defer a.free(url);
         try std.testing.expectEqualStrings(item.expected, url);
     }
+}
+
+test "model catalog preserves gateway reasoning levels and real metadata" {
+    var c = try Catalog.parse(std.testing.allocator,
+        \\{"data":[{"id":"gateway/model-a","owned_by":"gateway","reasoning":true,"context_window":872000,"modalities":{"input":["text","image"]},"reasoning_levels":["low","high","ultra"]},{"id":"gateway/model-b","supported_reasoning_levels":[{"effort":"medium"},{"effort":"max"}]},{"id":"gateway/model-c","reasoning_levels":[]}]}
+    , .endpoint);
+    defer c.deinit();
+    const first = c.resolve("gateway", "gateway/model-a").?;
+    try std.testing.expect(first.reasoning.? and first.vision.?);
+    try std.testing.expectEqual(@as(u32, 872000), first.context.?);
+    try std.testing.expectEqual([7]bool{ true, false, true, false, false, false, true }, first.efforts);
+    const second = c.resolve("gateway", "gateway/model-b").?;
+    try std.testing.expectEqual([7]bool{ false, true, false, false, true, false, false }, second.efforts);
+    const empty = c.resolve("gateway", "gateway/model-c").?;
+    try std.testing.expect(empty.control_known and !empty.hasControl());
+}
+
+test "gateway none is a native effort and undeclared ultra stays unavailable" {
+    var catalog = try Catalog.parse(std.testing.allocator, "{\"data\":[{\"id\":\"extended\",\"reasoning_levels\":[\"none\",\"ultra\"]},{\"id\":\"limited\",\"reasoning_levels\":[\"low\"]}]}", .endpoint);
+    defer catalog.deinit();
+    const extended = catalog.resolve("", "extended").?;
+    try std.testing.expect(extended.efforts[5] and extended.efforts[6]);
+    try std.testing.expect(!extended.toggle);
+    const limited = catalog.resolve("", "limited").?;
+    try std.testing.expect(!limited.efforts[5] and !limited.efforts[6]);
 }

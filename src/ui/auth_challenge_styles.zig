@@ -104,7 +104,7 @@ pub fn footer() ui.BoxStyle {
 }
 pub fn button(w: f32, primary: bool, danger: bool) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = w }, .height = .{ .px = footer_height }, .padding = .{}, .background = if (danger) c.danger else if (primary) c.accent else c.surface_2, .border = .{ .radius = 8 }, .justify = .center, .align_items = .center, .flex_shrink = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = footer_height }, .padding = .{}, .background = if (danger) c.action_danger else if (primary) c.action_accent else c.surface_2, .border = .{ .radius = 8 }, .justify = .center, .align_items = .center, .flex_shrink = 0 };
 }
 pub fn actionText(primary: bool) ui.TextStyle {
     var result = text(12, 500, false);

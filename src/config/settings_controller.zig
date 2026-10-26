@@ -59,7 +59,7 @@ pub const Controller = struct {
     search_query: []const u8 = "",
     search_return_page: ?usize = null,
     scroll_offsets: [8]f32 = @splat(0),
-    folded_sections: u64 = std.math.maxInt(u64) & ~(@as(u64, 1) | (@as(u64, 1) << 4) | (@as(u64, 1) << 8) | (@as(u64, 1) << 16) | (@as(u64, 1) << 48) | (@as(u64, 1) << 56)),
+    folded_sections: u64 = std.math.maxInt(u64) & ~(@as(u64, 1) | (@as(u64, 1) << 3) | (@as(u64, 1) << 4) | (@as(u64, 1) << 8) | (@as(u64, 1) << 16) | (@as(u64, 1) << 48) | (@as(u64, 1) << 56)),
     plugin_page: plugins.State,
     background: material.Draft,
     theme_library: themes.LibraryState,
@@ -879,6 +879,10 @@ test "provider draft owns keys and models across cancel save and restart" {
     var test_copy = try runtime.Snapshot.init(std.testing.allocator, c.model.value);
     defer test_copy.deinit();
     var ai = test_copy.value.ai;
+    // The three legacy backing slots are not active Providers on a fresh install.
+    ai.provider_count = 1;
+    ai.providers = ai.providers[0..1];
+    ai.providers[0].name = "test-provider";
     ai.providers[0].api_key = &key;
     var models = [_]config.AiModel{.{}};
     ai.providers[0].models = &models;
@@ -897,6 +901,10 @@ test "provider draft owns keys and models across cancel save and restart" {
     var reload = try runtime.RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "provider.toml");
     defer reload.deinit();
     try std.testing.expectEqualStrings("saved-key", reload.value.ai.providers[0].api_key);
+    try std.testing.expect(reload.value.ai.providers[0].api_key_ref != null);
+    const persisted = try tmp.dir.readFileAlloc(std.testing.io, "provider.toml", std.testing.allocator, .limited(64 * 1024));
+    defer std.testing.allocator.free(persisted);
+    try std.testing.expect(std.mem.indexOf(u8, persisted, "saved-key") == null);
     try std.testing.expectEqualStrings("saved-model", reload.value.ai.providers[0].models[0].id);
 }
 

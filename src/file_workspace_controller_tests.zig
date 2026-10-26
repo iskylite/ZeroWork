@@ -270,7 +270,7 @@ test "completed download refresh uses actual local metadata once per job attempt
     const remote_stamp = before.panes[1].stamp;
     try std.testing.expectEqual(@as(?u64, 64), before.panes[0].entries[0].size);
     try f.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "download.bin", .data = &@as([65829]u8, @splat('N')) });
-    const target: refresh.Target = .{ .owner = f.owner, .endpoint = f.local.endpoint, .directory = f.path };
+    const target: refresh.Target = .{ .owner = f.owner, .endpoint = .{ .local_fs = f.local.endpoint }, .directory = f.path };
     var completion: refresh.Completion = .{};
     var progress = downloadedReceipt(41, 1);
     for ([_]@import("transfer/manager.zig").State{ .running, .paused, .cancelled, .failed }) |state| {
@@ -317,13 +317,13 @@ test "completed download refresh preserves a newer navigation and rejects anothe
     try f.model.start();
     try f.awaitLocal();
     const before = f.model.projection().?.panes[0].stamp;
-    const target: refresh.Target = .{ .owner = f.owner, .endpoint = f.local.endpoint, .directory = f.path };
+    const target: refresh.Target = .{ .owner = f.owner, .endpoint = .{ .local_fs = f.local.endpoint }, .directory = f.path };
     var wrong = target;
     wrong.owner.generation += 1;
     var foreign_owner: refresh.Completion = .{};
     try std.testing.expect(!try foreign_owner.update(downloadedReceipt(51, 1), wrong, &f.model));
     wrong = target;
-    wrong.endpoint.binding_generation += 1;
+    wrong.endpoint.local_fs.binding_generation += 1;
     var foreign_endpoint: refresh.Completion = .{};
     try std.testing.expect(!try foreign_endpoint.update(downloadedReceipt(52, 1), wrong, &f.model));
     try std.testing.expectEqualDeep(before, f.model.projection().?.panes[0].stamp);
@@ -920,4 +920,55 @@ test "file workspace controller cross-card folder drop validates exact directory
     action.action.transfer.directory = "/remote/shared/different";
     try std.testing.expectError(error.InvalidTransferDirectory, f.model.handle(action));
     try std.testing.expectEqual(@as(usize, 1), f.transfer_count);
+}
+
+test "file workspace controller external multi-file drop freezes explicit paths and destination without changing local selection" {
+    var f: Fixture = undefined;
+    try f.init(true, false);
+    defer f.stop();
+    try f.model.start();
+    try f.awaitLocal();
+    const first = f.model.projection().?;
+    const request: V.ExternalUpload = .{ .destination = first.panes[1].stamp, .directory = first.panes[1].resolved_path, .paths = &.{ "/tmp/drop/a.yaml", "/tmp/other/b.md", "/tmp/drop/a.yaml" } };
+    try f.model.externalUpload(request);
+    try std.testing.expectEqual(@as(usize, 1), f.transfer_count);
+    try std.testing.expect(f.frozen.?.owner.eql(f.owner));
+    try std.testing.expectEqual(@as(usize, 2), f.frozen.?.paths.len);
+    try std.testing.expectEqualStrings("/tmp/drop/a.yaml", f.frozen.?.paths[0]);
+    try std.testing.expectEqualStrings("/tmp/other/b.md", f.frozen.?.paths[1]);
+    try std.testing.expectEqual(@as(usize, 0), f.model.projection().?.panes[0].selected_keys.len);
+    var stale = request;
+    stale.destination.directory_revision += 1;
+    try std.testing.expectError(error.StaleTransferDestination, f.model.externalUpload(stale));
+    var relative = request;
+    relative.paths = &.{"relative.txt"};
+    try std.testing.expectError(error.AbsolutePathRequired, f.model.externalUpload(relative));
+    try std.testing.expectEqual(@as(usize, 1), f.transfer_count);
+}
+
+test "completed upload refresh targets original remote endpoint and preserves newer navigation" {
+    const refresh = @import("host/transfer_directory_refresh.zig");
+    var f: Fixture = undefined;
+    try f.init(true, true);
+    defer f.stop();
+    try f.model.start();
+    try f.awaitLocal();
+    const before = f.model.projection().?;
+    const target: refresh.Target = .{ .owner = f.owner, .side = .remote, .endpoint = .{ .sftp = f.endpoint }, .directory = before.panes[1].resolved_path };
+    var wrong = target;
+    wrong.endpoint.sftp.binding_generation += 1;
+    var rejected: refresh.Completion = .{};
+    try std.testing.expect(!try rejected.update(downloadedReceipt(71, 1), wrong, &f.model));
+    try std.testing.expectEqual(@as(usize, 0), f.model.pending.items.len);
+    var completion: refresh.Completion = .{};
+    try std.testing.expect(try completion.update(downloadedReceipt(72, 1), target, &f.model));
+    const refreshing = f.model.projection().?;
+    try std.testing.expectEqualDeep(before.panes[0].stamp, refreshing.panes[0].stamp);
+    try std.testing.expect(refreshing.panes[1].stamp.request_id > before.panes[1].stamp.request_id);
+    try std.testing.expect(!try completion.update(downloadedReceipt(72, 1), target, &f.model));
+    const request = refreshing.panes[1].stamp.request_id;
+    var later: refresh.Completion = .{};
+    try std.testing.expect(!try later.update(downloadedReceipt(73, 1), target, &f.model));
+    try std.testing.expectEqual(request, f.model.projection().?.panes[1].stamp.request_id);
+    try std.testing.expectEqual(@as(usize, 1), f.model.pending.items.len);
 }

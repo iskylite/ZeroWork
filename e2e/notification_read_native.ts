@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { deflateSync, inflateSync } from "node:zlib";
-import { waitForServerReady, waitFor, query, focused, clickAt, key, type_, resizeWindow, screenshot, stats, sleep } from "../zig-out/share/zenit/harness/client.ts";
+import { waitForServerReady, waitFor, query, tree, focused, clickAt, key, type_, resizeWindow, screenshot, stats, sleep, screenPos } from "../zig-out/share/zenit/harness/client.ts";
 
 type Rect = { x: number; y: number; w: number; h: number };
 type Image = { width: number; height: number; channels: number; pixels: Buffer };
@@ -28,7 +28,7 @@ type Session = { label: string; tab: string; session_id: string; focus_id: numbe
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const options: Record<string, string> = {};
 for (let i = 2; i < process.argv.length; i += 2) {
-  assert(["--out", "--binary", "--expected-sha", "--prepare-only", "--run", "--self-test", "--abort"].includes(process.argv[i]) && process.argv[i + 1], `Invalid option ${process.argv[i]}`);
+  assert(["--out", "--binary", "--expected-sha", "--prepare-only", "--run", "--self-test", "--abort", "--dots-only"].includes(process.argv[i]) && process.argv[i + 1], `Invalid option ${process.argv[i]}`);
   assert(!(process.argv[i] in options), `Duplicate option ${process.argv[i]}`);
   options[process.argv[i]] = process.argv[i + 1];
 }
@@ -139,7 +139,7 @@ const report: any = {
   permissions: { notification_request: "forbidden", system_send: "forbidden", Bell: "forbidden", authorization_query: "readonly production query allowed" },
   network: { external_connections_created: 0, hosts_fixture_empty: true, AI_requests: 0 },
   input: { setup: "public Harness synthetic UI input only", acceptance: "root CUA window/tab/focus/wheel actions", foreground_from_synthetic_harness_claimed: false },
-  measurement: { node: "tabs.connection_status inside exact tabs.tab.<TabId>", border_style_in_public_harness: "not exposed", method: "actual Metal PNG accent pixels within queried original 6x6 point node; no production metadata added", dark_accent_rgb: [99, 102, 241] },
+  measurement: { method: "assert no trailing dot node in original tab, including unread output scenarios" },
   limitations: ["A completion file only synchronizes root's action; it does not itself prove OS foreground. Root must save and review actual CUA evidence.", "Scrollback is actual VT history; Local @log replay has no live Local frame source and is not fabricated.", "Normal Local replacement creates a new SessionId. Same-SessionId generation retry is not invented; its stale-generation refusal remains covered by targeted real-VT/headless tests.", "Pixel/query samples are sequential, not an atomic frame. Final screenshots still need root visual review.", "Forced cleanup is recorded separately from a normal native close."],
 };
 const stagePlan = [
@@ -217,13 +217,16 @@ async function click(id: string): Promise<void> {
 async function tabs(): Promise<any[]> { return flatten(await visible("tabs.strip")).filter(node => shown(node) && /^tabs\.tab\.\d+$/.test(node.test_id ?? "")); }
 async function currentSurfaceText(): Promise<string> {
   const grid = text(await visible("local.status.grid")).match(/(\d+)×(\d+)/); assert(grid, "Actual Local grid is published");
-  const lines: string[] = [];
+  const lines: string[] = [];const debugRows:any[]=[];
   for (let start = 0; start < Number(grid[2]); start += 8) {
     const batch = await Promise.all(Array.from({ length: Math.min(8, Number(grid[2]) - start) }, (_, i) => query(`terminal.surface.row.${start + i}`)));
     for (const values of batch) {
+      debugRows.push(values);
       const row = values.find(shown); if (row) lines.push((row.children ?? []).filter(shown).filter((n: any) => n.tag === "text").sort((a: any, b: any) => a.rect.x - b.rect.x).map((n: any) => n.text ?? "").join(""));
     }
   }
+  await writeFile(join(output,"surface-rows-latest.json"),JSON.stringify(debugRows,null,2));
+  await writeFile(join(output,"surface-text-latest.txt"),lines.join("\n"));
   return lines.join("\n");
 }
 async function trace(): Promise<any[]> {
@@ -255,19 +258,11 @@ async function capture(name: string): Promise<void> {
   await writeFile(treePath, JSON.stringify(record, null, 2)); assert((await screenshot(imagePath)).ok);
   report.stages.push({ name, evidence: treePath, screenshot: imagePath, visual_review: "pending_root" }); await persist();
 }
-async function dot(session: Session, name: string): Promise<any> {
-  const tab = await visible(session.tab), node = flatten(tab).find(value => value.test_id === "tabs.connection_status" && shown(value));
-  assert(node, `Original tab ${session.tab} exposes its existing status dot`);
-  assert(Math.abs(node.rect.w - 6) < 0.5 && Math.abs(node.rect.h - 6) < 0.5, "Original dot stays 6x6 logical points");
-  const path = join(output, `${name}.dot.png`); assert((await screenshot(path)).ok);
-  const image = decodePng(await readFile(path)), frame = await stats();
-  const scale = frame.window_scale ?? image.width / 1440;
-  assert(Math.abs(image.width - 1440 * scale) <= 2 && Math.abs(image.height - 900 * scale) <= 2, "Keep the controlled 1440x900 logical viewport during CUA checks");
-  return { tab: session.tab, node_id: node.id, rect: node.rect, scale, screenshot: path, ...accentPixels(image, node.rect, scale) };
-}
 async function expectDot(session: Session, unread: boolean, name: string): Promise<any> {
-  const value = await waitFor(async () => { const result = await dot(session, name); return (unread ? result.pixels >= Math.max(3, Math.ceil(result.area * 0.04)) : result.pixels === 0) ? result : null; }, 12000);
-  report.checks.push({ name, original_session: session.session_id, expected_unread: unread, pixel_measurement: value });
+  const tab = await visible(session.tab);
+  assert(!flatten(tab).some(value => ["tabs.unread_attention", "tabs.connection_status"].includes(value.test_id)), "Tab trailing dots are removed even while output is unread");
+  const value = { tab: session.tab, attention_node_visible: false, pixels: 0 };
+  report.checks.push({ name, original_session: session.session_id, unread_scenario: unread, tab_dot_absent: true });
   await assertNoSystemEffects(); return value;
 }
 async function handoff(stage: string, action: string, details: any = {}): Promise<void> {
@@ -281,7 +276,7 @@ async function handoff(stage: string, action: string, details: any = {}): Promis
   const completed = await waitFor(async () => {
     if (!(details.allow_normal_exit && app.exitCode === 0 && app.signalCode === null)) await alive();
     try { return JSON.parse(await readFile(marker, "utf8")); } catch (error: any) { if (error.code === "ENOENT") return null; throw error; }
-  }, 240000);
+  }, 900000);
   assert.equal(completed.method, "cua"); assert.equal(Number(completed.target_pid), app.pid);
   assert(Array.isArray(completed.native_actions) && completed.native_actions.length, "Root records actual native actions");
   assert(typeof completed.native_capture === "string" && completed.native_capture.startsWith("/"));
@@ -297,9 +292,12 @@ async function createSession(label: string, previous: string[]): Promise<Session
   // row content is subsequently queried in batches to respect the RPC limit.
   // terminal.surface draws cells; its host terminal.input owns native input,
   // actual focus and wheel dispatch. No acceptance click targets the surface.
-  const input = await visible("terminal.input");
-  const surface = flatten(input).find(node => shown(node) && node.test_id === "terminal.surface");
-  assert(surface, "The real Local drawing surface belongs to the exact input ancestor");
+  const inputRect = await waitFor(async()=>{const r=await screenPos("terminal.input");return r.w>0&&r.h>0?r:null},15000);
+  const surfaceRect = await waitFor(async()=>{const r=await screenPos("terminal.surface");return r.w>0&&r.h>0?r:null},15000);
+  const initialFocus = await focused();
+  const input = {id:initialFocus.id,test_id:initialFocus.test_id,rect:inputRect};
+  const surface = {rect:surfaceRect,id:null};
+  assert(surface.rect.x >= input.rect.x && surface.rect.y >= input.rect.y && surface.rect.x + surface.rect.w <= input.rect.x + input.rect.w + 1 && surface.rect.y + surface.rect.h <= input.rect.y + input.rect.h + 1, "The visible Local drawing surface lies inside the exact focused input rectangle (query descendants may be depth-limited)");
   const focus = await focused();
   assert.equal(focus.id, input.id, "Actual new terminal focus belongs to terminal.input, not a drawing child");
   assert.equal(focus.test_id, "terminal.input");
@@ -314,8 +312,8 @@ async function createSession(label: string, previous: string[]): Promise<Session
     "      { IFS= read -r zw_marker; IFS= read -r zw_rows; } < \"$zw_request\"",
     "      [[ \"$zw_marker\" == ZW_NOTIFY_* && \"$zw_rows\" == <-> ]] || return 2", "      (( zw_rows>=1 && zw_rows<=200 )) || return 3",
     "      for (( zw_line=1; zw_line<=zw_rows; zw_line++ )); do print -r -- \"${zw_marker}_row_${zw_line}\"; done", "      print -r -- \"${zw_marker}_TAIL\"",
-    "      print -r -- \"$sysparams[pid]\" \"$zw_marker\" > \"$zw_request.done\"", "      /bin/rm -- \"$zw_request\"", "    done", "    /bin/sleep 0.05", "  done", "}",
-    "zw_notification_producer &", "zw_notification_producer_pid=$!", `print -r -- "$$" "$zw_notification_producer_pid" "$ZSH_VERSION" "$PWD" > ${quote(receipt)}`, "",
+    "      print -rl -- \"$sysparams[pid]\" \"$zw_marker\" > \"$zw_request.done\"", "      /bin/rm -- \"$zw_request\"", "    done", "    /bin/sleep 0.05", "  done", "}",
+    "zw_notification_producer &", "zw_notification_producer_pid=$!", `print -rl -- "$$" "$zw_notification_producer_pid" "$ZSH_VERSION" "$PWD" > ${quote(receipt)}`, "",
   ].join("\n");
   await writeFile(script, body); await writeFile(join(output, `setup-${label}.zsh`), body);
   assert((await type_(`. ${quote(script)}`)).ok); assert((await key("enter")).ok);
@@ -363,6 +361,18 @@ try {
   assert.equal(sessions.filter(session => pidAlive(session.shell_pid)).length, 2);
   await assertNoSystemEffects(); await capture("00-two-real-local-sessions");
 
+  if(options["--dots-only"]==="1") {
+    const before = (await reads(a)).length;
+    await produce(a,"dot-removal-background",4);
+    await expectDot(a,true,"inactive-original-output-has-no-trailing-dot");
+    await expectDot(b,false,"active-sibling-has-no-trailing-dot");
+    await noNewRead(a,before,"New inactive output remains unconsumed by sibling");
+    await capture("01-inactive-output-no-trailing-dots");
+    await stopProducer(a); await stopProducer(b);
+    report.status="no_trailing_dot_checks_passed_pending_pixel_review";
+    report.input.acceptance="Public Harness only; no physical foreground/read acceptance claimed";
+    report.scope="Latest user requirement only: inactive original session produces real output; neither tab receives trailing dots. Full physical read matrix intentionally out of scope.";
+  } else {
   await handoff("01-history-then-background", "Activate this exact native app. Select A; physically scroll upward until the last seed TAIL is absent. Select B and click its actual terminal. Leave A in its preserved historical scrollback; do not use Harness foreground/focus or a synthetic scroll.", { original_a: a, original_b: b, latest_a_seed: a.seed });
   assert.equal((await focused()).id, b.focus_id); assert((await currentSurfaceText()).includes(b.seed));
   const aBefore = (await reads(a)).length, tail1 = await produce(a, "inactive-history", 72);
@@ -425,6 +435,7 @@ try {
   await assertNoSystemEffects();
   report.status = "native_read_checks_passed_pending_root_cua_pixel_review";
   report.normal_native_close = true;
+  }
 } catch (error) {
   failure = launchError ?? error; report.status = "failed"; report.error = String(failure);
   if (app.exitCode === null && app.signalCode === null) try { await capture("failure-live"); } catch (captureError) { report.capture_error = String(captureError); }
@@ -438,6 +449,7 @@ try {
     app.kill("SIGTERM"); await Promise.race([ended, sleep(3000)]);
     if (app.exitCode === null && app.signalCode === null) { app.kill("SIGKILL"); await ended; }
   }
+  try { await waitFor(async()=>sessions.every(session=>!pidAlive(session.shell_pid)&&!pidAlive(session.producer_pid))||null,3000); } catch { report.cleanup_settle_timeout=true; }
   report.process_cleanup = { exit_code: app.exitCode, signal: app.signalCode, recorded_pid_states: sessions.map(session => ({ label: session.label, shell_pid: session.shell_pid, shell_alive: pidAlive(session.shell_pid), producer_pid: session.producer_pid, producer_alive: pidAlive(session.producer_pid) })) };
   report.notification_trace = await trace(); report.finished_at = new Date().toISOString();
   await writeFile(join(output, "report.json"), JSON.stringify(report, null, 2)); await log.close();

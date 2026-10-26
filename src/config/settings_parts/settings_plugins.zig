@@ -76,12 +76,23 @@ fn mountList(cx: *ui.Cx, bound: *binding.Binding, root: *ui.Node) !void {
             };
         }
         if (group_matches != 0) {
-            const note = try ui.textStyled(cx, S.note, if (origin == .builtin) "内置协议随应用管理。" else "插件随应用管理。");
+            const note = try ui.text(cx, if (origin == .builtin) "内置协议随应用管理。" else "插件随应用管理。", .{ .font_size = 11, .line_height = 18.0 / 11.0, .color = S.theme.current().fg_2 });
             note.style.margin = .{ .top = 8, .bottom = 8 };
             try section.body.appendChild(cx.allocator, note);
         }
         matched += group_matches;
         if (group_matches != 0 or bound.controller.search_query.len == 0) try root.appendChild(cx.allocator, section.root) else cx.destroyDetached(section.root);
+    }
+    if (bound.controller.search_query.len == 0 or binding.matches(bound.controller.search_query, "协议扩展 BMC iKVM VNC RDP FTP")) {
+        const future = try card(cx, bound, "协议扩展", "远程桌面、文件传输与带外管理", ui.icons.layers, 42, false);
+        future.root.meta.ownership.meta.test_id = "settings.plugins.future";
+        future.body.meta.ownership.meta.test_id = "settings.plugins.future.body";
+        try future.body.appendChild(cx.allocator, try futureRow(cx, bound, "BMC iKVM", "远程查看服务器画面，使用键鼠控制和电源管理。", ui.icons.server));
+        try future.body.appendChild(cx.allocator, try futureRow(cx, bound, "VNC / RDP / FTP", "连接远程桌面，或通过 FTP 传输文件。", ui.icons.layers));
+        const note = try ui.text(cx, "连接配置通过连接编辑器管理。", .{ .font_size = 11, .line_height = 18.0 / 11.0, .color = S.theme.current().fg_2 });
+        note.style.margin = .{ .top = 8, .bottom = 8 };
+        try future.body.appendChild(cx.allocator, note);
+        try root.appendChild(cx.allocator, future.root);
     }
     if (matched == 0) try root.appendChild(cx.allocator, try ui.textStyled(cx, S.note, if (bound.controller.search_query.len == 0) "没有已注册的插件" else "没有匹配的设置"));
 }
@@ -305,4 +316,19 @@ fn infoButton(cx: *ui.Cx, bound: *binding.Binding, details: *Info, entry: regist
     const button = try ui.widgets.Button(.{ .label = label, .icon_asset = if (icon_only) ui.icons.info else null, .icon_only = icon_only, .icon_size = @as(f32, 16), .variant = .ghost, .a11y_label = title, .base_style = style, .hover_style = S.buttonHover(), .on_click = cx.on(InfoAction, state, InfoAction.show) }).mount(bound.scope, cx);
     button.meta.ownership.meta.test_id = try pluginId(bound.scope, entry.id, suffix);
     return button;
+}
+
+fn futureRow(cx: *ui.Cx, bound: *binding.Binding, name: []const u8, description_text: []const u8, icon: ui.SvgAsset) !*ui.Node {
+    const row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 66 }, .direction = .row, .align_items = .center, .gap = 10, .flex_shrink = 0, .min_width = 0 }, .{});
+    try row.appendChild(cx.allocator, try ui.iconTint(cx, icon, S.theme.current().accent, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
+    const labels = try ui.box(cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 3 }, .{});
+    try labels.appendChild(cx.allocator, try ui.text(cx, name, .{ .font_size = 12, .font_weight = 500, .line_height = 1.5, .color = S.theme.current().fg_1 }));
+    const detail = try ui.text(cx, description_text, .{ .font_size = 11, .line_height = 18.0 / 11.0, .color = S.theme.current().fg_2, .wrap = .word });
+    detail.style.width = .fill();
+    try labels.appendChild(cx.allocator, detail);
+    try row.appendChild(cx.allocator, labels);
+    const tag = try ui.widgets.Tag(.{ .label = "暂不可用", .color = .neutral, .size = .sm }).mount(bound.scope, cx);
+    tag.setStyleInline(cx.allocator, .{ .height = .{ .px = 22 }, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = S.theme.current().hover, .border = .{ .radius = 5 }, .flex_shrink = 0 });
+    try row.appendChild(cx.allocator, tag);
+    return row;
 }

@@ -1,3 +1,7 @@
+<p align="center">
+  <a href="assets/macos/README.md"><img src="assets/macos/AppIcon.png" width="160" height="160" alt="ZeroWork Logo"></a>
+</p>
+
 # ZeroWork
 
 [English](README.md)
@@ -6,7 +10,7 @@ ZeroWork 是面向 Apple Silicon Mac 的 SSH 终端，架构定义见 [总体架
 
 ## 当前基线
 
-当前版本为 **0.2.1（插件宿主 API 2）**。**目前仅确认 Figma 原型已对齐 V3，App 尚未完成全部 V3 设计同步。** 详见 [当前脱敏基线](docs/DEVELOPMENT/V0.2.1_STATUS.md)。实现及兼容性边界记录在 [V0.2.1 实现说明](docs/DEVELOPMENT/V0.2.1_IMPLEMENTATION.md)中；候选版本的具体结果、真实 SSH/AI 验证证据及环境限制见 [V0.2.1 实机验收](docs/DEVELOPMENT/V0.2.1_LIVE_ACCEPTANCE.md)。
+当前版本为 **0.2（插件宿主 API 2）**。**目前仅确认 Figma 原型已对齐 V3，App 尚未完成全部 V3 设计同步。** 详见 [当前脱敏基线](docs/DEVELOPMENT/V0.2_STATUS.md)。实现及兼容性边界记录在 [V0.2 实现说明](docs/DEVELOPMENT/V0.2_IMPLEMENTATION.md)中；候选版本的具体结果、真实 SSH/AI 验证证据及环境限制见 [V0.2 实机验收](docs/DEVELOPMENT/V0.2_LIVE_ACCEPTANCE.md)。
 
 - 项目使用 Zig 0.17.0（本地通过 zvm 管理），目标固定为 arm64、macOS 14 或更新版本。
 - P0 配置模型及严格子集 TOML 加载器。

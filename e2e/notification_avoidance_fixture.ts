@@ -39,10 +39,10 @@ try{
  const body=card.children.find((n:any)=>shown(n)&&n.tag==='box'&&n.test_id!=='notifications.dismiss.0');
  const icon=card.children.find((n:any)=>shown(n)&&n.tag==='image');
  const dismiss=card.children.find((n:any)=>n.test_id==='notifications.dismiss.0');
- assert.equal(card.rect.w,320);assert.equal(card.rect.h,62,'measured V3 two-line toast height');
- assert.equal(body.rect.w,241);assert.equal(body.rect.h,36);
- assert.equal(body.rect.y-card.rect.y,13);assert.equal(icon.rect.x-card.rect.x,13);assert.equal(icon.rect.y-card.rect.y,14);
- assert.equal(dismiss.rect.y-card.rect.y,13);assert.equal(dismiss.rect.w,19);assert.equal(dismiss.rect.h,19);
+ assert.equal(card.rect.w,340);assert.equal(card.rect.h,60,'measured V3 two-line feedback height');
+ assert.equal(body.rect.w,261);assert.equal(body.rect.h,36);
+ assert.equal(body.rect.y-card.rect.y,11);assert.equal(icon.rect.x-card.rect.x,13);assert.equal(icon.rect.y-card.rect.y,12);
+ assert.equal(dismiss.rect.y-card.rect.y,11);assert.equal(dismiss.rect.w,19);assert.equal(dismiss.rect.h,19);
  report.toast_contract={card:card.rect,body:body.rect,icon:icon.rect,close:dismiss.rect};
  await writeFile(join(out,'two-line-toast.json'),JSON.stringify(card,null,2));
  const before=(await query('workspace.sidebar')).find(shown)!.rect.w;

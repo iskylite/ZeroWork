@@ -70,7 +70,7 @@ test "appearance worker late import is released and background error retains the
     _ = try controller.requestThemeImport();
     const result = try finish(&worker, &controller, &registry);
     try std.testing.expect(!result.changed and result.problem == null);
-    try std.testing.expectEqual(@as(usize, 8), registry.records.items.len);
+    try std.testing.expectEqual(@as(usize, 17), registry.records.items.len);
     try std.testing.expectEqualStrings("dark", controller.model.value.ui.theme);
     var request = try controller.requestBackground("/zerowork-test-missing-image.png");
     try worker.startBackground(&request);

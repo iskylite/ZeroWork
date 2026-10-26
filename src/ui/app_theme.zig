@@ -5,6 +5,9 @@ const ui = @import("ui");
 
 pub const Name = enum { dark, light, sauber };
 pub const Colors = struct {
+    action_accent: ui.Color = ui.Color.TRANSPARENT,
+    action_accent_2: ui.Color = ui.Color.TRANSPARENT,
+    action_danger: ui.Color = ui.Color.TRANSPARENT,
     app: ui.Color,
     surface_1: ui.Color,
     surface_2: ui.Color,
@@ -98,13 +101,43 @@ pub fn materialVisible() bool {
 /// Publish exactly the registry's prepared roles, including imported themes.
 /// Storage is process-owned; no borrowed draft strings reach widget tokens.
 pub fn selectTokens(tokens: @import("../config/theme_registry.zig").UiTokens) void {
+    applied_colors = tokenColors(tokens);
+    refreshWidgets();
+}
+fn tokenColors(tokens: @import("../config/theme_registry.zig").UiTokens) Colors {
     var next: Colors = undefined;
     inline for (@typeInfo(Colors).@"struct".field_names) |field| {
         const rgba = @field(tokens, field);
         @field(next, field) = ui.Color.rgba(@intCast(rgba >> 24), @intCast((rgba >> 16) & 255), @intCast((rgba >> 8) & 255), @intCast(rgba & 255));
     }
-    applied_colors = next;
-    refreshWidgets();
+    return completeColors(next);
+}
+
+fn completeColors(value: Colors) Colors {
+    var c = value;
+    if (c.action_accent.a == 0) c.action_accent = c.accent;
+    if (c.action_accent_2.a == 0) c.action_accent_2 = c.action_accent;
+    if (c.action_danger.a == 0) c.action_danger = c.danger;
+    return c;
+}
+
+/// Filled actions use a distinct background from links, marks and status inks.
+/// Imported palettes may provide a very pale accent; select a readable ink.
+pub fn actionForeground(background: ui.Color) ui.Color {
+    return if (contrast(background, ui.Color.WHITE) >= contrast(background, hex(0x101014))) ui.Color.WHITE else hex(0x101014);
+}
+fn luminance(c: ui.Color) f64 {
+    var result: f64 = 0;
+    inline for (.{ "r", "g", "b" }, .{ 0.2126, 0.7152, 0.0722 }) |field, weight| {
+        const channel = @as(f64, @floatFromInt(@field(c, field))) / 255;
+        result += weight * (if (channel <= 0.04045) channel / 12.92 else std.math.pow(f64, (channel + 0.055) / 1.055, 2.4));
+    }
+    return result;
+}
+fn contrast(a: ui.Color, b: ui.Color) f64 {
+    const x = luminance(a);
+    const y = luminance(b);
+    return (@max(x, y) + 0.05) / (@min(x, y) + 0.05);
 }
 
 pub fn fromName(name: []const u8) Name {
@@ -121,9 +154,11 @@ pub fn select(name: Name) void {
 /// remains in RuntimeConfig; a registry palette can change without select().
 pub fn currentName() Name {
     if (applied_colors) |value| {
-        if (std.meta.eql(value, colors(.sauber))) return .sauber;
-        const luminance = @as(u32, value.app.r) * 299 + @as(u32, value.app.g) * 587 + @as(u32, value.app.b) * 114;
-        return if (luminance < 128000) .dark else .light;
+        // Registry presets can revise their role colors. Recognize Sauber from
+        // its authoritative registered palette rather than stale fallback RGBs.
+        if (std.meta.eql(value, tokenColors(@import("../config/theme_registry.zig").builtinTokens("sauber")))) return .sauber;
+        const weighted_luminance = @as(u32, value.app.r) * 299 + @as(u32, value.app.g) * 587 + @as(u32, value.app.b) * 114;
+        return if (weighted_luminance < 128000) .dark else .light;
     }
     return selected;
 }
@@ -152,7 +187,7 @@ fn refreshWidgets() void {
     applied_widgets.name = if (applied_colors != null) "global" else @tagName(selected);
 }
 pub fn colors(name: Name) Colors {
-    return switch (name) {
+    var c: Colors = switch (name) {
         .dark => .{
             .app = hex(0x060608),
             .surface_1 = hex(0x131316),
@@ -229,6 +264,14 @@ pub fn colors(name: Name) Colors {
             .shadow = ui.Color.rgba(20, 70, 35, 36),
         },
     };
+    const actions = @import("../config/theme_registry.zig").builtinTokens(@tagName(name));
+    c.action_accent = tokenColor(actions.action_accent);
+    c.action_accent_2 = tokenColor(actions.action_accent_2);
+    c.action_danger = tokenColor(actions.action_danger);
+    return completeColors(c);
+}
+fn tokenColor(rgba: u32) ui.Color {
+    return ui.Color.rgba(@intCast(rgba >> 24), @intCast((rgba >> 16) & 255), @intCast((rgba >> 8) & 255), @intCast(rgba & 255));
 }
 
 test "registry token publication updates native appearance family without changing palette" {
@@ -289,29 +332,45 @@ fn widgetTokensFrom(c: Colors, dark: bool) ui.ThemeTokens {
     t.fg_secondary = c.fg_2;
     t.fg_tertiary = c.fg_3;
     t.fg_disabled = c.fg_3;
-    t.accent = c.accent;
-    t.accent_hover = c.accent;
+    // Zenit uses accent for checked checkbox/radio/switch fills. V3 uses --primary.
+    t.accent = c.action_accent;
+    t.accent_hover = c.action_accent;
+    t.accent_muted = c.selection;
     t.accent_subtle = c.selection;
     t.border = ui.Color.TRANSPARENT;
     t.border_strong = ui.Color.TRANSPARENT;
     t.border_focus = ui.Color.TRANSPARENT;
+    // V3 controls use selected surfaces for focus; the HTML adds no outline.
     t.focus_ring = ui.Color.TRANSPARENT;
+    t.fg_inverse = actionForeground(c.action_accent);
     t.success = c.ok;
+    t.success_subtle = c.ok.withAlpha(24);
+    t.warning_subtle = c.warn.withAlpha(24);
+    t.danger_subtle = c.danger.withAlpha(24);
+    t.danger_hover = c.action_danger;
+    t.info = c.accent_ink;
+    t.info_subtle = c.selection;
     t.warning = c.warn;
-    t.danger = c.danger;
+    t.danger = c.action_danger;
     t.selection_bg = c.selection;
-    t.button_primary_bg = c.accent;
-    t.button_primary_fg = ui.Color.WHITE;
+    t.button_primary_bg = c.action_accent;
+    t.button_primary_fg = actionForeground(c.action_accent);
     t.button_secondary_bg = c.surface_2;
     t.button_secondary_fg = c.fg_1;
     t.input_bg = c.well;
     t.input_border = ui.Color.TRANSPARENT;
     t.checkbox_bg = c.well;
     t.checkbox_border = ui.Color.TRANSPARENT;
-    t.switch_track_on = c.accent;
+    t.checkbox_disabled_bg = c.surface_2;
+    t.checkbox_disabled_border = c.well_border;
+    t.checkbox_disabled_checked_bg = c.well_border;
+    t.switch_track_on = c.action_accent;
+    t.switch_thumb = actionForeground(c.action_accent);
     t.switch_track_off = c.well_border;
     t.list_hover_bg = c.hover;
     t.list_selection_bg = c.selection;
+    t.list_selection_hover_bg = c.selection;
+    t.table_header_bg = c.surface_2;
     t.separator = ui.Color.TRANSPARENT;
     t.tooltip_bg = c.overlay;
     t.tooltip_fg = c.fg_1;
@@ -347,7 +406,7 @@ test "global surface tints do not depend on whether an image is visible" {
         try std.testing.expectEqual(no_image.surface_1, widget.bg_primary);
         try std.testing.expectEqual(no_image.well, widget.input_bg);
         try std.testing.expectEqual(no_image.overlay, widget.tooltip_bg);
-        try std.testing.expectEqual(base.accent, widget.button_primary_bg);
+        try std.testing.expectEqual(base.action_accent, widget.button_primary_bg);
     }
     var registry = try @import("../config/theme_registry.zig").Registry.init(std.testing.allocator);
     defer registry.deinit();
@@ -359,7 +418,43 @@ test "global surface tints do not depend on whether an image is visible" {
     _ = setMaterialVisible(false);
     try std.testing.expectEqual(ui.Color.rgba(0x12, 0x34, 0x56, materialAlpha("surface_1")), current().surface_1);
     try std.testing.expectEqual(ui.Color.rgba(0x23, 0x45, 0x67, materialAlpha("overlay")), current().overlay);
-    try std.testing.expectEqual(imported_base.accent, widgetTheme(currentName()).tokens.color.button_primary_bg);
+    try std.testing.expectEqual(imported_base.action_accent, widgetTheme(currentName()).tokens.color.button_primary_bg);
     _ = setMaterialVisible(true);
     try std.testing.expectEqual(imported_base, baseColors());
+}
+
+test "all V3 themes publish independent filled action and readable state roles" {
+    const previous = currentName();
+    defer select(previous);
+    inline for (@import("../config/theme_presets.zig").ids) |id| {
+        const record = @import("../config/theme_registry.zig").builtinTokens(id);
+        selectTokens(record);
+        const c = current();
+        const widget = widgetTheme(currentName()).tokens.color;
+        try std.testing.expectEqual(tokenColor(record.action_accent), widget.button_primary_bg);
+        try std.testing.expectEqual(tokenColor(record.action_accent), widget.accent);
+        try std.testing.expectEqual(tokenColor(record.action_danger), widget.danger);
+        try std.testing.expect(contrast(widget.button_primary_bg, widget.button_primary_fg) >= 4.49);
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, widget.focus_ring);
+        try std.testing.expectEqual(c.fg_3, widget.fg_disabled);
+        try std.testing.expectEqual(c.surface_2, widget.checkbox_disabled_bg);
+        try std.testing.expectEqual(c.well, widget.input_bg);
+        try std.testing.expectEqual(c.selection, widget.list_selection_bg);
+        if (!std.mem.eql(u8, id, "dark") and !std.mem.eql(u8, id, "light") and !std.mem.eql(u8, id, "sauber"))
+            try std.testing.expect(!ui.Color.eql(c.action_accent, c.accent));
+    }
+}
+
+test "legacy imported palettes derive readable filled action foreground" {
+    const previous = currentName();
+    defer select(previous);
+    var record = @import("../config/theme_registry.zig").builtinTokens("light");
+    record.action_accent = 0;
+    record.action_accent_2 = 0;
+    record.action_danger = 0;
+    record.accent = 0xf8e99aff;
+    selectTokens(record);
+    const widget = widgetTheme(currentName()).tokens.color;
+    try std.testing.expectEqual(tokenColor(record.accent), widget.button_primary_bg);
+    try std.testing.expect(contrast(widget.button_primary_bg, widget.button_primary_fg) > 10);
 }

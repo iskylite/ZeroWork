@@ -1,4 +1,4 @@
-//! Local Figma Bridge: 234:339575, 235:353724, 233:339167, 235:355272.
+//! Native connection attempt, aligned with UI_V3/connection modal and stage rows.
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
 pub const width: f32 = 760;
@@ -14,11 +14,14 @@ pub fn panel(h: f32, viewport_width: f32) ui.BoxStyle {
 pub fn header() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 40 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 12, .right = 12 }, .flex_shrink = 0 };
 }
-pub fn body() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .column, .padding = .{ .left = 12, .right = 12, .top = 8, .bottom = 12 }, .gap = 6 };
+pub fn attemptHeader(compact: bool) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = if (compact) 48 else 52 }, .direction = .row, .align_items = .center, .gap = 12, .padding = .{ .left = if (compact) 18 else 20, .right = if (compact) 18 else 20 }, .flex_shrink = 0 };
+}
+pub fn body(compact: bool) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .column, .padding = .{ .left = if (compact) 18 else 24, .right = if (compact) 18 else 24, .top = 0, .bottom = if (compact) 12 else 20 }, .gap = 12 };
 }
 pub fn stack() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 6, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 12, .flex_shrink = 0 };
 }
 pub fn row(h: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = h }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
@@ -27,14 +30,18 @@ pub fn scroll() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_height = 0 };
 }
 pub fn chainScroll() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 94 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0 };
 }
 pub fn chain(count: usize, available: f32) ui.BoxStyle {
-    const total = @as(f32, @floatFromInt(count)) * 140 + @as(f32, @floatFromInt(count -| 1)) * 36;
-    return .{ .width = .{ .px = @max(total, available) }, .height = .{ .px = 94 }, .direction = .row, .align_items = .center, .justify = .center, .gap = 6, .flex_shrink = 0 };
+    _ = count;
+    _ = available;
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 12, .flex_shrink = 0 };
 }
 pub fn card(selected: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = 140 }, .height = .{ .px = 94 }, .direction = .column, .align_items = .start, .justify = .start, .padding = ui.Padding.all(10), .gap = 2, .background = if (selected) theme.current().selection else theme.current().surface_2, .border = .{ .width = 0, .radius = 9 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 42 }, .direction = .row, .align_items = .center, .padding = .{ .left = 12, .right = 12, .top = 10, .bottom = 10 }, .gap = 12, .background = if (selected) theme.current().selection else theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+}
+pub fn footer(compact: bool) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = if (compact) 54 else 62 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = if (compact) 18 else 24, .right = if (compact) 18 else 24, .top = if (compact) 10 else 14, .bottom = if (compact) 10 else 14 }, .background = theme.current().surface_2, .flex_shrink = 0 };
 }
 pub fn connector() ui.BoxStyle {
     return .{ .width = .{ .px = 24 }, .height = .{ .px = 52 }, .direction = .column, .align_items = .center, .justify = .center, .gap = 4, .flex_shrink = 0 };
@@ -72,8 +79,7 @@ pub fn attemptText() ui.TextStyle {
     return result;
 }
 pub fn notice(failed: bool) ui.BoxStyle {
-    const color = if (failed) theme.current().danger else theme.current().accent;
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = if (failed) 78 else 62, .padding = ui.Padding.all(12), .gap = 4, .direction = .column, .background = color.withAlpha(23), .border = .{ .radius = 9 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = if (failed) 78 else 62, .padding = ui.Padding.all(12), .gap = 4, .direction = .column, .background = theme.current().well, .border = .{ .radius = 9 }, .flex_shrink = 0 };
 }
 pub fn logs() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 124 }, .background = theme.current().well, .border = .{ .radius = 9 }, .flex_shrink = 0, .overflow_hidden = true };
@@ -85,7 +91,7 @@ pub fn logContent() ui.BoxStyle {
     return result;
 }
 pub fn button(w: f32, h: f32, primary: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .background = if (primary) theme.current().accent else theme.current().surface_2, .border = .{ .radius = 8 }, .align_items = .center, .justify = .center, .flex_shrink = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .background = if (primary) theme.current().action_accent else theme.current().surface_2, .border = .{ .radius = 8 }, .align_items = .center, .justify = .center, .flex_shrink = 0 };
 }
 pub fn iconButton(size: f32) ui.BoxStyle {
     var result = button(size, size, false);

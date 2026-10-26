@@ -3,7 +3,7 @@ const ui = @import("ui");
 const S = @import("ai_sessions_styles.zig");
 const T = @import("app_theme.zig");
 pub const Entry = struct { id: u64, title: []const u8, owner: []const u8, detail: []const u8 = "", active: bool = false, phase: @import("../ai/assistant_store.zig").Phase = .idle };
-pub const Hooks = struct { context: *anyopaque, select: *const fn (*anyopaque, u64) void, remove: *const fn (*anyopaque, u64) void };
+pub const Hooks = struct { context: *anyopaque, select: *const fn (*anyopaque, u64) void, request_close: *const fn (*anyopaque, u64) void, remove: *const fn (*anyopaque, u64) void };
 pub const View = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
@@ -21,18 +21,20 @@ pub const View = struct {
     detail: *ui.Node,
     dialog: *ui.Node,
     control_styles: [2]*ui.Signal(ui.BoxStyle),
-    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, anchor: *ui.Node, hooks: Hooks) !*View {
+    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, _: *ui.Node, hooks: Hooks) !*View {
         const open = try scope.createSignal(bool, false);
         const confirmation = try scope.createSignal(bool, false);
-        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .position = .bottom_end, .anchor = .{ .node = anchor }, .width = 344, .max_height = 320, .constrain_width_to_viewport = true, .shift_main_axis = true, .viewport_padding = 12 }).mount(scope, cx);
-        popup.wrapper.setStyleInline(cx.allocator, .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 } });
-        popup.chrome.setStyleInline(cx.allocator, S.popover());
         const scroll = try ui.widgets.ScrollArea(.{ .height = 168, .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
         scroll.container.setStyleInline(cx.allocator, S.listSurface());
         scroll.content.setStyleInline(cx.allocator, S.menu());
         scroll.container.meta.ownership.meta.test_id = "ai.sessions.menu";
-        try popup.content.appendChild(cx.allocator, scroll.container);
-        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .hooks = hooks, .open = open, .confirmation = confirmation, .highlighted = try scope.createSignal(u64, 0), .content = scroll.content, .root = popup.wrapper, .surface = scroll.container, .scroll = scroll, .detail = undefined, .dialog = undefined, .control_styles = .{ try scope.createSignal(ui.BoxStyle, S.control(false)), try scope.createSignal(ui.BoxStyle, S.control(true)) } });
+        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .hooks = hooks, .open = open, .confirmation = confirmation, .highlighted = try scope.createSignal(u64, 0), .content = scroll.content, .root = scroll.container, .surface = scroll.container, .scroll = scroll, .detail = undefined, .dialog = undefined, .control_styles = .{ try scope.createSignal(ui.BoxStyle, S.control(false)), try scope.createSignal(ui.BoxStyle, S.control(true)) } });
+        try scope.createEffect(.{ .view = self }, struct {
+            fn run(ctx: anytype) void {
+                ctx.view.root.setDisplay(if (ctx.view.open.get()) .flex else .none);
+                ctx.view.cx.requestRedraw();
+            }
+        }.run);
         const modal = try ui.widgets.Modal(.{ .open = confirmation, .width = 320, .max_height = 220, .background = T.current().overlay }).mount(scope, cx);
         if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         self.dialog = modal.dialog;
@@ -55,8 +57,8 @@ pub const View = struct {
     fn titleStyle(_: *const ui.ThemeTokens) ui.TextStyle {
         var s = S.text(true);
         s.font_weight = 600;
-        s.font_size = 12;
-        s.line_height = 18.0 / 12.0;
+        s.font_size = 13;
+        s.line_height = 20.0 / 13.0;
         return s;
     }
     fn detailStyle(_: *const ui.ThemeTokens) ui.TextStyle {
@@ -89,11 +91,15 @@ pub const View = struct {
         select_id: [64]u8 = undefined,
         delete_id: [64]u8 = undefined,
         row_id: [64]u8 = undefined,
+        actions_start: ?*ui.Node = null,
         status_icon: ?*ui.Node = null,
         status_label: ?*ui.Signal([]const u8) = null,
         fn event(event_value: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
             const self: *Row = @ptrCast(@alignCast(raw orelse return .ignored));
             if (event_value != .mouse_down or event_value.mouse_down.button != .left) return .ignored;
+            // Action buttons handle their own mouse-up click; do not hide
+            // their row while the pointer is still pressed.
+            if (self.actions_start) |action| if (event_value.mouse_down.x >= action.globalRect().x) return .ignored;
             self.view.highlighted.set(self.id);
             self.select();
             return .handled;
@@ -103,7 +109,7 @@ pub const View = struct {
             self.view.hooks.select(self.view.hooks.context, self.id);
         }
         fn remove(self: *Row) void {
-            self.view.confirm(self.id);
+            self.view.hooks.request_close(self.view.hooks.context, self.id);
         }
     };
     pub fn show(self: *View, entries: []const Entry) !void {
@@ -120,12 +126,12 @@ pub const View = struct {
 
         const heading = try ui.box(self.cx, S.heading(), .{});
         heading.meta.ownership.meta.test_id = "ai.sessions.heading";
-        try heading.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get("messages-square").?, T.current().fg_2, .{ .width = .{ .px = 17 }, .height = .{ .px = 17 } }));
+        try heading.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get("messages-square").?, T.current().fg_2, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 } }));
         var heading_style = S.text(true);
-        heading_style.font_weight = 700;
-        heading_style.font_size = 13;
-        heading_style.line_height = 20.0 / 13.0;
-        try heading.appendChild(self.cx.allocator, try ui.text(self.cx, "AI 会话列表", heading_style));
+        heading_style.font_weight = 600;
+        heading_style.font_size = 11.5;
+        heading_style.line_height = 16.0 / 11.5;
+        try heading.appendChild(self.cx.allocator, try ui.text(self.cx, "会话", heading_style));
         const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = 14, .a11y_label = "关闭 AI 会话列表", .base_style = @as(ui.BoxStyle, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{} }), .on_click = self.cx.on(View, self, closeMenu) }).mount(scope, self.cx);
         close.meta.ownership.meta.test_id = "ai.sessions.close";
         try heading.appendChild(self.cx.allocator, try ui.spacer(self.cx));
@@ -138,15 +144,10 @@ pub const View = struct {
             empty.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16.5 } });
             try self.content.appendChild(self.cx.allocator, empty);
         }
-        var highlight_exists = false;
-        for (entries) |entry| if (entry.id == self.highlighted.peek()) {
-            highlight_exists = true;
-        };
-        if (!highlight_exists) for (entries) |entry| {
-            if (entry.active) {
-                self.highlighted.set(entry.id);
-                break;
-            }
+        self.highlighted.set(0);
+        for (entries) |entry| if (entry.active) {
+            self.highlighted.set(entry.id);
+            break;
         };
         for (entries) |entry| {
             const state = try scope.createState(Row, .{ .view = self, .id = entry.id });
@@ -168,19 +169,20 @@ pub const View = struct {
             try hint.trigger.appendChild(self.cx.allocator, state.status_icon.?);
             hint.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .flex_shrink = 0, .align_items = .center, .justify = .center });
             try row.appendChild(self.cx.allocator, hint.wrapper);
-            const copy = try ui.box(self.cx, .{ .width = .fill(), .min_width = 0, .direction = .column, .gap = 3 }, .{});
+            const copy = try ui.box(self.cx, .{ .width = .fill(), .min_width = 0, .direction = .row, .align_items = .center, .gap = 6 }, .{});
             try row.appendChild(self.cx.allocator, copy);
             const title = try ui.text(self.cx, entry.title, S.text(true));
             title.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16.5 }, .min_width = 0 });
             try copy.appendChild(self.cx.allocator, title);
-            const summary = if (entry.detail.len != 0) try @import("std").fmt.allocPrint(self.cx.allocator, "{s} · {s}", .{ entry.owner, entry.detail }) else try self.cx.allocator.dupe(u8, entry.owner);
+            const summary = try self.cx.allocator.dupe(u8, entry.owner);
             defer self.cx.allocator.free(summary);
             const owner = try ui.text(self.cx, "", S.text(false));
             try owner.setTextContent(self.cx.allocator, summary);
-            owner.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 15 }, .flex_shrink = 1 });
+            owner.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 130 }, .min_width = 0, .height = .{ .px = 15 }, .flex_shrink = 1 });
             try copy.appendChild(self.cx.allocator, owner);
-            const select = try ui.widgets.Button(.{ .variant = .ghost, .label = "继续 ›", .a11y_label = "继续此 AI 会话", .base_style = @as(ui.BoxStyle, .{ .width = .{ .px = 42 }, .height = .{ .px = 24 }, .padding = .{}, .font_size = 11, .font_weight = 400, .text_color = T.current().accent_ink }), .hover_style = S.actionHover(false), .on_click = self.cx.on(Row, state, Row.select) }).mount(scope, self.cx);
-            select.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 42 }, .height = .{ .px = 24 }, .padding = .{}, .font_size = 11, .text_color = T.current().accent });
+            const select = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get("arrow-up-right").?, .icon_size = 14, .a11y_label = "继续此 AI 会话", .base_style = @as(ui.BoxStyle, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .font_size = 11, .font_weight = 400, .text_color = T.current().accent_ink }), .hover_style = S.actionHover(false), .on_click = self.cx.on(Row, state, Row.select) }).mount(scope, self.cx);
+            select.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .font_size = 11, .text_color = T.current().accent });
+            state.actions_start = select;
             select.meta.ownership.meta.test_id = try @import("std").fmt.bufPrint(&state.select_id, "ai.session.jump.{d}", .{entry.id});
             try row.appendChild(self.cx.allocator, select);
             const remove = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "删除 AI 会话", .hover_style = S.actionHover(true), .on_click = self.cx.on(Row, state, Row.remove) }).mount(scope, self.cx);
@@ -190,7 +192,7 @@ pub const View = struct {
             try row.appendChild(self.cx.allocator, remove);
             try self.content.appendChild(self.cx.allocator, row);
         }
-        self.desired_height = @min(260, 38 + if (entries.len == 0) @as(f32, 16.5) else @as(f32, @floatFromInt(entries.len)) * 54.5 + @as(f32, @floatFromInt(entries.len - 1)) * 6);
+        self.desired_height = @min(160, 34 + if (entries.len == 0) @as(f32, 20) else @as(f32, @floatFromInt(entries.len)) * 30 + @as(f32, @floatFromInt(entries.len - 1)) * 2);
         self.surface.setStyleInline(self.cx.allocator, .{ .height = .{ .px = self.desired_height }, .display = .flex });
         ui.widgets.setScrollY(self.scroll.state, self.scroll.content, 0);
         self.open.set(true);
@@ -218,9 +220,13 @@ pub const View = struct {
             }
         }
     }
-    pub fn fitWithin(_: *View, _: f32) void {}
-    pub fn height(_: *View) f32 {
-        return 0;
+    pub fn fitWithin(self: *View, available: f32) void {
+        const next = @min(self.desired_height, @max(0, available));
+        if (self.surface.style.height != .px or @abs(self.surface.style.height.px - next) > 0.5)
+            self.surface.setStyleInline(self.cx.allocator, .{ .height = .{ .px = next } });
+    }
+    pub fn height(self: *View) f32 {
+        return if (self.open.peek()) self.surface.style.height.px else 0;
     }
     fn phaseTestId(phase: @import("../ai/assistant_store.zig").Phase) []const u8 {
         return switch (phase) {

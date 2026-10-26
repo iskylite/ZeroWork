@@ -399,3 +399,25 @@ test "native provider model dialog fits the compact settings panel" {
     try std.testing.expect(footer.y + footer.h <= dialog.y + dialog.h + 0.1);
     f.clickId("settings.ai.model.cancel");
 }
+
+test "native provider long model choice preserves the catalog trigger and chevron bounds" {
+    var f: Fixture = undefined;
+    try f.init(true);
+    defer f.deinit();
+    f.cx.setViewport(860, 480);
+    f.clickId("settings.ai.provider.0.model.0.edit_model");
+    const editor = f.mounted.model_editor.?;
+    const label = editor.catalog_label.?;
+    try label.setTextContent(f.cx.allocator, "organization/production-inference-model-with-a-very-long-descriptive-name-and-version-2026-10-26");
+    f.frame();
+    f.frame();
+    const trigger = byId(f.cx.root.?, "settings.ai.model.catalog").?;
+    const rect = trigger.globalRect();
+    const label_rect = label.globalRect();
+    const chevron = trigger.children.items[trigger.children.items.len - 1].globalRect();
+    try std.testing.expect(label_rect.x + label_rect.w <= chevron.x + 0.1);
+    try std.testing.expect(chevron.x + chevron.w <= rect.x + rect.w + 0.1);
+    try std.testing.expectEqual(@as(f32, 12), chevron.w);
+    try std.testing.expectEqual(@as(@TypeOf(label.getText().?.text_overflow), .ellipsis), label.getText().?.text_overflow);
+    f.clickId("settings.ai.model.cancel");
+}

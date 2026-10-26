@@ -82,11 +82,11 @@ test "transfer projection global popover stays in current Cx hides without nativ
     try std.testing.expectEqual(h.cx, p.cx);
     try std.testing.expectEqual(h.root, p.root.parent.?);
     try std.testing.expectApproxEqAbs(@as(f32, 360), bounds.w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 199), bounds.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 158), bounds.h, 0.01);
     try std.testing.expectApproxEqAbs(trigger.y + trigger.h + 8, bounds.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 12), 1440 - bounds.x - bounds.w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 85), p.list.container.globalRect().y - bounds.y, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 101), p.list.container.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 60), p.list.container.globalRect().h, 0.01);
     try std.testing.expect(p.foot.style.display == .none);
     try std.testing.expect(text(p.head, "全局传输管理器") != null);
     try std.testing.expect(text(p.head, "本会话传输") == null);
@@ -148,7 +148,7 @@ test "transfer projection theme publication repaints mounted headings and scoped
     click(h, scopeButton(p.scope_row, "原会话").?);
     h.frames();
     try std.testing.expectEqual(@as(usize, 1), p.visible.items.len);
-    try std.testing.expectEqual(theme.current().accent, scopeButton(p.scope_row, "原会话").?.getBackground());
+    try std.testing.expectEqual(theme.current().action_accent, scopeButton(p.scope_row, "原会话").?.getBackground());
     theme.select(.light);
     _ = theme.setMaterialVisible(true);
     h.cx.setTheme(theme.widgetTheme(.light));
@@ -277,8 +277,8 @@ test "transfer projection exact window and session geometry uses actual widgets"
     pop.show();
     h.frames();
     try std.testing.expectApproxEqAbs(@as(f32, 344), pop.root.globalRect().w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 209), pop.root.globalRect().h, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 101), pop.list.container.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 168), pop.root.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 60), pop.list.container.globalRect().h, 0.01);
     try std.testing.expect(id(pop.root, "transfer.window.minimize") == null);
 }
 test "transfer projection scope generation counts filter and copied strings remain independent" {
@@ -691,6 +691,7 @@ test "transfer projection changed after layout binds rows in the submitted frame
     const Change = struct {
         panel: *V.Panel,
         rows: *[80]V.Task,
+        mounted_row: usize,
         fired: bool = false,
         rows_after_refresh: usize = 0,
         scroll_after_refresh: f32 = 0,
@@ -698,15 +699,20 @@ test "transfer projection changed after layout binds rows in the submitted frame
             const self: *@This() = @ptrCast(@alignCast(raw));
             if (self.fired) return .done;
             self.fired = true;
-            self.rows[74].done_bytes = 41;
-            self.rows[74].name = "updated-progress.tar.gz";
+            self.rows[self.mounted_row].done_bytes = 41;
+            self.rows[self.mounted_row].name = "updated-progress.tar.gz";
             self.panel.update(.{ .revision = 2, .rows = self.rows }) catch unreachable;
             self.rows_after_refresh = count(self.panel.root, "transfer.task");
             self.scroll_after_refresh = self.panel.list.state.scroll_y;
             return .needs_layout;
         }
     };
-    var change: Change = .{ .panel = p, .rows = &rows };
+    // Choose a row bound by the actual virtual list after scrolling. Its
+    // position changes with card pitch and viewport; index 74 was incidental.
+    const mounted_row = for (p.virtual.pool_bindings) |binding| {
+        if (binding) |visible_index| break p.visible.items[visible_index];
+    } else return error.NoMountedTransferRow;
+    var change: Change = .{ .panel = p, .rows = &rows, .mounted_row = mounted_row };
     try h.cx.addAfterLayoutHook(&change, Change.run);
     defer h.cx.removeAfterLayoutHook(&change);
     h.cx.requestRedraw();
@@ -1114,12 +1120,12 @@ test "transfer projection V3 three filters use real phases preserve jobs and con
     click(h, id(p.root, "transfer.filter.active").?);
     h.frames();
     try std.testing.expectEqual(@as(usize, 3), p.visible.items.len);
-    try std.testing.expectApproxEqAbs(@as(f32, 319), p.list.container.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 3 * 60 + 2 * 6), p.list.container.globalRect().h, 0.1);
     click(h, id(p.root, "transfer.filter.completed").?);
     h.frames();
     try std.testing.expectEqual(@as(usize, 1), p.visible.items.len);
     try std.testing.expectEqual(@as(u64, 5), p.source.?.value.rows[p.visible.items[0]].target.job);
-    try std.testing.expectApproxEqAbs(@as(f32, 101), id(p.root, "transfer.task").?.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 40), id(p.root, "transfer.task").?.globalRect().h, 0.1);
     const task_id = id(p.root, "transfer.task").?.id;
     try p.update(.{ .revision = 2, .rows = &rows });
     h.frames();
@@ -1217,21 +1223,21 @@ test "transfer projection V3 measured collapsed card follows the frozen job DOM"
     const meta = id(p.root, "transfer.task.meta").?.globalRect();
     const action = id(p.root, "transfer.task.primary").?.globalRect();
     try std.testing.expect(p.expanded == null);
-    try std.testing.expectApproxEqAbs(@as(f32, 199), p.root.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 158), p.root.globalRect().h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 334), card.w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 101), card.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 60), card.h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 314), head.w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 20), head.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 24), head.h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 16), name.h, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 243), name.w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 3), track.h, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 38), track.y - card.y, 0.01);
+    try std.testing.expect(name.w >= 100);
+    try std.testing.expectApproxEqAbs(@as(f32, 2), track.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 58), track.y - card.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 14), meta.h, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 47), meta.y - card.y, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 60), action.w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 36), meta.y - card.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 34), action.w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 24), action.h, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 67), action.y - card.y, 0.01);
-    try std.testing.expect(text(p.root, "查看位置") != null);
+    try std.testing.expectApproxEqAbs(@as(f32, 8), action.y - card.y, 0.01);
+    try std.testing.expect(text(p.root, "查看") != null);
     try std.testing.expectEqual(@as(usize, 1), textCount(id(p.root, "transfer.filter.all").?));
     try std.testing.expectEqual(@as(usize, 1), textCount(id(p.root, "transfer.task.primary").?));
     try std.testing.expectApproxEqAbs(@as(f32, 16), text(p.root, "全部 1").?.globalRect().h, 0.01);
@@ -1275,22 +1281,130 @@ test "transfer projection V3 all native phases keep the measured card and truthf
     const h = try H.init(860, 480);
     defer h.deinit();
     var capture: Capture = .{};
-    const p = try h.panel(&capture, .global_popover);
-    p.show();
-    for ([_]V.Phase{ .queued, .running, .retry_wait, .pausing, .paused, .conflict, .verifying, .succeeded, .skipped, .failed, .checksum_failed, .cancelling, .cancelled, .cleanup_unknown }, 0..) |phase, i| {
-        var task = row(1, 101, phase);
-        if (phase == .failed or phase == .checksum_failed) task.status_detail = "目标文件没有通过校验";
-        try p.update(.{ .revision = i + 1, .rows = &.{task} });
-        h.frames();
-        try std.testing.expect(p.expanded == null);
-        try std.testing.expectApproxEqAbs(@as(f32, if (phase == .failed or phase == .checksum_failed) 123 else 101), id(p.root, "transfer.task").?.globalRect().h, 0.01);
-        try std.testing.expectApproxEqAbs(@as(f32, 20), id(p.root, "transfer.task.head").?.globalRect().h, 0.01);
-        try std.testing.expectApproxEqAbs(@as(f32, 14), id(p.root, "transfer.task.meta").?.globalRect().h, 0.01);
-        if (phase == .failed or phase == .checksum_failed) {
-            try std.testing.expect(text(p.root, "目标文件没有通过校验") != null);
-            try std.testing.expectApproxEqAbs(@as(f32, 16), id(p.root, "transfer.task.error").?.globalRect().h, 0.01);
+    for ([_]V.Presentation{ .global_popover, .session_popover, .session_tray }) |presentation| {
+        const p = try h.panel(&capture, presentation);
+        p.show();
+        for ([_]V.Phase{ .queued, .running, .retry_wait, .pausing, .paused, .conflict, .verifying, .succeeded, .skipped, .failed, .checksum_failed, .cancelling, .cancelled, .cleanup_unknown }, 0..) |phase, i| {
+            var task = row(1, 101, phase);
+            if (phase == .failed or phase == .checksum_failed) task.status_detail = "目标文件没有通过校验";
+            try p.update(.{ .revision = i + 1, .rows = &.{task} });
+            h.frames();
+            try std.testing.expect(p.expanded == null);
+            try std.testing.expectApproxEqAbs(@as(f32, 40), id(p.root, "transfer.task").?.globalRect().h, 0.01);
+            try std.testing.expectApproxEqAbs(@as(f32, 24), id(p.root, "transfer.task.head").?.globalRect().h, 0.01);
+            try std.testing.expect(id(p.root, "transfer.task.meta").?.globalRect().w > 0);
+            const filename = id(p.root, "transfer.task.name").?.globalRect();
+            const location = id(p.root, "transfer.task.location").?.globalRect();
+            const rate = id(p.root, "transfer.task.rate").?.globalRect();
+            const status = id(p.root, "transfer.task.status").?.globalRect();
+            try std.testing.expect(filename.w > 0);
+            try std.testing.expect(location.w > 0);
+            try std.testing.expectApproxEqAbs(filename.y + filename.h / 2, location.y + location.h / 2, 0.5);
+            const rate_text = id(p.root, "transfer.task.rate").?.getText().?.content;
+            const full_rate_width = ui.Cx.measureTextWidthCallback(h.cx, rate_text.ptr, rate_text.len, 10, 400, false);
+            try std.testing.expect(rate.w >= full_rate_width - 0.5);
+            try std.testing.expect(filename.x + filename.w <= status.x + 0.5);
+            try std.testing.expect(location.x + location.w <= rate.x + 0.5);
+            const card_bounds = id(p.root, "transfer.task").?.globalRect();
+            if (presentation == .session_tray) {
+                const viewport = p.list.container.globalRect();
+                const progress = id(p.root, "transfer.task.progress").?.globalRect();
+                try std.testing.expect(viewport.h >= 40);
+                try std.testing.expect(card_bounds.y >= viewport.y - 0.5);
+                try std.testing.expect(card_bounds.y + card_bounds.h <= viewport.y + viewport.h + 0.5);
+                try std.testing.expect(progress.y + progress.h <= viewport.y + viewport.h + 0.5);
+            }
+            inline for (.{ "transfer.task.primary", "transfer.task.cancel" }) |action_id| {
+                if (id(p.root, action_id)) |action_node| {
+                    const action_bounds = action_node.globalRect();
+                    try std.testing.expect(action_bounds.w > 0 and action_bounds.h == 24);
+                    try std.testing.expect(action_bounds.x >= card_bounds.x and action_bounds.x + action_bounds.w <= card_bounds.x + card_bounds.w + 0.5);
+                }
+            }
+            if (phase == .failed or phase == .checksum_failed) {
+                try std.testing.expect(text(p.root, "目标文件没有通过校验") != null);
+                try std.testing.expectApproxEqAbs(@as(f32, 14), id(p.root, "transfer.task.error").?.globalRect().h, 0.01);
+            }
+            if (phase == .cancelled or phase == .checksum_failed or phase == .cleanup_unknown) try std.testing.expect(id(p.root, "transfer.task.primary") == null);
         }
-        if (phase == .cancelled or phase == .checksum_failed or phase == .cleanup_unknown) try std.testing.expect(id(p.root, "transfer.task.primary") == null);
+        p.hide();
     }
     try std.testing.expectEqual(@as(usize, 0), capture.calls);
+}
+
+test "transfer projection presents only mounted viewport rows matching current filter and search" {
+    const h = try H.init(1440, 900);
+    defer h.deinit();
+    var c: Capture = .{};
+    const p = try h.panel(&c, .global_popover);
+    var rows: [80]V.Task = undefined;
+    for (&rows, 0..) |*task, i| task.* = row(i + 1, 101, .running);
+    try p.update(.{ .revision = 1, .rows = &rows });
+    p.show();
+    h.frames();
+    try std.testing.expect(p.presents(80));
+    try std.testing.expect(!p.presents(1));
+    p.setFilter(.failed);
+    try std.testing.expect(!p.presents(80));
+    p.setFilter(.all);
+    p.search.set("unmatched-file-name");
+    try std.testing.expect(!p.presents(80));
+    p.search.set("");
+    h.frames();
+    ui.widgets.scroll_area.setScrollY(p.list.state, p.list.content, 520);
+    h.frames();
+    try std.testing.expect(!p.presents(80));
+}
+
+test "transfer projection direction filter keeps each file card owner scoped" {
+    const h = try H.init(860, 480);
+    defer h.deinit();
+    var capture: Capture = .{};
+    const p = try h.panel(&capture, .session_tray);
+    var upload = row(1, 101, .running);
+    upload.direction = .upload;
+    var download = row(2, 101, .running);
+    download.direction = .download;
+    var other = row(3, 202, .running);
+    other.direction = .upload;
+    p.selected_scope = .{ .session = upload.target.owner.? };
+    p.setDirectionFilter(.upload);
+    try p.update(.{ .revision = 1, .scope = .{ .session = upload.target.owner.? }, .rows = &.{ upload, download, other } });
+    p.show();
+    h.frames();
+    try std.testing.expectEqual(@as(usize, 1), p.visible.items.len);
+    try std.testing.expectEqual(@as(u64, 1), p.source.?.value.rows[p.visible.items[0]].target.job);
+    p.setDirectionFilter(.download);
+    h.frames();
+    try std.testing.expectEqual(@as(usize, 1), p.visible.items.len);
+    try std.testing.expectEqual(@as(u64, 2), p.source.?.value.rows[p.visible.items[0]].target.job);
+}
+
+test "transfer direction trays hide empty cards without layout and restore with tasks" {
+    const h = try H.init(860, 480);
+    defer h.deinit();
+    var capture: Capture = .{};
+    const p = try h.panel(&capture, .session_tray);
+    p.setDirectionFilter(.upload);
+    try p.update(.{ .revision = 1, .rows = &.{} });
+    p.show();
+    h.frames();
+    try std.testing.expectEqual(@as(@TypeOf(p.root.style.display), .none), p.root.style.display);
+    var task = row(1, 101, .running);
+    task.direction = .upload;
+    try p.update(.{ .revision = 2, .rows = &.{task} });
+    h.frames();
+    try std.testing.expectEqual(@as(@TypeOf(p.root.style.display), .flex), p.root.style.display);
+    try std.testing.expect(text(p.root, "上传传输") != null);
+    try std.testing.expectEqual(@as(f32, 0), p.root.style.border.width);
+    try p.update(.{ .revision = 3, .rows = &.{} });
+    h.frames();
+    p.show();
+    try std.testing.expectEqual(@as(@TypeOf(p.root.style.display), .none), p.root.style.display);
+    p.setDirectionFilter(.download);
+    task.direction = .download;
+    try p.update(.{ .revision = 4, .rows = &.{task} });
+    h.frames();
+    try std.testing.expect(text(p.root, "下载传输") != null);
+    try std.testing.expectEqual(@as(@TypeOf(p.root.style.display), .flex), p.root.style.display);
 }

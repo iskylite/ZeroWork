@@ -237,11 +237,18 @@ test "file mkdir UI real toolbar and Enter creates once refreshes and locates wi
     const remote_stamp = before.panes[1].stamp;
     const before_count = before.panes[0].entries.len;
     const field = paneNode(&f, original.owner, "files.mkdir.field");
-    try std.testing.expectApproxEqAbs(@as(f32, 290), field.globalRect().w, 0.1);
+    // The editable name column follows the current file-pane width; its
+    // folder glyph and 6px gap reserve 22px before the field.
+    const name_column = field.parent.?.globalRect();
+    try std.testing.expectApproxEqAbs(name_column.w - 22, field.globalRect().w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 24), field.globalRect().h, 0.1);
     const result = paneNode(&f, original.owner, "files.mkdir.result");
-    try std.testing.expectApproxEqAbs(@as(f32, 594), result.globalRect().w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 108), result.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(paneNode(&f, original.owner, "files.data_clip").globalRect().w, result.globalRect().w, 0.1);
+    // Result uses content height: 8px padding, four rows and three 4px gaps.
+    try std.testing.expect(result.style.height == .fit);
+    var result_height: f32 = 16 + 3 * 4;
+    for (result.children.items) |child| result_height += child.globalRect().h;
+    try std.testing.expectApproxEqAbs(result_height, result.globalRect().h, 0.1);
     try enterName(&f, original.owner, "新目录 with spaces");
     try std.testing.expectEqual(before_count, model.projection().?.panes[0].entries.len);
     f.cx.handleKeyDown(.@"return", .{});

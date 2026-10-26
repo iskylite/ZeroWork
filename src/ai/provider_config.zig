@@ -214,7 +214,7 @@ test "settings selection resolves exact provider model context and auth without 
     var first_models = [_]app_config.AiModel{.{ .id = "shared", .context_window = 200000, .default = true }};
     var second_models = [_]app_config.AiModel{
         .{ .id = "default", .context_window = 8192, .default = true },
-        .{ .id = "shared", .context_window = 64000, .reasoning = true, .efforts = .{ true, false, false, true, false } },
+        .{ .id = "shared", .context_window = 64000, .reasoning = true, .efforts = .{ true, false, false, true, false, false, false } },
     };
     var providers = [_]app_config.AiProvider{
         .{ .name = "cloud", .kind = .anthropic, .enabled = true, .endpoint = "https://cloud.test/messages", .api_key = "cloud-key", .model_count = 1, .models = &first_models },
@@ -274,7 +274,7 @@ test "settings selection rejects deleted disabled ambiguous and out of count key
 
 test "settings selection effort validation reads actual reasoning and declared subset" {
     var models = [_]app_config.AiModel{
-        .{ .id = "limited", .context_window = 8192, .default = true, .reasoning = true, .efforts = .{ true, false, true, false, false } },
+        .{ .id = "limited", .context_window = 8192, .default = true, .reasoning = true, .efforts = .{ true, false, true, false, false, false, false } },
         .{ .id = "quiet", .context_window = 8192, .reasoning = false, .efforts = @splat(true) },
     };
     var providers = [_]app_config.AiProvider{.{ .kind = .openai_compat, .enabled = true, .name = "ollama", .endpoint = "https://example.test/chat", .api_key = "saved", .model_count = 2, .models = &models }};

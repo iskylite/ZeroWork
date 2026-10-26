@@ -25,6 +25,7 @@ pub const Action = enum {
     close_session,
     // Tab (page) context menu, mockup-tab-context.
     rename_tab,
+    tab_color,
     clone_session,
     view_jump_chain,
     open_theme,
@@ -122,6 +123,7 @@ pub fn items(kind: Kind, context: Context) []const Item {
 /// per-tab configuration; deliberately disjoint from terminal text actions.
 const tab_menu = [_]Item{
     .{ .action = .rename_tab, .label = "重命名页签", .icon = "pencil", .shortcut = "⌘⇧R" },
+    .{ .action = .tab_color, .label = "页签颜色", .icon = "palette" },
     .{ .action = .new_tab, .label = "新建同主机会话", .icon = "plus" },
     .{ .action = .clone_session, .label = "镜像复制会话", .icon = "copy" },
     .{ .action = .edit_host, .label = "编辑主机配置", .icon = "settings" },
@@ -137,6 +139,7 @@ const local_tab = [_]Item{
     .{ .action = .new_tab, .label = "新建本地会话", .icon = "plus" },
     .{ .action = .clone_session, .label = "复制会话与目录", .icon = "copy" },
     .{ .action = .rename_tab, .label = "重命名", .icon = "pencil", .shortcut = "⌘⇧R" },
+    .{ .action = .tab_color, .label = "页签颜色", .icon = "palette" },
     .{ .action = .history, .label = "当前会话历史", .icon = "history" },
     .{ .action = .search, .label = "搜索终端", .icon = "search", .shortcut = "⌘F" },
     .{ .action = .export_session, .label = "导出会话记录", .icon = "download" },
@@ -156,13 +159,14 @@ const local_terminal = [_]Item{
 test "local menus expose current local capabilities without remote or future operations" {
     for ([_]Kind{ .tab, .session_ended }) |kind| {
         const list = items(kind, .{ .local_session = true });
-        try std.testing.expectEqual(@as(usize, 7), list.len);
+        try std.testing.expectEqual(@as(usize, 8), list.len);
         try std.testing.expectEqual(Action.new_tab, list[0].action);
         try std.testing.expectEqual(Action.clone_session, list[1].action);
         try std.testing.expect(list[1].shortcut == null);
-        try std.testing.expectEqual(Action.history, list[3].action);
-        try std.testing.expectEqual(Action.search, list[4].action);
-        try std.testing.expectEqual(Action.export_session, list[5].action);
+        try std.testing.expectEqual(Action.tab_color, list[3].action);
+        try std.testing.expectEqual(Action.history, list[4].action);
+        try std.testing.expectEqual(Action.search, list[5].action);
+        try std.testing.expectEqual(Action.export_session, list[6].action);
         for (list) |item| try std.testing.expect(item.action != .edit_host and item.action != .view_jump_chain and item.action != .reconnect);
     }
     const context: Context = .{ .local_session = true };
@@ -257,7 +261,7 @@ test "context menus keep terminal and host actions separate" {
 
 test "tab menu carries session lifecycle actions, disjoint from text ops" {
     const tab = items(.tab, .{});
-    try std.testing.expectEqual(@as(usize, 9), tab.len);
+    try std.testing.expectEqual(@as(usize, 10), tab.len);
     try std.testing.expectEqual(Action.rename_tab, tab[0].action);
     // Terminal text operations never appear on the tab menu (zero-overlap rule).
     for (tab) |item| {
@@ -266,8 +270,8 @@ test "tab menu carries session lifecycle actions, disjoint from text ops" {
         try std.testing.expect(item.action != .search);
     }
     // Danger styling on disconnect+close.
-    try std.testing.expect(tab[8].danger);
-    try std.testing.expectEqual(Action.close_session, tab[8].action);
+    try std.testing.expect(tab[9].danger);
+    try std.testing.expectEqual(Action.close_session, tab[9].action);
     // "Close others" requires multiple open tabs.
     try std.testing.expect(!isEnabled(.close_others, .{ .multi_tabs = false }));
     try std.testing.expect(isEnabled(.close_others, .{ .multi_tabs = true }));

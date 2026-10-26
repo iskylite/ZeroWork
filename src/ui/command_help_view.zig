@@ -1,8 +1,8 @@
 const ui = @import("ui");
-const mock = @import("mockups/common.zig");
+const design = @import("design_tokens.zig");
 const theme = @import("app_theme.zig");
 const catalog = @import("command_catalog.zig");
-const tok = mock.tok;
+const tok = design.tok;
 const c_line5 = ui.Color.rgba(0, 0, 0, 13);
 
 pub fn mountCard(cx: *ui.Cx) !*ui.Node {

@@ -34,7 +34,7 @@ function flatten(n: any): any[] { return !n || n.hidden === true || n.visible ==
 async function visible(id: string): Promise<any> { return waitFor(async () => (await query(id)).find(shown) ?? null, 20000); }
 async function capture(name: string): Promise<Record<string, any>> {
   await sleep(120);
-  const nodes = Object.fromEntries(await Promise.all(["files.workspace", "files.local", "files.remote", "files.path", "files.rows", "files.data_clip", "files.columns", "files.error", "files.transfer", "files.new_folder"].map(async id => [id, await query(id)])));
+  const nodes = Object.fromEntries(await Promise.all(["files.workspace", "files.local", "files.remote", "files.breadcrumb", "files.rows", "files.data_clip", "files.columns", "files.error", "files.transfer", "files.new_folder"].map(async id => [id, await query(id)])));
   const path = join(output, `${name}.png`);
   assert((await screenshot(path)).ok, `Native capture ${name}`);
   await writeFile(join(output, `${name}.tree.json`), JSON.stringify(nodes["files.workspace"], null, 2));
@@ -98,7 +98,7 @@ try {
     const moved = scrolled["files.columns"].filter(shown);
     assert(moved[0].rect.x < columns[0].rect.x, "Left header follows real horizontal scroll");
     assert.equal(moved[1].rect.x, columns[1].rect.x, "Right card scroll remains independent");
-    assert.equal(scrolled["files.path"].filter(shown)[0].rect.y, compact["files.path"].filter(shown)[0].rect.y);
+    assert.equal(scrolled["files.breadcrumb"].filter(shown)[0].rect.y, compact["files.breadcrumb"].filter(shown)[0].rect.y);
     report.checks.push("Native 392×374 cards retain 490 point columns; left horizontal scroll moves its header independently and paths remain fixed; actual data clips reserve the 12 point horizontal rail");
   });
   await run("empty", async () => {

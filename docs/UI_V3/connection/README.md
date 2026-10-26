@@ -29,7 +29,7 @@
 ## 引用与视觉合同
 
 - 已落地参考：`src/ui/quick_connect.zig`、`quick_connect_view.zig`、`connection_host.zig`、`plugin_editor_host.zig`，公共资产与配置宿主。
-- KVM：`docs/DESIGN/V0.2.2_BMC_IKVM.md` §3（配置/独立连接/有序路径/测试边界）。Figma 证据由根任务统一保存于 `../verification/figma-reference.json`；本任务另实读启动节点 `1066:217241` 的字段和样式。
+- KVM：`docs/DESIGN/V0.3_BMC_IKVM.md` §3（配置/独立连接/有序路径/测试边界）。Figma 证据由根任务统一保存于 `../verification/figma-reference.json`；本任务另实读启动节点 `1066:217241` 的字段和样式。
 - V3 tokens 最后加载 ../theme-tokens.css，遵循 DESIGN_STANDARDS §2.2：bg #060608、surface-1 #131316、surface-2 #1b1b1f、well #0c0c0f、overlay #18181c。字体使用本地 Inter / JetBrains Mono 和系统中文字体；17px/1.7线性SVG。
 - 默认 App 1440×900，外圆角14，壳外边距8、区域间距6，展开侧栏224/折叠48；连接模态760×710（小窗最大432高，内部滚动），头脚固定。尺寸选择是评审工具，不属于产品功能。
 

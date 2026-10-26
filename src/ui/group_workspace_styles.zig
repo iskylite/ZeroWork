@@ -11,7 +11,7 @@ pub fn header() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 30 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = gap, .margin = .{ .left = 12, .right = 12, .top = 8, .bottom = 8 } };
 }
 pub fn control() ui.BoxStyle {
-    return .{ .width = .{ .px = 26 }, .height = .{ .px = 26 }, .flex_shrink = 0, .border = .{ .radius = 6 } };
+    return .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .flex_shrink = 0, .border = .{ .radius = 7 } };
 }
 pub fn label() ui.TextStyle {
     return .{ .font_size = 12, .color = theme.current().fg_2, .selectable = false, .text_overflow = .ellipsis };

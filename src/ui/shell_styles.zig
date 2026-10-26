@@ -7,11 +7,11 @@ pub const gap: f32 = 6;
 pub const title_height: f32 = 46;
 pub const status_height: f32 = 32;
 pub const sidebar_width: f32 = 224;
-pub const sidebar_collapsed: f32 = 48;
+pub const sidebar_collapsed: f32 = 0;
 pub const card_radius: f32 = 11;
 // The windowed inset clears the native traffic lights; a header without
 // native controls uses the same inset at both ends.
-pub const title_controls_inset: f32 = 82;
+pub const title_controls_inset: f32 = 79;
 pub const title_content_inset: f32 = 10;
 
 pub fn titlePaddingForChrome(chrome: anytype) ui.Padding {
@@ -78,7 +78,7 @@ pub fn settingsBody(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn settingsNavigation(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = @import("v3_geometry.zig").settings_sidebar }, .height = .fill(), .flex_shrink = 0, .direction = .column, .padding = .{ .top = 4 }, .gap = 6, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
+    return .{ .width = .{ .px = @import("v3_geometry.zig").settings_sidebar }, .height = .fill(), .flex_shrink = 0, .direction = .column, .padding = .{ .top = 4 }, .gap = 6, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .side_widths = .{ 0, 1, 0, 0 }, .color = c.fg_1.withAlpha(31), .radius = 0 } };
 }
 pub fn settingsContent(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .column };
@@ -86,6 +86,12 @@ pub fn settingsContent(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn toolbarButton(allocator: std.mem.Allocator, node: *ui.Node) void {
     const c = theme.current();
     node.setStyleInline(allocator, .{ .width = .{ .px = @import("v3_geometry.zig").icon_action }, .height = .{ .px = @import("v3_geometry.zig").icon_action }, .padding = ui.Padding.ZERO, .flex_shrink = 0, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 7 } });
+}
+
+// Actual workspace HTML .title-actions .icon-btn is 30 × 30.
+pub fn titleToolbarButton(allocator: std.mem.Allocator, node: *ui.Node) void {
+    toolbarButton(allocator, node);
+    node.setStyleInline(allocator, .{ .width = .{ .px = 30 }, .height = .{ .px = 30 } });
 }
 
 pub fn emptyGuide(_: *const ui.ThemeTokens) ui.BoxStyle {
@@ -191,7 +197,7 @@ test "global material publication repaints retained shell after an image becomes
     try std.testing.expectEqual(@import("v3_geometry.zig").settings_sidebar, nodes[4].style.width.px);
     _ = theme.setMaterialVisible(false);
     publication.publish(cx, theme.widgetTheme(.dark));
-    for (nodes, 0..) |node, index| try std.testing.expectEqual(if (index == 3) theme.current().overlay.a else theme.current().surface_1.a, node.getBackground().a);
+    for (nodes, 0..) |node, index| try std.testing.expectEqual(if (index == 4) @as(u8, 0) else if (index == 3) theme.current().overlay.a else theme.current().surface_1.a, node.getBackground().a);
     try std.testing.expectEqual(@as(u8, 0), shell.getBackground().a);
 }
 
@@ -206,17 +212,11 @@ pub fn emptyIcon(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn emptyButton(primary: bool) ui.BoxStyle {
     const c = theme.current();
-    var style: ui.BoxStyle = .{ .width = .{ .px = if (primary) 100 else 76 }, .height = .{ .px = 35 }, .padding = .{ .left = 14, .right = 14 }, .gap = 7, .font_size = 12, .font_weight = 500, .background = if (primary) c.accent else c.hover, .text_color = if (primary) ui.Color.WHITE else c.fg_1, .border = .{ .radius = 8 }, .shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .inset_shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .flex_shrink = 0 };
+    var style: ui.BoxStyle = .{ .width = .{ .fit = .{} }, .height = .{ .px = 35 }, .padding = .{ .left = 14, .right = 14 }, .gap = 7, .font_size = 12, .font_weight = 500, .background = if (primary) c.action_accent else c.hover, .text_color = if (primary) theme.actionForeground(c.action_accent) else c.fg_1, .border = .{ .radius = 8 }, .shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .inset_shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .flex_shrink = 0 };
     if (primary) {
-        // Built-in V3 gradients; imported palettes keep their own accent.
         const family = theme.currentName();
-        const standard = ui.Color.eql(c.accent, theme.colors(family).accent);
-        style.gradient = if (!standard) .{ .from = c.accent, .to = c.accent, .direction = .diagonal } else switch (family) {
-            .dark => .{ .from = ui.Color.hex(0x6164ec), .to = ui.Color.hex(0x8457ea), .direction = .diagonal },
-            .light => .{ .from = ui.Color.hex(0x4f46e5), .to = ui.Color.hex(0x7c3aed), .direction = .diagonal },
-            .sauber => .{ .from = ui.Color.hex(0x1345f6), .to = ui.Color.hex(0x2563eb), .direction = .diagonal },
-        };
-        style.shadow = .{ .blur = 10, .offset_y = 3, .color = c.accent.withAlpha(if (family == .dark) 89 else 82) };
+        style.gradient = .{ .from = c.action_accent, .to = c.action_accent_2, .direction = .diagonal };
+        style.shadow = .{ .blur = 10, .offset_y = 3, .color = c.action_accent.withAlpha(if (family == .dark) 89 else 82) };
         style.inset_shadow = .{ .offset_y = 1, .blur = 0, .color = ui.Color.WHITE.withAlpha(46) };
     }
     return style;

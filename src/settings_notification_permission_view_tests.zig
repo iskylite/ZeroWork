@@ -52,6 +52,8 @@ test "notification actual settings switches call explicit user edit hook while m
     const mounted = try view.mountPage(cx, scope, &controller, .{ .context = &probe, .changed = Probe.changed, .request_edit = Probe.request, .action = Probe.action, .edit = Probe.edit, .authorization_help = Probe.help });
     try cx.root.?.appendChild(a, mounted.root);
     cx.layout();
+    const help_reads_after_mount = probe.help_reads;
+    try std.testing.expect(help_reads_after_mount > 0);
     mounted.refreshFooter();
     try std.testing.expectEqual(@as(usize, 0), probe.user_edits);
     const field = byId(mounted.root, "settings.field.transfer_done").?;
@@ -67,7 +69,7 @@ test "notification actual settings switches call explicit user edit hook while m
     try std.testing.expect(controller.model.value.notify.transfer_done);
     mounted.refreshFooter();
     try std.testing.expectEqual(@as(usize, 2), probe.user_edits);
-    try std.testing.expectEqual(@as(usize, 1), probe.help_reads);
+    try std.testing.expectEqual(help_reads_after_mount, probe.help_reads);
 }
 
 test "notification actual switch preserves waiting and failed authorization feedback through field footer refresh" {

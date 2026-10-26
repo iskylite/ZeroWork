@@ -18,7 +18,7 @@ const Fixture = struct {
     last: ?Controls.Envelope = null,
     reject: bool = false,
     fn init(self: *Fixture) !void {
-        self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .scope = undefined, .view = undefined, .panel = undefined, .send = undefined, .models = .{ .{ .id = "alpha", .context_window = 200000, .reasoning = true, .vision = true, .efforts = .{ true, false, true, false, false } }, .{ .id = "quiet", .context_window = 32000, .efforts = @splat(false) } }, .disabled_models = .{.{ .id = "ghost", .efforts = @splat(false) }}, .providers = undefined, .owned = .init(a) };
+        self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .scope = undefined, .view = undefined, .panel = undefined, .send = undefined, .models = .{ .{ .id = "alpha", .context_window = 200000, .reasoning = true, .vision = true, .efforts = .{ true, false, true, false, false, false, false } }, .{ .id = "quiet", .context_window = 32000, .efforts = @splat(false) } }, .disabled_models = .{.{ .id = "ghost", .efforts = @splat(false) }}, .providers = undefined, .owned = .init(a) };
         self.providers = .{ .{ .name = "lab", .enabled = true, .endpoint = "https://fixture.invalid/v1", .api_key = "fixture", .model_count = 2, .models = &self.models }, .{ .name = "offline", .enabled = false, .models = &self.disabled_models, .model_count = 1 } };
         self.cx.setViewport(1440, 900);
         self.cx.root = try ui.box(self.cx, .{ .width = .fill(), .height = .fill() }, .{});
@@ -378,8 +378,8 @@ test "AI composer model identities expose provider and ID and unconfigured model
     defer f.deinit();
     f.enter(f.view.buttons[2]);
     const alpha = modelOption(f.cx.root.?, "alpha").?;
-    try std.testing.expectEqualStrings("alpha\nlab · alpha\n上下文 200000 tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.label.?);
-    try std.testing.expectEqualStrings("alpha\nlab · alpha\n上下文 200000 tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.description.?);
+    try std.testing.expectEqualStrings("alpha\nlab · alpha\n配置上下文 200000 tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.label.?);
+    try std.testing.expectEqualStrings("alpha\nlab · alpha\n配置上下文 200000 tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.description.?);
     const Hook = struct {
         fn open(raw: *anyopaque) void {
             const fixture: *Fixture = @ptrCast(@alignCast(raw));
@@ -538,4 +538,46 @@ test "AI composer context compaction emits captured start and cancel with acknow
     const before = f.calls;
     f.enter(find(f.cx.root.?, "ai.usage.compaction.start").?);
     try std.testing.expectEqual(before, f.calls);
+}
+
+test "AI composer declared none and ultra are distinct endpoint slider choices" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.models[0].efforts = .{ true, false, false, false, false, true, true };
+    var declared = f.snapshot();
+    declared.revision += 1;
+    try f.view.update(declared);
+    f.settle();
+    f.enter(f.view.buttons[2]);
+    try std.testing.expectEqual(@as(usize, 3), f.view.reasoning_count);
+    try std.testing.expectEqualStrings("关闭", f.view.effort_ticks[0].getText().?.content);
+    try std.testing.expectEqualStrings("超高", f.view.effort_ticks[2].getText().?.content);
+    f.cx.setFocus(f.view.slider.wrapper);
+    f.cx.handleKeyDown(.home, .{});
+    f.settle();
+    try std.testing.expectEqual(Controls.Effort.none, f.last.?.action.effort.value);
+    f.cx.handleKeyDown(.end, .{});
+    f.settle();
+    try std.testing.expectEqual(Controls.Effort.ultra, f.last.?.action.effort.value);
+}
+
+test "AI composer pointer reaches every one of seven declared native efforts" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.models[0].efforts = @splat(true);
+    var declared = f.snapshot();
+    declared.revision += 1;
+    try f.view.update(declared);
+    f.settle();
+    f.enter(f.view.buttons[2]);
+    const area = f.view.slider_track.globalRect();
+    for ([_]Controls.Effort{ .none, .low, .medium, .high, .xhigh, .max, .ultra }, 0..) |expected, index| {
+        const x = area.x + std.math.clamp(area.w * @as(f32, @floatFromInt(index)) / 6, 0.5, area.w - 0.5);
+        f.cx.handleMouseDown(x, area.y + area.h / 2, .{});
+        f.cx.handleMouseUp(x, area.y + area.h / 2);
+        f.settle();
+        try std.testing.expectEqual(expected, f.last.?.action.effort.value);
+    }
 }

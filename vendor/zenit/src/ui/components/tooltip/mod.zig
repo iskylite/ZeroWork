@@ -39,6 +39,9 @@ pub const TooltipProps = struct {
     background: ?Color = null,
     text_color: ?Color = null,
     font_size: f32 = 12,
+    /// Optional bounded content width for paths and other long values.
+    width: ?f32 = null,
+    wrap: core.TextWrap = .none,
 };
 
 /// Create Tooltip: `W.Tooltip(.{ .text = "Copy link" })`.
@@ -72,6 +75,8 @@ pub const TooltipBuilder = struct {
 
         const result = try popover_mod.Popover(.{
             .position = p.position,
+            .width = p.width,
+            .constrain_width_to_viewport = p.width != null,
             .trigger = .hover,
             .offset = .{ .static = p.offset },
             .open_delay_ms = p.open_delay_ms,
@@ -107,10 +112,16 @@ pub const TooltipBuilder = struct {
         // Built and mounted: after that, released with wrapper if binding fails. Hangs under
         // Popover's scope (content in portal).
         var label: *Node = undefined;
+        var label_style = styles.tooltipLabelStyle(p.text_color, p.font_size, t);
+        label_style.wrap = p.wrap;
         try view.mount(result.scope, cx, result.content, view.capture(&label, view.text(
-            .{ .style = styles.tooltipLabelStyle(p.text_color, p.font_size, t) },
+            .{ .style = label_style },
             p.text.peek(),
         )));
+        if (p.width) |width| {
+            result.content.setStyleInline(allocator, .{ .width = .{ .px = width }, .min_width = 0 });
+            label.setStyleInline(allocator, .{ .width = .fill(), .min_width = 0 });
+        }
         // Tooltip a11y name points to label's text copy; re-point when dynamic text updates.
         if (result.content.behavior.interaction.a11y) |*a| a.label = label.getText().?.content;
         if (!p.text.isStatic()) {

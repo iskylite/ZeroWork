@@ -241,7 +241,7 @@ test "quick connect model toggles overlay and sidebar" {
     try std.testing.expect(model.quick_connect_open);
     try std.testing.expectEqual(@as(usize, 1), (try model.setQuery("db")).len);
     model.toggleSidebar();
-    try std.testing.expectEqual(@as(f32, 48), model.sidebar.width());
+    try std.testing.expectEqual(@as(f32, 0), model.sidebar.width());
 }
 
 test "parseQuickTarget requires a user and accepts the optional ssh prefix" {

@@ -207,7 +207,7 @@ pub const Plugin = struct {
         return .{
             .id = model.protocol_id,
             .display_name = "Fixture · 合成画面",
-            .plugin_version = "0.2.1-test",
+            .plugin_version = "0.2.0-test",
             .origin = .bundled,
             .order = 100,
             .icons = .{ .settings = "server", .protocol = "server", .tab = "server" },

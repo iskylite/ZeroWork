@@ -60,6 +60,8 @@ pub const Wizard = struct {
     footer: ?*ui.Node = null,
     authentication_area: *ui.Node = undefined,
     protocol_icon: ?*ui.Node = null,
+    protocol_picker: ?*ui.Node = null,
+    painted_colors: ?S.theme.Colors = null,
     open: ?*ui.Signal(bool) = null,
     locked: ?*ui.Signal(bool) = null,
     sig_protocol: ?*ui.Signal(?[]const u8) = null,
@@ -185,6 +187,7 @@ pub const Wizard = struct {
         self.plugin_slot = null;
     }
     fn destroyEditorNodes(self: *Wizard) void {
+        self.protocol_picker = null;
         if (self.plugin_slot) |slot| while (slot.children.items.len != 0) {
             const child = slot.children.items[slot.children.items.len - 1];
             slot.removeChild(child);
@@ -291,6 +294,7 @@ pub const Wizard = struct {
         const self: *Wizard = @ptrCast(@alignCast(raw));
         const picker = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 41 }, .direction = .row, .align_items = .center, .padding = ui.Padding.all(5), .gap = 6, .background = S.theme.current().well, .border = .{ .radius = 9 }, .flex_shrink = 0 }, .{});
         picker.meta.ownership.meta.test_id = "wizard.protocol";
+        self.protocol_picker = picker;
         for (self.protocol_options, 0..) |option, index| {
             const click = try scope.createState(ProtocolClick, .{ .wizard = self, .index = index });
             const button = try ui.widgets.Button(.{ .label = option.label, .variant = .ghost, .disabled = self.locked.?, .on_click = cx.on(ProtocolClick, click, ProtocolClick.activate), .base_style = @as(@FieldType(ui.widgets.ControlShellConfig, "style"), .{ .width = .fill(), .flex = 1, .height = .{ .px = 31 }, .padding = .{}, .corner_radius = 7, .font_size = 11, .font_weight = 400, .text_color = if (std.mem.eql(u8, option.value, self.protocol_id)) S.theme.current().accent_ink else S.theme.current().fg_1, .background = if (std.mem.eql(u8, option.value, self.protocol_id)) S.theme.current().selection else ui.Color.TRANSPARENT, .border_width = 0 }) }).mount(scope, cx);
@@ -314,13 +318,31 @@ pub const Wizard = struct {
         }
     };
     fn refreshAppearance(self: *Wizard) void {
+        const colors = S.theme.current();
+        self.painted_colors = colors;
+        if (self.modal) |node| node.setStyleInline(self.alloc, .{ .background = colors.overlay });
+        if (self.title) |node| node.setTextColor(colors.fg_1);
+        if (self.protocol_picker) |picker| {
+            picker.setBackground(colors.well);
+            for (picker.children.items, 0..) |button, index| {
+                if (index >= self.protocol_options.len) break;
+                const chosen = std.mem.eql(u8, self.protocol_options[index].value, self.protocol_id);
+                button.setStyleInline(self.alloc, .{ .background = if (chosen) colors.selection else ui.Color.TRANSPARENT });
+                paintPickerText(button, if (chosen) colors.accent_ink else colors.fg_1);
+            }
+        }
         const manifest = self.plugin_registry.find(self.protocol_id) orelse return;
         if (self.protocol_icon) |node| {
             const asset = @import("session_icon.zig").asset(manifest.icons.protocol);
             if (asset.icon_id) |id| if (asset.pickRep(18)) |rep| node.setIcon(.{ .icon_id = id, .rep = rep, .tint = S.theme.current().accent });
         }
     }
+    fn paintPickerText(node: *ui.Node, color: ui.Color) void {
+        if (node.getText() != null) node.setTextColor(color);
+        for (node.children.items) |child| paintPickerText(child, color);
+    }
     pub fn show(self: *Wizard) void {
+        self.refreshAppearance();
         const root = self.root orelse return;
         if (self.plugin_editor) |editor| if (editor.vtable.visibility_changed) |changed| changed(editor.context, true);
         self.open.?.set(true);
@@ -357,6 +379,11 @@ pub const Wizard = struct {
         // Modal's deferred style host can initialise after mount. Reapply the
         // owned content contract once, before natural editor height escapes it.
         var body_changed = false;
+        const colors = S.theme.current();
+        if (self.painted_colors == null or !std.meta.eql(self.painted_colors.?, colors)) {
+            self.refreshAppearance();
+            body_changed = true;
+        }
         const parent_visible = if (self.plugin_editor) |editor| if (editor.vtable.parent_presentation_visible) |get| get(editor.context) else true else true;
         if (self.parent_presentation_visible != parent_visible) {
             if (self.root) |barrier| {

@@ -108,7 +108,7 @@ pub const Config = struct {
     pub fn format(self: Config, buffer: []u8) std.Io.Writer.Error![]const u8 {
         var writer = std.Io.Writer.fixed(buffer);
         try writer.print("[meta]\nconfig_revision = {d}\n\n", .{self.config_revision});
-        try writer.print("[ui]\ntheme = \"{s}\"\nfont_family = \"{s}\"\nfont_size = {d}\nfont_weight = \"{s}\"\nline_height = {d}\ncursor_style = \"{s}\"\nsidebar_collapsed = {}\ninput_line_highlight = {}\ntimestamp_gutter = {}\n\n", .{ self.ui.theme, self.ui.font_family, self.ui.font_size, self.ui.font_weight, self.ui.line_height, self.ui.cursor_style, self.ui.sidebar_collapsed, self.ui.input_line_highlight, self.ui.timestamp_gutter });
+        try writer.print("[ui]\nicon_background = \"{s}\"\ntheme = \"{s}\"\nfont_family = \"{s}\"\nfont_size = {d}\nfont_weight = \"{s}\"\nline_height = {d}\ncursor_style = \"{s}\"\nsidebar_collapsed = {}\ninput_line_highlight = {}\ntimestamp_gutter = {}\n\n", .{ @tagName(self.ui.icon_background), self.ui.theme, self.ui.font_family, self.ui.font_size, self.ui.font_weight, self.ui.line_height, self.ui.cursor_style, self.ui.sidebar_collapsed, self.ui.input_line_highlight, self.ui.timestamp_gutter });
         const background = self.ui.materials.background;
         try writer.print("[ui.materials]\nblur_px = {d}\n\n[ui.materials.background]\nenabled = {}\npath = ", .{ self.ui.materials.blur_px, background.enabled });
         try std.json.Stringify.value(background.path, .{}, &writer);
@@ -137,7 +137,7 @@ pub const Config = struct {
             try writer.print("enabled = {}\n", .{p.enabled});
             for (p.models[0..p.model_count]) |m| {
                 try writer.print("[[ai.providers.models]]\nname = \"{s}\"\ncontext_window = {d}\ndefault = {}\nreasoning = {}\nvision = {}\nefforts = [", .{ m.id, m.context_window, m.default, m.reasoning, m.vision });
-                const names = [_][]const u8{ "low", "medium", "high", "xhigh", "max" };
+                const names = [_][]const u8{ "low", "medium", "high", "xhigh", "max", "none", "ultra" };
                 var first = true;
                 for (m.efforts, 0..) |enabled, k| if (enabled) {
                     if (!first) try writer.writeAll(",");
@@ -188,7 +188,7 @@ pub const Config = struct {
                 if (eq(key, "config_revision")) self.config_revision = try parseInt(u64, value) else return error.UnknownKey;
             },
             .ui => {
-                if (eq(key, "theme")) self.ui.theme = try parseString(value) else if (eq(key, "font_family")) self.ui.font_family = try parseString(value) else if (eq(key, "font_size")) self.ui.font_size = try parseInt(u8, value) else if (eq(key, "font_weight")) self.ui.font_weight = try parseString(value) else if (eq(key, "line_height")) self.ui.line_height = try parseFloat(value) else if (eq(key, "cursor_style")) self.ui.cursor_style = try parseString(value) else if (eq(key, "sidebar_collapsed")) self.ui.sidebar_collapsed = try parseBool(value) else if (eq(key, "input_line_highlight")) self.ui.input_line_highlight = try parseBool(value) else if (eq(key, "timestamp_gutter")) self.ui.timestamp_gutter = try parseBool(value) else return error.UnknownKey;
+                if (eq(key, "icon_background")) self.ui.icon_background = std.meta.stringToEnum(IconBackground, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "theme")) self.ui.theme = try parseString(value) else if (eq(key, "font_family")) self.ui.font_family = try parseString(value) else if (eq(key, "font_size")) self.ui.font_size = try parseInt(u8, value) else if (eq(key, "font_weight")) self.ui.font_weight = try parseString(value) else if (eq(key, "line_height")) self.ui.line_height = try parseFloat(value) else if (eq(key, "cursor_style")) self.ui.cursor_style = try parseString(value) else if (eq(key, "sidebar_collapsed")) self.ui.sidebar_collapsed = try parseBool(value) else if (eq(key, "input_line_highlight")) self.ui.input_line_highlight = try parseBool(value) else if (eq(key, "timestamp_gutter")) self.ui.timestamp_gutter = try parseBool(value) else return error.UnknownKey;
             },
             .@"ui.materials" => {
                 if (eq(key, "blur_px")) self.ui.materials.blur_px = try parseInt(u8, value) else return error.UnknownKey;
@@ -298,7 +298,7 @@ pub const Config = struct {
                 if (m.image_token_reservation) |reservation| if (reservation == 0 or reservation > 131072) return error.OutOfRange;
                 if (!p.enabled) continue;
                 if (m.id.len == 0 or m.context_window == 0) return error.InvalidValue;
-                if (m.reasoning and !m.reasoning_toggle and !m.efforts[0] and !m.efforts[1] and !m.efforts[2] and !m.efforts[3] and !m.efforts[4]) return error.InvalidValue;
+                if (m.reasoning and !m.reasoning_toggle and !m.efforts[0] and !m.efforts[1] and !m.efforts[2] and !m.efforts[3] and !m.efforts[4] and !m.efforts[5] and !m.efforts[6]) return error.InvalidValue;
             }
         }
         if (self.ssh.connect_timeout_sec == 0 or self.ssh.socks_port == 0 or self.transfer.max_tasks == 0 or self.log.retention_days == 0) return error.OutOfRange;
@@ -323,7 +323,8 @@ fn validPreferenceId(value: []const u8) bool {
     return true;
 }
 
-pub const Ui = struct { theme: []const u8 = "dark", font_family: []const u8 = "JetBrains Mono", font_size: u8 = 14, font_weight: []const u8 = "regular", line_height: f32 = 11.0 / 7.0, cursor_style: []const u8 = "block", sidebar_collapsed: bool = false, input_line_highlight: bool = true, timestamp_gutter: bool = false, materials: material.Materials = .{} };
+pub const IconBackground = enum { transparent, light, dark };
+pub const Ui = struct { icon_background: IconBackground = .transparent, theme: []const u8 = "dark", font_family: []const u8 = "JetBrains Mono", font_size: u8 = 14, font_weight: []const u8 = "regular", line_height: f32 = 11.0 / 7.0, cursor_style: []const u8 = "block", sidebar_collapsed: bool = false, input_line_highlight: bool = true, timestamp_gutter: bool = false, materials: material.Materials = .{} };
 pub fn resetDefaults() Config {
     var value: Config = .{};
     value.ui.theme = "sauber";
@@ -358,6 +359,7 @@ pub const AiModel = struct {
     default: bool = false,
     reasoning: bool = false,
     /// Discovery-only metadata, never persisted into the user configuration.
+    context_discovered: bool = false,
     reasoning_toggle: bool = false,
     reasoning_discovered: bool = false,
     reasoning_adaptive: bool = false,
@@ -365,7 +367,7 @@ pub const AiModel = struct {
     vision: bool = false,
     /// Conservative configured budget for models without a known image token formula.
     image_token_reservation: ?u32 = null,
-    efforts: [5]bool = .{ true, true, true, false, false },
+    efforts: [7]bool = .{ true, true, true, false, false, false, false },
 };
 pub const default_providers = [_]AiProvider{ .{ .kind = .anthropic }, .{ .kind = .openai_compat }, .{ .kind = .ollama } };
 pub const Ai = struct {
@@ -525,7 +527,10 @@ test "provider models roundtrip with allocator ownership" {
     const c = try Config.parseWithAllocator(arena.allocator(), source);
     var b: [8192]u8 = undefined;
     const loaded = try Config.parseWithAllocator(arena.allocator(), try c.format(&b));
-    try std.testing.expectEqualDeep(c.ai, loaded.ai);
+    // Flat legacy input retains spare migration slots; compare all active data.
+    var expected = c.ai;
+    expected.providers = expected.providers[0..expected.provider_count];
+    try std.testing.expectEqualDeep(expected, loaded.ai);
     try std.testing.expectError(error.RequiresAllocator, Config.parse(source));
 }
 
@@ -572,7 +577,7 @@ test "disabled provider models reject unserializable ids but allow incomplete ro
     try std.testing.expect(!loaded.ai.providers[0].enabled);
     try std.testing.expectEqualStrings("", loaded.ai.providers[0].models[0].id);
     try std.testing.expectEqual(@as(u32, 0), loaded.ai.providers[0].models[0].context_window);
-    try std.testing.expectEqualDeep(@as([5]bool, @splat(false)), loaded.ai.providers[0].models[0].efforts);
+    try std.testing.expectEqualDeep(@as([7]bool, @splat(false)), loaded.ai.providers[0].models[0].efforts);
 }
 
 test "plugin preference strings preserve unknown plugin values through escaped serialization" {
@@ -616,4 +621,24 @@ test "new configuration starts with no provider and flat legacy providers retain
     const loaded = try Config.parseWithAllocator(arena.allocator(), written);
     try std.testing.expectEqual(@as(usize, 2), loaded.ai.provider_count);
     try std.testing.expectEqualStrings(old.ai.providers[1].endpoint, loaded.ai.providers[1].endpoint);
+}
+
+test "none and ultra effort configuration roundtrips without enabling undeclared steps" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const c = try Config.parseWithAllocator(arena.allocator(), "[ai]\ndefault_provider=\"gateway\"\n[[ai.providers]]\nid=\"gateway\"\nkind=\"openai_compat\"\nendpoint=\"http://127.0.0.1:9/v1/chat/completions\"\n[[ai.providers.models]]\nname=\"extended\"\nreasoning=true\nefforts=[\"none\",\"ultra\"]\n");
+    var buffer: [8192]u8 = undefined;
+    const loaded = try Config.parseWithAllocator(arena.allocator(), try c.format(&buffer));
+    try std.testing.expectEqualDeep(c.ai.providers[0].models[0].efforts, loaded.ai.providers[0].models[0].efforts);
+    try std.testing.expectEqual([7]bool{ false, false, false, false, false, true, true }, loaded.ai.providers[0].models[0].efforts);
+}
+
+test "app icon background defaults and persisted choice" {
+    try std.testing.expectEqual(IconBackground.transparent, (try Config.parse("[ui]\ntheme = \"dark\"\n")).ui.icon_background);
+    const parsed = try Config.parse("[ui]\nicon_background = \"light\"\n");
+    try std.testing.expectEqual(IconBackground.light, parsed.ui.icon_background);
+    var buffer: [32768]u8 = undefined;
+    const restored = try Config.parse(try parsed.format(&buffer));
+    try std.testing.expectEqual(IconBackground.light, restored.ui.icon_background);
+    try std.testing.expectError(error.InvalidValue, Config.parse("[ui]\nicon_background = \"invalid\"\n"));
 }
