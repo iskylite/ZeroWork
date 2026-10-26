@@ -274,6 +274,9 @@ pub const Panel = struct {
     primary_label: *ui.Signal([]const u8) = undefined,
     status_row: *ui.Node = undefined,
     status_text: *ui.Node = undefined,
+    resume_checked: *ui.Signal(bool) = undefined,
+    md5_checked: *ui.Signal(bool) = undefined,
+    notify_checked: *ui.Signal(bool) = undefined,
     resume_label: *ui.Signal([]const u8) = undefined,
     md5_label: *ui.Signal([]const u8) = undefined,
     notify_label: *ui.Signal([]const u8) = undefined,
@@ -319,6 +322,9 @@ pub const Panel = struct {
         self.primary_style = try scope.createSignal(ui.BoxStyle, S.confirmationPrimary());
         self.option_style = try scope.createSignal(ui.BoxStyle, S.option());
         self.primary_label = try scope.createText("开始上传", .{});
+        self.resume_checked = try scope.createSignal(bool, true);
+        self.md5_checked = try scope.createSignal(bool, false);
+        self.notify_checked = try scope.createSignal(bool, true);
         self.resume_label = try scope.createText("", .{});
         self.md5_label = try scope.createText("", .{});
         self.notify_label = try scope.createText("", .{});
@@ -376,13 +382,11 @@ pub const Panel = struct {
         self.source_summary.setStyleInline(cx.allocator, S.confirmationHint());
         const chips = try ui.box(cx, S.row(24, 6), .{});
         try scroll.content.appendChild(cx.allocator, chips);
-        const resume_button = try ui.widgets.Button(.{ .label = self.resume_label, .variant = .ghost, .base_style = self.option_style, .on_click = cx.on(Panel, self, toggleResume) }).mount(scope, cx);
-        try chips.appendChild(cx.allocator, resume_button);
-        const md5_button = try ui.widgets.Button(.{ .label = self.md5_label, .variant = .ghost, .base_style = self.option_style, .on_click = cx.on(Panel, self, toggleMd5) }).mount(scope, cx);
-        try chips.appendChild(cx.allocator, md5_button);
-        const notify_button = try ui.widgets.Button(.{ .label = self.notify_label, .variant = .ghost, .base_style = self.option_style, .on_click = cx.on(Panel, self, toggleNotify) }).mount(scope, cx);
-        notify_button.meta.ownership.meta.test_id = "transfer.confirmation.notify";
-        try chips.appendChild(cx.allocator, notify_button);
+        inline for (.{ .{ "断点续传", "transfer.confirmation.resume", "resume_checked", "resumeChanged" }, .{ "MD5 校验", "transfer.confirmation.md5", "md5_checked", "md5Changed" }, .{ "完成通知", "transfer.confirmation.notify", "notify_checked", "notifyChanged" } }) |item| {
+            const check = try ui.widgets.Checkbox(.{ .label = item[0], .checked = @field(self, item[2]), .box_size = @as(f32, 14), .label_font_size = @as(f32, 11), .on_change = cx.on(Panel, self, @field(Panel, item[3])) }).mount(scope, cx);
+            check.meta.ownership.meta.test_id = item[1];
+            try chips.appendChild(cx.allocator, check);
+        }
         self.status_row = try ui.box(cx, S.errorLine(), .{});
         try inner.appendChild(cx.allocator, self.status_row);
         self.status_text = try self.text(self.status_row, "", 11, 400, true);
@@ -765,9 +769,24 @@ pub const Panel = struct {
         try self.source_summary.setTextContent(self.cx.allocator, value);
     }
     fn applyOptions(self: *Panel) void {
+        self.resume_checked.set(self.resume_transfer);
+        self.md5_checked.set(self.md5);
+        self.notify_checked.set(self.notify_complete);
         self.resume_label.set(if (self.resume_transfer) "断点续传 · 开" else "断点续传 · 关");
         self.md5_label.set(if (self.md5) "MD5 校验 · 开" else "MD5 校验 · 关");
         self.notify_label.set(if (self.notify_complete) "完成通知 · 开" else "完成通知 · 关");
+    }
+    fn resumeChanged(self: *Panel, value: bool) void {
+        self.resume_transfer = value;
+        self.applyOptions();
+    }
+    fn md5Changed(self: *Panel, value: bool) void {
+        self.md5 = value;
+        self.applyOptions();
+    }
+    fn notifyChanged(self: *Panel, value: bool) void {
+        self.notify_complete = value;
+        self.applyOptions();
     }
     fn toggleResume(self: *Panel) void {
         self.resume_transfer = !self.resume_transfer;

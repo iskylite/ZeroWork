@@ -8,7 +8,12 @@ pub const columns_fixed: f32 = 282;
 pub const path_font: f32 = 11.5;
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 pub fn root(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .direction = .row, .gap = 6, .padding = .{ .top = 24 }, .min_width = 0, .min_height = 0, .background = theme.current().app };
+    return .{ .width = .fill(), .height = .fill(), .direction = .row, .gap = 6, .min_width = 0, .min_height = 0, .background = theme.current().app };
+}
+/// Each side owns a file card plus an optional sibling transfer card.
+/// Hidden transfer roots do not contribute a gap or reserve any height.
+pub fn columnStack(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .column, .gap = 6 };
 }
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .column, .gap = 0, .padding = ui.Padding.all(1), .background = theme.current().surface_1, .border = .{ .radius = 11, .width = 1, .color = theme.current().border }, .overflow = .hidden, .overflow_hidden = true };
@@ -116,7 +121,8 @@ pub fn dragPreview(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .right = .{ .px = 8 }, .bottom = .{ .px = 40 } }, .height = .{ .px = 74 }, .flex_shrink = 0, .direction = .column, .gap = 4, .padding = ui.Padding.all(8), .background = theme.current().surface_2, .border = .{ .radius = 9 }, .hit_behavior = .pass_through };
 }
 
-/// V2 Bridge 342:1091861, target-card frozen transfer draft.
-pub fn copyConfirmation(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 132 }, .flex_shrink = 0, .direction = .column, .padding = .{ .top = 8, .bottom = 8, .left = 8, .right = 8 }, .gap = 4, .background = theme.current().surface_2, .border = .{ .radius = 9 } };
+
+
+pub fn dragGhost() ui.BoxStyle {
+    return .{ .position = .absolute, .width = .{ .px = 220 }, .height = .{ .px = 36 }, .padding = ui.Padding.all(8), .background = theme.current().overlay, .border = .{ .radius = 8 }, .shadow = .{ .blur = 16, .offset_y = 4, .color = theme.current().shadow }, .z_index = 80, .hit_behavior = .pass_through };
 }

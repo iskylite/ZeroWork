@@ -15,6 +15,7 @@ pub const Source = struct {
     create_key: operations.OperationKey,
     open_key: operations.OperationKey,
     spec: sessions.SessionCreateSpec,
+    progress_observer: ?@import("../proto/ssh/connection_progress.zig").Observer = null,
 
     pub fn ownsOperation(self: Source, key: operations.OperationKey) bool {
         if (key.operation_id == 0) return false;
@@ -105,6 +106,7 @@ const Binding = struct {
     startup_key: ?operations.OperationKey = null,
     auxiliary: ?sessions.AuxiliaryReadonlyStart = null,
     service: ?Backend = null,
+    journal: @import("../proto/ssh/connection_progress.zig").Journal = .{},
     phase: Phase = .connecting,
     failure: ?readonly.Failure = null,
     cleanup: readonly.ReleaseReceipt = .awaiting,
@@ -121,6 +123,7 @@ const Pending = struct {
     cleanup: readonly.ReleaseReceipt = .awaiting,
     final_taken: bool = false,
 };
+const Diagnostic = struct { handle: sessions.ServiceHandle, failure: ?readonly.Failure, journal: @import("../proto/ssh/connection_progress.zig").Journal.Snapshot };
 const binding_limit = 8;
 const operation_limit = 64;
 const response_limit = 64;
@@ -130,11 +133,14 @@ pub const FileBindingHost = struct {
     sessions: *sessions.SessionHost,
     factory: Factory,
     bindings: std.ArrayList(*Binding) = .empty,
+    finished_diagnostics: std.ArrayList(Diagnostic) = .empty,
     pending: std.ArrayList(Pending) = .empty,
     responses: std.ArrayList(Response) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, host: *sessions.SessionHost, factory: Factory) !FileBindingHost {
         var self: FileBindingHost = .{ .allocator = allocator, .sessions = host, .factory = factory };
+        try self.finished_diagnostics.ensureTotalCapacity(allocator, binding_limit);
+        errdefer self.finished_diagnostics.deinit(allocator);
         try self.bindings.ensureTotalCapacity(allocator, binding_limit);
         errdefer self.bindings.deinit(allocator);
         try self.pending.ensureTotalCapacity(allocator, operation_limit);
@@ -199,10 +205,11 @@ pub const FileBindingHost = struct {
             .connection_snapshot_id = domain_state.create_operation.operation_id,
         };
         binding.* = .{ .owner = owner, .handles = handles, .endpoint = endpoint, .source = source, .open_key = open_key, .startup_key = startup_key };
+        binding.journal.begin(open_key.attempt_id orelse 0);
         if (provider) |shared| {
             binding.service = .{ .shared = try shared.attach(shared.context, endpoint, open_key) };
         } else {
-            const connector = try self.factory.prepare(self.factory.context, .{ .owner = owner, .create_key = domain_state.create_operation, .open_key = open_key, .spec = binding.source.value });
+            const connector = try self.factory.prepare(self.factory.context, .{ .owner = owner, .create_key = domain_state.create_operation, .open_key = open_key, .spec = binding.source.value, .progress_observer = binding.journal.observer() });
             var transferred = false;
             errdefer if (!transferred) self.factory.discard(self.factory.context, connector);
             if (!connector.key.eql(open_key)) return error.FactoryOperationMismatch;
@@ -301,6 +308,10 @@ pub const FileBindingHost = struct {
             if (receipt == .released) {
                 try self.released(binding);
                 if (drained and binding.buffered == null) {
+                    if (binding.startup_key != null) {
+                        if (self.finished_diagnostics.items.len == binding_limit) _ = self.finished_diagnostics.orderedRemove(0);
+                        self.finished_diagnostics.appendAssumeCapacity(.{ .handle = binding.handles.directory, .failure = binding.failure, .journal = binding.journal.snapshot() });
+                    }
                     try service.deinit();
                     binding.source.deinit();
                     _ = self.bindings.orderedRemove(index);
@@ -372,6 +383,18 @@ pub const FileBindingHost = struct {
         return null;
     }
 
+    pub fn connectionFailure(self: *FileBindingHost, handle: sessions.ServiceHandle) ?readonly.Failure {
+        for (self.bindings.items) |binding| if (binding.handles.directory.eql(handle)) return binding.failure;
+        for (self.finished_diagnostics.items) |value| if (value.handle.eql(handle)) return value.failure;
+        return null;
+    }
+
+    pub fn connectionJournal(self: *FileBindingHost, handle: sessions.ServiceHandle) ?@import("../proto/ssh/connection_progress.zig").Journal.Snapshot {
+        for (self.bindings.items) |binding| if (binding.handles.directory.eql(handle)) return binding.journal.snapshot();
+        for (self.finished_diagnostics.items) |value| if (value.handle.eql(handle)) return value.journal;
+        return null;
+    }
+
     pub fn state(self: *FileBindingHost, handle: sessions.ServiceHandle) ?State {
         for (self.bindings.items) |binding| if (binding.handles.directory.eql(handle) or binding.handles.file_read.eql(handle)) return .{
             .owner = binding.owner,
@@ -421,6 +444,7 @@ pub const FileBindingHost = struct {
         self.responses.deinit(self.allocator);
         self.pending.deinit(self.allocator);
         self.bindings.deinit(self.allocator);
+        self.finished_diagnostics.deinit(self.allocator);
     }
 
     fn validateHandles(self: *FileBindingHost, owner: identity.SessionHandle, handles: Bindings) !void {
@@ -683,6 +707,8 @@ pub const DirectFactory = struct {
                 .connect_timeout_ms = self.policy.timeout_ms,
                 .keepalive_sec = remote.keepalive_sec,
                 .compression = remote.compression,
+                .progress_observer = self.source.progress_observer,
+                .attempt_id = self.source.open_key.attempt_id orelse 0,
                 .open_shell = false,
             });
         }

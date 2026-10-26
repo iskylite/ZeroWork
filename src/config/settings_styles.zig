@@ -217,9 +217,9 @@ pub fn section(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn sectionState(expanded: bool) ui.BoxStyle {
     var style = section(undefined);
-    style.padding = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 };
-    style.border = .{ .width = 1, .color = theme.current().fg_1.withAlpha(31), .radius = geometry.section_radius };
-    style.shadow = .{ .blur = 3, .offset_y = 1, .color = theme.current().fg_1.withAlpha(10) };
+    style.padding = ui.Padding.all(0);
+    style.border = .{ .width = 0, .side_widths = .{ 0, 0, 0, 0 }, .radius = geometry.section_radius };
+    style.shadow = .{ .blur = 0, .color = ui.Color.TRANSPARENT };
     _ = expanded;
     style.background = theme.current().surface_2;
     style.overflow_hidden = true;
@@ -234,8 +234,8 @@ pub fn sectionTitle(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn summaryHeader(has_summary: bool) ui.BoxStyle {
     var style = sectionHeader(undefined);
-    style.background = theme.current().surface_1;
-    style.border = .{ .radius = 11 };
+    style.background = theme.current().surface_2;
+    style.border = .{ .width = 0, .side_widths = .{ 0, 0, 0, 0 }, .radius = 11 };
     style.overflow_hidden = true;
     style.height = .{ .fit = .{} };
     style.min_height = if (has_summary) geometry.section_summary_header else 60;

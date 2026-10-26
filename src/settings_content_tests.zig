@@ -1057,3 +1057,20 @@ test "settings line height display preserves precise value when submitted unchan
     f.cx.handleKeyDown(.@"return", .{});
     try std.testing.expectEqual(expected, f.controller.model.value.ui.line_height);
 }
+
+test "settings section cards explicitly suppress inherited outline on every edge" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    const root = try ui.box(cx, .{}, .{});
+    cx.root = root;
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    var controller = try @import("config/settings_controller.zig").Controller.init(std.testing.allocator, .{});
+    defer controller.deinit();
+    controller.model.selectPage(2);
+    var context: u8 = 0;
+    const content = try view.mountContent(cx, scope, &controller, .{ .context = &context, .changed = changed, .request_edit = request, .action = action, .mount_providers = providers });
+    try root.appendChild(cx.allocator, content);
+    const card = byId(content, "settings.ssh.connection").?;
+    for (card.style.border.resolvedWidths()) |edge| try std.testing.expectEqual(@as(f32, 0), edge);
+}

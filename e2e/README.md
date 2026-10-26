@@ -51,7 +51,7 @@ node e2e/workspace.ts --out /absolute/path/to/evidence
 
 `node e2e/button_constraints_native.ts /tmp/ui-button-evidence` 使用当前test-mode二进制，在1440×900及860×480检查首页、快速连接、八类设置展开与滚动、Local/AI及重命名取消。加位置参数 `path` 单独复验长中英文下载目录：省略label、完整有界Tooltip和Esc。行为断言、几何候选与像素验收分别记录；runner不调用外部服务或真实删除操作。
 
-传输单行与关闭专项使用 `zig build transfer-controls-preview -Dtest-mode=true -Dtransfer-preview-presentation=global_popover`（另可选`session_popover`、`session_tray`），然后 `node e2e/transfer_controls_native.ts /absolute/bin/transfer-controls-preview /tmp/transfer-controls-new-run fixture`；tray模式用末参数`tray`，正式应用关闭检查用正式test-mode二进制及末参数`main`。该fixture复用生产renderer和按钮，仅使用合成任务。必须检查40px单行完整可见、SFTP按owner及上传/下载方向分列、无任务隐藏且不占位、卡片之间无细线分割、X后面板隐藏及重新打开后的第二次关闭，不能只验发送click成功。
+传输浅卡片与关闭专项使用 `zig build transfer-controls-preview -Dtest-mode=true -Dtransfer-preview-presentation=global_popover`（另可选`session_popover`、`session_tray`），然后 `node e2e/transfer_controls_native.ts /absolute/bin/transfer-controls-preview /tmp/transfer-controls-new-run fixture`；tray模式用末参数`tray`，正式应用关闭检查用正式test-mode二进制及末参数`main`。该fixture复用生产renderer和按钮，仅使用合成任务。必须检查76px卡片（84px排列节距、3px进度）主行及元信息完整可见、默认不显示复选框、管理后选择、按钮直接展开、450ms hover分组详情及完成上传复制路径、SFTP按owner及上传/下载方向分列、无任务隐藏且不占位、卡片之间无细线分割、X后面板隐藏及重新打开后的第二次关闭，不能只验发送click成功。
 
 通用结构回归：`zig build test-ui -Dui-test-filter='UI constraints' -j2`。其他模块专项及未通过边界见[按钮与尺寸审计](../docs/DEVELOPMENT/UI_CONTROL_AUDIT_20261026.md)，不能将单个runner通过称为所有操作全绿。
 

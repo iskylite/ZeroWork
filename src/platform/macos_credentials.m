@@ -79,7 +79,9 @@ static int owned_reference(const char *reference) {
     }
     return 1;
 }
-static OSStatus load_vault(const char *service) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+static OSStatus load_vault_with_ui(const char *service, int allow_ui) {
     CFStringRef name = CFStringCreateWithCString(NULL, service, kCFStringEncodingUTF8);
     if (!name) return errSecAllocate;
     if (cached_service) {
@@ -90,7 +92,21 @@ static OSStatus load_vault(const char *service) {
     if (!q) { CFRelease(name); return errSecAllocate; }
     CFDictionarySetValue(q, kSecReturnData, kCFBooleanTrue);
     CFDictionarySetValue(q, kSecMatchLimit, kSecMatchLimitOne);
-    CFTypeRef data = NULL; OSStatus status = no_ui_call(0, q, NULL, &data); CFRelease(q);
+    CFTypeRef data = NULL;
+    OSStatus status;
+    if (allow_ui) {
+        // Only the explicit startup recovery action may request system UI.
+        // This reads the same vault and preserves its existing access control.
+        CFDictionarySetValue(q, kSecUseAuthenticationUI, kSecUseAuthenticationUIAllow);
+        Boolean previous = false;
+        status = SecKeychainGetUserInteractionAllowed(&previous);
+        if (!status) {
+            status = SecKeychainSetUserInteractionAllowed(true);
+            if (!status) status = SecItemCopyMatching(q, &data);
+            (void)SecKeychainSetUserInteractionAllowed(previous);
+        }
+    } else status = no_ui_call(0, q, NULL, &data);
+    CFRelease(q);
     CFMutableDictionaryRef next = NULL;
     int exists = 0;
     if (status == errSecItemNotFound) {
@@ -126,6 +142,9 @@ static OSStatus load_vault(const char *service) {
     if (status) { CFRelease(next); CFRelease(name); return status; }
     cached_service = name; cached_vault = next; vault_exists = exists; return errSecSuccess;
 }
+static OSStatus load_vault(const char *service) { return load_vault_with_ui(service, 0); }
+int zw_credentials_authorize(const char *service) { return (int)load_vault_with_ui(service, 1); }
+#pragma clang diagnostic pop
 static OSStatus save_vault(const char *service, CFMutableDictionaryRef candidate) {
     CFMutableDictionaryRef q = vault_query(service);
     if (!q) return errSecAllocate;

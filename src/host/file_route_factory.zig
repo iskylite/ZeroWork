@@ -42,7 +42,7 @@ pub const SourceFactory = struct {
             },
             .host_key_observer = self.host_key_observer,
             .auth_interaction = self.auth_interaction,
-            .progress_observer = self.progress_observer,
+            .progress_observer = source.progress_observer orelse self.progress_observer,
             .timeout_ms = self.timeout_ms,
             .forward_services = self.forward_services,
         };

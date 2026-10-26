@@ -22,6 +22,8 @@ pub const Snapshot = struct {
     attached: bool = false,
     inline_authentication: bool = false,
     local_ready: bool = false,
+    file_session: bool = false,
+    activity: []const u8 = "",
     failure: ?Failure = null,
     /// Controller-owned history across whole-chain retries, newest 128 total.
     /// Empty means show this journal only; the view never fabricates history.
@@ -52,6 +54,7 @@ const Owned = struct {
         for (source.hops, hops) |hop, *destination| destination.* = .{ .name = try owned.dupe(u8, hop.name), .host = try owned.dupe(u8, hop.host), .user = try owned.dupe(u8, hop.user), .port = hop.port };
         copy.hops = hops;
         copy.logs = try owned.dupe(LogRecord, source.logs);
+        copy.activity = try owned.dupe(u8, source.activity);
         if (source.failure) |fault| {
             var frozen = fault;
             frozen.reason = try owned.dupe(u8, fault.reason);
@@ -127,6 +130,8 @@ pub const View = struct {
     chain_scope: ?*ui.Scope = null,
     title: *ui.Node,
     header_icon: *ui.Node = undefined,
+    header_spinner: *ui.Node = undefined,
+    spinner_color: *ui.Signal(?ui.Color),
     identity_chip: *ui.Node = undefined,
     toggle_button: *ui.Node = undefined,
     copy_icon: ?*ui.Node = null,
@@ -178,6 +183,7 @@ pub const View = struct {
             .cx = cx,
             .scope = scope,
             .callbacks = callbacks,
+            .spinner_color = try scope.createSignal(?ui.Color, S.theme.current().accent),
             .root = modal.overlay,
             .dialog = modal.dialog,
             .modal_body = modal.body,
@@ -221,6 +227,10 @@ pub const View = struct {
         self.header = header;
         self.header_icon = try ui.iconTint(cx, ui.icons.get("network").?, S.theme.current().accent, S.icon(18));
         try header.appendChild(cx.allocator, self.header_icon);
+        self.header_spinner = try ui.widgets.Spinner(.{ .size = 18, .stroke_width = 2, .color = self.spinner_color }).mount(scope, cx);
+        self.header_spinner.meta.ownership.meta.test_id = "connection.progress.spinner";
+        self.header_spinner.setDisplay(.none);
+        try header.appendChild(cx.allocator, self.header_spinner);
         self.title = try self.appendLabel(header, "连接进度", S.text(13, 700, false));
         self.title.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 20 }, .flex = 1, .min_width = 0 });
         self.header_action = try ui.box(cx, S.iconButton(22), .{});
@@ -370,6 +380,7 @@ pub const View = struct {
         const c = S.theme.current();
         self.dialog.setStyleInline(self.cx.allocator, S.panel(self.dialog.style.height.px, self.cx.viewport.width));
         _ = self.header_icon.setTint(c.accent);
+        self.spinner_color.set(c.accent);
         self.title.setTextColor(c.fg_1);
         self.endpoint.setTextColor(c.fg_1);
         self.identity_chip.setStyleInline(self.cx.allocator, S.chip());
@@ -472,6 +483,9 @@ pub const View = struct {
 
     fn refresh(self: *View) !void {
         const source = &self.source.?.value;
+        const spinning = source.file_session and !source.attached and source.state != .failed and source.state != .cancelled and !self.cancel_requested;
+        self.header_spinner.setDisplay(if (spinning) .flex else .none);
+        self.header_icon.setDisplay(if (spinning) .none else .flex);
         const target = source.hops[source.hops.len - 1];
         var buffer: [2048]u8 = undefined;
         try self.endpoint.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "{s}@{s}:{d}", .{ target.user, target.host, target.port }));
@@ -640,6 +654,9 @@ pub const View = struct {
         } else if (self.cancel_requested or source.state == .cancelled) {
             try title.writer.writeAll(if (source.cleanup == .released) "连接已取消" else "正在取消连接");
             try detail.writer.writeAll(cleanupText(source.cleanup));
+        } else if (source.file_session) {
+            try title.writer.writeAll("正在连接 SFTP");
+            try detail.writer.writeAll(source.activity);
         } else if (source.state == .protocol_ready or source.state == .attaching) {
             try title.writer.writeAll("协议已就绪，正在接入会话");
             try detail.writer.writeAll("等待会话接入结果。");
@@ -718,6 +735,9 @@ pub const View = struct {
         }
     }
     fn writeLogs(self: *View, writer: *std.Io.Writer) !void {
+        const source = self.source.?.value;
+        if (source.failure) |fault| try writer.print("失败原因：{s}\n", .{fault.reason});
+        if (source.file_session) try writer.print("SFTP：{s}\n", .{source.activity});
         const count = self.logCount();
         for (0..count) |index| {
             const record = self.logAt(index);
@@ -841,7 +861,7 @@ pub const View = struct {
     fn canRetry(self: *const View) bool {
         const source = if (self.source) |*source| &source.value else return false;
         if (source.attached or source.state != .failed or source.cleanup != .released) return false;
-        const resources = source.resources orelse return false;
+        const resources = source.resources orelse return source.file_session;
         return resources.released() and !resources.hasUnknown();
     }
     fn copyFeedback(self: *View, success: bool) void {
@@ -961,7 +981,8 @@ pub fn failureText(err: ?anyerror) []const u8 {
         error.HostKeyConfirmationRequired => "主机身份尚未确认",
         error.HostKeyRevoked => "服务器主机密钥已被撤销",
         error.Cancelled => "已取消",
-        else => "连接未完成，请查看当前失败阶段",
+        error.SftpSubsystemDenied => "服务器拒绝 SFTP 子系统",
+        else => @errorName(failure),
     } else "连接失败";
 }
 fn prepareCustomButton(button: *ui.Node) void {

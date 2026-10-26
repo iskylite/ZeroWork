@@ -346,7 +346,11 @@ pub const Controller = struct {
         try self.submit(side, if (side == .local) self.options.local.initial_path else self.options.remote.initial_path, .refresh);
     }
     pub fn viewCallbacks(self: *Controller) View.Callbacks {
-        return .{ .context = self, .action = onAction, .external_upload = onExternalUpload, .current_stamp = currentViewStamp };
+        return .{ .context = self, .action = onAction, .external_upload = onExternalUpload, .current_stamp = currentViewStamp, .current_projection = currentViewProjection };
+    }
+    fn currentViewProjection(raw: *anyopaque) ?View.Projection {
+        const self: *Controller = @ptrCast(@alignCast(raw));
+        return self.projection();
     }
     fn currentViewStamp(raw: *anyopaque, side: Side) View.Stamp {
         const self: *Controller = @ptrCast(@alignCast(raw));

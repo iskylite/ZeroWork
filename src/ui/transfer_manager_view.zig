@@ -236,16 +236,40 @@ pub fn mountWindow(cx: *ui.Cx, scope: *ui.Scope, manager: *backend.Manager, call
     return panel;
 }
 
+// A short leave grace lets the pointer cross the tooltip's 8px gap.
+const DetailHover = struct {
+    cx: *ui.Cx,
+    close: ?ui.Handler(void),
+    show: ?ui.Handler(void),
+    deadline: ?i128 = null,
+    fn enter(self: *DetailHover) void { self.deadline = null; }
+    fn triggerEnter(self: *DetailHover) void { self.enter(); if (self.show) |show| show.invoke(); }
+    fn leave(self: *DetailHover) void {
+        self.deadline = @import("../platform/realtime.zig").monotonicNs() + 250 * std.time.ns_per_ms;
+        self.cx.scheduleRedrawAfterNs(250 * std.time.ns_per_ms);
+    }
+    fn tick(node: *ui.Node) void {
+        const self: *DetailHover = @ptrCast(@alignCast(node.meta.ownership.debug_slots.state_ptrs[0].?));
+        if (self.deadline) |deadline| {
+            const now = @import("../platform/realtime.zig").monotonicNs();
+            if (now >= deadline) { self.deadline = null; if (self.close) |close| close.invoke(); }
+            else self.cx.scheduleRedrawAfterNs(@intCast(deadline - now));
+        }
+    }
+};
+
 const Control = struct {
     panel: *Panel,
     target: ?Target = null,
     action: ?TaskAction = null,
     window: ?WindowAction = null,
     choice: ?usize = null,
+    menu_open: ?*ui.Signal(bool) = null,
     state_filter: ?Filter = null,
-    kind: enum { action, detail, events, copy_path, window, choice, search, filter, new_transfer, batch, batch_pause, batch_resume, batch_cancel, all_tasks, scope_tasks, state_filter } = .action,
+    kind: enum { action, detail, events, copy_path, copy_local_path, window, choice, search, filter, new_transfer, batch, batch_pause, batch_resume, batch_cancel, all_tasks, scope_tasks, state_filter } = .action,
     fn run(self: *Control) void {
         const p = self.panel;
+        if (self.menu_open) |open| open.set(false);
         p.in_action = true;
         defer p.in_action = false;
         switch (self.kind) {
@@ -259,9 +283,9 @@ const Control = struct {
                 };
                 p.event_view.?.show(task_.target.job, task_.events) catch |err| p.fail(err);
             },
-            .copy_path => {
+            .copy_path, .copy_local_path => {
                 const task_ = p.task(self.target.?) orelse return;
-                if (!ui.platform_services.clipboardSetText(p.cx.system_sdk, task_.remote_path)) p.fail(error.ClipboardUnavailable);
+                if (!ui.platform_services.clipboardSetText(p.cx.system_sdk, if (self.kind == .copy_local_path) task_.local_path else task_.remote_path)) p.fail(error.ClipboardUnavailable);
             },
             .detail => {
                 if (p.task(self.target.?) == null) return;
@@ -305,7 +329,9 @@ const Control = struct {
                 }
             },
             .batch => {
+                p.scopes_dirty = true;
                 p.batch_visible = !p.batch_visible;
+                if (!p.batch_visible) p.selection.clearRetainingCapacity();
                 p.invalidate();
             },
             .batch_pause => p.performBatch(.pause) catch |err| p.fail(err),
@@ -329,7 +355,7 @@ const Control = struct {
                 break;
             };
         }
-        p.batch_visible = p.selection.items.len > 0;
+        p.batch_visible = true;
         p.invalidate();
     }
 };
@@ -353,6 +379,9 @@ pub const Panel = struct {
     tray_requested_show: bool = false,
     counts: Counts = .{},
     expanded: ?Target = null,
+    tray_layout_width: f32 = 0,
+    metadata_layout_width: f32 = 0,
+    owner_column_width: f32 = 106,
     events_open: bool = false,
     event_view: ?*@import("transfer_events_view.zig").View = null,
     batch_visible: bool = false,
@@ -375,6 +404,7 @@ pub const Panel = struct {
     v3_filters: ?*ui.Node = null,
     v3_filter_labels: [3]?*ui.Node = @splat(null),
     counts_row: *ui.Node,
+    tools_row: *ui.Node,
     counts_labels: [5]*ui.Node,
     title_badge: *ui.Node,
     notice: *ui.Node,
@@ -397,25 +427,24 @@ pub const Panel = struct {
 
     pub fn mountProjection(cx: *ui.Cx, scope: *ui.Scope, options: Options, hooks: Hooks) !*Panel {
         const p = try cx.allocator.create(Panel);
-        p.* = .{ .cx = cx, .scope = scope, .root = undefined, .options = options, .hooks = hooks, .window_disabled = try scope.createSignal(bool, hooks.window == null), .paint_colors = S.theme.current(), .head = undefined, .heading_title = undefined, .foot = undefined, .scope_row = undefined, .counts_row = undefined, .counts_labels = undefined, .title_badge = undefined, .notice = undefined, .footer_label = undefined, .footer_rate = undefined, .empty = undefined, .failure = undefined, .search = try scope.createText("", .{}), .search_node = undefined, .filters_node = undefined, .batch_row = undefined, .batch_label = undefined, .list = undefined, .virtual = undefined };
+        p.* = .{ .cx = cx, .scope = scope, .root = undefined, .options = options, .hooks = hooks, .window_disabled = try scope.createSignal(bool, hooks.window == null), .paint_colors = S.theme.current(), .head = undefined, .heading_title = undefined, .foot = undefined, .scope_row = undefined, .counts_row = undefined, .tools_row = undefined, .counts_labels = undefined, .title_badge = undefined, .notice = undefined, .footer_label = undefined, .footer_rate = undefined, .empty = undefined, .failure = undefined, .search = try scope.createText("", .{}), .search_node = undefined, .filters_node = undefined, .batch_row = undefined, .batch_label = undefined, .list = undefined, .virtual = undefined };
         try scope.onCleanup(Panel, p, cleanup);
         const tray = options.presentation == .session_tray;
-        const window = options.presentation == .window or options.presentation == .global_popover;
+        const window = !tray;
         const native_window = options.presentation == .window;
-        p.root = try ui.box(cx, if (tray) S.sessionTray() else if (native_window) S.panel(window) else S.v3Panel(window), .{});
+        p.root = try ui.box(cx, if (tray) S.sessionTray() else S.panel(true), .{});
         p.root.meta.ownership.meta.test_id = "transfer.manager";
         if (!native_window and !tray) p.root.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .top = .{ .px = 46 }, .right = .{ .px = 14 } }, .z_index = 50 });
         p.root.setDisplay(.none);
-        p.head = try ui.box(cx, S.row(if (native_window) 30 else if (tray) 28.5 else 26, if (native_window) 6 else 8), .{});
+        p.head = try ui.box(cx, S.row(if (tray) 28 else 30, 6), .{});
         p.head.meta.ownership.meta.test_id = "transfer.header";
-        if (!native_window and !tray) p.head.setStyleInline(cx.allocator, .{ .padding = .{ .top = 2 } });
         try p.root.appendChild(cx.allocator, p.head);
-        if (native_window) {
+        if (!tray) {
             try p.root.insertChildBefore(cx.allocator, try ui.boxStyled(cx, S.topFade, .{}), p.head);
             try p.root.appendChild(cx.allocator, try ui.boxStyled(cx, S.grip, .{}));
         }
-        if (!tray) try p.head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("arrow-down-up").?, S.theme.current().accent_ink, S.icon(if (native_window) 18 else 17)));
-        const heading_title = try p.label(p.head, if (native_window) "传输任务" else if (window) "全局传输管理器" else if (tray) "当前会话传输" else "文件传输", if (tray) 12 else 13, 700, false);
+        if (!tray) try p.head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("arrow-down-up").?, S.theme.current().accent_ink, S.icon(18)));
+        const heading_title = try p.label(p.head, if (tray) "当前会话传输" else "传输任务", if (tray) 12 else 13, 700, false);
         p.heading_title = heading_title;
         heading_title.meta.ownership.meta.test_id = "transfer.header.title";
         if (!native_window) if (heading_title.getText()) |old| {
@@ -423,40 +452,24 @@ pub const Panel = struct {
             props.line_height = 20.0 / 13.0;
             heading_title.setText(props);
         };
-        heading_title.setStyleInline(cx.allocator, if (native_window) S.label(72) else S.flexibleLabel());
+        heading_title.setStyleInline(cx.allocator, if (tray) S.flexibleLabel() else S.label(72));
+        if (!tray) try p.head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.lock_keyhole, S.theme.current().fg_2, S.icon(12)));
         p.title_badge = try p.label(p.head, "", 10.5, 400, true);
-        p.title_badge.setDisplay(.none);
+        p.title_badge.setDisplay(if (tray) .none else .flex);
         p.title_badge.setStyleInline(cx.allocator, .{ .height = .{ .px = 22 }, .padding = .{ .left = 8, .right = 8 }, .background = S.theme.current().surface_2, .border = .{ .radius = 6 } });
-        if (native_window) try p.head.appendChild(cx.allocator, try ui.spacer(cx));
+        if (!tray) try p.head.appendChild(cx.allocator, try ui.spacer(cx));
         if (native_window) {
             _ = try p.button(p.head, scope, "最小化传输窗口", "transfer.window.minimize", "minus", .{ .panel = p, .kind = .window, .window = .minimize }, p.window_disabled, 22);
             _ = try p.button(p.head, scope, "缩放传输窗口", "transfer.window.zoom", "maximize-2", .{ .panel = p, .kind = .window, .window = .zoom }, p.window_disabled, 22);
         }
         if (tray) {
-            try p.v3TaskAction(p.head, scope, "全局传输管理", "transfer.open.all", .{ .panel = p, .kind = .all_tasks }, hooks.open_manager == null);
+            _ = try p.button(p.head, scope, "管理任务", "transfer.batch", "list-checks", .{ .panel = p, .kind = .batch }, false, 24);
         } else _ = try p.button(p.head, scope, if (native_window) "收起传输" else "关闭浮卡", "transfer.window.close", "x", .{ .panel = p, .kind = .window, .window = .close }, false, if (native_window) 22 else 24);
-        try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(if (native_window) 9 else if (tray) 6 else 8), .{}));
-        if (!native_window and window) {
-            const segments = try ui.box(cx, S.v3Segment(), .{});
-            segments.meta.ownership.meta.test_id = "transfer.filters";
-            p.v3_filters = segments;
-            try p.root.appendChild(cx.allocator, segments);
-            for ([_][]const u8{ "全部", "进行中", "已完成" }, [_]Filter{ .all, .active, .ended }, 0..) |name_, filter_, i| {
-                const state = try scope.createState(Control, .{ .panel = p, .kind = .state_filter, .state_filter = filter_ });
-                const b = try ui.widgets.Button(.{ .label = name_, .variant = .ghost, .base_style = S.v3Filter(i == 0), .on_click = cx.on(Control, state, Control.run) }).mount(scope, cx);
-                b.meta.ownership.meta.test_id = switch (filter_) {
-                    .all => "transfer.filter.all",
-                    .active => "transfer.filter.active",
-                    else => "transfer.filter.completed",
-                };
-                p.v3_filter_labels[i] = b;
-                try segments.appendChild(cx.allocator, b);
-            }
-            try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(8), .{}));
-        }
-        p.scope_row = try ui.box(cx, S.row(32, 6), .{});
+        try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(if (tray) 6 else 9), .{}));
+        p.scope_row = try ui.box(cx, S.row(@import("workspace_tab_styles.zig").height, 4), .{});
         try p.root.appendChild(cx.allocator, p.scope_row);
         p.counts_row = try ui.box(cx, S.row(28, 6), .{});
+        p.counts_row.meta.ownership.meta.test_id = "transfer.states.toolbar";
         try p.root.appendChild(cx.allocator, p.counts_row);
         for (&p.counts_labels, 0..) |*label_, i| {
             const box = try ui.box(cx, S.badge(if (i == 0) 84 else 74, countColor(i)), .{});
@@ -464,6 +477,8 @@ pub const Panel = struct {
             try p.counts_row.appendChild(cx.allocator, box);
         }
         try p.counts_row.appendChild(cx.allocator, try ui.spacer(cx));
+        p.tools_row = try ui.box(cx, .{ .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
+        try p.counts_row.appendChild(cx.allocator, p.tools_row);
         p.search_node = try ui.widgets.Input(.{ .value = p.search, .placeholder = "搜索文件名、路径或会话", .on_change = cx.on(Panel, p, searchChanged) }).mount(scope, cx);
         p.search_node.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 30 }, .flex_shrink = 0 });
         p.search_node.meta.ownership.meta.test_id = "transfer.search";
@@ -500,11 +515,11 @@ pub const Panel = struct {
         p.failure = try p.label(p.root, "", 10.5, 400, true);
         p.failure.setStyleInline(cx.allocator, S.errorLine());
         p.failure.setDisplay(.none);
-        const empty_state = try ui.box(cx, if (native_window) S.emptyState() else S.v3EmptyState(), .{});
+        const empty_state = try ui.box(cx, S.emptyState(), .{});
         p.empty_container = empty_state;
         empty_state.meta.ownership.meta.test_id = "transfer.empty";
         try p.root.appendChild(cx.allocator, empty_state);
-        if (native_window) {
+        if (!tray) {
             try empty_state.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.folder_open, S.theme.current().fg_2, S.icon(18)));
             p.empty = try p.label(empty_state, "", 12, 500, false);
         } else {
@@ -545,25 +560,15 @@ pub const Panel = struct {
         p.virtual = list.state;
         p.list = .{ .container = list.container, .content = list.state.content_node, .state = list.state.scroll_state };
         list.container.setStyleInline(cx.allocator, S.viewport());
-        p.list.content.style.padding.right = if (native_window) 14 else 0;
+        p.list.content.style.padding.right = if (tray) 0 else 14;
         try p.root.appendChild(cx.allocator, list.container);
-        try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(if (native_window) 6 else if (window) 0 else 10), .{}));
+        try p.root.appendChild(cx.allocator, try ui.box(cx, S.gap(if (tray) 0 else 6), .{}));
         p.foot = try ui.box(cx, if (native_window or window) S.row(32, 6) else S.v3Footer(), .{});
         try p.root.appendChild(cx.allocator, p.foot);
         p.footer_label = try p.label(p.foot, "", 10.5, 400, true);
         p.footer_label.setStyleInline(cx.allocator, .{ .width = .{ .px = 210 }, .min_width = 0, .overflow = .hidden, .flex_shrink = 1 });
         p.footer_rate = try p.label(p.foot, "", 10.5, 400, true);
         p.footer_rate.setStyleInline(cx.allocator, S.flexibleLabel());
-        if (window) {
-            _ = try p.button(p.foot, scope, "查看全部任务", "transfer.open.all", "list", .{ .panel = p, .kind = .all_tasks }, false, 28);
-            _ = try p.button(p.foot, scope, "所选任务操作", "transfer.batch", "ellipsis", .{ .panel = p, .kind = .batch }, false, 28);
-        } else {
-            p.footer_label.setDisplay(.none);
-            p.footer_rate.setDisplay(.none);
-            try p.v3FooterAction(p.foot, scope, "打开 SFTP", "transfer.open.sftp", .{ .panel = p, .kind = .new_transfer }, hooks.new_transfer == null, false);
-            try p.foot.appendChild(cx.allocator, try ui.spacer(cx));
-            try p.v3FooterAction(p.foot, scope, "全局传输管理", "transfer.open.all", .{ .panel = p, .kind = .all_tasks }, hooks.open_manager == null, true);
-        }
         try cx.addAfterLayoutHook(p, afterLayout);
         return p;
     }
@@ -585,7 +590,7 @@ pub const Panel = struct {
     fn button(self: *Panel, parent: *ui.Node, scope: *ui.Scope, label_: []const u8, test_id: []const u8, icon: []const u8, control: Control, disabled: anytype, size: f32) !*ui.Node {
         const state = try scope.createState(Control, control);
         const owned_label = try scope.createText(label_, .{});
-        const node = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get(icon), .icon_size = if (self.options.presentation != .window and control.kind == .window) @as(f32, 14) else 16, .a11y_label = owned_label, .base_style = S.action(size), .disabled = disabled, .on_click = self.cx.on(Control, state, Control.run) }).mount(scope, self.cx);
+        const node = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get(icon), .icon_size = if (size <= 24) @as(f32, 14) else 16, .a11y_label = owned_label, .base_style = S.action(size), .disabled = disabled, .on_click = self.cx.on(Control, state, Control.run) }).mount(scope, self.cx);
         node.meta.ownership.meta.test_id = test_id;
         try parent.appendChild(self.cx.allocator, node);
         return node;
@@ -644,15 +649,10 @@ pub const Panel = struct {
         self.visible.clearRetainingCapacity();
         self.counts = .{};
         const query = self.search.peek();
-        var v3_active: usize = 0;
-        var v3_completed: usize = 0;
         for (source.value.rows, 0..) |task_, i| {
             if (!belongs(self.selected_scope, task_.target.owner)) continue;
             if (self.direction_filter) |direction| if (task_.direction != direction) continue;
             const kind = category(task_.phase);
-            const active = task_.phase == .queued or task_.phase == .retry_wait or task_.phase == .running or task_.phase == .verifying;
-            if (active) v3_active += 1;
-            if (task_.phase == .succeeded) v3_completed += 1;
             switch (kind) {
                 .active => self.counts.active += 1,
                 .waiting => self.counts.waiting += 1,
@@ -662,22 +662,9 @@ pub const Panel = struct {
                 .all => unreachable,
             }
             if (task_.phase == .running) self.counts.speed_bps +|= task_.speed_bps;
-            if (self.options.presentation != .window and self.filter == .active) {
-                if (!active) continue;
-            } else if (self.options.presentation != .window and self.filter == .ended) {
-                if (task_.phase != .succeeded) continue;
-            } else if (self.filter != .all and self.filter != kind) continue;
+            if (self.filter != .all and self.filter != kind) continue;
             if (query.len > 0 and !contains(task_.name, query) and !contains(task_.local_path, query) and !contains(task_.remote_path, query) and !contains(task_.owner_label, query)) continue;
             try self.visible.append(self.cx.allocator, i);
-        }
-        if (self.options.presentation != .window) {
-            // UI_V3 prepends queued jobs; its session preview uses jobs.slice(-3).
-            std.mem.reverse(usize, self.visible.items);
-            if (self.options.presentation == .session_popover and self.visible.items.len > 3) {
-                const start = self.visible.items.len - 3;
-                std.mem.copyForwards(usize, self.visible.items[0..3], self.visible.items[start..]);
-                self.visible.shrinkRetainingCapacity(3);
-            }
         }
         var selected_index: usize = 0;
         while (selected_index < self.selection.items.len) {
@@ -688,6 +675,19 @@ pub const Panel = struct {
             };
             if (retained) selected_index += 1 else _ = self.selection.orderedRemove(selected_index);
         }
+        if (self.options.presentation != .session_popover and self.options.presentation != .session_tray) {
+            var preferred: f32 = 106;
+            for (self.visible.items) |index| preferred = @max(preferred, self.cx.text.measureTextWidth(source.value.rows[index].owner_label, 11, 400, false) + 2);
+            // Filename gets its measured list-wide width first; only the owner
+            // gives up space, retaining a small ellipsis slot on narrow views.
+            var filename_width: f32 = 120;
+            for (self.visible.items) |index| filename_width = @max(filename_width, self.cx.text.measureTextWidth(source.value.rows[index].name, 12, 400, false) + 2);
+            const available = if (self.metadata_layout_width > 0) self.metadata_layout_width else 812;
+            const reserved: f32 = 20 + 14 + 76 + 112 + 102 + 30 + (if (self.batch_visible) @as(f32, 22) else 0);
+            const budget = @max(0, available - reserved);
+            const filename_reserved = @min(filename_width, @max(0, budget - 48));
+            self.owner_column_width = @min(preferred, @max(0, budget - filename_reserved));
+        }
         if (self.expanded) |target| if (self.task(target) == null) {
             self.expanded = null;
             self.events_open = false;
@@ -696,7 +696,7 @@ pub const Panel = struct {
         const scope_label = if (self.scope_choice) |i| source.value.choices[i].label else source.value.scope_label;
         if (self.selected_scope == .session) {
             try self.format(self.title_badge, "会话 #{d}", .{@backingInt(self.selected_scope.session.session_id)});
-        } else try self.title_badge.setTextContent(self.cx.allocator, scope_label);
+        } else try self.title_badge.setTextContent(self.cx.allocator, if (self.selected_scope == .all) "全局" else scope_label);
         try self.notice.setTextContent(self.cx.allocator, source.value.notice);
         self.notice.parent.?.setDisplay(if (self.options.presentation != .session_popover and source.value.notice.len != 0) .flex else .none);
         const values = [_]usize{ self.counts.active, self.counts.waiting, self.counts.paused, self.counts.failed, self.counts.ended };
@@ -706,36 +706,21 @@ pub const Panel = struct {
             node.parent.?.setStyleInline(self.cx.allocator, S.badge(if (i == 0) 84 else 74, if (count == 0) S.theme.current().fg_3 else countColor(i)));
         }
         const has_tasks = self.counts.active + self.counts.waiting + self.counts.paused + self.counts.failed + self.counts.ended != 0;
-        self.counts_row.setDisplay(if (self.options.presentation == .window and has_tasks) .flex else .none);
+        self.counts_row.setDisplay(if (self.options.presentation != .session_tray and has_tasks) .flex else .none);
         self.footer_rate.setDisplay(if (has_tasks) .flex else .none);
-        try self.footer_label.setTextContent(self.cx.allocator, if (self.options.presentation == .session_popover) scope_label else "");
-        self.footer_label.setDisplay(if (self.options.presentation == .session_popover) .flex else .none);
+        try self.footer_label.setTextContent(self.cx.allocator, scope_label);
+        self.footer_label.setDisplay(if (self.options.presentation != .session_tray) .flex else .none);
         try self.format(self.footer_rate, "{d} 进行中 · {d:.1} MiB/s · {d} 等待", .{ self.counts.active, @as(f64, @floatFromInt(self.counts.speed_bps)) / 1048576, self.counts.waiting });
         self.search_node.setDisplay(if (self.search_visible) .flex else .none);
         self.filters_node.setDisplay(if (self.filter_visible) .flex else .none);
-        self.batch_row.setDisplay(if (self.batch_visible and self.options.presentation == .window) .flex else .none);
-        if (self.options.presentation != .window) {
+        self.batch_row.setDisplay(if (self.batch_visible) .flex else .none);
+        if (self.options.presentation == .session_tray) {
             self.scope_row.setDisplay(.none);
+            self.counts_row.setDisplay(.none);
+            self.foot.setDisplay(.none);
             self.search_node.setDisplay(.none);
             self.filters_node.setDisplay(.none);
-            if (self.options.presentation == .global_popover or self.options.presentation == .session_tray) self.foot.setDisplay(.none);
-            self.footer_label.setDisplay(.none);
-            self.footer_rate.setDisplay(.none);
-            const total_count = self.counts.active + self.counts.waiting + self.counts.paused + self.counts.failed + self.counts.ended;
-            for ([_][]const u8{ "全部", "进行中", "已完成" }, [_]usize{ total_count, v3_active, v3_completed }, [_]Filter{ .all, .active, .ended }, 0..) |name_, count, filter_, i| if (self.v3_filter_labels[i]) |button_| {
-                const label_ = firstTextNode(button_) orelse return error.MissingFilterLabel;
-                try self.format(label_, "{s} {d}", .{ name_, count });
-                label_.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 16 } });
-                if (label_.getText()) |old| {
-                    var props = old;
-                    props.font_size = 11;
-                    props.font_weight = 400;
-                    props.line_height = 16.0 / 11.0;
-                    props.color = if (self.filter == filter_) S.theme.current().accent_ink else S.theme.current().fg_2;
-                    label_.setText(props);
-                }
-                button_.setStyleInline(self.cx.allocator, S.v3Filter(self.filter == filter_));
-            };
+            self.notice.parent.?.setDisplay(.none);
         }
         if (self.options.presentation == .session_tray) {
             try self.heading_title.setTextContent(self.cx.allocator, if (self.direction_filter) |direction| (if (direction == .upload) "上传传输" else "下载传输") else "当前会话传输");
@@ -762,28 +747,48 @@ pub const Panel = struct {
     fn renderScopes(self: *Panel) !void {
         if (self.scope_scope) |scope| scope.dispose();
         self.scope_scope = null;
-        while (self.scope_row.children.items.len > 0) {
-            const child = self.scope_row.children.items[self.scope_row.children.items.len - 1];
-            self.cx.detachChild(self.scope_row, child);
-            self.cx.destroyDetached(child);
+        for ([_]*ui.Node{ self.scope_row, self.tools_row }) |parent| {
+            while (parent.children.items.len > 0) {
+                const child = parent.children.items[parent.children.items.len - 1];
+                self.cx.detachChild(parent, child);
+                self.cx.destroyDetached(child);
+            }
         }
+        self.scope_row.setDisplay(if (self.options.presentation == .session_popover or self.options.presentation == .session_tray) .none else .flex);
         const scope = try self.scope.childScope();
         self.scope_scope = scope;
         const source = self.source orelse return;
         const strip = try ui.widgets.ScrollArea(.{ .direction = .horizontal }).mount(scope, self.cx);
-        strip.container.setStyleInline(self.cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 32 } });
-        strip.content.setStyleInline(self.cx.allocator, .{ .direction = .row, .gap = 6, .height = .{ .px = 32 }, .align_items = .center });
+        strip.container.setStyleInline(self.cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = @import("workspace_tab_styles.zig").height } });
+        strip.content.setStyleInline(self.cx.allocator, .{ .direction = .row, .gap = 4, .height = .{ .px = @import("workspace_tab_styles.zig").height }, .align_items = .center });
         try self.scope_row.appendChild(self.cx.allocator, strip.container);
         for (source.value.choices, 0..) |choice, i| {
+            if (self.options.presentation == .session_popover) continue;
+            if (choice.scope == .sessions) continue;
+            if (choice.scope != .all) {
+                var has_tasks = false;
+                for (source.value.rows) |task_| if (belongs(choice.scope, task_.target.owner)) { has_tasks = true; break; };
+                if (!has_tasks) continue;
+            }
             const state = try scope.createState(Control, .{ .panel = self, .kind = .choice, .choice = i });
-            const label_ = try scope.createText(choice.label, .{});
+            const tabs = @import("workspace_tab_styles.zig");
             const selected = scopeEql(choice.scope, self.selected_scope);
-            const button_ = try ui.widgets.Button(.{ .label = label_, .variant = if (selected) ui.widgets.button.ButtonVariant.primary else ui.widgets.button.ButtonVariant.secondary, .a11y_label = label_, .base_style = S.choice(if (i == 0) 100 else if (i == 1) 146 else 132, selected), .on_click = self.cx.on(Control, state, Control.run) }).mount(scope, self.cx);
+            const width = std.math.clamp(self.cx.text.measureTextWidth(choice.label, 12, 500, false) + 28, 100, 220);
+            const button_ = try ui.box(self.cx, tabs.tab(width, selected), .{});
+            button_.behavior.interaction.a11y = .{ .role = .tab, .label = choice.label, .selected = selected };
+            button_.behavior.interaction.focusable = true;
+            _ = ui.clickable(button_, self.cx.on(Control, state, Control.run));
+            const title = try ui.text(self.cx, "", tabs.title());
+            try title.setTextContent(self.cx.allocator, choice.label);
+            title.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .margin = .{ .left = 10, .right = 10 } });
+            try button_.appendChild(self.cx.allocator, title);
+            if (selected) try button_.appendChild(self.cx.allocator, try ui.box(self.cx, tabs.underline(width), .{}));
             button_.meta.ownership.meta.test_id = "transfer.scope";
             try strip.content.appendChild(self.cx.allocator, button_);
         }
-        _ = try self.button(self.scope_row, scope, "搜索任务", "transfer.search.toggle", "search", .{ .panel = self, .kind = .search }, false, 28);
-        _ = try self.button(self.scope_row, scope, "筛选任务状态", "transfer.filter.toggle", "filter", .{ .panel = self, .kind = .filter }, false, 28);
+        try self.v3TaskAction(self.tools_row, scope, if (self.batch_visible) "完成" else "管理", "transfer.batch", .{ .panel = self, .kind = .batch }, false);
+        _ = try self.button(self.tools_row, scope, "搜索任务", "transfer.search.toggle", "search", .{ .panel = self, .kind = .search }, false, 28);
+        _ = try self.button(self.tools_row, scope, "筛选任务状态", "transfer.filter.toggle", "filter", .{ .panel = self, .kind = .filter }, false, 28);
     }
     fn renderItem(node: *ui.Node, index: usize, cx: *ui.Cx, raw: ?*anyopaque) void {
         const self: *Panel = @ptrCast(@alignCast(raw.?));
@@ -793,66 +798,89 @@ pub const Panel = struct {
     }
     fn renderTask(self: *Panel, index: usize, scope: *ui.Scope, cx: *ui.Cx) !*ui.Node {
         const task_ = self.source.?.value.rows[self.visible.items[index]];
-        if (self.options.presentation != .window) return self.renderV3Task(task_, scope, cx);
-        const expanded = self.expanded != null and same(self.expanded.?, task_.target);
+
         const root = try ui.box(cx, S.stack(), .{});
         root.setStyleInline(cx.allocator, .{ .gap = 4 });
-        const row = try ui.box(cx, S.task(self.isSelected(task_.target)), .{});
+        var row_style = S.task(self.isSelected(task_.target));
+        if (!self.isSelected(task_.target) and task_.phase == .running) row_style.background = S.theme.current().accent.withAlpha(18);
+        const row = try ui.box(cx, row_style, .{});
         row.meta.ownership.meta.test_id = "transfer.task";
         try root.appendChild(cx.allocator, row);
-        const upper = try ui.box(cx, S.row(24, 6), .{});
+        const compact = self.options.presentation == .session_tray and self.tray_layout_width < 480;
+        const upper = try ui.box(cx, S.row(24, if (compact) 3 else 6), .{});
+        upper.meta.ownership.meta.test_id = "transfer.task.head";
         try row.appendChild(cx.allocator, upper);
         const control = try scope.createState(Control, .{ .panel = self, .target = task_.target });
         const checkbox = try ui.widgets.Checkbox(.{ .checked = self.isSelected(task_.target), .box_size = @as(f32, 16), .label = "", .disabled = task_.target.owner == null, .on_change = cx.on(Control, control, Control.checked) }).mount(scope, cx);
-        if (checkbox.children.items.len > 0) checkbox.children.items[0].setStyleInline(cx.allocator, .{ .background = if (self.isSelected(task_.target)) S.theme.current().accent else S.theme.current().well, .border = .{ .width = 0, .radius = 4 } });
         checkbox.behavior.interaction.a11y.?.label = "选择传输任务";
         checkbox.meta.ownership.meta.test_id = "transfer.task.select";
         try upper.appendChild(cx.allocator, checkbox);
+        checkbox.setDisplay(if (self.batch_visible) .flex else .none);
         const color = phaseColor(task_.phase);
         try upper.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (task_.direction == .upload) "arrow-up-right" else "arrow-down-left").?, color, S.icon(14)));
         checkbox.setStyleInline(cx.allocator, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .min_width = 16, .padding = .ZERO, .flex_shrink = 0 });
-        const name = try self.label(upper, task_.name, 11.5, 400, false);
-        name.setStyleInline(cx.allocator, S.flexibleLabel());
-        if (self.options.presentation != .session_popover) {
-            const owner = try self.label(upper, task_.owner_label, 10, 400, true);
-            owner.setStyleInline(cx.allocator, S.label(106));
+        _ = try self.taskTextSlot(upper, scope, task_.name, 12, false, false, "transfer.task.name");
+        if (self.options.presentation != .session_tray and self.options.presentation != .session_popover) {
+            const owner = try self.label(upper, task_.owner_label, 11, 400, true);
+            owner.setStyleInline(cx.allocator, S.label(self.owner_column_width));
+            owner.meta.ownership.meta.test_id = "transfer.task.owner";
             if (owner.getText()) |old| {
                 var text_props = old;
                 text_props.text_overflow = .ellipsis;
+                text_props.text_align = .end;
                 owner.setText(text_props);
             }
         }
-        const status = try self.label(upper, phaseLabel(task_.phase), 10.5, 500, true);
+        const status = try self.label(upper, phaseLabel(task_.phase), 11, 400, true);
         status.setTextColor(color);
-        status.setStyleInline(cx.allocator, S.label(76));
+        status.meta.ownership.meta.test_id = "transfer.task.status";
+        status.setStyleInline(cx.allocator, S.label(if (compact) 48 else if (self.options.presentation == .session_tray) 66 else 76));
+        if (status.getText()) |value| {
+            var props = value;
+            props.text_overflow = .ellipsis;
+            props.text_align = .end;
+            status.setText(props);
+        }
         var buffer: [96]u8 = undefined;
         const description = if (task_.phase == .running) try std.fmt.bufPrint(&buffer, "{d:.1} MiB/s", .{@as(f64, @floatFromInt(task_.speed_bps)) / 1048576}) else if (task_.status_detail.len > 0) task_.status_detail else switch (task_.phase) {
             .queued => "等待连接",
             .paused => if (task_.can_resume) "等待继续" else "数据已保留",
             else => "",
         };
-        const rate = try self.label(upper, description, 10, 400, true);
-        rate.setStyleInline(cx.allocator, S.label(112));
+        const rate = try self.label(upper, description, 11, 400, true);
+        rate.meta.ownership.meta.test_id = "transfer.task.rate";
+        rate.setStyleInline(cx.allocator, S.label(if (self.options.presentation == .session_tray) 76 else 112));
+        if (v3HasError(task_)) rate.meta.ownership.meta.test_id = "transfer.task.error";
+        if (compact) rate.setDisplay(.none);
         if (rate.getText()) |old| {
             var text_props = old;
             text_props.text_align = .end;
+            text_props.text_overflow = .ellipsis;
             rate.setText(text_props);
         }
         const actions = try ui.box(cx, S.row(24, 2), .{});
-        actions.style.width = .{ .px = 76 };
+        actions.style.width = .{ .px = 102 };
+        actions.style.justify = .end;
+        actions.meta.ownership.meta.test_id = "transfer.task.actions";
         try upper.appendChild(cx.allocator, actions);
-        if (primaryAction(task_.phase)) |action| {
-            _ = try self.button(actions, scope, actionLabel(action, task_.direction), "transfer.task.primary", actionIcon(action, task_.direction), .{ .panel = self, .target = task_.target, .action = action }, !self.actionAvailable(task_.target) or (action == .resume_transfer and !task_.can_resume), 24);
-        } else {
-            const slot = try ui.box(cx, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .align_items = .center, .justify = .center, .flex_shrink = 0 }, .{});
-            try slot.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (task_.phase == .queued or task_.phase == .retry_wait) "clock" else if (task_.phase == .verifying or task_.phase == .pausing or task_.phase == .cancelling) "loader-circle" else "minus").?, S.theme.current().fg_3, S.icon(16)));
-            try actions.appendChild(cx.allocator, slot);
+        // Successful uploads have no local reveal action; their single copy
+        // action below matches the HTML card and avoids duplicate copy icons.
+        if (!(task_.phase == .succeeded and task_.direction == .upload)) {
+            if (primaryAction(task_.phase)) |action| {
+                _ = try self.button(actions, scope, actionLabel(action, task_.direction), "transfer.task.primary", actionIcon(action, task_.direction), .{ .panel = self, .target = task_.target, .action = action }, !self.actionAvailable(task_.target) or (action == .resume_transfer and !task_.can_resume) or (action == .reveal and !self.canReveal(task_.target)), 24);
+            } else {
+                const slot = try ui.box(cx, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .align_items = .center, .justify = .center, .flex_shrink = 0 }, .{});
+                try slot.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (task_.phase == .queued or task_.phase == .retry_wait) "clock" else if (task_.phase == .verifying or task_.phase == .pausing or task_.phase == .cancelling) "loader-circle" else "minus").?, S.theme.current().fg_3, S.icon(16)));
+                try actions.appendChild(cx.allocator, slot);
+            }
         }
-        _ = try self.button(actions, scope, "查看任务详情", "transfer.task.more", "ellipsis", .{ .panel = self, .target = task_.target, .kind = .detail }, false, 24);
-        _ = try self.button(actions, scope, if (expanded) "收起任务详情" else "展开任务详情", "transfer.task.expand", if (expanded) "chevron-up" else "chevron-down", .{ .panel = self, .target = task_.target, .kind = .detail }, false, 24);
-        const lower = try ui.box(cx, S.row(14, 6), .{});
+        _ = try self.button(actions, scope, "复制远程路径", "transfer.task.copy_path", "copy", .{ .panel = self, .target = task_.target, .kind = .copy_path }, false, 24);
+        _ = try self.button(actions, scope, "查看任务事件", "transfer.task.events", "list", .{ .panel = self, .target = task_.target, .kind = .events }, false, 24);
+        if (allows(task_.phase, .cancel)) _ = try self.button(actions, scope, "取消任务", "transfer.task.cancel", "x", .{ .panel = self, .target = task_.target, .action = .cancel }, !self.actionAvailable(task_.target), 24);
+        const lower = try ui.box(cx, S.row(16, 6), .{});
+        lower.meta.ownership.meta.test_id = "transfer.task.meta";
         try row.appendChild(cx.allocator, lower);
-        const progress = try self.label(lower, "", 9.5, 400, true);
+        const progress = try self.label(lower, "", 11, 400, true);
         var done_buffer: [40]u8 = undefined;
         var total_buffer: [40]u8 = undefined;
         const done_text = try byteLabel(&done_buffer, task_.done_bytes);
@@ -864,22 +892,109 @@ pub const Panel = struct {
                 try self.format(progress, "{s} / {s} · 约 {d}s", .{ done_text, total_text, seconds });
             } else try self.format(progress, "{s} / {s}", .{ done_text, total_text });
         } else try self.format(progress, "{s} / 大小未知", .{done_text});
-        progress.setStyleInline(cx.allocator, .{ .width = .{ .px = 270 }, .min_width = 0, .flex_shrink = 1 });
-        const path = try self.label(lower, task_.remote_path, 9.5, 400, true);
-        path.setStyleInline(cx.allocator, S.flexibleLabel());
-        if (path.getText()) |old| {
-            var text_props = old;
-            text_props.text_align = .end;
-            path.setText(text_props);
-        }
-        if (category(task_.phase) != .ended) {
+        progress.setStyleInline(cx.allocator, .{ .width = .{ .px = if (compact) @max(@as(f32, 1), (self.tray_layout_width - 40) * 0.48) else if (self.options.presentation == .session_tray) 160 else 270 }, .min_width = 0, .flex_shrink = 1, .overflow = .hidden, .overflow_hidden = true });
+        _ = try self.taskTextSlot(lower, scope, task_.remote_path, 10.5, true, true, "transfer.task.location");
+        {
             const track = try ui.box(cx, S.track(), .{});
+            track.meta.ownership.meta.test_id = "transfer.task.progress";
             try row.appendChild(cx.allocator, track);
             const fraction: f64 = if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
             try track.appendChild(cx.allocator, try ui.box(cx, S.fill(@floatCast(fraction), color), .{}));
         }
-        if (expanded) try self.renderDetail(root, scope, task_);
+        const tip = try ui.widgets.Tooltip(.{ .text = "", .open_delay_ms = @as(f32, 450), .position = .bottom_end, .offset = 8, .width = @as(f32, 420), .wrap = .word }).mount(scope, cx);
+        const hover = try scope.createState(DetailHover, .{ .cx = cx, .close = tip.wrapper.behavior.events.on_leave, .show = tip.wrapper.behavior.events.on_hover });
+        tip.wrapper.behavior.events.on_hover = cx.on(DetailHover, hover, DetailHover.triggerEnter);
+        tip.wrapper.behavior.events.on_leave = cx.on(DetailHover, hover, DetailHover.leave);
+        tip.wrapper.meta.ownership.debug_slots.state_ptrs[0] = hover;
+        tip.wrapper.addBeforeRender(DetailHover.tick);
+        tip.content.behavior.events.on_hover = cx.on(DetailHover, hover, DetailHover.enter);
+        tip.content.behavior.events.on_leave = cx.on(DetailHover, hover, DetailHover.leave);
+        // Keep Tooltip's portal, delay and lifetime; replace its empty label
+        // visually with the same structured detail groups as the HTML baseline.
+        tip.content.children.items[0].setDisplay(.none);
+        tip.content.setStyleInline(cx.allocator, S.hoverDetail());
+        const detail_ext = try tip.content.style.ensureExtFallible(cx.allocator);
+        detail_ext.hit_shape = .{ .rounded_rect = 10 };
+        detail_ext.clip_shape = .{ .rounded_rect = 10 };
+        tip.content.meta.ownership.meta.test_id = "transfer.task.hover_detail";
+        const identity_text = try std.fmt.allocPrint(cx.allocator, "任务 #{d} · {s}", .{ task_.target.job, task_.owner_label });
+        defer cx.allocator.free(identity_text);
+        const detail_identity = try self.detailLabel(tip.content, identity_text, false, true, "transfer.detail.identity");
+        detail_identity.setStyleInline(cx.allocator, S.hoverDetailIdentity());
+        const filename_group = try ui.box(cx, S.hoverDetailField(), .{});
+        try tip.content.appendChild(cx.allocator, filename_group);
+        _ = try self.detailLabel(filename_group, "文件名", false, true, "transfer.detail.label");
+        _ = try self.detailLabel(filename_group, task_.name, false, false, "transfer.detail.name");
+        try self.detailField(tip.content, "本地路径", task_.local_path, "transfer.detail.local", scope, task_.target, true);
+        try self.detailField(tip.content, "远程路径", task_.remote_path, "transfer.detail.remote", scope, task_.target, false);
+        if (task_.options.len != 0) {
+            const tags = try ui.box(cx, S.row(24, 6), .{});
+            tags.meta.ownership.meta.test_id = "transfer.detail.options";
+            try tip.content.appendChild(cx.allocator, tags);
+            var parts = std.mem.splitSequence(u8, task_.options, " · ");
+            while (parts.next()) |part| {
+                const enabled = std.mem.endsWith(u8, part, "开");
+                const tag = try ui.box(cx, S.optionTag(enabled), .{});
+                try tags.appendChild(cx.allocator, tag);
+                var tag_text = S.text(10, 400, true);
+                tag_text.color = if (enabled) S.theme.current().ok_ink else S.theme.current().fg_2;
+                const label_ = try ui.text(cx, "", tag_text);
+                try label_.setTextContent(cx.allocator, part);
+                try tag.appendChild(cx.allocator, label_);
+            }
+        }
+        tip.content.behavior.interaction.a11y.?.label = "传输任务详情";
+        tip.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = S.row_height }, .flex_shrink = 0 });
+        tip.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill() });
+        root.removeChild(row);
+        try tip.trigger.appendChild(cx.allocator, row);
+        try root.appendChild(cx.allocator, tip.wrapper);
         return root;
+    }
+    fn detailLabel(self: *Panel, parent: *ui.Node, value: []const u8, mono: bool, secondary: bool, test_id: []const u8) !*ui.Node {
+        var style = S.text(11, 400, secondary);
+        style.use_monospace_font = mono;
+        style.line_height = 16.0 / 11.0;
+        style.wrap = .word;
+        const node = try ui.text(self.cx, "", style);
+        try node.setTextContent(self.cx.allocator, value);
+        node.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
+        node.meta.ownership.meta.test_id = test_id;
+        try parent.appendChild(self.cx.allocator, node);
+        return node;
+    }
+
+    fn detailField(self: *Panel, parent: *ui.Node, title: []const u8, value: []const u8, test_id: []const u8, scope: *ui.Scope, target: Target, local: bool) !void {
+        const group = try ui.box(self.cx, S.hoverDetailField(), .{});
+        try parent.appendChild(self.cx.allocator, group);
+        const heading = try ui.box(self.cx, S.row(24, 6), .{});
+        try group.appendChild(self.cx.allocator, heading);
+        _ = try self.detailLabel(heading, title, false, true, "transfer.detail.label");
+        if (value.len != 0) _ = try self.button(heading, scope, if (local) "复制本地路径" else "复制远程路径", if (local) "transfer.detail.copy_local" else "transfer.detail.copy_remote", "copy", .{ .panel = self, .target = target, .kind = if (local) .copy_local_path else .copy_path }, false, 24);
+        const path = try self.detailLabel(group, if (value.len != 0) value else "未提供", true, false, test_id);
+        if (value.len != 0) {
+            const control = try scope.createState(Control, .{ .panel = self, .target = target, .kind = if (local) .copy_local_path else .copy_path });
+            _ = ui.clickable(path, self.cx.on(Control, control, Control.run));
+        }
+    }
+
+    /// Owned shrinking text keeps paint and hit bounds inside its row while
+    /// exposing the complete task identity in a bounded native tooltip.
+    fn taskTextSlot(self: *Panel, parent: *ui.Node, scope: *ui.Scope, value: []const u8, size: f32, mono: bool, right: bool, test_id: []const u8) !*ui.Node {
+        _ = scope;
+        const height: f32 = if (mono) 16 else 18;
+        const slot = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = height }, .flex = 1, .min_width = 0, .overflow = .hidden, .overflow_hidden = true }, .{});
+        try parent.appendChild(self.cx.allocator, slot);
+        var style = S.text(size, 400, mono);
+        style.text_overflow = .ellipsis;
+        style.use_monospace_font = mono;
+        style.text_align = if (right) .end else .start;
+        const node = try ui.text(self.cx, "", style);
+        try node.setTextContent(self.cx.allocator, value);
+        node.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = height }, .min_width = 0, .overflow = .hidden, .overflow_hidden = true });
+        node.meta.ownership.meta.test_id = test_id;
+        try slot.appendChild(self.cx.allocator, node);
+        return node;
     }
     fn v3TaskAction(self: *Panel, parent: *ui.Node, scope: *ui.Scope, label_: []const u8, test_id: []const u8, control: Control, disabled: bool) !void {
         const state = try scope.createState(Control, control);
@@ -914,160 +1029,85 @@ pub const Panel = struct {
         }
         try parent.appendChild(self.cx.allocator, button_);
     }
-    fn renderV3Task(self: *Panel, task_: Task, scope: *ui.Scope, cx: *ui.Cx) !*ui.Node {
-        const expanded = self.expanded != null and same(self.expanded.?, task_.target);
-        const root = try ui.box(cx, S.stack(), .{});
-        root.setStyleInline(cx.allocator, .{ .gap = 4 });
-        var card_style = S.v3Card();
-        card_style.height = .{ .px = v3TaskHeight(task_) };
-        const card = try ui.box(cx, card_style, .{});
-        card.meta.ownership.meta.test_id = "transfer.task";
-        try root.appendChild(cx.allocator, card);
-        const head = try ui.box(cx, S.row(24, 6), .{});
-        head.meta.ownership.meta.test_id = "transfer.task.head";
-        try card.appendChild(cx.allocator, head);
-        const color = if (task_.phase == .succeeded) S.theme.current().ok_ink else S.theme.current().fg_2;
-        try head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (task_.direction == .upload) "upload" else "download").?, S.theme.current().accent_ink, S.icon(15)));
-        // The existing native detail state is entered through the file title.
-        // Its control adds no extra action or height to the compact row.
-        const detail_control = try scope.createState(Control, .{ .panel = self, .target = task_.target, .kind = .detail });
-        const name_label = try scope.createText(task_.name, .{});
-        const name_tip = try ui.widgets.Tooltip(.{ .text = name_label, .open_delay_ms = @as(f32, 450) }).mount(scope, cx);
-        name_tip.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 24 } });
-        name_tip.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_width = 0 });
-        try head.appendChild(cx.allocator, name_tip.wrapper);
-        const name_button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = name_label, .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 24 }, .flex = 1, .min_width = 0, .padding = .ZERO, .font_size = 12, .font_weight = 600, .text_color = S.theme.current().fg_1, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 0 }, .shadow = .{}, .justify = .start }, .on_click = cx.on(Control, detail_control, Control.run) }).mount(scope, cx);
-        name_button.meta.ownership.meta.test_id = "transfer.task.expand";
-        try name_tip.trigger.appendChild(cx.allocator, name_button);
-        const name = try ui.text(cx, task_.name, .{ .font_size = 12, .font_weight = 600, .color = S.theme.current().fg_1, .line_height = 16.0 / 12.0, .text_overflow = .ellipsis });
-        name.meta.ownership.meta.test_id = "transfer.task.name";
-        name.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0, .flex_shrink = 1 });
-        try name_button.appendChild(cx.allocator, name);
-        const badge = try ui.box(cx, .{ .height = .{ .px = 18 }, .padding = .{ .left = 5, .right = 5, .top = 2, .bottom = 2 }, .background = S.theme.current().well, .border = .{ .radius = 5 }, .flex_shrink = 0 }, .{});
-        badge.meta.ownership.meta.test_id = "transfer.task.status";
-        const status = try self.label(badge, if (task_.phase == .failed) "失败" else if (task_.phase == .conflict) "同名冲突" else phaseLabel(task_.phase), 10, 400, true);
-        status.setTextColor(color);
-        status.setStyleInline(cx.allocator, .{ .height = .{ .px = 14 }, .flex_shrink = 0 });
-        if (status.getText()) |old| {
-            var props = old;
-            props.line_height = 1.4;
-            status.setText(props);
-        }
-        try head.appendChild(cx.allocator, badge);
-        const meta = try ui.box(cx, S.row(24, 8), .{});
-        meta.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
-        meta.meta.ownership.meta.test_id = "transfer.task.meta";
-        try head.appendChild(cx.allocator, meta);
-        const location_text = try scope.createText("", .{});
-        const tip = try ui.widgets.Tooltip(.{ .text = location_text, .open_delay_ms = @as(f32, 450) }).mount(scope, cx);
-        tip.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 14 } });
-        tip.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_width = 0, .overflow = .hidden });
-        try meta.appendChild(cx.allocator, tip.wrapper);
-        const path = try self.label(tip.trigger, "", 10, 400, true);
-        const destination = if (task_.direction == .upload) task_.remote_path else task_.local_path;
-        const directory = std.fs.path.dirname(destination) orelse destination;
-        const location = try std.fmt.allocPrint(cx.allocator, "{s} · {s}", .{ task_.owner_label, directory });
-        defer cx.allocator.free(location);
-        try path.setTextContent(cx.allocator, if (v3HasError(task_)) task_.status_detail else location);
-        if (v3HasError(task_)) {
-            tip.trigger.meta.ownership.meta.test_id = "transfer.task.error";
-            path.setTextColor(S.theme.current().danger);
-        }
-        if (v3HasError(task_)) {
-            const diagnostic = try std.fmt.allocPrint(cx.allocator, "{s}\n{s}", .{ location, task_.status_detail });
-            defer cx.allocator.free(diagnostic);
-            location_text.set(diagnostic);
-        } else location_text.set(location);
-        path.meta.ownership.meta.test_id = "transfer.task.location";
-        path.setStyleInline(cx.allocator, S.flexibleLabel());
-        if (path.getText()) |old| {
-            var props = old;
-            props.text_overflow = .ellipsis;
-            props.line_height = 1.4;
-            path.setText(props);
-        }
-        var total_buffer: [40]u8 = undefined;
-        var rate_buffer: [96]u8 = undefined;
-        const description = v3RateLabel(task_, &rate_buffer, &total_buffer);
-        const rate = try self.label(meta, description, 10, 400, true);
-        rate.meta.ownership.meta.test_id = "transfer.task.rate";
-        rate.setStyleInline(cx.allocator, .{ .height = .{ .px = 14 }, .flex_shrink = 0 });
-        if (rate.getText()) |old| {
-            var props = old;
-            props.line_height = 1.4;
-            rate.setText(props);
-        }
-        const actions = try ui.box(cx, .{ .height = .{ .px = 24 }, .direction = .row, .gap = 4, .align_items = .center, .flex_shrink = 0 }, .{});
-        actions.meta.ownership.meta.test_id = "transfer.task.actions";
-        try head.appendChild(cx.allocator, actions);
-        const primary: ?TaskAction = switch (task_.phase) {
-            .queued, .retry_wait, .running => .pause,
-            .paused => .resume_transfer,
-            .failed => .retry,
-            .succeeded => .reveal,
-            .conflict => .resolve_conflict,
-            else => null,
+    fn taskMenu(self: *Panel, parent: *ui.Node, scope: *ui.Scope, task_: Task) !void {
+        const menu = try ui.widgets.Popover(.{ .position = .bottom_end, .width = @as(f32, 180), .size_policy = .fit_content, .a11y_role = .menu }).mount(scope, self.cx);
+        menu.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .flex_shrink = 0 });
+        menu.trigger.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .fill() });
+        menu.content.meta.ownership.meta.test_id = "transfer.task.menu";
+        menu.content.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 2, .padding = ui.Padding.all(4), .background = S.theme.current().overlay, .border = .{ .radius = 8 } });
+        const trigger = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.ellipsis, .icon_size = @as(f32, 14), .a11y_label = "任务操作", .base_style = S.action(24) }).mount(scope, self.cx);
+        trigger.meta.ownership.meta.test_id = "transfer.task.more";
+        try menu.trigger.appendChild(self.cx.allocator, trigger);
+        try parent.appendChild(self.cx.allocator, menu.wrapper);
+        const entries = [_]struct { label: []const u8, id: []const u8, icon: []const u8, kind: @FieldType(Control, "kind"), action: ?TaskAction = null }{
+            .{ .label = "复制远程路径", .id = "transfer.task.copy_path", .icon = "copy", .kind = .copy_path },
+            .{ .label = "查看任务事件", .id = "transfer.task.events", .icon = "list", .kind = .events },
+            .{ .label = "取消任务", .id = "transfer.task.cancel", .icon = "x", .kind = .action, .action = .cancel },
         };
-        if (primary) |action_| try self.v3TaskAction(actions, scope, switch (action_) {
-            .reveal => "查看",
-            .pause => "暂停",
-            .resume_transfer => "继续",
-            .retry => "重试",
-            .resolve_conflict => "处理",
-            else => actionLabel(action_, task_.direction),
-        }, "transfer.task.primary", .{ .panel = self, .target = task_.target, .action = action_ }, !self.actionAvailable(task_.target) or (action_ == .resume_transfer and !task_.can_resume) or (action_ == .reveal and !self.canReveal(task_.target)));
-        if (allows(task_.phase, .cancel)) try self.v3TaskAction(actions, scope, "取消", "transfer.task.cancel", .{ .panel = self, .target = task_.target, .action = .cancel }, !self.actionAvailable(task_.target));
-        var track_style = S.track();
-        track_style.height = .{ .px = 2 };
-        track_style.position = .absolute;
-        track_style.inset = .{ .left = .{ .px = 0 }, .bottom = .{ .px = 0 } };
-        track_style.background = S.theme.current().hover;
-        track_style.border = .{ .radius = 0 };
-        track_style.overflow = .hidden;
-        const track = try ui.box(cx, track_style, .{});
-        track.meta.ownership.meta.test_id = "transfer.task.progress";
-        try card.appendChild(cx.allocator, track);
-        const fraction: f64 = if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
-        var fill_style = S.fill(@floatCast(fraction), S.theme.current().accent);
-        fill_style.border = .{ .radius = 0 };
-        try track.appendChild(cx.allocator, try ui.box(cx, fill_style, .{}));
-        if (expanded) try self.renderDetail(root, scope, task_);
-        return root;
+        for (entries) |entry| {
+            if (entry.action) |action| if (!allows(task_.phase, action)) continue;
+            const state = try menu.scope.createState(Control, .{ .panel = self, .target = task_.target, .kind = entry.kind, .action = entry.action, .menu_open = menu.open });
+            const label_ = try menu.scope.createText(entry.label, .{});
+            const button_ = try ui.widgets.Button(.{ .label = label_, .variant = .ghost, .icon_asset = ui.icons.get(entry.icon), .icon_size = @as(f32, 14), .a11y_label = label_, .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 28 }, .justify = .start, .padding = .{ .left = 8, .right = 8 }, .font_size = 11, .text_color = if (entry.action != null) S.theme.current().danger else S.theme.current().fg_2, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 5 }, .shadow = .{} }, .disabled = entry.action != null and !self.actionAvailable(task_.target), .on_click = self.cx.on(Control, state, Control.run) }).mount(menu.scope, self.cx);
+            button_.meta.ownership.meta.test_id = entry.id;
+            try menu.content.appendChild(self.cx.allocator, button_);
+        }
     }
     fn renderDetail(self: *Panel, root: *ui.Node, scope: *ui.Scope, task_: Task) !void {
         const detail_box = try ui.box(self.cx, S.detail(), .{});
+        detail_box.meta.ownership.meta.test_id = "transfer.task.detail";
         try root.appendChild(self.cx.allocator, detail_box);
-        const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, self.cx);
-        scroll.container.setStyleInline(self.cx.allocator, S.viewport());
-        scroll.content.setStyleInline(self.cx.allocator, .{ .direction = .column, .gap = 4 });
-        try detail_box.appendChild(self.cx.allocator, scroll.container);
-        inline for (.{ .{ "本地", "local_path" }, .{ "远程", "remote_path" } }) |field| {
-            const node = try self.label(scroll.content, "", 10.5, 400, true);
-            try self.format(node, "{s}  {s}", .{ field[0], @field(task_, field[1]) });
-            node.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 17 }, .flex_shrink = 0, .overflow = .hidden });
-        }
-        const title = try self.label(scroll.content, "", 10.5, 400, true);
+        const title = try self.label(detail_box, "", 10.5, 400, true);
         if (task_.route.len == 0) try self.format(title, "任务 #{d} · {s}", .{ task_.target.job, task_.owner_label }) else try self.format(title, "任务 #{d} · {s} · {s}", .{ task_.target.job, task_.owner_label, task_.route });
-        title.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 17 }, .flex_shrink = 0 });
-        const options = try self.label(scroll.content, task_.options, 10.5, 400, true);
+        title.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 26 }, .padding = .{ .left = 8, .right = 8, .top = 5 }, .background = S.theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0, .overflow = .hidden });
+        if (title.getText()) |value| {
+            var props = value;
+            props.text_overflow = .ellipsis;
+            title.setText(props);
+        }
+        const paths = try ui.box(self.cx, S.row(20, 8), .{});
+        try detail_box.appendChild(self.cx.allocator, paths);
+        inline for (.{ .{ "本地", "local_path" }, .{ "远程", "remote_path" } }) |field| {
+            const value = try std.fmt.allocPrint(self.cx.allocator, "{s}  {s}", .{ field[0], @field(task_, field[1]) });
+            defer self.cx.allocator.free(value);
+            const owned = try scope.createText(value, .{});
+            const tip = try ui.widgets.Tooltip(.{ .text = owned, .open_delay_ms = @as(f32, 450), .width = @as(f32, 480), .wrap = .word }).mount(scope, self.cx);
+            tip.wrapper.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 20 }, .flex = 1, .min_width = 0 });
+            tip.trigger.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .fill(), .min_width = 0, .overflow = .hidden, .overflow_hidden = true });
+            try paths.appendChild(self.cx.allocator, tip.wrapper);
+            var path_text_style = S.text(10.5, 400, true);
+            path_text_style.text_overflow = .ellipsis;
+            path_text_style.use_monospace_font = true;
+            const node = try ui.text(self.cx, owned.get(), path_text_style);
+            node.meta.ownership.meta.test_id = if (std.mem.eql(u8, field[1], "local_path")) "transfer.task.detail.local" else "transfer.task.detail.remote";
+            try tip.trigger.appendChild(self.cx.allocator, node);
+            node.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 17 }, .overflow = .hidden });
+            if (node.getText()) |old| {
+                var props = old;
+                props.text_overflow = .ellipsis;
+                props.use_monospace_font = true;
+                node.setText(props);
+            }
+        }
+        const metadata = try ui.box(self.cx, S.row(18, 8), .{});
+        try detail_box.appendChild(self.cx.allocator, metadata);
+        const options = try self.label(metadata, task_.options, 10.5, 400, true);
         options.setTextColor(S.theme.current().accent_ink);
-        options.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 17 }, .flex_shrink = 0 });
-        const summary = try self.label(scroll.content, task_.event_summary, 10.5, 400, true);
-        summary.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 17 }, .flex_shrink = 0, .overflow = .hidden });
-        const actions = try ui.box(self.cx, S.row(28, 6), .{});
-        try scroll.content.appendChild(self.cx.allocator, actions);
+        options.setStyleInline(self.cx.allocator, S.flexibleLabel());
+        const summary = try self.label(metadata, if (task_.status_detail.len > 0) task_.status_detail else task_.event_summary, 10.5, 400, true);
+        summary.setStyleInline(self.cx.allocator, S.flexibleLabel());
+        const actions = try ui.box(self.cx, S.row(24, 4), .{});
+        try detail_box.appendChild(self.cx.allocator, actions);
         try actions.appendChild(self.cx.allocator, try ui.spacer(self.cx));
-        _ = try self.button(actions, scope, "复制远程路径", "transfer.task.copy_path", "copy", .{ .panel = self, .target = task_.target, .kind = .copy_path }, false, 28);
-        _ = try self.button(actions, scope, "查看任务事件", "transfer.task.events", "list", .{ .panel = self, .target = task_.target, .kind = .events }, false, 28);
-        _ = try self.button(actions, scope, "收起任务详情", "transfer.task.collapse", "chevron-up", .{ .panel = self, .target = task_.target, .kind = .detail }, false, 28);
+        _ = try self.button(actions, scope, "复制远程路径", "transfer.task.copy_path", "copy", .{ .panel = self, .target = task_.target, .kind = .copy_path }, false, 24);
+        _ = try self.button(actions, scope, "查看任务事件", "transfer.task.events", "list", .{ .panel = self, .target = task_.target, .kind = .events }, false, 24);
+        _ = try self.button(actions, scope, "收起任务详情", "transfer.task.collapse", "chevron-up", .{ .panel = self, .target = task_.target, .kind = .detail }, false, 24);
     }
 
     fn itemHeight(index: usize, raw: ?*anyopaque) f32 {
         const p: *Panel = @ptrCast(@alignCast(raw.?));
         if (p.source == null or index >= p.visible.items.len) return S.row_pitch;
-        const expanded = p.expanded != null and same(p.expanded.?, p.source.?.value.rows[p.visible.items[index]].target);
-        if (p.options.presentation != .window) return v3TaskHeight(p.source.?.value.rows[p.visible.items[index]]) + (if (index + 1 < p.visible.items.len) @as(f32, 6) else 0) + (if (expanded) @as(f32, 153) else 0);
-        return if (expanded) S.detail_height + 2 else S.row_pitch;
+        return S.row_pitch;
     }
     fn itemLabel(index: usize, buffer: []u8, raw: ?*anyopaque) []const u8 {
         const p: *Panel = @ptrCast(@alignCast(raw.?));
@@ -1211,7 +1251,7 @@ pub const Panel = struct {
         if (self.event_view) |view| view.retheme();
         S.repaint(self.root, self.paint_colors);
         self.paint_colors = S.theme.current();
-        self.root.setStyleInline(self.cx.allocator, if (self.options.presentation == .session_tray) S.sessionTray() else if (self.options.presentation == .window) S.panel(true) else S.v3Panel(self.options.presentation == .global_popover));
+        self.root.setStyleInline(self.cx.allocator, if (self.options.presentation == .session_tray) S.sessionTray() else S.panel(true));
         self.scopes_dirty = true;
         self.invalidate();
     }
@@ -1271,6 +1311,7 @@ pub const Panel = struct {
         }
         var choices: std.ArrayList(ScopeChoice) = .empty;
         try choices.append(a, .{ .label = "全部会话", .scope = .all });
+        if (self.callbacks.?.scope_choices) |extra| try choices.appendSlice(a, try extra(self.callbacks.?.context, a));
         for (rows) |row| if (row.target.owner) |owner| {
             var exists = false;
             for (choices.items) |choice| if (scopeEql(choice.scope, .{ .session = owner })) {
@@ -1279,7 +1320,6 @@ pub const Panel = struct {
             };
             if (!exists) try choices.append(a, .{ .label = row.owner_label, .scope = .{ .session = owner } });
         };
-        if (self.callbacks.?.scope_choices) |extra| try choices.appendSlice(a, try extra(self.callbacks.?.context, a));
         var selected: Scope = if (self.options.presentation == .session_popover or self.options.presentation == .session_tray) self.selected_scope else .all;
         var scope_label: []const u8 = if (self.options.presentation == .session_popover or self.options.presentation == .session_tray) (if (self.selected_scope == .sessions) "当前组" else "当前会话") else "全部会话";
         for (choices.items) |choice| if (scopeEql(choice.scope, self.selected_scope)) {
@@ -1305,39 +1345,13 @@ pub const Panel = struct {
             if (self.manager) |manager| if (manager.progress(job)) |progress| {
                 phase = if (progress.job_cleanup == .unknown) .cleanup_unknown else if (progress.state == .failed and progress.failure == .checksum) .checksum_failed else std.meta.stringToEnum(Phase, @tagName(progress.state)).?;
             };
-            const active = phase == .queued or phase == .retry_wait or phase == .running or phase == .verifying;
-            if (self.options.presentation != .window and self.filter == .active) {
-                if (!active) continue;
-            } else if (self.options.presentation != .window and self.filter == .ended) {
-                if (phase != .succeeded) continue;
-            } else if (self.filter != .all and self.filter != category(phase)) continue;
+            if (self.filter != .all and self.filter != category(phase)) continue;
             const search_text = self.search.peek();
             if (search_text.len > 0 and !contains(task_.name, search_text) and !contains(task_.local_path, search_text) and !contains(task_.remote_path, search_text) and !contains(task_.owner_label, search_text)) continue;
             const rect = self.virtual.pool_nodes[slot].globalRect();
             if (rect.w > 0 and rect.h > 0 and rect.x < clip.x + clip.w and rect.x + rect.w > clip.x and rect.y < clip.y + clip.h and rect.y + rect.h > clip.y) return true;
         }
         return false;
-    }
-    fn v3Measure(self: *Panel, value: []const u8, size: f32, weight: u16) f32 {
-        return ui.Cx.measureTextWidthCallback(self.cx, value.ptr, value.len, size, weight, false);
-    }
-    fn v3ContentWidth(self: *Panel) f32 {
-        const source = self.source orelse return 360;
-        var result: f32 = 360;
-        for (self.visible.items) |i| {
-            const task_ = source.value.rows[i];
-            const head_width = self.v3Measure(task_.name, 12, 600) + self.v3Measure(if (task_.phase == .failed) "失败" else if (task_.phase == .conflict) "同名冲突" else phaseLabel(task_.phase), 10, 400) + 87;
-            const destination = if (task_.direction == .upload) task_.remote_path else task_.local_path;
-            const directory = std.fs.path.dirname(destination) orelse destination;
-            var rate_buffer: [96]u8 = undefined;
-            var total_buffer: [40]u8 = undefined;
-            const rate = v3RateLabel(task_, &rate_buffer, &total_buffer);
-            const meta_width = self.v3Measure(task_.owner_label, 10, 400) + self.v3Measure(" · ", 10, 400) + self.v3Measure(directory, 10, 400) + self.v3Measure(rate, 10, 400) + 54;
-            result = @max(result, @max(head_width, meta_width));
-            if (v3HasError(task_)) result = @max(result, self.v3Measure(task_.status_detail, 11, 400) + 46);
-            if (result >= 760) return 760;
-        }
-        return std.math.clamp(@ceil(result + 260), @as(f32, 620), @as(f32, 760));
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const p: *Panel = @ptrCast(@alignCast(raw));
@@ -1354,6 +1368,14 @@ pub const Panel = struct {
         const parent = p.root.parent orelse return .done;
         const bounds = parent.globalRect();
         if (bounds.w <= 0 or bounds.h <= 0) return .done;
+        if (p.options.presentation != .session_popover and p.options.presentation != .session_tray) {
+            const width = p.list.container.globalRect().w - p.list.content.style.padding.right;
+            if (width > 0 and @abs(width - p.metadata_layout_width) > 0.5) {
+                p.metadata_layout_width = width;
+                p.dirty = true;
+                return .needs_layout;
+            }
+        }
         if (p.options.presentation == .window) {
             const available_width = @max(0, bounds.w - parent.style.padding.left - parent.style.padding.right);
             const available_height = @max(0, bounds.h - parent.style.padding.top - parent.style.padding.bottom);
@@ -1364,28 +1386,43 @@ pub const Panel = struct {
             return .needs_layout;
         }
         if (p.options.presentation == .session_tray) {
+            // Width changes must rebind virtual rows, including the first real
+            // layout after mount (where no usable width was available yet).
+            const actual_width = p.root.globalRect().w;
+            if (actual_width > 0 and @abs(actual_width - p.tray_layout_width) > 0.5) {
+                p.tray_layout_width = actual_width;
+                p.dirty = true;
+                p.cx.requestRedraw();
+                return .needs_layout;
+            }
             var task_height: f32 = 0;
             for (p.visible.items, 0..) |_, i| task_height += itemHeight(i, p);
             // Keep file rows usable at the minimum window height; extra
             // transfer rows stay in this list's native scroll viewport.
             // Header/insets and list gap preserve one complete compact row.
-            const minimum: f32 = if (p.visible.items.len == 0) 104.5 else 104;
+            // 9/8px insets + 28px header + 6px gap + one complete card.
+            // A short/self-sized parent must not feed the old clipped height
+            // back into this budget; management adds its own 28px row.
+            const chrome: f32 = 9 + 28 + 6 + 8 + (if (p.batch_visible) @as(f32, 28) else 0);
+            const minimum: f32 = chrome + S.row_height;
             const maximum = @min(@as(f32, 190), @max(minimum, bounds.h * 0.32));
-            const height = std.math.clamp(50 + task_height, minimum, maximum);
+            const height = std.math.clamp(chrome + task_height, minimum, maximum);
             if (p.root.style.height == .px and p.root.style.height.px == height) return .done;
             p.root.setStyleInline(p.cx.allocator, .{ .width = .fill(), .height = .{ .px = height }, .padding = .{ .top = 9, .right = 12, .bottom = 8, .left = 12 } });
             return .needs_layout;
         }
         const global = p.options.presentation == .global_popover;
-        const desired_width: f32 = if (p.visible.items.len == 0) 420 else p.v3ContentWidth();
+        const desired_width: f32 = 760;
         const width = @max(@as(f32, 1), @min(desired_width, bounds.w - 24));
         var list_height: f32 = 0;
         for (p.visible.items, 0..) |_, i| list_height += itemHeight(i, p);
-        if (list_height == 0) list_height = 53;
-        const max_height = @max(@as(f32, 1), @min(bounds.h - 24, @min(@as(f32, 420), @max(@as(f32, 160), @floor(bounds.h * 0.65)))));
+        if (list_height == 0) list_height = 100;
+        const max_height = @max(@as(f32, 1), @min(bounds.h - 24, @as(f32, 578)));
         const failure_height: f32 = if (p.failure.style.display != .none) @max(@as(f32, 24), p.failure.globalRect().h) else 0;
         const notice_height: f32 = if (p.notice.parent.?.style.display != .none) @max(@as(f32, 36), p.notice.parent.?.globalRect().h) else 0;
-        const height = @min((if (global) @as(f32, 98) else 108) + list_height + failure_height + notice_height, max_height);
+        const chrome: f32 = (if (global) @as(f32, 188) else 144) + (if (p.batch_visible) @as(f32, 28) else 0);
+        const presentation_cap: f32 = if (global) 578 else 420;
+        const height = @min(chrome + list_height + failure_height + notice_height, @min(presentation_cap, max_height));
         var top: f32 = 46;
         var right: f32 = 12;
         if (p.anchor_id) |id| {

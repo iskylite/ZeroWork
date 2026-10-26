@@ -72,7 +72,12 @@ pub const Host = struct {
     }
 
     pub fn plugin(self: *Host) application.FilePlugin {
-        return .{ .adapter = self.adapter.adapter(), .context = self, .tick = tick, .shutdown = shutdown };
+        return .{ .adapter = self.adapter.adapter(), .context = self, .tick = tick, .shutdown = shutdown, .progress = connectionProgress };
+    }
+
+    fn connectionProgress(raw: *anyopaque, owner: identity.SessionHandle, key: sessions.OperationKey) ?lifecycle.ConnectionProgress {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        return self.adapter.connectionProgress(owner, key);
     }
 
     /// Called immediately after ApplicationHost init, before UI event delivery.

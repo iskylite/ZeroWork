@@ -230,6 +230,7 @@ const ClickCtx = struct {
 /// the exact context the menu needs to build/enable rows, without exposing
 /// Workspace internals across the module boundary.
 pub const MenuBridge = struct {
+    host_action: ?*const fn (?*anyopaque, usize, sidebar_view.HostAction) void = null,
     context: ?*anyopaque = null,
     fire: ?*const fn (ctx: ?*anyopaque, trigger: Trigger, host_index: usize, tab_index: ?usize, multi_tabs: bool, anchor: ui.ComputedRect) void = null,
 
@@ -324,6 +325,7 @@ fn cursorStyle(name: []const u8) TerminalViewNode.CursorStyle {
 pub const GroupAction = enum { pin, leave, close_member, toggle_broadcast, broadcast, split_side, split_stack, stop_broadcast, stop_group_ai };
 
 pub const Workspace = struct {
+    recent_connections: @import("quick_connect.zig").RecentList = .{},
     plugins: plugin_registry.Registry = .{},
     content_services: ?plugin_ui.ContentServicesFactory = null,
 
@@ -967,14 +969,16 @@ pub const Workspace = struct {
                 const row = try sidebar_view.HostRow.mount(self.cx, scope, .{
                     .name = host.name,
                     .kind = if (host.protocol == .sftp) .file else .terminal,
-                    .icon = session_icon.forConnection(self.plugins, host.protocolId(), @import("session_os_cache.zig").load(self.allocator, self.io, self.hosts_path, host), false),
+                    .icon = session_icon.forHost(self.plugins, host.protocolId(), @import("session_os_cache.zig").load(self.allocator, self.io, self.hosts_path, host)),
+                    .protocol = host.protocolId(),
+                    .supports_route = if (self.plugins.find(host.protocolId())) |plugin| plugin.supports(@import("../host/plugin_registry.zig").legacyServiceDefinitions(&.{.route})[0]) else false,
                     .detail = detail,
                     .route = route,
                     .hops = if (host.route.len > 0) host.route.len else host.jump_chain.len,
                     .online = self.hostOnline(index),
                     .selected = self.selected_host == index,
                     .forward = self.backgroundForwardBadge(host.owner()),
-                }, .{ .context = context, .select = onSidebarSelect, .connect = onSidebarConnect, .menu = onSidebarMenu });
+                }, .{ .context = context, .select = onSidebarSelect, .connect = onSidebarConnect, .menu = onSidebarMenu, .action = onSidebarAction });
                 context.node = row.node;
                 try section.members.appendChild(self.allocator, row.node);
                 try self.host_rows.append(self.allocator, .{ .node = row.node, .name_node = row.name, .host_index = index, .click_ctx = context, .view = row });
@@ -1007,6 +1011,12 @@ pub const Workspace = struct {
             return cell.workspace.registry.indexOf(owner.id);
         }
         return cell.workspace.identities.hostIndex(cell.host_id orelse return null);
+    }
+    fn onSidebarAction(raw: *anyopaque, action: sidebar_view.HostAction) void {
+        const cell: *ClickCtx = @ptrCast(@alignCast(raw));
+        const index = sidebarIndex(cell) orelse return;
+        const run = cell.workspace.menu_bridge.host_action orelse return;
+        run(cell.workspace.menu_bridge.context, index, action);
     }
     fn onSidebarSelect(raw: *anyopaque) void {
         onSidebarConnect(raw);
@@ -1288,7 +1298,7 @@ pub const Workspace = struct {
             close.setFocusable(active);
             try tab_box.appendChild(self.cx.allocator, close);
             if (active) {
-                const underline = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 10 }, .top = .{ .px = tab_styles.height - 3 } }, .width = .{ .px = width - 20 }, .height = .{ .px = 3 }, .background = self.palette.accent, .border = .{ .radius = 1.25 } }, .{});
+                const underline = try ui.box(self.cx, tab_styles.underline(width), .{});
                 try tab_box.appendChild(self.cx.allocator, underline);
             }
             try tooltip.trigger.appendChild(self.cx.allocator, tab_box);
@@ -3388,6 +3398,7 @@ pub const Workspace = struct {
         if (index >= self.registry.hosts.len) return error.InvalidHost;
         try self.identities.appendHosts(self.allocator, self.registry.hosts.len);
         try self.createSession(self.registry.hosts[index], self.hostId(index).?, index, "");
+        self.recent_connections.record(self.registry.hosts[index].connection_id, 0);
     }
 
     /// The saved revision supplies every routing and policy field. Secrets
@@ -3399,6 +3410,7 @@ pub const Workspace = struct {
         const index = self.registry.indexOf(owner.id) orelse return error.InvalidHost;
         try self.identities.appendHosts(self.allocator, self.registry.hosts.len);
         try self.createSession(host, self.hostId(index).?, index, "");
+        self.recent_connections.record(owner.id, 0);
     }
 
     /// The session factory owns a frozen copy. A temporary direct endpoint
@@ -4205,7 +4217,7 @@ pub const Workspace = struct {
                 @import("session_os_cache.zig").save(self.allocator, self.io, self.hosts_path, host, kind);
                 for (self.host_rows.items) |row| {
                     const current = self.registry.hosts[row.host_index];
-                    if (current.connection_id == host.connection_id and std.mem.eql(u8, current.host, host.host) and current.port == host.port and std.mem.eql(u8, current.user, host.user)) session_icon.setNode(row.view.dot, kind);
+                    if (current.connection_id == host.connection_id and std.mem.eql(u8, current.host, host.host) and current.port == host.port and std.mem.eql(u8, current.user, host.user)) session_icon.setHostNode(row.view.dot, self.plugins, current.protocolId(), kind);
                 }
             }
             for (self.tab_nodes.items) |node| if (node.tab_id == tab.tab_id) session_icon.setNode(node.type_icon, kind);

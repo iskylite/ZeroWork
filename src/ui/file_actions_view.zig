@@ -20,6 +20,7 @@ pub const View = struct {
     frozen: ?Frozen = null,
     pending: ?Frozen = null,
     history: bool = false,
+    anchor_rect: ui.ComputedRect = .{ .x = 0, .y = 0, .w = 0, .h = 0 },
     rebuild: bool = false,
     feedback: ?*ui.Node = null,
     rows: *ui.Node = undefined,
@@ -36,11 +37,12 @@ pub const View = struct {
     }
     fn anchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
         const self: *View = @ptrCast(@alignCast(raw));
-        const rect = (if (self.history) self.pane.history_button else self.pane.context_button).globalRect();
+        const rect = self.anchor_rect;
         return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
     }
     pub fn show(self: *View, envelope: Files.Envelope, entries: ?[]const Controller.HistoryEntry) !void {
         const projection = self.model.projection() orelse return error.FileProjectionUnavailable;
+        self.anchor_rect = if (entries != null) self.pane.history_button.globalRect() else self.pane.context_anchor orelse self.pane.context_button.globalRect();
         var arena = std.heap.ArenaAllocator.init(self.cx.allocator);
         errdefer arena.deinit();
         const a = arena.allocator();
@@ -112,12 +114,12 @@ pub const View = struct {
                 if (!entry.succeeded) try self.add("移除当前记录", "files.history.remove", .remove, entry.path, false);
             }
         } else {
-            self.rows = try ui.box(self.cx, .{ .width = .{ .px = 240 }, .height = .{ .fit = .{} }, .direction = .column, .gap = 6 }, .{});
+            self.rows = try ui.box(self.cx, .{ .width = .{ .px = 212 }, .height = .{ .fit = .{} }, .direction = .column, .gap = 2 }, .{});
             try self.content.appendChild(self.cx.allocator, self.rows);
             const source = self.model.projection().?.panes[@backingInt(self.pane.side)];
             try self.add(if (self.pane.side == .local) "上传所选…" else "下载所选…", "files.context.transfer", .transfer, null, !source.can_transfer or frozen.envelope.action.context.keys.len == 0);
             try self.add("复制完整路径", "files.context.copy", .copy, null, frozen.envelope.action.context.keys.len == 0);
-            try self.add("重命名（待支持）", "files.context.rename", .none, null, true);
+            try self.add("重命名", "files.context.rename", .none, null, true);
             try self.add("新建文件夹…", "files.context.mkdir", .mkdir, null, !source.can_mkdir);
         }
         self.feedback = try ui.textStyled(self.cx, S.feedback, "");
@@ -165,10 +167,16 @@ pub const View = struct {
     fn add(self: *View, label: []const u8, id: []const u8, kind: Kind, path: ?[]const u8, disabled: bool) !void {
         const scope = self.rows_scope.?;
         const action = try scope.createState(Action, .{ .menu = self, .kind = kind, .path = path });
-        const button = try ui.widgets.Button(.{ .label = label, .variant = .ghost, .disabled = disabled, .base_style = S.row(), .hover_style = S.hover(), .on_click = self.cx.on(Action, action, Action.click) }).mount(scope, self.cx);
+        const icon: ?ui.SvgAsset = if (self.history) null else switch (kind) {
+            .transfer => if (self.pane.side == .local) ui.icons.arrow_up_from_line else ui.icons.arrow_down_to_line,
+            .copy => ui.icons.copy,
+            .mkdir => ui.icons.folder_plus,
+            else => ui.icons.pencil,
+        };
+        const button = try ui.widgets.Button(.{ .label = label, .icon_asset = icon, .icon_size = @as(f32, 14), .variant = .ghost, .disabled = disabled, .base_style = S.row(self.history), .hover_style = S.hover(), .on_click = self.cx.on(Action, action, Action.click) }).mount(scope, self.cx);
         action.node = button;
         button.meta.ownership.meta.test_id = id;
-        button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (self.history) 320 else 240 }, .flex_shrink = 0 });
+        button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (self.history) 320 else 212 }, .height = .{ .px = if (self.history) 28 else 34 }, .direction = .row, .justify = .start, .gap = 10, .padding = .{ .left = 10, .right = 10 }, .flex_shrink = 0 });
         try self.rows.appendChild(self.cx.allocator, button);
     }
     fn fail(self: *View, err: anyerror) void {

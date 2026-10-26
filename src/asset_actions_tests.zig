@@ -31,7 +31,7 @@ fn groupRef(registry: *const hosts.Registry, index: usize) actions.GroupRef {
     return .{ .id = value.group_id, .revision = value.revision };
 }
 
-test "asset action clone commits new identity without secrets or pinned and preserves frozen options" {
+test "asset action clone commits new identity with saved credentials and preserves frozen options" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     var live = try fixture(tmp.dir);
@@ -46,7 +46,7 @@ test "asset action clone commits new identity without secrets or pinned and pres
     try std.testing.expectEqual(@as(?usize, 3), result.index);
     try std.testing.expect(clone.connection_id != original.id);
     try std.testing.expectEqual(@as(u64, 1), clone.revision);
-    try std.testing.expect(clone.password == null and clone.key_passphrase == null and clone.totp_secret == null and !clone.pinned);
+    try std.testing.expect(clone.password != null and clone.totp_secret != null and clone.pinned);
     const source = try live.get(original);
     try std.testing.expectEqualStrings("password-secret", source.password.?);
     try std.testing.expectEqualStrings("JBSWY3DPEHPK3PXP", source.totp_secret.?);
@@ -59,15 +59,15 @@ test "asset action clone commits new identity without secrets or pinned and pres
     const key_copy = try actions.apply(a, io, tmp.dir, path, &live, .{ .clone = .{ .owner = live.hosts[2].owner(), .name = "key-copy" } });
     const copied_key = try live.get(key_copy.owner.?);
     try std.testing.expectEqualStrings("/tmp/key-path", copied_key.identity_file.?);
-    try std.testing.expect(copied_key.key_passphrase == null and copied_key.password == null and copied_key.totp_secret == null);
+    try std.testing.expect(copied_key.key_passphrase != null and copied_key.password == null);
     var disk = try store.loadHosts(io, tmp.dir, a, path);
     defer disk.deinit();
     const saved_clone = try disk.get(result.owner.?);
     const saved_key = try disk.get(key_copy.owner.?);
     try std.testing.expectEqual(result.owner.?, saved_clone.owner());
-    try std.testing.expect(saved_clone.password == null and saved_clone.key_passphrase == null and saved_clone.totp_secret == null and !saved_clone.pinned);
+    try std.testing.expect(saved_clone.password != null and saved_clone.totp_secret != null and saved_clone.pinned);
     try std.testing.expectEqual(hosts.AuthMode.password, saved_clone.auth_mode);
-    try std.testing.expect(saved_key.password == null and saved_key.key_passphrase == null and saved_key.totp_secret == null);
+    try std.testing.expect(saved_key.password == null and saved_key.key_passphrase != null);
     try std.testing.expectEqualStrings("/tmp/key-path", saved_key.identity_file.?);
     try std.testing.expectEqual(key_copy.commit.revision, disk.revision);
     try std.testing.expectEqualSlices(u8, &key_copy.commit.source_hash, &disk.source_hash.?);

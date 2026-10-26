@@ -2,11 +2,11 @@
 const std = @import("std");
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
-pub const expanded_width: f32 = 224;
+pub const expanded_width: f32 = 300;
 pub const collapsed_width: f32 = 48;
-pub const host_height: f32 = 46.5;
+pub const host_height: f32 = 36;
 pub const group_height: f32 = 26;
-pub const tail_width: f32 = 52;
+pub const tail_width: f32 = 36;
 pub const action_size: f32 = 24;
 
 pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
@@ -25,15 +25,15 @@ pub fn viewport() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0 };
 }
 pub fn list() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 12, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 6, .min_width = 0 };
 }
 
 /// Main workspace Sidebar 233:335283: each asset group is one inset surface.
 pub fn groupCard() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 4, .background = ui.Color.TRANSPARENT, .flex_shrink = 0, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 0, .padding = ui.Padding.all(3), .background = theme.current().surface_2, .border = .{ .radius = 9 }, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn members() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 4, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 1, .min_width = 0 };
 }
 pub fn footer() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 34 }, .padding = .{ .left = 10, .right = 10 }, .direction = .row, .align_items = .center, .justify = .center, .gap = 6, .background = theme.current().surface_2, .border = .{ .radius = 8 }, .font_size = 12, .font_weight = 400, .text_color = theme.current().fg_1, .flex_shrink = 0 };
@@ -66,7 +66,7 @@ pub fn action(size: f32) ui.BoxStyle {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .flex_shrink = 0 };
 }
 pub fn host(selected: bool, hot: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = host_height }, .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 9 }, .background = if (selected) theme.current().selection else if (hot) theme.current().hover else ui.Color.TRANSPARENT, .border = .{ .radius = 8 }, .flex_shrink = 0, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .px = host_height }, .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 9 }, .background = if (selected) theme.current().selection else if (hot) theme.current().selection else ui.Color.TRANSPARENT, .border = .{ .radius = 9 }, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn content() ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 9 }, .min_width = 0 };
@@ -78,7 +78,7 @@ pub fn tail() ui.BoxStyle {
     return .{ .width = .{ .px = tail_width }, .height = .{ .px = action_size }, .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .flex_shrink = 0 };
 }
 pub fn route() ui.BoxStyle {
-    return .{ .width = .{ .px = 32 }, .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 36 }, .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .flex_shrink = 0 };
 }
 pub fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };
@@ -87,7 +87,7 @@ pub fn text(size: f32, weight: u16, secondary: bool) ui.TextStyle {
     return .{ .font_size = size, .font_weight = weight, .line_height = if (size == 13) 20.0 / 13.0 else if (size == 12) 1.5 else 16.0 / size, .color = if (secondary) theme.current().fg_2 else theme.current().fg_1, .selectable = false, .text_overflow = .ellipsis };
 }
 pub fn marker() ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 6 } }, .width = .{ .px = 2.5 }, .height = .{ .px = 20 }, .background = theme.current().accent, .border = .{ .radius = 1.25 } };
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 7 } }, .width = .{ .px = 3 }, .height = .{ .px = 22 }, .background = theme.current().accent, .border = .{ .radius = 1.25 } };
 }
 pub fn status(online: bool) ui.BoxStyle {
     return .{ .width = .{ .px = 6 }, .height = .{ .px = 6 }, .background = if (online) theme.current().ok else theme.current().fg_3, .border = .{ .radius = 3 }, .flex_shrink = 0 };
@@ -102,7 +102,7 @@ pub fn groupContent() ui.BoxStyle {
     return value;
 }
 pub fn badge() ui.BoxStyle {
-    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .direction = .row, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .direction = .row, .align_items = .center, .justify = .center, .background = theme.current().well, .padding = .{ .left = 7, .right = 7 }, .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn badgeText() ui.TextStyle {
     return .{ .font_size = 10, .font_weight = 400, .line_height = 1.4, .color = theme.current().fg_2, .selectable = false, .text_overflow = .clip };

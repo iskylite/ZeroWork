@@ -10,11 +10,12 @@ pub const Callbacks = struct {
     new_profile: *const fn (*anyopaque) void,
     quick: *const fn (*anyopaque) void,
     local: ?*const fn (*anyopaque) void = null,
+    new_sftp: ?*const fn (*anyopaque) void = null,
     saved: ?*const fn (*anyopaque, identity.AssetOwner) void = null,
 };
-const Action = enum(usize) { local, quick, new_profile };
-const labels = [_][]const u8{ "Local Terminal", "SSH / SFTP 快捷连接", "新建已保存连接" };
-const ids = [_][]const u8{ "session.menu.local", "session.menu.quick", "session.menu.new_profile" };
+const Action = enum(usize) { local, new_profile, new_sftp };
+const labels = [_][]const u8{ "本地终端", "新建主机", "新建 SFTP" };
+const ids = [_][]const u8{ "session.menu.local", "session.menu.new_profile", "session.menu.new_sftp" };
 
 pub const View = struct {
     cx: *ui.Cx,
@@ -39,6 +40,20 @@ pub const View = struct {
     saved_scope: ?*ui.Scope = null,
     saved_rows: std.ArrayList(SavedRow) = .empty,
     selected_saved: ?usize = null,
+    more_button: *ui.Node = undefined,
+    more_popup: ui.widgets.popover.PopoverResult = undefined,
+    more_content: *ui.Node = undefined,
+    more_area: *ui.Node = undefined,
+    more_scroll: *ui.widgets.scroll_area.ScrollState = undefined,
+    more_scope: ?*ui.Scope = null,
+    more_rows: std.ArrayList(SavedRow) = .empty,
+    selected_more: usize = 0,
+    selected_more_trigger: bool = false,
+    more_hovered: bool = false,
+    more_trigger_hover: *ui.Signal(bool) = undefined,
+    more_panel_hover: *ui.Signal(bool) = undefined,
+    more_suppressed: bool = false,
+    more_close_at: i64 = 0,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
         const self = try cx.allocator.create(View);
@@ -56,7 +71,7 @@ pub const View = struct {
         self.chrome.behavior.interaction.a11y = .{ .role = .menu, .label = "新建会话" };
         self.chrome.behavior.events.capture_context = self;
         self.chrome.behavior.events.on_event_capture = onEvent;
-        const icons = [_]ui.SvgAsset{ @import("session_icon.zig").resolve(.local), @import("quick_connect_icon.zig").asset, ui.icons.plus };
+        const icons = [_]ui.SvgAsset{ ui.icons.terminal, ui.icons.server, ui.icons.folder };
         for (labels, 0..) |label, index| {
             if (index == 1) {
                 const area = try ui.widgets.ScrollArea(.{}).mount(self.scope, cx);
@@ -67,15 +82,17 @@ pub const View = struct {
                 self.saved_content = area.content;
                 try popup.content.appendChild(cx.allocator, area.container);
             }
-            if (index == 2) {
+            if (index == 1) {
                 const divider = try ui.box(cx, S.separator(), .{});
-                self.separator = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 1 }, .background = S.theme.current().border, .flex_shrink = 0 }, .{});
+                try self.mountMore(popup.content);
+                self.separator = try ui.text(cx, "快捷连接", .{ .font_size = 10, .line_height = 1.6, .color = S.theme.current().fg_2 });
                 try divider.appendChild(cx.allocator, self.separator);
                 try popup.content.appendChild(cx.allocator, divider);
             }
             const action = try self.scope.createState(Row, .{ .view = self, .action = @fromBackingInt(@intCast(index)) });
             const node = try ui.widgets.Button(.{ .a11y_label = label, .variant = .ghost, .disabled = index == 0 and callbacks.local == null, .base_style = S.row(), .hover_style = self.hover_style, .on_click = cx.on(Row, action, Row.choose) }).mount(self.scope, cx);
             node.setStyleInline(cx.allocator, S.row());
+            @import("sidebar_view.zig").setFocusRing(node);
             node.meta.ownership.meta.test_id = ids[index];
             if (node.behavior.interaction.a11y) |*a| a.role = .menuitem;
             self.buttons[index] = node;
@@ -96,15 +113,22 @@ pub const View = struct {
     }
     pub fn show(self: *View, anchor: *ui.Node) !void {
         self.anchor_id = anchor.id;
-        self.selected = if (self.callbacks.local != null) .local else .quick;
+        self.selected = if (self.callbacks.local != null) .local else .new_profile;
         self.chosen = false;
         self.selected_saved = null;
+        self.selected_more_trigger = false;
+        self.more_trigger_hover.set(false);
+        self.more_panel_hover.set(false);
+        self.more_hovered = false;
+        self.more_popup.close.invoke();
+        self.more_close_at = 0;
         self.retheme();
         self.open.set(true);
         self.cx.setFocus(self.buttons[@backingInt(self.selected)]);
         self.cx.requestRedraw();
     }
     pub fn hide(self: *View) void {
+        self.more_popup.close.invoke();
         self.open.set(false);
         self.restoreFocus();
         self.cx.requestRedraw();
@@ -114,23 +138,51 @@ pub const View = struct {
     }
     pub fn handleKey(self: *View, key: ui.events.KeyCode) ui.events.EventResult {
         if (!self.isOpen()) return .ignored;
+        const in_more = if (self.cx.focused_node) |focused| within(self.more_popup.chrome, focused) else false;
+        if (in_more) {
+            switch (key) {
+                .up, .down => {
+                    const len = self.more_rows.items.len;
+                    if (len > 0) {
+                        self.selected_more = if (key == .down) (self.selected_more + 1) % len else (self.selected_more + len - 1) % len;
+                        const row = self.more_rows.items[self.selected_more];
+                        self.cx.setFocus(row.button);
+                        ui.widgets.scroll_area.scrollIntoView(self.more_scroll, self.more_content, row.button, .nearest);
+                    }
+                },
+                .left, .escape => {
+                    self.more_suppressed = true;
+                    self.more_popup.close.invoke();
+                    self.cx.setFocus(self.more_button);
+                },
+                .@"return", .space => if (self.more_rows.items.len > 0) self.activateSaved(self.more_rows.items[self.selected_more].owner),
+                else => return .ignored,
+            }
+            return .stop;
+        }
+        if ((self.cx.focused_node == self.more_button or self.selected_more_trigger) and (key == .right or key == .@"return" or key == .space)) {
+            self.openMore();
+            return .stop;
+        }
         switch (key) {
             .escape => self.hide(),
             .up, .down => {
-                const total = self.saved_rows.items.len + 3;
-                const current = if (self.selected_saved) |i| i + 1 else switch (self.selected) {
+                const total = self.saved_rows.items.len + 4;
+                const current = if (self.selected_saved) |i| i + 1 else if (self.selected_more_trigger) total - 3 else switch (self.selected) {
                     .local => @as(usize, 0),
-                    .quick => total - 2,
-                    .new_profile => total - 1,
+                    .new_profile => total - 2,
+                    .new_sftp => total - 1,
                 };
                 var next = if (key == .down) (current + 1) % total else (current + total - 1) % total;
                 if (next == 0 and self.callbacks.local == null) next = if (key == .down) 1 else total - 1;
                 self.selected_saved = if (next > 0 and next <= self.saved_rows.items.len) next - 1 else null;
+                self.selected_more_trigger = next == total - 3;
                 if (self.selected_saved) |i| {
                     self.cx.setFocus(self.saved_rows.items[i].button);
-                    ui.widgets.scroll_area.scrollIntoView(self.saved_scroll, self.saved_content, self.saved_rows.items[i].button, .nearest);
+                } else if (self.selected_more_trigger) {
+                    self.cx.setFocus(self.more_button);
                 } else {
-                    self.selected = if (next == 0) .local else if (next == total - 2) .quick else .new_profile;
+                    self.selected = if (next == 0) .local else if (next == total - 2) .new_profile else .new_sftp;
                     self.cx.setFocus(self.buttons[@backingInt(self.selected)]);
                 }
                 self.paintSelection();
@@ -146,15 +198,15 @@ pub const View = struct {
         self.hide();
         switch (action) {
             .local => self.callbacks.local.?(self.callbacks.context),
-            .quick => self.callbacks.quick(self.callbacks.context),
             .new_profile => self.callbacks.new_profile(self.callbacks.context),
+            .new_sftp => if (self.callbacks.new_sftp) |create| create(self.callbacks.context),
         }
     }
     fn paintSelection(self: *View) void {
         for (self.saved_rows.items, 0..) |row, index| row.button.setBackground(if (self.selected_saved == index) S.theme.current().selection else ui.Color.TRANSPARENT);
         for (self.highlights, 0..) |highlight, index| {
             highlight.setBackground(S.theme.current().selection);
-            highlight.setDisplay(if (self.selected_saved == null and index == @backingInt(self.selected)) .flex else .none);
+            highlight.setDisplay(if (!self.selected_more_trigger and self.selected_saved == null and index == @backingInt(self.selected)) .flex else .none);
         }
     }
     pub fn setSaved(self: *View, entries: []const Saved) !void {
@@ -171,10 +223,11 @@ pub const View = struct {
         self.saved_rows.clearRetainingCapacity();
         self.saved_scroll.scroll_y = 0;
         self.saved_content.setStyle(self.cx.allocator, .translate_y, 0);
-        for (entries) |entry| {
+        for (entries[0..@min(entries.len, 3)]) |entry| {
             const action = try scope.createState(SavedAction, .{ .view = self, .owner = entry.owner });
             const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = entry.name, .base_style = S.row(), .hover_style = self.hover_style, .on_click = self.cx.on(SavedAction, action, SavedAction.choose) }).mount(scope, self.cx);
             button.setStyleInline(self.cx.allocator, S.row());
+            @import("sidebar_view.zig").setFocusRing(button);
             button.meta.ownership.meta.test_id = "session.menu.saved";
             if (button.behavior.interaction.a11y) |*a| a.role = .menuitem;
             const content = try ui.box(self.cx, S.rowContent(), .{});
@@ -189,12 +242,98 @@ pub const View = struct {
             try self.saved_rows.append(self.cx.allocator, .{ .owner = entry.owner, .button = button, .label = label, .icon = icon });
         }
         if (entries.len == 0) {
-            const label = try ui.text(self.cx, "暂无已保存连接", S.label());
+            const label = try ui.text(self.cx, "暂无最近连接", S.label());
             label.meta.ownership.meta.test_id = "session.menu.empty";
             label.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 33 }, .padding = .{ .left = 10, .top = 9 } });
             try self.saved_content.appendChild(self.cx.allocator, label);
         }
-        self.saved_area.setStyle(self.cx.allocator, .height, .{ .px = @as(f32, @floatFromInt(@min(@max(entries.len, 1), 8))) * 33 });
+        self.saved_area.setStyle(self.cx.allocator, .height, .{ .px = @as(f32, @floatFromInt(@min(@max(entries.len, 1), 3))) * 33 });
+    }
+    fn mountMore(self: *View, parent: *ui.Node) !void {
+        const button = try ui.widgets.Button(.{ .a11y_label = "更多", .variant = .ghost, .base_style = S.row(), .hover_style = self.hover_style, .on_click = self.cx.on(View, self, openMore) }).mount(self.scope, self.cx);
+        @import("sidebar_view.zig").setFocusRing(button);
+        button.meta.ownership.meta.test_id = "session.menu.more";
+        self.more_button = button;
+        const more_content = try ui.box(self.cx, S.rowContent(), .{});
+        const more_label = try ui.text(self.cx, "更多", S.label());
+        more_label.setStyleInline(self.cx.allocator, .{ .width = .fill(), .flex = 1 });
+        try more_content.appendChild(self.cx.allocator, more_label);
+        try more_content.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.chevron_right, S.theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
+        try button.appendChild(self.cx.allocator, more_content);
+        try parent.appendChild(self.cx.allocator, button);
+        const popup = try ui.widgets.Popover(.{ .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = moreAnchor } }, .position = .right_start, .width = @as(f32, 240), .max_width = @as(f32, 240), .viewport_padding = 8, .constrain_width_to_viewport = true, .shift_main_axis = true, .close_on_escape = false, .close_on_outside_click = false, .offset = .{ .static = 2 }, .size_policy = .fit_content }).mount(self.scope, self.cx);
+        self.more_popup = popup;
+        popup.chrome.behavior.events.on_event_capture = onEvent;
+        popup.chrome.behavior.events.capture_context = self;
+        popup.chrome.setStyleInline(self.cx.allocator, S.panel());
+        popup.chrome.setStyle(self.cx.allocator, .width, .{ .px = 240 });
+        popup.chrome.meta.ownership.meta.test_id = "session.menu.more.panel";
+        try self.root.appendChild(self.cx.allocator, popup.wrapper);
+        const area = try ui.widgets.ScrollArea(.{}).mount(popup.scope, self.cx);
+        area.container.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 264 }, .max_height = 264, .flex_shrink = 0 });
+        area.container.meta.ownership.meta.test_id = "session.menu.more.scroll";
+        area.content.setStyleInline(self.cx.allocator, .{ .width = .fill(), .direction = .column });
+        self.more_area = area.container;
+        self.more_scroll = area.state;
+        self.more_content = area.content;
+        try popup.content.appendChild(self.cx.allocator, area.container);
+        const hovered = try ui.hooks.useHover(self.scope, button);
+        const over_panel = try ui.hooks.useHover(self.scope, popup.chrome);
+        self.more_trigger_hover = hovered;
+        self.more_panel_hover = over_panel;
+        const focus = try ui.hooks.useFocusState(self.scope, self.cx, button);
+        try self.scope.createEffect(.{ .view = self, .hovered = hovered, .over_panel = over_panel, .focus = focus.focused }, struct {
+            fn run(ctx: anytype) void {
+                if (!ctx.view.open.get()) {
+                    ctx.view.more_popup.open.?.set(false);
+                    return;
+                }
+                ctx.view.more_hovered = ctx.hovered.get() or ctx.over_panel.get();
+                if (!ctx.view.more_hovered and !ctx.focus.get()) ctx.view.more_suppressed = false;
+                if (!ctx.view.more_suppressed and (ctx.view.more_hovered or ctx.focus.get())) {
+                    ctx.view.more_close_at = 0;
+                    ctx.view.more_popup.open.?.set(true);
+                }
+                ctx.view.cx.scheduleRedrawAfterNs(180 * std.time.ns_per_ms);
+            }
+        }.run);
+    }
+    fn moreAnchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
+        const self: *View = @ptrCast(@alignCast(raw));
+        const r = self.more_button.globalRect();
+        const panel = self.chrome.globalRect();
+        return .{ .x = panel.x, .y = r.y, .w = panel.w, .h = r.h };
+    }
+    fn openMore(self: *View) void {
+        self.more_suppressed = false;
+        self.selected_more = 0;
+        self.more_popup.show.invoke();
+        if (self.more_rows.items.len > 0) self.cx.setFocus(self.more_rows.items[0].button);
+    }
+    pub fn setAll(self: *View, entries: []const Saved) !void {
+        while (self.more_content.children.items.len > 0) {
+            const child = self.more_content.children.items[self.more_content.children.items.len - 1];
+            self.cx.detachChild(self.more_content, child);
+            self.cx.freeNode(child);
+        }
+        if (self.more_scope) |scope| scope.dispose();
+        self.more_scope = try self.more_popup.scope.childScope();
+        const scope = self.more_scope.?;
+        self.more_rows.clearRetainingCapacity();
+        ui.widgets.scroll_area.setScrollY(self.more_scroll, self.more_content, 0);
+        for (entries) |entry| {
+            const cell = try scope.createState(SavedAction, .{ .view = self, .owner = entry.owner });
+            const button = try ui.widgets.Button(.{ .label = try scope.createText(entry.name, .{}), .icon_asset = entry.icon, .icon_size = @as(f32, 14), .variant = .ghost, .base_style = S.row(), .hover_style = self.hover_style, .on_click = self.cx.on(SavedAction, cell, SavedAction.choose) }).mount(scope, self.cx);
+            button.meta.ownership.meta.test_id = "session.menu.more.host";
+            @import("sidebar_view.zig").setFocusRing(button);
+            try self.more_content.appendChild(self.cx.allocator, button);
+            try self.more_rows.append(self.cx.allocator, .{ .owner = entry.owner, .button = button, .label = button, .icon = firstIcon(button) orelse button });
+        }
+        if (entries.len == 0) {
+            const empty = try ui.text(self.cx, "暂无已保存主机", S.label());
+            try self.more_content.appendChild(self.cx.allocator, empty);
+        }
+        self.more_area.setStyle(self.cx.allocator, .height, .{ .px = @as(f32, @floatFromInt(@min(@max(entries.len, 1), 8))) * 33 });
     }
     fn activateSaved(self: *View, owner: identity.AssetOwner) void {
         if (!self.isOpen() or self.chosen) return;
@@ -207,7 +346,8 @@ pub const View = struct {
         const colors = S.theme.current();
         self.chrome.setStyleInline(self.cx.allocator, S.panel());
         self.hover_style.set(.{ .background = colors.hover });
-        self.separator.setBackground(colors.border);
+        self.separator.setTextColor(colors.fg_2);
+        self.more_popup.chrome.setStyleInline(self.cx.allocator, S.panel());
         for (self.labels, self.icons) |label, icon| {
             label.setTextColor(colors.fg_1);
             _ = icon.setTint(colors.fg_2);
@@ -237,6 +377,14 @@ pub const View = struct {
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
         if (!self.isOpen()) return .done;
+        if (self.more_popup.open.?.peek()) {
+            const focused = if (self.cx.focused_node) |node| within(self.more_popup.chrome, node) or node == self.more_button else false;
+            if (self.more_hovered or focused) self.more_close_at = 0 else {
+                const now = @import("../platform/realtime.zig").milliseconds(self);
+                if (self.more_close_at == 0) self.more_close_at = now + 180;
+                if (now >= self.more_close_at) self.more_popup.close.invoke() else self.cx.scheduleRedrawAfterNs(180 * std.time.ns_per_ms);
+            }
+        }
         if (self.anchorNode() == null) self.hide() else if (self.paint_revision != self.cx.theme_version) self.retheme();
         return .done;
     }
@@ -247,6 +395,7 @@ pub const View = struct {
     fn cleanup(self: *View) void {
         self.cx.removeAfterLayoutHook(self);
         self.saved_rows.deinit(self.cx.allocator);
+        self.more_rows.deinit(self.cx.allocator);
         self.cx.allocator.destroy(self);
     }
 };
@@ -265,6 +414,16 @@ const Row = struct {
         self.view.activate(self.action);
     }
 };
+fn firstIcon(node: *ui.Node) ?*ui.Node {
+    if (node.getIcon() != null) return node;
+    for (node.children.items) |child| if (firstIcon(child)) |found| return found;
+    return null;
+}
+fn within(parent: *ui.Node, node: *ui.Node) bool {
+    var current: ?*ui.Node = node;
+    while (current) |value| : (current = value.parent) if (value == parent) return true;
+    return false;
+}
 fn find(node: *ui.Node, id: u32) ?*ui.Node {
     if (node.id == id) return node;
     for (node.children.items) |child| if (find(child, id)) |result| return result;
@@ -301,16 +460,16 @@ test "new session menu maps each creation command once and restores focus" {
     var probe: Probe = .{};
     const view = try View.mount(cx, scope, .{ .context = &probe, .local = Probe.onLocal, .quick = Probe.onQuick, .new_profile = Probe.onSaved });
     try cx.root.?.appendChild(cx.allocator, view.root);
-    for ([_]Action{ .local, .quick, .new_profile }) |action| {
+    for ([_]Action{ .local, .new_profile, .new_sftp }) |action| {
         try view.show(anchor);
-        for (0..@backingInt(action)) |_| _ = view.handleKey(.down);
+        view.selected = action;
         _ = view.handleKey(.@"return");
         _ = view.handleKey(.@"return");
         try std.testing.expect(!view.isOpen());
         try std.testing.expect(cx.focused_node == anchor);
     }
     try std.testing.expectEqual(@as(usize, 1), probe.local);
-    try std.testing.expectEqual(@as(usize, 1), probe.quick);
+    try std.testing.expectEqual(@as(usize, 0), probe.quick);
     try std.testing.expectEqual(@as(usize, 1), probe.saved);
     try view.show(anchor);
     _ = view.handleKey(.escape);
@@ -353,9 +512,9 @@ test "new session menu skips unavailable local command and clamps compact menu" 
     try cx.root.?.appendChild(cx.allocator, view.root);
     try view.show(anchor);
     _ = view.handleKey(.up);
-    try std.testing.expectEqual(Action.new_profile, view.selected);
+    try std.testing.expect(view.selected_more_trigger);
     _ = view.handleKey(.down);
-    try std.testing.expectEqual(Action.quick, view.selected);
+    try std.testing.expectEqual(Action.new_profile, view.selected);
     view.activate(.local);
     try std.testing.expect(view.isOpen());
     try cx.setTestFrameStep(100);
@@ -365,8 +524,8 @@ test "new session menu skips unavailable local command and clamps compact menu" 
         _ = cx.render();
     }
     const r = view.chrome.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 210), r.w, 0.5);
-    try std.testing.expectApproxEqAbs(@as(f32, 153), r.h, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 240), r.w, 0.5);
+    try std.testing.expect(r.h > 150 and r.h < 260);
     try std.testing.expect(r.x >= 8 and r.x + r.w <= 852.5);
 }
 
@@ -403,6 +562,8 @@ test "saved session menu refreshes rows and captures stable owner" {
     var many: [12]Saved = undefined;
     for (&many) |*entry| entry.* = .{ .owner = owner, .name = "Saved row", .icon = ui.icons.terminal };
     try view.setSaved(&many);
+    try view.setAll(&many);
+    try std.testing.expectEqual(@as(usize, 12), view.more_rows.items.len);
     try view.show(anchor);
     try cx.setTestFrameStep(100);
     for (0..8) |_| {
@@ -410,12 +571,12 @@ test "saved session menu refreshes rows and captures stable owner" {
         cx.layout();
         _ = cx.render();
     }
-    try std.testing.expectApproxEqAbs(@as(f32, 264), view.saved_area.globalRect().h, 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 99), view.saved_area.globalRect().h, 0.5);
     try std.testing.expect(view.chrome.globalRect().y + view.chrome.globalRect().h <= 472.5);
     view.hide();
     try view.setSaved(&.{});
     try std.testing.expectEqual(@as(usize, 0), view.saved_rows.items.len);
     try view.show(anchor);
     _ = view.handleKey(.down);
-    try std.testing.expectEqual(Action.quick, view.selected);
+    try std.testing.expect(view.selected_more_trigger);
 }

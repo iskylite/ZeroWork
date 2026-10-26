@@ -233,7 +233,7 @@ pub fn build(b: *std.Build) void {
     transfer_controls_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     transfer_controls_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
     transfer_controls_preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
-    b.step("transfer-controls-preview", "Build shared single-line transfer row and close-control acceptance fixture").dependOn(&b.addInstallArtifact(transfer_controls_preview, .{}).step);
+    b.step("transfer-controls-preview", "Build shared Figma transfer cards and close-control acceptance fixture").dependOn(&b.addInstallArtifact(transfer_controls_preview, .{}).step);
 
     const run = b.addRunArtifact(exe);
     run.step.dependOn(b.getInstallStep());

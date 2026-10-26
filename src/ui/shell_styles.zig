@@ -6,7 +6,7 @@ pub const outer: f32 = 8;
 pub const gap: f32 = 6;
 pub const title_height: f32 = 46;
 pub const status_height: f32 = 32;
-pub const sidebar_width: f32 = 224;
+pub const sidebar_width: f32 = 300;
 pub const sidebar_collapsed: f32 = 0;
 pub const card_radius: f32 = 11;
 // The windowed inset clears the native traffic lights; a header without
@@ -98,7 +98,7 @@ pub fn emptyGuide(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = 520 }, .max_width = 520, .height = .{ .fit = .{} }, .flex_shrink = 0, .direction = .column, .align_items = .center, .padding = .ZERO, .gap = 13 };
 }
 pub fn emptyActions(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .height = .{ .px = 35 }, .margin = .{ .top = 5 }, .flex_shrink = 0, .direction = .row, .gap = 8, .align_items = .center };
+    return .{ .height = .{ .px = 38 }, .margin = .{ .top = 5 }, .flex_shrink = 0, .direction = .row, .gap = 8, .align_items = .center };
 }
 
 pub fn collapsedSidebar(_: *const ui.ThemeTokens) ui.BoxStyle {
@@ -212,7 +212,7 @@ pub fn emptyIcon(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn emptyButton(primary: bool) ui.BoxStyle {
     const c = theme.current();
-    var style: ui.BoxStyle = .{ .width = .{ .fit = .{} }, .height = .{ .px = 35 }, .padding = .{ .left = 14, .right = 14 }, .gap = 7, .font_size = 12, .font_weight = 500, .background = if (primary) c.action_accent else c.hover, .text_color = if (primary) theme.actionForeground(c.action_accent) else c.fg_1, .border = .{ .radius = 8 }, .shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .inset_shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .flex_shrink = 0 };
+    var style: ui.BoxStyle = .{ .width = .{ .px = 156 }, .height = .{ .px = 38 }, .padding = .{ .left = 14, .right = 14 }, .gap = 7, .font_size = 12, .font_weight = 500, .background = if (primary) c.action_accent else c.hover, .text_color = if (primary) theme.actionForeground(c.action_accent) else c.fg_1, .border = .{ .radius = 8 }, .shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .inset_shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .flex_shrink = 0 };
     if (primary) {
         const family = theme.currentName();
         style.gradient = .{ .from = c.action_accent, .to = c.action_accent_2, .direction = .diagonal };

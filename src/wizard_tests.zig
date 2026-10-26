@@ -920,20 +920,11 @@ fn feedbackFrames(f: *SaveFixture) void {
 }
 fn selectWizardAuth(f: *SaveFixture, id: []const u8) !void {
     feedbackFrames(f);
-    const trigger = findId(f.wizard.root.?, "wizard.auth").?;
-    f.cx.setFocus(trigger);
+    const option = findId(f.wizard.root.?, id) orelse return error.MissingAuthenticationPicker;
+    f.cx.setFocus(option);
     f.cx.handleKeyDown(.@"return", .{});
     feedbackFrames(f);
-    for (f.wizard.selects.items) |picker| if (picker.trigger == trigger) {
-        try std.testing.expect(picker.open.?.peek());
-        const option = findId(picker.panel, id).?;
-        const rect = option.globalRect();
-        f.cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
-        feedbackFrames(f);
-        try std.testing.expect(!picker.open.?.peek());
-        return;
-    };
-    return error.MissingAuthenticationPicker;
+    try std.testing.expect(option.behavior.interaction.a11y.?.checked.?);
 }
 fn replaceWizardInput(f: *SaveFixture, id: []const u8, value: []const u8) void {
     f.cx.setFocus(findId(f.wizard.root.?, id).?);
@@ -1050,7 +1041,6 @@ test "wizard explicit password persistence writes a credential reference and reh
         defer f.deinit();
         f.wizard.loadDraft(.{ .name = "remembered", .host = "secret.example", .user = "ops", .protocol = protocol, .password = "wizard-test-password" });
         f.wizard.show();
-        SaveFixture.activate(findId(f.wizard.root.?, "wizard.password.remember").?);
         try std.testing.expect(f.wizard.currentDraft().save_password);
         SaveFixture.activate(f.wizard.next1_btn.?);
         SaveFixture.activate(f.wizard.next2_btn.?);
@@ -1084,7 +1074,7 @@ test "wizard unchecked and cancelled passwords never enter credential storage" {
     var f: SaveFixture = undefined;
     try f.init(.ssh);
     defer f.deinit();
-    f.wizard.loadDraft(.{ .name = "one-shot", .host = "secret.example", .user = "ops", .password = "never-persist-this" });
+    f.wizard.loadDraft(.{ .name = "one-shot", .host = "secret.example", .user = "ops", .password = "never-persist-this", .save_password = false });
     f.wizard.show();
     try std.testing.expect(!f.wizard.currentDraft().save_password);
     try std.testing.expectEqualStrings("never-persist-this", (try f.wizard.currentDraft().toHostConfig()).password.?);
@@ -1268,7 +1258,6 @@ test "wizard route choices disable identities selected by other hops" {
     try std.testing.expect(!f.wizard.jump_options[0].?.peek()[1].disabled);
 }
 
-
 test "wizard access mode restores a loaded route without changing its saved identity" {
     var f: SaveFixture = undefined;
     try f.init(.ssh);
@@ -1280,4 +1269,43 @@ test "wizard access mode restores a loaded route without changing its saved iden
     try std.testing.expectEqual(@as(usize, 1), f.wizard.currentDraft().route.len);
     try std.testing.expectEqual(route_id, f.wizard.currentDraft().route[0]);
     try std.testing.expect(f.wizard.canSave());
+}
+
+test "copy saved host retains credential references route and all persistent attributes" {
+    var memory: store.credentials.MemoryBackend = .{};
+    defer memory.deinit();
+    const previous = store.credentials.useBackendForTesting(memory.backend());
+    defer store.credentials.restoreBackendForTesting(previous);
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var initial = try hosts.Registry.parse(a, "[[hosts]]\nname=\"jump\";host=\"jump.test\";user=\"ops\"\n[[hosts]]\nname=\"original\";host=\"target.test\";user=\"root\"\nauth={password=\"saved-password\"}\njump_chain=[\"jump\"];startup_commands=[\"cd /srv\"];scrollback=20000;compression=true;keepalive=false\n");
+    defer initial.deinit();
+    try store.saveHosts(std.testing.io, tmp.dir, "hosts.toml", initial);
+    var live = try store.loadHosts(std.testing.io, tmp.dir, a, "hosts.toml");
+    defer live.deinit();
+    const owner = try live.duplicate(live.hosts[1].owner(), "copy");
+    const source = live.hosts[1];
+    try store.saveHosts(std.testing.io, tmp.dir, "hosts.toml", live);
+    var reopened = try store.loadHosts(std.testing.io, tmp.dir, a, "hosts.toml");
+    defer reopened.deinit();
+    const copy = try reopened.get(owner);
+    try std.testing.expectEqualStrings("saved-password", copy.password.?);
+    try std.testing.expect(copy.password_ref != null);
+    try std.testing.expectEqualSlices(hosts.identity.ConnectionId, source.route, copy.route);
+    try std.testing.expectEqualStrings(source.startup_commands[0], copy.startup_commands[0]);
+    try std.testing.expectEqual(source.scrollback, copy.scrollback);
+    try std.testing.expectEqual(source.compression, copy.compression);
+    try std.testing.expectEqual(source.keepalive, copy.keepalive);
+    var edited = reopened.hosts[1];
+    edited.password = "replacement-password";
+    _ = try reopened.update(edited.owner(), edited);
+    try store.saveHosts(std.testing.io, tmp.dir, "hosts.toml", reopened);
+    var after_edit = try store.loadHosts(std.testing.io, tmp.dir, a, "hosts.toml");
+    defer after_edit.deinit();
+    try std.testing.expectEqualStrings("saved-password", (try after_edit.get(owner)).password.?);
+    try after_edit.remove(after_edit.hosts[1].owner());
+    try store.saveHosts(std.testing.io, tmp.dir, "hosts.toml", after_edit);
+    var after_delete = try store.loadHosts(std.testing.io, tmp.dir, a, "hosts.toml");
+    defer after_delete.deinit();
+    try std.testing.expectEqualStrings("saved-password", (try after_delete.get(owner)).password.?);
 }

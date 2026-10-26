@@ -198,7 +198,14 @@ pub const View = struct {
         return input;
     }
     pub fn update(self: *View, revision: u64, assets: []const SavedAsset) !void {
-        if (self.source) |source| if (source.revision == revision) return;
+        if (self.source) |source| if (source.revision == revision and source.assets.len == assets.len) {
+            var same_order = true;
+            for (source.assets, assets) |before, after| if (!std.meta.eql(before.owner, after.owner)) {
+                same_order = false;
+                break;
+            };
+            if (same_order) return;
+        };
         const owned = try Owned.init(self.cx.allocator, revision, assets);
         if (self.source) |*previous| previous.arena.deinit();
         self.source = owned;

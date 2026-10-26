@@ -14,3 +14,7 @@ body[data-size=compact] #desktop{margin:12px auto}.review{max-width:1488px;margi
 /* A light scrim preserves the shared background and both theme families' contrast. */
 #settings-layer{background:rgb(0 0 0 / var(--material-scrim-alpha,.25))}.utility-layer{box-shadow:0 0 0 2000px rgb(0 0 0 / var(--material-scrim-alpha,.25)),0 20px 60px #0004}
 #desktop>.popover{background:var(--overlay);backdrop-filter:blur(var(--material-blur,0px));-webkit-backdrop-filter:blur(var(--material-blur,0px))}
+
+#transfers{padding:17px 14px 16px;border-radius:14px;overflow:hidden;display:flex;flex-direction:column}#transfers[hidden]{display:none}#transfers>header{height:30px;min-height:30px;margin-bottom:9px;font-size:13px}#transfers #task-list{min-height:0;overflow:auto;max-height:360px;padding-right:6px}
+
+#transfers:before{content:"";position:absolute;left:calc(50% - 16px);top:7px;width:32px;height:3px;border-radius:2px;background:var(--subtle,#5b5b64)}#transfers>header{justify-content:flex-start}#transfers #close-transfers{margin-left:auto}.transfer-scope-bar .spacer{flex:1}

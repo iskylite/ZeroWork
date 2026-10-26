@@ -52,11 +52,17 @@ pub const PresentationHooks = struct {
 };
 pub const PathHook = struct { context: *anyopaque, get: *const fn (*anyopaque, domain.CreateRequest) anyerror![]const u8 };
 pub const Options = struct { initial_path: ?PathHook = null };
+pub const ConnectionProgress = struct {
+    journal: @import("../proto/ssh/connection_progress.zig").Journal.Snapshot,
+    failure: ?operations.Failure,
+    activity: []const u8,
+};
 const Stage = enum { queued, file_open, realpath, listing, transfer_open, publish_ready, presenting, attaching, attached, draining, closed };
 const Entry = struct {
     request: Snapshot(domain.CreateRequest),
     arena: std.heap.ArenaAllocator,
     stage: Stage = .queued,
+    journal: @import("../proto/ssh/connection_progress.zig").Journal = .{},
     handles: ?Bindings = null,
     endpoint: ?readonly.EndpointRef = null,
     file_attempted: bool = false,
@@ -131,6 +137,19 @@ pub const SftpAdapter = struct {
         }
         return receipt;
     }
+    pub fn connectionProgress(self: *SftpAdapter, owner: identity.SessionHandle, key: operations.OperationKey) ?ConnectionProgress {
+        const entry = self.find(owner) orelse return null;
+        if (!entry.request.value.key.eql(key)) return null;
+        return .{ .journal = entry.journal.snapshot(), .failure = entry.failure, .activity = switch (entry.stage) {
+            .queued, .file_open => "正在建立 SSH / SFTP 连接…",
+            .realpath, .listing => "正在读取 SFTP 初始目录…",
+            .transfer_open => "正在建立文件传输连接…",
+            .publish_ready, .presenting, .attaching => "正在打开文件工作区…",
+            .attached => "SFTP 已连接",
+            .draining, .closed => "SFTP 连接已结束",
+        } };
+    }
+
     pub fn safeTick(self: *SftpAdapter, host: *domain.SessionHost, file_host: *files.FileBindingHost) !bool {
         if (self.ticking) return error.ReentrantSftpTick;
         if (file_host.sessions != host or (self.host != null and self.host.? != host) or (self.file_host != null and self.file_host.? != file_host)) return error.HostChanged;
@@ -144,6 +163,15 @@ pub const SftpAdapter = struct {
             if (entry.stage == .closed) continue;
             active = true;
             const request = entry.request.value;
+            if (entry.handles) |handles| if (file_host.connectionJournal(handles.directory)) |journal| {
+                // Preserve diagnostics before teardown releases the file binding.
+                entry.journal.attempt = journal.attempt;
+                entry.journal.entries = journal.entries;
+                entry.journal.count = journal.count;
+                entry.journal.dropped = journal.dropped;
+                entry.journal.completed = journal.completed;
+                entry.journal.failure = journal.failure;
+            };
             const state = host.queryState(request.handle);
             if (state == null or !state.?.create_operation.eql(request.key)) {
                 entry.cancel_requested = true;
@@ -166,8 +194,8 @@ pub const SftpAdapter = struct {
             if (entry.cancel_requested or entry.failure != null) entry.stage = .draining;
             if (entry.stage != .queued and entry.stage != .draining and entry.stage != .attached and entry.endpoint != null) {
                 if (file_host.state(entry.handles.?.directory)) |physical| {
-                    if (physical.phase == .failed or physical.phase == .closing or physical.phase == .cleanup_unknown or physical.phase == .closed) try self.recordFailure(entry, failure("sftp_connection_failed"));
-                } else try self.recordFailure(entry, failure("sftp_binding_closed"));
+                    if (physical.phase == .failed or physical.phase == .closing or physical.phase == .cleanup_unknown or physical.phase == .closed) try self.recordFailure(entry, failure(if (entry.journal.failure) |fault| (if (fault.failure) |err| @errorName(err) else "sftp_connection_failed") else if (physical.failure) |err| @tagName(err) else "sftp_connection_failed"));
+                } else try self.recordFailure(entry, failure(if (entry.journal.failure) |fault| (if (fault.failure) |err| @errorName(err) else "sftp_binding_closed") else if (file_host.connectionFailure(entry.handles.?.directory)) |err| @tagName(err) else "sftp_binding_closed"));
             }
             if (entry.failure != null) entry.stage = .draining;
             if (entry.stage == .draining) {
@@ -308,7 +336,15 @@ pub const SftpAdapter = struct {
         var copy = value;
         copy.code = try a.dupe(u8, value.code);
         copy.safe_message = try a.dupe(u8, value.safe_message);
-        copy.stage = if (value.stage) |stage| try a.dupe(u8, stage) else null;
+        copy.stage = try a.dupe(u8, value.stage orelse switch (entry.stage) {
+            .queued => "配置检查",
+            .file_open => "SSH / SFTP 连接",
+            .realpath => "解析初始目录",
+            .listing => "读取初始目录",
+            .transfer_open => "建立文件传输连接",
+            .publish_ready, .presenting, .attaching => "打开文件工作区",
+            .attached, .draining, .closed => "结束连接",
+        });
         copy.cleanup = .releasing;
         entry.failure = copy;
     }
@@ -401,6 +437,7 @@ pub const SftpAdapter = struct {
         errdefer owned.deinit();
         const entry = try self.allocator.create(Entry);
         entry.* = .{ .request = owned, .arena = .init(self.allocator) };
+        entry.journal.begin(request.key.attempt_id orelse 0);
         self.entries.appendAssumeCapacity(entry);
     }
     fn cancel(raw: *anyopaque, key: operations.OperationKey) domain.CloseReceipt {

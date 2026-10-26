@@ -35,6 +35,8 @@ const Fixture = struct {
     calls: usize = 0,
     record: Record = .{},
     auto_ack: bool = false,
+    defer_selection_paint: bool = false,
+    acknowledged: ?@import("ui/session_lifecycle.zig").Snapshot(files.Projection) = null,
     fn init(self: *Fixture, width: f32, height: f32) !void {
         self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .scope = undefined, .view = undefined };
         self.cx.setViewport(width, height);
@@ -49,6 +51,11 @@ const Fixture = struct {
         self.cx.clearFocus();
         self.scope.dispose();
         self.cx.deinit();
+        if (self.acknowledged) |*value| value.deinit();
+    }
+    fn acknowledgedProjection(raw: *anyopaque) ?files.Projection {
+        const self: *Fixture = @ptrCast(@alignCast(raw));
+        return if (self.acknowledged) |value| value.value else self.current();
     }
     fn current(self: *Fixture) files.Projection {
         return .{ .revision = self.view.source.?.value.revision, .owner = owner, .panes = .{ self.view.panes[0].projection().?, self.view.panes[1].projection().? } };
@@ -85,7 +92,11 @@ const Fixture = struct {
             pane.selected_keys = envelope.action.selection.keys;
             pane.anchor = envelope.action.selection.anchor;
             pane.focused_key = envelope.action.selection.focused_key;
-            try self.view.update(value);
+            if (self.defer_selection_paint) {
+                const frozen = try @import("ui/session_lifecycle.zig").Snapshot(files.Projection).init(a, value);
+                if (self.acknowledged) |*old| old.deinit();
+                self.acknowledged = frozen;
+            } else try self.view.update(value);
         }
     }
     fn settle(self: *Fixture) void {
@@ -146,15 +157,44 @@ test "file workspace file tooltip keeps filename path and metadata on separate v
     try std.testing.expectEqual(@as(usize, 0), f.calls);
 }
 
+test "file workspace transfer cards are siblings below top aligned file cards and empty slots reserve nothing" {
+    var f: Fixture = undefined;
+    try f.init(1194, 794);
+    defer f.deinit();
+    const local = f.view.panes[0].root;
+    const remote = f.view.panes[1].root;
+    const column = f.view.transferSlot(.local);
+    try std.testing.expect(column != local);
+    try std.testing.expect(local.parent == column);
+    try std.testing.expectEqual(@as(f32, 0), local.globalRect().y);
+    try std.testing.expectEqual(local.globalRect().y, remote.globalRect().y);
+    const initial_height = local.globalRect().h;
+    const transfer = try ui.box(f.cx, .{ .width = .fill(), .height = .{ .px = 104 }, .flex_shrink = 0 }, .{});
+    transfer.setDisplay(.none);
+    try column.appendChild(a, transfer);
+    f.settle();
+    try std.testing.expectEqual(initial_height, local.globalRect().h);
+    transfer.setDisplay(.flex);
+    f.settle();
+    try std.testing.expectEqual(column, transfer.parent.?);
+    try std.testing.expectEqual(@as(f32, 6), transfer.globalRect().y - local.globalRect().y - local.globalRect().h);
+    try std.testing.expectEqual(initial_height - 110, local.globalRect().h);
+    try std.testing.expectEqual(initial_height, remote.globalRect().h);
+    try std.testing.expectEqual(column.globalRect().y + column.globalRect().h, transfer.globalRect().y + transfer.globalRect().h);
+    transfer.setDisplay(.none);
+    f.settle();
+    try std.testing.expectEqual(initial_height, local.globalRect().h);
+}
+
 test "file workspace V3 independent cards and fixed header footer use measured geometry" {
     var f: Fixture = undefined;
     try f.init(1194, 794);
     defer f.deinit();
     for (f.view.panes) |pane| {
         try std.testing.expectEqual(@as(f32, 594), pane.root.globalRect().w);
-        try std.testing.expectEqual(@as(f32, 770), pane.root.globalRect().h);
+        try std.testing.expectEqual(@as(f32, 794), pane.root.globalRect().h);
         try std.testing.expectEqual(@as(f32, 592), pane.table.globalRect().w);
-        try std.testing.expectEqual(@as(f32, 597), pane.table.globalRect().h);
+        try std.testing.expectEqual(@as(f32, 621), pane.table.globalRect().h);
         try std.testing.expectEqual(@as(f32, 34), pane.header.globalRect().h);
         try std.testing.expectEqual(@as(f32, 757), pane.footer.globalRect().y);
         try std.testing.expectEqual(@as(f32, 757), pane.actions.globalRect().y);
@@ -196,10 +236,10 @@ test "file workspace narrow columns fit with independent vertical scrolling and 
     const left = f.view.panes[0];
     const right = f.view.panes[1];
     try std.testing.expectEqual(@as(f32, 392), left.root.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 185), left.table.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 209), left.table.globalRect().h);
     try std.testing.expectApproxEqAbs(left.column_width - 34, left.name_width + left.size_width, 0.01);
     try std.testing.expectEqual(@as(f32, 390), left.column_width);
-    try std.testing.expectEqual(@as(f32, 151), left.list.state.viewport_height);
+    try std.testing.expectEqual(@as(f32, 175), left.list.state.viewport_height);
     const footer = left.footer.globalRect();
     const path = left.path.node.globalRect();
     const header = left.header.globalRect();
@@ -273,7 +313,7 @@ test "file workspace compact horizontal rail truly clips row paint and hit testi
     const clip = pane.list.content.parent.?;
     try std.testing.expect(clip != pane.list.container);
     try std.testing.expect(clip.style.overflow_hidden);
-    try std.testing.expectEqual(@as(f32, 139), clip.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 163), clip.globalRect().h);
     try std.testing.expectEqual(body.y + body.h - 12, clip.globalRect().y + clip.globalRect().h);
     const y = body.y + body.h - 6;
     f.cx.handleMouseDown(body.x + 80, y, .{});
@@ -380,7 +420,7 @@ test "file workspace failed refresh preserves rows path and scroll and disables 
     try std.testing.expect(remote.footer.style.display == .none);
     const failure = remote.error_box.globalRect();
     const pane = remote.root.globalRect();
-    try std.testing.expectEqual(@as(f32, 137), table.h);
+    try std.testing.expectEqual(@as(f32, 161), table.h);
     try std.testing.expectEqual(stale.y + stale.h, table.y);
     try std.testing.expectEqual(table.y + table.h, failure.y);
     try std.testing.expectEqual(pane.y + pane.h - 1, failure.y + failure.h);
@@ -501,7 +541,7 @@ test "file workspace actual Cx cross-card drag freezes source and opens one conf
     try std.testing.expect(f.view.panes[1].drag_preview.style.display == .none);
 }
 
-test "file workspace drag folder target is exact metadata and file target or Escape never transfers" {
+test "file workspace drag folder target is exact and regular file targets its directory while Escape cancels" {
     const remote_entries = [_]files.Entry{
         .{ .absolute_path = "/srv/fixture/shared", .raw_name = "shared", .display_name = "shared", .kind = .directory },
         .{ .absolute_path = "/srv/fixture/folder.zip", .raw_name = "folder.zip", .display_name = "folder.zip", .kind = .file },
@@ -530,10 +570,12 @@ test "file workspace drag folder target is exact metadata and file target or Esc
     const file = f.row(.remote, remote_entries[1].absolute_path).globalRect();
     f.cx.handleMouseMove(file.x + 100, file.y + file.h / 2);
     f.settle();
-    try std.testing.expect(f.view.drop_side == null);
+    try std.testing.expectEqual(files.Side.remote, f.view.drop_side.?);
+    try std.testing.expect(f.view.drag_ghost.style.display != .none);
     f.cx.handleMouseUp(file.x + 100, file.y + file.h / 2);
     f.settle();
-    try std.testing.expectEqual(calls, f.calls);
+    try std.testing.expectEqual(calls + 1, f.calls);
+    try std.testing.expectEqualStrings(f.current().panes[1].resolved_path, f.record.path[0..f.record.path_len]);
     dragStart(&f, entries[2].absolute_path);
     f.cx.handleMouseMove(folder.x + 100, folder.y + folder.h / 2);
     f.settle();
@@ -541,6 +583,103 @@ test "file workspace drag folder target is exact metadata and file target or Esc
     f.settle();
     f.cx.handleMouseUp(folder.x + 100, folder.y + folder.h / 2);
     f.settle();
-    try std.testing.expectEqual(calls, f.calls);
+    try std.testing.expectEqual(calls + 1, f.calls);
     try std.testing.expect(f.view.drag_source == null and f.view.drop_side == null);
+}
+
+test "file workspace rejected drag start safely releases capture during mouse move" {
+    var f: Fixture = undefined;
+    try f.init(1194, 794);
+    defer f.deinit();
+    // No selection acknowledgement: startup rejects the stale selection and
+    // releases capture synchronously inside the threshold mouse-move callback.
+    dragStart(&f, entries[2].absolute_path);
+    try std.testing.expect(f.view.drag_source == null);
+    try std.testing.expect(!f.cx.dispatcher.hasPointerCapture());
+    try std.testing.expect(f.record.tag != .transfer);
+}
+
+test "file workspace remote drag downloads into the original local directory" {
+    var f: Fixture = undefined;
+    try f.init(1194, 794);
+    defer f.deinit();
+    f.auto_ack = true;
+    var value = f.current();
+    value.revision += 1;
+    const remote_entries = [_]files.Entry{.{ .absolute_path = "/srv/fixture/download.txt", .raw_name = "download.txt", .display_name = "download.txt", .kind = .file, .size = 32 }};
+    value.panes[1].entries = &remote_entries;
+    value.panes[1].state = .ready;
+    try f.view.update(value);
+    f.settle();
+    const handle = find(f.row(.remote, remote_entries[0].absolute_path), "files.row.drag").?;
+    const r = handle.globalRect();
+    f.cx.handleMouseDown(r.x + 20, r.y + r.h / 2, .{});
+    f.settle();
+    f.cx.handleMouseMove(r.x + 28, r.y + r.h / 2);
+    f.settle();
+    try std.testing.expect(f.view.drag_source != null);
+    const target = f.view.panes[0].data_clip.globalRect();
+    const x = target.x + 100;
+    const y = target.y + target.h - 30;
+    f.cx.handleMouseMove(x, y);
+    f.settle();
+    f.cx.handleMouseUp(x, y);
+    f.settle();
+    try std.testing.expectEqual(std.meta.Tag(files.Action).transfer, f.record.tag);
+    try std.testing.expectEqualStrings("/tmp/fixture", f.record.path[0..f.record.path_len]);
+    try std.testing.expectEqualStrings(remote_entries[0].absolute_path, f.record.keys[0][0..f.record.lengths[0]]);
+    try std.testing.expect(f.view.drag_source == null);
+}
+
+test "file workspace starts an unselected file drag before selection paint catches up" {
+    var f: Fixture = undefined;
+    try f.init(1194, 794);
+    defer f.deinit();
+    f.auto_ack = true;
+    f.defer_selection_paint = true;
+    f.view.callbacks.current_projection = Fixture.acknowledgedProjection;
+    dragStart(&f, entries[2].absolute_path);
+    try std.testing.expect(f.view.drag_source != null);
+    try std.testing.expectEqual(@as(usize, 0), f.view.source.?.value.panes[0].selected_keys.len);
+    const target = f.view.panes[1].data_clip.globalRect();
+    f.cx.handleMouseMove(target.x + 100, target.y + 80);
+    f.cx.handleMouseUp(target.x + 100, target.y + 80);
+    f.settle();
+    try std.testing.expectEqual(std.meta.Tag(files.Action).transfer, f.record.tag);
+    try std.testing.expectEqualStrings(entries[2].absolute_path, f.record.keys[0][0..f.record.lengths[0]]);
+}
+
+test "file workspace right click records pointer anchor instead of toolbar" {
+    var f: Fixture = undefined;
+    try f.init(1194, 794);
+    defer f.deinit();
+    f.auto_ack = true;
+    const r = f.row(.local, entries[2].absolute_path).globalRect();
+    const x = r.x + 80;
+    const y = r.y + 14;
+    f.cx.handleMouseDownEx(x, y, .right, .{});
+    f.settle();
+    try std.testing.expectEqual(@as(f32, x), f.view.panes[0].context_anchor.?.x);
+    try std.testing.expectEqual(@as(f32, y), f.view.panes[0].context_anchor.?.y);
+    try std.testing.expectEqual(std.meta.Tag(files.Action).context, f.record.tag);
+}
+
+test "file workspace drag can start from size column as well as filename" {
+    var f: Fixture = undefined;
+    try f.init(1194, 794);
+    defer f.deinit();
+    f.auto_ack = true;
+    const size = find(f.row(.local, entries[2].absolute_path), "files.row.size").?.globalRect();
+    const x = size.x + size.w / 2;
+    const y = size.y + size.h / 2;
+    f.cx.handleMouseDown(x, y, .{});
+    f.settle();
+    f.cx.handleMouseMove(x + 12, y);
+    f.settle();
+    try std.testing.expect(f.view.drag_source != null);
+    try std.testing.expect(f.view.drag_ghost.style.display != .none);
+    f.cx.handleKeyDown(.escape, .{});
+    f.settle();
+    try std.testing.expect(f.view.drag_source == null);
+    try std.testing.expect(f.view.drag_ghost.style.display == .none);
 }

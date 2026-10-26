@@ -208,3 +208,14 @@ AI继续复用`docs/SPEC/prototypes/v2/index-dark.html`与`vanta.css`的三点�
 ## 2026-10-26 二轮评审更新
 
 当前以 [二轮效果图](../review-followup-20261026.html)、[修改与逐入口检查记录](../REVIEW_FOLLOWUP_20261026.md) 为准。侧栏为显示/隐藏，不保留图标折叠态；保存主机与会话分离，主机菜单不操作任意一条同主机会话的转发。旧验证截图作为历史记录保留。传输使用共享 `transfer-row`，消息使用共享 `feedback`，具体语义、时长和位置见设计指南。
+
+
+## 2026-10-27 SFTP 确认框与文件菜单
+
+上传、下载确认框采用 480×398 逻辑尺寸，按标题、文件摘要、来源/目标路径、传输选项及操作区组织。路径为本次操作冻结的只读目录；取消不创建任务，开始按钮明确显示上传或下载。超长路径限制在路径容器内，确认框显示期间关闭底层文件提示，避免浮层重叠。
+
+文件右键菜单为 224×154，使用 34px 行高、14px 图标和左对齐文字；重命名仍为禁用状态。菜单沿用点击位置与边界约束。HTML 与原生使用各自真实数据，内容不同不视为布局偏差。
+
+效果图：[上传确认](../reference/sftp-overlay-polish-20261027/html-confirm-upload.png)、[文件菜单实机效果](../reference/sftp-overlay-polish-20261027/native-file-menu.png)。原生截图：[上传确认](../reference/sftp-overlay-polish-20261027/native-confirm-upload.png)、[文件菜单](../reference/sftp-overlay-polish-20261027/native-file-menu.png)、[小窗口下载确认](../reference/sftp-overlay-polish-20261027/native-confirm-download-compact.png)。测量记录见同目录 measurements.json。
+
+验证覆盖原生真实鼠标拖拽上传/下载及外部文件投放、传输内容校验、860×480 小窗口确认框边界与底层提示关闭；文件工作区相关测试通过。App 产物为 0.2.2，仅构建 .app。

@@ -64,6 +64,10 @@ pub const Host = struct {
         // A later owner's prompt cannot replace the card currently being
         // read. Reconcile its actual attached/released receipt first.
         const captured = self.progress.operationKey();
+        const file_key = if (captured) |key| (if (self.application.fileConnectionProgress(key) != null) key else if (self.workspace.connectionProgress(key) != null) null else self.application.fileProgressKey()) else self.application.fileProgressKey();
+        if (file_key) |key| {
+            if (try self.refreshFile(key, pending)) return;
+        }
         var source = if (captured) |key| self.workspace.connectionProgress(key) else null;
         if (captured != null and source == null) self.hide();
         const key = if (source) |current| current.key else if (pending) |request| request.identity.key else self.workspace.nextConnectionPresentationKey() orelse {
@@ -125,6 +129,50 @@ pub const Host = struct {
         }
     }
 
+    fn refreshFile(self: *Host, key: operations.OperationKey, pending: ?auth.Snapshot) !bool {
+        if (key.owner != .session) return false;
+        const state = self.application.sessions.queryState(key.owner.session) orelse return false;
+        if (!state.create_operation.eql(key)) return false;
+        if (state.lifecycle == .attached or state.lifecycle == .closed or state.lifecycle == .ended) {
+            self.application.dismissFileProgress(key);
+            self.hide();
+            return false;
+        }
+        const diagnostic = self.application.fileConnectionProgress(key) orelse return false;
+        if (pending) |request| if (self.workspace.authenticationHostFor(request.identity) != null) {
+            self.progress.hide();
+            var modal_request = request;
+            modal_request.presentation = .otp_modal;
+            try self.showAuthentication(modal_request);
+            self.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
+            return true;
+        };
+        self.bridge.clear();
+        const source = try self.application.fileSource(key.owner.session, key);
+        var reason: [1536]u8 = undefined;
+        const fault = diagnostic.failure;
+        const failure: ?Progress.Failure = if (fault) |value| .{
+            .hop = if (diagnostic.journal.failure) |entry| entry.hop else null,
+            .phase = if (diagnostic.journal.failure) |entry| entry.phase else null,
+            .reason = try std.fmt.bufPrint(&reason, "{s} · {s}（{s}）", .{ ApplicationHost.fileFailureText(value.code), value.stage orelse diagnostic.activity, value.code }),
+        } else null;
+        const saved = source.host;
+        const hop: Progress.Hop = .{ .name = saved.name, .host = saved.host, .user = saved.user, .port = saved.port };
+        try self.progress.show(.{
+            .key = key,
+            .hops = &.{hop},
+            .journal = diagnostic.journal,
+            .state = if (fault != null) .failed else if (state.lifecycle == .failed) .cancelled else if (diagnostic.journal.completed) .protocol_ready else .connecting,
+            .cleanup = state.create_cleanup,
+            .local_ready = true,
+            .failure = failure,
+            .file_session = true,
+            .activity = diagnostic.activity,
+        });
+        self.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
+        return true;
+    }
+
     fn prefillValid(raw: *anyopaque, window: u64, expires_ns: ?i128) bool {
         const self: *Host = @ptrCast(@alignCast(raw));
         const now = self.totp_clock.now();
@@ -149,6 +197,12 @@ pub const Host = struct {
     fn retry(raw: *anyopaque, key: operations.OperationKey) !void {
         const self: *Host = @ptrCast(@alignCast(raw));
         if (key.owner != .session) return error.InvalidOperation;
+        if (self.application.fileConnectionProgress(key) != null) {
+            _ = try self.application.sessions.retry(key.owner.session);
+            self.application.dismissFileProgress(key);
+            self.progress.hide();
+            return;
+        }
         const current = self.workspace.connectionProgress(key) orelse return error.StaleConnection;
         if (current.cleanup != .released) return error.CleanupNotReleased;
         const id = self.application.legacyForHandle(key.owner.session) orelse return error.StaleConnection;
@@ -156,11 +210,12 @@ pub const Host = struct {
     }
     fn close(raw: *anyopaque, key: operations.OperationKey) void {
         const self: *Host = @ptrCast(@alignCast(raw));
+        self.application.dismissFileProgress(key);
         self.workspace.dismissConnectionProgress(key) catch {};
     }
     fn copyLogs(raw: *anyopaque, key: operations.OperationKey, text: []const u8) !void {
         const self: *Host = @ptrCast(@alignCast(raw));
-        _ = self.workspace.connectionProgress(key) orelse return error.StaleConnection;
+        if (self.workspace.connectionProgress(key) == null and self.application.fileConnectionProgress(key) == null) return error.StaleConnection;
         if (!ui.platform_services.clipboardSetText(self.cx.system_sdk, text)) return error.ClipboardUnavailable;
     }
     fn cleanup(self: *Host) void {

@@ -25,6 +25,7 @@ pub const Runtime = struct {
         isConnected: *const fn (*anyopaque) bool,
         markAttached: *const fn (*anyopaque) void,
         setInputBufferEnabled: *const fn (*anyopaque, bool) void,
+        requestCurrentDirectory: ?*const fn (*anyopaque) anyerror!void = null,
         copyCwd: *const fn (*anyopaque, std.mem.Allocator) anyerror!?[]u8,
         searchText: *const fn (*anyopaque, std.mem.Allocator) anyerror![]u8,
         readLines: *const fn (*anyopaque, terminal.LineLimits, std.mem.Allocator) anyerror!terminal.Lines,
@@ -122,6 +123,10 @@ pub const Runtime = struct {
     pub fn setInputBufferEnabled(self: *Runtime, enabled: bool) void {
         if (self.torn_down) return;
         return self.vtable.setInputBufferEnabled(self.context, enabled);
+    }
+    pub fn requestCurrentDirectory(self: *Runtime) !void {
+        if (self.vtable.requestCurrentDirectory) |call| return call(self.context);
+        return error.UnsupportedOperation;
     }
     pub fn copyCwd(self: *Runtime, allocator: std.mem.Allocator) anyerror!?[]u8 {
         if (self.torn_down) return error.SessionClosed;

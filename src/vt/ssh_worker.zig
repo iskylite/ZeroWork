@@ -41,6 +41,8 @@ pub const RuntimeOptions = struct {
     jump_options: []const Options = &.{},
 };
 
+pub const current_directory_command = " printf '\\033]7;\\007\\033]7;file://localhost%s\\007' \"$(printf '%s' \"$PWD\" | sed 's/%/%25/g;s/ /%20/g')\"\n";
+
 const startup_input_limit: usize = 64 * 1024;
 
 /// Encode the declarative startup command list for the PTY input queue.
@@ -82,6 +84,7 @@ fn encodeStartupInput(allocator: std.mem.Allocator, commands: []const []const u8
 /// Owns the concrete single-hop SSH → VT → UI worker resources.
 pub const SshWorker = struct {
     allocator: std.mem.Allocator,
+    cwd_capture: @import("cwd_capture.zig").Capture = .{},
     wakeup: @import("../platform/wakeup.zig").Wakeup,
     library: *const Library,
     options: Options,
@@ -216,7 +219,9 @@ pub const SshWorker = struct {
         worker.reconnect_backoff = runtime.reconnect_backoff;
         worker.auto_reconnect = runtime.auto_reconnect;
         worker.buffer_input = runtime.buffer_input;
+        worker.cwd_capture = .{};
         worker.io = .{
+            .output_filter = .{ .context = worker, .feed = captureDirectoryOutput, .finish = finishDirectoryOutput },
             .feed = .{ .engine = @import("engine.zig").VtEngine.from(VtAdapter, &worker.vt), .text_slot = &worker.text },
             .input = &worker.input,
             .reader = reader,
@@ -663,6 +668,25 @@ pub const SshWorker = struct {
     }
 
     /// Copy the shell-reported cwd (OSC 7/9/1337) for UI/AI consumers.
+    fn finishDirectoryOutput(raw: *anyopaque, io: *WorkerIo) !void {
+        const self: *SshWorker = @ptrCast(@alignCast(raw));
+        try self.cwd_capture.finish(io);
+    }
+    fn captureDirectoryOutput(raw: *anyopaque, io: *WorkerIo, bytes: []const u8) !void {
+        const self: *SshWorker = @ptrCast(@alignCast(raw));
+        try self.cwd_capture.feed(io, bytes, realtime.monotonicNs());
+    }
+    pub fn requestCurrentDirectory(self: *SshWorker) !void {
+        self.vt.clearCwd();
+        self.cwd_capture.arm();
+        // Execute in the interactive shell: a separate exec channel starts in
+        // the login directory and cannot observe a preceding `cd`.
+        self.pushInput(current_directory_command) catch |err| {
+            self.cwd_capture.requested.store(false, .release);
+            return err;
+        };
+    }
+
     pub fn copyCwd(self: *SshWorker, allocator: std.mem.Allocator) !?[]u8 {
         return self.vt.copyCwd(allocator);
     }
@@ -819,8 +843,9 @@ test "startup command encoder bounds input before allocation" {
 }
 
 fn inputTestWorker(worker: *SshWorker) !void {
-    worker.input = try InputQueue.init(std.testing.allocator, 128);
-    worker.replay = try Replay.init(std.testing.allocator, 128);
+    worker.cwd_capture = .{};
+    worker.input = try InputQueue.init(std.testing.allocator, 256);
+    worker.replay = try Replay.init(std.testing.allocator, 256);
     worker.options = .{ .host = "fixture", .user = "fixture", .auth = .agent, .operation_key = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(8) } }, .operation_id = 1, .attempt_id = 1 } };
     worker.replay.configure(worker.options.operation_key, true, false);
     worker.vt = try VtAdapter.init(std.testing.allocator, 3, 80);
@@ -1019,4 +1044,21 @@ test "AI legacy SSH selection capture freezes actual VT bytes original owner ver
     try std.testing.expectError(error.StaleSelection, worker.captureAiSelection(a, owner, range, version));
     try std.testing.expectError(error.StaleOwner, worker.captureAiSelection(a, try owner.nextGeneration(), range, worker.vt.snapshot().version));
     try std.testing.expectEqual(@as(usize, 0), worker.vt.view_store.refs.items.len);
+}
+
+test "current directory request clears stale paths and consumes a fresh shell report" {
+    var worker: SshWorker = undefined;
+    try inputTestWorker(&worker);
+    defer deinitInputTestWorker(&worker);
+    worker.vt.configureCwdTracking();
+    worker.replay.configure(worker.options.operation_key, true, true);
+    _ = try worker.vt.feed("\x1b]7;file://localhost/old\x07");
+    try worker.requestCurrentDirectory();
+    try std.testing.expect((try worker.copyCwd(std.testing.allocator)) == null);
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(current_directory_command, worker.input.drain(&buffer));
+    _ = try worker.vt.feed("\x1b]7;\x07\x1b]7;file://localhost/srv/a%20b%25c\x07");
+    const path = (try worker.copyCwd(std.testing.allocator)).?;
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("/srv/a b%c", path);
 }

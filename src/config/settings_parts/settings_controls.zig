@@ -23,7 +23,9 @@ fn inputPresentation(key: Key, label: []const u8) struct { label: []const u8, un
 /// and its description share a flexible column in either fold state.
 pub fn sectionHeader(cx: *ui.Cx, scope: *ui.Scope, result: ui.widgets.AccordionItemResult, icon: ui.SvgAsset, expanded: bool, summary: []const u8, id: []const u8) !*ui.Node {
     result.item.setStyleInline(cx.allocator, S.sectionState(expanded));
+    result.item.setBorderWidth(0);
     result.header.setStyleInline(cx.allocator, S.summaryHeader(summary.len != 0));
+    result.header.setBorderWidth(0);
 
     result.header.removeChild(result.chevron);
     result.header.removeChild(result.title);
@@ -198,6 +200,8 @@ pub const Section = struct {
         self.summary_node.setDisplay(if (text.len != 0) .flex else .none);
         self.header.setStyleInline(self.page.cx.allocator, S.summaryHeader(text.len != 0));
         self.root.setStyleInline(self.page.cx.allocator, S.sectionState(expanded));
+        self.root.setBorderWidth(0);
+        self.header.setBorderWidth(0);
 
         const saving = self.page.bound.controller.state() == .saving;
         self.header.setFocusable(!saving);

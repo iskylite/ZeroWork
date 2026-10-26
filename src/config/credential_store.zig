@@ -253,3 +253,8 @@ test "credential isolated instance service is stable and refuses scope switching
     try std.testing.expectError(error.CredentialScopeAlreadyConfigured, configureScope("/owned-fixture/instance-b", true));
     try std.testing.expectEqualStrings(first, try scopeService());
 }
+
+pub fn authorizeScope() !void {
+    if (builtin.is_test) return error.CredentialUnavailable;
+    try native.authorize(try scope());
+}

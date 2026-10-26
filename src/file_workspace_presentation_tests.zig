@@ -354,13 +354,18 @@ test "file workspace presentation context and history use real menus and reject 
     projection = model.projection().?;
     const entry = projection.panes[0].entries[0].absolute_path;
     const keys = [_][]const u8{entry};
+    menu.pane.context_anchor = .{ .x = 320, .y = 280, .w = 0, .h = 0 };
     envelope = .{ .side = .local, .stamp = projection.panes[0].stamp, .projection_revision = projection.revision, .selection_revision = projection.panes[0].selection_revision, .action = .{ .context = .{ .keys = &keys, .anchor = entry, .focused_key = entry } } };
     try model.handle(envelope);
     try f.frame();
     try std.testing.expect(menu.open.peek() and !menu.history);
+    try std.testing.expectEqual(@as(f32, 320), menu.anchor_rect.x);
+    try std.testing.expectEqual(@as(f32, 280), menu.anchor_rect.y);
     for (0..12) |_| try f.frame();
-    try std.testing.expectApproxEqAbs(@as(f32, 260), menu.chrome.globalRect().w, 1);
-    try std.testing.expectApproxEqAbs(@as(f32, 150), menu.chrome.globalRect().h, 1);
+    try std.testing.expectApproxEqAbs(@as(f32, 224), menu.chrome.globalRect().w, 1);
+    try std.testing.expectApproxEqAbs(@as(f32, 320), menu.chrome.globalRect().x, 1);
+    try std.testing.expectApproxEqAbs(@as(f32, 284), menu.chrome.globalRect().y, 1);
+    try std.testing.expectApproxEqAbs(@as(f32, 154), menu.chrome.globalRect().h, 1);
     try std.testing.expect(find(menu.content, "files.context.copy") != null);
     const rename = find(menu.content, "files.context.rename").?;
     try std.testing.expect(!rename.behavior.interaction.focusable);
@@ -439,7 +444,7 @@ test "file workspace presentation explicit directory recovery waits old worker r
     try std.testing.expectEqual(@import("ui/file_workspace_view.zig").State.stale, model.paneStatus(.remote).state);
 }
 
-test "file workspace presentation inline copy freezes target and waits explicit confirmation with saved choices" {
+test "file workspace presentation floating copy freezes target and waits explicit confirmation with saved choices" {
     const Copy = @import("ui/file_copy_view.zig");
     const Capture = struct {
         count: usize = 0,
@@ -470,7 +475,11 @@ test "file workspace presentation inline copy freezes target and waits explicit 
     try copy.open(.{ .owner = source.owner, .source = .{ .stamp = p.panes[0].stamp, .endpoint = .{ .local_fs = f.local.endpoint }, .selection_revision = 1, .directory = f.path }, .destination = .{ .stamp = p.panes[1].stamp, .endpoint = .{ .sftp = source.initial_directory.endpoint }, .selection_revision = 1, .directory = "/remote/locked" }, .paths = &paths }, .{ .resume_transfer = false, .md5_check = true });
     path[0] = 'X';
     for (0..12) |_| try f.frame();
-    try std.testing.expectApproxEqAbs(@as(f32, 132), copy.root.globalRect().h, 1);
+    try std.testing.expect(copy.root.parent != copy.pane.root);
+    try std.testing.expect(copy.open_value.peek());
+    try std.testing.expect(copy.pane.view.confirmation_open.peek());
+    try std.testing.expect(copy.overlay.globalRect().w > copy.root.globalRect().w);
+    try std.testing.expectApproxEqAbs(@as(f32, 398), copy.root.globalRect().h, 1);
     try std.testing.expectEqual(@as(usize, 0), captured.count);
     // Cancel has no queue callback; a later explicit draft still owns copies.
     const frozen = copy.frozen.?.intent;

@@ -5,15 +5,17 @@
 - Upstream: https://github.com/version-next/zenit
 - Revision: `9c1ba9bfea58210404e447b04b6ff25b6442f0ff`
 - Package: `zenit` (`dev/zig-0.17.0`, complete source snapshot tracked by ZeroWork)
-- Local patch revision: `2026-10-26-tooltip-bounded-content` (optional `width`/`wrap`; upstream revision and license unchanged)
+- Local patch revision: `2026-10-27-pointer-drag-hit-test-accounting` (optional `width`/`wrap`; upstream revision and license unchanged)
 - Minimum Zig: `0.17.0`
 - License: GPL-3.0-only (commercial alternative documented upstream)
 - Canonical source files: `3505` (tracked sources plus declared working-tree additions)
-- Canonical tracked-tree SHA-256: `f9b28136d37aba2627c8df8962e2352e28d7688938e387300d8b3c2b9b12c457`
+- Canonical tracked-tree SHA-256: `d83d8b92a46cea9346e4994d3b285ae4ced6a8573dbc988adea06e7d8a49d6c2`
 - Hash algorithm: sort and deduplicate `git ls-files --cached --others --exclude-standard vendor/zenit`; for each path hash big-endian u64 path length, path relative to `vendor/zenit`, big-endian u64 content length, then raw content bytes
 - Project decision: GPL-3.0-only use authorized for current development; distribution obligations remain active.
 
 The upstream `LICENSE`, `LICENSING.md`, source, and package metadata are retained under `vendor/zenit/`. Do not update this tree without recording a new fixed revision and reviewing its license and build contract.
+
+Latest local patch moves the mouse-move hit-count assertion before drag callbacks, which can legitimately perform their own hover lookup; no API, toolchain or license changes.
 
 Local adaptations are included in the canonical hash: bounded/wrapping Tooltip content through public optional properties (defaults preserve the existing API and behavior), native close confirmation/commit/completion and IME handling, rendering and hit-test fixes, idle interaction-geometry drainage, material subtree cache ranges, safe focus cleanup, legacy hidden-control window configuration, fixed ASCII grid positioning for explicitly configured terminal faces, and the compile-time automation boundary that removes all process environment overrides from formal macOS App builds. The upstream repository metadata is not required for building this snapshot. Run `python3 scripts/verify_vendor_zenit.py` to verify the exact vendored tree.
 

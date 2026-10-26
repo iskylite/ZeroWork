@@ -39,3 +39,7 @@ fn rgb(c: ui.Color) u24 {
 pub fn place(cx: *ui.Cx, node: *ui.Node, x: f32, y: f32, width: f32, height: f32) void {
     node.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = x }, .top = .{ .px = y } }, .width = .{ .px = width }, .height = .{ .px = height }, .hit_behavior = .pass_through });
 }
+
+pub fn recordTime(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 11, .line_height = 2, .color = theme.current().fg_3, .text_align = .end, .use_monospace_font = true, .selectable = false };
+}

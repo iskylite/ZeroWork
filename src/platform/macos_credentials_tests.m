@@ -12,12 +12,17 @@ static Boolean fake_interaction = true;
 static int reads, ref_reads, additions, updates, deletions, legacy_deletions;
 static CFStringRef expected_service = CFSTR("com.zerowork.tests.mock-only");
 static int other_item_exists;
-static OSStatus fail_read, fail_write, fail_delete;
+static OSStatus fail_read, fail_write, fail_delete, fail_authorize;
+static int authorization_reads;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 static void check_query(CFDictionaryRef q) {
-    assert(!fake_interaction);
+    assert((fake_interaction && CFEqual(CFDictionaryGetValue(q, kSecUseAuthenticationUI), kSecUseAuthenticationUIAllow)) ||
+           (!fake_interaction && CFEqual(CFDictionaryGetValue(q, kSecUseAuthenticationUI), kSecUseAuthenticationUIFail)));
     assert(CFEqual(CFDictionaryGetValue(q, kSecAttrService), expected_service));
     assert(CFEqual(CFDictionaryGetValue(q, kSecAttrAccount), CFSTR("vault-v1")));
 }
+#pragma clang diagnostic pop
 static OSStatus fake_copy(CFDictionaryRef q, CFTypeRef *result) {
     check_query(q);
     if (CFDictionaryGetValue(q, kSecReturnRef)) {
@@ -27,7 +32,8 @@ static OSStatus fake_copy(CFDictionaryRef q, CFTypeRef *result) {
         *result = CFRetain(CFSTR("legacy-owned-reference")); return errSecSuccess;
     }
     reads++;
-    if (fail_read) return fail_read;
+    if (fake_interaction) { authorization_reads++; if (fail_authorize) return fail_authorize; }
+    else if (fail_read) return fail_read;
     if (!fake_item) return errSecItemNotFound;
     *result = CFRetain(fake_item); return errSecSuccess;
 }
@@ -145,6 +151,24 @@ int main(void) {
     reset_cache(); fail_read = errSecInteractionNotAllowed;
     assert(zw_credentials_get(scope, a, &missing, &length) == errSecInteractionNotAllowed);
     assert(!cached_service && fake_interaction);
+    fail_read = errSecSuccess;
+    assert(zw_credentials_add(scope, a, (const unsigned char *)"preserved-secret", 16) == errSecSuccess);
+    reset_cache();
+    fail_read = errSecAuthFailed;
+    assert(zw_credentials_get(scope, a, &missing, &length) == errSecAuthFailed);
+    assert(!cached_service && authorization_reads == 0);
+    int writes_before_authorize = additions + updates + deletions;
+    fake_interaction = false;
+    fail_authorize = errSecUserCanceled;
+    assert(zw_credentials_authorize(scope) == errSecUserCanceled);
+    assert(!cached_service && !fake_interaction);
+    fail_authorize = errSecSuccess;
+    assert(zw_credentials_authorize(scope) == errSecSuccess);
+    assert(!fake_interaction && authorization_reads == 2);
+    assert(additions + updates + deletions == writes_before_authorize);
+    expect_secret(a, "preserved-secret");
+    assert(authorization_reads == 2); // Cached use never prompts again.
+    fake_interaction = true;
     puts("native vault mock regression passed: one item, cached reads, immutable refs, rollback, size limit, restart, metadata-only erase, cache isolation, legacy deletion fallback, no UI");
     return 0;
 }

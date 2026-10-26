@@ -32,6 +32,7 @@ pub fn forOs(kind: Os) ?ui.SvgAsset {
         .macos => @import("assets_generated.zig").local_apple,
         .windows => os.windows,
         .ubuntu => os.ubuntu,
+        .rocky => @import("rocky_os_asset.zig").rocky,
         .linux, .debian, .fedora, .arch, .alpine, .freebsd => os.linux,
     };
 }
@@ -50,4 +51,42 @@ test "OS icons take precedence over protocol and retain unknown fallback" {
     try std.testing.expectEqual(forOs(.ubuntu).?.icon_id, forConnection(.{}, "sftp", .ubuntu, false).icon_id);
     try std.testing.expectEqual(forOs(.windows).?.icon_id, forConnection(.{}, "ssh", .windows, false).icon_id);
     try std.testing.expectEqual(forPlugin(.{}, "ssh", false).icon_id, forConnection(.{}, "ssh", .unknown, false).icon_id);
+}
+
+/// Saved hosts use source colours; live tabs keep their existing status tint.
+pub fn forHost(source: @import("../host/plugin_registry.zig").Registry, protocol_id: []const u8, kind: Os) ui.SvgAsset {
+    const os = @import("host_os_assets.zig");
+    return switch (kind) {
+        .ubuntu => os.ubuntu,
+        .rocky => os.rocky,
+        .debian => os.debian,
+        .fedora => os.fedora,
+        .arch => os.archlinux,
+        .linux => os.linux,
+        .alpine => os.alpine,
+        .freebsd => os.freebsd,
+        .windows => os.windows,
+        .macos => forOs(kind).?,
+        .unknown => if (@import("std").mem.eql(u8, protocol_id, "ssh") or @import("std").mem.eql(u8, protocol_id, "sftp")) os.linux else forPlugin(source, protocol_id, false),
+    };
+}
+pub fn setHostNode(node: *ui.Node, source: @import("../host/plugin_registry.zig").Registry, protocol_id: []const u8, kind: Os) void {
+    const selected = forHost(source, protocol_id, kind);
+    node.setImage(null); // Replace an already-uploaded generic OS texture after discovery.
+    node.setIcon(.{ .icon_id = selected.icon_id.?, .rep = selected.pickRep(18).?, .tint = ui.Color.WHITE });
+    node.markRenderDirty();
+}
+
+test "saved host artwork has independent coloured assets without changing tab OS assets" {
+    const std = @import("std");
+    const artwork = @import("host_os_assets.zig");
+    const kinds = [_]Os{ .ubuntu, .debian, .fedora, .arch, .alpine, .freebsd, .windows, .linux, .rocky };
+    for (kinds, 0..) |kind, i| {
+        const saved = forHost(.{}, "ssh", kind);
+        const index = artwork.index(saved.icon_id.?).?;
+        try std.testing.expectEqual(@as(usize, 72 * 72 * 4), artwork.pixels[index].len);
+        for (kinds[0..i]) |previous| try std.testing.expect(forHost(.{}, "ssh", previous).icon_id != saved.icon_id);
+    }
+    try std.testing.expectEqual(artwork.linux.icon_id, forHost(.{}, "ssh", .unknown).icon_id);
+    try std.testing.expectEqual(@import("session_os_assets.zig").ubuntu.icon_id, forOs(.ubuntu).?.icon_id);
 }

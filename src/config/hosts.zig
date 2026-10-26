@@ -411,7 +411,7 @@ pub const Registry = struct {
         return allocator.dupe(u8, writer.written());
     }
     /// Full persistence, including existing explicitly stored credentials.
-    /// Use duplicate() for configuration copying; it strips all secrets.
+    /// duplicate() preserves explicitly saved credentials and configuration.
     pub fn formatOne(host: HostConfig, writer: *std.Io.Writer) !void {
         try writer.writeAll("[[hosts]]\n");
         if (@backingInt(host.connection_id) != 0) try writer.print("connection_id = {d}\nrevision = {d}\n", .{ @backingInt(host.connection_id), host.revision });
@@ -564,13 +564,6 @@ pub const Registry = struct {
     pub fn duplicate(self: *Registry, expected: identity.AssetOwner, name: []const u8) !identity.AssetOwner {
         var source = try self.get(expected);
         source.name = name;
-        source.pinned = false;
-        source.password_ref = null;
-        source.key_passphrase_ref = null;
-        source.totp_secret_ref = null;
-        source.password = null;
-        source.key_passphrase = null;
-        source.totp_secret = null;
         return self.add(source);
     }
     pub fn setPinned(self: *Registry, expected: identity.AssetOwner, pinned: bool) !identity.AssetOwner {

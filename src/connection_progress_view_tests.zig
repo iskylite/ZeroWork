@@ -426,3 +426,30 @@ test "connection progress viewport width changes preserve reachable actions at u
     const cancel = f.view.cancel_button.?.globalRect();
     try std.testing.expect(cancel.x >= panel.x and cancel.x + cancel.w <= panel.x + panel.w);
 }
+
+test "SFTP progress keeps failure code and permits retry only after actual cleanup" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.record(0, 1, .transport, .started);
+    var snapshot = f.snapshot(&direct);
+    snapshot.file_session = true;
+    snapshot.activity = "正在读取 SFTP 初始目录…";
+    try f.show(snapshot);
+    try std.testing.expect(f.view.isVisible());
+    try std.testing.expect(f.view.header_spinner.style.display == .flex);
+    snapshot.state = .failed;
+    snapshot.failure = .{ .reason = "服务器拒绝 SFTP 子系统（SftpSubsystemDenied）" };
+    snapshot.cleanup = .releasing;
+    try f.show(snapshot);
+    try std.testing.expect(f.view.header_spinner.style.display == .none);
+    f.view.retry();
+    try std.testing.expectEqual(@as(usize, 0), f.retries);
+    snapshot.cleanup = .released;
+    try f.show(snapshot);
+    try std.testing.expect(std.mem.indexOf(u8, f.view.summary_detail.getText().?.content, "SftpSubsystemDenied") != null);
+    f.view.copyLogs();
+    try std.testing.expectEqual(@as(usize, 1), f.copies);
+    f.view.retry();
+    try std.testing.expectEqual(@as(usize, 1), f.retries);
+}

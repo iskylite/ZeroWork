@@ -9,6 +9,12 @@ const S = @import("../../ui/wizard_styles.zig");
 const hosts_mod = @import("../../config/hosts.zig");
 const identity = @import("../../host/identity.zig");
 pub const TestProgress = @import("../../ui/wizard_test_progress.zig");
+const auth_options = [_]ui.widgets.checkbox.RadioOption{
+    .{ .value = "password", .label = "密码", .test_id = "wizard.auth.password" },
+    .{ .value = "key", .label = "私钥文件", .test_id = "wizard.auth.key" },
+    .{ .value = "agent", .label = "SSH Agent", .test_id = "wizard.auth.agent" },
+};
+
 var next_draft_id: std.atomic.Value(u64) = .init(1);
 
 fn allocateDraftId() !u64 {
@@ -66,7 +72,7 @@ pub const Draft = struct {
     auth: Auth = .password,
     password: ?[]const u8 = null,
     /// Explicit consent to persist the login password through the credential store.
-    save_password: bool = false,
+    save_password: bool = @import("../../host/plugin_ui_contract.zig").default_save_password,
     key_path: ?[]const u8 = null,
     key_passphrase: ?[]const u8 = null,
     keepalive: bool = true,
@@ -118,7 +124,7 @@ pub const Draft = struct {
                 .private_key => .key,
             },
             .password = host.password,
-            .save_password = host.password_ref != null or host.password != null,
+            .save_password = true,
             .key_path = host.identity_file,
             .key_passphrase = host.key_passphrase,
             .keepalive = host.keepalive,
@@ -192,7 +198,7 @@ pub const Draft = struct {
     pub fn toPersistentHostConfig(self: Draft) !hosts_mod.HostConfig {
         var host = try self.toHostConfig();
         if (!self.save_password) host.password = null;
-        host.key_passphrase = null;
+        if (self.copy_source_owner == null) host.key_passphrase = null;
         host.totp_secret = null;
         return host;
     }
@@ -672,7 +678,7 @@ pub const RemoteEditor = struct {
         self.sig_port = try scope.createText("22", .{});
         self.sig_user = try scope.createText("", .{});
         self.sig_password = try scope.createText("", .{});
-        self.sig_save_password = try scope.createSignal(bool, false);
+        self.sig_save_password = try scope.createSignal(bool, true);
         self.sig_key_path = try scope.createText("", .{});
         self.sig_key_passphrase = try scope.createText("", .{});
         self.sig_encoding = try scope.createText("UTF-8", .{});
@@ -1197,9 +1203,7 @@ pub const RemoteEditor = struct {
                 self.identity_exhausted = true;
                 return;
             };
-            self.sig_password.?.set("");
-            self.sig_save_password.?.set(false);
-            self.sig_key_passphrase.?.set("");
+            self.sig_save_password.?.set(asset.save_password);
             const copy_name = std.fmt.allocPrint(self.alloc, "{s}-副本", .{asset.name}) catch return;
             defer self.alloc.free(copy_name);
             self.sig_name.?.set(copy_name);
@@ -2131,6 +2135,10 @@ pub const RemoteEditor = struct {
         self.hide();
     }
 
+    fn onAuthPicked(self: *RemoteEditor, value: []const u8) void {
+        self.onAuthChanged(value);
+    }
+
     fn onAuthChanged(self: *RemoteEditor, value: ?[]const u8) void {
         if (self.isLocked()) {
             self.sig_auth.?.set(@tagName(self.auth));
@@ -2178,7 +2186,7 @@ pub const RemoteEditor = struct {
         const protocol = std.meta.stringToEnum(Protocol, value) orelse return;
         if (protocol != .ssh and protocol != .sftp) return;
         self.sig_password.?.set("");
-        self.sig_save_password.?.set(false);
+        self.sig_save_password.?.set(true);
         self.sig_key_passphrase.?.set("");
         self.protocol_id = value;
         self.protocol = protocol;
@@ -2939,17 +2947,10 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     _ = try field(w, identity_row, "用户名", w.sig_user.?, "", "wizard.user", null, false);
     const auth_field = try ui.box(cx, S.field(null), .{});
     try auth_field.appendChild(w.alloc, try fieldLabel(cx, "认证方式"));
-    const auth_options = [_]ui.widgets.SelectOption{
-        .{ .value = "password", .label = "密码", .test_id = "wizard.auth.password" },
-        .{ .value = "key", .label = "私钥文件", .test_id = "wizard.auth.key" },
-        .{ .value = "agent", .label = "SSH Agent", .test_id = "wizard.auth.agent" },
-    };
-    const auth_select = try ui.widgets.Select(.{ .options = &auth_options, .value = w.sig_auth.?, .width = (S.width - 48 - 16) / 2, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onAuthChanged) }).mount(w.scope, cx);
-    skinSelect(w, auth_select, 32, 12);
-    auth_select.wrapper.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0 });
-    auth_select.trigger.meta.ownership.meta.test_id = "wizard.auth";
-    auth_select.chrome.meta.ownership.meta.test_id = "wizard.auth.menu";
-    try auth_field.appendChild(w.alloc, auth_select.wrapper);
+    const auth_group = try ui.widgets.RadioGroup(.{ .options = &auth_options, .value = w.sig_auth.?, .horizontal = true, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onAuthPicked) }).mount(w.scope, cx);
+    auth_group.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .min_height = 32, .gap = 12 });
+    auth_group.meta.ownership.meta.test_id = "wizard.auth";
+    try auth_field.appendChild(w.alloc, auth_group);
     try identity_row.appendChild(w.alloc, auth_field);
     try details.appendChild(w.alloc, identity_row);
     try card.appendChild(w.alloc, details);
@@ -3772,7 +3773,7 @@ test "copy picker clones every draft field and leaves cancellation unchanged" {
     try std.testing.expectEqual(Auth.key, copy.auth);
     try std.testing.expectEqualStrings("~/.ssh/id_ed25519", copy.key_path.?);
     try std.testing.expect(copy.password == null);
-    try std.testing.expect(copy.key_passphrase == null);
+    try std.testing.expectEqualStrings(source[0].key_passphrase.?, copy.key_passphrase.?);
     try std.testing.expect(copy.draft_id != before.draft_id);
     try std.testing.expect(!copy.keepalive);
     try std.testing.expect(copy.compression);

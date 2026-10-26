@@ -72,6 +72,7 @@ pub const Callbacks = struct {
     export_files: ?*const fn (?*anyopaque, ExternalExport) anyerror!bool = null,
     external_upload: ?*const fn (*anyopaque, ExternalUpload) anyerror!void = null,
     current_stamp: ?*const fn (*anyopaque, Side) Stamp = null,
+    current_projection: ?*const fn (*anyopaque) ?Projection = null,
 };
 const Owned = struct {
     arena: std.heap.ArenaAllocator,
@@ -134,10 +135,14 @@ pub const View = struct {
     root: *ui.Node,
     callbacks: Callbacks,
     panes: [2]*Pane,
+    columns: [2]*ui.Node,
     source: ?Owned = null,
     pending: ?Owned = null,
     paint_colors: S.theme.Colors,
+    confirmation_open: *ui.Signal(bool),
     drag_source: ?DragSource = null,
+    drag_ghost: *ui.Node = undefined,
+    drag_ghost_label: *ui.Node = undefined,
     export_handoff: bool = false,
     external_destination: ?Stamp = null,
     drop_side: ?Side = null,
@@ -145,7 +150,7 @@ pub const View = struct {
     drop_path_len: usize = 0,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
-        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .root = undefined, .callbacks = callbacks, .panes = undefined, .paint_colors = S.theme.current() });
+        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .root = undefined, .callbacks = callbacks, .panes = undefined, .columns = undefined, .paint_colors = S.theme.current(), .confirmation_open = try scope.createSignal(bool, false) });
         self.root = try ui.boxStyled(cx, S.root, .{});
         self.root.meta.ownership.meta.test_id = "files.workspace";
         self.root.setDisplay(.none);
@@ -153,15 +158,26 @@ pub const View = struct {
         self.root.behavior.events.on_event_capture = nativeDrag;
         self.root.behavior.events.capture_context = self;
         for (&self.panes, 0..) |*pane, i| {
+            const column = try ui.boxStyled(cx, S.columnStack, .{});
+            column.meta.ownership.meta.test_id = if (i == 0) "files.column.local" else "files.column.remote";
+            self.columns[i] = column;
             pane.* = try Pane.mount(self, @fromBackingInt(@intCast(i)));
-            try self.root.appendChild(cx.allocator, pane.*.root);
+            try column.appendChild(cx.allocator, pane.*.root);
+            try self.root.appendChild(cx.allocator, column);
         }
+        self.drag_ghost = try ui.box(cx, S.dragGhost(), .{});
+        self.drag_ghost.meta.ownership.meta.test_id = "files.drag.ghost";
+        self.drag_ghost_label = try ui.textStyled(cx, S.title, "");
+        self.drag_ghost_label.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .overflow = .hidden });
+        try self.drag_ghost.appendChild(cx.allocator, self.drag_ghost_label);
+        try self.root.appendChild(cx.allocator, self.drag_ghost);
+        self.drag_ghost.setDisplay(.none);
         try scope.onCleanup(View, self, cleanup);
         try cx.addAfterLayoutHook(self, afterLayout);
         return self;
     }
     pub fn transferSlot(self: *View, side: Side) *ui.Node {
-        return self.panes[@backingInt(side)].root;
+        return self.columns[@backingInt(side)];
     }
     /// Queues a fully owned projection; apply at the next layout safe point.
     /// The host accumulates paged results and publishes only a final snapshot.
@@ -259,6 +275,9 @@ pub const View = struct {
         return .stop;
     }
     fn latest(self: *View) ?Projection {
+        // Selection is acknowledged by the controller synchronously, while
+        // its painted projection arrives on the next safe tick.
+        if (self.callbacks.current_projection) |current| return current(self.callbacks.context);
         return if (self.pending) |owned| owned.value else if (self.source) |owned| owned.value else null;
     }
     fn beginDrag(self: *View, row: *Row) !void {
@@ -274,6 +293,9 @@ pub const View = struct {
         const selected: Selection = .{ .keys = keys, .anchor = if (source.anchor) |key| try a.dupe(u8, key) else null, .focused_key = if (source.focused_key) |key| try a.dupe(u8, key) else null };
         const directory = try a.dupe(u8, source.resolved_path);
         self.drag_source = .{ .arena = arena, .side = row.pane.side, .stamp = source.stamp, .selection_revision = source.selection_revision, .selection = selected, .directory = directory };
+        var title: [512]u8 = undefined;
+        try self.drag_ghost_label.setTextContent(self.cx.allocator, std.fmt.bufPrint(&title, "{s} · {d} 项", .{ std.fs.path.basename(row.key), keys.len }) catch "拖动文件");
+        self.drag_ghost.setDisplay(.flex);
     }
     fn targetAt(self: *View, point: drag.Point) ?DropTarget {
         const source = self.drag_source orelse return null;
@@ -286,12 +308,16 @@ pub const View = struct {
             const key = (if (node.behavior.interaction.a11y) |value| value.label else null) orelse return null;
             const index = entryIndex(target.entries, key) orelse return null;
             const entry = target.entries[index];
-            if (entry.kind != .directory) return null;
-            return .{ .side = side, .stamp = target.stamp, .directory = entry.absolute_path, .entry = entry.absolute_path };
+            if (entry.kind == .directory) return .{ .side = side, .stamp = target.stamp, .directory = entry.absolute_path, .entry = entry.absolute_path };
+            // A regular file is not a directory: use its containing pane.
+            return .{ .side = side, .stamp = target.stamp, .directory = target.resolved_path, .entry = null };
         }
         return .{ .side = side, .stamp = target.stamp, .directory = target.resolved_path, .entry = null };
     }
     fn hoverDrag(self: *View, point: drag.Point) void {
+        const bounds = self.root.globalRect();
+        self.drag_ghost.setStyleInline(self.cx.allocator, .{ .inset = .{ .left = .{ .px = std.math.clamp(point.x - bounds.x + 14, 0, @max(0, bounds.w - 220)) }, .top = .{ .px = std.math.clamp(point.y - bounds.y + 14, 0, @max(0, bounds.h - 36)) } } });
+        self.cx.requestRedraw();
         const target = self.targetAt(point);
         const side: ?Side = if (target) |value| value.side else null;
         const path: []const u8 = if (target) |value| value.directory else "";
@@ -325,6 +351,7 @@ pub const View = struct {
         try self.callbacks.action(self.callbacks.context, .{ .side = source.side, .stamp = source.stamp, .projection_revision = projection.revision, .selection_revision = source.selection_revision, .action = .{ .transfer = .{ .selection = source.selection, .destination = target.stamp, .directory = target.directory, .target_entry = target.entry } } });
     }
     fn clearDrag(self: *View) void {
+        self.drag_ghost.setDisplay(.none);
         if (self.drag_source) |*source| source.arena.deinit();
         self.drag_source = null;
         self.drop_side = null;
@@ -381,6 +408,7 @@ pub const Pane = struct {
     path_focus_pending: bool = false,
     refresh_receipt: ?struct { stamp: Stamp, anchor: ui.ComputedRect } = null,
     context_button: *ui.Node = undefined,
+    context_anchor: ?ui.ComputedRect = null,
     history_button: *ui.Node = undefined,
     nav_disabled: *ui.Signal(bool),
     back_disabled: *ui.Signal(bool),
@@ -423,6 +451,9 @@ pub const Pane = struct {
     filter_value: *ui.Signal([]const u8) = undefined,
     filter_pending: bool = false,
     filtered: std.ArrayList(Entry) = .empty,
+    measured_columns: bool = false,
+    measured_compact: bool = false,
+    preferred_columns: [3]f32 = .{ 36, 36, 58 },
 
     fn mount(view: *View, side: Side) !*Pane {
         const cx = view.cx;
@@ -611,6 +642,7 @@ pub const Pane = struct {
     }
     fn rebuildFilter(self: *Pane) !void {
         const p = self.projection() orelse return;
+        self.measured_columns = false;
         self.filtered.clearRetainingCapacity();
         for (p.entries) |entry| if (matchesFilter(entry, self.filter_value.peek())) {
             try self.filtered.append(self.view.cx.allocator, entry);
@@ -805,6 +837,7 @@ pub const Pane = struct {
         self.paint.set(self.paint.peek() +% 1);
         self.root.markLayoutDirty();
     }
+
     fn geometry(self: *Pane) bool {
         const cx = self.view.cx;
         if (self.path_focus_pending) {
@@ -825,16 +858,26 @@ pub const Pane = struct {
         const compact = available < S.min_columns;
         // HTML table-layout:auto: the fixed 34px selector column is followed
         // by unconstrained columns, distributing width by max-content size.
-        var preferred_name: f32 = 36;
-        var preferred_size: f32 = 36;
-        var preferred_date: f32 = 58;
-        if (self.rowProjection()) |p| for (p.entries) |entry| {
-            preferred_name = @max(preferred_name, 27 + @min(if (compact) @as(f32, 110) else 130, cx.text.measureTextWidth(entry.display_name, 12, 400, false)));
-            var size_buffer: [64]u8 = undefined;
-            const size_label = if (entry.kind == .directory or parentEntry(entry)) "—" else if (entry.size) |size_| formatSize(&size_buffer, size_) catch "未知" else "未知";
-            preferred_size = @max(preferred_size, 2 + monoWidth(size_label, 12));
-            preferred_date = @max(preferred_date, 11 + monoWidth(entry.modified_label, 11));
-        };
+        // Text measurement scales with directory size; scrolling changes only
+        // the viewport, so reuse these metrics until rows or compact mode change.
+        if (!self.measured_columns or self.measured_compact != compact) {
+            var preferred_name: f32 = 36;
+            var preferred_size: f32 = 36;
+            var preferred_date: f32 = 58;
+            if (self.rowProjection()) |p| for (p.entries) |entry| {
+                preferred_name = @max(preferred_name, 27 + @min(if (compact) @as(f32, 110) else 130, cx.text.measureTextWidth(entry.display_name, 12, 400, false)));
+                var size_buffer: [64]u8 = undefined;
+                const size_label = if (entry.kind == .directory or parentEntry(entry)) "—" else if (entry.size) |size_| formatSize(&size_buffer, size_) catch "未知" else "未知";
+                preferred_size = @max(preferred_size, 2 + monoWidth(size_label, 12));
+                preferred_date = @max(preferred_date, 11 + monoWidth(entry.modified_label, 11));
+            };
+            self.preferred_columns = .{ preferred_name, preferred_size, preferred_date };
+            self.measured_columns = true;
+            self.measured_compact = compact;
+        }
+        const preferred_name = self.preferred_columns[0];
+        const preferred_size = self.preferred_columns[1];
+        const preferred_date = self.preferred_columns[2];
         const preferred_total = preferred_name + preferred_size + (if (compact) @as(f32, 0) else preferred_date);
         const remaining = @max(0, width - 34);
         const size_width = remaining * preferred_size / preferred_total;
@@ -1044,6 +1087,7 @@ pub const Pane = struct {
         defer cx.allocator.free(detail);
         const tooltip_text = try scope.createText(detail, .{});
         const tooltip = try ui.widgets.Tooltip(.{ .text = tooltip_text, .open = row.tooltip_open, .open_delay_ms = @as(f32, 450) }).mount(scope, cx);
+        tooltip.content.meta.ownership.meta.test_id = "files.row.tooltip";
         for (tooltip.content.children.items) |label_| if (label_.getText()) |current| {
             var multiline = current;
             multiline.wrap = .word;
@@ -1058,7 +1102,7 @@ pub const Pane = struct {
         try row.columns.appendChild(cx.allocator, row.name_cell);
         row.name_cell.meta.ownership.meta.test_id = "files.row.drag";
         row.name_cell.setStyleInline(cx.allocator, .{ .hit_behavior = .@"opaque" });
-        row.drag_binding = try drag.Binding.attach(scope, cx, row.name_cell, .{ .can_start = Row.dragCanStart }, Row.dragged, row);
+        row.drag_binding = try drag.Binding.attach(scope, cx, row.columns, .{ .can_start = Row.dragCanStart }, Row.dragged, row);
         row.name_cell.behavior.events.on_event_capture = Row.nameCapture;
         row.name_cell.behavior.events.capture_context = row;
         var size_buffer: [64]u8 = undefined;
@@ -1104,7 +1148,7 @@ const Control = struct {
                 if (self.pane.view.callbacks.current_stamp) |query| self.pane.refresh_receipt = .{ .stamp = query(self.pane.view.callbacks.context, self.pane.side), .anchor = anchor };
             },
             .recover => try self.pane.emit(.recover),
-            .context => try self.pane.emit(.{ .context = selection }),
+            .context => { self.pane.context_anchor = null; try self.pane.emit(.{ .context = selection }); },
             .new_folder => if (fresh(p) and p.writable and p.can_mkdir) {
                 try self.pane.emit(.new_folder);
             },
@@ -1136,6 +1180,8 @@ const Row = struct {
     }
     fn paint(self: *Row) void {
         _ = self.pane.paint.get();
+        _ = self.tooltip_open.get();
+        if (self.pane.view.confirmation_open.get()) self.tooltip_open.set(false);
         const p = self.current() orelse return;
         const selected = contains(p.selected_keys, self.key);
         self.checked.set(selected);
@@ -1277,6 +1323,7 @@ const Row = struct {
             .mouse_down => |e| {
                 self.modifiers = e.modifiers;
                 if (e.button == .right) {
+                    self.pane.context_anchor = .{ .x = e.x, .y = e.y, .w = 0, .h = 0 };
                     self.choose(e.modifiers, true) catch |err| self.pane.report(err);
                     return .stop;
                 }

@@ -215,7 +215,7 @@ pub const Document = struct {
                 r.record_dirty = false;
                 continue;
             };
-            self.raw.recordApplication(.{ .id = r.id, .owner = self.owner, .timestamp_ms = if (r.updated_at == 0) r.timestamp else r.updated_at, .anchor_row = if (position) |point| point.row else null, .command = r.command, .output = r.output, .state = @fromBackingInt(@intCast(@backingInt(r.state))) }) catch |err| {
+            self.raw.recordApplication(.{ .id = r.id, .owner = self.owner, .timestamp_ms = r.timestamp, .anchor_row = if (position) |point| point.row else null, .command = r.command, .output = r.output, .state = @fromBackingInt(@intCast(@backingInt(r.state))) }) catch |err| {
                 if (err == error.WorkerBusy) {
                     complete = false;
                     continue;
@@ -286,7 +286,7 @@ pub const Document = struct {
                 try spans.append(self.allocator, span);
             }
             _ = start;
-            const stamp = self.stamps.get(r.id);
+            const stamp = if (std.mem.trim(u8, doc.text[r.start..r.end], " \t\r\n").len == 0) null else self.stamps.get(r.id);
             rows.items[rows.items.len - 1].timestamp_ms = stamp;
             try meta.append(self.allocator, .{ .timestamp = stamp });
         }
@@ -853,5 +853,25 @@ test "builtin_records command decoration retains exact pixels across terminal fo
         const logical_inset: f32 = @floatFromInt(document.command_inset_cells);
         try std.testing.expectApproxEqAbs(record_geometry.command_inset, logical_inset * width + row.presentation.shift_x, 0.001);
         try std.testing.expectEqualStrings("@ts invalid", document.records.items[0].command);
+    }
+}
+
+test "builtin_records persistence retains each original execution time after completion" {
+    const a = std.testing.allocator;
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 6, 80);
+    defer adapter.destroy();
+    _ = try adapter.feed("prompt% ");
+    var timeline = try @import("../vt/timeline.zig").Timeline.init(a, 16, 8192);
+    defer timeline.deinit();
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(5) }, .timeline = &timeline };
+    var document = Document.init(a, source.service(), source.owner);
+    defer document.deinit();
+    for ([_]i64{ 1000123, 1002456 }) |at| {
+        const id = try document.begin("@ts", at);
+        try document.finish(source.owner, id, .success, "时间戳已切换");
+        const event = timeline.events.items[timeline.events.items.len - 1];
+        const recorded = try std.json.parseFromSlice(terminal.ApplicationRecord, a, event.payload, .{});
+        defer recorded.deinit();
+        try std.testing.expectEqual(at, recorded.value.timestamp_ms);
     }
 }

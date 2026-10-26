@@ -173,6 +173,14 @@ pub const Adapter = struct {
         return if (self.cwd_owned) |cwd| try allocator.dupe(u8, cwd) else null;
     }
 
+    /// Discard the previous prompt's path before an explicit shell report.
+    pub fn clearCwd(self: *Adapter) void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.mutex.unlock();
+        if (self.cwd_owned) |value| self.allocator.free(value);
+        self.cwd_owned = null;
+    }
+
     fn onPwdChanged(_: c.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {
         const ptr = userdata orelse return;
         const self: *Adapter = @ptrCast(@alignCast(ptr));

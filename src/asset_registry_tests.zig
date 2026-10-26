@@ -84,7 +84,7 @@ test "asset registry rejects ambiguous identities types and routes before persis
     }) |case| try std.testing.expectError(case.expected, hosts.Registry.parse(a, case.source));
 }
 
-test "asset registry duplicate preserves protocol authentication route and options but no secrets or pinned" {
+test "asset registry duplicate preserves protocol authentication route and options including saved secrets and pinned" {
     var registry = try hosts.Registry.parse(a, legacy);
     defer registry.deinit();
     const source = registry.hosts[1].owner();
@@ -93,7 +93,7 @@ test "asset registry duplicate preserves protocol authentication route and optio
     const copied = try registry.duplicate(current, "target copy");
     const copy = try registry.get(copied);
     try std.testing.expect(copy.connection_id != current.id and copy.revision == 1);
-    try std.testing.expect(copy.password == null and copy.key_passphrase == null and copy.totp_secret == null and !copy.pinned);
+    try std.testing.expect(copy.password != null and copy.pinned);
     try std.testing.expectEqual(hosts.AuthMode.password, copy.auth_mode);
     try std.testing.expectEqualSlices(hosts.identity.ConnectionId, registry.hosts[1].route, copy.route);
     const route = try registry.resolveRoute(copied, a);

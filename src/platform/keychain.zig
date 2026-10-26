@@ -1,4 +1,5 @@
 const std = @import("std");
+extern fn zw_credentials_authorize(service: [*:0]const u8) c_int;
 extern fn zw_credentials_get(service: [*:0]const u8, account: [*:0]const u8, out: *?[*]u8, length: *usize) c_int;
 extern fn zw_credentials_add(service: [*:0]const u8, account: [*:0]const u8, value: [*]const u8, length: usize) c_int;
 extern fn zw_credentials_delete(service: [*:0]const u8, account: [*:0]const u8) c_int;
@@ -49,3 +50,6 @@ pub fn collect(allocator: std.mem.Allocator, service: [:0]const u8, keep: []cons
 pub fn erase(service: [:0]const u8) !void {
     try check(zw_credentials_erase(service));
 }
+
+/// Explicit user-requested startup recovery; ordinary reads remain noninteractive.
+pub fn authorize(service: [:0]const u8) !void { try check(zw_credentials_authorize(service)); }

@@ -105,7 +105,7 @@ test "global appearance transfer confirmation repaint keeps captured intent and 
     const owner: @import("host/identity.zig").SessionHandle = .{ .session_id = @fromBackingInt(99), .generation = 7 };
     panel.show(.{ .mode = .download, .owner = owner, .endpoint = "original-host", .host_name = "Original", .sources = &.{"/immutable.bin"}, .local_dir = "/owned", .md5 = false });
     w.frame();
-    const md5 = findText(panel.card, "MD5 校验 · 关") orelse return error.MissingMd5Control;
+    const md5 = findText(panel.card, "MD5 校验") orelse return error.MissingMd5Control;
     const rect = md5.globalRect();
     w.cx.handleMouseDown(rect.x + rect.w / 2, rect.y + rect.h / 2, .{});
     w.cx.handleMouseUp(rect.x + rect.w / 2, rect.y + rect.h / 2);

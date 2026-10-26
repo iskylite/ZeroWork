@@ -36,23 +36,16 @@ pub const Model = struct {
         self.user_collapsed = self.collapsed;
     }
     pub fn width(self: Model) f32 {
-        return if (self.collapsed) 0 else 224;
+        return if (self.collapsed) 0 else 300;
     }
 
-    /// A session boundary resets the default. While sessions remain open,
-    /// Command-B keeps the user's explicit choice across resize/tab changes.
+    /// Session changes never override the user's sidebar choice.
     pub fn setSessionCount(self: *Model, count: usize) bool {
-        const before = self.collapsed;
-        if ((self.session_count == 0) != (count == 0)) {
-            self.user_collapsed = null;
-            self.collapsed = count != 0;
-        }
         self.session_count = count;
-        return before != self.collapsed;
+        return false;
     }
-
     pub fn updateForWindow(self: *Model, _: f32) void {
-        self.collapsed = self.user_collapsed orelse (self.session_count != 0);
+        self.collapsed = self.user_collapsed orelse false;
     }
 
     /// Startup follows the session default. A later explicit settings Save
@@ -86,25 +79,19 @@ test "sidebar searches assets by name host and group" {
     try std.testing.expectEqual(@as(f32, 0), model.width());
 }
 
-test "sidebar session boundaries reset defaults and resize preserves explicit choice" {
+test "sidebar sessions and resize preserve the explicit visibility choice" {
     var model = Model.init(std.testing.allocator);
     defer model.deinit();
     model.applyCommittedPreference(true, 860);
     try std.testing.expect(!model.collapsed);
-    try std.testing.expect(model.setSessionCount(1));
-    try std.testing.expect(model.collapsed);
-    model.toggleCollapsed();
+    try std.testing.expect(!model.setSessionCount(1));
     model.updateForWindow(860);
     try std.testing.expect(!model.collapsed);
-    try std.testing.expect(!model.setSessionCount(2));
-    try std.testing.expect(!model.collapsed);
     model.toggleCollapsed();
-    try std.testing.expect(model.setSessionCount(0));
-    try std.testing.expect(!model.collapsed);
-    model.updateForWindow(860);
-    try std.testing.expectEqual(@as(f32, 224), model.width());
-    try std.testing.expect(model.setSessionCount(1));
+    try std.testing.expect(!model.setSessionCount(0));
+    model.updateForWindow(1440);
     try std.testing.expect(model.collapsed);
     model.applyCommittedPreference(false, 1440);
     try std.testing.expect(!model.collapsed);
+    try std.testing.expectEqual(@as(f32, 300), model.width());
 }

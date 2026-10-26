@@ -32,6 +32,7 @@ const Row = struct {
     root: *ui.Node,
     test_id: []u8,
     time: *ui.Node,
+    record_time: *ui.Node,
     selected: *ui.Node,
     marker: *ui.Node,
     status_icon: *ui.Node,
@@ -98,7 +99,6 @@ pub const Surface = struct {
     blink_running: bool = false,
     reduced_motion: bool = false,
     last_blink: f64 = 0,
-    last_second: i64 = -1,
     error_message: ?[]const u8 = null,
     error_until_ms: f64 = 0,
     message: *ui.Node,
@@ -384,18 +384,11 @@ pub const Surface = struct {
             self.blink = !self.blink;
             changed = true;
         }
-        const clock_running = current_input and self.options.timestamps;
-        const second = @divFloor(now, 1000);
-        if (clock_running and second != self.last_second) {
-            self.last_second = second;
-            changed = true;
-        }
         if (changed or was_focused != self.focused) try self.render(now);
         if (blink_running) {
             const remaining = @max(1, blink_half_period_ms - (self.cx.frame_time_ms - self.last_blink));
             self.cx.scheduleRedrawAfterNs(@intFromFloat(remaining * std.time.ns_per_ms));
         }
-        if (clock_running) self.cx.scheduleRedrawAfterNs(@intCast((1000 - @mod(now, 1000)) * std.time.ns_per_ms));
         return changed;
     }
     fn resize(self: *Surface) !void {
@@ -428,7 +421,7 @@ pub const Surface = struct {
     pub fn bodyX(self: *const Surface) f32 {
         return if (self.options.timestamps) S.gutter else 0;
     }
-    fn render(self: *Surface, now_ms: i64) !void {
+    fn render(self: *Surface, _: i64) !void {
         const projection = &self.snapshot.?.projection;
         // OSC default-background changes affect cell color resolution, while the
         // terminal canvas always exposes the shared application background.
@@ -445,7 +438,11 @@ pub const Surface = struct {
             article.meta.ownership.meta.test_id = "terminal.command.article";
             try root.appendChild(self.cx.allocator, article);
             const time = try ui.textStyled(self.cx, S.timestamp, "");
+            time.meta.ownership.meta.test_id = "terminal.timestamp";
             try root.appendChild(self.cx.allocator, time);
+            const record_time = try ui.textStyled(self.cx, records_style.recordTime, "");
+            record_time.meta.ownership.meta.test_id = "terminal.command.time";
+            try root.appendChild(self.cx.allocator, record_time);
             const marker = try ui.textStyled(self.cx, records_style.markerText, "ZeroWork");
             marker.setStyleInline(self.cx.allocator, records_style.markerBox(self.cx.tokens));
             marker.meta.ownership.meta.test_id = "terminal.command.source";
@@ -459,7 +456,7 @@ pub const Surface = struct {
             (try selected.style.ensureExtFallible(self.cx.allocator)).z_index = 4;
             try root.appendChild(self.cx.allocator, selected);
             try self.root.appendChild(self.cx.allocator, root);
-            self.rows.appendAssumeCapacity(.{ .root = root, .test_id = test_id, .time = time, .selected = selected, .marker = marker, .status_icon = status_icon, .article = article });
+            self.rows.appendAssumeCapacity(.{ .root = root, .test_id = test_id, .time = time, .record_time = record_time, .selected = selected, .marker = marker, .status_icon = status_icon, .article = article });
         }
         while (self.rows.items.len > projection.rows) {
             var row = self.rows.pop().?;
@@ -487,8 +484,25 @@ pub const Surface = struct {
             }
             const current = !self.snapshot.?.read_only and projection.cursor.visible and value.viewport_y == projection.cursor.row;
             row.root.setBackground(if (value.application_record_id == 0 and current and self.options.highlight) S.inputHighlight(self.cx.tokens) else ui.Color.TRANSPARENT);
-            const stamp = if (current and self.focused) now_ms else value.submitted_wallclock_ms orelse value.received_wallclock_ms;
-            try self.renderTime(row, stamp);
+            const cells = projection.cells[value.cell_start .. value.cell_start + value.cell_count];
+            const has_text = for (cells) |cell| {
+                if (std.mem.trim(u8, projection.grapheme(cell), " \t\r\n").len > 0) break true;
+            } else false;
+            const stamp = value.submitted_wallclock_ms orelse value.received_wallclock_ms;
+            const header = value.application_kind == 1 and value.id[1] == 0;
+            try self.renderTime(row, if (has_text and (value.application_record_id == 0 or header)) stamp else null);
+            row.record_time.setDisplay(if (header and stamp != null) .flex else .none);
+            if (header and stamp != null) {
+                var bytes: [24]u8 = undefined;
+                var clock: [8]u8 = undefined;
+                const text = try std.fmt.bufPrint(&bytes, "{s}.{d:0>3}", .{ try input.localTimestamp(&clock, stamp.?), @as(u16, @intCast(@mod(stamp.?, 1000))) });
+                try row.record_time.setTextContent(self.cx.allocator, text);
+                row.record_time.setTextColor(@import("app_theme.zig").current().fg_3);
+                var time_props = row.record_time.getText().?;
+                time_props.line_height = self.options.row_height / time_props.font_size;
+                row.record_time.setText(time_props);
+                try absolute(self.cx, row.record_time, @max(self.bodyX(), row_width - 100), 0, 100, self.options.row_height);
+            }
             row.marker.setDisplay(if (value.application_kind == 1 and value.id[1] == 0 and projection.cols > self.composite.command_inset_cells + 5) .flex else .none);
             if (value.application_kind == 1) {
                 row.marker.setBackground(@import("app_theme.zig").current().accent.withAlpha(31));
@@ -509,7 +523,6 @@ pub const Surface = struct {
                 row.status_icon.setText(props);
                 records_style.place(self.cx, row.status_icon, self.bodyX(), 0, records_style.result_icon_width, self.options.row_height);
             }
-            const cells = projection.cells[value.cell_start .. value.cell_start + value.cell_count];
             var hash = std.hash.Wyhash.init(0);
             hash.update(std.mem.asBytes(&value.id));
             for (cells) |cell| {
@@ -546,7 +559,10 @@ pub const Surface = struct {
             props.use_monospace_font = self.options.family_id == 0;
             row.time.setText(props);
         }
-        try absolute(self.cx, row.time, S.timestamp_x, S.timestamp_y, S.timestamp_width, S.timestamp_height);
+        var aligned = row.time.getText().?;
+        aligned.line_height = self.options.row_height / aligned.font_size;
+        row.time.setText(aligned);
+        try absolute(self.cx, row.time, S.timestamp_x, S.timestamp_y, S.timestamp_width, self.options.row_height);
     }
     pub fn presentationY(self: *const Surface, index: usize) f32 {
         if (self.snapshot) |snap| if (index < snap.projection.visible_rows.len) return @import("terminal_record_geometry.zig").rowY(snap.projection.visible_rows[index].presentation, index, self.options.row_height);
@@ -555,6 +571,7 @@ pub const Surface = struct {
     fn renderGlyphs(self: *Surface, row: *Row, cells: []const vt.Cell, projection: *const vt.Projection) !void {
         var used: usize = 0;
         for (cells, 0..) |cell, col| {
+            if (row.record_time.style.display != .none and self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(col + 1)) * self.options.cell_width > row.root.style.width.px - 104) continue;
             if (cell.width == .wide_tail) continue;
             const text = projection.grapheme(cell);
             if (text.len == 0 and cell.background == .default and cell.attributes == 0) continue;

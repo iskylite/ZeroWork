@@ -62,8 +62,9 @@ pub const FilePlugin = struct {
     context: *anyopaque,
     tick: *const fn (*anyopaque, *session.SessionHost) anyerror!bool,
     shutdown: *const fn (*anyopaque) CloseReceipt,
+    progress: ?*const fn (*anyopaque, identity.SessionHandle, OperationKey) ?@import("../host/sftp_adapter.zig").ConnectionProgress = null,
 };
-const FileCreateSource = struct { handle: identity.SessionHandle, key: OperationKey, source: SourceSnapshot, failure_reported: bool = false };
+const FileCreateSource = struct { handle: identity.SessionHandle, key: OperationKey, source: SourceSnapshot, failure_reported: bool = false, progress_dismissed: bool = false };
 const CloseTarget = @import("workspace_model.zig").CloseTarget;
 const WindowClose = struct {
     ticket: windows.Close,
@@ -452,6 +453,28 @@ pub const ApplicationHost = struct {
 
     pub fn registry(self: *const ApplicationHost) plugins.Registry {
         return self.sessions.registry;
+    }
+
+    pub fn fileProgressKey(self: *ApplicationHost) ?OperationKey {
+        for (self.file_sources.items) |source| {
+            if (source.progress_dismissed) continue;
+            const state = self.sessions.queryState(source.handle) orelse continue;
+            if (state.create_operation.eql(source.key) and (state.lifecycle == .creating or state.lifecycle == .ready or state.lifecycle == .failed)) return source.key;
+        }
+        return null;
+    }
+
+    pub fn dismissFileProgress(self: *ApplicationHost, key: OperationKey) void {
+        for (self.file_sources.items) |*source| if (source.key.eql(key)) {
+            source.progress_dismissed = true;
+        };
+    }
+
+    pub fn fileConnectionProgress(self: *ApplicationHost, key: OperationKey) ?@import("../host/sftp_adapter.zig").ConnectionProgress {
+        if (key.owner != .session) return null;
+        for (self.file_sources.items) |source| if (source.key.eql(key) and source.progress_dismissed) return null;
+        const plugin = self.file_plugin orelse return null;
+        return if (plugin.progress) |get| get(plugin.context, key.owner.session, key) else null;
     }
 
     /// Frozen UI identity for a queued file create, independent of current
@@ -1085,6 +1108,23 @@ pub const ApplicationHost = struct {
         return pending;
     }
 
+    pub fn fileFailureText(code: []const u8) []const u8 {
+        const pairs = .{
+            .{ "AuthenticationFailed", "服务器未接受认证信息" },
+            .{ "ConnectionRefused", "连接被拒绝，请检查端口和服务" },
+            .{ "ConnectFailed", "无法建立 TCP 连接，请检查地址、端口与网络" },
+            .{ "ConnectionTimedOut", "连接超时" },
+            .{ "ConnectionTimeout", "连接超时" },
+            .{ "timeout", "连接超时" },
+            .{ "subsystem_denied", "服务器拒绝 SFTP 子系统" },
+            .{ "SftpSubsystemDenied", "服务器拒绝 SFTP 子系统" },
+            .{ "permission_denied", "没有访问目录的权限" },
+            .{ "not_found", "初始目录不存在" },
+        };
+        inline for (pairs) |pair| if (std.mem.eql(u8, code, pair[0])) return pair[1];
+        return "连接未完成，请查看连接日志中的失败阶段";
+    }
+
     fn publishFileCreateFailure(self: *ApplicationHost, key: OperationKey, failure: @import("../host/operation.zig").Failure) void {
         if (key.owner != .session) return;
         const state = self.sessions.queryState(key.owner.session) orelse return;
@@ -1092,10 +1132,11 @@ pub const ApplicationHost = struct {
         for (self.file_sources.items) |*source| {
             if (!source.handle.eql(key.owner.session) or !source.key.eql(key) or source.failure_reported) continue;
             source.failure_reported = true;
+            var detail: [1536]u8 = undefined;
             const message = if (std.mem.eql(u8, failure.code, "ProxyJumpTransportUnavailable"))
                 "连接失败：独立 SFTP 会话暂不支持跳板链（ProxyJumpTransportUnavailable）"
             else
-                failure.safe_message;
+                std.fmt.bufPrint(&detail, "{s}：{s}{s}{s}（{s}）", .{ failure.safe_message, fileFailureText(failure.code), if (failure.stage != null) " · " else "", failure.stage orelse "", failure.code }) catch failure.safe_message;
             if (self.file_failure) |feedback| feedback.publish(feedback.context, source.handle, message);
             return;
         }

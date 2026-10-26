@@ -401,7 +401,7 @@ pub const Presentation = struct {
         if (entry.scope_disposed or entry.released) return null;
         return if (entry.view) |view| view.transferSlot(side) else null;
     }
-    /// The file workspace reserves a 24-point strip slot above both cards.
+    /// File cards align with the sidebar; the assistant panel uses the full content bounds.
     pub fn assistantBounds(self: *Presentation, owner: identity.SessionHandle) ?ui.ComputedRect {
         const entry = self.find(owner) orelse return null;
         if (entry.scope_disposed or entry.released) return null;

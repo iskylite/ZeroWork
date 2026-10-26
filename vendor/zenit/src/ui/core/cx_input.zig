@@ -257,7 +257,6 @@ pub fn handleMouseMoveEx(self: *Cx, x: f32, y: f32, modifiers: Modifiers) void {
     // R4a: mark dirty only when mouse actually moves, hover hit changes with cursor position, needs
     // frame to re-dispatch; stationary move events shouldn't wake new frame (idle frame-gating
     // depends on this).
-    const hit_tests_before = self.perf.hit_test_count;
     cx_render.ensureHitTestSceneFresh(self);
     if (x != self.mouse_x or y != self.mouse_y) {
         self.needs_redraw = true;
@@ -268,6 +267,7 @@ pub fn handleMouseMoveEx(self: *Cx, x: f32, y: f32, modifiers: Modifiers) void {
     self.cursor_state.pointer_valid = true;
     self.gesture_arena.onTouchMove(x, y, @import("zenit_time").nanoTimestamp(self.io));
     if (self.root != null) {
+        const hit_tests_before = self.perf.hit_test_count;
         const has_capture = self.dispatcher.hasPointerCapture();
         const hit = if (has_capture)
             null
@@ -311,10 +311,13 @@ pub fn handleMouseMoveEx(self: *Cx, x: f32, y: f32, modifiers: Modifiers) void {
         }
         const hovered = resolveInteractionTarget(raw_hovered);
         self.perf.mouse_move_hit_test_count += 1;
+        // Count this move's lookup before dispatching callbacks. Starting or
+        // cancelling a drag may legitimately release capture and resync hover,
+        // which performs its own lookup during this dispatch.
+        std.debug.assert(self.perf.hit_test_count - hit_tests_before <= 1);
         self.hovered_node = self.dispatcher.dispatchMouseMoveEx(x, y, hovered, modifiers);
         self.hovered_handle = if (self.hovered_node) |n| self.node_registry.handleFor(n) else null;
     }
-    std.debug.assert(self.perf.hit_test_count - hit_tests_before <= 1);
     // Update system cursor
     cx_cursor.updateCursorShape(self);
     self.inspector.handleMouseMove(self, x, y);

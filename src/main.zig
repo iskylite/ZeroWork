@@ -1440,12 +1440,22 @@ const AiHost = struct {
     fn updateStrip(self: *AiHost) void {
         const strip = self.strip orelse return;
         const pane = if (self.currentScope() != null) self.ownerBounds() else null;
+        // File workspaces align with the sidebar. Their toolbar AI entry remains
+        // available without reserving or overlaying a strip across the file cards.
+        const file_workspace = if (self.workspace) |workspace| blk: {
+            if (workspace.active_group_view != null) break :blk false;
+            const index = workspace.active_tab orelse break :blk false;
+            if (index >= workspace.tabs.items.len) break :blk false;
+            const tab = workspace.tabs.items[index];
+            const protocol = if (tab.plugin_protocol_id.len > 0) tab.plugin_protocol_id else if (tab.host_snapshot) |saved| saved.value.protocolId() else "";
+            break :blk tab.file_scope != null and std.mem.eql(u8, protocol, "sftp");
+        } else false;
         const same_owner = self.requestDisplayed();
         const busy = same_owner and self.thread_state.load(.acquire) == 1;
         const pending = same_owner and self.tool_bridge.pendingApproval() != null;
         const state: @import("ui/ai_strip_view.zig").State = if (pending) .approval else if (busy) .working else if (same_owner and self.recoveryVisible()) .failed else if (self.controller.stream.cards.items.len > 0) .success else .idle;
         const phase: usize = @intCast(@divTrunc(@import("platform/realtime.zig").milliseconds(self), 200));
-        strip.update(pane, pane != null, state, phase, self.controller.model.visible);
+        strip.update(pane, pane != null and !file_workspace, state, phase, self.controller.model.visible);
     }
 
     fn toggle(self: *AiHost) void {
@@ -2709,6 +2719,8 @@ const RenameTabCtx = struct {
 };
 
 const MenuHost = struct {
+    pending_sidebar_action: ?struct { owner: @import("host/identity.zig").AssetOwner, action: @import("ui/sidebar_view.zig").HostAction } = null,
+
     allocator: std.mem.Allocator,
     cx: *ui.Cx,
     state: MenuState = .{},
@@ -2801,6 +2813,28 @@ const MenuHost = struct {
     }
 
     /// MenuBridge callback: (ctx, trigger, host_index, tab_index, multi_tabs).
+    fn sidebarAction(ctx: ?*anyopaque, index: usize, action: @import("ui/sidebar_view.zig").HostAction) void {
+        const self: *MenuHost = @ptrCast(@alignCast(ctx orelse return));
+        const workspace = self.workspace orelse return;
+        if (index >= workspace.registry.hosts.len) return;
+        self.pending_sidebar_action = .{ .owner = workspace.registry.hosts[index].owner(), .action = action };
+        self.cx.requestRedraw();
+    }
+    fn drainSidebarAction(self: *MenuHost) void {
+        const pending = self.pending_sidebar_action orelse return;
+        self.pending_sidebar_action = null;
+        const workspace = self.workspace orelse return;
+        _ = workspace.registry.get(pending.owner) catch return;
+        const index = workspace.registry.indexOf(pending.owner.id) orelse return;
+        self.hide();
+        self.context_host = index;
+        self.captured_host = workspace.hostId(index);
+        self.captured_asset = pending.owner;
+        self.context_tab = null;
+        self.captured_tab = null;
+        self.captured_owner = null;
+        self.runCapturedAction(if (pending.action == .copy) .clone_host else .edit_host);
+    }
     fn bridgeFire(ctx: ?*anyopaque, trigger: MenuTrigger, host_index: usize, tab_index: ?usize, multi_tabs: bool, anchor: ui.ComputedRect) void {
         const self: *MenuHost = @ptrCast(@alignCast(ctx orelse return));
         _ = multi_tabs; // recomputed inside showWith from the live tab count
@@ -5489,6 +5523,10 @@ const AppNavHost = struct {
     material_pane: ?*ui.Node = null,
     appearance_ui_hash: ?u64 = null,
     appearance_theme: *shell_styles.ThemePublication = undefined,
+    empty_choose_label: ?*ui.Signal([]const u8) = null,
+    empty_choose_icon: ?*ui.Signal(?ui.SvgAsset) = null,
+    empty_has_hosts: ?bool = null,
+    host_artwork: [@import("ui/host_os_assets.zig").pixels.len]?u32 = @splat(null),
     chrome: struct {
         toolbar_tint: ?*ui.Signal(?ui.Color) = null,
         transfer_badge: ?*ui.Node = null,
@@ -5543,8 +5581,19 @@ const AppNavHost = struct {
                 if (self.workspace) |workspace| {
                     var entries: std.ArrayList(session_menu_mod.Saved) = .empty;
                     defer entries.deinit(self.cx.allocator);
-                    for (workspace.registry.hosts) |host| entries.append(self.cx.allocator, .{ .owner = host.owner(), .name = host.name, .icon = @import("ui/session_icon.zig").forConnection(workspace.plugins, host.protocolId(), @import("ui/session_os_cache.zig").load(workspace.allocator, workspace.io, workspace.hosts_path, host), false) }) catch return;
-                    menu.setSaved(entries.items) catch return;
+                    for (workspace.registry.hosts) |host| entries.append(self.cx.allocator, .{ .owner = host.owner(), .name = host.name, .icon = @import("ui/session_icon.zig").forHost(workspace.plugins, host.protocolId(), @import("ui/session_os_cache.zig").load(workspace.allocator, workspace.io, workspace.hosts_path, host)) }) catch return;
+                    menu.setAll(entries.items) catch return;
+                    var recent: std.ArrayList(session_menu_mod.Saved) = .empty;
+                    defer recent.deinit(self.cx.allocator);
+                    for (0..workspace.recent_connections.len) |rank| {
+                        const owner = workspace.recent_connections.resolve(rank, &workspace.registry) orelse continue;
+                        for (entries.items) |entry| if (entry.owner.id == owner.id) {
+                            recent.append(self.cx.allocator, entry) catch return;
+                            break;
+                        };
+                        if (recent.items.len == 3) break;
+                    }
+                    menu.setSaved(recent.items) catch return;
                 }
                 menu.show(anchor) catch |err| applog.warn(.workspace, "session menu: {s}", .{@errorName(err)});
             }
@@ -5564,9 +5613,22 @@ const AppNavHost = struct {
 
     fn newSessionProfile(raw: *anyopaque) void {
         const self: *AppNavHost = @ptrCast(@alignCast(raw));
-        if (self.wizard) |wizard| wizard.show();
+        if (self.wizard_host) |host| {
+            host.selected_group = null;
+            host.refreshAssets() catch return;
+            remote_editor.loadDraft(host.wizard, .{}) catch return;
+            host.wizard.show();
+        }
     }
 
+    fn newSftpProfile(raw: *anyopaque) void {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        const host = self.wizard_host orelse return;
+        host.selected_group = null;
+        host.refreshAssets() catch return;
+        remote_editor.loadDraft(host.wizard, .{ .protocol = .sftp, .port = 22 }) catch return;
+        host.wizard.show();
+    }
     fn quickSession(raw: *anyopaque) void {
         const self: *AppNavHost = @ptrCast(@alignCast(raw));
         self.toggleQuickConnect();
@@ -5596,6 +5658,44 @@ const AppNavHost = struct {
         if (self.collapsed_sidebar) |collapsed| collapsed.setCollapsed(self.quick.sidebar.collapsed);
     }
 
+    fn homeConnect(self: *AppNavHost) void {
+        if (self.workspace) |workspace| if (workspace.registry.hosts.len == 0) {
+            if (self.wizard) |wizard| wizard.show();
+            return;
+        };
+        self.toggleQuickConnect();
+    }
+    fn paintHostArtwork(self: *AppNavHost, node: *ui.Node) void {
+        const app = self.app_runtime orelse return;
+        if (node.getImage()) |image| {
+            if (!ui.Color.eql(image.tint, ui.Color.WHITE)) _ = node.setTint(ui.Color.WHITE);
+            return;
+        }
+        const icon = node.getIcon() orelse return;
+        const assets = @import("ui/host_os_assets.zig");
+        const index = assets.index(icon.icon_id) orelse return;
+        if (self.host_artwork[index] == null) self.host_artwork[index] = app.renderer.image_renderer.loadTexture(72, 72, assets.pixels[index]) catch return;
+        node.setIcon(null);
+        node.setImage(.{ .texture_id = self.host_artwork[index].?, .tint = ui.Color.WHITE });
+        node.markRenderDirty();
+    }
+    fn syncHostArtwork(self: *AppNavHost) void {
+        const workspace = self.workspace orelse return;
+        for (workspace.host_rows.items) |row| self.paintHostArtwork(row.view.dot);
+        if (self.session_menu) |menu| if (menu.isOpen()) {
+            for (menu.saved_rows.items) |row| self.paintHostArtwork(row.icon);
+            for (menu.more_rows.items) |row| self.paintHostArtwork(row.icon);
+        };
+    }
+    fn syncHomeConnect(self: *AppNavHost) void {
+        const workspace = self.workspace orelse return;
+        const has_hosts = workspace.registry.hosts.len > 0;
+        if (self.empty_has_hosts == has_hosts) return;
+        self.empty_has_hosts = has_hosts;
+        if (self.empty_choose_label) |label| label.set(if (has_hosts) "快速连接" else "新建连接");
+        if (self.empty_choose_icon) |icon| icon.set(if (has_hosts) @import("ui/quick_connect_icon.zig").asset else ui.icons.plus);
+        if (self.chrome.empty_description) |node| node.setTextContent(self.allocator, if (has_hosts) "直接打开本地终端，或从左侧选择已保存的 SSH / SFTP 连接。" else "直接打开本地终端，或新建一个 SSH / SFTP 连接。") catch {};
+    }
     fn toggleQuickConnect(self: *AppNavHost) void {
         const host = self.quick_host orelse return;
         if (host.view.isOpen()) host.close() else host.show() catch |err| {
@@ -5606,6 +5706,7 @@ const AppNavHost = struct {
 
     fn hookRun(ctx: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *AppNavHost = @ptrCast(@alignCast(ctx));
+        if (self.menu_host) |menu| menu.drainSidebarAction();
         if (process_windows) |process| if (process.data_cleanup_owner != null) return .done;
         if (self.quick_host) |host| if (host.view.isOpen()) host.refreshAssets() catch |err| {
             if (self.workspace) |workspace| workspace.status(@errorName(err));
@@ -5713,6 +5814,8 @@ const AppNavHost = struct {
         };
         if (self.settings) |settings| if (settings.restoreScroll()) return .needs_layout;
         const width = self.cx.viewport.width;
+        self.syncHomeConnect();
+        self.syncHostArtwork();
         const before = self.quick.sidebar.collapsed;
         if (self.settings) |settings| {
             self.quick.sidebar.applyCommittedPreference(settings.runtime.value.ui.sidebar_collapsed, width);
@@ -6129,6 +6232,7 @@ const AppNavHost = struct {
     }
 
     fn cleanup(self: *AppNavHost) void {
+        if (self.app_runtime) |app| for (self.host_artwork) |texture| if (texture) |id| app.renderer.image_renderer.unloadTexture(id);
         self.cx.removeAfterLayoutHook(self);
         if (self.ai) |ai| {
             ai.request_cancel.cancel();
@@ -7195,14 +7299,7 @@ const AppNavHost = struct {
                 if (ai.input_node) |input| self.cx.setFocus(input);
             } else workspace.status("AI 运维助手暂不可用"),
             .upload => |source| if (self.transfer_host) |transfer| {
-                // OSC 7 cwd is the real remote target for uploads; keep the
-                // panel usable when a shell has not published one yet.
-                const runtime = workspace.tabs.items[active].runtime;
-                const remote_dir = if (runtime) |session| session.workerPtr().copyCwd(self.allocator) catch null else null;
-                defer if (remote_dir) |owned| self.allocator.free(owned);
-                if (source) |path| {
-                    transfer.showPanel(.{ .mode = .upload, .sources = &.{path}, .remote_dir = remote_dir orelse "" });
-                } else transfer.showPanel(.{ .mode = .upload, .remote_dir = remote_dir orelse "" });
+                transfer.showPanel(.{ .mode = .upload, .sources = if (source) |path| &.{path} else &.{} });
             } else workspace.status("传输面板暂不可用"),
             .download => |download| if (self.transfer_host) |transfer| {
                 // SSH opens its transfer service lazily from this confirmation,
@@ -7357,7 +7454,25 @@ const QuickConnectHost = struct {
             if (@backingInt(host.connection_id) == 0) continue;
             try assets.append(self.allocator, .{ .owner = host.owner(), .name = host.name, .host = host.host, .user = host.user, .port = host.port, .group = host.group, .hops = host.jump_chain.len, .protocol = host.protocol, .os = @import("ui/session_os_cache.zig").load(self.allocator, self.workspace.io, self.workspace.hosts_path, host) });
         }
-        try self.view.update(revision, assets.items);
+        // Recency only reorders real saved identities; never fabricate fallback recent rows.
+        var ordered: std.ArrayList(QuickView.SavedAsset) = .empty;
+        defer ordered.deinit(self.allocator);
+        for (0..self.workspace.recent_connections.len) |rank| {
+            const owner = self.workspace.recent_connections.resolve(rank, &self.workspace.registry) orelse continue;
+            for (assets.items) |entry| if (entry.owner.id == owner.id) {
+                try ordered.append(self.allocator, entry);
+                break;
+            };
+        }
+        for (assets.items) |entry| {
+            var present = false;
+            for (ordered.items) |previous| if (previous.owner.id == entry.owner.id) {
+                present = true;
+                break;
+            };
+            if (!present) try ordered.append(self.allocator, entry);
+        }
+        try self.view.update(revision, ordered.items);
         self.painted_revision = revision;
     }
     fn show(self: *QuickConnectHost) !void {
@@ -7988,20 +8103,24 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     empty_title.style.height = .{ .px = 24 };
     empty_title.style.flex_shrink = 0;
     try empty_guide.appendChild(cx.allocator, empty_title);
-    const empty_description = try ui.textStyled(cx, shell_styles.emptyDescription, "直接使用 Local Terminal，或从左侧选择一个已保存的 SSH / SFTP 连接。");
+    const empty_description = try ui.textStyled(cx, shell_styles.emptyDescription, "直接打开本地终端，或从左侧选择已保存的 SSH / SFTP 连接。");
     empty_description.style.height = .{ .px = 18.15 };
     empty_description.style.flex_shrink = 0;
     try empty_guide.appendChild(cx.allocator, empty_description);
     const empty_btns = try ui.boxStyled(cx, shell_styles.emptyActions, .{});
     const empty_local_style = try scope.createSignal(ui.BoxStyle, shell_styles.emptyButton(true));
     const empty_choose_style = try scope.createSignal(ui.BoxStyle, shell_styles.emptyButton(false));
-    const empty_local = try ui.widgets.Button(.{ .label = "Local Terminal", .icon_asset = ui.icons.terminal, .icon_size = @as(f32, 17), .icon_tint = ui.Color.WHITE, .variant = .primary, .base_style = empty_local_style }).mount(scope, cx);
+    const empty_local = try ui.widgets.Button(.{ .label = "本地终端", .icon_asset = ui.icons.terminal, .icon_size = @as(f32, 17), .icon_tint = ui.Color.WHITE, .variant = .primary, .base_style = empty_local_style }).mount(scope, cx);
     empty_local.setStyleInline(cx.allocator, shell_styles.emptyButton(true));
     empty_local.meta.ownership.meta.test_id = "workspace.empty.local";
+    @import("ui/sidebar_view.zig").setFocusRing(empty_local);
     try empty_btns.appendChild(cx.allocator, empty_local);
-    const empty_choose = try ui.widgets.Button(.{ .label = "选择连接", .variant = .secondary, .base_style = empty_choose_style }).mount(scope, cx);
+    const empty_choose_label = try scope.createText("快速连接", .{});
+    const empty_choose_icon = try scope.createSignal(?ui.SvgAsset, @import("ui/quick_connect_icon.zig").asset);
+    const empty_choose = try ui.widgets.Button(.{ .label = empty_choose_label, .icon_asset = empty_choose_icon, .icon_size = @as(f32, 17), .variant = .secondary, .base_style = empty_choose_style }).mount(scope, cx);
     empty_choose.setStyleInline(cx.allocator, shell_styles.emptyButton(false));
     empty_choose.meta.ownership.meta.test_id = "workspace.empty.choose";
+    @import("ui/sidebar_view.zig").setFocusRing(empty_choose);
     try empty_btns.appendChild(cx.allocator, empty_choose);
     try empty_guide.appendChild(cx.allocator, empty_btns);
     try empty_state.appendChild(cx.allocator, empty_guide);
@@ -8032,7 +8151,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     // WizardHost initialization so edit actions can reuse the same draft UI.
 
     // Wire the menu seam: sidebar/tab triggers flow Workspace → MenuHost.
-    workspace.menu_bridge = .{ .context = @ptrCast(menu_host), .fire = MenuHost.bridgeFire };
+    workspace.menu_bridge = .{ .context = @ptrCast(menu_host), .fire = MenuHost.bridgeFire, .host_action = MenuHost.sidebarAction };
     applog.info(.ui, "workspace ready: hosts={d} ui={s}x{s}", .{ workspace.registry.hosts.len, "1280", "800" });
 
     const quick_host = try cx.allocator.create(QuickConnectHost);
@@ -8045,6 +8164,8 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const nav_host = try cx.allocator.create(AppNavHost);
     nav_host.* = .{ .allocator = cx.allocator, .cx = cx, .quick = QuickConnect.init(cx.allocator), .quick_panel = quick_panel, .settings = settings_host, .ai = ai_host, .roster = @import("ui/group_model.zig").Roster.init(cx.allocator) };
     nav_host.appearance_theme = try cx.bindState(shell_styles.ThemePublication, .{});
+    nav_host.empty_choose_label = empty_choose_label;
+    nav_host.empty_choose_icon = empty_choose_icon;
     nav_host.chrome.empty_icon = empty_icon;
     nav_host.chrome.empty_title = empty_title;
     nav_host.chrome.empty_description = empty_description;
@@ -8052,7 +8173,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     ai_host.roster = &nav_host.roster;
     quick_host.nav = nav_host;
     nav_host.quick_host = quick_host;
-    empty_choose.behavior.events.on_click = cx.on(AppNavHost, nav_host, AppNavHost.toggleQuickConnect);
+    empty_choose.behavior.events.on_click = cx.on(AppNavHost, nav_host, AppNavHost.homeConnect);
     empty_local.behavior.events.on_click = cx.on(AppNavHost, nav_host, AppNavHost.newLocalSessionClick);
     nav_host.workspace = workspace;
     nav_host.shell_root = root;
@@ -8074,7 +8195,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     if (cx.root) |window_root| try window_root.insertChildBefore(cx.allocator, background_view.root, if (window_root.children.items.len != 0) window_root.children.items[0] else null);
 
     settings_host.native_close_waiter = &nav_host.native_close_pending;
-    const session_menu = try session_menu_mod.View.mount(cx, scope, .{ .context = nav_host, .new_profile = AppNavHost.newSessionProfile, .quick = AppNavHost.quickSession, .local = AppNavHost.newLocalSession, .saved = AppNavHost.savedSession });
+    const session_menu = try session_menu_mod.View.mount(cx, scope, .{ .context = nav_host, .new_profile = AppNavHost.newSessionProfile, .new_sftp = AppNavHost.newSftpProfile, .quick = AppNavHost.quickSession, .local = AppNavHost.newLocalSession, .saved = AppNavHost.savedSession });
     session_menu.root.style.position = .absolute;
     session_menu.root.style.width = .{ .px = 0 };
     session_menu.root.style.height = .{ .px = 0 };
@@ -8812,6 +8933,7 @@ const TransferHost = struct {
     conflict_presented: bool = false,
     manager_visible: bool = false,
     manager_open_requested: bool = false,
+    cwd_pending: ?struct { owner: @import("host/identity.zig").SessionHandle, started: u64 } = null,
     reveal_requested: ?struct { job: transfer_mod.JobId, attempt: u8, owner: @import("host/identity.zig").SessionHandle } = null,
     sftp_open_requested: bool = false,
     manager_last_refresh_ms: u64 = 0,
@@ -9434,18 +9556,12 @@ const TransferHost = struct {
     fn transferScopeChoices(raw: *anyopaque, a: std.mem.Allocator) ![]const transfer_manager_view.ScopeChoice {
         const self: *TransferHost = @ptrCast(@alignCast(raw));
         var choices: std.ArrayList(transfer_manager_view.ScopeChoice) = .empty;
-        const roster = self.workspace.group_roster orelse return &.{};
-        for (roster.groups.items) |group| {
-            var members: std.ArrayList(@import("host/identity.zig").SessionHandle) = .empty;
-            for (group.members.items) |member| {
-                if (!member.active) continue;
-                for (self.workspace.tabs.items) |tab| if (tab.id == member.pane_id and tab.content_owner == .session) {
-                    try members.append(a, tab.content_owner.session);
-                    break;
-                };
-            }
-            if (members.items.len == 0) continue;
-            try choices.append(a, .{ .label = try std.fmt.allocPrint(a, "组 · {s}", .{group.name}), .scope = .{ .sessions = .{ .members = members.items, .revision = group.membership_revision } } });
+        for (self.workspace.tabs.items) |tab| {
+            if (tab.content_owner != .session) continue;
+            const owner = tab.content_owner.session;
+            var has_tasks = false;
+            for (self.tasks.job_owners.items) |record| if (record.owner.eql(owner) and self.manager.progress(record.job) != null) { has_tasks = true; break; };
+            if (has_tasks) try choices.append(a, .{ .label = try a.dupe(u8, tab.titleSlice()), .scope = .{ .session = owner } });
         }
         return choices.items;
     }
@@ -9773,7 +9889,19 @@ const TransferHost = struct {
         self.file_binding = null;
         self.file_conflict_context = null;
         self.showConfirmation(.{ .mode = mode, .owner = owner, .endpoint = host.host, .host_name = tab.titleSlice(), .available = true, .sources = if (source) |value| &.{value} else &.{}, .local_dir = "", .remote_dir = cwd orelse "", .edit_remote_source = mode == .download, .require_directory_selection = mode == .download });
+        if (mode == .upload) self.requestUploadDirectory(owner, tab.runtime.?.workerPtr());
         self.cx.requestRedraw();
+    }
+
+    fn requestUploadDirectory(self: *TransferHost, owner: @import("host/identity.zig").SessionHandle, runtime: *@import("host/runtime_service.zig").Runtime) void {
+        runtime.requestCurrentDirectory() catch {
+            self.workspace.status("无法读取当前远程目录，请重试");
+            return;
+        };
+        self.panel.remote_dir_sig.set("");
+        self.panel.remote_hint.setTextContent(self.allocator, "正在读取当前终端目录…") catch {};
+        self.cwd_pending = .{ .owner = owner, .started = wallClockMsTransfer() };
+        self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
     }
 
     fn showPanel(self: *TransferHost, data: transfer_panel_mod.Data) void {
@@ -9792,6 +9920,7 @@ const TransferHost = struct {
         captured.available = host != null and !tab.closing and !tab.archived and !tab.failed and tab.runtime != null;
         captured.unavailable_reason = "当前会话无法进行远程文件传输";
         self.showConfirmation(captured);
+        if (data.mode == .upload and data.remote_dir.len == 0 and captured.available) if (captured.owner) |owner| self.requestUploadDirectory(owner, tab.runtime.?.workerPtr());
     }
 
     fn showFileTransfer(raw: *anyopaque, intent: @import("host/file_workspace_controller.zig").FrozenTransfer, binding: @import("host/session_host.zig").ServiceHandle) !void {
@@ -10012,6 +10141,34 @@ const TransferHost = struct {
 
     /// after-layout 轮询：连接完成→消费挂起任务；活跃→tick + 进度行。
     fn poll(self: *TransferHost) void {
+        if (self.cwd_pending) |pending| cwd: {
+            if (!self.panel.open.peek()) {
+                self.cwd_pending = null;
+                break :cwd;
+            }
+            const id = self.application.legacyForHandle(pending.owner) orelse {
+                self.cwd_pending = null;
+                break :cwd;
+            };
+            const tab = self.workspace.sessionTab(id) orelse {
+                self.cwd_pending = null;
+                break :cwd;
+            };
+            const runtime = tab.runtime orelse {
+                self.cwd_pending = null;
+                break :cwd;
+            };
+            const path = runtime.workerPtr().copyCwd(self.allocator) catch null;
+            defer if (path) |value| self.allocator.free(value);
+            if (path) |value| {
+                self.panel.remote_dir_sig.set(value);
+                self.panel.remote_hint.setTextContent(self.allocator, "已自动填入执行 @up 时的远程目录") catch {};
+                self.cwd_pending = null;
+            } else if (wallClockMsTransfer() -| pending.started > 5000) {
+                self.panel.remote_hint.setTextContent(self.allocator, "未能读取当前目录，请在终端空闲时重新执行 @up") catch {};
+                self.cwd_pending = null;
+            } else self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+        }
         if (self.reveal_requested) |request| {
             self.reveal_requested = null;
             self.revealCompleted(request.job, request.attempt, request.owner) catch |err| self.workspace.status(@errorName(err));
@@ -10304,8 +10461,20 @@ pub fn main() !void {
         return err;
     };
     @import("config/store.zig").prepareCredentials(io_threaded.io(), std.Io.Dir.cwd(), std.heap.c_allocator, data_paths.config, data_paths.hosts) catch |err| {
-        _ = dataStartupAlert(err, false);
-        return err;
+        if ((err == error.CredentialDenied or err == error.CredentialLocked) and dataStartupAlert(err, false)) {
+            credentials.authorizeScope() catch |failure| {
+                // Do not offer another authorization loop after cancel/denial.
+                _ = dataStartupAlert(error.CredentialAuthorizationFailed, false);
+                return failure;
+            };
+            @import("config/store.zig").prepareCredentials(io_threaded.io(), std.Io.Dir.cwd(), std.heap.c_allocator, data_paths.config, data_paths.hosts) catch |failure| {
+                _ = dataStartupAlert(error.CredentialAuthorizationFailed, false);
+                return failure;
+            };
+        } else {
+            if (err != error.CredentialDenied and err != error.CredentialLocked) _ = dataStartupAlert(err, false);
+            return err;
+        }
     };
     applog.init(.{}, io_threaded.io());
     defer applog.shutdown();

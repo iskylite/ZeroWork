@@ -5,6 +5,10 @@ const ui = @import("ui");
 const identity = @import("identity.zig");
 const envelope = @import("../config/connection_envelope.zig");
 
+/// Shared initial preference for password-capable connection editors.
+/// Contributions use this default while retaining an explicit user opt-out.
+pub const default_save_password = true;
+
 pub const SubmitIntent = enum { save, save_and_open, temporary, probe };
 pub const EditorEvents = struct {
     context: *anyopaque,
@@ -22,6 +26,7 @@ pub const EditorMount = struct {
     scope: *ui.Scope,
     slot: *ui.Node,
     protocol_id: []const u8,
+    save_password_by_default: bool = default_save_password,
     /// Shared host component, instantiated in the editor scope.
     protocol_picker: ?EditorProtocolPicker = null,
     initial: ?envelope.Envelope = null,

@@ -21,6 +21,9 @@ pub fn tab(width: f32, active: bool) ui.BoxStyle {
     const c = theme.current();
     return .{ .shadow = if (active) .{ .blur = if (theme.currentName() == .dark) 8 else 6, .offset_y = if (theme.currentName() == .dark) 2 else 1, .color = c.shadow.withAlpha(if (theme.currentName() == .dark) 89 else 18) } else .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .width = .{ .px = width }, .height = .{ .px = height }, .direction = .row, .align_items = .center, .background = if (active) c.tab_on else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 8 }, .flex_shrink = 0 };
 }
+pub fn underline(width: f32) ui.BoxStyle {
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 10 }, .top = .{ .px = height - 3 } }, .width = .{ .px = width - 20 }, .height = .{ .px = 3 }, .background = theme.current().accent, .border = .{ .radius = 1.25 } };
+}
 pub fn title() ui.TextStyle {
     return .{ .font_size = title_font, .font_weight = title_weight, .color = theme.current().fg_1, .line_height = 1.5, .text_overflow = .ellipsis, .selectable = false };
 }

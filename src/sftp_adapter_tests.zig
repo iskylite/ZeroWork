@@ -53,12 +53,16 @@ const Factory = struct {
     close_state: std.atomic.Value(u8) = .init(@backingInt(files.readonly.ReleaseReceipt.awaiting)),
     destroyed: std.atomic.Value(bool) = .init(false),
     token: ?*const std.atomic.Value(bool) = null,
+    observer: ?@import("proto/ssh/connection_progress.zig").Observer = null,
+    attempt: u64 = 0,
     fn interface(self: *Factory) files.Factory {
         return .{ .context = self, .prepare = prepare, .discard = discard };
     }
     fn prepare(raw: *anyopaque, source: files.Source) !files.readonly.Connector {
         const self: *Factory = @ptrCast(@alignCast(raw));
         self.prepares += 1;
+        self.observer = source.progress_observer;
+        self.attempt = source.open_key.attempt_id orelse 0;
         if (self.reject) return error.FileConnectorRejected;
         return .{ .key = source.open_key, .ctx = self, .connect_fn = connect, .close_fn = close, .deinit_fn = destroy };
     }
@@ -69,7 +73,9 @@ const Factory = struct {
         self.token = token;
         self.entered.store(true, .release);
         try wait(&self.unblock);
-        return if (token.load(.acquire)) error.Cancelled else error.ControlledConnectFailed;
+        if (token.load(.acquire)) return error.Cancelled;
+        if (self.observer) |observer| observer.callback(observer.context, .{ .attempt = self.attempt, .hop = 0, .hop_count = 1, .host = "original.invalid", .port = 22, .phase = .transport, .status = .failed, .failure = error.ControlledConnectFailed });
+        return error.ControlledConnectFailed;
     }
     fn close(raw: *anyopaque, _: ?*ssh.Session) files.readonly.ReleaseReceipt {
         const self: *Factory = @ptrCast(@alignCast(raw));
@@ -446,4 +452,31 @@ test "sftp adapter optional VM real file and transfer readiness initial director
         try std.testing.expectEqualStrings(input.saved.private_options, presented.initial_directory.requested_path);
         std.debug.print("SFTP_ADAPTER_VM_PASS mode={s} actual_file_init=true actual_transfer_init=true initial_retired=true original_target=true cleanup=released shell=false remote_mutation=false\n", .{@tagName(mode)});
     }
+}
+
+test "sftp adapter preserves exact startup failure after the worker and file binding have released" {
+    var hooks: Hooks = .{};
+    const adapter = try module.SftpAdapter.init(std.testing.allocator, hooks.transfer(), hooks.presentation(), .{});
+    var host = try sessions.SessionHost.init(std.testing.allocator, &.{adapter.adapter()});
+    defer host.deinit();
+    var factory: Factory = .{ .caller = std.Thread.getCurrentId() };
+    var file_host = try files.FileBindingHost.init(std.testing.allocator, &host, factory.interface());
+    defer stop(adapter, &host, &file_host, &factory);
+    const accepted = try host.create(spec(), target);
+    _ = try adapter.safeTick(&host, &file_host);
+    try wait(&factory.entered);
+    factory.close_state.store(@backingInt(files.readonly.ReleaseReceipt.released), .release);
+    factory.unblock.store(true, .release);
+    const deadline = clock.monotonicNs() + 5 * std.time.ns_per_s;
+    while (file_host.bindings.items.len != 0) {
+        _ = try file_host.safeTick();
+        if (clock.monotonicNs() >= deadline) return error.TestTimeout;
+        pause();
+    }
+    try std.testing.expectEqual(@as(usize, 0), file_host.bindings.items.len);
+    _ = try adapter.safeTick(&host, &file_host);
+    const progress = adapter.connectionProgress(accepted.handle, accepted.operation).?;
+    try std.testing.expectEqualStrings("ControlledConnectFailed", progress.failure.?.code);
+    try std.testing.expectEqual(error.ControlledConnectFailed, progress.journal.failure.?.failure.?);
+    try std.testing.expectEqual(sessions.Lifecycle.failed, host.queryState(accepted.handle).?.lifecycle);
 }

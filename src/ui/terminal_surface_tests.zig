@@ -775,7 +775,7 @@ test "terminal surface caret uses 550ms and actual accessibility preferences wit
 
     view.setTimestampGutter(true);
     _ = try view.refreshTerminalService(owner, true);
-    try std.testing.expect(cx.next_redraw_delay_ns.? > 0 and cx.next_redraw_delay_ns.? <= std.time.ns_per_s);
+    try std.testing.expectEqual(@as(?u64, null), cx.next_redraw_delay_ns);
     cx.next_redraw_scheduled_at = null;
     cx.next_redraw_delay_ns = null;
     _ = try view.refreshTerminalService(owner, false);
@@ -1528,4 +1528,49 @@ test "global backdrop survives OSC default backgrounds while explicit ANSI cells
     try std.testing.expect(surface.preedit_node.getBackground().a <= 64);
     surface.showError(error.WorkerBusy);
     try std.testing.expect(surface.message_root.getBackground().a <= 64);
+}
+
+test "terminal timestamp skips blank rows and builtin headers preserve distinct execution times" {
+    var transport: FakeTransport = undefined;
+    try transport.init(12, 80);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(1000, 600);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    view.setTimestampGutter(true);
+    try view.bindTerminalService(transport.service());
+    try transport.controller.feedOutput(owner, 1, "visible\r\n\r\nprompt% ", 1000);
+    _ = cx.render();
+    _ = try view.refreshTerminalService(owner, false);
+    _ = cx.render();
+    const surface = view.terminal_surface.?;
+    const first = try surface.composite.begin("@ts", 1000123);
+    try surface.composite.finish(owner, first, .success, "开启");
+    const second = try surface.composite.begin("@help", 1002456);
+    try surface.composite.finish(owner, second, .success, "帮助");
+    surface.force_snapshot = true;
+    _ = try view.refreshTerminalService(owner, false);
+    _ = cx.render();
+    var count: usize = 0;
+    for (surface.rows.items, 0..) |row, i| {
+        const snapshot = surface.snapshot.?.projection;
+        const item = snapshot.visible_rows[i];
+        const cells = snapshot.cells[item.cell_start..][0..item.cell_count];
+        const has_text = for (cells) |cell| {
+            if (std.mem.trim(u8, snapshot.grapheme(cell), " \r\n\t").len > 0) break true;
+        } else false;
+        if (!has_text) try std.testing.expect(row.time.style.display == .none);
+        if (row.record_time.style.display != .none) {
+            try std.testing.expect(item.application_kind == 1);
+            try std.testing.expectEqual(if (count == 0) @as(i64, 1000123) else @as(i64, 1002456), item.received_wallclock_ms.?);
+            const clock_text = row.record_time.getText().?;
+            try std.testing.expect(std.mem.endsWith(u8, clock_text.content, if (count == 0) ".123" else ".456"));
+            try std.testing.expect(row.time.style.display != .none);
+            count += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
 }

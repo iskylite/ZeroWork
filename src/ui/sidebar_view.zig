@@ -104,14 +104,6 @@ pub const View = struct {
         try MenuKeyboard.install(cx, new_menu);
         const bottom = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 8, .flex_shrink = 0 }, .{});
         bottom.meta.ownership.meta.test_id = "sidebar.bottom";
-        const local = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "Local Terminal", .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 34 }, .direction = .row, .align_items = .center, .justify = .start, .padding = .{ .left = 10, .right = 10 }, .gap = 8, .border = .{ .radius = 8 }, .flex_shrink = 0 }, .hover_style = hover, .on_click = cx.on(View, self, View.newLocal) }).mount(scope, cx);
-        local.meta.ownership.meta.test_id = "sidebar.local";
-        try local.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.terminal, T.current().fg_2, S.icon(17)));
-        const local_label = try text(cx, local, "Local Terminal", 12, 400, true);
-        local_label.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
-        _ = try text(cx, local, "zsh", 9, 400, true);
-        setFocusRing(local);
-        try bottom.appendChild(cx.allocator, local);
         const footer = try self.footerButton(scope, "sidebar.footer.new", false);
         try bottom.appendChild(cx.allocator, footer);
         try full.appendChild(cx.allocator, bottom);
@@ -234,14 +226,16 @@ pub const View = struct {
     }
 };
 
+pub const HostAction = enum { copy, edit };
 pub const HostCallbacks = struct {
+    action: ?*const fn (*anyopaque, HostAction) void = null,
     context: *anyopaque,
     select: *const fn (*anyopaque) void,
     connect: *const fn (*anyopaque) void,
     menu: *const fn (*anyopaque, *ui.Node) void,
 };
 pub const ForwardBadge = struct { port: ?u16, phase: @import("socks_background_model.zig").Phase };
-pub const HostData = struct { icon: ?ui.SvgAsset = null, kind: @import("session_icon.zig").Kind = .terminal, name: []const u8, detail: []const u8, route: []const u8, hops: usize, online: bool, selected: bool = false, forward: ?ForwardBadge = null };
+pub const HostData = struct { protocol: []const u8 = "SSH", supports_route: bool = true, icon: ?ui.SvgAsset = null, kind: @import("session_icon.zig").Kind = .terminal, name: []const u8, detail: []const u8, route: []const u8, hops: usize, online: bool, selected: bool = false, forward: ?ForwardBadge = null };
 pub const HostRow = struct {
     cx: *ui.Cx,
     node: *ui.Node,
@@ -277,26 +271,28 @@ pub const HostRow = struct {
         self.node = node;
         const content = try ui.box(cx, S.content(), .{});
         try node.appendChild(cx.allocator, content);
-        self.dot = try ui.iconTint(cx, data.icon orelse @import("session_icon.zig").resolve(data.kind), T.current().fg_2, S.icon(17));
+        self.dot = try ui.iconTint(cx, data.icon orelse @import("session_icon.zig").resolve(data.kind), ui.Color.WHITE, S.icon(18));
         self.dot.meta.ownership.meta.test_id = "sidebar.host.icon";
         try content.appendChild(cx.allocator, self.dot);
-        const metadata = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 26.5 }, .direction = .column, .gap = 0, .min_width = 0 }, .{});
-        var name_style = S.text(11, 550, false);
-        name_style.line_height = 15.0 / 11.0;
-        const name = try ui.text(cx, data.name, name_style);
-        name.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
+        const metadata = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 6, .min_width = 0 }, .{});
+        const name = try ui.text(cx, data.name, S.text(12, 500, false));
+        name.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .min_width = 0, .flex_shrink = 1, .overflow_hidden = true });
         self.name = name;
         try metadata.appendChild(cx.allocator, name);
-        var detail_style = S.text(9, 400, true);
-        detail_style.line_height = 11.5 / 9.0;
-        const detail = try ui.text(cx, data.detail, detail_style);
-        detail.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .overflow_hidden = true });
-        try metadata.appendChild(cx.allocator, detail);
+        const tag = try ui.box(cx, .{ .height = .{ .px = 12 }, .padding = .{ .left = 3, .right = 3 }, .margin = .{ .top = 8 }, .direction = .row, .align_items = .center, .justify = .center, .background = T.current().well, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
+        tag.meta.ownership.meta.test_id = "sidebar.host.protocol";
+        const upper = try std.ascii.allocUpperString(cx.allocator, data.protocol);
+        defer cx.allocator.free(upper);
+        const protocol_text = try ui.text(cx, upper, .{ .font_size = 7, .font_weight = 400, .line_height = 10.0 / 7.0, .color = T.current().fg_2, .selectable = false });
+        try protocol_text.setTextContent(cx.allocator, upper);
+        protocol_text.setStyleInline(cx.allocator, .{ .height = .{ .px = 10 }, .flex_shrink = 0 });
+        try tag.appendChild(cx.allocator, protocol_text);
+        try metadata.appendChild(cx.allocator, tag);
         const identity = try std.fmt.allocPrint(cx.allocator, "{s}\n{s}\n{s}", .{ data.name, data.detail, data.route });
         defer cx.allocator.free(identity);
         const identity_hint = try mountHostHint(cx, scope, metadata, identity, node);
         var metadata_viewport = S.titleViewport();
-        metadata_viewport.height = .{ .px = 26.5 };
+        metadata_viewport.height = .{ .px = 24 };
         identity_hint.wrapper.setStyleInline(cx.allocator, metadata_viewport);
         identity_hint.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill() });
         try content.appendChild(cx.allocator, identity_hint.wrapper);
@@ -305,17 +301,17 @@ pub const HostRow = struct {
         try content.appendChild(cx.allocator, tail);
         const route = try ui.box(cx, S.route(), .{});
         // Direct connections leave the fixed trailing slot quiet; route detail stays in the host tooltip.
-        if (data.hops > 0) {
+        if (data.supports_route) {
             try route.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("route").?, T.current().fg_2, S.icon(12)));
             var count: [24]u8 = undefined;
             const hops = try text(cx, route, try std.fmt.bufPrint(&count, "{d}", .{data.hops}), 10.5, 400, true);
+            hops.meta.ownership.meta.test_id = "sidebar.host.hops";
+            hops.setStyleInline(cx.allocator, .{ .width = .{ .px = 12 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
             if (hops.getText()) |old| {
                 var next = old;
                 next.use_monospace_font = true;
                 hops.setText(next);
             }
-        } else {
-            _ = try text(cx, route, if (data.kind == .file) "SFTP" else "SSH", 9, 400, true);
         }
         self.route = route;
         try tail.appendChild(cx.allocator, route);
@@ -325,28 +321,35 @@ pub const HostRow = struct {
         self.forward_label.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try self.forward.appendChild(cx.allocator, self.forward_label);
         try tail.appendChild(cx.allocator, self.forward);
-        const actions = try ui.box(cx, S.tail(), .{});
+        const actions = try ui.box(cx, .{ .width = .{ .px = 72 }, .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 0, .flex_shrink = 0 }, .{});
         self.actions = actions;
         const connect_button = try iconButton(cx, scope, "play", "新标签连接", "sidebar.host.connect", S.action(24), tint, hover, cx.on(HostRow, self, HostRow.connect), swallowDoubleClick);
-        const menu_button = try iconButton(cx, scope, "ellipsis", "更多主机操作", "sidebar.host.more", S.action(24), tint, hover, cx.on(HostRow, self, HostRow.menu), swallowDoubleClick);
-        self.menu_trigger = menu_button;
         try actions.appendChild(cx.allocator, try hint(cx, scope, connect_button, "新标签连接", .right));
-        try actions.appendChild(cx.allocator, try hint(cx, scope, menu_button, "更多主机操作", .right));
-        try tail.appendChild(cx.allocator, actions);
+        const copy_button = try iconButton(cx, scope, "copy", "复制配置", "sidebar.host.copy", S.action(24), tint, hover, cx.on(HostRow, self, HostRow.copy), swallowDoubleClick);
+        const edit_button = try iconButton(cx, scope, "pencil", "编辑配置", "sidebar.host.edit", S.action(24), tint, hover, cx.on(HostRow, self, HostRow.edit), swallowDoubleClick);
+        try actions.appendChild(cx.allocator, try hint(cx, scope, copy_button, "复制配置", .right));
+        try actions.appendChild(cx.allocator, try hint(cx, scope, edit_button, "编辑配置", .right));
+        const menu_button = edit_button;
+        self.menu_trigger = edit_button;
+        // The complete host menu remains available on right click.
+
+        try content.appendChild(cx.allocator, actions);
         self.marker = try ui.box(cx, S.marker(), .{});
         try node.appendChild(cx.allocator, self.marker);
         const hovered = try ui.hooks.useHover(scope, node);
         const name_hover = try ui.hooks.useHover(scope, identity_hint.trigger);
         const connect_hover = try ui.hooks.useHover(scope, connect_button);
         const menu_hover = try ui.hooks.useHover(scope, menu_button);
+        const copy_hover = try ui.hooks.useHover(scope, copy_button);
         const focus = try ui.hooks.useFocusState(scope, cx, node);
         const connect_focus = try ui.hooks.useFocusState(scope, cx, connect_button);
         const menu_focus = try ui.hooks.useFocusState(scope, cx, menu_button);
-        try scope.createEffect(.{ .self = self, .hovered = hovered, .name_hover = name_hover, .connect_hover = connect_hover, .menu_hover = menu_hover, .focus = focus.focused, .focus_visible = focus.visible, .connect_focus = connect_focus.focused, .menu_focus = menu_focus.focused, .identity_open = identity_hint.open.?, .last_identity_focus = try scope.createState(bool, false), .theme = try cx.themeSignal(scope) }, struct {
+        const copy_focus = try ui.hooks.useFocusState(scope, cx, copy_button);
+        try scope.createEffect(.{ .self = self, .hovered = hovered, .name_hover = name_hover, .connect_hover = connect_hover, .menu_hover = menu_hover, .copy_hover = copy_hover, .copy_focus = copy_focus.focused, .focus = focus.focused, .focus_visible = focus.visible, .connect_focus = connect_focus.focused, .menu_focus = menu_focus.focused, .identity_open = identity_hint.open.?, .last_identity_focus = try scope.createState(bool, false), .theme = try cx.themeSignal(scope) }, struct {
             fn run(ctx: anytype) void {
                 _ = ctx.theme.get();
                 const picked = ctx.self.selected.get();
-                const hot = ctx.hovered.get() or ctx.name_hover.get() or ctx.connect_hover.get() or ctx.menu_hover.get() or ctx.focus.get() or ctx.connect_focus.get() or ctx.menu_focus.get() or ctx.self.menu_open.get();
+                const hot = ctx.hovered.get() or ctx.name_hover.get() or ctx.connect_hover.get() or ctx.menu_hover.get() or ctx.copy_hover.get() or ctx.copy_focus.get() or ctx.focus.get() or ctx.connect_focus.get() or ctx.menu_focus.get() or ctx.self.menu_open.get();
                 const identity_focus = ctx.focus_visible.get();
                 if (ctx.last_identity_focus.* != identity_focus) {
                     ctx.last_identity_focus.* = identity_focus;
@@ -360,14 +363,14 @@ pub const HostRow = struct {
                 ctx.self.node.setStyleInline(ctx.self.cx.allocator, S.host(picked, hot));
                 setFocusRing(ctx.self.node);
                 ctx.self.hot = hot;
-                ctx.self.route.setDisplay(if (hot or ctx.self.forward_badge != null) .none else .flex);
+                ctx.self.route.setDisplay(if (ctx.self.forward_badge != null and !hot) .none else .flex);
                 ctx.self.forward.setDisplay(if (!hot and ctx.self.forward_badge != null) .flex else .none);
                 if (ctx.self.forward_badge) |badge| ctx.self.forward_label.setTextColor(@import("socks_background_styles.zig").ink(badge.phase));
                 ctx.self.actions.setDisplay(if (hot) .flex else .none);
-                ctx.self.marker.setDisplay(if (picked) .flex else .none);
+                ctx.self.marker.setDisplay(if (picked or hot) .flex else .none);
                 if (ctx.self.name.getText()) |current| {
                     var next = current;
-                    next.font_weight = 550;
+                    next.font_weight = 500;
                     next.color = T.current().fg_1;
                     ctx.self.name.setText(next);
                 }
@@ -384,14 +387,14 @@ pub const HostRow = struct {
         const label = if (badge) |value| if (value.port) |port| std.fmt.bufPrint(&buffer, ":{d}后台", .{port}) catch "后台" else @import("socks_background_model.zig").phaseLabel(value.phase) else "";
         self.forward_label.setTextContent(self.cx.allocator, label) catch return;
         if (badge) |value| self.forward_label.setTextColor(@import("socks_background_styles.zig").ink(value.phase));
-        self.route.setDisplay(if (self.hot or badge != null) .none else .flex);
+        self.route.setDisplay(if (badge != null and !self.hot) .none else .flex);
         self.forward.setDisplay(if (!self.hot and badge != null) .flex else .none);
         if (self.node.behavior.interaction.a11y) |*props| props.description = if (badge) |value| @import("socks_background_model.zig").phaseLabel(value.phase) else null;
     }
     pub fn setOnline(self: *HostRow, online: bool) void {
         if (self.online == online) return;
         self.online = online;
-        _ = self.dot.setTint(T.current().fg_2);
+        _ = self.dot.setTint(ui.Color.WHITE);
     }
     pub fn setSelected(self: *HostRow, selected: bool) void {
         self.selected.set(selected);
@@ -404,6 +407,12 @@ pub const HostRow = struct {
     }
     fn connect(self: *HostRow) void {
         self.callbacks.connect(self.callbacks.context);
+    }
+    fn copy(self: *HostRow) void {
+        if (self.callbacks.action) |action| action(self.callbacks.context, .copy);
+    }
+    fn edit(self: *HostRow) void {
+        if (self.callbacks.action) |action| action(self.callbacks.context, .edit);
     }
     fn menu(self: *HostRow) void {
         self.callbacks.menu(self.callbacks.context, self.node);
@@ -459,7 +468,7 @@ pub const GroupRow = struct {
         chevron.setStyle(cx.allocator, .rotate, if (data.collapsed) -std.math.pi / 2.0 else @as(f32, 0));
         self.chevron = chevron;
         try content.appendChild(cx.allocator, chevron);
-        const name = try text(cx, content, data.name, 10, 400, true);
+        const name = try text(cx, content, data.name, 10, 700, true);
         name.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1 });
         if (data.color) |color| name.setTextColor(color);
         const tint = try scope.createSignal(?ui.Color, T.current().fg_2);
@@ -471,7 +480,7 @@ pub const GroupRow = struct {
         const count_text = try std.fmt.bufPrint(&count, "{d}", .{data.count});
         try count_label.setTextContent(cx.allocator, count_text);
         const count_width = @ceil(cx.text.measureTextWidth(count_text, 10, 400, false));
-        badge.setStyleInline(cx.allocator, .{ .width = .{ .px = count_width } });
+        badge.setStyleInline(cx.allocator, .{ .width = .{ .px = count_width + 14 } });
         var count_style = S.badgeLabel();
         count_style.width = .{ .px = count_width };
         count_label.setStyleInline(cx.allocator, count_style);

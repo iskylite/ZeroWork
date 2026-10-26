@@ -149,6 +149,7 @@ pub const TerminalViewNode = struct {
     row_texts: [max_grid_rows][]u8 = @splat(&[_]u8{}),
     timestamp_nodes: [max_grid_rows]?*ui.Node = @splat(null),
     record_markers: [max_grid_rows]?*ui.Node = @splat(null),
+    record_times: [max_grid_rows]?*ui.Node = @splat(null),
     record_states: [max_grid_rows]?*ui.Node = @splat(null),
     record_backgrounds: [max_grid_rows]?*ui.Node = @splat(null),
     row_layouts: [max_grid_rows]@import("terminal_record_geometry.zig").Layout = @splat(.{}),
@@ -352,6 +353,7 @@ pub const TerminalViewNode = struct {
         if (self.history.latest()) |entry| _ = self.renderFrame(self.cx, text_frame.decode(entry.wire).?) catch {};
         if (self.terminal_surface != null) {
             for (self.record_markers) |maybe| if (maybe) |node| node.setDisplay(.none);
+            for (self.record_times) |maybe| if (maybe) |node| node.setDisplay(.none);
             for (self.record_states) |maybe| if (maybe) |node| node.setDisplay(.none);
             for (self.timestamp_nodes) |maybe| if (maybe) |node| node.setDisplay(.none);
         } else if (self.legacy_document != null and self.legacy_document.?.enabled) {
@@ -3064,10 +3066,12 @@ pub const TerminalViewNode = struct {
             if (worker.copyProjection(cx.allocator)) |captured| {
                 var projection = captured;
                 defer projection.deinit(cx.allocator);
-                self.row_timestamps = @splat(null);
-                for (projection.visible_rows) |row| if (row.viewport_y < max_grid_rows and !row.continuation) {
-                    self.row_timestamps[row.viewport_y] = row.submitted_wallclock_ms orelse row.received_wallclock_ms;
-                };
+                if (self.legacy_document == null or !self.legacy_document.?.enabled) {
+                    self.row_timestamps = @splat(null);
+                    for (projection.visible_rows) |row| if (row.viewport_y < max_grid_rows and !row.continuation) {
+                        self.row_timestamps[row.viewport_y] = row.submitted_wallclock_ms orelse row.received_wallclock_ms;
+                    };
+                }
                 self.remote_input_context.alternate_screen = projection.modes.alternate_screen;
             } else |_| {}
             self.refreshLegacyTimestamps();
@@ -3506,12 +3510,13 @@ pub const TerminalViewNode = struct {
 
         for (0..max_grid_rows) |row| {
             const at = self.row_timestamps[row];
-            if (width == 0 or at == null or row >= self.frame_rows) {
+            if (width == 0 or at == null or row >= self.frame_rows or std.mem.trim(u8, self.row_texts[row], " \t\r\n").len == 0) {
                 if (self.timestamp_nodes[row]) |node| node.setDisplay(.none);
                 continue;
             }
             if (self.timestamp_nodes[row] == null) {
                 const node = ui.textStyled(self.cx, overlay_styles.timestampText, "") catch continue;
+                node.meta.ownership.meta.test_id = "terminal.timestamp";
                 node.style.position = .absolute;
                 self.rows_box.appendChild(self.cx.allocator, node) catch continue;
                 self.timestamp_nodes[row] = node;
@@ -3524,6 +3529,7 @@ pub const TerminalViewNode = struct {
             props.font_family = self.terminal_font_family_id;
             props.use_monospace_font = self.terminal_font_family_id == 0;
             props.color = app_theme.current().fg_3;
+            props.line_height = self.cell_height / props.font_size;
             node.setText(props);
             node.style.width = .{ .px = @import("terminal_styles.zig").timestamp_width };
             node.style.height = .{ .px = self.cell_height };
@@ -3833,6 +3839,7 @@ pub const TerminalViewNode = struct {
         self.rows_box.style.padding.right = self.historyContentPadding().right;
         const styles = @import("builtin_records_styles.zig");
         for (self.record_markers) |maybe| if (maybe) |node| node.setDisplay(.none);
+        for (self.record_times) |maybe| if (maybe) |node| node.setDisplay(.none);
         for (self.record_states) |maybe| if (maybe) |node| node.setDisplay(.none);
         for (self.row_nodes) |maybe| if (maybe) |node| {
             node.setBackground(ui.Color.TRANSPARENT);
@@ -3850,7 +3857,7 @@ pub const TerminalViewNode = struct {
             if (row.y < self.history_display_skip) continue;
             const at = row.y - self.history_display_skip;
             if (at >= max_grid_rows or at >= self.frame_rows) continue;
-            self.row_timestamps[at] = row.timestamp;
+            self.row_timestamps[at] = if (row.kind == 0 or (row.kind == 1 and row.id[1] == 0)) row.timestamp else null;
             const node = self.row_nodes[at] orelse continue;
             var layout = row.layout;
             if (layout.y) |value| {
@@ -3874,6 +3881,27 @@ pub const TerminalViewNode = struct {
                 background.setBackground(styles.tint(if (row.state == 2) 3 else row.kind));
                 styles.place(self.cx, background, self.historyContentPadding().left - @import("terminal_record_geometry.zig").padding_inline, self.rows_box.style.padding.top + layout.article_y, @max(1, self.root.rectFromWorldOrFallback().w - self.historyContentPadding().left - self.historyContentPadding().right + 2 * @import("terminal_record_geometry.zig").padding_inline), layout.article_height);
                 background.setDisplay(.flex);
+            }
+            if (row.kind == 1 and row.id[1] == 0 and row.timestamp != null) {
+                if (self.record_times[at] == null) {
+                    const clock = try ui.textStyled(self.cx, styles.recordTime, "");
+                    clock.meta.ownership.meta.test_id = "terminal.command.time";
+                    try self.rows_box.appendChild(self.cx.allocator, clock);
+                    self.record_times[at] = clock;
+                }
+                const clock = self.record_times[at].?;
+                var stamp: [8]u8 = undefined;
+                var bytes: [24]u8 = undefined;
+                const text = try std.fmt.bufPrint(&bytes, "{s}.{d:0>3}", .{ try @import("terminal_surface_input.zig").localTimestamp(&stamp, row.timestamp.?), @as(u16, @intCast(@mod(row.timestamp.?, 1000))) });
+                try clock.setTextContent(self.cx.allocator, text);
+                var props = clock.getText().?;
+                props.line_height = self.cell_height / props.font_size;
+                props.color = app_theme.current().fg_3;
+                clock.setText(props);
+                const right = self.root.rectFromWorldOrFallback().w - self.rows_box.style.padding.right;
+                styles.place(self.cx, clock, @max(x, right - 100), y, 100, self.cell_height);
+                clock.setDisplay(.flex);
+                styles.place(self.cx, node, x + layout.shift_x, y, @max(1, right - x - layout.shift_x - 104), self.cell_height);
             }
             if (row.kind == 1 and row.id[1] == 0 and self.frame_cols > 14) {
                 if (self.record_markers[at] == null) {

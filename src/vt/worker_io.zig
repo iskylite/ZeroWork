@@ -18,6 +18,7 @@ pub const ChannelReader = struct {
 
 pub const WorkerIo = struct {
     pub const TimestampFn = *const fn (*anyopaque) i64;
+    output_filter: ?struct { context: *anyopaque, feed: *const fn (*anyopaque, *WorkerIo, []const u8) anyerror!void, finish: ?*const fn (*anyopaque, *WorkerIo) anyerror!void = null } = null,
     feed: FeedBridge,
     input: *InputQueue,
     reader: ChannelReader,
@@ -102,12 +103,15 @@ pub const WorkerIo = struct {
         // Never discard a successfully read prefix when a later read reports
         // EOF or an error. Publication backpressure is handled by FeedBridge;
         // an actual parser failure must reach the owning worker.
-        if (total != 0) try self.feedOutput(self.read_buffer[0..total]);
+        if (total != 0) {
+            if (self.output_filter) |filter| try filter.feed(filter.context, self, self.read_buffer[0..total]) else try self.feedOutput(self.read_buffer[0..total]);
+        }
+        if (eof or read_error != null) if (self.output_filter) |filter| if (filter.finish) |finish| try finish(filter.context, self);
         if (eof) self.closed = true;
         if (read_error) |err| return err;
     }
 
-    fn feedOutput(self: *WorkerIo, bytes: []const u8) !void {
+    pub fn feedOutput(self: *WorkerIo, bytes: []const u8) !void {
         self.last_output_ns = @import("../platform/realtime.zig").monotonicNs();
         const timestamp_ms = if (self.timestamp_fn) |timestamp_fn| timestamp_fn(self.timestamp_ctx orelse unreachable) else 0;
         // Session-recording side effects are best-effort: a timeline or
@@ -170,6 +174,7 @@ pub const WorkerIo = struct {
     }
 
     pub fn resetTransport(self: *WorkerIo, reader: ChannelReader, writer: ChannelWriter) void {
+        if (self.output_filter) |filter| if (filter.finish) |finish| finish(filter.context, self) catch {};
         self.reader = reader;
         self.writer = writer;
         self.closed = false;
