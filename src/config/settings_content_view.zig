@@ -43,8 +43,8 @@ test "settings modal height never becomes negative in a tiny viewport" {
     try std.testing.expectEqual(@as(f32, 1), constrainedModalHeight(0, 16));
     try std.testing.expectEqual(@as(f32, 1), constrainedModalHeight(0, 32));
     try std.testing.expectEqual(@as(f32, 68), constrainedModalHeight(0, 100));
-    try std.testing.expectEqual(@as(f32, 790), constrainedModalHeight(0, 900));
-    try std.testing.expectEqual(@as(f32, 790), constrainedModalHeight(999, 900));
+    try std.testing.expectEqual(@as(f32, 640), constrainedModalHeight(0, 900));
+    try std.testing.expectEqual(@as(f32, 640), constrainedModalHeight(999, 900));
     try std.testing.expectEqual(@as(f32, 432), constrainedModalHeight(0, 480));
 }
 
