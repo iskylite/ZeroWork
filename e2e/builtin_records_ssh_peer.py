@@ -21,8 +21,11 @@ import paramiko
 logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 parser = argparse.ArgumentParser()
 parser.add_argument("--out", required=True)
+parser.add_argument("--sftp-root", type=Path, help="Allow SFTP reads/writes only inside this disposable test directory")
 args = parser.parse_args()
 out = Path(args.out); out.mkdir(parents=True)
+root = args.sftp_root.resolve() if args.sftp_root else None
+if root: root.mkdir(parents=True, exist_ok=False)
 stop = threading.Event()
 signal.signal(signal.SIGTERM, lambda *_: stop.set())
 signal.signal(signal.SIGINT, lambda *_: stop.set())
@@ -46,16 +49,78 @@ class Server(paramiko.ServerInterface):
         return True
     def check_channel_shell_request(self, _): self.shell.set(); return True
 
+class Handle(paramiko.SFTPHandle):
+    def stat(self):
+        try:
+            stream = getattr(self, "writefile", None) or self.readfile
+            return paramiko.SFTPAttributes.from_stat(os.fstat(stream.fileno()))
+        except OSError as error: return paramiko.SFTPServer.convert_errno(error.errno or 13)
+    def chattr(self, attrs):
+        try:
+            stream = getattr(self, "writefile", None) or self.readfile
+            if attrs.st_size is not None: os.ftruncate(stream.fileno(), attrs.st_size)
+            if attrs.st_mode is not None: os.fchmod(stream.fileno(), attrs.st_mode)
+            return paramiko.SFTP_OK
+        except OSError as error: return paramiko.SFTPServer.convert_errno(error.errno or 13)
+
+class Files(paramiko.SFTPServerInterface):
+    """Real files, bounded to the run-owned test root, including symlink targets."""
+    def path(self, value):
+        candidate = (root / value if not os.path.isabs(value) else Path(value)).resolve()
+        if not candidate.is_relative_to(root): raise PermissionError(value)
+        return candidate
+    def canonicalize(self, path):
+        try: return str(self.path(path))
+        except OSError: return str(root)
+    def stat(self, path):
+        try: return paramiko.SFTPAttributes.from_stat(self.path(path).stat())
+        except OSError as error: return paramiko.SFTPServer.convert_errno(error.errno or 13)
+    lstat = stat
+    def list_folder(self, path):
+        try:
+            result = []
+            for child in self.path(path).iterdir():
+                item = paramiko.SFTPAttributes.from_stat(child.stat()); item.filename = child.name; result.append(item)
+            return result
+        except OSError as error: return paramiko.SFTPServer.convert_errno(error.errno or 13)
+    def open(self, path, flags, attrs):
+        try:
+            fd = os.open(self.path(path), flags, 0o600)
+            mode = "r+b" if flags & os.O_RDWR else "wb" if flags & os.O_WRONLY else "rb"
+            stream = os.fdopen(fd, mode, buffering=0)
+            handle = Handle(flags)
+            if flags & (os.O_WRONLY | os.O_RDWR): handle.writefile = stream
+            if not flags & os.O_WRONLY: handle.readfile = stream
+            return handle
+        except OSError as error: return paramiko.SFTPServer.convert_errno(error.errno or 13)
+    def rename(self, old, new):
+        try: self.path(old).rename(self.path(new)); return paramiko.SFTP_OK
+        except OSError as error: return paramiko.SFTPServer.convert_errno(error.errno or 13)
+    posix_rename = rename
+    def remove(self, path):
+        try: self.path(path).unlink(); return paramiko.SFTP_OK
+        except OSError as error: return paramiko.SFTPServer.convert_errno(error.errno or 13)
+    def mkdir(self, path, attrs):
+        try: self.path(path).mkdir(); return paramiko.SFTP_OK
+        except OSError as error: return paramiko.SFTPServer.convert_errno(error.errno or 13)
+    def chattr(self, path, attrs):
+        try: paramiko.SFTPServer.set_file_attr(str(self.path(path)), attrs); return paramiko.SFTP_OK
+        except OSError as error: return paramiko.SFTPServer.convert_errno(error.errno or 13)
+
 connections = []
 def serve(connection, index):
     transport = paramiko.Transport(connection); transport.add_server_key(key)
     server=Server(); process=None; master=None
     try:
+        if root: transport.set_subsystem_handler("sftp", paramiko.SFTPServer, Files)
         transport.start_server(server=server); channel=transport.accept(10)
-        if channel is None or not server.shell.wait(10): return
+        if channel is None: return
+        if not server.shell.wait(1 if root else 10):
+            while transport.is_active() and not stop.wait(.1): pass
+            return
         master, slave = os.openpty(); server.master=master
         fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack("HHHH",server.size[1],server.size[0],0,0))
-        process=subprocess.Popen(["/bin/zsh","-i"],stdin=slave,stdout=slave,stderr=slave,start_new_session=True,env={**os.environ,"HOME":str(out),"ZDOTDIR":str(out),"TERM":"xterm-256color"})
+        process=subprocess.Popen(["/bin/zsh","-i"],stdin=slave,stdout=slave,stderr=slave,start_new_session=True,cwd=root,env={**os.environ,"HOME":str(out),"ZDOTDIR":str(out),"TERM":"xterm-256color"})
         os.close(slave)
         received=bytearray()
         with (out / f"received-{index}.bin").open("wb") as audit:

@@ -19,8 +19,8 @@ pub const operation_count = 13;
 
 /// Order and wording follow mockup-at-help.png. @@ is an escape, not an action.
 pub const entries = [_]Entry{
-    .{ .name = "@up", .usage = "@up [文件]", .description = "上传（统一传输面板）", .example = "@up", .icon = "📤" },
-    .{ .name = "@dl", .usage = "@dl <远程路径>", .description = "下载（可选目录+重命名）", .example = "@dl /var/log/app.log", .icon = "📥", .requires_arguments = true },
+    .{ .name = "@up", .usage = "@up [文件]", .description = "选择文件并上传", .example = "@up", .icon = "📤" },
+    .{ .name = "@dl", .usage = "@dl <远程路径>", .description = "选择保存位置并下载", .example = "@dl /var/log/app.log", .icon = "📥", .requires_arguments = true },
     .{ .name = "@ai", .usage = "@ai [问题]", .description = "打开 AI 助手，问题保留为草稿", .example = "@ai 连接为何失败", .icon = "✨" },
     .{ .name = "@new", .usage = "@new", .description = "同主机新会话·组内自动入组", .example = "@new", .icon = "🖥️" },
     .{ .name = "@dup", .usage = "@dup", .description = "镜像复制会话（含当前目录）", .example = "@dup", .icon = "⧉" },

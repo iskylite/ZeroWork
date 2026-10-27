@@ -7341,6 +7341,7 @@ const AppNavHost = struct {
             defer workspace.command_output = null;
             onLocalCommand(raw, text, executed);
             if (!executed) return;
+            if (parsed == .upload or parsed == .download) return;
             if (owner) |source| if (command_id) |id| {
                 if (creates and application.sessions.sessions.items.len > before) {
                     const created = application.sessions.sessions.items[before].handle;
@@ -7350,8 +7351,6 @@ const AppNavHost = struct {
                     self.finishOwnedCommand(source, id, .success, switch (parsed) {
                         .help => "已打开内置指令帮助",
                         .ai => "已打开 AI 助手",
-                        .upload => "已打开上传确认",
-                        .download => "已打开下载确认",
                         .group => "已加入终端组",
                         .pin => "已更新组内置顶状态",
                         .sync => "已更新组广播请求",
@@ -7412,12 +7411,10 @@ const AppNavHost = struct {
                 if (ai.input_node) |input| self.cx.setFocus(input);
             } else workspace.status("AI 运维助手暂不可用"),
             .upload => |source| if (self.transfer_host) |transfer| {
-                transfer.showPanel(.{ .mode = .upload, .sources = if (source) |path| &.{path} else &.{} });
+                transfer.requestCommandTransfer(active, .upload, source) catch |err| workspace.status(@errorName(err));
             } else workspace.status("传输面板暂不可用"),
             .download => |download| if (self.transfer_host) |transfer| {
-                // SSH opens its transfer service lazily from this confirmation,
-                // just like @up; an unopened auxiliary service is not a failure.
-                transfer.showPanel(.{ .mode = .download, .sources = &.{download.remote_path}, .edit_remote_source = true, .require_directory_selection = true });
+                transfer.requestCommandTransfer(active, .download, download.remote_path) catch |err| workspace.status(@errorName(err));
             } else workspace.status("传输面板暂不可用"),
             .group => |name| {
                 if (name.len == 0) {
@@ -9082,6 +9079,168 @@ const TransferHost = struct {
     session_id: ?ws.SessionId = null,
     session_owner: ?@import("host/identity.zig").SessionHandle = null,
 
+    command_picker: ?CommandPicker = null,
+    picker_running: bool = false,
+
+    const CommandPicker = struct {
+        owner: @import("host/identity.zig").SessionHandle,
+        operation: @import("host/operation.zig").OperationKey,
+        capability_revision: u64,
+        command_id: ?u64,
+        mode: transfer_panel_mod.Data.Mode,
+        source: [:0]u8,
+        started: u64,
+    };
+
+    extern fn zw_pick_upload_files(initial: [*:0]const u8, context: *anyopaque, receive: *const fn (*anyopaque, [*:0]const u8) callconv(.c) c_int) c_int;
+
+    const PickedFiles = struct {
+        allocator: std.mem.Allocator,
+        paths: std.ArrayList([]const u8) = .empty,
+        fn receive(raw: *anyopaque, path: [*:0]const u8) callconv(.c) c_int {
+            const self: *PickedFiles = @ptrCast(@alignCast(raw));
+            const owned = self.allocator.dupe(u8, std.mem.span(path)) catch return 0;
+            self.paths.append(self.allocator, owned) catch {
+                self.allocator.free(owned);
+                return 0;
+            };
+            return 1;
+        }
+        fn deinit(self: *PickedFiles) void {
+            for (self.paths.items) |path| self.allocator.free(path);
+            self.paths.deinit(self.allocator);
+        }
+    };
+
+    fn finishPicker(self: *TransferHost, request: CommandPicker, state: TerminalViewNode.CommandRecordState, message: []const u8) void {
+        if (request.command_id) |id| {
+            for (self.workspace.tabs.items) |tab| {
+                if (tab.terminal) |*terminal| if (terminal.commandRecordOwner()) |owner| {
+                    if (owner.eql(request.owner)) {
+                        _ = terminal.finishCommandRecord(owner, id, state, message);
+                        self.cx.requestRedraw();
+                        return;
+                    }
+                };
+            }
+        }
+        self.workspace.status(message);
+    }
+
+    fn validatePicker(self: *TransferHost, request: CommandPicker) !void {
+        const state = self.application.sessions.queryState(request.owner) orelse return error.TransferOwnerExpired;
+        const capabilities = (try self.application.sessions.capabilitySnapshot(request.owner)) orelse return error.TransferOwnerExpired;
+        if (state.lifecycle != .attached) return error.TransferSessionNotAttached;
+        if (!state.create_operation.eql(request.operation)) return error.TransferOwnerExpired;
+        if (capabilities.revision != request.capability_revision) return error.StaleCapabilityRevision;
+        // The SSH transfer service is opened lazily after selection. Require
+        // declaration and authorization here, not an already-open SFTP channel.
+        const transfer_capability = for (capabilities.services) |service| {
+            if (std.mem.eql(u8, service.key.name, "transfer")) break service;
+        } else return error.TransferUnsupported;
+        if (!transfer_capability.declared or !transfer_capability.authorized) return error.TransferNotAuthorized;
+        const tab = self.workspace.sessionTab(self.application.legacyForHandle(request.owner) orelse return error.TransferOwnerExpired) orelse return error.TransferOwnerExpired;
+        if (tab.closing or tab.archived or tab.failed or tab.runtime == null) return error.TransferOwnerExpired;
+    }
+
+    fn requestCommandTransfer(self: *TransferHost, index: usize, mode: transfer_panel_mod.Data.Mode, source: ?[]const u8) !void {
+        if (self.command_picker != null or self.picker_running) return error.FileSelectionInProgress;
+        const tab = self.workspace.tabs.items[index];
+        const owner = switch (tab.content_owner) {
+            .session => |value| value,
+            else => return error.TransferOwnerExpired,
+        };
+        const state = self.application.sessions.queryState(owner) orelse return error.TransferOwnerExpired;
+        const capabilities = (try self.application.sessions.capabilitySnapshot(owner)) orelse return error.TransferOwnerExpired;
+        const request: CommandPicker = .{
+            .owner = owner,
+            .operation = state.create_operation,
+            .capability_revision = capabilities.revision,
+            .command_id = if (self.workspace.command_output) |terminal| terminal.active_command_record else null,
+            .mode = mode,
+            .source = try self.allocator.dupeSentinel(u8, source orelse "", 0),
+            .started = wallClockMsTransfer(),
+        };
+        errdefer self.allocator.free(request.source);
+        try self.validatePicker(request);
+        try self.validateNewTransferPolicy();
+        if (mode == .upload) try tab.runtime.?.workerPtr().requestCurrentDirectory();
+        self.command_picker = request;
+        self.finishPicker(request, .pending, if (mode == .upload) "正在读取上传目标目录…" else "等待选择下载保存位置…");
+        self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+    }
+
+    fn runCommandPicker(self: *TransferHost, request: CommandPicker, remote_dir: []const u8) !bool {
+        try self.validatePicker(request);
+        const policy = self.workspace.app_config.transfer;
+        var files: PickedFiles = .{ .allocator = self.allocator };
+        defer files.deinit();
+        var buffer: [4096]u8 = undefined;
+        var local_dir: []const u8 = "";
+        if (request.mode == .upload) {
+            const result = zw_pick_upload_files(request.source, &files, PickedFiles.receive);
+            if (result < 0) return error.FileSelectionFailed;
+            if (result == 0 or files.paths.items.len == 0) return false;
+        } else {
+            const sdk = self.cx.system_sdk orelse return error.NativeDialogUnavailable;
+            const home = try @import("platform/account.zig").home(self.allocator);
+            defer self.allocator.free(home);
+            const initial = try @import("config/transfer_defaults.zig").downloadDirectory(self.allocator, policy.download_dir, home);
+            defer self.allocator.free(initial);
+            local_dir = (try sdk.runDialog(.{ .kind = .pick_folder, .title = "选择下载保存位置", .default_path = initial }, &buffer)) orelse return false;
+        }
+        // AppKit runs a nested event loop. Revalidate the captured session,
+        // rather than using whichever tab happens to be active afterwards.
+        try self.validatePicker(request);
+        const sources: []const []const u8 = if (request.mode == .upload) files.paths.items else &.{request.source};
+        const spec = try transfer_panel_mod.buildSpec(.{
+            .mode = request.mode,
+            .owner = request.owner,
+            .sources = sources,
+            .remote_dir = remote_dir,
+            .local_dir = local_dir,
+            .resume_transfer = policy.@"resume",
+            .md5 = policy.verify_md5,
+        });
+        try self.submitSessionTransfer(request.owner, spec);
+        return true;
+    }
+
+    fn pollCommandPicker(self: *TransferHost) void {
+        const request = self.command_picker orelse return;
+        self.validatePicker(request) catch |err| {
+            self.command_picker = null;
+            defer self.allocator.free(request.source);
+            self.finishPicker(request, .failure, @errorName(err));
+            return;
+        };
+        var cwd: ?[]u8 = null;
+        defer if (cwd) |value| self.allocator.free(value);
+        if (request.mode == .upload) {
+            const tab = self.workspace.sessionTab(self.application.legacyForHandle(request.owner).?).?;
+            cwd = tab.runtime.?.workerPtr().copyCwd(self.allocator) catch null;
+            if (cwd == null or cwd.?.len == 0) {
+                if (wallClockMsTransfer() -| request.started < 5000) {
+                    self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
+                    return;
+                }
+                self.command_picker = null;
+                defer self.allocator.free(request.source);
+                self.finishPicker(request, .failure, "无法读取当前远程目录，请在终端空闲时重新执行 @up");
+                return;
+            }
+        }
+        self.command_picker = null;
+        defer self.allocator.free(request.source);
+        self.picker_running = true;
+        defer self.picker_running = false;
+        const submitted = self.runCommandPicker(request, cwd orelse "") catch |err| {
+            self.finishPicker(request, .failure, @errorName(err));
+            return;
+        };
+        self.finishPicker(request, .success, if (!submitted) "已取消选择，未添加传输任务" else if (request.mode == .upload) "已加入上传队列" else "已加入下载队列");
+    }
+
     const AuxiliaryConnection = task_domain_mod.AuxiliaryConnection;
 
     const SharedConnection = task_domain_mod.SharedConnection;
@@ -10286,6 +10445,7 @@ const TransferHost = struct {
 
     /// after-layout 轮询：连接完成→消费挂起任务；活跃→tick + 进度行。
     fn poll(self: *TransferHost) void {
+        if (!self.picker_running) self.pollCommandPicker();
         if (self.cwd_pending) |pending| cwd: {
             if (!self.panel.open.peek()) {
                 self.cwd_pending = null;
@@ -10527,6 +10687,7 @@ const TransferHost = struct {
     }
 
     fn cleanup(self: *TransferHost) void {
+        if (self.command_picker) |request| self.allocator.free(request.source);
         self.cx.removeAfterLayoutHook(self);
         if (self.ticker_scope_arena) |*arena| arena.deinit();
         // Native transfer resources are exclusively owned by the process task
