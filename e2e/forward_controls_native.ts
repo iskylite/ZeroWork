@@ -2,13 +2,16 @@
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createHash,randomBytes} from 'node:crypto';
-import {mkdtemp,realpath,mkdir,readFile,writeFile,copyFile,open} from 'node:fs/promises';
+import {mkdtemp,realpath,mkdir,readFile,writeFile,copyFile,open,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve,dirname} from 'node:path';
 import net from 'node:net';
 import {waitForServerReady,waitFor,query,clickAt,key,type_,resizeWindow,screenshot,sleep,scrollAt,mouseMove} from '../zig-out/share/zenit/harness/client.ts';
 const out=resolve(process.argv[2]),theme=process.argv[3]??'dark';assert(['dark','light'].includes(theme));await mkdir(out,{recursive:false});
-const iso=await realpath(await mkdtemp(join(tmpdir(),'zw-v3-forward-'))),data=join(iso,'data'),rpc=join(iso,'rpc'),peerDir=join(iso,'peer');await Promise.all([mkdir(data),mkdir(rpc),mkdir(peerDir)]);
+const iso=await realpath(await mkdtemp(join(tmpdir(),'zw-v3-forward-'))),data=join(iso,'data'),rpc=join(iso,'rpc'),peerDir=join(iso,'peer');
+// Always remove this run's sandbox, including setup and reporting failures.
+try {
+await Promise.all([mkdir(data),mkdir(rpc),mkdir(peerDir)]);
 const peerCode=`import sys,time,json,signal,threading,hashlib,base64
 sys.path.insert(0,'e2e')
 from pathlib import Path
@@ -81,3 +84,6 @@ try{
  report.ports=ports;report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await cap('failure').catch(()=>{});process.exitCode=1}
 finally{if(app&&app.exitCode===null&&app.signalCode===null){app.kill('SIGTERM');await Promise.race([appEnd,sleep(3000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await appEnd}}if(peer.exitCode===null&&peer.signalCode===null){peer.kill('SIGTERM');await Promise.race([peerEnd,sleep(3000)]);if(peer.exitCode===null&&peer.signalCode===null){peer.kill('SIGKILL');await peerEnd}}await log.close();await peerLog.close();try{const final=JSON.parse(await readFile(join(peerDir,'report.json'),'utf8'));report.peer=final;assert(!JSON.stringify(final.calls).includes('UNEXPECTED_EXEC'),'Only the exact read-only OS probe may use exec');if(report.status==='passed'){assert.equal(final.calls.length,1,'One host activation must create exactly one SSH transport');assert.equal(final.calls[0].filter((x:any)=>x==='auth').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='pty').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='shell').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='session').length,2,'One PTY channel plus one OS-identification channel');assert.equal(final.calls[0].filter((x:any)=>x&&typeof x==='object'&&x.os_probe).length,1);assert.equal(final.forward_bytes[0],16384);assert.equal(final.echo_bytes,8192)} }catch(e){report.cleanup_error=String(e);report.status='failed';process.exitCode=1}report.isolated=iso;await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({status:report.status,error:report.error,out}))}
+} finally {
+ await rm(iso,{recursive:true,force:true});
+}

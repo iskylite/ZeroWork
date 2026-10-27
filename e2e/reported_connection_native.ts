@@ -2,13 +2,16 @@
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import {spawn,execFileSync} from 'node:child_process';
-import {mkdir,mkdtemp,realpath,copyFile,readFile,writeFile,open,readdir} from 'node:fs/promises';
+import {mkdir,mkdtemp,realpath,copyFile,readFile,writeFile,open,readdir,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
 import {waitForServerReady,waitFor,query,clickAt,key,type_,resizeWindow,screenshot,sleep,scrollAt,mouseDown,mouseMove,mouseUp} from '../zig-out/share/zenit/harness/client.ts';
 const out=resolve(process.argv[2]),source=resolve(process.argv[3]);await mkdir(out,{recursive:false});
-const iso=await realpath(await mkdtemp(join(tmpdir(),'zw-builtin-records-'))),rpc=join(iso,'rpc'),data=join(iso,'data'),shell=join(iso,'shell');await Promise.all([mkdir(rpc),mkdir(data),mkdir(shell)]);
+const iso=await realpath(await mkdtemp(join(tmpdir(),'zw-builtin-records-'))),rpc=join(iso,'rpc'),data=join(iso,'data'),shell=join(iso,'shell');
+// Always remove this run's sandbox, including setup and reporting failures.
+try {
+await Promise.all([mkdir(rpc),mkdir(data),mkdir(shell)]);
 await writeFile(join(shell,'.zshrc'),"bindkey -e\nPS1='records%# '\n");
 await writeFile(join(data,'config.toml'),'[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\n');
 await copyFile(source,join(iso,'zerowork'));await copyFile(join(source,'..','zw_ipc.so'),join(iso,'zw_ipc.so'));
@@ -39,3 +42,6 @@ try{
 }catch(e){report.status='failed';report.error=String(e);await capture('failure').catch(()=>{});process.exitCode=1}
 finally{if(app.exitCode===null&&app.signalCode===null){app.kill('SIGTERM');await Promise.race([ended,sleep(3000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await ended}}peer.kill('SIGTERM');await Promise.race([peerEnded,sleep(3500)]);await peerLog.close();await log.close();await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));}
 console.log(JSON.stringify({status:report.status,checks:report.checks,error:report.error,out}));
+} finally {
+ await rm(iso,{recursive:true,force:true});
+}
