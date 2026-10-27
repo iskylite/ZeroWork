@@ -42,4 +42,4 @@
 
 外边距5pt、卡间8pt、顶栏36pt、底栏26pt、页签30pt，材质直接使用本文P0/D/M最终常量表。原生构建与材质专项测试通过；HTML合同验证12主题、4组T、3组B、有图/无图，共2304次角色alpha断言。隔离原生Harness在1440×900、860×480下确认标题卡分别为(5,5,1430,36)、(5,5,850,36)，并通过连接向导打开/关闭验证。
 
-本次最终截图：[主界面](assets/design-records/final-material-20261027/final-home.png)、[连接向导](assets/design-records/final-material-20261027/final-wizard.png)、[最小窗口](assets/design-records/final-material-20261027/final-compact.png)；[元数据](assets/design-records/final-material-20261027/metadata.json)记录最终参数和二进制/图像哈希。这组为默认Dark、T0、无图片的原生截图，不将前面的Nord历史效果图视作本次最终参数证据。
+截图、临时配置、步骤快照和运行日志属于中间产物，保存在仓库外临时目录；设计规则以本文最终常量表为准。
