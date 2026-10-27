@@ -9,6 +9,7 @@ comptime {
     _ = @import("file_application_host_tests.zig");
 }
 test {
+    _ = @import("terminal_search_service_tests.zig");
     _ = @import("ui/remote_session_notice.zig");
     _ = @import("ui_constraint_tests.zig");
     _ = @import("record_cleanup_ui_tests.zig");
