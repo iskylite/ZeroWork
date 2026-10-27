@@ -205,12 +205,12 @@ test "quick connect native no match preserves query explicit profile and clear s
     defer h.deinit();
     const view = h.view;
     h.query("no-such-host");
-    // Figma 235:410394: compact empty state, inline clear and one action.
-    try near(255, view.chrome.globalRect().h);
+    // Revised centered connection guide, inline clear and one action.
+    try near(315, view.chrome.globalRect().h);
     try part(view.input.input_container, view.chrome, 16, 56, 488, 40);
     try part(view.clear, view.chrome, 464, 64, 24, 24);
     try std.testing.expect(view.secondary.style.display == .none);
-    try part(view.primary, view.chrome, 360, 203, 144, 34);
+    try part(view.primary, view.chrome, 360, 263, 144, 34);
     h.key(.@"return");
     try std.testing.expectEqual(@as(usize, 0), probe.profile_count);
     try std.testing.expectEqualStrings("no-such-host", view.query.peek());
@@ -326,7 +326,7 @@ test "quick connect initial empty state distinguishes absent saved hosts from fa
     defer h.deinit();
     try h.view.update(2, &.{});
     h.frames();
-    try std.testing.expectEqualStrings("还没有保存的主机", h.view.empty_title.getText().?.content);
+    try std.testing.expectEqualStrings("输入 SSH 地址，直接连接", h.view.empty_title.getText().?.content);
     try std.testing.expect(h.view.clear.style.display == .none);
     h.query("missing");
     try std.testing.expectEqualStrings("未找到匹配的主机", h.view.empty_title.getText().?.content);

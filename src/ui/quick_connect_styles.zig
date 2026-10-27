@@ -49,7 +49,7 @@ pub fn notice(invalid: bool) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 62 }, .direction = .column, .gap = 4, .padding = ui.Padding.all(12), .background = (if (invalid) theme.current().danger else theme.current().accent).withAlpha(23), .border = .{ .radius = 9 }, .flex_shrink = 0 };
 }
 pub fn noMatch() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 6, .padding = .{ .top = 10, .bottom = 10 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .align_items = .center, .gap = 8, .padding = .{ .top = 20, .bottom = 20, .left = 12, .right = 12 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
 }
 pub fn clearButton() ui.BoxStyle {
     return .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .gap = 6, .font_size = 12, .font_weight = 500, .text_color = theme.current().fg_2, .background = theme.current().surface_2, .border = .{ .radius = 7 }, .flex_shrink = 0 };

@@ -52,9 +52,9 @@ try {
   await click('notifications.history.expand');assert.equal((await visible('notifications.history.record')).rect.h,68);
   report.checks.push('8-second actionable countdown decreases and expires','expired and dismissed records remain in history','bell unread dot clears on opening','history action dispatches original fact','persistent error has no countdown','history fits minimum window and clear works','68-point collapsed rows, inline actions, full details expand and collapse with keyboard focus','three compact rows and 4000-character details remain bounded');
  }else{
-  await click('toolbar.quick_connect');assert(text(await visible('quick.empty.title')).includes('还没有保存的主机'));await absent('quick.clear');await capture('quick-initial');
+  await click('toolbar.quick_connect');assert(text(await visible('quick.empty.title')).includes('输入 SSH 地址，直接连接'));await absent('quick.clear');await capture('quick-initial');
   await h.type_('missing-host');assert(text(await visible('quick.empty.title')).includes('未找到匹配的主机'));await visible('quick.clear');await click('quick.clear');
-  assert(text(await visible('quick.empty.title')).includes('还没有保存的主机'));await h.key('escape');
+  assert(text(await visible('quick.empty.title')).includes('输入 SSH 地址，直接连接'));await h.key('escape');
   await click('workspace.empty.local');await visible('terminal.surface');await h.sleep(1000);
   const terminal=await visible('terminal.surface');await h.clickAt(terminal.rect.x+30,terminal.rect.y+30);
   await h.type_('zerowork_missing_command_review');await h.key('return');await visible('terminal.ai-error-hint');
