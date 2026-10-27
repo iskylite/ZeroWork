@@ -5591,15 +5591,22 @@ test "terminal scrollback wheel reaches native SSH output without application co
     try std.testing.expect(!document.enabled);
     _ = try view.refreshLegacyDocument();
     cx.layout();
-    var before = try adapter.copyProjection(a);
+    // Wheel scrolling belongs to the presented document, not the native VT.
+    var before = try document.service().snapshot(a);
     defer before.deinit(a);
     const rect = view.root.globalRect();
     cx.handleScroll(.{ .x = rect.x + 100, .y = rect.y + 50, .dx = 0, .dy = 200 });
-    var above = try adapter.copyProjection(a);
+    var above = try document.service().snapshot(a);
     defer above.deinit(a);
-    try std.testing.expect(above.scrollback.viewport_offset < before.scrollback.viewport_offset);
+    try std.testing.expect(above.projection.scrollback.viewport_offset < before.projection.scrollback.viewport_offset);
+    try std.testing.expect(!std.mem.eql(u8, before.projection.graphemes, above.projection.graphemes));
+    try std.testing.expect(!document.enabled);
     cx.handleScroll(.{ .x = rect.x + 100, .y = rect.y + 50, .dx = 0, .dy = -200 });
-    var bottom = try adapter.copyProjection(a);
+    var bottom = try document.service().snapshot(a);
     defer bottom.deinit(a);
-    try std.testing.expectEqual(before.scrollback.viewport_offset, bottom.scrollback.viewport_offset);
+    try std.testing.expectEqual(before.projection.scrollback.viewport_offset, bottom.projection.scrollback.viewport_offset);
+    try std.testing.expectEqualSlices(u8, before.projection.graphemes, bottom.projection.graphemes);
+    var native = try adapter.copyProjection(a);
+    defer native.deinit(a);
+    try std.testing.expectEqual(before.projection.scrollback.viewport_offset, native.scrollback.viewport_offset);
 }
