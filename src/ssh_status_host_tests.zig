@@ -124,7 +124,7 @@ test "SSH status host mounts exact live bar geometry and publishes only authorit
         try std.testing.expectApproxEqAbs(8 + item.x, r.x, 0.1);
         try std.testing.expectEqual(item.w, r.w);
         try std.testing.expectEqual(@as(f32, 26), r.h);
-        try std.testing.expectEqual(@as(f32, 863), r.y);
+        try std.testing.expectEqual(@as(f32, 862), r.y);
     }
     try std.testing.expectEqualStrings("已连接", f.bar.controls.identity_label.getText().?.content);
     try std.testing.expectEqualStrings("UTF-8", f.bar.controls.encoding_label.getText().?.content);

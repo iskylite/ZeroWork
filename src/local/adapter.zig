@@ -30,7 +30,7 @@ const Mutex = struct {
     }
 };
 
-pub const Options = struct { term: []const u8 = "xterm-256color", cols: u16 = 80, rows: u16 = 24, output_capacity: usize = 1024 * 1024, recording: ?recording_mod.Options = null };
+pub const Options = struct { scrollback_limit: u32 = 25000, term: []const u8 = "xterm-256color", cols: u16 = 80, rows: u16 = 24, output_capacity: usize = 1024 * 1024, recording: ?recording_mod.Options = null };
 pub const ProcessSnapshot = @import("../host/process_service.zig").ProcessSnapshot;
 pub const CwdSnapshot = @import("../host/process_service.zig").CwdSnapshot;
 pub const ExecRisk = @import("../host/process_service.zig").ExecRisk;
@@ -124,6 +124,7 @@ const Entry = struct {
     controller: ?Controller = null,
     process: ?pty.Session = null,
     recording: ?*recording_mod.Recording = null,
+    pending_scrollback_limit: std.atomic.Value(u64) = .init(0),
     recording_retention_days: std.atomic.Value(u16) = .init(14),
     recording_error: ?[]const u8 = null,
     trusted: ?trusted_mod.Bridge = null,
@@ -222,6 +223,14 @@ pub const LocalAdapter = struct {
     }
     /// Controller-thread configuration. Each new original generation captures
     /// ring/interval/storage; running recordings only receive retention policy.
+    pub fn configureScrollback(self: *LocalAdapter, limit: u32) void {
+        if (self.options.scrollback_limit == limit) return;
+        self.options.scrollback_limit = limit;
+        for (self.entries.items) |entry| {
+            entry.pending_scrollback_limit.store(@as(u64, limit) + 1, .release);
+            entry.wakeup.notify();
+        }
+    }
     pub fn configureRecording(self: *LocalAdapter, options: recording_mod.Options) !void {
         if (options.log.ring_mb == 0 or options.log.checkpoint_sec == 0) return error.InvalidRecordingOptions;
         var owned = options;
@@ -389,6 +398,7 @@ pub const LocalAdapter = struct {
                 // Once joined, projection ownership transfers to this thread
                 // so a backpressured EOF frame can still reach its consumer.
                 applyTheme(entry);
+                applyScrollbackLimit(entry);
                 refreshProjection(entry);
                 controller.retryPublication(nowMs());
                 if (controller.publicationPending() or entry.requested_theme != null) pending = true;
@@ -580,7 +590,7 @@ pub const LocalAdapter = struct {
         return .{ .handle = handle, .stdout = stdout, .stderr = try allocator.dupe(u8, job.stderr.items), .exit = job.exit, .cancelled = job.cancelled, .timed_out = job.timed_out, .truncated = job.truncated, .cleanup = job.cleanup, .done = job.done };
     }
 
-    const service_vtable: terminal.Service.VTable = .{ .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .export_recording = serviceExportRecording, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel };
+    const service_vtable: terminal.Service.VTable = .{ .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .export_recording = serviceExportRecording, .recording_lease = serviceRecordingLease, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel };
     fn serviceTrustedSnapshot(raw: *anyopaque, binding: host.ServiceHandle, allocator: std.mem.Allocator) !?terminal.trusted_edit.Snapshot {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));
         const entry = try self.resolve(binding, .terminal, true);
@@ -627,6 +637,14 @@ pub const LocalAdapter = struct {
         const recording = entry.recording;
         entry.mutex.unlock();
         if (recording) |value| try value.appendApplication(record);
+    }
+    fn serviceRecordingLease(raw: *anyopaque, binding: host.ServiceHandle) !@import("../vt/timeline.zig").Timeline.ExportLease {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, false);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        const recording = entry.recording orelse return error.RecordingUnavailable;
+        return recording.exportLease();
     }
     fn serviceExportRecording(raw: *anyopaque, binding: host.ServiceHandle, kind: terminal.RecordingKind, io: std.Io, dir: std.Io.Dir, path: []const u8) !void {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));
@@ -920,10 +938,15 @@ fn run(entry: *Entry) void {
         startFailure(entry, .{ .domain = .plugin, .code = "LocalTerminalInitFailed", .stage = "terminal", .cleanup = .released, .safe_message = "无法初始化本地终端" });
         return;
     };
+    entry.vt.?.setScrollbackLimit(entry.options.scrollback_limit) catch {
+        startFailure(entry, .{ .domain = .plugin, .code = "ScrollbackConfigurationFailed", .stage = "terminal", .cleanup = .released, .safe_message = "无法设置终端显示行数" });
+        return;
+    };
     entry.controller = Controller.init(.{ .owner = entry.handle, .engine = VtEngine.from(Vt, &entry.vt.?), .text_slot = &entry.text }) catch {
         startFailure(entry, .{ .domain = .plugin, .code = "LocalTerminalInitFailed", .stage = "terminal", .cleanup = .released, .safe_message = "无法初始化本地终端" });
         return;
     };
+    entry.controller.?.feed.deferred_projection = true;
     entry.trusted = trusted_mod.Bridge.init(entry.allocator, entry.handle) catch |err| blk: {
         entry.trusted_error = @errorName(err);
         break :blk null;
@@ -956,6 +979,7 @@ fn run(entry: *Entry) void {
         entry.mutex.lock();
         const status_before = .{ entry.process_state, entry.exit, entry.eof, entry.resize_error, entry.terminal_error, entry.snapshot_error, entry.theme_error, entry.applied_theme_revision };
         applyTheme(entry);
+        applyScrollbackLimit(entry);
         if (entry.close_requested.load(.acquire) and entry.process_state == .running) entry.process_state = .closing;
         const closing = entry.close_requested.load(.acquire) or entry.exit != null;
         if (entry.trusted) |*bridge| {
@@ -1045,12 +1069,20 @@ fn run(entry: *Entry) void {
             entry.exit = process.pollExit() catch entry.exit;
             if (entry.exit != null and !entry.close_requested.load(.acquire)) entry.process_state = .exited;
             if (native.zw_local_monotonic_ms() >= metadata_at) {
+                // The PTY worker exclusively owns process lifetime. Query the
+                // kernel without holding the UI/input mailbox guard, then
+                // publish only the copied metadata under that guard.
+                const input_sequence = entry.last_input_sequence;
+                entry.mutex.unlock();
                 const foreground = process.foreground();
-                var metadata_changed = !std.meta.eql(entry.foreground, foreground) or entry.foreground_valid != (foreground != null);
-                entry.foreground = foreground;
-                entry.foreground_valid = entry.foreground != null;
-                entry.metadata_observed_ms = native.zw_local_monotonic_ms();
                 const cwd = process.currentCwd(entry.allocator) catch null;
+                const observed_ms = native.zw_local_monotonic_ms();
+                entry.mutex.lock();
+                const foreground_valid = foreground != null and entry.writes.items.len == 0 and entry.last_input_sequence == input_sequence;
+                var metadata_changed = !std.meta.eql(entry.foreground, foreground) or entry.foreground_valid != foreground_valid;
+                entry.foreground = foreground;
+                entry.foreground_valid = foreground_valid;
+                entry.metadata_observed_ms = observed_ms;
                 if (cwd) |value| {
                     defer entry.allocator.free(value);
                     if (value.len <= entry.reported_cwd.len) {
@@ -1119,10 +1151,23 @@ fn run(entry: *Entry) void {
         const edit_fd = if (!closing) if (entry.trusted) |*bridge| bridge.pollFd() else -1 else -1;
         const edit_writable = if (entry.trusted) |*bridge| bridge.tx_offset < bridge.tx.items.len else false;
         const writable = entry.writes.items.len > 0 or entry.reply_offset < entry.reply_len;
-        const timeout: c_int = if (closing or !jobs_done or entry.controller.?.feed.republish_pending) 8 else 50;
+        const edit_pending = if (entry.trusted) |bridge| bridge.pending != null else false;
+        // Readability and the input pipe wake immediately. An idle session
+        // only needs its next metadata deadline, not twenty timer polls/sec.
+        const timeout: c_int = if (closing or !jobs_done or edit_pending or entry.controller.?.feed.republish_pending) 8 else @intCast(@min(250, metadata_at -| native.zw_local_monotonic_ms()));
         entry.mutex.unlock();
         entry.wakeup.waitExtra(fd, writable, edit_fd, edit_writable, timeout);
     }
+}
+
+fn applyScrollbackLimit(entry: *Entry) void {
+    const pending = entry.pending_scrollback_limit.swap(0, .acq_rel);
+    if (pending == 0) return;
+    entry.vt.?.setScrollbackLimit(@intCast(pending - 1)) catch |err| {
+        entry.snapshot_error = @errorName(err);
+    };
+    refreshProjection(entry);
+    @import("../platform/presentation_wakeup.zig").notify();
 }
 
 fn applyGeometry(entry: *Entry, transport: terminal.Transport, geometry: terminal.Geometry) void {
@@ -1148,7 +1193,13 @@ fn refreshProjection(entry: *Entry) void {
     const scalar = entry.vt.?.snapshot();
     entry.mode_revision = scalar.mode_revision;
     entry.modes = scalar.modes;
-    if (entry.projection) |value| if (value.version == scalar.version and entry.projection_geometry_revision == entry.geometry.revision and entry.projection_theme_revision == entry.applied_theme_revision) return;
+    if (entry.projection) |value| if (value.version == scalar.version and entry.projection_geometry_revision == entry.geometry.revision and entry.projection_theme_revision == entry.applied_theme_revision and !entry.controller.?.feed.republish_pending) return;
+    const now = nowMs();
+    const feed = &entry.controller.?.feed;
+    if (!entry.text.canPublish() or (feed.last_publish_ms != 0 and now -% feed.last_publish_ms < @import("../vt/feed_bridge.zig").FeedBridge.min_publish_interval_ms)) {
+        feed.republish_pending = true;
+        return;
+    }
     const value = entry.controller.?.copyProjection(entry.handle, entry.allocator) catch |err| {
         entry.snapshot_error = @errorName(err);
         return;
@@ -1158,6 +1209,11 @@ fn refreshProjection(entry: *Entry) void {
     entry.projection_output_sequence = entry.controller.?.status().output_sequence;
     entry.projection_geometry_revision = entry.geometry.revision;
     entry.projection_theme_revision = entry.applied_theme_revision;
+    feed.publishProjection(&entry.projection.?, now) catch |err| {
+        feed.republish_pending = true;
+        entry.snapshot_error = @errorName(err);
+        return;
+    };
     entry.snapshot_error = null;
     @import("../platform/presentation_wakeup.zig").notify();
 }

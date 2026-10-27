@@ -88,7 +88,8 @@ pub const Draft = struct {
     socks_max_connections: u16 = 64,
     terminal_type: []const u8 = "xterm-256color",
     terminal_type_explicit: bool = true,
-    scrollback: u32 = 50000,
+    scrollback: u32 = 25000,
+    scrollback_explicit: bool = false,
     jump_chain: []const []const u8 = &.{},
     route: []const identity.ConnectionId = &.{},
     startup_commands: []const []const u8 = &.{},
@@ -134,6 +135,7 @@ pub const Draft = struct {
             .terminal_type = host.terminal_type,
             .terminal_type_explicit = host.terminal_type_explicit,
             .scrollback = host.scrollback,
+            .scrollback_explicit = host.scrollback_explicit or host.scrollback != 25000,
             .route = host.route,
             .jump_chain = host.jump_chain,
             .startup_commands = host.startup_commands,
@@ -178,6 +180,7 @@ pub const Draft = struct {
             .terminal_type = self.terminal_type,
             .terminal_type_explicit = self.terminal_type_explicit,
             .scrollback = self.scrollback,
+            .scrollback_explicit = self.scrollback_explicit,
             .route = self.route,
             .jump_chain = self.jump_chain,
             .startup_commands = self.startup_commands,
@@ -383,12 +386,8 @@ pub const RemoteEditor = struct {
     header: ?*ui.Node = null,
     title: ?*ui.Node = null,
     discard_open: bool = false,
-    discard_expanded: bool = true,
-    discard_heading: ?*ui.Node = null,
-    discard_chevron: ?*ui.Node = null,
     discard_card: ?*ui.Node = null,
     discard_scroll: ?ui.widgets.ScrollAreaResult = null,
-    discard_name: ?*ui.Node = null,
     discard_status: ?*ui.Node = null,
     discard_continue: ?*ui.Node = null,
     discard_confirm: ?*ui.Node = null,
@@ -402,6 +401,7 @@ pub const RemoteEditor = struct {
     strict_checkbox: ?*ui.Node = null,
     compression_checkbox: ?*ui.Node = null,
     remember_checkbox: ?*ui.Node = null,
+    auth_group: ?*ui.Node = null,
     identity_body: ?*ui.Node = null,
     auth_body: ?*ui.Node = null,
     identity_card: ?*ui.Node = null,
@@ -433,6 +433,7 @@ pub const RemoteEditor = struct {
     summary_route_arrows: [9]?*ui.Node = @splat(null),
     protocol_icon: ?*ui.Node = null,
     protocol_select_icon: ?*ui.Node = null,
+    protocol_header: ?*ui.Node = null,
     summary_icon: ?*ui.Node = null,
     review_disclosure: ?*ui.Node = null,
     strict_focus_pending: bool = false,
@@ -544,6 +545,7 @@ pub const RemoteEditor = struct {
     sig_terminal: ?*ui.Signal([]const u8) = null,
     terminal_type_explicit: bool = true,
     sig_scrollback: ?*ui.Signal([]const u8) = null,
+    sig_scrollback_hint: ?*ui.Signal([]const u8) = null,
     startup_track: ?*ui.Node = null,
     socks_track: ?*ui.Node = null,
     socks_auto_track: ?*ui.Node = null,
@@ -619,6 +621,8 @@ pub const RemoteEditor = struct {
     sig_key_path: ?*ui.Signal([]const u8) = null,
     sig_key_passphrase: ?*ui.Signal([]const u8) = null,
     sig_encoding: ?*ui.Signal([]const u8) = null,
+    loaded_scrollback_explicit: bool = false,
+    scrollback_default: u32 = 25000,
     ssh_defaults: ?struct { connect_timeout_sec: u16, keepalive_sec: u16 } = null,
     connect_timeout_fact: ?*ui.Node = null,
     keepalive_fact: ?*ui.Node = null,
@@ -665,7 +669,9 @@ pub const RemoteEditor = struct {
         self.sig_socks_exit = try scope.createSignal(?[]const u8, null);
         self.socks_exit_text = try scope.createText("", .{});
         self.sig_terminal = try scope.createText("xterm-256color", .{});
-        self.sig_scrollback = try scope.createText("50000", .{});
+        self.sig_scrollback = try scope.createText("", .{});
+        self.sig_scrollback_hint = try scope.createText("", .{});
+        self.refreshScrollbackHint();
         for (&self.jump_values) |*v| v.* = try scope.createSignal(?[]const u8, null);
         for (&self.jump_options) |*v| v.* = try scope.createList(ui.widgets.SelectOption, &.{});
         for (&self.jump_text) |*v| v.* = try scope.createText("", .{});
@@ -725,9 +731,8 @@ pub const RemoteEditor = struct {
         const header = try ui.box(cx, S.header(), .{});
         self.header = header;
         if (self.embedded) header.setDisplay(.none);
-        self.protocol_icon = try ui.iconTint(cx, ui.icons.terminal, S.theme.current().accent, S.icon(18));
+        self.protocol_icon = try ui.iconTint(cx, ui.icons.plug, S.theme.current().accent, S.icon(18));
         self.protocol_icon.?.meta.ownership.meta.test_id = "wizard.protocol.icon";
-        self.protocol_icon.?.setDisplay(.none);
         try header.appendChild(self.alloc, self.protocol_icon.?);
         self.title = try ui.text(cx, "新建连接", S.text(13, 700, false));
         try header.appendChild(self.alloc, self.title.?);
@@ -740,6 +745,7 @@ pub const RemoteEditor = struct {
         skinSelect(self, protocol, 30, 12);
         self.protocol_select_icon = protocol.leading_icon;
         protocol.trigger.meta.ownership.meta.test_id = "wizard.protocol";
+        self.protocol_header = protocol.wrapper;
         try header.appendChild(self.alloc, protocol.wrapper);
         _ = try action(self, header, "关闭向导", "wizard.close", 22, 22, false, null, onCancelClick, ui.icons.x);
         try modal.body.appendChild(self.alloc, header);
@@ -795,7 +801,7 @@ pub const RemoteEditor = struct {
             scroll.container.setStyleInline(self.alloc, S.scroll());
             scroll.container.meta.ownership.meta.test_id = ([_][]const u8{ "wizard.scroll.identity", "wizard.scroll.route", "wizard.scroll.review" })[i];
             scroll.content.setStyleInline(self.alloc, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 6, .flex_shrink = 0 });
-            if (i <= 1) scroll.content.setStyleInline(self.alloc, .{ .padding = .{ .left = 4, .right = 4, .bottom = 20 } });
+            if (i <= 1) scroll.content.setStyleInline(self.alloc, .{ .padding = .{ .left = 4, .right = 20, .bottom = 20 } });
             try scroll.content.appendChild(self.alloc, content);
             try body.appendChild(self.alloc, scroll.container);
             self.scrolls[i] = scroll;
@@ -826,11 +832,10 @@ pub const RemoteEditor = struct {
         self.next2_btn = try action(self, footer, "下一步", "wizard.next.route", 64, 34, true, self.next2_disabled, onNext2Click, null);
         self.save_btn = try action(self, footer, "保存并连接", "wizard.save", 88, 34, true, self.open_disabled, onSaveClick, null);
         try modal.body.appendChild(self.alloc, footer);
-        const discard_footer = try ui.box(cx, S.footer(), .{});
+        const discard_footer = try ui.box(cx, S.discardFooter(), .{});
         self.discard_footer = discard_footer;
-        self.discard_continue = try action(self, discard_footer, "继续编辑", "wizard.discard.continue", 112, 34, false, null, onContinueEditing, null);
-        try discard_footer.appendChild(self.alloc, try ui.spacer(cx));
-        self.discard_confirm = try action(self, discard_footer, "放弃草稿", "wizard.discard.confirm", 112, 34, true, null, onDiscardConfirmed, null);
+        self.discard_continue = try action(self, discard_footer, "继续编辑", "wizard.discard.continue", 92, 34, false, null, onContinueEditing, null);
+        self.discard_confirm = try action(self, discard_footer, "放弃草稿", "wizard.discard.confirm", 92, 34, true, null, onDiscardConfirmed, null);
         try modal.body.appendChild(self.alloc, discard_footer);
         self.step = .protocol;
         try self.setAssets(self.assets);
@@ -891,8 +896,10 @@ pub const RemoteEditor = struct {
             paintSelectContent(select.content_slot, if (selected) S.theme.current().fg_2 else S.theme.current().fg_3);
         }
         if (self.startup_textarea) |area| paintSelectTypography(area.input);
-        for (self.inputs.items) |input| if (input.state.text_display_node) |text| paintSelectTypography(text);
-        for ([_]?*ui.Node{ self.remember_checkbox, self.compression_checkbox }) |entry| if (entry) |checkbox| paintCheckboxLabels(checkbox);
+        for (self.inputs.items) |input| if (input.state.text_display_node) |text| paintInputTypography(text);
+        if (self.remember_checkbox) |checkbox| paintCheckboxLabels(checkbox);
+        if (self.compression_checkbox) |group| paintAuthLabels(group);
+        if (self.auth_group) |group| paintAuthLabels(group);
         if (!self.embedded) {
             const parent_visible = !self.copy_open.?.peek();
             if (self.parent_presentation_visible != parent_visible) {
@@ -954,7 +961,7 @@ pub const RemoteEditor = struct {
             body.setStyleInline(self.alloc, .{ .padding = body_padding, .gap = if (compact) 12 else 14 });
             for (self.scrolls, 0..) |slot, i| if (slot) |scroll| {
                 const edge: f32 = if (compact) 0 else if (i <= 1) 4 else 0;
-                scroll.content.setStyleInline(self.alloc, .{ .padding = .{ .left = edge, .right = edge, .bottom = if (compact) 12 else 20 } });
+                scroll.content.setStyleInline(self.alloc, .{ .padding = .{ .left = edge, .right = edge + 16, .bottom = if (compact) 12 else 20 } });
             };
             if (self.confirm_card) |review| review.setStyleInline(self.alloc, .{ .padding = .{ .left = if (compact) 0 else 4, .right = if (compact) 0 else 4 } });
             if (self.footer) |footer| footer.setStyleInline(self.alloc, .{ .height = .{ .px = if (compact) 54 else 62 }, .padding = .{ .left = if (compact) 18 else 24, .right = if (compact) 18 else 24, .top = if (compact) 10 else 14, .bottom = if (compact) 10 else 14 } });
@@ -975,7 +982,7 @@ pub const RemoteEditor = struct {
         };
         const available_w = @max(1, self.cx.viewport.width - 32);
         const available_h = @max(1, self.cx.viewport.height - @as(f32, if (compact) 48 else 32));
-        const width = @min(S.width, available_w);
+        const width = @min(if (self.discard_open) S.discard_width else S.width, available_w);
         const desired_h = self.preferredModalHeight();
         const height = @min(@min(desired_h, S.max_height), available_h);
         const changed = self.viewport_width != width or self.viewport_height != height or self.viewport_step != self.step;
@@ -993,12 +1000,23 @@ pub const RemoteEditor = struct {
     }
 
     pub fn preferredModalHeight(self: *const RemoteEditor) f32 {
-        return if (self.discard_open) (if (self.discard_expanded) S.discard_height else S.discard_height - 66) else S.max_height;
+        return if (self.discard_open) S.discard_height else S.max_height;
     }
 
     /// Presents the host's current global defaults. These are read-only facts,
     /// separate from the connection draft and any already-frozen probe source.
     /// May be called before mount; no placeholder measurements are inferred.
+    pub fn setScrollbackDefault(self: *RemoteEditor, limit: u32) void {
+        if (self.scrollback_default == limit and self.sig_scrollback_hint != null) return;
+        self.scrollback_default = limit;
+        self.refreshScrollbackHint();
+    }
+    fn refreshScrollbackHint(self: *RemoteEditor) void {
+        const hint = self.sig_scrollback_hint orelse return;
+        var buffer: [96]u8 = undefined;
+        hint.set(if (self.scrollback_default == 0) "继承全局：0（不限制）" else std.fmt.bufPrint(&buffer, "继承全局：{d} 行", .{self.scrollback_default}) catch unreachable);
+    }
+
     pub fn setSshDefaults(self: *RemoteEditor, connect_timeout_sec: u16, keepalive_sec: u16) void {
         self.ssh_defaults = .{ .connect_timeout_sec = connect_timeout_sec, .keepalive_sec = keepalive_sec };
         self.refreshSshDefaults();
@@ -1097,11 +1115,18 @@ pub const RemoteEditor = struct {
         self.sig_group.?.set(value orelse "");
         self.onFieldChange("");
     }
+    fn onGroupInput(self: *RemoteEditor, _: []const u8) void {
+        if (self.isLocked()) return;
+        self.group_name_pending = false;
+        self.sig_group_selection.?.set(null);
+        self.onFieldChange("");
+    }
     pub fn loadDraft(self: *RemoteEditor, draft: Draft) void {
         // Loading an existing host is the edit path.  A later save should
         // update that host unless the user explicitly picks another source
         // from the copy row after this load.
         self.copied_from_existing = false;
+        self.loaded_scrollback_explicit = draft.scrollback_explicit or draft.scrollback != 25000;
         self.dormant_jump_count = 0;
         self.dormant_socks_exit = null;
         self.validation_focus_group = null;
@@ -1146,7 +1171,7 @@ pub const RemoteEditor = struct {
         self.sig_encoding.?.set(draft.encoding);
         self.sig_terminal.?.set(draft.terminal_type);
         self.terminal_type_explicit = draft.terminal_type_explicit;
-        self.sig_scrollback.?.set(std.fmt.bufPrint(&buf, "{d}", .{draft.scrollback}) catch "50000");
+        self.sig_scrollback.?.set(if (self.loaded_scrollback_explicit) (std.fmt.bufPrint(&buf, "{d}", .{draft.scrollback}) catch "25000") else "");
         self.sig_socks_port.?.set(std.fmt.bufPrint(&buf, "{d}", .{draft.socks_port}) catch "1080");
         self.sig_socks_bind.?.set(draft.socks_bind);
         self.socks_exit_text.?.set(if (draft.socks_exit) |index| std.fmt.bufPrint(&buf, "{d}", .{index}) catch "" else "");
@@ -1587,7 +1612,7 @@ pub const RemoteEditor = struct {
 
     /// 从输入信号组装 Draft 快照（切片借用信号缓冲）。
     pub fn currentDraft(self: *RemoteEditor) Draft {
-        const group = self.sig_group.?.get();
+        const group = std.mem.trim(u8, self.sig_group.?.get(), " \t\r\n");
         const password = self.sig_password.?.get();
         const key_path = self.sig_key_path.?.get();
         const key_passphrase = self.sig_key_passphrase.?.get();
@@ -1626,7 +1651,8 @@ pub const RemoteEditor = struct {
             .socks_exit = if (self.sig_socks_exit.?.get()) |value| std.fmt.parseInt(usize, value, 10) catch null else null,
             .terminal_type = self.sig_terminal.?.get(),
             .terminal_type_explicit = self.terminal_type_explicit,
-            .scrollback = std.fmt.parseInt(u32, self.sig_scrollback.?.get(), 10) catch 50000,
+            .scrollback = std.fmt.parseInt(u32, trim(self.sig_scrollback.?.get()), 10) catch 25000,
+            .scrollback_explicit = trim(self.sig_scrollback.?.get()).len != 0,
             .name = self.sig_name.?.get(),
             .protocol = self.protocol,
             .host = self.sig_host.?.get(),
@@ -1698,6 +1724,7 @@ pub const RemoteEditor = struct {
     // ── 步进与刷新 ───────────────────────────────────────────────────
 
     fn applyStep(self: *RemoteEditor) void {
+        if (self.protocol_header) |node| node.setDisplay(if (self.discard_open) .none else .flex);
         if (self.stepper) |stepper| stepper.setDisplay(if (self.discard_open) .none else .flex);
         self.discard_scroll.?.container.setDisplay(if (self.discard_open) .flex else .none);
         self.discard_footer.?.setDisplay(if (self.discard_open) .flex else .none);
@@ -1868,7 +1895,7 @@ pub const RemoteEditor = struct {
         if (self.next2_disabled) |v| v.set(busy or !self.validDraft());
         self.paintButtons();
         const editing = self.source_owner != null;
-        if (self.title) |title| title.setTextContent(self.alloc, if (editing) "编辑连接" else "新建连接") catch {};
+        if (self.title) |title| title.setTextContent(self.alloc, if (self.discard_open) (if (editing) "放弃未保存的更改？" else "放弃未保存的连接？") else if (editing) "编辑连接" else "新建连接") catch {};
         self.refreshProtocolAppearance();
         for (self.buttons.items) |button| {
             if (button.node == self.save_only_btn) {
@@ -1993,8 +2020,6 @@ pub const RemoteEditor = struct {
             return;
         }
         self.discard_open = true;
-        self.discard_expanded = true;
-        self.updateDiscardExpansion();
         self.refreshDiscard();
         self.applyStep();
         self.cx.setFocus(self.discard_continue.?);
@@ -2003,7 +2028,7 @@ pub const RemoteEditor = struct {
     fn hasDraftInput(self: *RemoteEditor) bool {
         const d = self.currentDraft();
         if (d.name.len != 0 or d.host.len != 0 or d.user.len != 0 or d.password != null or d.key_path != null or d.key_passphrase != null or d.group != null) return true;
-        return d.protocol != .ssh or d.auth != .password or d.port != 22 or !d.keepalive or d.compression or !d.strict_host_key_checking or d.socks_enabled or d.route.len != 0 or d.startup_commands.len != 0 or !std.mem.eql(u8, d.encoding, "UTF-8") or !std.mem.eql(u8, d.terminal_type, "xterm-256color") or d.scrollback != 50000;
+        return d.protocol != .ssh or d.auth != .password or d.port != 22 or !d.keepalive or d.compression or !d.strict_host_key_checking or d.socks_enabled or d.route.len != 0 or d.startup_commands.len != 0 or !std.mem.eql(u8, d.encoding, "UTF-8") or !std.mem.eql(u8, d.terminal_type, "xterm-256color") or d.scrollback != 25000;
     }
 
     fn onContinueEditing(self: *RemoteEditor) void {
@@ -2013,32 +2038,14 @@ pub const RemoteEditor = struct {
         self.cx.setFocus(self.cancel_btn.?);
     }
 
-    fn onDiscardToggle(self: *RemoteEditor) void {
-        if (!self.discard_open or self.cancel_requested) return;
-        self.discard_expanded = !self.discard_expanded;
-        self.updateDiscardExpansion();
-        _ = self.updateViewport();
-        self.cx.requestRedraw();
-    }
-
-    fn updateDiscardExpansion(self: *RemoteEditor) void {
-        const card = self.discard_card orelse return;
-        for (card.children.items) |child| if (child != self.discard_heading) child.setDisplay(if (self.discard_expanded) .flex else .none);
-        card.setStyleInline(self.alloc, .{ .height = .{ .px = if (self.discard_expanded) 118 else 52 } });
-        if (self.discard_chevron) |node| paintIcon(node, if (self.discard_expanded) ui.icons.chevron_down else ui.icons.chevron_right, 16, S.theme.current().fg_2);
-    }
-
     fn refreshDiscard(self: *RemoteEditor) void {
-        if (self.discard_name == null) return;
-        var buffer: [512]u8 = undefined;
-        const name = self.sig_name.?.get();
-        self.discard_name.?.setTextContent(self.alloc, std.fmt.bufPrint(&buffer, "{s} · 当前草稿尚未保存", .{if (name.len == 0) @as([]const u8, "未命名连接") else name}) catch "当前草稿尚未保存") catch {};
-        const status: []const u8 = if (self.test_source) |source| switch (source.value.cleanup) {
-            .released => "本次测试已结束。",
-            .unknown => "测试清理结果尚未确认。",
-            else => if (self.test_kind == .pending) "放弃后将取消正在进行的测试。" else "测试清理尚未结束。",
-        } else if (self.test_kind == .pending) "放弃后将取消正在进行的测试。" else "尚未保存或打开此连接。";
-        self.discard_status.?.setTextContent(self.alloc, status) catch {};
+        const status: []const u8 = if (self.test_source != null and self.test_source.?.value.cleanup == .unknown)
+            "未保存的内容将丢失；测试清理状态尚未确认。"
+        else if (self.test_kind == .pending)
+            "未保存的内容将丢失，正在进行的测试也会取消。"
+        else
+            "未保存的内容将丢失。";
+        if (self.discard_status) |node| node.setTextContent(self.alloc, status) catch {};
     }
 
     fn finishDiscard(self: *RemoteEditor) void {
@@ -2176,7 +2183,7 @@ pub const RemoteEditor = struct {
 
     fn refreshProtocolAppearance(self: *RemoteEditor) void {
         const asset = if (self.protocol == .sftp) ui.icons.folder_open else ui.icons.terminal;
-        if (self.protocol_icon) |icon| paintIcon(icon, asset, 18, S.theme.current().accent);
+        if (self.protocol_icon) |icon| paintIcon(icon, if (self.discard_open) ui.icons.circle_alert else ui.icons.plug, 18, if (self.discard_open) S.theme.current().warn_ink else S.theme.current().accent);
         if (self.protocol_select_icon) |icon| paintIcon(icon, asset, 16, S.theme.current().fg_2);
         if (self.summary_icon) |icon| paintIcon(icon, asset, 20, S.theme.current().accent);
     }
@@ -2296,9 +2303,13 @@ pub const RemoteEditor = struct {
         if (self.isLocked()) return;
         self.setStrictHostKeyChecking(checked);
     }
+    fn onCompressionPicked(self: *RemoteEditor, value: []const u8) void {
+        self.onCompressionChanged(std.mem.eql(u8, value, "on"));
+    }
     fn onCompressionChanged(self: *RemoteEditor, checked: bool) void {
         if (self.isLocked()) return;
         self.compression = checked;
+        self.sig_compression.?.set(checked);
         self.compression_explicit = true;
         self.onFieldChange("");
     }
@@ -2589,7 +2600,7 @@ pub const RemoteEditor = struct {
         self.painted_colors = colors;
         if (self.stepper) |stepper| stepper.setBackground(S.theme.current().well);
         if (self.footer) |footer| footer.setBackground(S.theme.current().surface_2);
-        if (self.discard_footer) |footer| footer.setBackground(S.theme.current().surface_2);
+        if (self.discard_footer) |footer| footer.setBackground(ui.Color.TRANSPARENT);
         self.modal.?.setBackground(S.theme.current().overlay);
         if (self.route_empty_hint) |node| node.setTextColor(S.theme.current().danger_ink);
         for (self.jump_rows) |node| if (node) |row| row.setBackground(ui.Color.TRANSPARENT);
@@ -2597,14 +2608,15 @@ pub const RemoteEditor = struct {
             _ = icon.setTint(S.theme.current().fg_3);
         };
         if (self.review_test_card) |card| card.setBackground(S.theme.current().well);
-        for ([_]?*ui.Node{self.discard_card}) |node| if (node) |card| card.setBackground(S.theme.current().surface_2);
+        if (self.discard_card) |card| card.setBackground(ui.Color.TRANSPARENT);
         for (self.inputs.items) |input| {
             input.input_container.setStyleInline(self.alloc, S.input());
             input.state.tokens = self.cx.tokens;
             input.state.dirty = true;
         }
         for (self.selects.items) |select| select.trigger.setBackground(S.theme.current().well);
-        for ([_]?*ui.Node{ self.remember_checkbox, self.compression_checkbox }) |entry| if (entry) |checkbox| paintCheckboxLabels(checkbox);
+        if (self.remember_checkbox) |checkbox| paintCheckboxLabels(checkbox);
+        if (self.compression_checkbox) |group| paintAuthLabels(group);
         if (self.startup_textarea) |area| {
             area.state.tokens = self.cx.tokens;
             area.state.dirty = true;
@@ -2614,7 +2626,7 @@ pub const RemoteEditor = struct {
         if (self.copy_dialog) |dialog| dialog.setBackground(S.theme.current().overlay);
         if (self.title) |title| title.setTextColor(S.theme.current().fg_1);
         if (self.discard_card) |card| for (card.children.items) |child| {
-            if (child.getText() != null) child.setTextColor(if (child == self.discard_name) S.theme.current().fg_1 else S.theme.current().fg_2);
+            if (child.getText() != null) child.setTextColor(S.theme.current().fg_2);
         };
         if (self.summary_card) |card| card.setBackground(S.theme.current().well);
         if (self.summary_route_card) |card| card.setBackground(S.theme.current().well);
@@ -2637,6 +2649,11 @@ pub const RemoteEditor = struct {
     }
 
     /// 任一输入变化：刷新下一步可用态与拓扑目标节点；旧测试结果作废。
+    fn onScrollbackChanged(self: *RemoteEditor, text: []const u8) void {
+        self.loaded_scrollback_explicit = trim(text).len != 0;
+        self.onFieldChange(text);
+    }
+
     fn onFieldChange(self: *RemoteEditor, _: []const u8) void {
         if (self.isLocked()) return;
         self.save_failure = null;
@@ -2748,7 +2765,7 @@ fn disclosure(w: *RemoteEditor, parent: *ui.Node, label: []const u8, id: []const
     return row;
 }
 
-const FieldKind = enum { name, host, user, port, key_path };
+const FieldKind = enum { name, host, user, port, key_path, scrollback };
 const FieldFeedback = struct {
     wizard: *RemoteEditor,
     kind: FieldKind,
@@ -2761,7 +2778,7 @@ const FieldFeedback = struct {
     previous_blur: ?ui.HandlerRef = null,
 
     fn prepare(w: *RemoteEditor, id: []const u8) !?*FieldFeedback {
-        const kind: FieldKind = if (std.mem.eql(u8, id, "wizard.name")) .name else if (std.mem.eql(u8, id, "wizard.host")) .host else if (std.mem.eql(u8, id, "wizard.user")) .user else if (std.mem.eql(u8, id, "wizard.port")) .port else if (std.mem.eql(u8, id, "wizard.key_path")) .key_path else return null;
+        const kind: FieldKind = if (std.mem.eql(u8, id, "wizard.name")) .name else if (std.mem.eql(u8, id, "wizard.host")) .host else if (std.mem.eql(u8, id, "wizard.user")) .user else if (std.mem.eql(u8, id, "wizard.port")) .port else if (std.mem.eql(u8, id, "wizard.key_path")) .key_path else if (std.mem.eql(u8, id, "wizard.scrollback")) .scrollback else return null;
         const self = try w.scope.createState(FieldFeedback, .{ .wizard = w, .kind = kind, .message = try w.scope.createText("", .{}) });
         try w.field_feedback.append(w.alloc, self);
         return self;
@@ -2814,8 +2831,14 @@ const FieldFeedback = struct {
             .host => w.sig_host.?.get(),
             .user => w.sig_user.?.get(),
             .port => w.sig_port.?.get(),
+            .scrollback => w.sig_scrollback.?.get(),
             .key_path => w.sig_key_path.?.get(),
         };
+        if (self.kind == .scrollback) {
+            if (trim(raw).len == 0) return "";
+            _ = std.fmt.parseInt(u32, trim(raw), 10) catch return "请输入非负整数；0 表示不限制。";
+            return "";
+        }
         if (self.kind == .key_path and w.auth != .key) return "";
         if (self.kind == .port) return if (parsePort(raw) == 0) "请输入 1–65535 的整数。" else "";
         if (trim(raw).len == 0) return switch (self.kind) {
@@ -2823,7 +2846,7 @@ const FieldFeedback = struct {
             .host => "请输入主机地址。",
             .user => "请输入登录用户。",
             .key_path => "请选择或输入私钥文件。",
-            .port => unreachable,
+            .port, .scrollback => unreachable,
         };
         if (self.kind != .key_path and (!std.unicode.utf8ValidateSlice(raw) or std.mem.indexOfAny(u8, raw, "\x00\r\n\t") != null)) return "请移除换行或控制字符。";
         return "";
@@ -2847,16 +2870,21 @@ fn field(w: *RemoteEditor, parent: *ui.Node, label: []const u8, value: *ui.Signa
     const group = try ui.box(w.cx, S.field(width), .{});
     const title = try fieldLabel(w.cx, label);
     title.style.height = .{ .px = 16.5 };
-    try group.appendChild(w.alloc, title);
+    if (std.mem.eql(u8, id, "wizard.scrollback")) {
+        const label_row = try ui.hstack(w.cx, .{ .width = .fill(), .height = .{ .px = 16.5 }, .gap = 8, .align_items = .center, .flex_shrink = 0 }, .{});
+        try label_row.appendChild(w.alloc, title);
+        try label_row.appendChild(w.alloc, try ui.text(w.cx, "0 不限制", S.text(10, 400, true)));
+        try group.appendChild(w.alloc, label_row);
+    } else try group.appendChild(w.alloc, title);
     const feedback = try FieldFeedback.prepare(w, id);
-    const input = try ui.widgets.Input(.{ .error_msg = if (feedback) |f| ui.Source([]const u8){ .signal = f.message } else ui.Source([]const u8){ .value = "" }, .value = value, .readonly = std.mem.eql(u8, id, "wizard.encoding"), .placeholder = placeholder, .input_type = @as(ui.widgets.input.InputType, if (secret) .password else .text), .disabled = w.locked.?, .on_change = w.cx.on(RemoteEditor, w, RemoteEditor.onFieldChange), .on_submit = w.cx.on(RemoteEditor, w, RemoteEditor.onFieldSubmit) }).mountResult(w.scope, w.cx);
+    const input = try ui.widgets.Input(.{ .error_msg = if (feedback) |f| ui.Source([]const u8){ .signal = f.message } else ui.Source([]const u8){ .value = "" }, .value = value, .readonly = std.mem.eql(u8, id, "wizard.encoding"), .placeholder = if (std.mem.eql(u8, id, "wizard.scrollback")) ui.Source([]const u8){ .signal = w.sig_scrollback_hint.? } else ui.Source([]const u8){ .value = placeholder }, .input_type = @as(ui.widgets.input.InputType, if (secret) .password else .text), .disabled = w.locked.?, .on_change = if (std.mem.eql(u8, id, "wizard.scrollback")) w.cx.on(RemoteEditor, w, RemoteEditor.onScrollbackChanged) else w.cx.on(RemoteEditor, w, RemoteEditor.onFieldChange), .on_submit = w.cx.on(RemoteEditor, w, RemoteEditor.onFieldSubmit) }).mountResult(w.scope, w.cx);
     input.node.setStyleInline(w.alloc, .{ .width = .fill(), .height = .{ .px = 34 }, .min_width = 0, .flex_shrink = 1 });
     input.input_container.setStyleInline(w.alloc, S.input());
     input.input_container.meta.ownership.meta.test_id = id;
-    input.state.font_size = 12;
-    input.state.line_height = 18;
+    input.state.font_size = 11;
+    input.state.line_height = 16;
     input.state.padding_h = 0;
-    input.state.char_width = 6.9;
+    input.state.char_width = 6.3;
     input.state.tokens = w.cx.tokens;
     input.state.dirty = true;
     if (feedback) |f| try f.attach(input, group, label);
@@ -2934,21 +2962,51 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     _ = try field(w, name_row, "连接名称", w.sig_name.?, "", "wizard.name", null, false);
     const group_field = try ui.box(cx, S.field(null), .{});
     try group_field.appendChild(w.alloc, try fieldLabel(cx, "资产分组"));
-    const group_select = try ui.widgets.Select(.{ .options = w.group_options.?, .value = w.sig_group_selection.?, .width = (S.width - 48 - 16) / 2, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onGroupChanged) }).mount(w.scope, cx);
-    skinSelect(w, group_select, 32, 12);
-    group_select.wrapper.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0 });
-    group_select.trigger.meta.ownership.meta.test_id = "wizard.group";
+    const group_control = try ui.hstack(cx, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 34 }, .gap = 0 }, .{});
+    const group_input = try ui.widgets.Input(.{ .value = w.sig_group.?, .placeholder = "未分组，可输入新分组", .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onGroupInput) }).mountResult(w.scope, cx);
+    group_input.node.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 34 } });
+    group_input.input_container.setStyleInline(w.alloc, S.input());
+    group_input.input_container.meta.ownership.meta.test_id = "wizard.group";
+    group_input.state.font_size = 11;
+    group_input.state.line_height = 16;
+    group_input.state.padding_h = 0;
+    group_input.state.char_width = 6.3;
+    group_input.state.tokens = cx.tokens;
+    group_input.state.dirty = true;
+    try w.inputs.append(w.alloc, group_input);
+    try group_control.appendChild(w.alloc, group_input.node);
+    const group_select = try ui.widgets.Select(.{ .options = w.group_options.?, .value = w.sig_group_selection.?, .width = 32, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onGroupChanged) }).mount(w.scope, cx);
+    skinSelect(w, group_select, 34, 12);
+    group_select.content_slot.setStyleInline(w.alloc, .{ .display = .none });
+    group_select.trigger.meta.ownership.meta.test_id = "wizard.group.pick";
     group_select.chrome.meta.ownership.meta.test_id = "wizard.group.menu";
-    try group_field.appendChild(w.alloc, group_select.wrapper);
+    group_select.chrome.setStyleInline(w.alloc, .{ .min_width = (S.width - 48 - 16) / 2 });
+    try group_control.appendChild(w.alloc, group_select.wrapper);
+    try group_field.appendChild(w.alloc, group_control);
     try name_row.appendChild(w.alloc, group_field);
     try details.appendChild(w.alloc, name_row);
-    try twoFields(w, details, "主机地址", w.sig_host.?, "wizard.host", "端口", w.sig_port.?, "wizard.port");
+    const target_row = try ui.box(cx, S.fieldRow(), .{});
+    _ = try field(w, target_row, "主机地址", w.sig_host.?, "", "wizard.host", null, false);
+    _ = try field(w, target_row, "端口", w.sig_port.?, "", "wizard.port", null, false);
+    try details.appendChild(w.alloc, target_row);
     const identity_row = try ui.box(cx, S.fieldRow(), .{});
     _ = try field(w, identity_row, "用户名", w.sig_user.?, "", "wizard.user", null, false);
     const auth_field = try ui.box(cx, S.field(null), .{});
     try auth_field.appendChild(w.alloc, try fieldLabel(cx, "认证方式"));
-    const auth_group = try ui.widgets.RadioGroup(.{ .options = &auth_options, .value = w.sig_auth.?, .horizontal = true, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onAuthPicked) }).mount(w.scope, cx);
-    auth_group.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .min_height = 32, .gap = 12 });
+    const auth_group = try ui.widgets.RadioGroup(.{ .options = &auth_options, .value = w.sig_auth.?, .focus_ring = S.radioFocus(), .horizontal = true, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onAuthPicked) }).mount(w.scope, cx);
+    w.auth_group = auth_group;
+    auth_group.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 34 }, .align_items = .center, .gap = 12 });
+    for (auth_group.children.items) |choice| {
+        if (choice.children.items.len < 2) continue;
+        choice.setStyle(w.alloc, .gap, 6);
+        const circle = choice.children.items[0];
+        circle.setStyle(w.alloc, .width, .{ .px = 14 });
+        circle.setStyle(w.alloc, .height, .{ .px = 14 });
+        if (circle.children.items.len != 0) {
+            circle.children.items[0].setStyle(w.alloc, .width, .{ .px = 7 });
+            circle.children.items[0].setStyle(w.alloc, .height, .{ .px = 7 });
+        }
+    }
     auth_group.meta.ownership.meta.test_id = "wizard.auth";
     try auth_field.appendChild(w.alloc, auth_group);
     try identity_row.appendChild(w.alloc, auth_field);
@@ -2971,8 +3029,8 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     key_input.node.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 34 } });
     key_input.input_container.setStyleInline(w.alloc, S.input());
     key_input.input_container.meta.ownership.meta.test_id = "wizard.key_path";
-    key_input.state.font_size = 12;
-    key_input.state.line_height = 18;
+    key_input.state.font_size = 11;
+    key_input.state.line_height = 16;
     key_input.state.padding_h = 0;
     key_input.state.dirty = true;
     try key_feedback.attach(key_input, key_group, "私钥文件");
@@ -2985,15 +3043,15 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     try auth_body.appendChild(w.alloc, key);
     const pw = try ui.boxStyled(cx, S.stack, .{});
     w.cred_pw_row = pw;
-    pw.setStyleInline(w.alloc, .{ .gap = 8 });
-    _ = try field(w, pw, "密码", w.sig_password.?, "可留空，连接时再输入", "wizard.password", null, true);
-    const remember = try ui.widgets.Checkbox(.{ .checked = w.sig_save_password.?, .label = "保存密码，下次连接自动使用", .box_size = @as(f32, 14), .label_font_size = @as(f32, 11), .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onSavePasswordChanged) }).mount(w.scope, cx);
-    remember.setStyleInline(w.alloc, .{ .width = .fill(), .height = .{ .px = 24 }, .gap = 8, .flex_shrink = 0 });
+    const password_row = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .align_items = .end, .gap = 16 }, .{});
+    try pw.appendChild(w.alloc, password_row);
+    _ = try field(w, password_row, "密码", w.sig_password.?, "可留空，连接时再输入", "wizard.password", null, true);
+    const remember = try ui.widgets.Checkbox(.{ .checked = w.sig_save_password.?, .label = "保存密码", .box_size = @as(f32, 14), .label_font_size = @as(f32, 11), .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onSavePasswordChanged) }).mount(w.scope, cx);
+    remember.setStyleInline(w.alloc, .{ .width = .{ .fit = .{} }, .height = .{ .px = 34 }, .gap = 8, .flex_shrink = 0 });
     remember.meta.ownership.meta.test_id = "wizard.password.remember";
     w.remember_checkbox = remember;
     paintCheckboxLabels(remember);
-    try pw.appendChild(w.alloc, remember);
-    try pw.appendChild(w.alloc, try ui.textStyled(cx, S.hint, "凭据保存到系统钥匙串，仅在此设备使用；导出连接不包含密码。"));
+    try password_row.appendChild(w.alloc, remember);
     try auth_body.appendChild(w.alloc, pw);
     const agent = try ui.textStyled(cx, S.paragraph, "建立连接时从本机 SSH Agent 获取可用身份，不读取或保存私钥。");
     agent.meta.ownership.meta.test_id = "wizard.auth.agent_notice";
@@ -3009,6 +3067,8 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     const advanced_body = try ui.boxStyled(cx, S.formSection, .{});
     w.advanced_body = advanced_body;
     advanced_body.meta.ownership.meta.test_id = "wizard.advanced.body";
+    const policy_row = try ui.box(cx, S.fieldRow(), .{});
+    policy_row.setStyleInline(w.alloc, .{ .align_items = .end });
     const policy_field = try ui.box(cx, S.field(null), .{});
     try policy_field.appendChild(w.alloc, try fieldLabel(cx, "主机密钥策略"));
     const policy_options = [_]ui.widgets.SelectOption{
@@ -3021,28 +3081,55 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     policy.trigger.meta.ownership.meta.test_id = "wizard.strict_host_key";
     w.strict_checkbox = policy.trigger;
     try policy_field.appendChild(w.alloc, policy.wrapper);
-    try advanced_body.appendChild(w.alloc, policy_field);
+    try policy_row.appendChild(w.alloc, policy_field);
+
+    const compression_field = try ui.box(cx, S.field(null), .{});
+    try compression_field.appendChild(w.alloc, try fieldLabel(cx, "SSH 传输压缩"));
+    const compression_choice = try w.scope.createSignal(?[]const u8, if (w.compression) "on" else "off");
+    const compression_options = [_]ui.widgets.checkbox.RadioOption{
+        .{ .value = "off", .label = "关闭", .test_id = "wizard.compression.disabled" },
+        .{ .value = "on", .label = "开启", .test_id = "wizard.compression.enabled" },
+    };
+    const compression = try ui.widgets.RadioGroup(.{ .options = &compression_options, .value = compression_choice, .focus_ring = S.radioFocus(), .horizontal = true, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onCompressionPicked) }).mount(w.scope, cx);
+    compression.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 34 }, .align_items = .center, .gap = 12 });
+    for (compression.children.items) |choice| {
+        if (choice.children.items.len < 2) continue;
+        choice.setStyle(w.alloc, .gap, 6);
+        const circle = choice.children.items[0];
+        circle.setStyle(w.alloc, .width, .{ .px = 14 });
+        circle.setStyle(w.alloc, .height, .{ .px = 14 });
+        if (circle.children.items.len != 0) {
+            circle.children.items[0].setStyle(w.alloc, .width, .{ .px = 7 });
+            circle.children.items[0].setStyle(w.alloc, .height, .{ .px = 7 });
+        }
+    }
+    compression.meta.ownership.meta.test_id = "wizard.compression";
+    if (compression.behavior.interaction.a11y) |*a11y| a11y.label = "SSH 传输压缩";
+    w.compression_checkbox = compression;
+    try w.scope.createEffect(.{ .checked = w.sig_compression.?, .choice = compression_choice }, struct {
+        fn run(ctx: anytype) void {
+            ctx.choice.set(if (ctx.checked.get()) "on" else "off");
+        }
+    }.run);
+    try compression_field.appendChild(w.alloc, compression);
+    try policy_row.appendChild(w.alloc, compression_field);
+    try advanced_body.appendChild(w.alloc, policy_row);
 
     const defaults = try ui.box(cx, S.fieldRow(), .{});
     w.connect_timeout_fact = try readonlyField(w, defaults, "连接超时（全局默认）", "—");
     w.connect_timeout_fact.?.meta.ownership.meta.test_id = "wizard.ssh.connect_timeout";
-    w.keepalive_fact = try readonlyField(w, defaults, "KeepAlive（全局默认）", "—");
+    w.keepalive_fact = try readonlyField(w, defaults, "保活间隔（全局默认）", "—");
     w.keepalive_fact.?.meta.ownership.meta.test_id = "wizard.ssh.keepalive";
     try advanced_body.appendChild(w.alloc, defaults);
-    const encoding = try ui.box(cx, S.fieldRow(), .{});
-    _ = try field(w, encoding, "字符编码", w.sig_encoding.?, "UTF-8", "wizard.encoding", null, false);
-    const compression = try ui.widgets.Checkbox(.{ .checked = w.sig_compression.?, .label = "SSH 传输压缩", .box_size = @as(f32, 14), .label_font_size = @as(f32, 11), .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onCompressionChanged) }).mount(w.scope, cx);
-    compression.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 55.5 }, .gap = 8, .flex = 1, .flex_shrink = 0 });
-    compression.meta.ownership.meta.test_id = "wizard.compression";
-    w.compression_checkbox = compression;
-    paintCheckboxLabels(compression);
-    try encoding.appendChild(w.alloc, compression);
-    try advanced_body.appendChild(w.alloc, encoding);
+    const terminal_row = try ui.box(cx, S.fieldRow(), .{});
+    _ = try field(w, terminal_row, "字符编码", w.sig_encoding.?, "UTF-8", "wizard.encoding", null, false);
+    _ = try field(w, terminal_row, "终端最大显示行数", w.sig_scrollback.?, "继承全局；0 不限制", "wizard.scrollback", null, false);
+    try advanced_body.appendChild(w.alloc, terminal_row);
     const commands = try ui.boxStyled(cx, S.commandField, .{});
     w.commands_card = commands;
     w.commands_details = commands;
-    try commands.appendChild(w.alloc, try fieldLabel(cx, "启动命令（每行一条，连接成功后按序执行）"));
-    const textarea = try ui.widgets.Textarea(.{ .value = w.sig_startup.?, .rows = 6, .placeholder = "cd /var/www/app", .error_msg = w.startup_error.?, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onStartupTextChanged) }).mountResult(w.scope, cx);
+    try commands.appendChild(w.alloc, try fieldLabel(cx, "启动命令 · 每行一条，连接后依次执行"));
+    const textarea = try ui.widgets.Textarea(.{ .value = w.sig_startup.?, .rows = 4, .placeholder = "cd /var/www/app", .error_msg = w.startup_error.?, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onStartupTextChanged) }).mountResult(w.scope, cx);
     textarea.input.meta.ownership.meta.test_id = "wizard.startup";
     textarea.wrapper.meta.ownership.meta.test_id = "wizard.startup.field";
     textarea.state.font_size = 12;
@@ -3196,27 +3283,12 @@ fn mountRoutePreview(w: *RemoteEditor, index: usize) !*ui.Node {
 }
 
 fn mountDiscard(w: *RemoteEditor) !*ui.Node {
-    const card = try ui.box(w.cx, S.discardCard(), .{});
-    const heading = try action(w, card, "放弃尚未保存的连接？", "wizard.discard.toggle", 668, 28, false, null, RemoteEditor.onDiscardToggle, null);
-    w.discard_heading = heading;
-    for (heading.children.items) |child| child.setDisplay(.none);
-    heading.setStyleInline(w.alloc, .{ .width = .fill(), .justify = .start, .background = ui.Color.TRANSPARENT });
-    try heading.appendChild(w.alloc, try ui.iconTint(w.cx, ui.icons.circle_alert, S.theme.current().fg_2, S.icon(16)));
-    try heading.appendChild(w.alloc, try ui.textStyled(w.cx, S.title, "放弃尚未保存的连接？"));
-    try heading.appendChild(w.alloc, try ui.spacer(w.cx));
-    w.discard_chevron = try ui.iconTint(w.cx, ui.icons.chevron_down, S.theme.current().fg_2, S.icon(16));
-    try heading.appendChild(w.alloc, w.discard_chevron.?);
-    w.discard_name = try ui.text(w.cx, "", S.discardText(false));
-    w.discard_name.?.setStyleInline(w.alloc, S.discardLine());
-    try card.appendChild(w.alloc, w.discard_name.?);
-    const note = try ui.text(w.cx, "继续编辑可保留所有输入；放弃只丢弃本份草稿。", S.discardText(true));
-    note.setStyleInline(w.alloc, S.discardLine());
-    try card.appendChild(w.alloc, note);
-    w.discard_status = try ui.text(w.cx, "", S.discardText(true));
+    const content = try ui.box(w.cx, S.discardCard(), .{});
+    w.discard_status = try ui.text(w.cx, "未保存的内容将丢失。", S.discardText(true));
     w.discard_status.?.meta.ownership.meta.test_id = "wizard.discard.status";
-    w.discard_status.?.setStyleInline(w.alloc, S.discardLine());
-    try card.appendChild(w.alloc, w.discard_status.?);
-    return card;
+    w.discard_status.?.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0 });
+    try content.appendChild(w.alloc, w.discard_status.?);
+    return content;
 }
 
 fn mountReview(w: *RemoteEditor) !*ui.Node {
@@ -3407,6 +3479,17 @@ fn mountReview(w: *RemoteEditor) !*ui.Node {
     return root;
 }
 
+fn paintInputTypography(node: *ui.Node) void {
+    if (node.getText()) |old| {
+        if (old.font_size != 11 or old.line_height != 16.0 / 11.0) {
+            var props = old;
+            props.font_size = 11;
+            props.line_height = 16.0 / 11.0;
+            node.setText(props);
+        }
+    }
+}
+
 fn paintSelectTypography(node: *ui.Node) void {
     if (node.getText()) |old| {
         if (old.font_size != 12 or old.line_height != 1.5) {
@@ -3446,6 +3529,20 @@ fn paintSelectMenu(select: ui.widgets.SelectResult) void {
         row.setBackground(if (highlighted) colors.hover else if (selected) colors.selection else ui.Color.TRANSPARENT);
         paintSelectContent(row, if (state.options[i].disabled) colors.fg_3 else if (selected) colors.accent_ink else colors.fg_1);
         _ = state.check_nodes[i].setTint(colors.accent_ink);
+    }
+}
+
+fn paintAuthLabels(group: *ui.Node) void {
+    for (group.children.items) |choice| {
+        if (choice.children.items.len < 2) continue;
+        const node = choice.children.items[1];
+        if (node.getText()) |old| {
+            if (old.font_size == 12 and old.line_height == 1.5) continue;
+            var props = old;
+            props.font_size = 12;
+            props.line_height = 1.5;
+            node.setText(props);
+        }
     }
 }
 
@@ -3866,4 +3963,41 @@ test "SSH host inheritance survives wizard draft copy and unrelated edit" {
     const explicit_false = try wizard.currentDraft().toHostConfig();
     try std.testing.expect(explicit_false.compression_explicit);
     try std.testing.expect(!explicit_false.compression);
+}
+
+test "host scrollback inherits global until explicitly edited and clearing restores inheritance" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{}, .{});
+    var editor: RemoteEditor = .{};
+    try cx.root.?.appendChild(a, try editor.mount(cx, scope));
+    editor.setScrollbackDefault(70000);
+    editor.loadDraft(.{ .name = "n", .host = "h", .user = "u" });
+    try std.testing.expectEqualStrings("", editor.sig_scrollback.?.get());
+    try std.testing.expectEqualStrings("继承全局：70000 行", editor.sig_scrollback_hint.?.get());
+    editor.setScrollbackDefault(12000);
+    try std.testing.expectEqualStrings("继承全局：12000 行", editor.sig_scrollback_hint.?.get());
+    try std.testing.expectEqualStrings("", editor.sig_scrollback.?.get());
+    var host = try editor.currentDraft().toHostConfig();
+    try std.testing.expect(!host.scrollback_explicit);
+    try std.testing.expect(@import("../../ui/session_runtime.zig").targetFromHost(host, &.{}).scrollback == null);
+    editor.sig_scrollback.?.set("0");
+    editor.onScrollbackChanged("0");
+    editor.setScrollbackDefault(0);
+    try std.testing.expectEqualStrings("继承全局：0（不限制）", editor.sig_scrollback_hint.?.get());
+    try std.testing.expectEqualStrings("0", editor.sig_scrollback.?.get());
+    host = try editor.currentDraft().toHostConfig();
+    try std.testing.expect(host.scrollback_explicit);
+    try std.testing.expectEqual(@as(?u32, 0), @import("../../ui/session_runtime.zig").targetFromHost(host, &.{}).scrollback);
+    editor.sig_scrollback.?.set("");
+    editor.onScrollbackChanged("");
+    host = try editor.currentDraft().toHostConfig();
+    try std.testing.expect(!host.scrollback_explicit);
+    var writer: std.Io.Writer.Allocating = .init(a);
+    defer writer.deinit();
+    try @import("../../config/hosts.zig").Registry.formatOne(host, &writer.writer);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "scrollback =") == null);
 }

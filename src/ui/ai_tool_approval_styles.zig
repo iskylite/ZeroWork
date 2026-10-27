@@ -6,7 +6,7 @@ pub fn wrapper(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = .{ .left = 14, .right = 14, .top = 9 }, .flex_shrink = 0, .direction = .column };
 }
 pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 167.625 }, .padding = ui.Padding.all(11), .flex_shrink = 0, .direction = .column, .background = theme.current().well, .border = .{ .width = 1, .color = theme.current().border, .radius = 9 }, .overflow = .hidden };
+    return .{ .width = .fill(), .height = .{ .px = 167.625 }, .padding = ui.Padding.all(11), .flex_shrink = 0, .direction = .column, .background = theme.current().well, .border = .{ .width = 0, .radius = 9 }, .overflow = .hidden };
 }
 pub fn header(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 22.5 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6, .margin = .{ .bottom = 6 } };

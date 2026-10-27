@@ -98,7 +98,7 @@ pub fn phaseLabel(phase: Phase) []const u8 {
         .cleanup_unknown => "清理结果未知",
     };
 }
-fn failureLabel(failure: backend.Failure) []const u8 {
+pub fn failureLabel(failure: backend.Failure) []const u8 {
     return switch (failure) {
         .invalid_request => "请求参数不可用",
         .not_found => "文件不存在",

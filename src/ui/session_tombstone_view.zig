@@ -16,7 +16,7 @@ test "tombstone snapshot exposes reconnect and read-only UI state" {
     current = snapshot(tombstone);
     try std.testing.expect(current.reconnect_visible);
     try std.testing.expect(current.read_only);
-    try std.testing.expectEqualStrings("Reconnect", current.label);
+    try std.testing.expectEqualStrings("重新连接", current.label);
     try std.testing.expect(tombstone.beginReconnect());
     current = snapshot(tombstone);
     try std.testing.expect(!current.reconnect_visible);

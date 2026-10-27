@@ -145,3 +145,38 @@ pub fn projectionText(allocator: std.mem.Allocator, projection: *const vt.Projec
     }
     return result.toOwnedSlice(allocator);
 }
+
+/// Preview only the latest command's visible output, bounded by semantic input
+/// and the following prompt. Never present older terminal context as its error.
+pub fn outputPreview(allocator: std.mem.Allocator, projection: *const vt.Projection) ![]u8 {
+    var start: ?usize = null;
+    for (projection.visible_rows, 0..) |row, index| {
+        for (projection.cells[row.cell_start..][0..row.cell_count]) |cell| {
+            if (cell.semantic == 1 and std.mem.trim(u8, projection.grapheme(cell), " ").len != 0) {
+                start = index;
+                break;
+            }
+        }
+    }
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+    if (start) |first| {
+        for (projection.visible_rows[first..], first..) |row, index| {
+            if (index > first and row.semantic_prompt != 0) break;
+            const line_start = result.items.len;
+            for (projection.cells[row.cell_start..][0..row.cell_count]) |cell| {
+                if (cell.semantic != 0 or cell.width == .wide_tail) continue;
+                const bytes = projection.grapheme(cell);
+                if (result.items.len + bytes.len > 512) {
+                    try result.appendSlice(allocator, "…");
+                    return result.toOwnedSlice(allocator);
+                }
+                try result.appendSlice(allocator, bytes);
+            }
+            while (result.items.len > line_start and result.items[result.items.len - 1] == ' ') result.items.len -= 1;
+            if (result.items.len > line_start and !row.wraps) try result.append(allocator, '\n');
+        }
+    }
+    while (result.items.len > 0 and result.items[result.items.len - 1] == '\n') result.items.len -= 1;
+    return result.toOwnedSlice(allocator);
+}

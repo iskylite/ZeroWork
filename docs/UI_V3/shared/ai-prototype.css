@@ -15,4 +15,6 @@
 #popover.ap-resource-popover{padding:0}#popover.ap-resource-popover>.popover-head{display:none}.ap-card[data-state*=await_confirm] .ap-status,.ap-card[data-state=mixed_group] .ap-status,.ap-card[data-state=stopped] .ap-status{color:#eab34c}.ap-card[data-state=analyzing] .ap-status,.ap-card[data-state=plan_assembling] .ap-status,.ap-card[data-state=group_running] .ap-status{color:var(--accent)}
 .ap-action[data-vision-checked=false] .ap-capability-checkbox{background:transparent!important;outline:1px solid var(--line)}.ap-action[data-vision-checked=false] .ap-capability-checkbox svg{opacity:0}.ap-action[data-vision-checked=true] .ap-capability-checkbox{background:var(--primary)!important}.ap-action[data-vision-checked=true] .ap-capability-checkbox svg{opacity:1}
 
+.ap-preview-heading{display:flex;align-items:center;gap:8px;font-size:13px!important;font-weight:700!important;line-height:18px!important;color:var(--fg)!important}.ap-preview-heading svg{width:18px;height:18px;flex-shrink:0;color:var(--accent)}
+
 .ap-user-bubble .ap-text{color:var(--bubble-fg,var(--accent-fg))!important}

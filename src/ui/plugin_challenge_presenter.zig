@@ -41,6 +41,7 @@ pub const Presenter = struct {
     open: *ui.Signal(bool),
     modal: ui.widgets.ModalResult = undefined,
     title: *ui.Node = undefined,
+    title_icon: *ui.Node = undefined,
     detail: *ui.Node = undefined,
     source: *ui.Node = undefined,
     material: *ui.Node = undefined,
@@ -58,6 +59,7 @@ pub const Presenter = struct {
     submit_label: *ui.Signal([]const u8) = undefined,
     choices: [32]Choice = undefined,
     choice_scroll: *ui.Node = undefined,
+    trust_actions: [2]*ui.Node = undefined,
     current: ?Current = null,
     pub fn isVisible(self: *const Presenter) bool {
         return self.open.peek();
@@ -69,7 +71,12 @@ pub const Presenter = struct {
         self.modal.dialog.meta.ownership.meta.test_id = "plugin.challenge.modal";
         self.modal.body.setStyleInline(cx.allocator, .{ .direction = .column, .width = .fill(), .height = .{ .fit = .{} }, .padding = ui.Padding.all(S.padding), .gap = S.gap });
         if (!self.modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, self.modal.overlay);
-        self.title = try label(cx, self.modal.body, "", S.text(13, 600, false));
+        const heading = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .align_items = .center, .gap = 8 }, .{});
+        self.title_icon = try ui.iconTint(cx, ui.icons.shield_question, S.theme.current().warn_ink, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        self.title_icon.meta.ownership.meta.test_id = "plugin.challenge.title_icon";
+        try heading.appendChild(cx.allocator, self.title_icon);
+        self.title = try label(cx, heading, "", S.text(15, 700, false));
+        try self.modal.body.appendChild(cx.allocator, heading);
         self.title.meta.ownership.meta.test_id = "plugin.challenge.title";
         self.source = try label(cx, self.modal.body, "", S.text(11, 500, false));
         self.source.meta.ownership.meta.test_id = "plugin.challenge.source";
@@ -126,7 +133,18 @@ pub const Presenter = struct {
         try self.modal.body.appendChild(cx.allocator, footer);
         const cancel_button = try ui.widgets.Button(.{ .label = "取消", .variant = .secondary, .on_click = cx.on(Presenter, self, cancel) }).mount(scope, cx);
         cancel_button.meta.ownership.meta.test_id = "plugin.challenge.cancel";
+        cancel_button.setStyleInline(cx.allocator, S.button(72, false, false));
+        styleActionText(cancel_button, false);
         try footer.appendChild(cx.allocator, cancel_button);
+        for (&self.trust_actions, 0..) |*action, i| {
+            const variant: ui.widgets.button.ButtonVariant = if (i == 1) .primary else .secondary;
+            const button = try ui.widgets.Button(.{ .label = self.choices[i].value, .variant = variant, .on_click = cx.on(Choice, &self.choices[i], Choice.choose) }).mount(scope, cx);
+            button.setStyleInline(cx.allocator, S.button(108, i == 1, false));
+            styleActionText(button, i == 1);
+            button.setDisplay(.none);
+            action.* = button;
+            try footer.appendChild(cx.allocator, button);
+        }
         self.submit_disabled = try scope.createSignal(bool, true);
         self.submit_label = try scope.createText("确认", .{});
         self.submit_button = try ui.widgets.Button(.{ .label = self.submit_label, .disabled = self.submit_disabled, .variant = .primary, .on_click = cx.on(Presenter, self, submit) }).mount(scope, cx);
@@ -151,6 +169,11 @@ pub const Presenter = struct {
         self.clearInput();
         self.current = .{ .owner = view.owner, .request_id = view.request_id, .generation = view.generation, .kind = view.kind, .field_count = view.payload.fields.len, .choice_count = view.payload.choices.len };
         try self.title.setTextContent(self.cx.allocator, view.payload.title);
+        self.title_icon.setDisplay(if (view.kind == .trust_material or view.kind == .secret_input) .flex else .none);
+        const changed_key = std.mem.eql(u8, view.payload.title, "主机密钥已变更");
+        const icon = if (changed_key) ui.icons.shield_alert else if (view.kind == .trust_material) ui.icons.shield_question else if (std.mem.eql(u8, view.payload.title, "解锁 SSH 私钥")) ui.icons.key_round else ui.icons.lock_keyhole;
+        const tint = if (changed_key) S.theme.current().danger_ink else if (view.kind == .trust_material) S.theme.current().warn_ink else S.theme.current().accent;
+        if (icon.icon_id) |id| if (icon.pickRep(18)) |rep| self.title_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = tint });
         try self.detail.setTextContent(self.cx.allocator, view.payload.detail);
         try self.source.setTextContent(self.cx.allocator, if (view.background and view.payload.source_name.len == 0) "来自后台会话的请求" else view.payload.source_name);
         self.source.setDisplay(if (view.background or view.payload.source_name.len > 0) .flex else .none);
@@ -159,7 +182,7 @@ pub const Presenter = struct {
         self.material_scroll.setStyle(self.cx.allocator, .height, .{ .px = @min(120, @max(60, self.cx.viewport.height - 460)) });
         self.input.node.setDisplay(if (view.kind == .secret_input and view.payload.fields.len == 0) .flex else .none);
         self.fields_scroll.setDisplay(if (view.payload.fields.len != 0) .flex else .none);
-        self.fields_scroll.setStyle(self.cx.allocator, .height, .{ .px = @min(@as(f32, @floatFromInt(view.payload.fields.len)) * 68, @max(120, self.cx.viewport.height - 320)) });
+        self.fields_scroll.setStyle(self.cx.allocator, .height, .{ .px = @min(@as(f32, @floatFromInt(view.payload.fields.len)) * 84, @max(120, self.cx.viewport.height - 320)) });
         for (&self.fields, 0..) |*field, i| {
             if (i >= view.payload.fields.len) {
                 field.root.setDisplay(.none);
@@ -171,7 +194,8 @@ pub const Presenter = struct {
             field.input.state.dirty = true;
             field.root.setDisplay(.flex);
         }
-        self.choice_scroll.setDisplay(if (view.payload.choices.len != 0) .flex else .none);
+        const trust_actions = view.payload.choices.len == 2 and std.mem.eql(u8, view.payload.choices[0].value, "trust_once") and std.mem.eql(u8, view.payload.choices[1].value, "trust_save");
+        self.choice_scroll.setDisplay(if (view.payload.choices.len != 0 and !trust_actions) .flex else .none);
         self.choice_scroll.setStyle(self.cx.allocator, .height, .{ .px = @min(@as(f32, @floatFromInt(view.payload.choices.len)) * 40, @max(80, self.cx.viewport.height - 360)) });
         self.submit_button.setDisplay(if (view.payload.choices.len != 0) .none else .flex);
         self.submit_label.set(view.payload.submit_label);
@@ -181,7 +205,12 @@ pub const Presenter = struct {
                 continue;
             }
             choice.value.set(view.payload.choices[i].label);
-            choice.root.setDisplay(.flex);
+            choice.root.setDisplay(if (trust_actions) .none else .flex);
+            choice.root.meta.ownership.meta.test_id = if (trust_actions) null else std.fmt.bufPrint(&choice.id, "plugin.challenge.choice.{d}", .{i}) catch unreachable;
+        }
+        for (self.trust_actions, 0..) |button, i| {
+            button.setDisplay(if (trust_actions) .flex else .none);
+            button.meta.ownership.meta.test_id = if (trust_actions) (if (i == 0) "plugin.challenge.choice.0" else "plugin.challenge.choice.1") else null;
         }
         self.refreshSubmit();
         self.open.set(true);
@@ -342,4 +371,14 @@ fn textNode(node: *ui.Node) ?*ui.Node {
     if (node.getText() != null) return node;
     for (node.children.items) |child| if (textNode(child)) |found| return found;
     return null;
+}
+fn styleActionText(button: *ui.Node, primary: bool) void {
+    if (textNode(button)) |node| if (node.getText()) |old| {
+        var value = old;
+        value.font_size = 12;
+        value.font_weight = 500;
+        value.color = S.actionColor(primary, false);
+        value.line_height = 1.5;
+        node.setText(value);
+    };
 }

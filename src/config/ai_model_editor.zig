@@ -67,6 +67,11 @@ pub const Editor = struct {
         self.modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = 480 }, .height = .{ .px = 550 }, .padding = .{}, .direction = .column, .gap = 0, .background = S.theme.current().overlay, .glass = S.theme.overlayGlass(), .border = .{ .radius = 14 }, .overflow_hidden = true });
         self.modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_height = 0, .flex = 1, .direction = .column, .gap = 0, .padding = .{} });
         const header = try ui.box(cx, S.modelDialogHeader(), .{});
+        header.setStyleInline(cx.allocator, .{ .gap = 8 });
+        const title_icon = try ui.iconTint(cx, ui.icons.settings_2, S.theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        title_icon.meta.ownership.meta.test_id = "settings.ai.model.title.icon";
+        title_icon.setStyleInline(cx.allocator, .{ .align_self = .start, .margin = .{ .top = 2 } });
+        try header.appendChild(cx.allocator, title_icon);
         const title = try ui.box(cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 3 }, .{});
         try title.appendChild(cx.allocator, try ui.text(cx, if (index == null) "添加模型" else "编辑模型", .{ .font_size = 13, .font_weight = 650, .line_height = 20.0 / 13.0, .color = S.theme.current().fg_1 }));
         try title.appendChild(cx.allocator, try ui.text(cx, try controls.owned(scope, name), .{ .font_size = 11, .font_weight = 400, .line_height = 18.0 / 11.0, .color = S.theme.current().fg_2 }));

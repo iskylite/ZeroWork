@@ -29,9 +29,9 @@ pub const Tombstone = struct {
 
     pub fn reconnectLabel(self: Tombstone) []const u8 {
         return switch (self.state) {
-            .ended => "Reconnect",
-            .reconnecting => "Reconnecting…",
-            .active => "Connected",
+            .ended => "重新连接",
+            .reconnecting => "正在重连…",
+            .active => "已连接",
         };
     }
 
@@ -41,9 +41,9 @@ pub const Tombstone = struct {
 
     pub fn banner(self: Tombstone) []const u8 {
         return switch (self.state) {
-            .ended => "●  Session ended · read-only",
-            .reconnecting => "●  Reconnecting · read-only",
-            .active => "●  Connected",
+            .ended => "连接已断开",
+            .reconnecting => "正在重连…",
+            .active => "已连接",
         };
     }
 };
@@ -54,13 +54,13 @@ test "session tombstone becomes read only and can restore" {
     tombstone.end("socket closed");
     try std.testing.expect(!tombstone.allowsRemoteInput());
     try std.testing.expect(tombstone.canReconnect());
-    try std.testing.expectEqualStrings("Reconnect", tombstone.reconnectLabel());
-    try std.testing.expectEqualStrings("●  Session ended · read-only", tombstone.banner());
+    try std.testing.expectEqualStrings("重新连接", tombstone.reconnectLabel());
+    try std.testing.expectEqualStrings("连接已断开", tombstone.banner());
     try std.testing.expect(tombstone.beginReconnect());
     try std.testing.expect(!tombstone.canReconnect());
     try std.testing.expect(!tombstone.allowsRemoteInput());
-    try std.testing.expectEqualStrings("Reconnecting…", tombstone.reconnectLabel());
-    try std.testing.expectEqualStrings("●  Reconnecting · read-only", tombstone.banner());
+    try std.testing.expectEqualStrings("正在重连…", tombstone.reconnectLabel());
+    try std.testing.expectEqualStrings("正在重连…", tombstone.banner());
     try std.testing.expect(!tombstone.beginReconnect());
     tombstone.restore();
     try std.testing.expect(tombstone.allowsRemoteInput());

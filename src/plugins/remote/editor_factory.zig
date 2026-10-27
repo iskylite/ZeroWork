@@ -98,11 +98,21 @@ fn preferredModalHeight(raw: *anyopaque) ?f32 {
     const self: *Instance = @ptrCast(@alignCast(raw));
     return self.editor.preferredModalHeight();
 }
+fn modalPresentation(raw: *anyopaque) contract.ModalPresentation {
+    const self: *Instance = @ptrCast(@alignCast(raw));
+    const remote_editor = self.editor;
+    const editing = remote_editor.source_owner != null;
+    return .{
+        .width = if (remote_editor.discard_open) @import("../../ui/wizard_styles.zig").discard_width else @import("../../ui/wizard_styles.zig").width,
+        .title = if (remote_editor.discard_open) (if (editing) "放弃未保存的更改？" else "放弃未保存的连接？") else if (editing) "编辑连接" else "新建连接",
+        .warning = remote_editor.discard_open,
+    };
+}
 fn parentPresentationVisible(raw: *anyopaque) bool {
     const self: *Instance = @ptrCast(@alignCast(raw));
     return !self.editor.copy_open.?.peek();
 }
-const vtable: contract.EditorInstance.VTable = .{ .snapshot = snapshot, .clear_secrets = clear, .unmount = release, .cancel = cancel, .preferred_modal_height = preferredModalHeight, .parent_presentation_visible = parentPresentationVisible, .visibility_changed = visibility };
+const vtable: contract.EditorInstance.VTable = .{ .snapshot = snapshot, .clear_secrets = clear, .unmount = release, .cancel = cancel, .preferred_modal_height = preferredModalHeight, .modal_presentation = modalPresentation, .parent_presentation_visible = parentPresentationVisible, .visibility_changed = visibility };
 
 /// Explicit legacy remote UI adapter for the application's existing Draft and
 /// probe callers. A missing/replaced contribution cannot construct this view.
@@ -167,7 +177,7 @@ pub fn assetsCurrent(assets: []const types.Draft, hosts: []const @import("../../
             !std.mem.eql(u8, host.terminal_type, asset.terminal_type) or
             host.terminal_type_explicit != asset.terminal_type_explicit or
             !std.mem.eql(u8, host.socks_bind, asset.socks_bind) or
-            host.scrollback != asset.scrollback or host.keepalive != asset.keepalive or
+            host.scrollback != asset.scrollback or (host.scrollback_explicit or host.scrollback != 25000) != asset.scrollback_explicit or host.keepalive != asset.keepalive or
             host.compression != asset.compression or host.compression_explicit != asset.compression_explicit or
             host.socks_enabled != asset.socks_enabled or
             host.socks_port != asset.socks_port or host.socks_exit != asset.socks_exit or

@@ -13,6 +13,17 @@ const peerCode=`import sys,time,json,signal,threading,hashlib,base64
 sys.path.insert(0,'e2e')
 from pathlib import Path
 from fixed_forward import Peer,Echo
+from shared_forward import Connection
+# The app opens a read-only OS-identification channel beside its PTY.
+# Record only this exact production probe; every other exec remains forbidden.
+def identify_os(self,channel,command):
+ expected=b'sh -c "uname -s; cat /etc/os-release" || cmd /c ver'
+ if command==expected:
+  self.calls.append({'os_probe':command.decode('utf-8')})
+  return False  # Fixture rejects exec: no shell command is actually run.
+ self.calls.append({'UNEXPECTED_EXEC':command.decode('utf-8','replace')})
+ return False
+Connection.check_channel_exec_request=identify_os
 out=Path(sys.argv[1]);peer=Peer();peer.deny_remote=False;peer.remote_cancelled=threading.Event();echo=Echo();peer.thread.start();stop=threading.Event()
 signal.signal(signal.SIGTERM,lambda *_:stop.set())
 signal.signal(signal.SIGINT,lambda *_:stop.set())
@@ -46,7 +57,7 @@ try{
  const sourceEvidence=process.argv[4]?JSON.parse(await readFile(process.argv[4],'utf8')):null;const sourceBinary=sourceEvidence?join(sourceEvidence.isolated,'zerowork'):resolve('zig-out/bin/zerowork');await copyFile(sourceBinary,join(iso,'zerowork'));await copyFile(join(dirname(sourceBinary),'zw_ipc.so'),join(iso,'zw_ipc.so'));report.sha256=createHash('sha256').update(await readFile(join(iso,'zerowork'))).digest('hex');
  process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;app=spawn(join(iso,'zerowork'),[],{env:{...process.env,ZENIT_E2E_FILE_RPC_DIR:rpc,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',log.fd,log.fd]});appEnd=new Promise(r=>app.once('close',r));report.pid=app.pid;
  await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);await resizeWindow(1440,900);
- const host=await vis('sidebar.host');assert((await clickAt(host.rect.x+50,host.rect.y+host.rect.h/2,2)).ok);
+ await click('sidebar.host');
  await waitFor(async()=>{const title=(await query('plugin.challenge.title')).find(shown);if(title){const source=text((await query('plugin.challenge.source')).find(shown));assert(source.includes('127.0.0.1'));const trust=(await query('plugin.challenge.choice.0')).find(n=>shown(n)&&text(n).includes('仅本次信任'));if(trust){assert(text((await query('plugin.challenge.material')).find(shown)).includes(ready.fingerprint));await click('plugin.challenge.choice.0');return null}const answer=[...(await query('plugin.challenge.secret')),...(await query('plugin.challenge.answer.0'))].find(n=>shown(n)&&n.focusable);if(answer){await edit(answer.test_id,ready.password);await click('plugin.challenge.submit');return null}}return text((await query('status.connection.identity')).find(shown)).includes('已连接')&&(await query('workspace.pane')).some(shown)?true:null},45000);
  await click('status.connection.forward');const empty=await vis('socks.info.empty');assert(text(empty).includes('没有转发规则'));assert.equal((await vis('socks.info')).rect.w,344);await cap('01-forward-empty');
  const ports:any={};
@@ -69,4 +80,4 @@ try{
  }
  report.ports=ports;report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await cap('failure').catch(()=>{});process.exitCode=1}
-finally{if(app&&app.exitCode===null&&app.signalCode===null){app.kill('SIGTERM');await Promise.race([appEnd,sleep(3000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await appEnd}}if(peer.exitCode===null&&peer.signalCode===null){peer.kill('SIGTERM');await Promise.race([peerEnd,sleep(3000)]);if(peer.exitCode===null&&peer.signalCode===null){peer.kill('SIGKILL');await peerEnd}}await log.close();await peerLog.close();try{const final=JSON.parse(await readFile(join(peerDir,'report.json'),'utf8'));assert(!JSON.stringify(final.calls).includes('UNEXPECTED_EXEC'));if(report.status==='passed'){assert.equal(final.calls.length,1);assert.equal(final.calls[0].filter((x:any)=>x==='auth').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='pty').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='shell').length,1);assert.equal(final.forward_bytes[0],16384);assert.equal(final.echo_bytes,8192)}report.peer=final}catch(e){report.cleanup_error=String(e);report.status='failed';process.exitCode=1}report.isolated=iso;await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({status:report.status,error:report.error,out}))}
+finally{if(app&&app.exitCode===null&&app.signalCode===null){app.kill('SIGTERM');await Promise.race([appEnd,sleep(3000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await appEnd}}if(peer.exitCode===null&&peer.signalCode===null){peer.kill('SIGTERM');await Promise.race([peerEnd,sleep(3000)]);if(peer.exitCode===null&&peer.signalCode===null){peer.kill('SIGKILL');await peerEnd}}await log.close();await peerLog.close();try{const final=JSON.parse(await readFile(join(peerDir,'report.json'),'utf8'));report.peer=final;assert(!JSON.stringify(final.calls).includes('UNEXPECTED_EXEC'),'Only the exact read-only OS probe may use exec');if(report.status==='passed'){assert.equal(final.calls.length,1,'One host activation must create exactly one SSH transport');assert.equal(final.calls[0].filter((x:any)=>x==='auth').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='pty').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='shell').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='session').length,2,'One PTY channel plus one OS-identification channel');assert.equal(final.calls[0].filter((x:any)=>x&&typeof x==='object'&&x.os_probe).length,1);assert.equal(final.forward_bytes[0],16384);assert.equal(final.echo_bytes,8192)} }catch(e){report.cleanup_error=String(e);report.status='failed';process.exitCode=1}report.isolated=iso;await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({status:report.status,error:report.error,out}))}

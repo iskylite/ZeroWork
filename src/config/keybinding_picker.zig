@@ -21,8 +21,11 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, _: *ui.Node, _: *ui.Node, map: *keys.
     modal.body.setStyleInline(cx.allocator, .{ .padding = .{}, .gap = 0, .width = .fill(), .min_height = 0, .direction = .column });
     modal.dialog.behavior.events.key_context = @ptrCast(self);
     modal.dialog.behavior.events.on_key_down = Recorder.keyDown;
-    const header = try ui.box(cx, .{ .width = .fill(), .min_height = 60, .padding = .{ .top = 16, .left = 20, .right = 20, .bottom = 10 }, .direction = .row, .align_items = .center, .flex_shrink = 0 }, .{});
+    const header = try ui.box(cx, .{ .width = .fill(), .min_height = 60, .padding = .{ .top = 16, .left = 20, .right = 20, .bottom = 10 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
     header.meta.ownership.meta.test_id = "settings.keybinding.header";
+    const title_icon = try ui.iconTint(cx, ui.icons.keyboard, c.accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+    title_icon.meta.ownership.meta.test_id = "settings.keybinding.title.icon";
+    try header.appendChild(cx.allocator, title_icon);
     const title = try ui.text(cx, "录制快捷键", .{ .font_size = 13, .font_weight = 650, .line_height = 20.0 / 13.0, .color = c.fg_1 });
     title.style.width = .fill();
     title.style.flex = 1;

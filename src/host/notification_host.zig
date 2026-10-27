@@ -11,14 +11,19 @@ pub const Window = struct {
     owns: *const fn (*anyopaque, notifications.Target) bool,
     activate: *const fn (*anyopaque, notifications.Target) bool,
     feedback: *const fn (*anyopaque, []const u8) void,
+    owner_name: ?*const fn (*anyopaque, ContentOwner) []const u8 = null,
     transfer_presented: ?*const fn (*anyopaque, u64) bool = null,
 };
+pub const ReconnectResult = enum { disconnected, recovered, failed };
+pub const Details = struct { object: []const u8 = "", detail: []const u8 = "" };
 pub const AiCompletion = struct {
+    details: Details = .{},
     result: enum { succeeded, failed, cancelled, unverified },
     resources_released: bool = false,
     final_answer: bool = false,
 };
 pub const TransferCompletion = struct {
+    details: Details = .{},
     result: enum { succeeded, failed, cancelled },
     resources_released: bool,
     notify_complete: bool,
@@ -155,14 +160,19 @@ pub const Host = struct {
             },
             .summary = switch (completion.result) {
                 .succeeded => "AI 回答已就绪",
-                .failed => "AI 请求失败，详情见助手对话",
+                .failed => "AI 请求失败",
                 .cancelled => "AI 请求已停止",
                 .unverified => "AI 执行结果待核查",
             },
             .terminal_confirmed = true,
             .resources_released = completion.resources_released,
             .final_answer = completion.final_answer,
-        });
+        }, .{ .object = completion.details.object, .detail = if (completion.details.detail.len != 0) completion.details.detail else switch (completion.result) {
+            .succeeded => "回答已生成，可在助手对话中查看。",
+            .failed => "请求未完成，请查看助手对话中的错误详情。",
+            .cancelled => "本次请求已停止。",
+            .unverified => "执行结果尚未确认，请查看结果后核查。",
+        } });
     }
     pub fn publishTransfer(self: *Host, owner: ContentOwner, job: u64, attempt: u64, completion: TransferCompletion) !void {
         try self.publishLegacy(.{
@@ -176,13 +186,24 @@ pub const Host = struct {
                 .failed => .failed,
                 .cancelled => .cancelled,
             },
-            .summary = if (completion.result == .succeeded) "文件传输已完成" else "文件传输已结束",
+            .summary = switch (completion.result) {
+                .succeeded => "文件传输已完成",
+                .failed => "文件传输失败",
+                .cancelled => "文件传输已取消",
+            },
             .terminal_confirmed = true,
             .resources_released = completion.resources_released,
             .system_enabled = completion.notify_complete,
-        });
+        }, .{ .object = completion.details.object, .detail = if (completion.details.detail.len != 0) completion.details.detail else switch (completion.result) {
+            .succeeded => "传输任务已完成，可查看任务详情。",
+            .failed => "传输未完成，请查看任务中的失败原因。",
+            .cancelled => "传输已取消，可在任务中查看已传输内容。",
+        } });
     }
-    pub fn publishReconnect(self: *Host, owner: ContentOwner, operation_id: u64, attempt: u64, result: enum { disconnected, recovered, failed }) !void {
+    pub fn publishReconnect(self: *Host, owner: ContentOwner, operation_id: u64, attempt: u64, result: ReconnectResult) !void {
+        return self.publishReconnectDetails(owner, operation_id, attempt, result, .{});
+    }
+    pub fn publishReconnectDetails(self: *Host, owner: ContentOwner, operation_id: u64, attempt: u64, result: ReconnectResult, details: Details) !void {
         try self.publishLegacy(.{
             .event_id = 0,
             .kind = .reconnect,
@@ -200,9 +221,13 @@ pub const Host = struct {
                 .failed => "SSH 重连未成功",
             },
             .terminal_confirmed = true,
-        });
+        }, .{ .object = details.object, .detail = if (details.detail.len != 0) details.detail else switch (result) {
+            .disconnected => "连接已中断，请查看连接状态。",
+            .recovered => "SSH 连接已重新建立。",
+            .failed => "未能重新建立连接，请查看连接日志。",
+        } });
     }
-    fn publishLegacy(self: *Host, value: notifications.Event) !void {
+    fn publishLegacy(self: *Host, value: notifications.Event, details: Details) !void {
         for (self.coordinator.records.items) |record| if (record.event.kind == value.kind and record.event.owner.eql(value.owner) and
             record.event.operation_id == value.operation_id and record.event.attempt_or_turn_id == value.attempt_or_turn_id and record.event.result == value.result) return;
         if (self.next_event == 0) return error.NotificationEventIdentityExhausted;
@@ -219,6 +244,11 @@ pub const Host = struct {
                 .ai_ready => "host.ai_ready",
             };
             const previous = self.coordinator.factFor(.{ .definition_id = definition_id, .owner = .{ .window_id = @backingInt(window.id), .content = event.owner }, .operation_id = event.operation_id, .attempt_id = event.attempt_or_turn_id, .event_revision = 1, .phase = .accepted, .title = event.summary });
+            const actions = [_]notifications.NotificationAction{.{ .kind = .locate_owner, .label = switch (event.kind) {
+                .transfer_done => "查看传输",
+                .reconnect => "查看连接",
+                .ai_ready => "查看对话",
+            } }};
             const presentation = try self.coordinator.publishNotification(.{
                 .definition_id = definition_id,
                 .owner = .{ .window_id = @backingInt(window.id), .content = event.owner },
@@ -240,6 +270,10 @@ pub const Host = struct {
                     else => .info,
                 },
                 .title = event.summary,
+                .detail = bounded(details.detail, 4096),
+                .object_name = bounded(details.object, 1024),
+                .owner_name = if (window.value.owner_name) |resolve| bounded(resolve(window.value.context, event.owner), 256) else "",
+                .actions = &actions,
             }, clock);
             if (event.kind == .transfer_done) if (window.value.transfer_presented) |is_presented| {
                 if (is_presented(window.value.context, event.operation_id)) self.coordinator.dismissNotification(presentation.fact_id);
@@ -317,7 +351,7 @@ pub const Host = struct {
         const action = record.event.actions[action_index];
         if (action.kind == .locate_owner) {
             if (!record.owner_ended) for (self.windows.items) |window| {
-                if (window.value.activate(window.value.context, .{ .owner = record.event.owner.content, .kind = .reconnect, .operation_id = record.event.operation_id, .attempt_or_turn_id = record.event.attempt_id })) return;
+                if (window.value.activate(window.value.context, .{ .owner = record.event.owner.content, .kind = if (std.mem.eql(u8, record.event.definition_id, "host.transfer_done")) .transfer_done else if (std.mem.eql(u8, record.event.definition_id, "host.ai_ready")) .ai_ready else .reconnect, .operation_id = record.event.operation_id, .attempt_or_turn_id = record.event.attempt_id })) return;
             };
             self.feedbackFor(null, "该通知所属内容已不可用");
             return error.NotificationOwnerEnded;
@@ -487,3 +521,9 @@ pub const Facade = struct {
         return self.publish(value);
     }
 };
+
+fn bounded(text: []const u8, limit: usize) []const u8 {
+    var len = @min(text.len, limit);
+    while (len > 0 and !std.unicode.utf8ValidateSlice(text[0..len])) len -= 1;
+    return text[0..len];
+}

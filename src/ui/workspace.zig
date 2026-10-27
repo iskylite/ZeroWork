@@ -27,6 +27,7 @@ const host_actions = @import("../host/actions.zig");
 const keybindings = @import("../config/keybindings.zig");
 const terminal_service = @import("../host/terminal_service.zig");
 const local_styles = @import("local_session_styles.zig");
+const RemoteNotice = @import("remote_session_notice.zig");
 const session_icon = @import("session_icon.zig");
 const group_view = @import("group_workspace_model.zig");
 const group_close = @import("group_close_controller.zig");
@@ -126,6 +127,10 @@ pub const SessionTab = struct {
     local: bool = false,
     detected_os: session_icon.Os = .unknown,
     local_scope: ?*ui.Scope = null,
+    remote_notice_scope: ?*ui.Scope = null,
+    remote_notice: ?*RemoteNotice.View = null,
+    remote_retrying: bool = false,
+    remote_retry_deadline: ?i128 = null,
     file_scope: ?*ui.Scope = null,
     transfer_trays: [2]?*@import("transfer_manager_view.zig").Panel = .{ null, null },
     plugin_renderer: ?plugin_ui.RendererInstance = null,
@@ -746,6 +751,19 @@ pub const Workspace = struct {
         return null;
     }
 
+    pub fn visibleLocalTerminalTabRect(self: *const Workspace) ?ui.ComputedRect {
+        if (self.tab_rebuild_pending or self.model.dragging) return null;
+        const viewport = (self.strip_viewport orelse return null).globalRect();
+        if (viewport.w <= 0) return null;
+        for (self.tab_nodes.items) |cell| {
+            const index = self.tabIndexById(cell.tab_id) orelse continue;
+            if (!self.tabs.items[index].local) continue;
+            const rect = cell.node.globalRect();
+            if (rect.w > 0 and rect.x >= viewport.x - 0.5 and rect.x + rect.w <= viewport.x + viewport.w + 0.5) return rect;
+        }
+        return null;
+    }
+
     pub fn sessionTab(self: *const Workspace, id: SessionId) ?*SessionTab {
         return if (self.tabIndex(id)) |index| self.tabs.items[index] else null;
     }
@@ -1153,7 +1171,7 @@ pub const Workspace = struct {
             };
             advance.* = @ceil(line.width);
         }
-        self.header_width = @max(0, self.cx.viewport.width - 16);
+        self.header_width = @max(0, self.cx.viewport.width - 2 * @import("shell_styles.zig").outer);
         self.strip_geometry = try tab_layout.calculate(self.header_width, self.strip_advances.items, self.strip_widths.items, self.strip_offset);
         if (self.reveal_active) {
             if (self.model.active) |id| {
@@ -1383,7 +1401,7 @@ pub const Workspace = struct {
     fn pickerDismiss(context: *anyopaque) void {
         const self: *Workspace = @ptrCast(@alignCast(context));
         if (self.picker_anchor) |node| self.cx.setFocus(node) else if (self.picker_focus_return) |id| {
-            if (self.tabIndexById(id)) |index| self.cx.setFocus(self.tabs.items[index].root);
+            if (self.tabIndexById(id)) |index| self.cx.setFocus(if (self.tabs.items[index].terminal) |*terminal| terminal.root else self.tabs.items[index].root);
         }
     }
     fn pickerStatus(context: *anyopaque, id: identity.TabId) []const u8 {
@@ -2711,6 +2729,9 @@ pub const Workspace = struct {
         // dispose their Local parent only after those owned pointers are cleared.
         if (tab.local_scope) |scope| scope.dispose();
         tab.local_scope = null;
+        if (tab.remote_notice_scope) |scope| scope.dispose();
+        tab.remote_notice_scope = null;
+        tab.remote_notice = null;
         if (tab.plugin_renderer) |renderer| renderer.vtable.unmount(renderer.context);
         tab.plugin_renderer = null;
         tab.transfer_trays = .{ null, null };
@@ -3605,18 +3626,22 @@ pub const Workspace = struct {
         const banner = try ui.box(self.cx, local_styles.banner(true), .{});
         try tab.root.appendChild(self.allocator, banner);
         tab.local_banner = banner;
+        banner.meta.ownership.meta.test_id = "local.notice";
         tab.local_spinner = try ui.widgets.Spinner(.{ .size = 16, .stroke_width = 2, .color = app_theme.current().fg_2 }).mount(tab.local_scope.?, self.cx);
         try banner.appendChild(self.allocator, tab.local_spinner.?);
-        tab.local_ended_icon = try ui.iconTint(self.cx, ui.icons.get("circle-check").?, app_theme.current().fg_2, local_styles.icon());
+        tab.local_ended_icon = try ui.iconTint(self.cx, ui.icons.get("terminal").?, app_theme.current().fg_2, local_styles.icon());
         try banner.appendChild(self.allocator, tab.local_ended_icon.?);
         tab.local_failure_icon = try ui.iconTint(self.cx, ui.icons.circle_alert, app_theme.current().danger, local_styles.icon());
         try banner.appendChild(self.allocator, tab.local_failure_icon.?);
-        tab.local_message = try ui.text(self.cx, "正在启动 zsh…", local_styles.title());
-        tab.local_message.?.setStyleInline(self.allocator, .{ .width = .{ .px = 240 }, .min_width = 0, .flex_shrink = 1 });
-        try banner.appendChild(self.allocator, tab.local_message.?);
+        const copy = try ui.box(self.cx, local_styles.copy(), .{});
+        copy.behavior.interaction.a11y = .{ .role = .status, .live = "polite" };
+        try banner.appendChild(self.allocator, copy);
+        tab.local_message = try ui.text(self.cx, "正在启动本地终端…", local_styles.title());
+        tab.local_message.?.meta.ownership.meta.test_id = "local.notice.title";
+        try copy.appendChild(self.allocator, tab.local_message.?);
         tab.local_detail = try ui.text(self.cx, "", local_styles.detail());
-        tab.local_detail.?.style.width = .{ .grow = .{ .min = 0 } };
-        try banner.appendChild(self.allocator, tab.local_detail.?);
+        tab.local_detail.?.meta.ownership.meta.test_id = "local.notice.detail";
+        try copy.appendChild(self.allocator, tab.local_detail.?);
         const cell = try self.allocator.create(ClickCtx);
         var adopted = false;
         errdefer if (!adopted) self.allocator.destroy(cell);
@@ -3628,22 +3653,22 @@ pub const Workspace = struct {
             }
         }.release);
         adopted = true;
-        const cancel = try ui.widgets.Button(.{ .icon_asset = ui.icons.x, .icon_only = true, .icon_size = @as(f32, 16), .icon_tint = app_theme.current().fg_2, .a11y_label = "取消启动", .variant = .ghost, .on_click = self.cx.on(ClickCtx, cell, cancelLocalStart) }).mount(tab.local_scope.?, self.cx);
+        const cancel = try ui.widgets.Button(.{ .label = "取消启动", .variant = .ghost, .size = .sm, .on_click = self.cx.on(ClickCtx, cell, cancelLocalStart) }).mount(tab.local_scope.?, self.cx);
         cancel.setStyleInline(self.allocator, local_styles.cancel());
         cancel.meta.ownership.meta.test_id = "local.start.cancel";
         tab.local_cancel = cancel;
         try banner.appendChild(self.allocator, cancel);
-        const close = try ui.widgets.Button(.{ .icon_asset = ui.icons.x, .icon_only = true, .icon_size = @as(f32, 16), .icon_tint = app_theme.current().fg_2, .a11y_label = "关闭页签", .variant = .ghost, .on_click = self.cx.on(ClickCtx, cell, cancelLocalStart) }).mount(tab.local_scope.?, self.cx);
+        const close = try ui.widgets.Button(.{ .label = "关闭页签", .variant = .ghost, .size = .sm, .on_click = self.cx.on(ClickCtx, cell, cancelLocalStart) }).mount(tab.local_scope.?, self.cx);
         close.setStyleInline(self.allocator, local_styles.cancel());
         close.meta.ownership.meta.test_id = "local.ended.close";
         tab.local_close = close;
         try banner.appendChild(self.allocator, close);
-        const retry = try ui.widgets.Button(.{ .label = "重试启动", .variant = .secondary, .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500, .text_color = app_theme.current().fg_1 }, .on_click = self.cx.on(ClickCtx, cell, retryLocalStart) }).mount(tab.local_scope.?, self.cx);
+        const retry = try ui.widgets.Button(.{ .label = "重试启动", .variant = .primary, .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500 }, .on_click = self.cx.on(ClickCtx, cell, retryLocalStart) }).mount(tab.local_scope.?, self.cx);
         retry.setStyleInline(self.allocator, local_styles.action());
         retry.meta.ownership.meta.test_id = "local.start.retry";
         tab.local_retry = retry;
         try banner.appendChild(self.allocator, retry);
-        const new = try ui.widgets.Button(.{ .label = "新建本地会话", .variant = .secondary, .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500, .text_color = app_theme.current().fg_1 }, .on_click = self.cx.on(ClickCtx, cell, newLocalFromEnded) }).mount(tab.local_scope.?, self.cx);
+        const new = try ui.widgets.Button(.{ .label = "新建终端", .variant = .primary, .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500 }, .on_click = self.cx.on(ClickCtx, cell, newLocalFromEnded) }).mount(tab.local_scope.?, self.cx);
         new.setStyleInline(self.allocator, local_styles.action());
         new.meta.ownership.meta.test_id = "local.ended.new";
         tab.local_new = new;
@@ -3702,19 +3727,36 @@ pub const Workspace = struct {
         tab.local_state = state;
         tab.failed = state == .failed;
         if (tab.local_message) |node| {
-            node.setTextContent(self.allocator, text) catch {};
-            node.setStyleInline(self.allocator, .{ .width = .{ .px = if (state == .starting) 240 else 304 }, .min_width = 0, .flex_shrink = 1 });
+            node.setTextContent(self.allocator, switch (state) {
+                .starting => "正在启动本地终端…",
+                .running => "本地终端",
+                .exited => "本地终端已退出",
+                .failed => "本地终端启动失败",
+                .closing => "正在关闭本地终端…",
+                .cleanup_unknown => "暂时无法确认终端已关闭",
+            }) catch {};
         }
         if (tab.local_banner) |node| {
             node.setStyleInline(self.allocator, local_styles.banner(state == .starting));
             node.setDisplay(if (state == .running) .none else .flex);
         }
-        if (tab.local_detail) |node| node.setTextContent(self.allocator, switch (state) {
-            .failed => "检查初始目录与可执行权限后重试",
-            .exited => "输出保留为只读",
-            .cleanup_unknown => "清理结果未知，保留原会话与请求",
-            else => "",
-        }) catch {};
+        if (tab.local_detail) |node| {
+            var buffer: [512]u8 = undefined;
+            const detail: []const u8 = switch (state) {
+                .starting => "正在准备 zsh 环境，请稍候",
+                .running => "",
+                .failed => std.fmt.bufPrint(&buffer, "{s}；请检查初始目录与可执行权限", .{text}) catch text,
+                .exited => blk: {
+                    const exit_detail = if (std.mem.indexOf(u8, text, " · ")) |offset| text[offset + " · ".len ..] else "";
+                    const prefix: []const u8 = if (std.mem.startsWith(u8, exit_detail, "exit ")) " · 退出码 " else if (std.mem.startsWith(u8, exit_detail, "signal ")) " · 终止信号 " else if (exit_detail.len > 0) " · " else "";
+                    const value = if (std.mem.startsWith(u8, exit_detail, "exit ")) exit_detail[5..] else if (std.mem.startsWith(u8, exit_detail, "signal ")) exit_detail[7..] else exit_detail;
+                    break :blk std.fmt.bufPrint(&buffer, "历史输出仍可查看，继续使用请新建终端{s}{s}", .{ prefix, value }) catch "历史输出仍可查看，继续使用请新建终端";
+                },
+                .closing => "正在释放会话资源，请稍候",
+                .cleanup_unknown => "资源清理结果未知，已保留会话；请稍后查看状态",
+            };
+            node.setTextContent(self.allocator, detail) catch {};
+        }
         if (tab.local_cancel) |node| node.setDisplay(if (state == .starting) .flex else .none);
         if (tab.local_close) |node| node.setDisplay(if (state == .exited or state == .failed) .flex else .none);
         if (tab.local_spinner) |node| node.setDisplay(if (state == .starting or state == .closing) .flex else .none);
@@ -3783,7 +3825,7 @@ pub const Workspace = struct {
                 terminal.releaseCommandDocument();
                 terminal.worker = null;
             }
-            tab.root.behavior.interaction.text_input_client = null;
+            if (tab.terminal) |*terminal| terminal.root.behavior.interaction.text_input_client = null;
             self.cx.refreshTextInputSession();
             if (tab.runtime) |runtime| receipt = runtime.releaseStep(.{ .session_id = tab.id, .retention_days = self.app_config.log.retention_days });
         }
@@ -3947,7 +3989,7 @@ pub const Workspace = struct {
         const previous = job.operation_key orelse return error.MissingOperation;
         if (tab.runtime) |runtime| {
             const state = runtime.reconnectSnapshot() orelse return error.SessionClosed;
-            if (state.key == null or !state.key.?.eql(previous) or state.phase != .waiting or state.cleanup != .released) return error.CleanupNotReleased;
+            if (state.key == null or !state.key.?.eql(previous) or (state.phase != .waiting and state.phase != .ended) or state.cleanup != .released) return error.CleanupNotReleased;
         } else if (!job.ready.load(.acquire) or !job.drained or !job.resource_ledger.snapshot().released()) return error.CleanupNotReleased;
         if (job.progress_history.items.len < 6) try job.progress_history.ensureUnusedCapacity(std.heap.c_allocator, 1);
         try job.retained_cleanup.resetReleased();
@@ -3966,13 +4008,18 @@ pub const Workspace = struct {
         job.cancelled.store(false, .release);
         job.err = null;
         job.cleanup_unknown = false;
-        job.progress_dismissed = false;
+        // Existing terminals keep retry progress inline; authentication still
+        // uses its protected challenge presenter when required.
+        job.progress_dismissed = tab.runtime != null;
         job.operation_key = next;
         tab.generation = generation;
         job.ticket = tab.ticket();
         job.progress.begin(next.attempt_id orelse 0);
         job.ready.store(false, .release);
         tab.failed = false;
+        tab.remote_retrying = true;
+        tab.remote_retry_deadline = null;
+        if (tab.remote_notice) |notice| notice.update(.{ .state = .reconnecting });
         tab.terminal.?.clearPendingPaste();
         tab.terminal.?.paste_confirmation_pending = false;
         if (tab.runtime) |runtime| {
@@ -4010,6 +4057,17 @@ pub const Workspace = struct {
         tab.terminal.?.refreshTombstone();
         self.tab_rebuild_pending = true;
         self.cx.requestRedraw();
+    }
+
+    fn reconnectRemoteNotice(raw: *anyopaque, id: u64) void {
+        const self: *Workspace = @ptrCast(@alignCast(raw));
+        const index = self.tabIndex(id) orelse return;
+        self.reconnectTab(index) catch |err| self.status(@errorName(err));
+    }
+
+    fn closeRemoteNotice(raw: *anyopaque, id: u64) void {
+        const self: *Workspace = @ptrCast(@alignCast(raw));
+        self.requestCloseTab(self.tabIndex(id) orelse return);
     }
 
     /// Updates only controller facts for the same attempt. Native completions
@@ -4051,6 +4109,15 @@ pub const Workspace = struct {
         var snapshot = try HostSnapshot.init(self.allocator, host);
         errdefer snapshot.deinit();
         var terminal = try TerminalViewNode.mount(self.cx);
+        var notice_scope: ?*ui.Scope = null;
+        var owned_pane: ?*ui.Node = null;
+        var terminal_attached = false;
+        errdefer {
+            terminal.releaseBuffers(self.cx);
+            if (notice_scope) |scope| scope.dispose();
+            if (owned_pane) |pane| self.cx.destroyDetached(pane);
+            if (!terminal_attached) self.cx.destroyDetached(terminal.root);
+        }
         terminal.completion_enabled = self.app_config.completion.enabled;
         terminal.palette_observer = self.command_bridge;
         terminal.input_observer = self.input_bridge;
@@ -4061,6 +4128,13 @@ pub const Workspace = struct {
         terminal.setTimestampGutter(self.app_config.ui.timestamp_gutter);
         terminal.setInputLineHighlight(self.app_config.ui.input_line_highlight) catch {};
         terminal.setOutput(self.cx, "正在连接…") catch {};
+        notice_scope = try self.scope.childScope();
+        const pane = try ui.box(self.cx, local_styles.pane(), .{});
+        owned_pane = pane;
+        terminal.root.setStyleInline(self.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0 });
+        const notice = try RemoteNotice.View.mount(self.cx, notice_scope.?, pane, .{ .context = self, .session_id = ticket.session_id, .reconnect = reconnectRemoteNotice, .close = closeRemoteNotice });
+        try pane.appendChild(self.allocator, terminal.root);
+        terminal_attached = true;
         tab.* = .{
             .id = ticket.session_id,
             .tab_id = try tab_ids.allocate(),
@@ -4069,13 +4143,15 @@ pub const Workspace = struct {
             .host_id = host_id,
             .host_index = host_index,
             .host_snapshot = snapshot,
-            .root = terminal.root,
+            .root = pane,
+            .remote_notice_scope = notice_scope,
+            .remote_notice = notice,
             .terminal = terminal,
         };
         tab.setTitle(host.name);
         try self.installTabModel(tab);
         try tab.terminal.?.attachSearch(self.scope);
-        try self.terminal_area.appendChild(self.cx.allocator, terminal.root);
+        try self.terminal_area.appendChild(self.cx.allocator, pane);
         // After publishing, every failure is represented by this tab. No worker
         // owns a pointer to it, so closing it cannot invalidate a pending job.
         self.tabs.appendAssumeCapacity(tab);
@@ -4220,6 +4296,32 @@ pub const Workspace = struct {
         for (self.tabs.items) |tab| {
             if (tab.local or tab.closing) continue;
             const runtime = tab.runtime orelse continue;
+            if (tab.remote_notice) |notice| if (runtime.reconnectSnapshot()) |captured| {
+                var state = RemoteNotice.Snapshot.fromRuntime(captured, tab.remote_retrying);
+                state.buffer_input = self.app_config.ssh.buffer_input;
+                if (tab.remote_retry_deadline) |deadline| {
+                    const remaining = @max(0, deadline - @import("../platform/realtime.zig").monotonicNs());
+                    state.auto_retry_seconds = @intCast(@divTrunc(remaining + std.time.ns_per_s - 1, std.time.ns_per_s));
+                }
+                if (state.state == .connected) tab.remote_retrying = false;
+                if (state.state == .reconnecting) tab.remote_retrying = true;
+                notice.update(state);
+                // Keep input and contextual actions in step with the same facts,
+                // including a failed successor after the first transport loss.
+                if (tab.terminal) |*terminal| switch (state.state) {
+                    .exited, .disconnected, .retry_failed => {
+                        if (terminal.tombstone.state != .ended) {
+                            terminal.tombstone.end(state.title());
+                            terminal.refreshTombstone();
+                        }
+                    },
+                    .reconnecting => {
+                        terminal.tombstone.state = .reconnecting;
+                        terminal.refreshTombstone();
+                    },
+                    .connected => {},
+                };
+            };
             const detection = runtime.osDetection();
             if (detection.pending) self.cx.scheduleRedrawAfterNs(100 * std.time.ns_per_ms);
             const kind = detection.kind;
@@ -4268,7 +4370,7 @@ pub const Workspace = struct {
         tab.failed = true;
         tab.terminal.?.removeFrameHook(self.cx);
         tab.terminal.?.worker = null;
-        tab.root.behavior.interaction.text_input_client = null;
+        if (tab.terminal) |*terminal| terminal.root.behavior.interaction.text_input_client = null;
         self.cx.refreshTextInputSession();
         self.notifyConnectionFailure(job, message);
         self.cancelSessionCreation(tab.id);
@@ -4308,7 +4410,7 @@ pub const Workspace = struct {
             workspace.drainCloseReceipts();
             if (workspace.pollGroupWorkspace()) return .needs_layout;
             if ((workspace.close_others_keep != null or workspace.window_close_request != null) and (workspace.confirming_id == null or workspace.window_close_reconcile)) workspace.continueCloseOthers();
-            if (workspace.header_width != @max(0, workspace.cx.viewport.width - 16)) {
+            if (workspace.header_width != @max(0, workspace.cx.viewport.width - 2 * @import("shell_styles.zig").outer)) {
                 workspace.reveal_active = true;
                 workspace.tab_rebuild_pending = true;
             }
@@ -4603,17 +4705,21 @@ test "Local presentation has independent owners and keeps ended output beneath i
     try std.testing.expectApproxEqAbs(pane.x + 16, starting.x, 0.1);
     try std.testing.expectApproxEqAbs(pane.y + 16, starting.y, 0.1);
     try std.testing.expectApproxEqAbs(pane.w - 32, starting.w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 34), starting.h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 64), starting.h, 0.1);
     try std.testing.expectApproxEqAbs(pane.y, tab.terminal.?.root.globalRect().y, 0.1);
     workspace.updateLocalState(second, .failed, "无法启动 /bin/zsh · EACCES");
     cx.layout();
-    try std.testing.expectApproxEqAbs(@as(f32, 38), tab.local_banner.?.globalRect().h, 0.1);
-    try std.testing.expectApproxEqAbs(pane.y + 38, tab.terminal.?.root.globalRect().y, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 64), tab.local_banner.?.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(pane.y + 64, tab.terminal.?.root.globalRect().y, 0.1);
     try std.testing.expect(tab.local_retry.?.style.display != .none);
+    try std.testing.expectEqualStrings("本地终端启动失败", tab.local_message.?.getText().?.content);
+    try std.testing.expect(std.mem.indexOf(u8, tab.local_detail.?.getText().?.content, "EACCES") != null);
     try std.testing.expect(tab.local_cancel.?.style.display == .none);
     try workspace.renameTab(1, "我的终端");
     workspace.updateLocalState(second, .exited, "本地 zsh 已退出 · exit 0");
     try std.testing.expectEqualStrings("我的终端", workspace.model.tabs.items[1].name());
+    try std.testing.expectEqualStrings("本地终端已退出", tab.local_message.?.getText().?.content);
+    try std.testing.expectEqualStrings("历史输出仍可查看，继续使用请新建终端 · 退出码 0", tab.local_detail.?.getText().?.content);
     try std.testing.expect(tab.local_new.?.style.display != .none);
     try std.testing.expect(tab.local_close.?.style.display != .none);
     try std.testing.expect(tab.local_retry.?.style.display == .none);
@@ -4676,11 +4782,11 @@ test "reconnect lifecycle is ended-only and rolls back after spawn failure" {
 
     // This is the rollback performed by reconnectTab's spawnSession error
     // path.  It must make the reconnect action reachable again, rather than
-    // leaving the source tab permanently in "Reconnecting…".
+    // leaving the source tab permanently in "正在重连…".
     tombstone.end("reconnect failed");
     try std.testing.expectEqual(@TypeOf(tombstone.state).ended, tombstone.state);
     try std.testing.expect(tombstone.canReconnect());
-    try std.testing.expectEqualStrings("Reconnect", tombstone.reconnectLabel());
+    try std.testing.expectEqualStrings("重新连接", tombstone.reconnectLabel());
 }
 
 test "reconnect uses an owned host snapshot after source storage changes" {

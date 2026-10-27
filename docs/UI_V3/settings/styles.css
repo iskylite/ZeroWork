@@ -140,3 +140,8 @@ body[data-integrated-settings] .future-only{display:none}
 .cursor-radio-dot{display:flex;align-items:center;justify-content:center;width:18px;height:18px;border:1.5px solid var(--muted);border-radius:50%;flex-shrink:0}.selected .cursor-radio-dot{background:var(--accent);border-color:var(--accent)}.selected .cursor-radio-dot::after{content:"";width:9px;height:9px;border-radius:50%;background:#fff}.cursor-options button:hover .cursor-radio-dot{border-color:var(--accent)}
 
 .model-meta{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}.model-capability{display:inline-flex;align-items:center}.model-capability svg{width:14px;height:14px}
+
+/* Icon + text headings for model, confirmation and shortcut overlays. */
+.semantic-heading{display:flex;align-items:center;gap:8px;font-weight:700}.semantic-heading>span:first-child{display:flex;color:var(--accent)}.semantic-heading svg{width:18px;height:18px;flex-shrink:0}.semantic-heading.danger>span:first-child{color:var(--danger)}
+
+.semantic-heading.danger{color:var(--fg)}

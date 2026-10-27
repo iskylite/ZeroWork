@@ -199,21 +199,21 @@ pub fn readonlyValue(_: *const ui.ThemeTokens) ui.TextStyle {
     return style;
 }
 
-// Figma 235:386917 / 358:1343982: 720×286 shell, 692×118 card.
-pub const discard_height: f32 = 286;
+// Compact discard confirmation: one consequence and two adjacent actions.
+pub const discard_width: f32 = 440;
+pub const discard_height: f32 = 192;
 pub fn discardCard() ui.BoxStyle {
-    var value = card(undefined);
-    value.height = .{ .px = 118 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .top = 10, .bottom = 12 }, .background = ui.Color.TRANSPARENT, .min_width = 0 };
+}
+pub fn discardFooter() ui.BoxStyle {
+    var value = row(62);
+    value.padding = .{ .left = 20, .right = 20, .top = 14, .bottom = 14 };
+    value.justify = .end;
+    value.gap = 8;
     return value;
 }
-pub fn discardLine() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0, .flex_shrink = 0 };
-}
-pub fn discardText(secondary: bool) ui.TextStyle {
-    var value = text(if (secondary) 11 else 12, 400, false);
-    value.color = if (secondary) theme.current().fg_2 else theme.current().fg_1;
-    value.line_height = 16.0 / @as(f32, if (secondary) 11 else 12);
-    return value;
+pub fn discardText(_: bool) ui.TextStyle {
+    return .{ .font_size = 12, .font_weight = 400, .line_height = 1.5, .color = theme.current().fg_2, .wrap = .word };
 }
 
 pub fn topFade(_: *const ui.ThemeTokens) ui.BoxStyle {
@@ -240,6 +240,12 @@ pub fn summaryOptions(_: *const ui.ThemeTokens) ui.TextStyle {
 }
 
 // Field error prototype 319:703127: 10.5px / 16px, input32 + gap4 + error16.
+// Radios communicate selection through their circle; the theme's transparent
+// focus token otherwise opts the entire option into a filled focus surface.
+pub fn radioFocus() ui.FocusRingConfig {
+    return .{ .color = theme.current().accent, .width = 0, .offset = 0 };
+}
+
 pub fn fieldRow() ui.BoxStyle {
     var value = row(52);
     value.height = .{ .fit = .{} };

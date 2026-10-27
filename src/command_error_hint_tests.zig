@@ -162,9 +162,13 @@ test "AI error hint real widgets preserve focus until click and only open origin
     try std.testing.expectEqual(@as(usize, 0), sink.calls);
     try std.testing.expectEqual(@as(@TypeOf(view.root.style.display), .flex), view.root.style.display);
     try std.testing.expectEqual(@as(f32, 340), view.root.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 100), view.root.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 108), view.open.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 28), view.open.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 109), view.root.globalRect().h);
+    try std.testing.expectEqualStrings("命令  false", view.command.getText().?.content);
+    try std.testing.expectEqualStrings("输出  失败 output", view.output.getText().?.content);
+    try std.testing.expect(view.detail.parent == view.exit_tag);
+    try std.testing.expectEqual(@as(f32, 20), view.exit_tag.globalRect().h);
+    try std.testing.expect(view.open.globalRect().w >= view.open_text.globalRect().w + 20);
+    try std.testing.expectEqual(@as(f32, 24), view.open.globalRect().h);
     view.activate();
     view.activate();
     try std.testing.expectEqual(@as(usize, 1), sink.calls);
@@ -202,7 +206,7 @@ test "AI error hint actual mounted paint follows global themes and closing setti
         cx.layout();
         try std.testing.expectEqual(@as(f32, 276), view.root.globalRect().w);
         try std.testing.expectEqual(theme.current().fg_1, view.title.getText().?.color);
-        try std.testing.expectEqual(theme.current().fg_2, view.detail.getText().?.color);
+        try std.testing.expectEqual(theme.current().danger_ink, view.detail.getText().?.color);
     }
     view.configure(owner, false, .{ .context = &sink, .on_open = Sink.open });
     view.activate();
@@ -245,4 +249,54 @@ test "AI error hint sequence cutoff and reconnect reset keep old running command
     try std.testing.expect(!try observe(&model, &adapter));
     _ = try adapter.feed(failure);
     try std.testing.expect(try observe(&model, &adapter));
+}
+
+test "AI error hint output preview excludes previous output and shell prompts" {
+    var adapter = try Adapter.init(a, 12, 80);
+    defer adapter.destroy();
+    _ = try adapter.feed("old unrelated output\r\n" ++ failure ++ "\x1b]133;A\x07next prompt % ");
+    var projection = try adapter.copyProjection(a);
+    defer projection.deinit(a);
+    const preview = try policy.outputPreview(a, &projection);
+    defer a.free(preview);
+    try std.testing.expectEqualStrings("失败 output", preview);
+}
+
+test "AI error hint output preview handles empty output and bounded Unicode" {
+    var adapter = try Adapter.init(a, 20, 80);
+    defer adapter.destroy();
+    _ = try adapter.feed("old output\r\n\x1b]133;A\x07% \x1b]133;B\x07false\r\n\x1b]133;C\x07\x1b]133;D;1\x07\x1b]133;A\x07% ");
+    var empty = try adapter.copyProjection(a);
+    defer empty.deinit(a);
+    const no_output = try policy.outputPreview(a, &empty);
+    defer a.free(no_output);
+    try std.testing.expectEqualStrings("", no_output);
+    _ = try adapter.feed("\x1b]133;B\x07test\r\n\x1b]133;C\x07");
+    for (0..100) |_| _ = try adapter.feed("错误详情");
+    _ = try adapter.feed("\r\n\x1b]133;D;1\x07");
+    var long = try adapter.copyProjection(a);
+    defer long.deinit(a);
+    const preview = try policy.outputPreview(a, &long);
+    defer a.free(preview);
+    try std.testing.expect(preview.len <= 515);
+    try std.testing.expect(std.unicode.utf8ValidateSlice(preview));
+    try std.testing.expect(std.mem.endsWith(u8, preview, "…"));
+}
+
+test "AI error hint exit tag maps success interruption and failure across themes" {
+    const styles = @import("ui/command_error_hint_styles.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        try std.testing.expectEqual(theme.current().ok_ink, styles.exitInk(0));
+        for ([_]i32{ 130, 143 }) |code| {
+            try std.testing.expectEqual(theme.current().warn_ink, styles.exitInk(code));
+            try std.testing.expectEqual(theme.current().warn.withAlpha(23), styles.exitTagFor(code).background.?);
+        }
+        for ([_]i32{ 1, 2, 126, 127, 137, 255 }) |code| {
+            try std.testing.expectEqual(theme.current().danger_ink, styles.exitInk(code));
+            try std.testing.expectEqual(theme.current().danger.withAlpha(23), styles.exitTagFor(code).background.?);
+        }
+    }
 }

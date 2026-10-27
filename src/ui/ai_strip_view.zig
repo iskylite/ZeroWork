@@ -39,8 +39,8 @@ pub const View = struct {
         self.root.style.justify = .center;
         self.root.style.gap = 0;
         const parent = (self.root.parent orelse return).globalRect();
-        const x = rect.x + (rect.w - 88) / 2 - parent.x;
-        const y = rect.y - parent.y;
+        const x = rect.x + (rect.w - S.width) / 2 - parent.x;
+        const y = rect.y + rect.h - parent.y;
         const ext = self.root.style.ensureExtPanic(self.cx.allocator);
         if (ext.inset.left != .px or ext.inset.top != .px or @abs(ext.inset.left.px - x) > 0.5 or @abs(ext.inset.top.px - y) > 0.5) {
             ext.inset = .{ .left = .{ .px = x }, .top = .{ .px = y } };

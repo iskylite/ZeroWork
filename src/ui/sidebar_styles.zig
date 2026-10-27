@@ -2,7 +2,7 @@
 const std = @import("std");
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
-pub const expanded_width: f32 = 300;
+pub const expanded_width: f32 = @import("sidebar_model.zig").default_width;
 pub const collapsed_width: f32 = 48;
 pub const host_height: f32 = 36;
 pub const group_height: f32 = 26;
@@ -10,7 +10,7 @@ pub const tail_width: f32 = 36;
 pub const action_size: f32 = 24;
 
 pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = expanded_width }, .height = .fill(), .direction = .column, .flex_shrink = 0, .background = theme.current().surface_1, .border = .{ .radius = 11 }, .overflow = .hidden };
+    return .{ .width = .{ .px = expanded_width }, .height = .fill(), .direction = .column, .flex_shrink = 0, .background = theme.current().surface_1, .shadow = @import("shell_styles.zig").cardShadow(), .inset_shadow = @import("shell_styles.zig").cardHighlight(), .border = .{ .radius = 11 }, .overflow = .hidden };
 }
 pub fn full() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .column, .min_height = 0, .padding = .{ .top = 12, .left = 10, .right = 10, .bottom = 10 }, .gap = 14 };

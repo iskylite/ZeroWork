@@ -99,6 +99,9 @@ pub const View = struct {
         try preview_parent.appendChild(cx.allocator, self.panel);
         const heading = try ui.boxStyled(cx, S.heading, .{});
         try self.panel.appendChild(cx.allocator, heading);
+        const title_icon = try ui.iconTint(cx, ui.icons.image, S.theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        title_icon.meta.ownership.meta.test_id = "ai.image.preview.title.icon";
+        try heading.appendChild(cx.allocator, title_icon);
         const title = try ui.textStyled(cx, S.headingText, "图片预览");
         title.setStyleInline(cx.allocator, S.fillLabel());
         try heading.appendChild(cx.allocator, title);

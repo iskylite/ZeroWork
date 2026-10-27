@@ -38,6 +38,9 @@ pub const FeedBridge = struct {
     last_publish_ms: i64 = 0,
     publication_lock: std.atomic.Value(bool) = .init(false),
     publication: ?Publication = null,
+    /// Local surfaces consume structured projections. Their owner publishes
+    /// text from that same projection after draining the output batch.
+    deferred_projection: bool = false,
 
     /// A main-thread value receipt for bytes actually accepted by TextSlot.
     /// A throttled/failed publication keeps its preceding receipt unchanged.
@@ -68,6 +71,10 @@ pub const FeedBridge = struct {
     /// cadence. All publication errors are contained: backpressure defers
     /// to the next worker step instead of failing the connection.
     pub fn publishTextFrame(self: *FeedBridge, now_ms: i64) void {
+        if (self.deferred_projection) {
+            self.republish_pending = true;
+            return;
+        }
         const slot = self.text_slot orelse return;
         // Uniform cadence for BOTH paths: an owed retry must also wait out
         // the interval. An earlier "pending bypasses the check" variant let
@@ -93,6 +100,21 @@ pub const FeedBridge = struct {
     /// the worker step loop, not from the read path.
     pub fn publishCurrentText(self: *FeedBridge, now_ms: i64) void {
         self.publishTextFrame(now_ms);
+    }
+
+    pub fn publishProjection(self: *FeedBridge, projection: *const @import("snapshot.zig").Projection, now_ms: i64) !void {
+        const slot = self.text_slot orelse return;
+        if (!slot.canPublish()) return error.ConsumerBehind;
+        const wire = try @import("projection_frame.zig").encode(std.heap.page_allocator, projection, true);
+        defer std.heap.page_allocator.free(wire);
+        const generation = try slot.publish(wire);
+        const snapshot = self.engine.snapshot();
+        while (self.publication_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
+        self.publication = .{ .text_generation = generation, .output_sequence = snapshot.output_sequence, .vt_version = projection.version };
+        self.publication_lock.store(false, .release);
+        self.last_publish_ms = now_ms;
+        self.republish_pending = false;
+        @import("../platform/presentation_wakeup.zig").notify();
     }
 
     fn publishTextFrameInner(self: *FeedBridge, slot: *TextSlot) !void {

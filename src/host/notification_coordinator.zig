@@ -218,7 +218,7 @@ pub const Coordinator = struct {
         const definition = self.definitionFor(event.definition_id) orelse return error.UnknownNotificationDefinition;
         if (definition.version != event.definition_version) return error.NotificationDefinitionVersionMismatch;
         if (event.owner.window_id == 0 or event.operation_id == 0 or event.event_revision == 0 or event.attempt_id == 0) return error.InvalidNotificationIdentity;
-        if (event.title.len == 0 or event.title.len > 256 or event.detail.len > 4096 or event.owner_name.len > 256 or event.actions.len > 3) return error.InvalidNotificationContent;
+        if (event.title.len == 0 or event.title.len > 256 or event.detail.len > 4096 or event.owner_name.len > 256 or event.object_name.len > 1024 or event.actions.len > 3) return error.InvalidNotificationContent;
         for (event.actions) |action| if (action.label.len == 0 or action.label.len > 128 or (action.kind == .safe_query and action.action_id == 0)) return error.InvalidNotificationAction;
         for (self.notification_records.items) |*record| if (sameNotification(record.event, event)) {
             if (event.event_revision <= record.event.event_revision) return .{ .fact_id = record.fact_id, .duplicate = true, .updated = false };
@@ -562,6 +562,7 @@ pub const NotificationEvent = struct {
     title: []const u8,
     detail: []const u8 = "",
     owner_name: []const u8 = "",
+    object_name: []const u8 = "",
     /// Host channel gate, in addition to the immutable definition and saved policy.
     system_enabled: bool = true,
     actions: []const NotificationAction = &.{},
@@ -606,6 +607,7 @@ fn copyNotification(allocator: std.mem.Allocator, event: NotificationEvent, fact
     copy.title = try owned.dupe(u8, event.title);
     copy.detail = try owned.dupe(u8, event.detail);
     copy.owner_name = try owned.dupe(u8, event.owner_name);
+    copy.object_name = try owned.dupe(u8, event.object_name);
     const actions = try owned.alloc(NotificationAction, event.actions.len);
     for (event.actions, 0..) |action, i| {
         actions[i] = action;

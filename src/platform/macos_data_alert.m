@@ -2,7 +2,7 @@
 #include <string.h>
 
 // Startup failures precede the Zenit window. Never include configuration values.
-int zw_data_startup_alert(const char *code, int reset_pending) {
+int zw_data_startup_alert(const char *code, int reset_pending, const unsigned char *icon_bytes, size_t icon_length) {
     @autoreleasepool {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
@@ -11,6 +11,13 @@ int zw_data_startup_alert(const char *code, int reset_pending) {
         [NSApp finishLaunching];
         NSAlert *alert = [[NSAlert alloc] init];
         alert.alertStyle = NSAlertStyleWarning;
+        // Startup can fail before the configured Dock icon is applied. Use the
+        // embedded current asset rather than LaunchServices' cached bundle icon.
+        NSImage *icon = [[NSImage alloc] initWithData:[NSData dataWithBytes:icon_bytes length:icon_length]];
+        if (icon && icon.valid) {
+            NSApp.applicationIconImage = icon;
+            alert.icon = icon;
+        }
         BOOL already_running = code && strcmp(code, "AlreadyRunning") == 0;
         BOOL credential_access = !reset_pending && code &&
             (strcmp(code, "CredentialDenied") == 0 || strcmp(code, "CredentialLocked") == 0);

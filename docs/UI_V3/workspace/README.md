@@ -17,6 +17,8 @@
 | SSH 认证 | [auth](index.html?mode=auth) | 可直接输入任意演示文本并确认 |
 | SSH 连接失败 | [failed](index.html?mode=failed) | 重试或关闭失败页签 |
 | 空工作区 | [empty](index.html?mode=empty) | 本地 / 快捷连接入口 |
+| 无主机侧栏 | [empty / hosts=empty](index.html?mode=empty&hosts=empty) | [空态](verification/sidebar-empty-no-search.png) |
+| 有主机侧栏 | [local](index.html?mode=local) | [展开搜索](verification/sidebar-hosts-search.png) |
 
 窗口基准：**1440 × 900 CSS / 逻辑像素**，对应 `src/main.zig` 的应用默认窗口。评审工具位于窗口外；页面最小宽度 1488px，较小浏览器通过滚动查看，不缩小字体或控件。设置弹窗不随工作区放大。
 

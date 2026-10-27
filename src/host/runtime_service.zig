@@ -24,6 +24,7 @@ pub const Runtime = struct {
         isAttached: *const fn (*anyopaque) bool,
         isConnected: *const fn (*anyopaque) bool,
         markAttached: *const fn (*anyopaque) void,
+        setScrollbackLimit: ?*const fn (*anyopaque, u32) void = null,
         setInputBufferEnabled: *const fn (*anyopaque, bool) void,
         requestCurrentDirectory: ?*const fn (*anyopaque) anyerror!void = null,
         copyCwd: *const fn (*anyopaque, std.mem.Allocator) anyerror!?[]u8,
@@ -34,6 +35,7 @@ pub const Runtime = struct {
         execService: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!@import("../ai/execbridge.zig").ExecBridge = null,
         transferService: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!*@import("../proto/ssh/shared_transfer_service.zig").Service = null,
         forwardService: ?*const fn (*anyopaque, session.ServiceHandle, ?usize) anyerror!*@import("../proto/ssh/forward_service.zig").Service = null,
+        captureExport: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!@import("../vt/timeline.zig").Timeline.ExportSnapshot = null,
         exportTimeline: *const fn (*anyopaque, std.Io, std.Io.Dir, []const u8) anyerror!void,
         sourceVersion: *const fn (*anyopaque) u64,
         captureAiSelection: *const fn (*anyopaque, std.mem.Allocator, identity.SessionHandle, @import("../vt/engine.zig").Selection, u64) anyerror!@import("ai_terminal_selection.zig").Captured,
@@ -120,6 +122,10 @@ pub const Runtime = struct {
         if (self.torn_down) return;
         return self.vtable.markAttached(self.context);
     }
+    pub fn setScrollbackLimit(self: *Runtime, limit: u32) void {
+        if (self.torn_down) return;
+        if (self.vtable.setScrollbackLimit) |call| call(self.context, limit);
+    }
     pub fn setInputBufferEnabled(self: *Runtime, enabled: bool) void {
         if (self.torn_down) return;
         return self.vtable.setInputBufferEnabled(self.context, enabled);
@@ -163,6 +169,11 @@ pub const Runtime = struct {
         if (self.torn_down) return error.SessionClosed;
         const invoke = self.vtable.forwardService orelse return error.UnsupportedService;
         return invoke(self.context, binding, exit_index);
+    }
+    pub fn captureExport(self: *Runtime, allocator: std.mem.Allocator) !@import("../vt/timeline.zig").Timeline.ExportSnapshot {
+        if (self.torn_down) return error.SessionClosed;
+        const call = self.vtable.captureExport orelse return error.RecordingUnavailable;
+        return call(self.context, allocator);
     }
     pub fn exportTimeline(self: *Runtime, io: std.Io, dir: std.Io.Dir, path: []const u8) anyerror!void {
         if (self.torn_down) return error.SessionClosed;

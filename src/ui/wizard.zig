@@ -37,6 +37,7 @@ pub const Wizard = struct {
     plugin_slot: ?*ui.Node = null,
     modal_body: ?*ui.Node = null,
     parent_presentation_visible: bool = true,
+    presentation_warning: bool = false,
     parent_barrier_color: ui.Color = ui.Color.TRANSPARENT,
     plugin_scope: ?*ui.Scope = null,
     plugin_editor: ?plugin_ui.EditorInstance = null,
@@ -124,7 +125,6 @@ pub const Wizard = struct {
         self.header = header;
         self.protocol_icon = try ui.iconTint(cx, ui.icons.plug, S.theme.current().accent, S.icon(18));
         self.protocol_icon.?.meta.ownership.meta.test_id = "wizard.protocol.icon";
-        self.protocol_icon.?.setDisplay(.none);
         try header.appendChild(self.alloc, self.protocol_icon.?);
         self.title = try ui.text(cx, "新建连接", S.text(13, 700, false));
         self.title.?.meta.ownership.meta.test_id = "wizard.title";
@@ -331,10 +331,9 @@ pub const Wizard = struct {
                 paintPickerText(button, if (chosen) colors.accent_ink else colors.fg_1);
             }
         }
-        const manifest = self.plugin_registry.find(self.protocol_id) orelse return;
         if (self.protocol_icon) |node| {
-            const asset = @import("session_icon.zig").asset(manifest.icons.protocol);
-            if (asset.icon_id) |id| if (asset.pickRep(18)) |rep| node.setIcon(.{ .icon_id = id, .rep = rep, .tint = S.theme.current().accent });
+            const asset = if (self.presentation_warning) ui.icons.circle_alert else ui.icons.plug;
+            if (asset.icon_id) |id| if (asset.pickRep(18)) |rep| node.setIcon(.{ .icon_id = id, .rep = rep, .tint = if (self.presentation_warning) colors.warn_ink else colors.accent });
         }
     }
     fn paintPickerText(node: *ui.Node, color: ui.Color) void {
@@ -398,14 +397,27 @@ pub const Wizard = struct {
             body.setStyleInline(self.alloc, S.modalBody());
             body_changed = true;
         };
-        const width = @min(S.width, @max(1, self.cx.viewport.width - 32));
+        var desired_width = S.width;
+        if (self.plugin_editor) |editor| if (editor.vtable.modal_presentation) |get| {
+            const presentation = get(editor.context);
+            if (std.math.isFinite(presentation.width) and presentation.width > 0) desired_width = @min(presentation.width, S.width);
+            if (self.title) |title| if (title.getText()) |text| {
+                if (!std.mem.eql(u8, text.content, presentation.title)) title.setTextContent(self.alloc, presentation.title) catch {};
+            };
+            if (self.presentation_warning != presentation.warning) {
+                self.presentation_warning = presentation.warning;
+                self.refreshAppearance();
+                body_changed = true;
+            }
+        };
+        const width = @min(desired_width, @max(1, self.cx.viewport.width - 32));
         var preferred = S.max_height;
         if (self.plugin_editor) |editor| if (editor.vtable.preferred_modal_height) |get| if (get(editor.context)) |value| {
             if (std.math.isFinite(value) and value > 0) preferred = @min(value, S.max_height);
         };
         const compact = self.cx.viewport.width <= 860 or self.cx.viewport.height <= 480;
         if (self.header) |header| {
-            const desired_h: f32 = if (compact) 48 else 52;
+            const desired_h: f32 = if (compact and !self.presentation_warning) 48 else 52;
             if (header.style.height != .px or header.style.height.px != desired_h) {
                 header.setStyleInline(self.alloc, .{ .height = .{ .px = desired_h }, .padding = .{ .left = if (compact) 18 else 20, .right = if (compact) 18 else 20, .top = if (compact) 12 else 14, .bottom = if (compact) 12 else 14 } });
                 body_changed = true;

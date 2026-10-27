@@ -351,16 +351,32 @@ int zw_local_poll_exit(ZW_LOCAL_PROCESS *p, ZW_LOCAL_EXIT *out) {
     p->reaped = 1; *out = p->exit; return 1;
 }
 int zw_local_foreground(ZW_LOCAL_PROCESS *p, ZW_LOCAL_FOREGROUND *out) {
-    if (!p->pty || p->closed || scan_members(p) < 0) return 0;
+    if (!p->pty || p->closed || p->reaped || !still_owned(p, &p->leader)) return 0;
     pid_t group = tcgetpgrp(p->fd);
-    for (size_t i = 0; i < p->member_count; ++i) if (p->members[i].pgid == group && still_owned(p, &p->members[i])) {
+    if (group <= 0) return 0;
+    /* Foreground metadata needs only this process group. A machine-wide
+     * session scan here held the terminal mutex across unrelated processes.
+     * Exit/close still perform their full ownership scan before signalling. */
+    int size = proc_listpids(PROC_PGRP_ONLY, (uint32_t)group, NULL, 0);
+    if (size <= 0 || size > INT_MAX - (int)(32 * sizeof(pid_t))) return 0;
+    size += 32 * sizeof(pid_t);
+    pid_t *pids = malloc((size_t)size);
+    if (!pids) return 0;
+    int bytes = proc_listpids(PROC_PGRP_ONLY, (uint32_t)group, pids, size);
+    int found = 0;
+    if (bytes > 0 && bytes < size) for (size_t i = 0; i < (size_t)bytes / sizeof(pid_t); ++i) {
         struct proc_bsdinfo info;
-        if (!process_info(p->members[i].pid, &info)) return 0;
-        *out = (ZW_LOCAL_FOREGROUND){ .pid = p->members[i].pid, .process_group = group, .session_id = p->sid };
+        if (pids[i] <= 0 || !process_info(pids[i], &info) || info.pbi_status == SZOMB ||
+            (pid_t)info.pbi_pgid != group || getsid(pids[i]) != p->sid) continue;
+        Member member = member_info(&info);
+        if (!still_owned(p, &member) || tcgetpgrp(p->fd) != group) continue;
+        *out = (ZW_LOCAL_FOREGROUND){ .pid = pids[i], .process_group = group, .session_id = p->sid };
         memcpy(out->name, info.pbi_name, sizeof(info.pbi_name)); out->name[sizeof(out->name)-1] = 0;
-        return 1;
+        found = 1;
+        break;
     }
-    return 0;
+    free(pids);
+    return found;
 }
 int zw_local_pid(ZW_LOCAL_PROCESS *p) { return p->pid; }
 const char *zw_local_initial_cwd(ZW_LOCAL_PROCESS *p) { return p->cwd; }

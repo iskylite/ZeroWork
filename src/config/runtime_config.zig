@@ -222,7 +222,7 @@ test "failed persistence does not replace the runtime snapshot" {
     defer runtime.deinit();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "blocked", .data = "not a directory" });
     try std.testing.expectError(error.NotDir, runtime.updateSetting(std.testing.io, tmp.dir, "ui", "font_family", .{ .text = "Edited Mono" }));
-    try std.testing.expectEqualStrings("JetBrains Mono", runtime.value.ui.font_family);
+    try std.testing.expectEqualStrings("Monaco", runtime.value.ui.font_family);
     try std.testing.expectEqualStrings("blocked/config.toml", runtime.path);
 }
 

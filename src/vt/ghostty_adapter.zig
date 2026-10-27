@@ -72,6 +72,18 @@ pub const Adapter = struct {
         return .{ .allocator = allocator, .terminal = terminal, .render_state = state, .rows = rows, .cols = cols, .cells = cells, .modes = projection.modes(terminal), .view_store = .{ .allocator = allocator }, .row_metadata = .{ .allocator = allocator } };
     }
 
+    /// Zero means unlimited. Ghostty uses a null pointer for unlimited;
+    /// a numeric zero would disable scrollback instead.
+    pub fn setScrollbackLimit(self: *Adapter, limit: u32) !void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.mutex.unlock();
+        var lines: usize = limit;
+        if (c.ghostty_terminal_set(self.terminal, c.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, null) != c.GHOSTTY_SUCCESS or
+            c.ghostty_terminal_set(self.terminal, c.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, if (limit == 0) null else &lines) != c.GHOSTTY_SUCCESS) return error.ScrollbackConfigurationFailed;
+        try self.refreshLocked();
+        self.refreshVersions();
+    }
+
     pub fn destroy(self: *Adapter) void {
         if (self.cwd_owned) |cwd| self.allocator.free(cwd);
         for (self.events.items) |event| self.allocator.free(event.text);
@@ -419,7 +431,9 @@ pub const Adapter = struct {
     pub fn searchSnapshot(self: *Adapter, allocator: std.mem.Allocator) !@import("search_snapshot.zig").Document {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
-        return @import("ghostty_search.zig").capture(self, allocator);
+        const document = try @import("ghostty_search.zig").capture(self, allocator);
+        self.row_metadata.annotateSearch(self.terminal, document.rows);
+        return document;
     }
     pub fn recordSubmission(self: *Adapter) void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
@@ -789,4 +803,24 @@ test "notification parser counters saturate while feed results retain actual Bel
     try std.testing.expect(!(try adapter.feed("\x1b]0;title\x07")).bell);
     try std.testing.expectEqual(std.math.maxInt(u64), adapter.snapshot().output_sequence);
     try std.testing.expectEqual(std.math.maxInt(u64), adapter.snapshot().bell_count);
+}
+
+test "terminal scrollback limits preserve unlimited zero and finite line configuration" {
+    var adapter = try Adapter.init(std.testing.allocator, 3, 40);
+    defer adapter.destroy();
+    try adapter.setScrollbackLimit(25000);
+    var lines: usize = 0;
+    if (c.ghostty_terminal_get(adapter.terminal, c.GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_LINES, &lines) != c.GHOSTTY_SUCCESS) return error.GhosttyGetFailed;
+    try std.testing.expectEqual(@as(usize, 25000), lines);
+    try adapter.setScrollbackLimit(0);
+    for (0..1000) |i| {
+        var buffer: [32]u8 = undefined;
+        _ = try adapter.feed(try std.fmt.bufPrint(&buffer, "retained-row-{d}\r\n", .{i}));
+    }
+    var projection_value = try adapter.copyProjection(std.testing.allocator);
+    defer projection_value.deinit(std.testing.allocator);
+    try std.testing.expect(projection_value.scrollback.total_rows >= 1000);
+    try adapter.setScrollbackLimit(100);
+    if (c.ghostty_terminal_get(adapter.terminal, c.GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_LINES, &lines) != c.GHOSTTY_SUCCESS) return error.GhosttyGetFailed;
+    try std.testing.expectEqual(@as(usize, 100), lines);
 }

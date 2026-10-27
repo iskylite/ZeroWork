@@ -14,7 +14,15 @@ pub const Props = struct {
 pub fn render(cx: *ui.Cx, scope: *ui.Scope, dialog: *ui.Node, body: *ui.Node, props: Props) !*ui.Node {
     dialog.setStyleInline(cx.allocator, styles.dialog(props.partial));
     body.setStyleInline(cx.allocator, styles.body());
-    try label(cx, body, if (props.plan.phase == .closing) "正在关闭组内会话" else if (props.partial) "部分成员尚未关闭" else "关闭组内全部会话？", styles.slot(12, 20), styles.title());
+    var heading_style = styles.slot(12, 20);
+    heading_style.direction = .row;
+    heading_style.align_items = .center;
+    heading_style.gap = 8;
+    const heading = try ui.box(cx, heading_style, .{});
+    heading.meta.ownership.meta.test_id = "groups.close.heading";
+    try body.appendChild(cx.allocator, heading);
+    try heading.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.circle_alert, theme.current().warn_ink, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 }));
+    try label(cx, heading, if (props.plan.phase == .closing) "正在关闭组内会话" else if (props.partial) "部分成员尚未关闭" else "关闭组内全部会话？", .{ .width = .fill(), .min_width = 0 }, styles.title());
     var buf: [512]u8 = undefined;
     const counts = props.plan.counts();
     const summary = if (props.partial) try std.fmt.bufPrint(&buf, "{s} · 已关闭 {d} · 未关闭 {d} · 待核实 {d}", .{ props.group_name, counts.closed, counts.unclosed, counts.unknown }) else try std.fmt.bufPrint(&buf, "{s} · {d} 个会话", .{ props.group_name, props.plan.approvalCount() });

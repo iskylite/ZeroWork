@@ -41,7 +41,8 @@ pub const HostConfig = struct {
     terminal_type: []const u8 = "xterm-256color",
     /// Programmatic configs specify their values; the parser records omitted keys.
     terminal_type_explicit: bool = true,
-    scrollback: u32 = 50000,
+    scrollback: u32 = 25000,
+    scrollback_explicit: bool = false,
     keepalive: bool = true,
     compression: bool = false,
     compression_explicit: bool = true,
@@ -493,7 +494,8 @@ pub const Registry = struct {
             try writer.writeAll("\nterminal_type = ");
             try writeString(writer, host.terminal_type);
         }
-        try writer.print("\nscrollback = {d}\nkeepalive = {}", .{ host.scrollback, host.keepalive });
+        if (host.scrollback_explicit or host.scrollback != 25000) try writer.print("\nscrollback = {d}", .{host.scrollback});
+        try writer.print("\nkeepalive = {}", .{host.keepalive});
         if (host.compression_explicit) try writer.print("\ncompression = {}", .{host.compression});
         try writer.print("\nsocks_enabled = {}\nsocks_port = {d}\nsocks_bind = ", .{ host.socks_enabled, host.socks_port });
         try writeString(writer, host.socks_bind);
@@ -775,7 +777,8 @@ const Builder = struct {
     ts_default: bool = true,
     terminal_type: []const u8 = "xterm-256color",
     terminal_type_explicit: bool = false,
-    scrollback: u32 = 50000,
+    scrollback: u32 = 25000,
+    scrollback_explicit: bool = false,
     keepalive: bool = true,
     compression: bool = false,
     compression_explicit: bool = false,
@@ -860,7 +863,10 @@ const Builder = struct {
             }
             return;
         }
-        if (std.mem.eql(u8, key, "name")) self.name = try parseString(allocator, value) else if (std.mem.eql(u8, key, "host")) self.host = try parseString(allocator, value) else if (std.mem.eql(u8, key, "port")) self.port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue else if (std.mem.eql(u8, key, "user")) self.user = try parseString(allocator, value) else if (std.mem.eql(u8, key, "auth")) try self.parseAuth(allocator, value) else if (std.mem.eql(u8, key, "totp_secret_ref")) self.totp_secret_ref = try parseString(allocator, value) else if (std.mem.eql(u8, key, "totp_secret")) self.totp_secret = try parseString(allocator, value) else if (std.mem.eql(u8, key, "jump_chain")) self.jump_chain = try parseStringArray(allocator, value) else if (std.mem.eql(u8, key, "startup_commands")) self.startup_commands = try parseStringArray(allocator, value) else if (std.mem.eql(u8, key, "group")) self.group = try parseString(allocator, value) else if (std.mem.eql(u8, key, "ts_default")) self.ts_default = try parseBool(value) else if (std.mem.eql(u8, key, "terminal_type")) self.terminal_type = try parseString(allocator, value) else if (std.mem.eql(u8, key, "socks_bind")) self.socks_bind = try parseString(allocator, value) else if (std.mem.eql(u8, key, "keepalive")) self.keepalive = try parseBool(value) else if (std.mem.eql(u8, key, "compression")) self.compression = try parseBool(value) else if (std.mem.eql(u8, key, "socks_enabled")) self.socks_enabled = try parseBool(value) else if (std.mem.eql(u8, key, "socks_auto_start")) self.socks_auto_start = try parseBool(value) else if (std.mem.eql(u8, key, "scrollback")) self.scrollback = std.fmt.parseInt(u32, value, 10) catch return error.InvalidValue else if (std.mem.eql(u8, key, "socks_port")) self.socks_port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue else if (std.mem.eql(u8, key, "socks_exit")) self.socks_exit = std.fmt.parseInt(usize, value, 10) catch return error.InvalidValue else self.unknown_fields = try appendRaw(allocator, self.unknown_fields, key, value);
+        if (std.mem.eql(u8, key, "name")) self.name = try parseString(allocator, value) else if (std.mem.eql(u8, key, "host")) self.host = try parseString(allocator, value) else if (std.mem.eql(u8, key, "port")) self.port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue else if (std.mem.eql(u8, key, "user")) self.user = try parseString(allocator, value) else if (std.mem.eql(u8, key, "auth")) try self.parseAuth(allocator, value) else if (std.mem.eql(u8, key, "totp_secret_ref")) self.totp_secret_ref = try parseString(allocator, value) else if (std.mem.eql(u8, key, "totp_secret")) self.totp_secret = try parseString(allocator, value) else if (std.mem.eql(u8, key, "jump_chain")) self.jump_chain = try parseStringArray(allocator, value) else if (std.mem.eql(u8, key, "startup_commands")) self.startup_commands = try parseStringArray(allocator, value) else if (std.mem.eql(u8, key, "group")) self.group = try parseString(allocator, value) else if (std.mem.eql(u8, key, "ts_default")) self.ts_default = try parseBool(value) else if (std.mem.eql(u8, key, "terminal_type")) self.terminal_type = try parseString(allocator, value) else if (std.mem.eql(u8, key, "socks_bind")) self.socks_bind = try parseString(allocator, value) else if (std.mem.eql(u8, key, "keepalive")) self.keepalive = try parseBool(value) else if (std.mem.eql(u8, key, "compression")) self.compression = try parseBool(value) else if (std.mem.eql(u8, key, "socks_enabled")) self.socks_enabled = try parseBool(value) else if (std.mem.eql(u8, key, "socks_auto_start")) self.socks_auto_start = try parseBool(value) else if (std.mem.eql(u8, key, "scrollback")) {
+            self.scrollback = std.fmt.parseInt(u32, value, 10) catch return error.InvalidValue;
+            self.scrollback_explicit = true;
+        } else if (std.mem.eql(u8, key, "socks_port")) self.socks_port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue else if (std.mem.eql(u8, key, "socks_exit")) self.socks_exit = std.fmt.parseInt(usize, value, 10) catch return error.InvalidValue else self.unknown_fields = try appendRaw(allocator, self.unknown_fields, key, value);
     }
 
     fn parseAuth(self: *Builder, allocator: std.mem.Allocator, value: []const u8) !void {
@@ -881,7 +887,7 @@ const Builder = struct {
         if (self.auth_mode) |mode| if ((self.identity_file != null or self.password != null or self.password_ref != null) and mode != inferred) return error.AmbiguousCredential;
         if (self.route.len != 0 and self.jump_chain.len != 0) return error.ConflictingRoute;
         if (self.group != null and self.asset_group_id != null) return error.ConflictingGroup;
-        const result: HostConfig = .{ .connection_id = self.connection_id, .revision = self.revision, .protocol = self.protocol, .protocol_id = self.protocol_id, .payload_version = self.payload_version, .plugin_payload = self.plugin_payload, .unknown_fields = self.unknown_fields, .unknown_options = self.unknown_options, .unknown_auth = self.unknown_auth, .auth_mode = self.auth_mode orelse inferred, .pinned = self.pinned, .strict_host_key_checking = self.strict_host_key_checking, .asset_group_id = self.asset_group_id, .route = self.route, .name = self.name orelse return error.MissingName, .host = self.host orelse if (self.protocol_id != null or self.payload_version > 1) "" else return error.MissingHost, .port = self.port, .user = self.user orelse if (self.protocol_id != null or self.payload_version > 1) "" else return error.MissingUser, .identity_file = self.identity_file, .key_passphrase = self.key_passphrase, .password = self.password, .totp_secret = self.totp_secret, .password_ref = self.password_ref, .key_passphrase_ref = self.key_passphrase_ref, .totp_secret_ref = self.totp_secret_ref, .jump_chain = self.jump_chain, .startup_commands = self.startup_commands, .group = self.group, .ts_default = self.ts_default, .terminal_type = self.terminal_type, .terminal_type_explicit = self.terminal_type_explicit, .scrollback = self.scrollback, .keepalive = self.keepalive, .compression = self.compression, .compression_explicit = self.compression_explicit, .socks_enabled = self.socks_enabled, .socks_port = self.socks_port, .socks_bind = self.socks_bind, .socks_exit = self.socks_exit, .socks_auto_start = self.socks_auto_start, .socks_max_connections = self.socks_max_connections };
+        const result: HostConfig = .{ .connection_id = self.connection_id, .revision = self.revision, .protocol = self.protocol, .protocol_id = self.protocol_id, .payload_version = self.payload_version, .plugin_payload = self.plugin_payload, .unknown_fields = self.unknown_fields, .unknown_options = self.unknown_options, .unknown_auth = self.unknown_auth, .auth_mode = self.auth_mode orelse inferred, .pinned = self.pinned, .strict_host_key_checking = self.strict_host_key_checking, .asset_group_id = self.asset_group_id, .route = self.route, .name = self.name orelse return error.MissingName, .host = self.host orelse if (self.protocol_id != null or self.payload_version > 1) "" else return error.MissingHost, .port = self.port, .user = self.user orelse if (self.protocol_id != null or self.payload_version > 1) "" else return error.MissingUser, .identity_file = self.identity_file, .key_passphrase = self.key_passphrase, .password = self.password, .totp_secret = self.totp_secret, .password_ref = self.password_ref, .key_passphrase_ref = self.key_passphrase_ref, .totp_secret_ref = self.totp_secret_ref, .jump_chain = self.jump_chain, .startup_commands = self.startup_commands, .group = self.group, .ts_default = self.ts_default, .terminal_type = self.terminal_type, .terminal_type_explicit = self.terminal_type_explicit, .scrollback = self.scrollback, .scrollback_explicit = self.scrollback_explicit, .keepalive = self.keepalive, .compression = self.compression, .compression_explicit = self.compression_explicit, .socks_enabled = self.socks_enabled, .socks_port = self.socks_port, .socks_bind = self.socks_bind, .socks_exit = self.socks_exit, .socks_auto_start = self.socks_auto_start, .socks_max_connections = self.socks_max_connections };
         try result.validate();
         return result;
     }

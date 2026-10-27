@@ -26,9 +26,14 @@ pub const Document = struct {
     source_version: u64 = 0,
     recording_failure: ?anyerror = null,
     cached: ?search.Document = null,
+    tail_cache: ?struct { fingerprint: u64, row: usize } = null,
+    full_rebuilds: u64 = 0,
+    tail_updates: u64 = 0,
     metadata: std.ArrayList(Meta) = .empty,
     stamps: std.AutoHashMapUnmanaged(vt.RowId, i64) = .empty,
     top: usize = 0,
+    pixel_scrolling: bool = false,
+    pixel_offset: f32 = 0,
     height: u16 = 1,
     row_height: f32 = 22,
     cell_width: f32 = 8.4,
@@ -54,6 +59,49 @@ pub const Document = struct {
         self.stamps.deinit(self.allocator);
         if (self.cached) |*d| d.deinit(self.allocator);
     }
+    pub fn composed(self: *const Document) bool {
+        return self.enabled or self.pixel_scrolling;
+    }
+    fn rowOrigin(doc: *const search.Document, index: usize) f32 {
+        if (index >= doc.rows.len) return 0;
+        const layout = doc.rows[index].presentation;
+        return layout.y.? - layout.before;
+    }
+    fn maxPixelOrigin(self: *const Document, doc: *const search.Document) f32 {
+        // Keep the existing bottom alignment, including command-card spacing.
+        return rowOrigin(doc, self.maxTop(doc));
+    }
+    fn locatePixel(self: *Document, doc: *const search.Document, origin: f32) void {
+        var lo: usize = 0;
+        var hi = doc.rows.len;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (rowOrigin(doc, mid) <= origin) lo = mid + 1 else hi = mid;
+        }
+        self.top = lo -| 1;
+        self.pixel_offset = origin - rowOrigin(doc, self.top);
+    }
+    /// Positive pixels move toward newer output. Only the UI document moves;
+    /// the PTY geometry and alternate-screen input protocol stay unchanged.
+    pub fn scrollPixels(self: *Document, pixels: f32) !void {
+        if (!std.math.isFinite(pixels) or pixels == 0) return;
+        var native = try self.raw.snapshot(self.allocator);
+        defer native.deinit(self.allocator);
+        if (native.projection.modes.alternate_screen) return;
+        self.height = native.projection.rows;
+        try self.rebuild(&native);
+        if (!self.composed()) {
+            self.top = @intCast(native.projection.scrollback.viewport_offset);
+            self.follow = native.projection.scrollback.viewport_offset + native.projection.scrollback.viewport_rows >= native.projection.scrollback.total_rows;
+        }
+        const doc = &self.cached.?;
+        const maximum = self.maxPixelOrigin(doc);
+        const previous = if (self.follow) maximum else rowOrigin(doc, self.top) + self.pixel_offset;
+        const origin = std.math.clamp(previous + pixels, 0, maximum);
+        self.locatePixel(doc, origin);
+        self.pixel_scrolling = true;
+        self.follow = origin == maximum;
+    }
     pub fn service(self: *Document) terminal.Service {
         return .{ .binding = self.raw.binding, .context = self, .vtable = &vtable };
     }
@@ -61,7 +109,7 @@ pub const Document = struct {
         if (height <= 0 or height == self.row_height) return false;
         self.row_height = height;
         self.invalidate();
-        return self.enabled;
+        return self.composed();
     }
     pub fn setCellWidth(self: *Document, width: f32) bool {
         if (width <= 0) return false;
@@ -72,15 +120,16 @@ pub const Document = struct {
         self.command_inset_cells = command;
         self.result_inset_cells = result;
         self.invalidate();
-        return self.enabled;
+        return self.composed();
     }
     pub fn setColors(self: *Document, colors: [3]u24) bool {
         if (std.meta.eql(self.colors, colors)) return false;
         self.colors = colors;
         self.invalidate();
-        return self.enabled;
+        return self.composed();
     }
     fn invalidate(self: *Document) void {
+        self.tail_cache = null;
         self.source_version = 0;
         self.revision +|= 1;
     }
@@ -92,7 +141,7 @@ pub const Document = struct {
         var snap = try self.raw.snapshot(self.allocator);
         defer snap.deinit(self.allocator);
         if (snap.projection.modes.alternate_screen) return error.CommandNotAtPrompt;
-        const anchor = try self.raw.createAnchor(.{ .space = if (screen_row != null) .screen else .viewport, .row = screen_row orelse snap.projection.cursor.row, .col = 0, .source_version = snap.projection.version });
+        const anchor = try self.raw.createAnchor(.{ .space = .screen, .row = screen_row orelse @as(u32, @intCast(snap.projection.scrollback.total_rows -| snap.projection.rows + snap.projection.active_cursor.row)), .col = 0, .source_version = snap.projection.version });
         errdefer self.raw.releaseAnchor(anchor) catch {};
         const owned = try self.displayCopy(command);
         errdefer self.allocator.free(owned);
@@ -235,6 +284,7 @@ pub const Document = struct {
     }
     fn rebuild(self: *Document, native: *const terminal.TerminalSnapshot) !void {
         if (self.cached != null and self.source_version == native.projection.version) return;
+        if (try self.patchTail(native)) return;
         var source = try self.raw.searchSnapshot(self.allocator);
         defer source.deinit(self.allocator);
         if (!source.owner.eql(self.owner) or source.document.source_version != native.projection.version) return error.StaleProjection;
@@ -247,10 +297,20 @@ pub const Document = struct {
         var meta: std.ArrayList(Meta) = .empty;
         errdefer meta.deinit(self.allocator);
         const doc = &source.document;
+        // Size from the captured source rather than growing and recopying
+        // complete history arrays repeatedly during composition.
+        var app_bytes: usize = 0;
+        for (self.records.items) |record| app_bytes += record.command.len + record.output.len + 2;
+        try text.ensureTotalCapacityPrecise(self.allocator, doc.text.len + app_bytes);
+        try rows.ensureTotalCapacityPrecise(self.allocator, doc.rows.len);
+        try spans.ensureTotalCapacityPrecise(self.allocator, doc.spans.len + @min(app_bytes, 4096));
+        try meta.ensureTotalCapacityPrecise(self.allocator, doc.rows.len);
         if (self.stamps.count() > 16384) self.stamps.clearRetainingCapacity();
         for (native.projection.visible_rows) |row| if (row.submitted_wallclock_ms orelse row.received_wallclock_ms) |stamp| try self.stamps.put(self.allocator, row.id, stamp);
         const native_cursor = native.projection.scrollback.total_rows -| native.projection.rows + native.projection.active_cursor.row;
-        var last: usize = @min(doc.rows.len, @as(usize, @intCast(native_cursor)) + 1);
+        // Plain VT scrolling must retain blank screen rows below the cursor;
+        // otherwise entering pixel mode would shift a partially filled screen.
+        var last: usize = if (!self.enabled) doc.rows.len else @min(doc.rows.len, @as(usize, @intCast(native_cursor)) + 1);
         for (doc.rows, 0..) |r, i| if (r.end > r.start) {
             last = @max(last, i + 1);
         };
@@ -286,7 +346,7 @@ pub const Document = struct {
                 try spans.append(self.allocator, span);
             }
             _ = start;
-            const stamp = if (std.mem.trim(u8, doc.text[r.start..r.end], " \t\r\n").len == 0) null else self.stamps.get(r.id);
+            const stamp = if (std.mem.trim(u8, doc.text[r.start..r.end], " \t\r\n").len == 0) null else r.timestamp_ms orelse self.stamps.get(r.id);
             rows.items[rows.items.len - 1].timestamp_ms = stamp;
             try meta.append(self.allocator, .{ .timestamp = stamp });
         }
@@ -355,6 +415,110 @@ pub const Document = struct {
         self.metadata.deinit(self.allocator);
         self.metadata = meta;
         self.source_version = native.projection.version;
+        self.full_rebuilds += 1;
+        self.tail_cache = null;
+        if (tailFingerprint(&native.projection)) |fingerprint| {
+            const cursor_id = native.projection.visible_rows[native.projection.cursor.row].id;
+            for (owned_rows, 0..) |row, i| if (std.meta.eql(row.id, cursor_id) and meta.items[i].kind == .shell) {
+                var trailing_blank = true;
+                for (owned_rows[i + 1 ..]) |after| if (after.end != after.start) {
+                    trailing_blank = false;
+                    break;
+                };
+                if (trailing_blank) self.tail_cache = .{ .fingerprint = fingerprint, .row = i };
+                break;
+            };
+        }
+    }
+    // Ordinary ZLE edits only replace the current final physical row. Verify
+    // every other visible cell, stable row identity, palette and geometry;
+    // then reuse the complete history/index instead of querying and composing
+    // all scrollback again. Newlines, scroll/erase, wrapping, modes, and record
+    // changes fall back to the authoritative full rebuild.
+    fn tailFingerprint(p: *const vt.Projection) ?u64 {
+        if (!p.cursor.visible or p.cursor.row >= p.visible_rows.len or p.scrollback.viewport_offset + p.scrollback.viewport_rows < p.scrollback.total_rows) return null;
+        var hash = std.hash.Wyhash.init(0);
+        std.hash.autoHash(&hash, .{ p.cols, p.rows, p.cursor.row, p.scrollback, p.colors, p.modes });
+        for (p.visible_rows, 0..) |row, i| {
+            std.hash.autoHash(&hash, .{ row.id, row.wraps, row.continuation, row.semantic_prompt });
+            if (i == p.cursor.row) continue;
+            for (p.cells[row.cell_start..][0..row.cell_count]) |cell| {
+                var style = cell;
+                style.grapheme_start = 0;
+                std.hash.autoHash(&hash, style);
+                hash.update(p.grapheme(cell));
+            }
+        }
+        return hash.final();
+    }
+    fn patchTail(self: *Document, native: *const terminal.TerminalSnapshot) !bool {
+        const cache = self.tail_cache orelse return false;
+        if (self.source_version == 0 or tailFingerprint(&native.projection) != cache.fingerprint) return false;
+        const doc = if (self.cached) |*value| value else return false;
+        if (cache.row >= doc.rows.len) return false;
+        const old = doc.rows[cache.row];
+        const row = native.projection.visible_rows[native.projection.cursor.row];
+        if (!std.meta.eql(old.id, row.id)) return false;
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(self.allocator);
+        var spans: std.ArrayList(search.Span) = .empty;
+        defer spans.deinit(self.allocator);
+        const cells = native.projection.cells[row.cell_start..][0..row.cell_count];
+        var end = cells.len;
+        while (end > 0 and cells[end - 1].grapheme_len == 0) end -= 1;
+        for (cells[0..end], 0..) |cell, col| {
+            if (cell.width == .wide_tail) continue;
+            const start: u32 = old.start + @as(u32, @intCast(text.items.len));
+            try text.appendSlice(self.allocator, if (cell.grapheme_len == 0) " " else native.projection.grapheme(cell));
+            var span: search.Span = .{ .start = start, .end = old.start + @as(u32, @intCast(text.items.len)), .row = @intCast(cache.row), .col = @intCast(col), .width = if (cell.width == .wide_lead) 2 else 1, .color = @import("../vt/projection_frame.zig").color(cell.foreground, native.projection.colors), .bg = @import("../vt/projection_frame.zig").color(cell.background, native.projection.colors), .flags = (cell.attributes & 3) | (if (cell.underline != 0) @as(u32, 4) else 0), .native_cell = cell };
+            span.start -= old.start;
+            span.end -= old.start;
+            try search.appendSpan(self.allocator, &spans, text.items, span);
+        }
+        for (spans.items) |*span| {
+            span.start += old.start;
+            span.end += old.start;
+        }
+        const prefix_spans = firstSpan(doc, cache.row);
+        if (std.mem.eql(u8, doc.text[old.start..old.end], text.items) and doc.spans.len - prefix_spans == spans.items.len) {
+            const same = for (doc.spans[prefix_spans..], spans.items) |saved, next| {
+                var a = saved;
+                var b = next;
+                if (a.native_cell) |*cell| cell.grapheme_start = 0;
+                if (b.native_cell) |*cell| cell.grapheme_start = 0;
+                if (!std.meta.eql(a, b)) break false;
+            } else true;
+            if (same) {
+                self.source_version = native.projection.version;
+                return true;
+            }
+        }
+        // Rows after the edited row were verified as empty at full rebuild.
+        // Grow existing buffers so ordinary edits do not recopy the entire
+        // retained history. Any allocation failure invalidates this cache.
+        self.source_version = 0;
+        self.tail_cache = null;
+        const new_len = doc.text.len - (old.end - old.start) + text.items.len;
+        const new_end = old.start + text.items.len;
+        const suffix_len = doc.text.len - old.end;
+        doc.spans = try self.allocator.realloc(doc.spans, prefix_spans + spans.items.len);
+        if (new_len < doc.text.len) std.mem.copyForwards(u8, doc.text[new_end..][0..suffix_len], doc.text[old.end..]);
+        doc.text = try self.allocator.realloc(doc.text, new_len);
+        if (new_end > old.end) std.mem.copyBackwards(u8, doc.text[new_end..], doc.text[old.end..][0..suffix_len]);
+        @memcpy(doc.text[old.start..new_end], text.items);
+        @memcpy(doc.spans[prefix_spans..], spans.items);
+        const delta = @as(i64, @intCast(text.items.len)) - @as(i64, old.end - old.start);
+        doc.rows[cache.row].end = old.start + @as(u32, @intCast(text.items.len));
+        for (doc.rows[cache.row + 1 ..]) |*after| {
+            after.start = @intCast(@as(i64, after.start) + delta);
+            after.end = @intCast(@as(i64, after.end) + delta);
+        }
+        self.revision +|= 1;
+        doc.source_version = self.revision;
+        self.source_version = native.projection.version;
+        self.tail_cache = cache;
+        self.tail_updates += 1;
+        return true;
     }
     fn appendApp(self: *Document, text: *std.ArrayList(u8), rows: *std.ArrayList(search.Row), spans: *std.ArrayList(search.Span), meta: *std.ArrayList(Meta), record: Record, value: []const u8, kind: @FieldType(Meta, "kind"), cols: u16, section: u64) !void {
         // App text is measured with the same public grapheme rules as the
@@ -390,7 +554,7 @@ pub const Document = struct {
                 if (col + width > line_cols and col > 0) break;
                 const at: u32 = @intCast(text.items.len);
                 try text.appendSlice(self.allocator, value[offset..][0..size]);
-                try spans.append(self.allocator, .{ .start = at, .end = @intCast(text.items.len), .row = index, .col = col, .width = width, .color = (@as(u32, switch (kind) {
+                try search.appendSpan(self.allocator, spans, text.items, .{ .start = at, .end = @intCast(text.items.len), .row = index, .col = col, .width = width, .color = (@as(u32, switch (kind) {
                     .command => self.colors[0],
                     .success => self.colors[1],
                     .failure => self.colors[2],
@@ -432,19 +596,35 @@ pub const Document = struct {
         errdefer native.deinit(allocator);
         self.height = native.projection.rows;
         self.alternate = native.projection.modes.alternate_screen;
-        if (!self.enabled or self.alternate) return native;
+        if (self.alternate) {
+            self.pixel_offset = 0;
+            self.follow = true;
+            return native;
+        }
+        if (!self.enabled and self.pixel_scrolling and self.follow) {
+            self.pixel_scrolling = false;
+            self.pixel_offset = 0;
+        }
+        if (!self.composed()) return native;
         try self.rebuild(&native);
         const doc = &self.cached.?;
         const pixel_height = @as(f32, @floatFromInt(self.height)) * self.row_height;
         const max_top = self.maxTop(doc);
-        if (self.follow) self.top = max_top else self.top = @min(self.top, max_top);
-        const origin = if (self.top < doc.rows.len) doc.rows[self.top].presentation.y.? - doc.rows[self.top].presentation.before else 0;
+        var origin: f32 = 0;
+        if (self.pixel_scrolling) {
+            const maximum = self.maxPixelOrigin(doc);
+            origin = if (self.follow) maximum else @min(rowOrigin(doc, @min(self.top, doc.rows.len -| 1)) + self.pixel_offset, maximum);
+            self.locatePixel(doc, origin);
+        } else {
+            if (self.follow) self.top = max_top else self.top = @min(self.top, max_top);
+            origin = rowOrigin(doc, self.top);
+        }
         var next_y: f32 = 0;
         var cells: std.ArrayList(vt.Cell) = .empty;
         defer cells.deinit(allocator);
         var graphemes: std.ArrayList(u8) = .empty;
         defer graphemes.deinit(allocator);
-        const visible = try allocator.alloc(vt.Row, self.height);
+        const visible = try allocator.alloc(vt.Row, @as(usize, self.height) + @intFromBool(self.pixel_scrolling and self.pixel_offset > 0 and self.height < std.math.maxInt(u16)));
         errdefer allocator.free(visible);
         var cursor = native.projection.cursor;
         cursor.visible = false;
@@ -497,17 +677,29 @@ pub const Document = struct {
             for (doc.spans[firstSpan(doc, index)..]) |s| {
                 if (s.row < index) continue;
                 if (s.row > index) break;
-                if (s.col >= native.projection.cols) continue;
-                const at: u32 = @intCast(graphemes.items.len);
-                try graphemes.appendSlice(allocator, doc.text[s.start..s.end]);
-                const color: vt.Color = if (metadata.kind == .shell) (if (s.color == 0) .default else .{ .rgb = @intCast(s.color >> 8) }) else .{ .rgb = switch (metadata.kind) {
-                    .command => self.colors[0],
-                    .success => self.colors[1],
-                    .failure => self.colors[2],
-                    else => 0x9ca3af,
-                } };
-                cells.items[start + s.col] = .{ .grapheme_start = at, .grapheme_len = s.end - s.start, .width = if (s.width == 2) .wide_lead else .single, .foreground = color, .background = if (s.bg == 0) .default else .{ .rgb = @intCast(s.bg >> 8) }, .attributes = @intCast(s.flags & 3), .underline = if (s.flags & 4 != 0) 1 else 0 };
-                if (s.width == 2 and s.col + 1 < native.projection.cols) cells.items[start + s.col + 1].width = .wide_tail;
+                var byte = s.start;
+                while (byte < s.end) {
+                    const cell = s.cellAt(byte);
+                    byte = cell.end;
+                    if (cell.col >= native.projection.cols) break;
+                    const at: u32 = @intCast(graphemes.items.len);
+                    try graphemes.appendSlice(allocator, doc.text[cell.start..cell.end]);
+                    const color: vt.Color = if (metadata.kind == .shell) (if (cell.color == 0) .default else .{ .rgb = @intCast(cell.color >> 8) }) else .{ .rgb = switch (metadata.kind) {
+                        .command => self.colors[0],
+                        .success => self.colors[1],
+                        .failure => self.colors[2],
+                        else => 0x9ca3af,
+                    } };
+                    cells.items[start + cell.col] = .{ .grapheme_start = at, .grapheme_len = cell.end - cell.start, .width = if (cell.width == 2) .wide_lead else .single, .foreground = color, .background = if (cell.bg == 0) .default else .{ .rgb = @intCast(cell.bg >> 8) }, .attributes = @intCast(cell.flags & 3), .underline = if (cell.flags & 4 != 0) 1 else 0 };
+                    if (metadata.kind == .shell) if (cell.native_cell) |style| {
+                        const text_cell = cells.items[start + cell.col];
+                        cells.items[start + cell.col] = style;
+                        cells.items[start + cell.col].grapheme_start = text_cell.grapheme_start;
+                        cells.items[start + cell.col].grapheme_len = text_cell.grapheme_len;
+                        cells.items[start + cell.col].width = text_cell.width;
+                    };
+                    if (cell.width == 2 and cell.col + 1 < native.projection.cols) cells.items[start + cell.col + 1].width = .wide_tail;
+                }
             }
         }
         const owned_cells = try cells.toOwnedSlice(allocator);
@@ -527,6 +719,10 @@ pub const Document = struct {
     }
     fn find(self: *Document, anchor: terminal.Anchor) !?struct { row: usize, col: u16 } {
         if (!anchor.owner.eql(self.owner)) return error.StaleOwner;
+        if (!self.enabled) {
+            const position = (try self.raw.resolveAnchor(anchor)) orelse return null;
+            return .{ .row = position.row, .col = position.col };
+        }
         const doc = self.cached orelse return null;
         for (self.refs.items) |ref| if (ref.id == anchor.id) {
             for (doc.rows, 0..) |row, i| if (std.meta.eql(row.id, ref.row)) return .{ .row = i, .col = ref.col };
@@ -536,7 +732,16 @@ pub const Document = struct {
     }
     fn createAnchor(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), point: terminal.Point) !terminal.Anchor {
         const self = try checked(raw, binding);
-        if (!self.enabled or self.alternate) return self.raw.createAnchor(point);
+        if (!self.enabled or self.alternate) {
+            var native_point = point;
+            if (self.pixel_scrolling and !self.alternate) {
+                if (point.source_version) |version| if (version != self.revision) return error.StaleProjection;
+                native_point.row += if (point.space == .viewport) @as(u32, @intCast(self.top)) else 0;
+                native_point.space = .screen;
+                native_point.source_version = self.source_version;
+            }
+            return self.raw.createAnchor(native_point);
+        }
         const doc = self.cached orelse return error.StaleProjection;
         if (point.source_version) |version| if (version != self.revision) return error.StaleProjection;
         const index = point.row + if (point.space == .viewport) self.top else @as(usize, 0);
@@ -549,7 +754,11 @@ pub const Document = struct {
     }
     fn resolveAnchor(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), anchor: terminal.Anchor) !?terminal.AnchorPosition {
         const self = try checked(raw, binding);
-        if (!self.enabled or self.alternate) return self.raw.resolveAnchor(anchor);
+        if (!self.enabled or self.alternate) {
+            var position = (try self.raw.resolveAnchor(anchor)) orelse return null;
+            if (self.pixel_scrolling and !self.alternate) position.source_version = if (position.source_version == self.source_version) self.revision else self.revision +| 1;
+            return position;
+        }
         const p = try self.find(anchor) orelse return null;
         return .{ .row = @intCast(p.row), .col = p.col, .alternate_screen = false, .source_version = self.revision };
     }
@@ -579,7 +788,7 @@ pub const Document = struct {
             for (doc.spans[firstSpan(doc, index)..]) |s| {
                 if (s.row < index) continue;
                 if (s.row > index) break;
-                if (s.col >= lo and s.col < hi) try out.appendSlice(allocator, doc.text[s.start..s.end]);
+                if (s.columns(lo, hi)) |clipped| try out.appendSlice(allocator, doc.text[clipped.start..clipped.end]);
             }
             if (out.items.len > limit) return error.SelectionTooLarge;
         }
@@ -587,9 +796,10 @@ pub const Document = struct {
     }
     fn scroll(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), value: terminal.Scroll) !void {
         const self = try checked(raw, binding);
-        if (!self.enabled or self.alternate) return self.raw.scroll(value);
+        if (!self.composed() or self.alternate) return self.raw.scroll(value);
         const doc = self.cached orelse return;
         const max_top = self.maxTop(&doc);
+        self.pixel_offset = 0;
         switch (value) {
             .bottom => {
                 self.follow = true;
@@ -612,7 +822,7 @@ pub const Document = struct {
     }
     fn searchSnapshot(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), allocator: std.mem.Allocator) !terminal.SearchSnapshot {
         const self = try checked(raw, binding);
-        if (!self.enabled or self.alternate) return self.raw.searchSnapshot(allocator);
+        if (!self.composed() or self.alternate) return self.raw.searchSnapshot(allocator);
         var native = try self.raw.snapshot(self.allocator);
         defer native.deinit(self.allocator);
         try self.rebuild(&native);
@@ -625,7 +835,7 @@ pub const Document = struct {
     }
     fn readLines(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), limits: terminal.LineLimits, allocator: std.mem.Allocator) !terminal.Lines {
         const self = try checked(raw, binding);
-        if (!self.enabled or self.alternate) return self.raw.readLines(limits, allocator);
+        if (!self.composed() or self.alternate) return self.raw.readLines(limits, allocator);
         var snap = try searchSnapshot(raw, binding, allocator);
         defer snap.deinit(allocator);
         var lines: std.ArrayList([]u8) = .empty;
@@ -691,6 +901,10 @@ pub const Document = struct {
         const self = try checked(raw, binding);
         return self.raw.setTheme(value);
     }
+    fn recordingLease(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding)) !@import("../vt/timeline.zig").Timeline.ExportLease {
+        const self = try checked(raw, binding);
+        return self.raw.recordingLease();
+    }
     fn exportRecording(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), kind: terminal.RecordingKind, io: std.Io, dir: std.Io.Dir, path: []const u8) !void {
         const self = try checked(raw, binding);
         return self.raw.exportRecording(kind, io, dir, path);
@@ -711,7 +925,7 @@ pub const Document = struct {
         const self = try checked(raw, binding);
         return self.raw.cancelTrustedEdit();
     }
-    const vtable: terminal.Service.VTable = .{ .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = readLines, .theme = theme, .export_recording = exportRecording, .trusted_snapshot = trustedSnapshot, .trusted_request = trustedRequest, .trusted_outcome = trustedOutcome, .trusted_cancel = trustedCancel, .search_snapshot = searchSnapshot };
+    const vtable: terminal.Service.VTable = .{ .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = readLines, .theme = theme, .export_recording = exportRecording, .recording_lease = recordingLease, .trusted_snapshot = trustedSnapshot, .trusted_request = trustedRequest, .trusted_outcome = trustedOutcome, .trusted_cancel = trustedCancel, .search_snapshot = searchSnapshot };
 };
 
 test "builtin_records native rows and app rows share ordered search selection and scroll" {
@@ -873,5 +1087,96 @@ test "builtin_records persistence retains each original execution time after com
         const recorded = try std.json.parseFromSlice(terminal.ApplicationRecord, a, event.payload, .{});
         defer recorded.deinit();
         try std.testing.expectEqual(at, recorded.value.timestamp_ms);
+    }
+}
+
+test "terminal records anchor at live prompt while viewport shows history and retain offscreen timestamps" {
+    const a = std.testing.allocator;
+    const Adapter = @import("../vt/ghostty_adapter.zig").Adapter;
+    var adapter = try Adapter.init(a, 4, 24);
+    defer adapter.destroy();
+    adapter.wall_clock_ms = struct {
+        fn now() i64 {
+            return 123456;
+        }
+    }.now;
+    _ = try adapter.feed("old0\r\nold1\r\nold2\r\nold3\r\nold4\r\nprompt% ");
+    try adapter.scroll(.top);
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(6) } };
+    var document = Document.init(a, source.service(), source.owner);
+    defer document.deinit();
+    const id = try document.begin("@ts", 234567);
+    try document.finish(source.owner, id, .success, "enabled");
+    var captured = try document.service().searchSnapshot(a);
+    defer captured.deinit(a);
+    const card = std.mem.indexOf(u8, captured.document.text, "@ts").?;
+    try std.testing.expect(card > std.mem.indexOf(u8, captured.document.text, "old4").?);
+    try std.testing.expect(card < std.mem.indexOf(u8, captured.document.text, "prompt%").?);
+    for (captured.document.rows) |row| {
+        if (row.application_kind == 0 and row.end > row.start)
+            try std.testing.expectEqual(@as(?i64, 123456), row.timestamp_ms);
+    }
+}
+
+test "terminal surface pixel scroll retains historical styles and leaves alternate input native" {
+    const a = std.testing.allocator;
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 6, 60);
+    defer adapter.destroy();
+    _ = try adapter.feed("\x1b[2;9;4:2;58;2;255;0;0mHISTORY_STYLE\x1b[0m\r\n");
+    for (0..30) |_| _ = try adapter.feed("ordinary output\r\n");
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(5) } };
+    var document = Document.init(a, source.service(), source.owner);
+    defer document.deinit();
+    try document.scrollPixels(-100000);
+    var snap = try document.service().snapshot(a);
+    defer snap.deinit(a);
+    const cell = snap.projection.cells[0];
+    try std.testing.expectEqualStrings("H", snap.projection.grapheme(cell));
+    try std.testing.expect(cell.attributes & (1 << 5) != 0);
+    try std.testing.expect(cell.attributes & (1 << 6) != 0);
+    try std.testing.expectEqual(@as(u8, 2), cell.underline);
+    try std.testing.expectEqual(@as(u24, 0xff0000), cell.underline_color.rgb);
+    try document.scrollPixels(0.5);
+    var partial = try document.service().snapshot(a);
+    defer partial.deinit(a);
+    try std.testing.expectApproxEqAbs(@as(f32, -0.5), partial.projection.visible_rows[0].presentation.y.?, 0.001);
+    try std.testing.expectEqual(@as(usize, 7), partial.projection.visible_rows.len);
+    _ = try adapter.feed("\x1b[?1049hALT");
+    var alternate = try document.service().snapshot(a);
+    defer alternate.deinit(a);
+    try std.testing.expect(alternate.projection.modes.alternate_screen);
+    try std.testing.expectEqual(@as(f32, 0), document.pixel_offset);
+    try document.scrollPixels(-0.5);
+    try std.testing.expectEqual(@as(f32, 0), document.pixel_offset);
+    _ = try adapter.feed("\x1b[?1049l");
+    var returned = try document.service().snapshot(a);
+    defer returned.deinit(a);
+    try std.testing.expect(document.follow);
+    try std.testing.expect(!returned.projection.modes.alternate_screen);
+}
+
+test "terminal surface pixel scroll crosses command card gaps without quantizing their layout" {
+    const a = std.testing.allocator;
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 4, 60);
+    defer adapter.destroy();
+    _ = try adapter.feed("prompt% ");
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(5) } };
+    var document = Document.init(a, source.service(), source.owner);
+    defer document.deinit();
+    const id = try document.begin("@example", 1234);
+    try document.finish(source.owner, id, .success, "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight");
+    var before = try document.service().snapshot(a);
+    defer before.deinit(a);
+    const previous_origin = Document.rowOrigin(&document.cached.?, document.top);
+    try document.scrollPixels(-0.5);
+    var after = try document.service().snapshot(a);
+    defer after.deinit(a);
+    const next_origin = Document.rowOrigin(&document.cached.?, document.top) + document.pixel_offset;
+    try std.testing.expectApproxEqAbs(previous_origin - 0.5, next_origin, 0.001);
+    for (after.projection.visible_rows) |row| {
+        if (document.top + row.viewport_y >= document.cached.?.rows.len) continue;
+        const original = document.cached.?.rows[document.top + row.viewport_y].presentation;
+        try std.testing.expectApproxEqAbs(original.y.? - next_origin, row.presentation.y.?, 0.001);
+        try std.testing.expectApproxEqAbs(original.article_y - next_origin, row.presentation.article_y, 0.001);
     }
 }

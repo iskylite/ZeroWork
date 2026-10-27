@@ -15,6 +15,7 @@ pub fn Binding(comptime Host: type) type {
         }
         fn localCreate(context: *anyopaque, request: session.CreateRequest) !void {
             const self: *Host = @ptrCast(@alignCast(context));
+            self.local_adapter.configureScrollback(self.workspace.app_config.ui.scrollback_limit);
             try self.local_adapter.configureRecording(.{ .io = self.workspace.io, .log = self.workspace.app_config.log });
             var mapping: ?*@typeInfo(@TypeOf(self.mappings.items)).pointer.child = null;
             // SessionHost.retry changes generation before invoking this callback.

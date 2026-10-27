@@ -3,6 +3,16 @@ const raw_stream_tap = @import("raw_stream_tap.zig");
 
 /// Bounded, allocator-owned stream timeline used by @log/export surfaces.
 pub const Timeline = struct {
+    pub const ExportSnapshot = struct { timeline: Timeline, cols: u16, rows: u16 };
+    /// Pins a recording independently of any tab or widget. Its capture and
+    /// release callbacks are safe on the export worker; the lease is consumed.
+    pub const ExportLease = struct {
+        context: *anyopaque,
+        capture: *const fn (*anyopaque, std.mem.Allocator) anyerror!Timeline,
+        release: *const fn (*anyopaque) void,
+        cols: u16,
+        rows: u16,
+    };
     allocator: std.mem.Allocator,
     events: std.ArrayList(Event) = .empty,
     max_events: usize,
@@ -89,12 +99,32 @@ pub const Timeline = struct {
     /// Exports a stable line-oriented representation. Payload bytes are escaped so
     /// terminal control sequences cannot alter a saved @log transcript.
     pub fn exportText(self: *Timeline, writer: *std.Io.Writer) !void {
-        self.lock();
-        defer self.mutex.unlock();
-        try self.exportTextUnlocked(writer);
+        var frozen = try self.snapshot();
+        defer frozen.deinit();
+        try frozen.exportTextUnlocked(writer);
     }
 
-    fn exportTextUnlocked(self: *const Timeline, writer: *std.Io.Writer) !void {
+    // The producer must never wait for a slow export sink while it owns the
+    // PTY guard. Copy the bounded transcript under the lock; serialize/write
+    // the owned snapshot after releasing it.
+    fn snapshot(self: *Timeline) !Timeline {
+        return self.snapshotWithAllocator(self.allocator);
+    }
+    pub fn snapshotWithAllocator(self: *Timeline, allocator: std.mem.Allocator) !Timeline {
+        self.lock();
+        defer self.mutex.unlock();
+        var copy = try Timeline.init(allocator, self.max_events, self.max_bytes);
+        errdefer copy.deinit();
+        try copy.events.ensureTotalCapacity(allocator, self.events.items.len);
+        for (self.events.items) |event| {
+            const payload = try allocator.dupe(u8, event.payload);
+            copy.events.appendAssumeCapacity(.{ .timestamp_ms = event.timestamp_ms, .stream_offset = event.stream_offset, .kind = event.kind, .payload = payload });
+            copy.bytes += payload.len;
+        }
+        return copy;
+    }
+
+    pub fn exportTextUnlocked(self: *const Timeline, writer: *std.Io.Writer) !void {
         for (self.events.items) |event| {
             if (event.kind == .application) {
                 const value = try std.json.parseFromSlice(@import("../host/terminal_service.zig").ApplicationRecord, self.allocator, event.payload, .{});
@@ -119,8 +149,12 @@ pub const Timeline = struct {
 
     /// Exports asciicast v2 events using stream-relative seconds.
     pub fn exportCast(self: *Timeline, writer: *std.Io.Writer, cols: u16, rows: u16) !void {
-        self.lock();
-        defer self.mutex.unlock();
+        var frozen = try self.snapshot();
+        defer frozen.deinit();
+        try frozen.exportCastUnlocked(writer, cols, rows);
+    }
+
+    pub fn exportCastUnlocked(self: *const Timeline, writer: *std.Io.Writer, cols: u16, rows: u16) !void {
         try writer.print("{{\"version\":2,\"width\":{d},\"height\":{d}}}\n", .{ cols, rows });
         const origin = if (self.events.items.len == 0) 0 else self.events.items[0].timestamp_ms;
         // PTY reads may split a UTF-8 scalar. Keep its prefix across events so
@@ -202,8 +236,8 @@ pub const Timeline = struct {
 
     /// Atomically persists the current transcript with owner-only permissions.
     pub fn save(self: *Timeline, io: std.Io, dir: std.Io.Dir, sub_path: []const u8) !void {
-        self.lock();
-        defer self.mutex.unlock();
+        var frozen = try self.snapshot();
+        defer frozen.deinit();
         var atomic_buffer: [16 * 1024]u8 = undefined;
         var atomic = try dir.createFileAtomic(io, sub_path, .{
             .permissions = @as(std.Io.File.Permissions, @fromBackingInt(@intCast(0o600))),
@@ -212,7 +246,7 @@ pub const Timeline = struct {
         });
         defer atomic.deinit(io);
         var writer = atomic.file.writer(io, &atomic_buffer);
-        try self.exportTextUnlocked(&writer.interface);
+        try frozen.exportTextUnlocked(&writer.interface);
         try writer.flush();
         try atomic.replace(io);
     }
@@ -304,4 +338,46 @@ test "cast file export is private and parses as asciicast JSON lines" {
     defer file.close(std.testing.io);
     const stat = try file.stat(std.testing.io);
     try std.testing.expectEqual(@as(std.posix.mode_t, 0o600), stat.permissions.toMode() & 0o777);
+}
+
+test "timeline export releases producer lock before writing and keeps a consistent snapshot" {
+    const Sink = struct {
+        timeline: *Timeline,
+        output: std.Io.Writer.Allocating,
+        checked: bool = false,
+        writer: std.Io.Writer = .{ .vtable = &.{ .drain = drain }, .buffer = &.{} },
+        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+            const self: *@This() = @fieldParentPtr("writer", w);
+            if (!self.checked) {
+                // A live PTY append can progress while the sink writes, and
+                // its new event must not leak into the frozen export.
+                if (!self.timeline.mutex.tryLock()) return error.WriteFailed;
+                self.timeline.mutex.unlock();
+                self.timeline.append(200, 3, "AFTER") catch return error.WriteFailed;
+                self.checked = true;
+            }
+            var count: usize = 0;
+            for (data[0 .. data.len - 1]) |part| {
+                try self.output.writer.writeAll(part);
+                count += part.len;
+            }
+            for (0..splat) |_| {
+                try self.output.writer.writeAll(data[data.len - 1]);
+                count += data[data.len - 1].len;
+            }
+            return count;
+        }
+    };
+    for ([_]bool{ false, true }) |cast| {
+        var timeline = try Timeline.init(std.testing.allocator, 8, 128);
+        defer timeline.deinit();
+        try timeline.append(100, 0, "BEFORE");
+        var sink: Sink = .{ .timeline = &timeline, .output = .init(std.testing.allocator) };
+        defer sink.output.deinit();
+        if (cast) try timeline.exportCast(&sink.writer, 80, 24) else try timeline.exportText(&sink.writer);
+        try std.testing.expect(sink.checked);
+        try std.testing.expectEqual(@as(usize, 2), timeline.eventCount());
+        try std.testing.expect(std.mem.indexOf(u8, sink.output.written(), "BEFORE") != null);
+        try std.testing.expect(std.mem.indexOf(u8, sink.output.written(), "AFTER") == null);
+    }
 }

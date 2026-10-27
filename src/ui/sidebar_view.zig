@@ -31,6 +31,16 @@ pub const View = struct {
     title: *ui.Node,
     search_box: *ui.Node,
     search: ui.widgets.input.InputResult,
+    search_button: *ui.Node,
+    search_clear: *ui.Node,
+    search_spacer: *ui.Node,
+    header: *ui.Node,
+    search_open: bool = false,
+    search_available: bool = true,
+    search_start_ms: f64 = 0,
+    search_start_width: f32 = 24,
+    search_width: f32 = 24,
+    search_animating: bool = false,
     search_value: *ui.Signal([]const u8),
     footer: *ui.Node,
     new_menu: ui.widgets.popover.PopoverResult,
@@ -50,6 +60,7 @@ pub const View = struct {
         try root.appendChild(cx.allocator, full);
         const header = try ui.box(cx, S.header(), .{});
         header.meta.ownership.meta.test_id = "sidebar.header";
+        header.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try full.appendChild(cx.allocator, header);
         try header.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("server").?, T.current().accent, S.icon(17)));
         const title = try text(cx, header, "主机与连接", 13, 700, false);
@@ -65,31 +76,14 @@ pub const View = struct {
         new_menu.content.meta.ownership.meta.test_id = "sidebar.new.menu";
         const plus = try iconButton(cx, scope, "plus", "新建", "sidebar.new", S.headerAction(), tint, hover, null, null);
         try new_menu.trigger.appendChild(cx.allocator, plus);
-        const collapse = try iconButton(cx, scope, "chevron-left", "隐藏侧栏 ⌘B", "sidebar.collapse", S.headerAction(), tint, hover, ui.Cx.simpleHandler(actions.collapse, actions.context), null);
-        try header.appendChild(cx.allocator, try hint(cx, scope, collapse, "隐藏侧栏 ⌘B", .right));
-        try header.appendChild(cx.allocator, new_menu.wrapper);
-        const search_box = try ui.box(cx, S.search(), .{});
-        search_box.meta.ownership.meta.test_id = "sidebar.search.well";
-        try full.appendChild(cx.allocator, search_box);
         const search_value = try scope.createText("", .{});
-        const search = try ui.widgets.Input(.{ .value = search_value, .placeholder = "搜索主机、标签、地址…", .placeholder_color = T.current().fg_2, .embedded = true, .on_change = actions.search_changed }).mountResult(scope, cx);
-        search.node.meta.ownership.meta.test_id = "sidebar.search";
-        search.node.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .justify = .center });
-        search.state.font_size = 11;
-        search.state.line_height = 16.5;
-        search.state.char_width = 11 * 0.6;
-        search.state.dirty = true;
-        if (search.state.text_display_node) |label| if (label.getText()) |old| {
-            var next = old;
-            next.font_size = 11;
-            next.font_weight = 400;
-            next.line_height = 1.5;
-            next.color = T.current().fg_2;
-            label.setText(next);
-        };
-        try search_box.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.search, T.current().fg_2, S.icon(14)));
-        try search_box.appendChild(cx.allocator, search.node);
-        _ = try text(cx, search_box, "⌘F", 9, 400, true);
+        const search = try mountSearchInput(cx, scope, search_value, actions.search_changed, "sidebar.search");
+        search.node.setDisplay(.none);
+        const search_box = try ui.box(cx, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .border = .{ .radius = 8 }, .min_width = 0, .overflow = .hidden, .flex_shrink = 0 }, .{});
+        search_box.meta.ownership.meta.test_id = "sidebar.search.well";
+        const search_spacer = try ui.spacer(cx);
+        search_spacer.setDisplay(.none);
+        try header.appendChild(cx.allocator, search_spacer);
         const viewport = try ui.widgets.ScrollArea(.{}).mount(scope, cx);
         viewport.container.meta.ownership.meta.test_id = "sidebar.viewport";
         viewport.container.setStyleInline(cx.allocator, S.viewport());
@@ -97,7 +91,19 @@ pub const View = struct {
         list.setStyleInline(cx.allocator, S.list());
         try viewport.content.appendChild(cx.allocator, list);
         try full.appendChild(cx.allocator, viewport.container);
-        const self = try scope.createState(View, .{ .cx = cx, .root = root, .full = full, .empty = undefined, .list = list, .title = title, .search_box = search_box, .search = search, .search_value = search_value, .footer = undefined, .new_menu = new_menu, .colors = T.current(), .actions = actions, .tint = tint, .hover = hover, .host_disabled = host_disabled, .group_disabled = group_disabled, .footer_style = footer_style, .empty_footer_style = empty_footer_style });
+        const self = try scope.createState(View, .{ .cx = cx, .root = root, .full = full, .empty = undefined, .list = list, .title = title, .header = header, .search_box = search_box, .search = search, .search_button = undefined, .search_clear = undefined, .search_spacer = search_spacer, .search_value = search_value, .footer = undefined, .new_menu = new_menu, .colors = T.current(), .actions = actions, .tint = tint, .hover = hover, .host_disabled = host_disabled, .group_disabled = group_disabled, .footer_style = footer_style, .empty_footer_style = empty_footer_style });
+        try search_box.appendChild(cx.allocator, search.node);
+        const clear = try iconButton(cx, scope, "x", "清空搜索", "sidebar.search.clear", S.headerAction(), tint, hover, cx.on(View, self, View.clearSearch), null);
+        clear.setDisplay(.none);
+        self.search_clear = clear;
+        try search_box.appendChild(cx.allocator, clear);
+        const search_button = try iconButton(cx, scope, "search", "搜索主机", "sidebar.search.toggle", S.headerAction(), tint, hover, cx.on(View, self, View.toggleSearch), null);
+        self.search_button = search_button;
+        try search_box.appendChild(cx.allocator, try hint(cx, scope, search_button, "搜索主机", .right));
+        try header.appendChild(cx.allocator, search_box);
+        const collapse = try iconButton(cx, scope, "chevron-left", "隐藏侧栏 ⌘B", "sidebar.collapse", S.headerAction(), tint, hover, ui.Cx.simpleHandler(actions.collapse, actions.context), null);
+        try header.appendChild(cx.allocator, try hint(cx, scope, collapse, "隐藏侧栏 ⌘B", .right));
+        try header.appendChild(cx.allocator, new_menu.wrapper);
         _ = try text(cx, new_menu.content, "新建", 10.5, 400, true);
         try self.newItem(new_menu.scope, "新建主机", "server", false);
         try self.newItem(new_menu.scope, "新建分组", "folder-plus", true);
@@ -123,7 +129,8 @@ pub const View = struct {
         try empty_header.appendChild(cx.allocator, try hint(cx, scope, empty_collapse, "隐藏侧栏 ⌘B", .right));
         _ = try text(cx, guide, "还没有主机", 13, 500, false);
         const explanation = try text(cx, guide, "添加连接配置后，主机会显示在这里。", 12, 400, true);
-        explanation.setStyleInline(cx.allocator, .{ .width = .{ .px = 190 }, .height = .{ .px = 36 } });
+        explanation.meta.ownership.meta.test_id = "sidebar.empty.explanation";
+        explanation.setStyleInline(cx.allocator, .{ .width = .fill() });
         if (explanation.getText()) |current| {
             var next = current;
             next.wrap = .word;
@@ -133,6 +140,12 @@ pub const View = struct {
         try empty.appendChild(cx.allocator, try self.footerButton(scope, "sidebar.empty.new", true));
         try root.appendChild(cx.allocator, empty);
         self.empty = empty;
+        try scope.createEffect(.{ .view = self, .value = search_value }, struct {
+            fn run(ctx: anytype) void {
+                _ = ctx.value.get();
+                ctx.view.syncSearchClear();
+            }
+        }.run);
         try scope.createEffect(.{ .view = self, .theme = try cx.themeSignal(scope) }, struct {
             fn run(ctx: anytype) void {
                 _ = ctx.theme.get();
@@ -143,17 +156,101 @@ pub const View = struct {
         try scope.onCleanup(View, self, cleanup);
         return self;
     }
+    pub fn setSearchAvailable(self: *View, available: bool) void {
+        if (self.search_available == available) return;
+        self.search_available = available;
+        if (!available) {
+            self.search_open = false;
+            self.search_animating = false;
+            self.search_width = 24;
+            self.search.node.setDisplay(.none);
+            self.search_clear.setDisplay(.none);
+            self.search_spacer.setDisplay(.none);
+            self.title.setDisplay(.flex);
+            self.search_box.setStyle(self.cx.allocator, .width, .{ .px = 24 });
+            self.search_box.setStyle(self.cx.allocator, .height, .{ .px = 24 });
+            self.search_box.setStyle(self.cx.allocator, .padding, .{});
+            self.search_box.setBackground(ui.Color.TRANSPARENT);
+            if (self.search_value.peek().len != 0) {
+                self.search_value.set("");
+                self.actions.search_changed.call("");
+            }
+        }
+        self.search_box.setDisplay(if (available) .flex else .none);
+    }
+    pub fn focusSearchFallback(self: *View) void {
+        if (self.search_available and self.full.style.display != .none) {
+            self.cx.setFocus(if (self.search_open) self.search.input_container else self.search_button);
+        }
+    }
+    fn toggleSearch(self: *View) void {
+        self.search_open = !self.search_open;
+        self.search_start_width = self.search_width;
+        self.search_start_ms = self.cx.frame_time_ms;
+        self.search_animating = true;
+        if (self.search_open) {
+            self.title.setDisplay(.none);
+            self.search_spacer.setDisplay(.flex);
+            self.search.node.setDisplay(.flex);
+            self.search_box.setStyle(self.cx.allocator, .height, .{ .px = 30 });
+            self.search_box.setStyle(self.cx.allocator, .padding, .{ .left = 8 });
+            self.search_box.setBackground(self.colors.well_border);
+            self.cx.setFocus(self.search.input_container);
+        } else {
+            if (self.search_value.peek().len != 0) {
+                self.search_value.set("");
+                self.actions.search_changed.call("");
+            }
+            self.search.node.setDisplay(.none);
+            self.cx.setFocus(self.search_button);
+        }
+        self.syncSearchClear();
+        self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+    }
+    fn syncSearchClear(self: *View) void {
+        self.search_clear.setDisplay(if (self.search_open and self.search_value.peek().len != 0) .flex else .none);
+    }
+    fn clearSearch(self: *View) void {
+        self.search_value.set("");
+        self.actions.search_changed.call("");
+        self.cx.setFocus(self.search.input_container);
+    }
+    fn animateSearch(self: *View) bool {
+        if (!self.search_animating) return false;
+        const target: f32 = if (self.search_open) @max(24, self.header.globalRect().w - 95) else 24;
+        const elapsed = @max(0, self.cx.frame_time_ms - self.search_start_ms);
+        const progress: f32 = @floatCast(@min(1, elapsed / 200.0));
+        const eased = 1 - (1 - progress) * (1 - progress);
+        const width = self.search_start_width + (target - self.search_start_width) * eased;
+        const changed = @abs(width - self.search_width) > 0.01;
+        if (changed) {
+            self.search_width = width;
+            self.search_box.setStyle(self.cx.allocator, .width, .{ .px = width });
+        }
+        if (progress >= 1) {
+            self.search_animating = false;
+            if (!self.search_open) {
+                self.search_box.setStyle(self.cx.allocator, .height, .{ .px = 24 });
+                self.search_box.setStyle(self.cx.allocator, .padding, .{});
+                self.search_box.setBackground(ui.Color.TRANSPARENT);
+                self.search_spacer.setDisplay(.none);
+                self.title.setDisplay(.flex);
+            }
+        } else self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+        return changed;
+    }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
+        const animated = self.animateSearch();
         var visible = self.full.style.display != .none and self.root.globalRect().w > 0 and self.root.globalRect().h > 0;
         var ancestor: ?*ui.Node = self.root;
         while (ancestor) |node| : (ancestor = node.parent) if (node.style.display == .none) {
             visible = false;
             break;
         };
-        if (visible == self.list_visible) return .done;
+        if (visible == self.list_visible) return if (animated) .needs_layout else .done;
         self.list_visible = visible;
-        if (!visible) return .done;
+        if (!visible) return if (animated) .needs_layout else .done;
         // Rows rebuilt while hidden can retain zero-width layout entries.
         // Re-layout the list once when it becomes visible in either location.
         self.list.markLayoutDirty();
@@ -211,7 +308,7 @@ pub const View = struct {
         self.hover.set(.{ .background = self.colors.hover });
         self.footer_style.set(S.footer());
         self.empty_footer_style.set(S.emptyFooter());
-        self.search_box.setBackground(self.colors.well);
+        self.search_box.setBackground(if (self.search_open or self.search_animating) self.colors.well_border else ui.Color.TRANSPARENT);
         self.search.state.tokens = self.cx.tokens;
         self.search.state.placeholder_color = self.colors.fg_2;
         self.search.state.dirty = true;
@@ -225,6 +322,25 @@ pub const View = struct {
         };
     }
 };
+
+fn mountSearchInput(cx: *ui.Cx, scope: *ui.Scope, value: *ui.Signal([]const u8), changed: ui.Handler([]const u8), id: []const u8) !ui.widgets.input.InputResult {
+    const input = try ui.widgets.Input(.{ .value = value, .placeholder = "搜索主机、标签、地址…", .placeholder_color = T.current().fg_2, .embedded = true, .on_change = changed }).mountResult(scope, cx);
+    input.node.meta.ownership.meta.test_id = id;
+    input.node.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .justify = .center });
+    input.state.font_size = 11;
+    input.state.line_height = 16.5;
+    input.state.char_width = 11 * 0.6;
+    input.state.dirty = true;
+    if (input.state.text_display_node) |label| if (label.getText()) |old| {
+        var next = old;
+        next.font_size = 11;
+        next.font_weight = 400;
+        next.line_height = 1.5;
+        next.color = T.current().fg_2;
+        label.setText(next);
+    };
+    return input;
+}
 
 pub const HostAction = enum { copy, edit };
 pub const HostCallbacks = struct {

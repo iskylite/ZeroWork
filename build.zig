@@ -208,6 +208,15 @@ pub fn build(b: *std.Build) void {
     settings_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
     b.step("settings-preview", "Build the read-only planning component acceptance runner").dependOn(&b.addInstallArtifact(settings_preview, .{}).step);
 
+    // Retained legacy authentication component acceptance; never installed by default.
+    const auth_preview = b.addExecutable(.{ .name = "auth-challenge-preview", .root_module = b.createModule(.{ .root_source_file = b.path("src/auth_challenge_native_fixture.zig"), .target = target, .optimize = optimize }) });
+    zenit.attach(zenit_dep, auth_preview);
+    auth_preview.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+    auth_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
+    auth_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+    auth_preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
+    b.step("auth-challenge-preview", "Build isolated retained authentication component acceptance window").dependOn(&b.addInstallArtifact(auth_preview, .{}).step);
+
     const events_preview = b.addExecutable(.{ .name = "transfer-events-preview", .root_module = b.createModule(.{ .root_source_file = b.path("src/transfer_events_native_fixture.zig"), .target = target, .optimize = optimize }) });
     zenit.attach(zenit_dep, events_preview);
     events_preview.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });

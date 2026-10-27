@@ -119,7 +119,8 @@ pub const Config = struct {
     pub fn format(self: Config, buffer: []u8) std.Io.Writer.Error![]const u8 {
         var writer = std.Io.Writer.fixed(buffer);
         try writer.print("[meta]\nconfig_revision = {d}\n\n", .{self.config_revision});
-        try writer.print("[ui]\nicon_background = \"{s}\"\ntheme = \"{s}\"\nfont_family = \"{s}\"\nfont_size = {d}\nfont_weight = \"{s}\"\nline_height = {d}\ncursor_style = \"{s}\"\nsidebar_collapsed = {}\ninput_line_highlight = {}\ntimestamp_gutter = {}\n\n", .{ @tagName(self.ui.icon_background), self.ui.theme, self.ui.font_family, self.ui.font_size, self.ui.font_weight, self.ui.line_height, self.ui.cursor_style, self.ui.sidebar_collapsed, self.ui.input_line_highlight, self.ui.timestamp_gutter });
+        try writer.print("[ui]\nicon_background = \"{s}\"\ntheme = \"{s}\"\nfont_family = \"{s}\"\nfont_size = {d}\nfont_weight = \"{s}\"\nline_height = {d}\ncursor_style = \"{s}\"\nsidebar_collapsed = {}\ninput_line_highlight = {}\ntimestamp_gutter = {}\nscrollback_limit = {d}\n\n", .{ @tagName(self.ui.icon_background), self.ui.theme, self.ui.font_family, self.ui.font_size, self.ui.font_weight, self.ui.line_height, self.ui.cursor_style, self.ui.sidebar_collapsed, self.ui.input_line_highlight, self.ui.timestamp_gutter, self.ui.scrollback_limit });
+        if (self.ui.sidebar_width) |width| try writer.print("sidebar_width = {d}\n\n", .{width});
         const background = self.ui.materials.background;
         try writer.print("[ui.materials]\nblur_px = {d}\n\n[ui.materials.background]\nenabled = {}\npath = ", .{ self.ui.materials.blur_px, background.enabled });
         try std.json.Stringify.value(background.path, .{}, &writer);
@@ -199,7 +200,7 @@ pub const Config = struct {
                 if (eq(key, "config_revision")) self.config_revision = try parseInt(u64, value) else return error.UnknownKey;
             },
             .ui => {
-                if (eq(key, "icon_background")) self.ui.icon_background = std.meta.stringToEnum(IconBackground, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "theme")) self.ui.theme = try parseString(value) else if (eq(key, "font_family")) self.ui.font_family = try parseString(value) else if (eq(key, "font_size")) self.ui.font_size = try parseInt(u8, value) else if (eq(key, "font_weight")) self.ui.font_weight = try parseString(value) else if (eq(key, "line_height")) self.ui.line_height = try parseFloat(value) else if (eq(key, "cursor_style")) self.ui.cursor_style = try parseString(value) else if (eq(key, "sidebar_collapsed")) self.ui.sidebar_collapsed = try parseBool(value) else if (eq(key, "input_line_highlight")) self.ui.input_line_highlight = try parseBool(value) else if (eq(key, "timestamp_gutter")) self.ui.timestamp_gutter = try parseBool(value) else return error.UnknownKey;
+                if (eq(key, "scrollback_limit")) self.ui.scrollback_limit = try parseInt(u32, value) else if (eq(key, "icon_background")) self.ui.icon_background = std.meta.stringToEnum(IconBackground, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "theme")) self.ui.theme = try parseString(value) else if (eq(key, "font_family")) self.ui.font_family = try parseString(value) else if (eq(key, "font_size")) self.ui.font_size = try parseInt(u8, value) else if (eq(key, "font_weight")) self.ui.font_weight = try parseString(value) else if (eq(key, "line_height")) self.ui.line_height = try parseFloat(value) else if (eq(key, "cursor_style")) self.ui.cursor_style = try parseString(value) else if (eq(key, "sidebar_collapsed")) self.ui.sidebar_collapsed = try parseBool(value) else if (eq(key, "sidebar_width")) self.ui.sidebar_width = try parseFloat(value) else if (eq(key, "input_line_highlight")) self.ui.input_line_highlight = try parseBool(value) else if (eq(key, "timestamp_gutter")) self.ui.timestamp_gutter = try parseBool(value) else return error.UnknownKey;
             },
             .@"ui.materials" => {
                 if (eq(key, "blur_px")) self.ui.materials.blur_px = try parseInt(u8, value) else return error.UnknownKey;
@@ -317,6 +318,7 @@ pub const Config = struct {
         if (!eq(self.log.export_format, "txt") and !eq(self.log.export_format, "cast") and !eq(self.log.export_format, "txt_cast")) return error.InvalidValue;
 
         if (self.ui.font_size < 8 or self.ui.font_size > 48) return error.OutOfRange;
+        if (self.ui.sidebar_width) |width| if (!std.math.isFinite(width) or width < 220 or width > 480) return error.OutOfRange;
         if (!std.math.isFinite(self.ui.line_height) or self.ui.line_height < 1.0 or self.ui.line_height > 3.0) return error.OutOfRange;
         if (std.mem.trim(u8, self.ui.font_family, " \t\r\n").len == 0 or !std.unicode.utf8ValidateSlice(self.ui.font_family) or std.mem.indexOfAny(u8, self.ui.font_family, "\"\\\n\r") != null) return error.InvalidValue;
         if (!validFontWeight(self.ui.font_weight) or !validCursorStyle(self.ui.cursor_style)) return error.InvalidValue;
@@ -335,7 +337,7 @@ fn validPreferenceId(value: []const u8) bool {
 }
 
 pub const IconBackground = enum { transparent, light, dark };
-pub const Ui = struct { icon_background: IconBackground = .transparent, theme: []const u8 = "dark", font_family: []const u8 = "JetBrains Mono", font_size: u8 = 14, font_weight: []const u8 = "regular", line_height: f32 = 11.0 / 7.0, cursor_style: []const u8 = "block", sidebar_collapsed: bool = false, input_line_highlight: bool = true, timestamp_gutter: bool = false, materials: material.Materials = .{} };
+pub const Ui = struct { scrollback_limit: u32 = 25000, icon_background: IconBackground = .transparent, theme: []const u8 = "dark", font_family: []const u8 = "Monaco", font_size: u8 = 14, font_weight: []const u8 = "regular", line_height: f32 = 1.5, cursor_style: []const u8 = "bar", sidebar_collapsed: bool = false, sidebar_width: ?f32 = null, input_line_highlight: bool = true, timestamp_gutter: bool = false, materials: material.Materials = .{} };
 pub fn resetDefaults() Config {
     var value: Config = .{};
     value.ui.theme = "sauber";
@@ -652,4 +654,18 @@ test "app icon background defaults and persisted choice" {
     const restored = try Config.parse(try parsed.format(&buffer));
     try std.testing.expectEqual(IconBackground.light, restored.ui.icon_background);
     try std.testing.expectError(error.InvalidValue, Config.parse("[ui]\nicon_background = \"invalid\"\n"));
+}
+
+test "terminal scrollback default and unlimited survive config serialization" {
+    try std.testing.expectEqual(@as(u32, 25000), (Config{}).ui.scrollback_limit);
+    for ([_]u32{ 0, 25000, 100000 }) |limit| {
+        var config_value: Config = .{};
+        config_value.ui.scrollback_limit = limit;
+        var buffer: [32768]u8 = undefined;
+        const encoded = try config_value.format(&buffer);
+        var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+        defer arena.deinit();
+        const decoded = try Config.parseWithAllocator(arena.allocator(), encoded);
+        try std.testing.expectEqual(limit, decoded.ui.scrollback_limit);
+    }
 }

@@ -1,0 +1,66 @@
+{
+  "scope": "Global notifications; native presenter remains the production implementation",
+  "reference": "index.html using ../shared/feedback.css and feedback.js",
+  "browser": {
+    "viewport": [
+      1280,
+      720
+    ],
+    "devicePixelRatio": 2
+  },
+  "native": {
+    "viewport": [
+      1000,
+      700
+    ],
+    "backingScale": 2
+  },
+  "card": {
+    "width": 340,
+    "padding": [
+      9,
+      13
+    ],
+    "gap": 4,
+    "radius": 9,
+    "border": 1,
+    "stackGap": 8,
+    "top": 62
+  },
+  "text": {
+    "title": [
+      12,
+      500,
+      18
+    ],
+    "body": [
+      11,
+      400,
+      18
+    ],
+    "action": [
+      11,
+      500,
+      16.5
+    ]
+  },
+  "action": {
+    "height": 24,
+    "horizontalPadding": 10,
+    "radius": 6,
+    "width": "content plus padding, bounded by footer"
+  },
+  "status": {
+    "height": 20,
+    "horizontalPadding": 6,
+    "radius": 4,
+    "failure": "danger",
+    "warning": "warn",
+    "success": "ok",
+    "cancelled": "neutral"
+  },
+  "overflow": "Single-line title, source, object and detail when a result action exists; full original strings retained. Messages without a result action preserve wrapped detail.",
+  "verification": "Native local scenario fixture calls production host publish functions and presenter; no remote operation is executed. See verification/report.json.",
+  "platformDifferences": "Native SVG icons and system text shaping; HTML uses CSS and text symbols. Card dimensions and control sizes are matched in logical pixels.",
+  "metadata": "Source and object share a single ellipsized line, joined by ·; identical labels are deduplicated."
+}

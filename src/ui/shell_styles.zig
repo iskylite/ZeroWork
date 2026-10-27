@@ -3,10 +3,10 @@ const ui = @import("ui");
 const theme = @import("app_theme.zig");
 
 pub const outer: f32 = 8;
-pub const gap: f32 = 6;
-pub const title_height: f32 = 46;
-pub const status_height: f32 = 32;
-pub const sidebar_width: f32 = 300;
+pub const gap: f32 = outer;
+pub const title_height: f32 = 40;
+pub const status_height: f32 = 30;
+pub const sidebar_width: f32 = @import("sidebar_model.zig").default_width;
 pub const sidebar_collapsed: f32 = 0;
 pub const card_radius: f32 = 11;
 // The windowed inset clears the native traffic lights; a header without
@@ -52,22 +52,24 @@ pub fn root(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn title(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 0, .blur = 0, .color = ui.Color.TRANSPARENT }, .width = .fill(), .height = .{ .px = title_height }, .margin = .{ .bottom = gap }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 4, .padding = .{ .left = title_controls_inset, .right = title_content_inset }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
+    return .{ .shadow = cardShadow(), .inset_shadow = cardHighlight(), .width = .fill(), .height = .{ .px = title_height }, .margin = .{ .bottom = gap }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 4, .padding = .{ .left = title_controls_inset, .right = title_content_inset }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
 }
 pub fn body(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .direction = .row, .gap = gap, .margin = .{ .bottom = gap } };
 }
 pub fn sidebar(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 0, .blur = 0, .color = ui.Color.TRANSPARENT }, .width = .{ .px = sidebar_width }, .height = .fill(), .flex_shrink = 0, .direction = .column, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius }, .overflow = .hidden };
+    return .{ .shadow = cardShadow(), .inset_shadow = cardHighlight(), .width = .{ .px = sidebar_width }, .height = .fill(), .flex_shrink = 0, .direction = .column, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius }, .overflow = .hidden };
 }
 pub fn pane(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 0, .blur = 0, .color = ui.Color.TRANSPARENT }, .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .column, .background = c.terminal, .border = .{ .width = 0, .color = c.border, .radius = card_radius }, .overflow = .hidden };
+    // All four workspace cards share the sidebar surface and treatment.
+    const background = c.surface_1;
+    return .{ .shadow = cardShadow(), .inset_shadow = cardHighlight(), .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .column, .background = background, .border = .{ .width = 0, .color = c.border, .radius = card_radius }, .overflow = .hidden };
 }
 pub fn status(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 0, .blur = 0, .color = ui.Color.TRANSPARENT }, .width = .fill(), .height = .{ .px = status_height }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 10, .right = 10 }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
+    return .{ .shadow = cardShadow(), .inset_shadow = cardHighlight(), .width = .fill(), .height = .{ .px = status_height }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 10, .right = 10 }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
 }
 pub fn settingsPanel(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
@@ -103,7 +105,7 @@ pub fn emptyActions(_: *const ui.ThemeTokens) ui.BoxStyle {
 
 pub fn collapsedSidebar(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = cardShadow(), .inset_shadow = .{ .offset_y = 0, .blur = 0, .color = ui.Color.TRANSPARENT }, .width = .{ .px = sidebar_collapsed }, .height = .fill(), .flex_shrink = 0, .direction = .column, .align_items = .center, .gap = 4, .padding = .{ .top = 8, .bottom = 8 }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
+    return .{ .shadow = cardShadow(), .inset_shadow = cardHighlight(), .width = .{ .px = sidebar_collapsed }, .height = .fill(), .flex_shrink = 0, .direction = .column, .align_items = .center, .gap = 4, .padding = .{ .top = 8, .bottom = 8 }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
 }
 
 pub fn collapsedAction() ui.BoxStyle {
@@ -130,6 +132,9 @@ test "shell publishes reused registry tokens and repaints retained chrome" {
     try shell.appendChild(cx.allocator, side);
     const title_id = titlebar.id;
     const side_id = side.id;
+    const content = try ui.boxStyled(cx, pane, .{});
+    try shell.appendChild(cx.allocator, content);
+    const content_id = content.id;
     var previous_publication = cx.tokens;
     for ([_][]const u8{ "light", "sauber", "dark" }) |id| {
         theme.selectTokens(registry.get(id).?.ui_tokens);
@@ -143,8 +148,12 @@ test "shell publishes reused registry tokens and repaints retained chrome" {
         try std.testing.expectEqual(c.app, shell.getBackground());
         try std.testing.expectEqual(c.surface_1, titlebar.getBackground());
         try std.testing.expectEqual(c.surface_1, side.getBackground());
-        try std.testing.expectEqual(@as(u8, 0), titlebar.style.shadow().?.color.a);
-        try std.testing.expectEqual(@as(u8, 0), side.style.shadow().?.color.a);
+        try std.testing.expectEqual(c.surface_1, content.getBackground());
+        try std.testing.expect(content.getBackground().a > 0);
+        try std.testing.expectEqual(content_id, content.id);
+        try std.testing.expectEqual(card_radius, content.style.border.radius);
+        try std.testing.expectEqual(c.shadow, titlebar.style.shadow().?.color);
+        try std.testing.expectEqual(c.shadow, side.style.shadow().?.color);
         try std.testing.expectEqual(c.fg_1, cx.tokens.tokens.color.fg_primary);
         try std.testing.expectEqual(title_id, titlebar.id);
         try std.testing.expectEqual(side_id, side.id);
@@ -208,7 +217,7 @@ pub fn emptyDescription(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 1.65, .color = theme.current().fg_2 };
 }
 pub fn emptyIcon(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = 56 }, .height = .{ .px = 56 }, .margin = .{ .bottom = 3 }, .flex_shrink = 0, .align_items = .center, .justify = .center, .background = theme.current().selection, .border = .{ .radius = 14 } };
+    return .{ .width = .{ .px = 56 }, .height = .{ .px = 56 }, .margin = .{ .bottom = 3 }, .flex_shrink = 0, .align_items = .center, .justify = .center };
 }
 pub fn emptyButton(primary: bool) ui.BoxStyle {
     const c = theme.current();
@@ -222,8 +231,9 @@ pub fn emptyButton(primary: bool) ui.BoxStyle {
     return style;
 }
 
-fn cardShadow() @typeInfo(@FieldType(ui.BoxStyle, "shadow")).optional.child {
-    // V3 shell sections have no individual elevation. The native window owns
-    // the exterior shadow; explicit zero clears any retained old shadow.
-    return .{ .blur = 0, .offset_y = 0, .color = ui.Color.TRANSPARENT };
+pub fn cardHighlight() @typeInfo(@FieldType(ui.BoxStyle, "inset_shadow")).optional.child {
+    return .{ .offset_y = 1, .blur = 0, .color = ui.Color.WHITE.withAlpha(if (theme.currentName() == .dark) 23 else 46) };
+}
+pub fn cardShadow() @typeInfo(@FieldType(ui.BoxStyle, "shadow")).optional.child {
+    return .{ .blur = 4.4, .offset_y = 2, .color = theme.current().shadow };
 }

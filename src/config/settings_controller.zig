@@ -753,13 +753,13 @@ test "failed settings save preserves runtime baseline and edited draft" {
     try controller.editKey("ui", "font_family", .{ .text = "Edited Mono" });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "blocked", .data = "not a directory" });
     try std.testing.expectError(error.NotDir, controller.save(std.testing.io, tmp.dir, &target));
-    try std.testing.expectEqualStrings("JetBrains Mono", target.value.ui.font_family);
-    try std.testing.expectEqualStrings("JetBrains Mono", controller.model.original.ui.font_family);
+    try std.testing.expectEqualStrings("Monaco", target.value.ui.font_family);
+    try std.testing.expectEqualStrings("Monaco", controller.model.original.ui.font_family);
     try std.testing.expectEqualStrings("Edited Mono", controller.model.value.ui.font_family);
     try std.testing.expect(controller.model.dirty);
     try std.testing.expectEqualStrings("NotDir", controller.last_error.?);
     controller.discard();
-    try std.testing.expectEqualStrings("JetBrains Mono", controller.model.value.ui.font_family);
+    try std.testing.expectEqualStrings("Monaco", controller.model.value.ui.font_family);
 }
 
 test "settings user data path survives saving and restarting from another directory" {
@@ -835,7 +835,9 @@ test "restore defaults can be discarded or saved and becomes the new baseline" {
     controller.resetDefaults();
     try controller.save(std.testing.io, tmp.dir, &target);
     try std.testing.expectEqual(@as(u8, 14), target.value.ui.font_size);
-    try std.testing.expectEqualStrings("JetBrains Mono", target.value.ui.font_family);
+    try std.testing.expectEqualStrings("Monaco", target.value.ui.font_family);
+    try std.testing.expectEqual(@as(f32, 1.5), target.value.ui.line_height);
+    try std.testing.expectEqualStrings("bar", target.value.ui.cursor_style);
     try controller.editKey("ui", "font_size", .{ .unsigned = 30 });
     controller.discard();
     try std.testing.expectEqual(@as(u8, 14), controller.model.value.ui.font_size);
@@ -930,7 +932,7 @@ test "invalid raw stays dirty with last valid preview and reverting becomes clea
     try std.testing.expectEqualStrings("font", c.search_query);
     try std.testing.expectEqual(@as(f32, 120), c.scroll_offsets[5]);
     try std.testing.expectError(error.OutOfRange, c.editRaw("ui", "line_height", "nan"));
-    try std.testing.expectEqual(@as(f32, 11.0 / 7.0), c.model.value.ui.line_height);
+    try std.testing.expectEqual(@as(f32, 1.5), c.model.value.ui.line_height);
 }
 
 test "settings merges external commits by field and discard follows latest revision" {
@@ -953,6 +955,28 @@ test "settings merges external commits by field and discard follows latest revis
     try std.testing.expectEqual(@as(u8, 18), c.model.value.ui.font_size);
     try std.testing.expectEqualStrings("dark-pro", c.model.value.ui.theme);
     try std.testing.expectEqual(State.clean, c.state());
+}
+
+test "saved sidebar width survives restart and an unrelated settings draft" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var target = try runtime.RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer target.deinit();
+    try std.testing.expect(target.value.ui.sidebar_width == null);
+    var c = try Controller.init(std.testing.allocator, target.value);
+    defer c.deinit();
+    try c.editKey("ui", "font_size", .{ .unsigned = 18 });
+    var candidate = target.value;
+    candidate.ui.sidebar_width = 312.5;
+    try target.save(std.testing.io, tmp.dir, candidate);
+    try c.save(std.testing.io, tmp.dir, &target);
+    var restarted = try runtime.RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
+    defer restarted.deinit();
+    try std.testing.expectEqual(@as(?f32, 312.5), restarted.value.ui.sidebar_width);
+    try std.testing.expectEqual(@as(u8, 18), restarted.value.ui.font_size);
+    candidate = target.value;
+    candidate.ui.sidebar_width = 500;
+    try std.testing.expectError(error.OutOfRange, target.save(std.testing.io, tmp.dir, candidate));
 }
 
 test "save locks draft and ignores old callbacks while retry commits once" {

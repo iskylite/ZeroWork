@@ -80,7 +80,7 @@ pub fn wrapper() ui.BoxStyle {
 }
 pub fn panel(kind: Kind, viewport: ui.Size) ui.BoxStyle {
     const panel_height = @min(height(kind), @max(0, viewport.height - 16));
-    return .{ .width = .{ .px = @min(width(kind), @max(0, viewport.width - 16)) }, .height = .{ .px = panel_height }, .min_height = panel_height, .direction = .column, .padding = if (kind == .model) ui.Padding.all(15) else if (kind == .attachment) ui.Padding.all(10) else if (kind == .usage) ui.Padding.all(14) else .{ .top = 10, .left = 12, .right = 12, .bottom = 12 }, .gap = if (kind == .attachment or kind == .model) 6 else 8, .background = theme.current().overlay, .border = .{ .width = if (kind == .model or kind == .usage) 1 else 0, .color = theme.current().border, .radius = if (kind == .attachment or kind == .usage or kind == .model) 11 else 14 }, .shadow = .{ .offset_y = 12, .blur = 24, .color = theme.current().shadow } };
+    return .{ .width = .{ .px = @min(width(kind), @max(0, viewport.width - 16)) }, .height = .{ .px = panel_height }, .min_height = panel_height, .direction = .column, .padding = if (kind == .model) ui.Padding.all(15) else if (kind == .attachment) ui.Padding.all(10) else if (kind == .usage) ui.Padding.all(14) else .{ .top = 10, .left = 12, .right = 12, .bottom = 12 }, .gap = if (kind == .attachment or kind == .model) 6 else 8, .background = theme.current().overlay, .border = .{ .width = 0, .radius = if (kind == .attachment or kind == .usage or kind == .model) 11 else 14 }, .shadow = .{ .offset_y = 12, .blur = 24, .color = theme.current().shadow } };
 }
 pub fn header() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 };

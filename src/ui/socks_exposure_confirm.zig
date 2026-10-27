@@ -72,7 +72,10 @@ pub const View = struct {
         self.body.content.style.width = .fill();
         self.body.content.style.flex_shrink = 0;
         try self.frame.appendChild(cx.allocator, self.body.container);
-        try self.body.content.appendChild(cx.allocator, heading);
+        const title_row = try ui.box(cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
+        try title_row.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.shield_alert, theme.current().danger_ink, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 }));
+        try title_row.appendChild(cx.allocator, heading);
+        try self.body.content.appendChild(cx.allocator, title_row);
         const intro = try ui.text(cx, "转发将绑定到 0.0.0.0。局域网内的其他设备可以访问此监听端口。", .{
             .font_size = 12,
             .color = theme.current().fg_2,

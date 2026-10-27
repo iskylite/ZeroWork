@@ -72,13 +72,13 @@ test "fullscreen titlebar retains children focus and window isolation across the
     hook.frame();
     other.frame();
     cx.setFocus(tab);
-    try std.testing.expectApproxEqAbs(@as(f32, 87), tab.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 83), tab.globalRect().x, 0.01);
     const bar_id = bar.id;
     const tab_id = tab.id;
     hook.chrome = .{ .fullscreen = true };
     cx.requestRedraw();
     hook.frame();
-    try std.testing.expectApproxEqAbs(@as(f32, 18), tab.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 14), tab.globalRect().x, 0.01);
     // Theme publication replays boxStyled defaults. The same safe hook must
     // restore native-state padding before the frame is presented.
     theme.select(.light);
@@ -86,7 +86,7 @@ test "fullscreen titlebar retains children focus and window isolation across the
     cx.setViewport(1728, 1117);
     hook.frame();
     try std.testing.expectEqual(@as(f32, 10), bar.style.padding.left);
-    try std.testing.expectApproxEqAbs(@as(f32, 18), tab.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 14), tab.globalRect().x, 0.01);
     try std.testing.expectEqual(bar_id, bar.id);
     try std.testing.expectEqual(tab_id, controls.children.items[0].id);
     try std.testing.expectEqual(tab, cx.focused_node.?);
@@ -95,7 +95,7 @@ test "fullscreen titlebar retains children focus and window isolation across the
     hook.chrome = .{ .native_controls_count = 3 };
     cx.setViewport(1440, 900);
     hook.frame();
-    try std.testing.expectApproxEqAbs(@as(f32, 87), tab.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 83), tab.globalRect().x, 0.01);
     try std.testing.expectEqual(tab, cx.focused_node.?);
     try std.testing.expectEqual(tab_id, controls.children.items[0].id);
     // The second window deliberately has no tabs; its own fullscreen state

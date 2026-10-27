@@ -386,3 +386,34 @@ test "auth password eye receives real pointer without submitting or changing sec
     try std.testing.expectEqual(@as(usize, 0), f.submitted);
     try std.testing.expectEqual(@as(usize, 0), f.cancelled);
 }
+
+test "auth challenge semantic title icons distinguish secrets from trust and keep warning colors after retheme" {
+    defer theme.select(.dark);
+    for (std.enums.values(auth.Kind)) |kind| {
+        theme.select(.dark);
+        var f: Fixture = undefined;
+        try f.init();
+        defer f.deinit();
+        _ = try f.offer(kind, .otp_modal, if (kind == .host_key_unknown or kind == .host_key_changed) &.{} else &.{.{ .text = "Fixture prompt", .echo = false }});
+        const asset = switch (kind) {
+            .password, .keyboard_interactive => ui.icons.lock_keyhole,
+            .private_key_passphrase => ui.icons.key_round,
+            .host_key_unknown => ui.icons.shield_question,
+            .host_key_changed => ui.icons.shield_alert,
+        };
+        try std.testing.expectEqual(asset.icon_id.?, f.view.header_icon.getIcon().?.icon_id);
+        for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+            theme.select(name);
+            f.cx.setTheme(theme.widgetTheme(name));
+            try f.view.retheme();
+            const colors = theme.current();
+            const tint = switch (kind) {
+                .host_key_unknown => colors.warn_ink,
+                .host_key_changed => colors.danger_ink,
+                else => colors.accent,
+            };
+            try std.testing.expectEqual(tint, f.view.header_icon.getIcon().?.tint);
+            try std.testing.expectEqual(colors.fg_1, f.view.title.getText().?.color);
+        }
+    }
+}

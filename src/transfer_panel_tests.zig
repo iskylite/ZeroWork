@@ -9,6 +9,7 @@ comptime {
     _ = @import("file_application_host_tests.zig");
 }
 test {
+    _ = @import("ui/remote_session_notice.zig");
     _ = @import("ui_constraint_tests.zig");
     _ = @import("record_cleanup_ui_tests.zig");
     _ = @import("application_data_cleanup_ui_tests.zig");
@@ -34,6 +35,7 @@ test {
     _ = @import("sidebar_view_tests.zig");
     _ = @import("ai_message_alignment_tests.zig");
     _ = @import("settings_runtime_consumer_tests.zig");
+    _ = @import("ui/session_export_jobs.zig");
     _ = @import("terminal_surface_tests.zig");
     _ = @import("ui/background_layers.zig");
     _ = @import("background_surface_tests.zig");

@@ -45,18 +45,19 @@ const ProcessWindows = struct {
         const app = try self.runtime.createWindowWith(.{
             .io = self.io,
             .font = .{ .fallback_families = @import("platform/ui_fonts.zig").families },
-            .window = .{ .width = 1440, .height = 900, .min_width = 860, .min_height = 480, .title = "ZeroWork", .titlebar = .custom_inset, .titlebar_height = 54, .titlebar_drag_right_inset = 150 },
+            .window = .{ .width = 1440, .height = 900, .min_width = 860, .min_height = 480, .title = "ZeroWork", .titlebar = .custom_inset, .titlebar_height = shell_styles.outer + shell_styles.title_height, .titlebar_drag_right_inset = 150 },
         }, mountUI);
         // A mounted native window still belongs to this request if later
         // attachment/factory validation fails. Close it through its owner at
         // the next runtime boundary instead of leaving an orphan empty view.
         errdefer _ = self.runtime.closeWindow(app.windowId());
-        app.win.setTrafficLightsLayout(28, 31, 12);
+        app.win.setTrafficLightsLayout(shell_styles.outer + 20, shell_styles.outer + shell_styles.title_height / 2, 12);
         installMonospaceFonts(app);
         app.setFontRegistry(registry);
         if (application_test_mode) try verifyUiFontPaths(app);
         const nav: *AppNavHost = @ptrCast(@alignCast(app.cx.root.?.behavior.events.capture_context orelse return error.MissingApplicationController));
         nav.app_runtime = app;
+        try nav.loadEmptyLogo();
         if (nav.settings) |settings| settings.app_runtime = app;
         _ = @import("ui/plugin_window_host.zig").Host.mount(app, nav.application_host orelse return error.MissingApplicationController, process_notifications, if (nav.ai) |ai| ai.notification_window else null) catch |err| {
             applog.err(.app, "plugin window services initialization: {s}", .{@errorName(err)});
@@ -174,6 +175,7 @@ const AiHost = struct {
     toolbar_trigger: ?*ui.Node = null,
     strip: ?*@import("ui/ai_strip_view.zig").View = null,
     dock: @import("ai/dock_state.zig").State = .{},
+    reveal: @import("ai/dock_state.zig").Reveal = .{},
     dock_titlebar: ?*ui.Node = null,
     panel_hover: ?*ui.Signal(bool) = null,
     sessions_view: ?*@import("ui/ai_sessions_view.zig").View = null,
@@ -349,6 +351,7 @@ const AiHost = struct {
         const scope = self.currentScope() orelse {
             if (self.gestures) |gestures| gestures.cancel();
             self.controller.model.visible = false;
+            self.reveal = .{};
             self.panel.setDisplay(.none);
             return;
         };
@@ -1217,7 +1220,7 @@ const AiHost = struct {
     }
 
     fn refresh(self: *AiHost, label: []const u8) void {
-        const snap = self.controller.snapshot(.{ .x = 0, .y = 0, .width = 800, .height = 600 }, .{ .x = 0, .y = 0, .width = 1200, .height = 800 });
+        _ = self.controller.snapshot(.{ .x = 0, .y = 0, .width = 800, .height = 600 }, .{ .x = 0, .y = 0, .width = 1200, .height = 800 });
         var buffer: [256]u8 = undefined;
         var writer = std.Io.Writer.fixed(&buffer);
         var owner_label: []const u8 = "当前会话";
@@ -1246,7 +1249,7 @@ const AiHost = struct {
         // Attachment history owns widget scopes and portal cleanup. Rebuild
         // only at the after-layout safe point, never inside a click callback.
         self.conversation_dirty = true;
-        self.panel.setDisplay(if (snap.visible) .flex else .none);
+        self.updatePresentation();
         if (self.stop_button) |button| {
             const busy = self.thread_state.load(.acquire) == 1 and self.requestDisplayed();
             button.setOpacityRaw(if (busy) 1 else 0);
@@ -1435,7 +1438,15 @@ const AiHost = struct {
         const strip = self.strip orelse return;
         const before = self.dock.mode;
         const now = @import("platform/realtime.zig").milliseconds(self);
-        self.dock.hover(strip.hovered.peek(), if (self.panel_hover) |v| v.peek() else false, now);
+        const strip_rect = strip.root.globalRect();
+        const x = self.cx.mouse_x;
+        const y = self.cx.mouse_y;
+        const strip_hovered = strip.root.style.display != .none and x >= strip_rect.x and x < strip_rect.x + strip_rect.w and y >= strip_rect.y and y < strip_rect.y + strip_rect.h;
+        const panel_hovered = if (self.card_box) |card| inside: {
+            const rect = card.globalRect();
+            break :inside self.controller.model.visible and x >= rect.x and x < rect.x + rect.w and y >= rect.y and y < rect.y + rect.h;
+        } else false;
+        self.dock.hover(strip_hovered, panel_hovered, now);
         if (before != self.dock.mode) {
             if (self.dock.mode == .preview) {
                 self.syncOwner() catch return;
@@ -1444,19 +1455,29 @@ const AiHost = struct {
                 self.refresh("AI 助手");
             } else if (self.dock.mode == .hidden) self.collapse();
         }
-        if (self.dock.mode == .preview) self.cx.scheduleRedrawAfterNs(50 * 1_000_000);
+        if (self.dock.mode == .preview or self.dock.enter_at != null) self.cx.scheduleRedrawAfterNs(16 * 1_000_000);
+        self.updatePresentation();
+    }
+
+    fn updatePresentation(self: *AiHost) void {
+        const visible = self.controller.model.visible;
+        const frame = self.reveal.update(visible, @import("platform/realtime.zig").milliseconds(self), self.cx.reduced_motion);
+        self.panel.setDisplay(if (visible or frame.opacity > 0.001) .flex else .none);
+        self.panel.setStyleInline(self.cx.allocator, .{ .opacity = frame.opacity, .translate_y = if (self.cx.reduced_motion) 0 else -6 * (1 - frame.opacity) });
+        self.panel.setHitTestVisible(visible);
+        if (frame.moving) self.cx.scheduleRedrawAfterNs(16 * 1_000_000);
     }
 
     fn updateStrip(self: *AiHost) void {
         const strip = self.strip orelse return;
         const pane = if (self.currentScope() != null) region: {
-            if (self.workspace) |workspace| if (workspace.active_group_view != null) {
-                var rect = workspace.terminal_area.globalRect();
-                rect.y -= 12;
-                rect.h += 12;
-                break :region rect;
-            };
-            break :region self.ownerBounds();
+            const workspace = self.workspace orelse break :region null;
+            const title = self.dock_titlebar orelse break :region null;
+            var rect = workspace.terminal_area.globalRect();
+            const title_rect = title.globalRect();
+            rect.y = title_rect.y;
+            rect.h = title_rect.h;
+            break :region rect;
         } else null;
         // File workspaces align with the sidebar. Their toolbar AI entry remains
         // available without reserving or overlaying a strip across the file cards.
@@ -1472,7 +1493,8 @@ const AiHost = struct {
         const busy = same_owner and self.thread_state.load(.acquire) == 1;
         const pending = same_owner and self.tool_bridge.pendingApproval() != null;
         const state: @import("ui/ai_strip_view.zig").State = if (pending) .approval else if (busy) .working else if (same_owner and self.recoveryVisible()) .failed else if (self.controller.stream.cards.items.len > 0) .success else .idle;
-        const phase: usize = @intCast(@divTrunc(@import("platform/realtime.zig").milliseconds(self), 200));
+        const now = @import("platform/realtime.zig").milliseconds(self);
+        const phase: usize = @intCast(@divTrunc(now, 200));
         strip.update(pane, pane != null and !file_workspace, state, phase, self.controller.model.visible);
     }
 
@@ -2516,7 +2538,7 @@ const AiHost = struct {
                 }
                 break :released true;
             } else true;
-            notifications.publishAi(owner, operation, self.manager.turn_id, .{ .result = if (uncertain) .unverified else if (state == 4) .cancelled else if (state == 2 and self.manager.saw_done) .succeeded else .failed, .resources_released = resources_released, .final_answer = state == 2 and self.manager.saw_done and final_answer and !uncertain }) catch |err| {
+            notifications.publishAi(owner, operation, self.manager.turn_id, .{ .result = if (uncertain) .unverified else if (state == 4) .cancelled else if (state == 2 and self.manager.saw_done) .succeeded else .failed, .resources_released = resources_released, .final_answer = state == 2 and self.manager.saw_done and final_answer and !uncertain, .details = .{ .detail = if (state == 3) self.failure_label else "" } }) catch |err| {
                 if (self.workspace) |workspace| workspace.status(@errorName(err));
             };
             self.request_operation_id = null;
@@ -3220,13 +3242,13 @@ const MenuHost = struct {
                 }
             };
         };
-        if (workspace.sidebar_chrome) |sidebar| self.cx.setFocus(sidebar.search.input_container);
+        if (workspace.sidebar_chrome) |sidebar| sidebar.focusSearchFallback();
     }
     fn assetActionCompleted(raw: *anyopaque, mode: @import("ui/asset_action_view.zig").Mode) void {
         const self: *MenuHost = @ptrCast(@alignCast(raw));
         if (self.workspace) |workspace| {
             workspace.status(if (mode == .delete) "主机配置已删除，已打开的会话继续运行" else "主机已移动，已打开的会话继续运行");
-            if (workspace.sidebar_chrome) |sidebar| self.cx.setFocus(sidebar.search.input_container);
+            if (workspace.sidebar_chrome) |sidebar| sidebar.focusSearchFallback();
         }
     }
     fn submitAssetAction(raw: *anyopaque, request: @import("config/asset_actions.zig").Request) !@import("config/asset_actions.zig").Result {
@@ -3500,33 +3522,7 @@ const MenuHost = struct {
                     workspace.status("会话尚未连接");
                     return;
                 }
-                const Sink = struct {
-                    workspace: *ws.Workspace,
-                    capture: Export.SessionCapture,
-                    runtime: ?*SessionRuntime,
-                    local_service: ?@import("host/terminal_service.zig").Service,
-                    pub fn validate(target_sink: @This()) !void {
-                        const index = target_sink.workspace.tabIndexById(target_sink.capture.tab_id) orelse return error.StaleExportOwner;
-                        const tab = target_sink.workspace.tabs.items[index];
-                        if (!target_sink.capture.matches(tab.tab_id, tab.content_owner) or tab.runtime != target_sink.runtime or tab.closing) return error.StaleExportOwner;
-                        if (target_sink.runtime) |current| if (current.torn_down) return error.SessionClosed;
-                        if (target_sink.local_service) |service| {
-                            const terminal_view = tab.terminal orelse return error.StaleExportOwner;
-                            const surface = terminal_view.terminal_surface orelse return error.StaleExportOwner;
-                            if (!surface.service.binding.eql(service.binding)) return error.StaleExportOwner;
-                        }
-                    }
-                    pub fn write(target_sink: @This(), kind: Export.Kind, destination_path: []const u8) !void {
-                        if (target_sink.local_service) |service| {
-                            try service.exportRecording(@fromBackingInt(@intCast(@backingInt(kind))), target_sink.workspace.io, .cwd(), destination_path);
-                        } else if (target_sink.runtime) |current| try current.exportTimeline(target_sink.workspace.io, .cwd(), destination_path) else return error.RecordingUnavailable;
-                    }
-                };
-                const sink: Sink = .{ .workspace = workspace, .capture = .{ .tab_id = source_tab.tab_id, .owner = source_tab.content_owner }, .runtime = runtime, .local_service = local_service };
-                sink.validate() catch |err| {
-                    workspace.status(@errorName(err));
-                    return;
-                };
+                const capture: Export.SessionCapture = .{ .tab_id = source_tab.tab_id, .owner = source_tab.content_owner };
                 const format = Export.Format.parse(workspace.app_config.log.export_format) catch |err| {
                     workspace.status(@errorName(err));
                     return;
@@ -3537,11 +3533,34 @@ const MenuHost = struct {
                     workspace.status(@errorName(err));
                     return;
                 };
-                const saved = Export.run(self.allocator, format, path, sink) catch |err| {
-                    workspace.status(@errorName(err));
+                const destination = path orelse return;
+                const current_index = workspace.tabIndexById(capture.tab_id) orelse return;
+                const current_tab = workspace.tabs.items[current_index];
+                if (!capture.matches(current_tab.tab_id, current_tab.content_owner) or current_tab.runtime != runtime or current_tab.closing) {
+                    workspace.status("StaleExportOwner");
                     return;
-                };
-                if (saved) workspace.status("已导出会话日志");
+                }
+                const Jobs = @import("ui/session_export_jobs.zig");
+                const manager = Jobs.Manager.forCx(self.cx) orelse return;
+                if (manager.job != null) {
+                    workspace.status("日志正在导出中");
+                    return;
+                }
+                const source: Jobs.Source = if (local_service) |service| blk: {
+                    const surface = (current_tab.terminal orelse return).terminal_surface orelse return;
+                    if (!surface.service.binding.eql(service.binding)) return;
+                    break :blk .{ .live = service.recordingLease() catch |err| {
+                        workspace.status(@errorName(err));
+                        return;
+                    } };
+                } else if (runtime) |current| blk: {
+                    if (current.torn_down) return;
+                    break :blk .{ .frozen = current.captureExport(std.heap.c_allocator) catch |err| {
+                        workspace.status(@errorName(err));
+                        return;
+                    } };
+                } else return;
+                manager.start(source, format, destination) catch |err| workspace.status(@errorName(err));
             },
             .close_others => {
                 const tab_index = self.context_tab orelse return;
@@ -3776,10 +3795,10 @@ const HistoryHost = struct {
     fn runRowAction(self: *HistoryHost, index: usize, action: @import("ui/history_row.zig").Action) !void {
         const path = try self.model.replayPath(index);
         const entry = self.model.at(index) orelse return error.InvalidHistoryIndex;
-        const data = try self.archive.dir.readFileAlloc(self.archive.io, path, self.allocator, .limited(128 * 1024 * 1024));
-        defer self.allocator.free(data);
         switch (action) {
             .replay => {
+                const data = try self.archive.dir.readFileAlloc(self.archive.io, path, self.allocator, .limited(128 * 1024 * 1024));
+                defer self.allocator.free(data);
                 var timeline = try @import("ui/history_cast.zig").load(self.allocator, data);
                 defer timeline.deinit();
                 const workspace = self.workspace orelse return error.WorkspaceUnavailable;
@@ -3792,24 +3811,22 @@ const HistoryHost = struct {
                 const format = try Export.Format.parse(workspace.app_config.log.export_format);
                 const captured_path = try self.allocator.dupe(u8, path);
                 defer self.allocator.free(captured_path);
-                const Sink = struct {
-                    host: *HistoryHost,
-                    capture: Export.ArchiveCapture,
-                    data: []const u8,
-                    pub fn validate(target_sink: @This()) !void {
-                        for (target_sink.host.model.entries.items) |current| if (target_sink.capture.matches(current)) return;
-                        return error.StaleExportOwner;
-                    }
-                    pub fn write(target_sink: @This(), kind: Export.Kind, destination_path: []const u8) !void {
-                        try Export.writeArchive(target_sink.host.allocator, target_sink.host.archive.io, .cwd(), kind, destination_path, target_sink.data);
-                    }
-                };
-                const sink: Sink = .{ .host = self, .capture = .{ .id = entry.id, .cast_path = captured_path }, .data = data };
-                try sink.validate();
+                const capture: Export.ArchiveCapture = .{ .id = entry.id, .cast_path = captured_path };
                 const sdk = self.cx.system_sdk orelse return error.NativeDialogUnavailable;
                 var path_buffer: [4096]u8 = undefined;
                 const target = try sdk.runDialog(.{ .kind = .save_file, .title = format.defaultFilename() }, &path_buffer);
-                if (try Export.run(self.allocator, format, target, sink)) workspace.status("已导出历史会话日志");
+                const destination = target orelse return;
+                var valid = false;
+                for (self.model.entries.items) |current| if (capture.matches(current)) {
+                    valid = true;
+                    break;
+                };
+                if (!valid) return error.StaleExportOwner;
+                const Jobs = @import("ui/session_export_jobs.zig");
+                const manager = Jobs.Manager.forCx(self.cx) orelse return error.WorkspaceUnavailable;
+                if (manager.job != null) return error.ExportInProgress;
+                const lease = try @import("vt/session_archive.zig").acquireLease(std.heap.c_allocator, self.archive.io, self.archive.dir, captured_path);
+                try manager.start(.{ .archive = lease }, format, destination);
             },
         }
     }
@@ -5498,7 +5515,8 @@ const AppNavHost = struct {
     quick_host: ?*QuickConnectHost = null,
     sidebar_panel: *ui.Node = undefined,
     sidebar_grip: ?*ui.Node = null,
-    sidebar_drag_width: f32 = 300,
+    sidebar_drag_width: f32 = @import("ui/sidebar_model.zig").default_width,
+    sidebar_alignment_pending_before_drag: bool = true,
     sidebar_full: ?*ui.Node = null,
     sidebar_empty: ?*ui.Node = null,
     collapsed_sidebar: ?*CollapsedSidebar = null,
@@ -5554,6 +5572,7 @@ const AppNavHost = struct {
     empty_choose_icon: ?*ui.Signal(?ui.SvgAsset) = null,
     empty_has_hosts: ?bool = null,
     host_artwork: [@import("ui/host_os_assets.zig").pixels.len]?u32 = @splat(null),
+    empty_logo_texture: ?u32 = null,
     chrome: struct {
         toolbar_tint: ?*ui.Signal(?ui.Color) = null,
         transfer_badge: ?*ui.Node = null,
@@ -5683,9 +5702,26 @@ const AppNavHost = struct {
     fn resizeSidebar(event: ui.interaction.drag.Event, raw: *anyopaque) void {
         const self: *AppNavHost = @ptrCast(@alignCast(raw));
         switch (event.phase) {
-            .start => self.sidebar_drag_width = self.quick.sidebar.expanded_width,
-            .move, .end => self.quick.sidebar.expanded_width = std.math.clamp(self.sidebar_drag_width + event.delta.x, 220, @min(480, @max(220, self.cx.viewport.width - 480))),
-            .cancel => self.quick.sidebar.expanded_width = self.sidebar_drag_width,
+            .start => {
+                self.sidebar_drag_width = self.quick.sidebar.expanded_width;
+                self.sidebar_alignment_pending_before_drag = self.quick.sidebar.initial_width_pending;
+                self.quick.sidebar.initial_width_pending = false;
+            },
+            .move, .end => {
+                self.quick.sidebar.expanded_width = std.math.clamp(self.sidebar_drag_width + event.delta.x, 220, @min(480, @max(220, self.cx.viewport.width - 480)));
+                if (event.phase == .end) if (self.settings) |settings| {
+                    var candidate = settings.runtime.value;
+                    candidate.ui.sidebar_width = self.quick.sidebar.expanded_width;
+                    settings.runtime.save(self.cx.io, std.Io.Dir.cwd(), candidate) catch |err| {
+                        std.log.err("failed to save sidebar width: {s}", .{@errorName(err)});
+                        if (self.workspace) |workspace| workspace.status("侧栏宽度保存失败");
+                    };
+                };
+            },
+            .cancel => {
+                self.quick.sidebar.expanded_width = self.sidebar_drag_width;
+                self.quick.sidebar.initial_width_pending = self.sidebar_alignment_pending_before_drag;
+            },
         }
         self.applySidebar();
         self.cx.requestRedraw();
@@ -5705,6 +5741,18 @@ const AppNavHost = struct {
         };
         self.toggleQuickConnect();
     }
+    fn loadEmptyLogo(self: *AppNavHost) !void {
+        const app = self.app_runtime orelse return;
+        const node = self.chrome.empty_icon orelse return;
+        if (self.empty_logo_texture != null) return;
+        var image = try @import("config/background_asset.zig").decode(self.allocator, @import("app_icon_assets").transparent, .{});
+        defer image.deinit(self.allocator);
+        const texture = try app.renderer.image_renderer.loadTexture(image.width, image.height, image.pixels);
+        self.empty_logo_texture = texture;
+        node.setImage(.{ .texture_id = texture });
+        node.markRenderDirty();
+    }
+
     fn paintHostArtwork(self: *AppNavHost, node: *ui.Node) void {
         const app = self.app_runtime orelse return;
         if (node.getImage()) |image| {
@@ -5747,6 +5795,9 @@ const AppNavHost = struct {
     fn hookRun(ctx: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *AppNavHost = @ptrCast(@alignCast(ctx));
         if (self.menu_host) |menu| menu.drainSidebarAction();
+        if (self.wizard_host) |host| if (self.workspace) |workspace| {
+            if (remote_editor.editor(host.wizard)) |editor| editor.setScrollbackDefault(workspace.app_config.ui.scrollback_limit);
+        };
         if (process_windows) |process| if (process.data_cleanup_owner != null) return .done;
         if (self.quick_host) |host| if (host.view.isOpen()) host.refreshAssets() catch |err| {
             if (self.workspace) |workspace| workspace.status(@errorName(err));
@@ -5856,6 +5907,17 @@ const AppNavHost = struct {
         const width = self.cx.viewport.width;
         self.syncHomeConnect();
         self.syncHostArtwork();
+        var sidebar_width_changed = false;
+        if (self.quick.sidebar.initial_width_pending) if (self.workspace) |workspace| if (workspace.visibleLocalTerminalTabRect()) |rect| {
+            const left = if (self.sidebar_panel.parent) |row| row.globalRect().x else shell_styles.outer;
+            sidebar_width_changed = self.quick.sidebar.alignInitialWidth(rect.x + rect.w, left, width);
+            if (sidebar_width_changed) self.applySidebar();
+        };
+        const sidebar_width: ui.Sizing = .{ .px = self.quick.sidebar.expanded_width };
+        if (!std.meta.eql(self.sidebar_panel.style.width, sidebar_width)) {
+            self.applySidebar();
+            sidebar_width_changed = true;
+        }
         const before = self.quick.sidebar.collapsed;
         if (self.settings) |settings| {
             self.quick.sidebar.applyCommittedPreference(settings.runtime.value.ui.sidebar_collapsed, width);
@@ -5888,6 +5950,7 @@ const AppNavHost = struct {
 
         if (self.workspace) |workspace| {
             const no_hosts = workspace.registry.hosts.len == 0 and workspace.registry.groups.len == 0;
+            if (workspace.sidebar_chrome) |sidebar| sidebar.setSearchAvailable(workspace.registry.hosts.len != 0);
             if (self.title_controls) |controls| controls.setDisplay(.flex);
             if (self.sidebar_full) |full| full.setDisplay(if (no_hosts) .none else .flex);
             if (self.sidebar_empty) |empty| empty.setDisplay(if (no_hosts) .flex else .none);
@@ -5951,7 +6014,7 @@ const AppNavHost = struct {
             if (self.local_status_view) |view| {
                 view.root.setDisplay(if (local_active) .flex else .none);
                 view.setSidebarCollapsed(self.quick.sidebar.collapsed);
-                view.layoutForWidth(@max(0, self.cx.viewport.width - 16));
+                view.layoutForWidth(@max(0, self.cx.viewport.width - 2 * shell_styles.outer));
             }
             if (self.collapsed_sidebar) |restore| {
                 const destination = if (local_active and self.local_status_view != null) self.local_status_view.?.root else self.status_bar;
@@ -5974,7 +6037,7 @@ const AppNavHost = struct {
             }
         }
 
-        return if (before != self.quick.sidebar.collapsed or resize or title_chrome_changed) .needs_layout else .done;
+        return if (before != self.quick.sidebar.collapsed or resize or title_chrome_changed or sidebar_width_changed) .needs_layout else .done;
     }
 
     fn onEvent(event: ui.events.Event, context: ?*anyopaque) ui.events.EventResult {
@@ -6272,6 +6335,7 @@ const AppNavHost = struct {
     }
 
     fn cleanup(self: *AppNavHost) void {
+        if (self.app_runtime) |app| if (self.empty_logo_texture) |id| app.renderer.image_renderer.unloadTexture(id);
         if (self.app_runtime) |app| for (self.host_artwork) |texture| if (texture) |id| app.renderer.image_renderer.unloadTexture(id);
         self.cx.removeAfterLayoutHook(self);
         if (self.ai) |ai| {
@@ -6463,7 +6527,17 @@ const AppNavHost = struct {
         };
         if (self.background_view) |view| try view.update(image, materials, self.cx.viewport.width, self.cx.viewport.height);
         if (self.shell_root) |root| root.setBackground(ui.Color.TRANSPARENT);
-        if (self.material_pane) |pane| pane.setBackground(ui.Color.TRANSPARENT);
+        if (self.material_pane) |pane| {
+            var background = shell_styles.pane(self.cx.tokens).background;
+            // File pages own two sibling cards; their shared layout stays clear.
+            if (self.workspace) |workspace| if (workspace.model.active) |active| {
+                for (workspace.tabs.items) |tab| if (tab.tab_id == active and tab.terminal == null) {
+                    background = ui.Color.TRANSPARENT;
+                    break;
+                };
+            };
+            pane.setStyleInline(self.allocator, .{ .background = background });
+        }
         if (self.workspace) |workspace| for (workspace.tabs.items) |tab| {
             tab.root.setBackground(ui.Color.TRANSPARENT);
             if (tab.terminal) |*terminal| terminal.root.setBackground(ui.Color.TRANSPARENT);
@@ -6478,7 +6552,6 @@ const AppNavHost = struct {
         if (self.settings) |settings| if (settings.search_input) |input| settings_content_view.styles.paintSearch(self.cx, &input);
         if (self.chrome.toolbar_tint) |tint| tint.set(c.fg_2);
         if (self.chrome.transfer_badge) |badge| badge.setBackground(c.ok);
-        if (self.chrome.empty_icon) |icon| _ = icon.setTint(c.accent);
         if (self.chrome.empty_title) |node| node.setTextColor(c.fg_1);
         if (self.chrome.empty_description) |node| node.setTextColor(c.fg_2);
         for (self.chrome.empty_actions, 0..) |entry, index| if (entry) |action| {
@@ -7720,6 +7793,7 @@ fn mountSidebar(cx: *ui.Cx, scope: *ui.Scope, p: Palette, workspace: *ws.Workspa
     nav_host.sidebar_full = view.full;
     nav_host.sidebar_empty = view.empty;
     nav_host.chrome.sidebar_search_input = view.search;
+    view.setSearchAvailable(workspace.registry.hosts.len != 0);
     const empty = workspace.registry.hosts.len == 0 and workspace.registry.groups.len == 0;
     view.full.setDisplay(if (empty) .none else .flex);
     view.empty.setDisplay(if (empty) .flex else .none);
@@ -8136,7 +8210,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     empty_guide.meta.ownership.meta.test_id = "workspace.empty";
     const empty_icon_box = try ui.boxStyled(cx, shell_styles.emptyIcon, .{});
     empty_icon_box.meta.ownership.meta.test_id = "workspace.empty.icon";
-    const empty_icon = try ui.iconTint(cx, ui.icons.terminal, app_theme.current().accent, .{ .width = .{ .px = 26 }, .height = .{ .px = 26 } });
+    const empty_icon = try ui.box(cx, .{ .width = .{ .px = 56 }, .height = .{ .px = 56 }, .flex_shrink = 0 }, .{});
     try empty_icon_box.appendChild(cx.allocator, empty_icon);
     try empty_guide.appendChild(cx.allocator, empty_icon_box);
     const empty_title = try ui.textStyled(cx, shell_styles.emptyTitle, "打开终端，开始工作");
@@ -8186,6 +8260,15 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     workspace.error_hint_handler = .{ .context = ai_host, .on_open = AiHost.openCommandError };
     menu_host.workspace = workspace;
     history_host.workspace = workspace;
+    _ = try @import("ui/session_export_jobs.zig").Manager.mount(cx, scope, .{
+        .context = workspace,
+        .publish = struct {
+            fn publish(raw: *anyopaque, message: []const u8) void {
+                const target: *ws.Workspace = @ptrCast(@alignCast(raw));
+                target.status(message);
+            }
+        }.publish,
+    });
     menu_host.ai = ai_host;
     // Wizard is mounted below; MenuHost receives the live pointers after
     // WizardHost initialization so edit actions can reuse the same draft UI.
@@ -8203,6 +8286,11 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
 
     const nav_host = try cx.allocator.create(AppNavHost);
     nav_host.* = .{ .allocator = cx.allocator, .cx = cx, .quick = QuickConnect.init(cx.allocator), .quick_panel = quick_panel, .settings = settings_host, .ai = ai_host, .roster = @import("ui/group_model.zig").Roster.init(cx.allocator) };
+    if (app_config.value.ui.sidebar_width) |width| {
+        const available = if (cx.viewport.width > 0) @min(480, @max(220, cx.viewport.width - 480)) else 480;
+        nav_host.quick.sidebar.expanded_width = @min(width, available);
+        nav_host.quick.sidebar.initial_width_pending = false;
+    }
     nav_host.appearance_theme = try cx.bindState(shell_styles.ThemePublication, .{});
     nav_host.empty_choose_label = empty_choose_label;
     nav_host.empty_choose_icon = empty_choose_icon;
@@ -8522,6 +8610,7 @@ const WizardHost = struct {
         state.editor.on_test = startProbe;
         state.editor.test_ctx = self;
         state.editor.setSshDefaults(self.workspace.app_config.ssh.connect_timeout_sec, self.workspace.app_config.ssh.keepalive_sec);
+        state.editor.setScrollbackDefault(self.workspace.app_config.ui.scrollback_limit);
         try state.editor.setAssets(self.assets);
         try self.installEditorGroups(&state.editor);
     }
@@ -8634,7 +8723,10 @@ const WizardHost = struct {
     }
 
     fn refreshAssets(self: *WizardHost) !void {
-        if (remote_editor.editor(self.wizard)) |editor| editor.setSshDefaults(self.workspace.app_config.ssh.connect_timeout_sec, self.workspace.app_config.ssh.keepalive_sec);
+        if (remote_editor.editor(self.wizard)) |editor| {
+            editor.setSshDefaults(self.workspace.app_config.ssh.connect_timeout_sec, self.workspace.app_config.ssh.keepalive_sec);
+            editor.setScrollbackDefault(self.workspace.app_config.ui.scrollback_limit);
+        }
         const next = try remote_editor.projectAssets(self.allocator, self.workspace.registry.hosts);
         errdefer self.releaseAssets(next);
         // Install the replacement before freeing slices borrowed by the wizard.
@@ -8792,7 +8884,7 @@ const NotificationWindowHook = struct {
     fn mount(cx: *ui.Cx, scope: *ui.Scope, host: *NotificationHost, workspace: *ws.Workspace, settings: *SettingsHost, nav: *AppNavHost, transfer: *TransferHost) !*NotificationWindowHook {
         const self = try cx.allocator.create(NotificationWindowHook);
         self.* = .{ .host = host, .cx = cx, .workspace = workspace, .settings = settings, .nav = nav, .transfer = transfer, .id = undefined };
-        self.id = host.registerWindow(.{ .context = self, .owns = owns, .activate = activate, .feedback = feedback, .transfer_presented = transferPresented }) catch |err| {
+        self.id = host.registerWindow(.{ .context = self, .owns = owns, .activate = activate, .feedback = feedback, .owner_name = ownerName, .transfer_presented = transferPresented }) catch |err| {
             cx.allocator.destroy(self);
             return err;
         };
@@ -8813,6 +8905,11 @@ const NotificationWindowHook = struct {
             if (value.style.display == .none or value.isPaintSkipped()) return false;
         }
         return true;
+    }
+    fn ownerName(raw: *anyopaque, owner: @import("host/identity.zig").ContentOwner) []const u8 {
+        const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
+        for (self.workspace.tabs.items) |tab| if (tab.content_owner.eql(owner)) return tab.titleSlice();
+        return "原会话已关闭";
     }
     fn transferPresented(raw: *anyopaque, job: u64) bool {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
@@ -8895,9 +8992,9 @@ const NotificationWindowHook = struct {
         const key = state.key orelse return;
         if (key.owner != .session or !tab.content_owner.eql(.{ .session = key.owner.session }) or key.attempt_id == null) return;
         if (state.phase == .active and key.attempt_id.? > 1) {
-            self.host.publishReconnect(tab.content_owner, key.operation_id, key.attempt_id.?, .recovered) catch |err| applog.warn(.app, "reconnect notification: {s}", .{@errorName(err)});
+            self.host.publishReconnectDetails(tab.content_owner, key.operation_id, key.attempt_id.?, .recovered, .{ .object = tab.titleSlice() }) catch |err| applog.warn(.app, "reconnect notification: {s}", .{@errorName(err)});
         } else if ((state.phase == .waiting or state.phase == .releasing) and state.failure != null) {
-            self.host.publishReconnect(tab.content_owner, key.operation_id, key.attempt_id.?, if (state.was_attached) .disconnected else .failed) catch |err| applog.warn(.app, "disconnect notification: {s}", .{@errorName(err)});
+            self.host.publishReconnectDetails(tab.content_owner, key.operation_id, key.attempt_id.?, if (state.was_attached) .disconnected else .failed, .{ .object = tab.titleSlice(), .detail = @import("ui/connection_progress_view.zig").failureText(state.failure) }) catch |err| applog.warn(.app, "disconnect notification: {s}", .{@errorName(err)});
         }
     }
     fn run(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
@@ -10256,10 +10353,14 @@ const TransferHost = struct {
             if (process_notifications) |notifications| for (self.tasks.job_owners.items) |captured| {
                 const progress = self.manager.progress(captured.job) orelse continue;
                 if (progress.job_cleanup != .released or (progress.state != .succeeded and progress.state != .failed and progress.state != .cancelled)) continue;
-                const notify_complete = for (self.manager.jobs.items) |job| {
-                    if (job.id == captured.job) break job.spec.notify_complete;
+                const completed_job = for (self.manager.jobs.items) |job| {
+                    if (job.id == captured.job) break job;
                 } else continue;
-                notifications.publishTransfer(.{ .session = captured.owner }, progress.job, progress.attempt, .{ .result = if (progress.state == .succeeded) .succeeded else if (progress.state == .failed) .failed else .cancelled, .resources_released = true, .notify_complete = notify_complete }) catch |err| applog.warn(.app, "transfer notification: {s}", .{@errorName(err)});
+                const notify_complete = completed_job.spec.notify_complete;
+                var transfer_object_buffer: [1024]u8 = undefined;
+                const first_source = if (completed_job.spec.sources.len > 0) std.fs.path.basename(completed_job.spec.sources[0]) else "文件传输";
+                const transfer_object = if (completed_job.spec.sources.len > 1) std.fmt.bufPrint(&transfer_object_buffer, "{s} 等 {d} 项", .{ first_source, completed_job.spec.sources.len }) catch first_source else first_source;
+                notifications.publishTransfer(.{ .session = captured.owner }, progress.job, progress.attempt, .{ .result = if (progress.state == .succeeded) .succeeded else if (progress.state == .failed) .failed else .cancelled, .resources_released = true, .notify_complete = notify_complete, .details = .{ .object = transfer_object, .detail = if (progress.failure) |failure| @import("ui/transfer_manager_view.zig").failureLabel(failure) else "" } }) catch |err| applog.warn(.app, "transfer notification: {s}", .{@errorName(err)});
             };
             if (@import("platform/runtime_mode.zig").automation) for (self.tasks.job_owners.items) |*captured| {
                 const progress = self.manager.progress(captured.job) orelse continue;
@@ -10466,9 +10567,10 @@ fn wallClockMsTransfer() u64 {
 
 fn dataStartupAlert(err: anyerror, reset_pending: bool) bool {
     const Native = struct {
-        extern fn zw_data_startup_alert([*:0]const u8, c_int) c_int;
+        extern fn zw_data_startup_alert([*:0]const u8, c_int, [*]const u8, usize) c_int;
     };
-    return Native.zw_data_startup_alert(@errorName(err), if (reset_pending) 1 else 0) != 0;
+    const icon = @import("app_icon_assets").transparent;
+    return Native.zw_data_startup_alert(@errorName(err), if (reset_pending) 1 else 0, icon.ptr, icon.len) != 0;
 }
 
 pub fn main() !void {
@@ -10554,10 +10656,10 @@ pub fn main() !void {
     const app = try windows.createWindow(.{
         .io = io_threaded.io(),
         .font = .{ .fallback_families = @import("platform/ui_fonts.zig").families },
-        .window = .{ .width = 1440, .height = 900, .min_width = 860, .min_height = 480, .title = "ZeroWork", .titlebar = .custom_inset, .titlebar_height = 54, .titlebar_drag_right_inset = 150 },
+        .window = .{ .width = 1440, .height = 900, .min_width = 860, .min_height = 480, .title = "ZeroWork", .titlebar = .custom_inset, .titlebar_height = shell_styles.outer + shell_styles.title_height, .titlebar_drag_right_inset = 150 },
     });
     process.primary = app;
-    app.win.setTrafficLightsLayout(28, 31, 12);
+    app.win.setTrafficLightsLayout(shell_styles.outer + 20, shell_styles.outer + shell_styles.title_height / 2, 12);
     installMonospaceFonts(app);
     registry.setFontSystem(&process.font_system.?);
     app.setFontRegistry(&registry);
@@ -10567,6 +10669,7 @@ pub fn main() !void {
     try app.mount(mountUI);
     const nav: *AppNavHost = @ptrCast(@alignCast(app.cx.root.?.behavior.events.capture_context orelse return error.MissingApplicationController));
     nav.app_runtime = app;
+    try nav.loadEmptyLogo();
     if (nav.settings) |settings| settings.app_runtime = app;
     _ = @import("ui/plugin_window_host.zig").Host.mount(app, nav.application_host orelse return error.MissingApplicationController, process_notifications, if (nav.ai) |ai| ai.notification_window else null) catch |err| {
         applog.err(.app, "plugin window services initialization: {s}", .{@errorName(err)});

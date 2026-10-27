@@ -99,6 +99,7 @@ pub fn drainRetainedResources(raw: *anyopaque) ReleaseReceipt {
 /// thread never owns Zenit nodes; Scope cleanup stops it before freeing handles.
 pub fn workerRuntimeOptions(app_config: config.Config) @import("../vt/ssh_worker.zig").RuntimeOptions {
     return .{
+        .scrollback = app_config.ui.scrollback_limit,
         .timeline_max_bytes = @as(usize, app_config.log.ring_mb) * 1024 * 1024,
         .reconnect_max = app_config.ssh.reconnect_max,
         .auto_reconnect = app_config.ssh.auto_reconnect and app_config.ssh.reconnect_max > 0,
@@ -211,7 +212,7 @@ pub const SessionRuntime = struct {
         errdefer runtime.library.deinit();
         applog.info(.ssh, "session init: {s}@{s}:{d} auth={s}", .{ user, host, target.port, @tagName(target.auth_mode) });
         var worker_options = workerRuntimeOptions(app_config);
-        worker_options.scrollback = target.scrollback;
+        worker_options.scrollback = target.scrollback orelse app_config.ui.scrollback_limit;
         // Per-host values override global SSH policy when present; absent host
         // fields inherit the persisted application settings.
         worker_options.keepalive_sec = if (target.keepalive orelse true) app_config.ssh.keepalive_sec else 0;
@@ -509,7 +510,7 @@ pub fn targetFromHost(host: hosts_mod.HostConfig, route_hosts: []const hosts_mod
         .identity_file = host.identity_file,
         .key_passphrase = host.key_passphrase,
         .terminal_type = if (host.terminal_type_explicit) host.terminal_type else null,
-        .scrollback = host.scrollback,
+        .scrollback = if (host.scrollback_explicit or host.scrollback != 25000) host.scrollback else null,
         .keepalive = host.keepalive,
         .compression = if (host.compression_explicit) host.compression else null,
         .startup_commands = host.startup_commands,

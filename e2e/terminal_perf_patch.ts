@@ -3,14 +3,14 @@
 import assert from 'node:assert/strict';
 import {cleanupOwnedBridgeDirectories} from './native_owned_cleanup.ts';
 import {spawn, execFileSync} from 'node:child_process';
-import {mkdir, mkdtemp, open, writeFile, readFile, rm} from 'node:fs/promises';
+import {mkdir, mkdtemp, open, writeFile, readFile, rm, realpath} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {resolve, join} from 'node:path';
 import {createHash} from 'node:crypto';
-import {waitForServerReady, query, clickTestId, type_, key, waitFor, screenshot, resizeWindow, screenPos, stats} from '../zig-out/share/zenit/harness/client.ts';
+import {waitForServerReady, query, clickTestId, type_, key, waitFor, screenshot, resizeWindow, screenPos, stats, resetTiming, startWindowRecording, stopWindowRecording} from '../zig-out/share/zenit/harness/client.ts';
 const [binaryArg, outputArg] = process.argv.slice(2);
 assert(binaryArg && outputArg, 'usage: node e2e/terminal_perf_patch.ts binary output');
-const binary=resolve(binaryArg), out=resolve(outputArg), isolated=await mkdtemp(join(tmpdir(),'zw-perf-'));
+const binary=resolve(binaryArg), out=resolve(outputArg), isolated=await realpath(await mkdtemp(join(tmpdir(),'zw-perf-')));
 const rpc=join(isolated,'rpc'), data=join(isolated,'data');
 for (const path of [out,rpc,data]) await mkdir(path,{recursive:true});
 await writeFile(join(data,'config.toml'),'[meta]\nconfig_revision = 1\n[ui]\ntheme = "dark"\nfont_family = "Menlo"\nfont_size = 14\n');
@@ -41,6 +41,8 @@ async function idle(label:string){
 try {
  await waitForServerReady();await resizeWindow(1200,800);
  assert((await clickTestId('workspace.empty.local')).ok);
+ // Let the native pane apply its first PTY resize before discovering the row pool.
+ await sleep(500);
  const initial=await waitFor(async()=>{const n=await surface();return n?.children?.some((r:any)=>r.test_id?.startsWith('terminal.surface.row.'))?n:null;},15000);
  rowIds=initial.children.filter((n:any)=>n.test_id?.startsWith('terminal.surface.row.')).map((n:any)=>n.test_id);
  assert(rowIds.length>0,'Discover actual terminal rows before output grows');
@@ -65,6 +67,32 @@ try {
  await waitFor(async()=>(await tailText()).includes('PATCH_FLOOD_DONE')||null,30000);
  const after=sample();report.flood={cpu_seconds:after.cpu_seconds-before.cpu_seconds,wall_ms:after.at-before.at,rss_kib:after.rss_kib};
  await idle('post_flood_idle');report.frame_stats=await stats();
+ const measuredRows=await rows();
+ function nodeCount(n:any):number{return 1+(n.children??[]).reduce((sum:number,c:any)=>sum+nodeCount(c),0);}
+ report.terminal_row_nodes=measuredRows.reduce((sum:number,row:any)=>sum+nodeCount(row),0);
+ await resetTiming();
+ const echoObservations:number[]=[];
+ let typed='';
+ for(const char of 'printf ZW_NATIVE_TYPING_0123456789'){
+  typed+=char;const began=performance.now();await type_(char);
+  await waitFor(async()=>(await tailText()).includes(typed)||null,5000,5);
+  echoObservations.push(performance.now()-began);
+ }
+ report.rpc_character_visible_ms=echoObservations;
+ report.typing_frame_stats=await stats();
+ await key('enter');await sleep(300);
+ await resetTiming();
+ await type_("/usr/bin/perl -e '$|=1; for(1..180){printf \"NATIVE_STREAM_%03d abcdefghijklmnopqrstuvwxyz\\n\", $_; select undef,undef,undef,0.01} print \"NATIVE_STREAM_DONE\\n\"'");await key('enter');
+ await sleep(2600);
+ await waitFor(async()=>(await tailText()).includes('NATIVE_STREAM_DONE')||null,10000);
+ report.continuous_frame_stats=await stats();
+ assert((await screenshot(join(out,'continuous-output.png'))).ok);
+ if(process.env.ZEROWORK_PERF_RECORD==='1'){
+  await startWindowRecording(join(out,'continuous-output.mp4'),{fps:60});
+  await type_("/usr/bin/perl -e '$|=1;for(1..120){printf \"RECORDING_%03d abcdefghijklmnopqrstuvwxyz\\n\",$_;select undef,undef,undef,0.01}'");await key('enter');
+  await sleep(2200);report.recording=await stopWindowRecording();
+ }
+ report.checks.push('Per-character PTY echo and 180 paced output updates remain responsive');
  assert((await screenshot(join(out,'post-flood.png'))).ok);
  await writeFile(join(out,'post-flood-rows.json'),JSON.stringify(Object.fromEntries(await Promise.all(tailIds.map(async(id:string)=>[id,await query(id)]))),null,2));
  if(process.env.ZEROWORK_PERF_SAMPLE==='1') execFileSync('/usr/bin/sample',[String(child.pid),'3','-file',join(out,'sample.txt')],{stdio:'ignore'});

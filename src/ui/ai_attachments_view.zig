@@ -80,6 +80,7 @@ pub const View = struct {
     preview_body: ui.widgets.scroll_area.ScrollAreaResult = undefined,
     preview_label: *ui.Node = undefined,
     preview_title: *ui.Node = undefined,
+    preview_icon: *ui.Node = undefined,
     preview_identity_box: *ui.Node = undefined,
     preview_identity: *ui.Node = undefined,
     preview_metadata: *ui.Node = undefined,
@@ -221,15 +222,20 @@ pub const View = struct {
         if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         self.preview_panel = modal.dialog;
         modal.dialog.meta.ownership.meta.test_id = "ai.attachment.preview";
-        modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = 480 }, .height = .{ .fit = .{} }, .padding = ui.Padding.all(1), .background = S.theme.current().overlay, .border = .{ .width = 1, .color = S.theme.current().border, .radius = 14 } });
+        modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = 480 }, .height = .{ .fit = .{} }, .padding = ui.Padding.all(1), .background = S.theme.current().overlay, .border = .{ .width = 0, .radius = 14 } });
         modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = .{}, .gap = 0, .direction = .column });
         const heading = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 79.1484375 }, .padding = .{ .top = 20, .left = 22, .right = 22, .bottom = 16 }, .gap = 12, .direction = .row, .align_items = .start, .flex_shrink = 0 }, .{});
         heading.meta.ownership.meta.test_id = "ai.attachment.preview.header";
         try modal.body.appendChild(cx.allocator, heading);
         const titles = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 5, .min_width = 0 }, .{});
         try heading.appendChild(cx.allocator, titles);
+        const title_row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
+        try titles.appendChild(cx.allocator, title_row);
+        self.preview_icon = try ui.iconTint(cx, ui.icons.paperclip, S.theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        self.preview_icon.meta.ownership.meta.test_id = "ai.attachment.preview.title.icon";
+        try title_row.appendChild(cx.allocator, self.preview_icon);
         self.preview_title = try ui.text(cx, "上下文附件", .{ .font_size = 15, .font_weight = 700, .line_height = 20.0 / 15.0, .color = S.theme.current().fg_1 });
-        try titles.appendChild(cx.allocator, self.preview_title);
+        try title_row.appendChild(cx.allocator, self.preview_title);
         self.preview_identity = try ui.text(cx, "", .{ .font_size = 11, .line_height = 1.65, .color = S.theme.current().fg_2, .text_overflow = .ellipsis });
         self.preview_identity.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 18.1484375 } });
         self.preview_identity.meta.ownership.meta.test_id = "ai.attachment.preview.path";
@@ -546,6 +552,7 @@ pub const View = struct {
             for (self.cards.items) |card| card.retheme();
             self.preview_panel.setBackground(S.theme.current().overlay);
             self.preview_title.setTextColor(self.colors.fg_1);
+            _ = self.preview_icon.setTint(self.colors.accent);
             self.preview_identity_box.setBackground(self.colors.well);
             self.preview_identity.setTextColor(self.colors.fg_1);
             self.preview_metadata.setTextColor(self.colors.fg_2);

@@ -281,7 +281,10 @@ fn mountDetails(cx: *ui.Cx, bound: *binding.Binding, root: *ui.Node) !*Info {
     try bound.registerTooltip(open);
     modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = 390 }, .height = .{ .px = 208 }, .max_height = 240, .padding = .{}, .direction = .column, .gap = 0, .background = S.theme.current().overlay, .border = .{ .radius = 14 }, .overflow_hidden = true });
     modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .column, .gap = 0, .padding = .{} });
-    state.header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 60 }, .direction = .row, .padding = .{ .left = 20, .right = 20, .top = 16, .bottom = 10 }, .align_items = .center, .flex_shrink = 0 }, .{});
+    state.header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 60 }, .direction = .row, .padding = .{ .left = 20, .right = 20, .top = 16, .bottom = 10 }, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
+    const title_icon = try ui.iconTint(cx, ui.icons.info, S.theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+    title_icon.meta.ownership.meta.test_id = "settings.plugins.info.title.icon";
+    try state.header.appendChild(cx.allocator, title_icon);
     state.title = try ui.textStyled(cx, S.title, "");
     try state.header.appendChild(cx.allocator, state.title);
     try modal.body.appendChild(cx.allocator, state.header);

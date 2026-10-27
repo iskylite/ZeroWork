@@ -74,3 +74,26 @@ test "search snapshot stale source cannot create a hit anchor and retained ancho
     try std.testing.expectError(error.StaleOwner, controller.searchSnapshot(foreign, a));
     try std.testing.expectError(error.StaleOwner, controller.createAnchor(foreign, mapped));
 }
+
+test "search snapshot ASCII runs keep exact columns, styled blanks and Unicode boundaries" {
+    var adapter = try Adapter.init(a, 3, 80);
+    defer adapter.destroy();
+    _ = try adapter.feed("abcdef\x1b[31mghij\x1b[0m界e\u{301}👩‍💻 xyz\r\nplain\x1b[44m   \x1b[0m");
+    var document = try adapter.searchSnapshot(a);
+    defer document.deinit(a);
+    try std.testing.expect(document.spans.len < 15);
+    for (0..10) |byte| {
+        const cell = document.spanAt(byte).?;
+        try std.testing.expectEqual(@as(u16, @intCast(byte)), cell.col);
+        try std.testing.expectEqual(@as(u16, 1), cell.width);
+        try std.testing.expectEqual(@as(u32, @intCast(byte)), cell.start);
+        try std.testing.expectEqual(@as(u32, @intCast(byte + 1)), cell.end);
+    }
+    const clipped = document.spans[0].columns(2, 5).?;
+    try std.testing.expectEqualStrings("cde", document.text[clipped.start..clipped.end]);
+    const styled = document.spanAt(std.mem.indexOf(u8, document.text, "plain").? + 6).?;
+    try std.testing.expect(styled.bg != 0);
+    try std.testing.expectEqual(@as(u16, 6), styled.col);
+    try std.testing.expect(document.spans[0].columns(6, 10) == null);
+    try std.testing.expect(std.mem.indexOf(u8, document.text, "界e\u{301}👩‍💻 xyz") != null);
+}

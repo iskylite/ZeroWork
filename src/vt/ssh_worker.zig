@@ -122,6 +122,7 @@ pub const SshWorker = struct {
     /// UI→worker PTY resize request. UI thread stores (dims, seq); the worker
     /// applies the latest request on its next step. Low 16 bits = cols,
     /// high 16 = rows.
+    pending_scrollback_limit: std.atomic.Value(u64) = .init(0),
     resize_dims: std.atomic.Value(u32) = .init(0),
     resize_seq: std.atomic.Value(u32) = .init(0),
     applied_resize_seq: u32 = 0,
@@ -149,11 +150,7 @@ pub const SshWorker = struct {
         errdefer closeSessionForRollback(&session);
         var vt = try VtAdapter.init(allocator, options.rows, options.cols);
         errdefer vt.destroy();
-        if (runtime.scrollback) |limit| {
-            const c = @import("generated_ghostty_vt");
-            var lines: usize = limit;
-            if (c.ghostty_terminal_set(vt.terminal, c.GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &lines) != c.GHOSTTY_SUCCESS) return error.ScrollbackConfigurationFailed;
-        }
+        try vt.setScrollbackLimit(runtime.scrollback orelse 25000);
         // The UI consumes the text slot only; the dirty-page slot is an
         // optional FeedBridge feature and stays unwired here because nobody
         // consumes it. Wiring it without a consumer used to trip ConsumerBehind
@@ -208,6 +205,7 @@ pub const SshWorker = struct {
         worker.startup_input = startup_input;
         worker.startup_pending = .init(runtime.wait_for_attachment or startup_input.len != 0);
         worker.presentation_attached = .init(!runtime.wait_for_attachment);
+        worker.pending_scrollback_limit = .init(0);
         worker.resize_dims = .init(0);
         worker.resize_seq = .init(0);
         worker.applied_resize_seq = 0;
@@ -309,7 +307,19 @@ pub const SshWorker = struct {
         }
     }
 
+    pub fn requestScrollbackLimit(self: *SshWorker, limit: u32) void {
+        self.pending_scrollback_limit.store(@as(u64, limit) + 1, .release);
+        self.wakeup.notify();
+    }
+    pub fn applyPendingScrollbackLimit(self: *SshWorker) !void {
+        const pending = self.pending_scrollback_limit.swap(0, .acq_rel);
+        if (pending == 0) return;
+        try self.vt.setScrollbackLimit(@intCast(pending - 1));
+        self.io.feed.publishCurrentText(realtime.milliseconds(undefined));
+    }
+
     pub fn step(self: *SshWorker, timeout_ms: u32) !void {
+        try self.applyPendingScrollbackLimit();
         for (self.forward_services[0..self.forward_count]) |service| if (service) |value| if (value.parentCloseRequested()) return error.ForwardParentClosing;
         if (!self.loop_active) return error.WorkerStopped;
         if (self.io.closed) return self.finishShellStep();
@@ -1061,4 +1071,36 @@ test "current directory request clears stale paths and consumes a fresh shell re
     const path = (try worker.copyCwd(std.testing.allocator)).?;
     defer std.testing.allocator.free(path);
     try std.testing.expectEqualStrings("/srv/a b%c", path);
+}
+
+test "live scrollback requests apply to existing SSH engine and zero removes the limit" {
+    const a = std.testing.allocator;
+    var worker: SshWorker = undefined;
+    worker.vt = try VtAdapter.init(a, 4, 80);
+    defer worker.vt.destroy();
+    worker.pending_scrollback_limit = .init(0);
+    worker.wakeup = try @import("../platform/wakeup.zig").Wakeup.init();
+    defer worker.wakeup.deinit();
+    var text = try TextSlot.init(a, TextSlot.default_capacity);
+    defer text.deinit(a);
+    worker.io.feed = .{ .engine = @import("engine.zig").VtEngine.from(VtAdapter, &worker.vt), .text_slot = &text };
+    try worker.vt.setScrollbackLimit(0);
+    for (0..3000) |i| {
+        var buffer: [32]u8 = undefined;
+        _ = try worker.vt.feed(try std.fmt.bufPrint(&buffer, "live-row-{d}\r\n", .{i}));
+    }
+    worker.requestScrollbackLimit(128);
+    try worker.applyPendingScrollbackLimit();
+    var limited = try worker.vt.copyProjection(a);
+    defer limited.deinit(a);
+    try std.testing.expect(limited.scrollback.total_rows < 3000);
+    worker.requestScrollbackLimit(0);
+    try worker.applyPendingScrollbackLimit();
+    for (0..3000) |i| {
+        var buffer: [32]u8 = undefined;
+        _ = try worker.vt.feed(try std.fmt.bufPrint(&buffer, "after-row-{d}\r\n", .{i}));
+    }
+    var unlimited = try worker.vt.copyProjection(a);
+    defer unlimited.deinit(a);
+    try std.testing.expect(unlimited.scrollback.total_rows >= 3000);
 }

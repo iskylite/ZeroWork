@@ -17,6 +17,7 @@ pub const View = struct {
     busy: *ui.Signal(bool),
     dialog: *ui.Node,
     title: *ui.Node,
+    title_icon: *ui.Node,
     headline: *ui.Node,
     detail: *ui.Node,
     preserved: *ui.Node,
@@ -44,7 +45,12 @@ pub const View = struct {
         modal.dialog.meta.ownership.meta.test_id = "data.cleanup.modal";
         if (modal.dialog.behavior.interaction.a11y) |*a| a.label = "清除全部应用数据";
         modal.body.setStyleInline(cx.allocator, S.body());
-        const title = try text(cx, modal.body, "清除全部应用数据？", 13, 28, 700, 28);
+        const header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
+        try modal.body.appendChild(cx.allocator, header);
+        const title_icon = try ui.iconTint(cx, ui.icons.trash_2, S.theme.current().danger_ink, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        title_icon.meta.ownership.meta.test_id = "data.cleanup.title.icon";
+        try header.appendChild(cx.allocator, title_icon);
+        const title = try text(cx, header, "清除全部应用数据？", 15, 28, 700, 28);
         const headline = try text(cx, modal.body, "将清除全部应用数据", 14, 22, 700, 22);
         const detail = try text(cx, modal.body, scope_text, 11.5, 18, 400, 54);
         const preserved = try text(cx, modal.body, preserved_text, 11.5, 18, 400, 36);
@@ -66,7 +72,7 @@ pub const View = struct {
         try primary.appendChild(cx.allocator, primary_label);
         try actions.appendChild(cx.allocator, primary);
         try modal.body.appendChild(cx.allocator, actions);
-        self.* = .{ .cx = cx, .hooks = hooks, .open = open, .disabled = disabled, .busy = busy, .dialog = modal.dialog, .title = title, .headline = headline, .detail = detail, .preserved = preserved, .outcome = outcome, .message = message, .cancel = cancel, .cancel_label = cancel_label, .primary = primary, .primary_label = primary_label, .colors = S.theme.current() };
+        self.* = .{ .cx = cx, .hooks = hooks, .open = open, .disabled = disabled, .busy = busy, .dialog = modal.dialog, .title = title, .title_icon = title_icon, .headline = headline, .detail = detail, .preserved = preserved, .outcome = outcome, .message = message, .cancel = cancel, .cancel_label = cancel_label, .primary = primary, .primary_label = primary_label, .colors = S.theme.current() };
         try scope.onCleanup(View, self, cleanup);
         try cx.addAfterLayoutHook(self, afterLayout);
         self.retheme();
@@ -154,6 +160,7 @@ pub const View = struct {
         const c = S.theme.current();
         self.dialog.setStyleInline(self.cx.allocator, S.dialog(self.cx.viewport.width));
         self.title.setTextColor(c.fg_1);
+        _ = self.title_icon.setTint(c.danger_ink);
         self.headline.setTextColor(if (self.mode == .working) c.fg_1 else S.warning());
         self.detail.setTextColor(c.fg_1);
         self.preserved.setTextColor(c.fg_1);

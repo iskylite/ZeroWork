@@ -7,7 +7,7 @@ pub fn listSurface() ui.BoxStyle {
         .max_height = 160,
         .flex_shrink = 0,
         .display = .flex,
-        .background = T.current().well,
+        .background = ui.Color.TRANSPARENT,
         .corner_radius = 0,
     };
 }
@@ -18,7 +18,7 @@ pub fn heading() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 24 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 14, .right = 14 } };
 }
 pub fn rowBackground(active: bool, hovered: bool) ui.BoxStyle {
-    return .{ .background = if (hovered) T.current().hover else if (active) T.current().accent.withAlpha(24) else ui.Color.TRANSPARENT, .corner_radius = 0 };
+    return .{ .background = if (hovered) T.current().hover else if (active) T.current().accent.withAlpha(24) else ui.Color.TRANSPARENT, .corner_radius = 7 };
 }
 pub fn actionHover(danger: bool) ui.BoxStyle {
     return .{ .background = if (danger) T.current().danger.withAlpha(20) else T.current().hover, .corner_radius = 5 };
@@ -56,5 +56,5 @@ fn dangerBackground() ui.Color {
 }
 
 pub fn popover() ui.BoxStyle {
-    return .{ .width = .{ .px = 344 }, .direction = .column, .padding = ui.Padding.all(15), .background = T.current().overlay, .border = .{ .width = 1, .color = T.current().border, .radius = 11 }, .shadow = .{ .color = T.current().shadow, .blur = 24, .offset_y = 12 } };
+    return .{ .width = .{ .px = 344 }, .direction = .column, .padding = ui.Padding.all(15), .background = T.current().overlay, .border = .{ .width = 0, .radius = 11 }, .shadow = .{ .color = T.current().shadow, .blur = 24, .offset_y = 12 } };
 }

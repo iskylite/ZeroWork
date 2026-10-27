@@ -250,7 +250,11 @@ pub const View = struct {
         const c = S.theme.current();
         if (self.form) |form| form.setStyleInline(self.cx.allocator, S.form(if (self.inline_form) 0 else form.style.width.px, form.style.height.px, self.inline_form));
         if (self.modal) |modal| modal.dialog.setBackground(c.overlay);
-        _ = self.header_icon.setTint(c.accent);
+        _ = self.header_icon.setTint(switch (snapshot.kind) {
+            .host_key_unknown => c.warn_ink,
+            .host_key_changed => c.danger_ink,
+            else => c.accent,
+        });
         _ = self.header_close_icon.setTint(c.fg_2);
         _ = self.identity_icon.setTint(c.fg_2);
         for (self.own_labels.items) |entry| entry.node.setTextColor(if (entry.strong) c.fg_1 else c.fg_2);
@@ -436,12 +440,17 @@ pub const View = struct {
         }
         const header = try ui.box(self.cx, S.header(), .{});
         const header_icon: []const u8 = switch (snapshot.kind) {
-            .keyboard_interactive => "shield-check",
-            .host_key_unknown => "fingerprint",
+            .password, .keyboard_interactive => "lock-keyhole",
+            .host_key_unknown => "shield-question",
             .host_key_changed => "shield-alert",
             else => "key-round",
         };
-        self.header_icon = try ui.iconTint(self.cx, ui.icons.get(header_icon).?, S.theme.current().accent, S.icon(18));
+        self.header_icon = try ui.iconTint(self.cx, ui.icons.get(header_icon).?, switch (snapshot.kind) {
+            .host_key_unknown => S.theme.current().warn_ink,
+            .host_key_changed => S.theme.current().danger_ink,
+            else => S.theme.current().accent,
+        }, S.icon(18));
+        self.header_icon.meta.ownership.meta.test_id = "auth.challenge.title.icon";
         try header.appendChild(self.cx.allocator, self.header_icon);
         self.title = try self.label(header, titleFor(snapshot.kind), S.text(13, 700, false));
         self.title.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 20 }, .flex = 1, .min_width = 0 });

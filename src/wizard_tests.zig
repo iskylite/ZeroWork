@@ -845,14 +845,11 @@ test "wizard discard confirmation preserves exact draft and step until explicit 
     f.cx.layout();
     try std.testing.expect(f.wizard.discard_open);
     try std.testing.expect(f.wizard.isVisible());
-    try std.testing.expectEqual(@as(f32, 286), f.wizard.modal.?.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 192), f.wizard.modal.?.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 440), f.wizard.modal.?.globalRect().w);
+    try std.testing.expectEqualStrings("放弃未保存的连接？", f.wizard.title.?.getText().?.content);
     try std.testing.expectEqual(@as(usize, 0), f.cancel_calls);
     try std.testing.expect(!f.wizard.canSave());
-    SaveFixture.activate(f.wizard.discard_heading.?);
-    try std.testing.expect(!f.wizard.discard_expanded);
-    try std.testing.expectEqual(@as(usize, 0), f.cancel_calls);
-    SaveFixture.activate(f.wizard.discard_heading.?);
-    try std.testing.expect(f.wizard.discard_expanded);
     SaveFixture.activate(f.wizard.discard_continue.?);
     try std.testing.expect(!f.wizard.discard_open);
     try std.testing.expectEqual(mod.Step.confirm, f.wizard.step);

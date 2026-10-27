@@ -58,6 +58,7 @@ pub fn writeConfig(value: *config.Config, section: []const u8, key: []const u8, 
         if (std.mem.eql(u8, key, "input_line_highlight")) return setBool(&value.ui.input_line_highlight, next);
         if (std.mem.eql(u8, key, "timestamp_gutter")) return setBool(&value.ui.timestamp_gutter, next);
         if (std.mem.eql(u8, key, "sidebar_collapsed")) return setBool(&value.ui.sidebar_collapsed, next);
+        if (std.mem.eql(u8, key, "scrollback_limit")) return setUnsigned(&value.ui.scrollback_limit, next, 0, std.math.maxInt(u32));
         if (std.mem.eql(u8, key, "font_size")) return setUnsigned(&value.ui.font_size, next, 8, 48);
         if (std.mem.eql(u8, key, "font_family")) return setText(&value.ui.font_family, next);
         if (std.mem.eql(u8, key, "line_height")) return setDecimal(&value.ui.line_height, next, 1.0, 3.0);
@@ -183,6 +184,7 @@ pub fn read(value: config.Config, section: []const u8, key: []const u8) ?Value {
         if (std.mem.eql(u8, key, "input_line_highlight")) return .{ .boolean = value.ui.input_line_highlight };
         if (std.mem.eql(u8, key, "timestamp_gutter")) return .{ .boolean = value.ui.timestamp_gutter };
         if (std.mem.eql(u8, key, "sidebar_collapsed")) return .{ .boolean = value.ui.sidebar_collapsed };
+        if (std.mem.eql(u8, key, "scrollback_limit")) return .{ .unsigned = value.ui.scrollback_limit };
         if (std.mem.eql(u8, key, "font_size")) return .{ .unsigned = value.ui.font_size };
         if (std.mem.eql(u8, key, "font_family")) return .{ .text = value.ui.font_family };
         if (std.mem.eql(u8, key, "line_height")) return .{ .decimal = value.ui.line_height };

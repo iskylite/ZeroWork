@@ -159,6 +159,7 @@ pub const Service = struct {
         theme: *const fn (*anyopaque, session.ServiceHandle, Theme) anyerror!void,
         application_record: ?*const fn (*anyopaque, session.ServiceHandle, ApplicationRecord) anyerror!void = null,
         export_recording: ?*const fn (*anyopaque, session.ServiceHandle, RecordingKind, std.Io, std.Io.Dir, []const u8) anyerror!void = null,
+        recording_lease: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!@import("../vt/timeline.zig").Timeline.ExportLease = null,
         trusted_snapshot: ?*const fn (*anyopaque, session.ServiceHandle, std.mem.Allocator) anyerror!?trusted_edit.Snapshot = null,
         trusted_request: ?*const fn (*anyopaque, session.ServiceHandle, trusted_edit.Request) anyerror!void = null,
         trusted_outcome: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!?trusted_edit.Outcome = null,
@@ -249,5 +250,9 @@ pub const Service = struct {
     pub fn exportRecording(self: Service, kind: RecordingKind, io: std.Io, dir: std.Io.Dir, path: []const u8) !void {
         const export_recording = self.vtable.export_recording orelse return error.RecordingUnavailable;
         try export_recording(self.context, self.binding, kind, io, dir, path);
+    }
+    pub fn recordingLease(self: Service) !@import("../vt/timeline.zig").Timeline.ExportLease {
+        const call = self.vtable.recording_lease orelse return error.RecordingUnavailable;
+        return call(self.context, self.binding);
     }
 };

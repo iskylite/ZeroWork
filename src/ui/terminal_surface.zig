@@ -40,6 +40,7 @@ const Row = struct {
     layout: @import("terminal_record_geometry.zig").Layout = .{},
     glyphs: std.ArrayList(Glyph) = .empty,
     hash: u64 = 0,
+    content_id: ?vt.RowId = null,
 };
 const Pending = union(enum) { bytes: []u8, key: terminal.KeyEvent, mouse: terminal.MouseRequest };
 
@@ -57,6 +58,7 @@ pub const Surface = struct {
     cx: *ui.Cx,
     host: *ui.Node,
     root: *ui.Node,
+    viewport: *ui.Node,
     service: terminal.Service,
     composite: @import("terminal_document.zig").Document,
     owner: identity.SessionHandle,
@@ -116,7 +118,7 @@ pub const Surface = struct {
     rectangle: bool = false,
     mouse_reporting: bool = false,
     wheel_remainder: f32 = 0,
-    pending_scroll: i32 = 0,
+    pending_scroll: f32 = 0,
     scrollbar: ?*ui.Node = null,
     scrollbar_until: f64 = 0,
     pending_paste: ?terminal.Paste = null,
@@ -142,15 +144,18 @@ pub const Surface = struct {
         const root = try ui.boxStyled(cx, S.surface, .{});
         errdefer cx.destroyDetached(root);
         root.meta.ownership.meta.test_id = "terminal.surface";
+        const viewport = try ui.box(cx, .{ .position = .absolute, .overflow = .hidden, .hit_behavior = .pass_through }, .{});
+        viewport.meta.ownership.meta.test_id = "terminal.surface.viewport";
+        try root.appendChild(cx.allocator, viewport);
         const caret = try leaf(cx, options.cursor);
         caret.meta.ownership.meta.test_id = "terminal.surface.caret";
         (try caret.style.ensureExtFallible(cx.allocator)).z_index = 5;
-        try root.appendChild(cx.allocator, caret);
+        try viewport.appendChild(cx.allocator, caret);
         const preedit = try ui.text(cx, "", .{ .font_size = options.font_size, .font_family = options.family_id, .use_monospace_font = options.family_id == 0, .selectable = false });
         try absolute(cx, preedit, 0, 0, 0, options.row_height);
         (try preedit.style.ensureExtFallible(cx.allocator)).z_index = 6;
         preedit.setDisplay(.none);
-        try root.appendChild(cx.allocator, preedit);
+        try viewport.appendChild(cx.allocator, preedit);
         const message_root = try ui.box(cx, S.errorMessage(0, 0, 0, options.row_height, options.background), .{});
         message_root.meta.ownership.meta.test_id = "terminal.message";
         message_root.behavior.interaction.a11y = .{ .role = .status, .live = "polite" };
@@ -161,7 +166,7 @@ pub const Surface = struct {
         try message_root.appendChild(cx.allocator, message);
         message_root.setDisplay(.none);
         message.setDisplay(.none);
-        self.* = .{ .cx = cx, .host = host, .root = root, .service = service, .owner = owner, .options = owned_options, .composite = @import("terminal_document.zig").Document.init(cx.allocator, service, owner), .caret = caret, .preedit_node = preedit, .message = message, .message_root = message_root };
+        self.* = .{ .cx = cx, .host = host, .root = root, .viewport = viewport, .service = service, .owner = owner, .options = owned_options, .composite = @import("terminal_document.zig").Document.init(cx.allocator, service, owner), .caret = caret, .preedit_node = preedit, .message = message, .message_root = message_root };
         self.service = self.composite.service();
         self.scrollbar = try @import("terminal_scrollbar.zig").mount(cx, root);
         try host.appendChild(cx.allocator, root);
@@ -248,9 +253,9 @@ pub const Surface = struct {
         };
         if (self.pending_scroll != 0) {
             var accepted = true;
-            self.service.scroll(.{ .delta = self.pending_scroll }) catch |err| {
+            self.composite.scrollPixels(self.pending_scroll) catch |err| {
                 accepted = false;
-                if (err != error.WorkerBusy) {
+                if (err != error.WorkerBusy and err != error.SnapshotUnavailable and err != error.StaleProjection) {
                     self.pending_scroll = 0;
                     self.showError(err);
                 }
@@ -392,7 +397,7 @@ pub const Surface = struct {
             @import("terminal_scrollbar.zig").update(self.cx, bar, range.total_rows, range.viewport_offset, range.viewport_rows, !value.projection.modes.alternate_screen and (self.cx.frame_time_ms < self.scrollbar_until or range.viewport_offset + range.viewport_rows < range.total_rows));
             if (self.cx.frame_time_ms < self.scrollbar_until) self.cx.scheduleRedrawAfterNs(900 * std.time.ns_per_ms);
         }
-        const current_input = self.focused and !value.read_only and value.projection.cursor.visible and value.projection.cursor.row < value.projection.rows;
+        const current_input = self.focused and !value.read_only and value.projection.cursor.visible and value.projection.cursor.row < value.projection.visible_rows.len;
         const text_blinking = for (value.projection.cells) |cell| {
             if (cell.attributes & (1 << 3) != 0) break true;
         } else false;
@@ -450,8 +455,10 @@ pub const Surface = struct {
         // OSC default-background changes affect cell color resolution, while the
         // terminal canvas always exposes the shared application background.
         self.root.setBackground(ui.Color.TRANSPARENT);
-        const row_width = @max(0, self.root.rectFromWorldOrFallback().w - self.contentPadding().left - self.contentPadding().right);
-        while (self.rows.items.len < projection.rows) {
+        const bounds = self.root.rectFromWorldOrFallback();
+        try absolute(self.cx, self.viewport, 0, self.contentPadding().top, bounds.w, @min(@max(0, bounds.h - self.contentPadding().top - self.contentPadding().bottom), @as(f32, @floatFromInt(projection.rows)) * self.options.row_height));
+        const row_width = @max(0, bounds.w - self.contentPadding().left - self.contentPadding().right);
+        while (self.rows.items.len < projection.visible_rows.len) {
             try self.rows.ensureUnusedCapacity(self.cx.allocator, 1);
             const test_id = try std.fmt.allocPrint(self.cx.allocator, "terminal.surface.row.{d}", .{self.rows.items.len});
             errdefer self.cx.allocator.free(test_id);
@@ -479,18 +486,33 @@ pub const Surface = struct {
             const selected = try leaf(self.cx, S.selection(self.cx.tokens));
             (try selected.style.ensureExtFallible(self.cx.allocator)).z_index = 4;
             try root.appendChild(self.cx.allocator, selected);
-            try self.root.appendChild(self.cx.allocator, root);
+            try self.viewport.appendChild(self.cx.allocator, root);
             self.rows.appendAssumeCapacity(.{ .root = root, .test_id = test_id, .time = time, .record_time = record_time, .selected = selected, .marker = marker, .status_icon = status_icon, .article = article });
         }
-        while (self.rows.items.len > projection.rows) {
+        while (self.rows.items.len > projection.visible_rows.len) {
             var row = self.rows.pop().?;
             row.glyphs.deinit(self.cx.allocator);
-            self.cx.detachChild(self.root, row.root);
+            self.cx.detachChild(self.viewport, row.root);
             self.cx.destroyDetached(row.root);
             self.cx.allocator.free(row.test_id);
         }
+        // Keep shaped glyphs with their document row as the viewport moves.
+        // Match every retained row before painting, so newly exposed rows only
+        // reuse nodes belonging to content that has left the viewport.
+        for (projection.visible_rows) |value| {
+            const target = value.viewport_y;
+            for (self.rows.items, 0..) |cached, index| {
+                if (cached.content_id) |id| if (std.meta.eql(id, value.id)) {
+                    std.mem.swap(Row, &self.rows.items[target], &self.rows.items[index]);
+                    // Query ids belong to viewport slots, not recycled content.
+                    std.mem.swap([]u8, &self.rows.items[target].test_id, &self.rows.items[index].test_id);
+                    break;
+                };
+            }
+        }
         for (projection.visible_rows) |value| {
             const row = &self.rows.items[value.viewport_y];
+            row.content_id = value.id;
             row.root.meta.ownership.meta.test_id = switch (value.application_kind) {
                 1 => "terminal.command.record",
                 2, 3, 4 => "terminal.command.output",
@@ -499,7 +521,7 @@ pub const Surface = struct {
             if (self.displayed_theme) |theme| row.selected.setBackground(rgba(theme.selection));
             row.layout = value.presentation;
             const row_y = self.presentationY(value.viewport_y);
-            try absolute(self.cx, row.root, self.contentPadding().left, self.contentPadding().top + row_y, row_width, self.options.row_height);
+            try absolute(self.cx, row.root, self.contentPadding().left, row_y, row_width, self.options.row_height);
             const first_article = value.application_record_id != 0 and (value.viewport_y == 0 or projection.visible_rows[value.viewport_y - 1].application_record_id != value.application_record_id);
             row.article.setDisplay(if (first_article) .flex else .none);
             if (first_article) {
@@ -517,15 +539,14 @@ pub const Surface = struct {
             try self.renderTime(row, if (has_text and (value.application_record_id == 0 or header)) stamp else null);
             row.record_time.setDisplay(if (header and stamp != null) .flex else .none);
             if (header and stamp != null) {
-                var bytes: [24]u8 = undefined;
-                var clock: [8]u8 = undefined;
-                const text = try std.fmt.bufPrint(&bytes, "{s}.{d:0>3}", .{ try input.localTimestamp(&clock, stamp.?), @as(u16, @intCast(@mod(stamp.?, 1000))) });
+                var clock: [19]u8 = undefined;
+                const text = try input.localDateTimestamp(&clock, stamp.?);
                 try row.record_time.setTextContent(self.cx.allocator, text);
                 row.record_time.setTextColor(@import("app_theme.zig").current().fg_3);
                 var time_props = row.record_time.getText().?;
                 time_props.line_height = self.options.row_height / time_props.font_size;
                 row.record_time.setText(time_props);
-                try absolute(self.cx, row.record_time, @max(self.bodyX(), row_width - 100), 0, 100, self.options.row_height);
+                try absolute(self.cx, row.record_time, @max(self.bodyX(), row_width - 160), 0, 160, self.options.row_height);
             }
             row.marker.setDisplay(if (value.application_kind == 1 and value.id[1] == 0 and projection.cols > self.composite.command_inset_cells + 5) .flex else .none);
             if (value.application_kind == 1) {
@@ -550,13 +571,18 @@ pub const Surface = struct {
             var hash = std.hash.Wyhash.init(0);
             hash.update(std.mem.asBytes(&value.id));
             for (cells) |cell| {
-                std.hash.autoHash(&hash, cell);
+                var style_cell = cell;
+                // Grapheme arena offsets change when a row moves in a snapshot;
+                // only its text and style determine whether glyphs need work.
+                style_cell.grapheme_start = 0;
+                std.hash.autoHash(&hash, style_cell);
                 hash.update(projection.grapheme(cell));
                 if (cell.attributes & (1 << 3) != 0) {
                     hash.update(std.mem.asBytes(&self.blink));
                     hash.update(std.mem.asBytes(&self.focused));
                 }
             }
+            std.hash.autoHash(&hash, .{ @as(u32, @bitCast(row_width)), row.record_time.style.display != .none });
             std.hash.autoHash(&hash, @as(u32, @bitCast(value.presentation.shift_x)));
             std.hash.autoHash(&hash, projection.colors);
             std.hash.autoHash(&hash, projection.modes.reverse_colors);
@@ -594,11 +620,29 @@ pub const Surface = struct {
     }
     fn renderGlyphs(self: *Surface, row: *Row, cells: []const vt.Cell, projection: *const vt.Projection) !void {
         var used: usize = 0;
-        for (cells, 0..) |cell, col| {
-            if (row.record_time.style.display != .none and self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(col + 1)) * self.options.cell_width > row.root.style.width.px - 104) continue;
+        var col: usize = 0;
+        while (col < cells.len) {
+            const cell = cells[col];
+            const start = col;
+            col += 1;
+            if (row.record_time.style.display != .none and self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(start + 1)) * self.options.cell_width > row.root.style.width.px - 164) continue;
             if (cell.width == .wide_tail) continue;
-            const text = projection.grapheme(cell);
+            var text = projection.grapheme(cell);
             if (text.len == 0 and cell.background == .default and cell.attributes == 0) continue;
+            // Keep complex graphemes at their exact VT columns. Adjacent ASCII
+            // cells share one native text run instead of two nodes per cell.
+            // fixed advance preserves the terminal grid even for ligatures.
+            var ascii: [500]u8 = undefined;
+            if (asciiCell(cell, projection)) {
+                ascii[0] = text[0];
+                while (col < cells.len and col - start < ascii.len) : (col += 1) {
+                    const next = cells[col];
+                    if (!asciiCell(next, projection) or !sameCellStyle(cell, next)) break;
+                    if (row.record_time.style.display != .none and self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(col + 1)) * self.options.cell_width > row.root.style.width.px - 164) break;
+                    ascii[col - start] = projection.grapheme(next)[0];
+                }
+                text = ascii[0 .. col - start];
+            }
             if (used == row.glyphs.items.len) {
                 try row.glyphs.ensureUnusedCapacity(self.cx.allocator, 1);
                 const node = try ui.text(self.cx, "", .{ .selectable = false });
@@ -633,6 +677,7 @@ pub const Surface = struct {
             props.font_family = self.options.family_id;
             props.use_monospace_font = self.options.family_id == 0;
             props.use_italic_font = cell.attributes & 2 != 0;
+            props.monospace_char_width = self.options.cell_width;
             props.strikethrough = cell.attributes & (1 << 5) != 0;
             props.color = fg;
             spans[0] = .{ .start = 0, .end = @intCast(props.content.len), .underline = cell.underline != 0 and cell.underline != 2, .underline_color = resolveColor(cell.underline_color, fg, projection.colors), .underline_style = switch (cell.underline) {
@@ -647,8 +692,8 @@ pub const Surface = struct {
             published = true;
             glyph.node.setBackground(if (cell.background == .default and cell.attributes & (1 << 4) == 0 and !projection.modes.reverse_colors) ui.Color.TRANSPARENT else bg);
             glyph.node.setDisplay(.flex);
-            const x = self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(col)) * self.options.cell_width;
-            const width = self.options.cell_width * @as(f32, if (cell.width == .wide_lead) 2 else 1);
+            const x = self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(start)) * self.options.cell_width;
+            const width = self.options.cell_width * @as(f32, @floatFromInt(if (cell.width == .wide_lead) @as(usize, 2) else col - start));
             try absolute(self.cx, glyph.node, x, 0, width, self.options.row_height);
             glyph.overline.setDisplay(if (cell.attributes & (1 << 8) != 0) .flex else .none);
             glyph.overline.setBackground(fg);
@@ -683,11 +728,11 @@ pub const Surface = struct {
     fn renderCaret(self: *Surface) !void {
         const value = &self.snapshot.?;
         const cursor = value.projection.cursor;
-        const show = !value.read_only and self.active and cursor.visible and cursor.row < value.projection.rows and (self.reduced_motion or !self.focused or self.blink or !value.projection.modes.cursor_blinking);
+        const show = !value.read_only and self.active and cursor.visible and cursor.row < value.projection.visible_rows.len and (self.reduced_motion or !self.focused or self.blink or !value.projection.modes.cursor_blinking);
         self.caret.setDisplay(if (show) .flex else .none);
         if (!show) return;
         var x = self.contentPadding().left + self.bodyX() + @as(f32, @floatFromInt(cursor.col + self.command_caret_cells)) * self.options.cell_width;
-        var y = self.contentPadding().top + self.presentationY(cursor.row);
+        var y = self.presentationY(cursor.row);
         var width = self.options.cell_width;
         var height = self.options.row_height;
         if (self.preedit.len != 0) x += self.measured(self.preedit[0..self.preedit_cursor]);
@@ -738,7 +783,7 @@ pub const Surface = struct {
         self.preedit_node.setText(props);
         published = true;
         self.preedit_node.setBackground(self.options.background.withAlpha(@min(self.options.background.a, 64)));
-        try absolute(self.cx, self.preedit_node, self.contentPadding().left + self.bodyX() + @as(f32, @floatFromInt(cursor.col + self.command_caret_cells)) * self.options.cell_width, self.contentPadding().top + self.presentationY(cursor.row), @max(self.options.cell_width, self.measured(self.preedit)), self.options.row_height);
+        try absolute(self.cx, self.preedit_node, self.contentPadding().left + self.bodyX() + @as(f32, @floatFromInt(cursor.col + self.command_caret_cells)) * self.options.cell_width, self.presentationY(cursor.row), @max(self.options.cell_width, self.measured(self.preedit)), self.options.row_height);
     }
     pub fn queueText(self: *Surface, bytes: []const u8) !void {
         if (bytes.len == 0) return;
@@ -775,7 +820,11 @@ pub const Surface = struct {
     }
     pub fn pump(self: *Surface) !void {
         defer if (self.pending.items.len > 0 or self.trusted_pending != null) self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
-        if (try self.service.trustedOutcome()) |outcome| {
+        const trusted_outcome = self.service.trustedOutcome() catch |err| {
+            if (err == error.WorkerBusy) return;
+            return err;
+        };
+        if (trusted_outcome) |outcome| {
             self.trusted_outcome = outcome;
             if (self.trusted_pending == outcome.operation) {
                 self.trusted_pending = null;
@@ -792,8 +841,16 @@ pub const Surface = struct {
             };
             _ = self.released_anchors.orderedRemove(0);
         }
-        while (try self.service.takeWriteReceipt()) |receipt| {
-            self.force_snapshot = true;
+        while (self.service.takeWriteReceipt() catch |err| {
+            if (err == error.WorkerBusy) return;
+            return err;
+        }) |receipt| {
+            // Successful delivery updates input bookkeeping; a new viewport
+            // arrives through publication. Do not clone/recompose the whole
+            // screen once for a receipt and again for the shell's echo.
+            if (receipt.state == .completed) {
+                if (self.snapshot) |*snapshot| snapshot.input_revision = @max(snapshot.input_revision, receipt.input_sequence);
+            } else self.force_snapshot = true;
             if (receipt.state == .failed) self.showError(if (receipt.failure == .stale_mode) error.StaleMode else error.TransportFailed);
         }
         while (self.pending.items.len > 0 and self.snapshot != null and !self.snapshot.?.read_only) {
@@ -849,21 +906,11 @@ pub const Surface = struct {
             else => "终端操作未完成，请重试。",
         };
         self.error_until_ms = self.cx.frame_time_ms + 3000;
-        const rect = self.root.rectFromWorldOrFallback();
-        self.message_root.setStyleInline(self.cx.allocator, S.errorMessage(self.contentPadding().left, @max(0, rect.w - self.contentPadding().left - self.contentPadding().right), @max(self.contentPadding().top, rect.h - self.options.row_height - self.contentPadding().bottom), self.options.row_height, self.options.background));
-        self.message.setStyleInline(self.cx.allocator, .{ .height = .{ .px = self.options.row_height } });
-        var props = self.message.getText().?;
-        props.font_size = 11;
-        props.font_weight = 400;
-        props.line_height = self.options.row_height / 11;
-        props.color = self.cx.tokens.tokens.color.fg_secondary;
-        self.message.setText(props);
-        self.message_root.behavior.interaction.a11y.?.live_text = self.error_message;
-        self.message.setTextContent(self.cx.allocator, self.error_message.?) catch {};
-        self.message_root.setDisplay(.flex);
-        self.message.setDisplay(.flex);
-        self.cx.requestRedraw();
-        self.cx.scheduleRedrawAfterNs(3 * std.time.ns_per_s);
+        self.message_root.setDisplay(.none);
+        self.message.setDisplay(.none);
+        self.feedback.publish(self.feedback.context, self.cx, self.owner, self.error_message.?) catch |publish_err| {
+            std.log.debug("terminal error feedback unavailable: {s}", .{@errorName(publish_err)});
+        };
     }
 
     /// Shared by drag-release, Cmd-C and the host's captured menu-copy path.
@@ -990,6 +1037,16 @@ pub const Surface = struct {
         return input.copySelectionText(self, allocator);
     }
 };
+
+fn asciiCell(cell: vt.Cell, projection: *const vt.Projection) bool {
+    const text = projection.grapheme(cell);
+    return cell.width == .single and text.len == 1 and text[0] >= ' ' and text[0] <= '~';
+}
+fn sameCellStyle(a: vt.Cell, b: vt.Cell) bool {
+    return a.attributes == b.attributes and a.underline == b.underline and
+        std.meta.eql(a.foreground, b.foreground) and std.meta.eql(a.background, b.background) and
+        std.meta.eql(a.underline_color, b.underline_color);
+}
 
 pub fn resolveColor(value: vt.Color, fallback: ui.Color, colors: vt.Colors) ui.Color {
     return switch (value) {

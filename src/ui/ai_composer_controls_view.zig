@@ -332,16 +332,17 @@ pub const View = struct {
             .usage => "ai.usage.menu",
         };
         var title: ?*ui.Node = null;
-        if (kind != .attachment and kind != .usage and kind != .effort and kind != .model) {
+        if (kind == .permission or kind == .usage) {
             const header = try ui.box(self.cx, S.header(), .{});
-            try header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get("sliders-horizontal").?, S.theme.current().accent, S.icon(16)));
+            try header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, if (kind == .permission) ui.icons.shield else ui.icons.chart_pie, S.theme.current().accent, S.icon(16)));
             title = try self.label(header, switch (kind) {
                 .permission => "执行权限",
                 .model => "选择模型",
                 .effort => "推理档位",
                 .usage => "上下文与来源",
                 else => unreachable,
-            }, S.text(12, 500, 18, false), S.flexibleLabel(18));
+            }, S.text(13, 700, 20, false), S.flexibleLabel(20));
+            title.?.meta.ownership.meta.test_id = if (kind == .permission) "ai.permission.title" else "ai.usage.title";
             const close_context = try self.scope.createState(Choice, .{ .view = self, .kind = kind });
             const close_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = 16, .a11y_label = "关闭选项", .base_style = S.close(), .hover_style = self.hover_style, .on_click = self.cx.on(Choice, close_context, Choice.choose) }).mount(self.scope, self.cx);
             try header.appendChild(self.cx.allocator, close_button);
@@ -640,7 +641,7 @@ pub const View = struct {
                     style.min_height = panel_height;
                 }
                 if (kind == .usage) if (self.source) |source| if (source.value.usage) |usage| {
-                    const panel_height = @min(@as(f32, 232) + @as(f32, @floatFromInt(usage.parts.len)) * 24 + (if (usage.redacted != null) @as(f32, 20) else 0), @max(0, self.cx.viewport.height - 16));
+                    const panel_height = @min(@as(f32, 268) + @as(f32, @floatFromInt(usage.parts.len)) * 24 + (if (usage.redacted != null) @as(f32, 20) else 0), @max(0, self.cx.viewport.height - 16));
                     style.height = .{ .px = panel_height };
                     style.min_height = panel_height;
                     style.max_height = panel_height;
@@ -1046,7 +1047,7 @@ pub const View = struct {
         const footer = try ui.box(self.cx, S.compactionFooter(), .{});
         try footer.appendChild(self.cx.allocator, button);
         try self.usage_body.appendChild(self.cx.allocator, footer);
-        const desired_height = @min(@as(f32, 232) + @as(f32, @floatFromInt(usage.parts.len)) * 24 + (if (usage.redacted != null) @as(f32, 20) else 0), @max(0, self.cx.viewport.height - 16));
+        const desired_height = @min(@as(f32, 268) + @as(f32, @floatFromInt(usage.parts.len)) * 24 + (if (usage.redacted != null) @as(f32, 20) else 0), @max(0, self.cx.viewport.height - 16));
         self.popups[@backingInt(S.Kind.usage)].widget.chrome.setStyleInline(self.cx.allocator, .{ .height = .{ .px = desired_height }, .min_height = desired_height, .max_height = desired_height });
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {

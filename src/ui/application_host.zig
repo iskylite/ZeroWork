@@ -82,6 +82,13 @@ const HistoryClose = struct {
     state: enum { pending, closed, unknown } = .pending,
 };
 const ReconnectPolicy = struct { automatic: bool, max: u8, backoff: [5]u8 };
+// Only the scrollback policy follows the saved asset; endpoint, authentication
+// and the rest of an active connection keep their immutable source snapshot.
+fn currentScrollbackLimit(registry: *const hosts.Registry, source: hosts.HostConfig, global: u32) u32 {
+    const current = if (registry.indexOf(source.connection_id)) |index| registry.hosts[index] else source;
+    return if (current.scrollback_explicit or current.scrollback != 25000) current.scrollback else global;
+}
+
 const Mapping = struct {
     process: ?*local_mod.Service = null,
     handle: identity.SessionHandle,
@@ -91,6 +98,7 @@ const Mapping = struct {
     tab_id: identity.TabId,
     owner: identity.ContentOwner,
     source: ?SourceSnapshot,
+    applied_scrollback_limit: ?u32 = null,
     connected_received: bool = false,
     ready_published: bool = false,
     attached_published: bool = false,
@@ -916,6 +924,7 @@ pub const ApplicationHost = struct {
     }
 
     pub fn safeTick(self: *ApplicationHost) !bool {
+        self.local_adapter.configureScrollback(self.workspace.app_config.ui.scrollback_limit);
         self.local_adapter.applyRecordingRetention(self.workspace.app_config.config_revision, self.workspace.app_config.log.retention_days);
         var background_pending = false;
         if (self.domain.backgrounds) |host| {
@@ -1163,6 +1172,11 @@ pub const ApplicationHost = struct {
         const tab = self.workspace.sessionTab(mapping.legacy_id) orelse return false;
         const runtime = tab.runtime orelse return false;
         if (!runtime.torn_down) runtime.setInputBufferEnabled(self.workspace.app_config.ssh.buffer_input);
+        const limit = currentScrollbackLimit(&self.workspace.registry, mapping.source.?.value.host, self.workspace.app_config.ui.scrollback_limit);
+        if (mapping.applied_scrollback_limit == null or mapping.applied_scrollback_limit.? != limit) {
+            runtime.setScrollbackLimit(limit);
+            mapping.applied_scrollback_limit = limit;
+        }
         const notice = runtime.reconnectSnapshot() orelse return false;
         if (notice.key == null or !notice.key.?.eql(mapping.create_operation)) return false;
         if (notice.phase == .ready) {
@@ -1230,6 +1244,7 @@ pub const ApplicationHost = struct {
         }
         mapping.cleanup_received = notice.cleanup == .released;
         mapping.cleanup_unknown_received = notice.cleanup == .unknown;
+        tab.remote_retry_deadline = if (mapping.reconnect_ticket) |ticket| (if (!ticket.invalidated and !ticket.claimed) ticket.deadline_ns else null) else null;
         return notice.cleanup == .awaiting or (mapping.reconnect_ticket != null and mapping.reconnect_ticket.?.deadline_ns != null);
     }
 
@@ -2408,4 +2423,23 @@ test "file create failure without a tab reaches original window once" {
     stale.operation_id += 1;
     app.publishFileCreateFailure(stale, failure);
     try std.testing.expectEqual(@as(usize, 1), feedback.calls);
+}
+
+test "running SSH scrollback follows host edits and restored global inheritance by stable identity" {
+    const a = std.testing.allocator;
+    var registry = try hosts.Registry.parse(a, "[[hosts]]\nname=\"same\"\nhost=\"one\"\nuser=\"u\"\n");
+    defer registry.deinit();
+    const source = registry.hosts[0];
+    try std.testing.expectEqual(@as(u32, 25000), currentScrollbackLimit(&registry, source, 25000));
+    registry.hosts[0].revision += 1;
+    registry.hosts[0].scrollback = 128;
+    registry.hosts[0].scrollback_explicit = true;
+    try std.testing.expectEqual(@as(u32, 128), currentScrollbackLimit(&registry, source, 25000));
+    try std.testing.expectEqual(@as(u32, 128), currentScrollbackLimit(&registry, source, 40000));
+    registry.hosts[0].scrollback = 0;
+    try std.testing.expectEqual(@as(u32, 0), currentScrollbackLimit(&registry, source, 40000));
+    registry.hosts[0].scrollback = 25000;
+    registry.hosts[0].scrollback_explicit = false;
+    try std.testing.expectEqual(@as(u32, 40000), currentScrollbackLimit(&registry, source, 40000));
+    try std.testing.expectEqual(@as(u32, 0), currentScrollbackLimit(&registry, source, 0));
 }

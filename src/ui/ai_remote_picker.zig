@@ -96,6 +96,10 @@ pub const View = struct {
         self.surface = modal.body;
         self.surface.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 8, .padding = ui.Padding.all(20) });
         const heading = try ui.boxStyled(cx, S.row, .{});
+        heading.setStyleInline(cx.allocator, .{ .gap = 8 });
+        const title_icon = try ui.iconTint(cx, ui.icons.file_search, S.theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        title_icon.meta.ownership.meta.test_id = "ai.remote.title.icon";
+        try heading.appendChild(cx.allocator, title_icon);
         try heading.appendChild(cx.allocator, try ui.textStyled(cx, S.heading, "附加远端文件"));
         try heading.appendChild(cx.allocator, try ui.box(cx, .{ .width = .fill() }, .{}));
         try heading.appendChild(cx.allocator, try self.button("关闭", "ai.remote.close", close));

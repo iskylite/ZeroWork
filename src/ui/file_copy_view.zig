@@ -18,6 +18,7 @@ pub const View = struct {
     overlay: *ui.Node = undefined,
     open_value: *ui.Signal(bool),
     heading: *ui.Node = undefined,
+    heading_icon: *ui.Node = undefined,
     subtitle: *ui.Node = undefined,
     filename: *ui.Node = undefined,
     summary: *ui.Node = undefined,
@@ -48,7 +49,12 @@ pub const View = struct {
         try self.root.appendChild(cx.allocator, header);
         const title_column = try ui.box(cx, .{ .width = .fill(), .flex = 1, .height = .{ .px = 42 }, .direction = .column, .gap = 4, .min_width = 0 }, .{});
         try header.appendChild(cx.allocator, title_column);
-        self.heading = try v3Label(cx, title_column, "", 15, 600, false, "files.copy.heading", 22);
+        const heading_row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 22 }, .direction = .row, .align_items = .center, .gap = 8 }, .{});
+        try title_column.appendChild(cx.allocator, heading_row);
+        self.heading_icon = try ui.iconTint(cx, ui.icons.arrow_up_from_line, V3.theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        self.heading_icon.meta.ownership.meta.test_id = "files.copy.heading.icon";
+        try heading_row.appendChild(cx.allocator, self.heading_icon);
+        self.heading = try v3Label(cx, heading_row, "", 15, 600, false, "files.copy.heading", 22);
         self.subtitle = try v3Label(cx, title_column, "", 11, 400, true, "files.copy.subtitle", 16);
         const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 14), .a11y_label = "关闭传输确认", .base_style = M.button(), .on_click = cx.on(View, self, dismiss) }).mount(scope, cx);
         close.meta.ownership.meta.test_id = "files.copy.close";
@@ -103,6 +109,8 @@ pub const View = struct {
         self.resume_value.set(defaults.resume_transfer);
         self.md5_value.set(defaults.md5_check);
         const upload = intent.source.endpoint == .local_fs;
+        const heading_asset = if (upload) ui.icons.arrow_up_from_line else ui.icons.arrow_down_to_line;
+        if (heading_asset.icon_id) |id| if (heading_asset.pickRep(18)) |rep| self.heading_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = V3.theme.current().accent });
         try self.heading.setTextContent(self.cx.allocator, if (upload) "上传文件" else "下载文件");
         try self.subtitle.setTextContent(self.cx.allocator, if (upload) "本地文件 → 远端目录" else "远端文件 → 本地保存目录");
         self.primary_label.set(if (upload) "开始上传" else "开始下载");

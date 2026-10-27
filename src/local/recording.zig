@@ -57,6 +57,7 @@ pub const Recording = struct {
     closed: bool = false,
     archived: bool = false,
     writer: ?std.Thread = null,
+    references: std.atomic.Value(usize) = .init(1),
     wakeup: @import("../platform/wakeup.zig").Wakeup,
 
     pub fn init(allocator: std.mem.Allocator, owner: identity.SessionHandle, options: Options, cols: u16, rows: u16, now_ms: i64) !*Recording {
@@ -118,6 +119,10 @@ pub const Recording = struct {
 
     pub fn deinit(self: *Recording) void {
         self.stopWriter();
+        self.releaseExport();
+    }
+    fn releaseExport(self: *Recording) void {
+        if (self.references.fetchSub(1, .acq_rel) != 1) return;
         self.wakeup.deinit();
         for (self.queue.items) |segment| self.allocator.free(segment.bytes);
         self.queue.deinit(self.allocator);
@@ -129,6 +134,18 @@ pub const Recording = struct {
         self.allocator.free(self.checkpoint_path);
         self.allocator.free(self.cast_path);
         self.allocator.destroy(self);
+    }
+    pub fn exportLease(self: *Recording) Timeline.ExportLease {
+        _ = self.references.fetchAdd(1, .monotonic);
+        return .{ .context = self, .capture = captureExport, .release = releaseLease, .cols = self.initial_cols, .rows = self.initial_rows };
+    }
+    fn captureExport(raw: *anyopaque, allocator: std.mem.Allocator) !Timeline {
+        const self: *Recording = @ptrCast(@alignCast(raw));
+        return self.timeline.snapshotWithAllocator(allocator);
+    }
+    fn releaseLease(raw: *anyopaque) void {
+        const self: *Recording = @ptrCast(@alignCast(raw));
+        self.releaseExport();
     }
     fn lock(self: *Recording) void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
@@ -480,4 +497,21 @@ test "idle recording writer wakes for output theme resize and drains its final q
     try std.testing.expect(std.mem.indexOf(u8, cast, "中文") != null);
     try std.testing.expect(std.mem.indexOf(u8, cast, "\"r\",\"100x30\"") != null);
     try std.testing.expectEqual(@as(usize, 128), std.mem.count(u8, cast, "tail\\n"));
+}
+
+test "Local export lease keeps the original recording alive after owner release" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(path);
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(919), .generation = 2 };
+    const recording = try Recording.init(std.testing.allocator, owner, .{ .io = std.testing.io, .directory = path, .log = .{ .ring_mb = 1, .checkpoint_sec = 30 } }, 80, 24, 0);
+    recording.appendOutput(owner, "owned before close", 100);
+    const lease = recording.exportLease();
+    defer lease.release(lease.context);
+    recording.deinit();
+    var captured = try lease.capture(lease.context, std.testing.allocator);
+    defer captured.deinit();
+    try std.testing.expectEqual(@as(usize, 1), captured.events.items.len);
+    try std.testing.expectEqualStrings("owned before close", captured.events.items[0].payload);
 }

@@ -34,7 +34,7 @@ pub fn label() ui.TextStyle {
     return .{ .font_size = 11, .line_height = 16.0 / 11.0, .color = ink(), .selectable = false };
 }
 pub fn recent() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 34 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 6, .padding = .{ .left = 11, .right = 11 }, .border = .{ .width = 1, .radius = 9, .color = theme.current().border }, .background = theme.current().surface_2, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 34 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 6, .padding = .{ .left = 11, .right = 11 }, .border = .{ .width = 0, .radius = 9 }, .background = theme.current().surface_2, .flex_shrink = 0 };
 }
 
 pub fn accentInk() ui.Color {

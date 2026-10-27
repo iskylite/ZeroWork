@@ -371,7 +371,7 @@ test "replacement never leaves stale content or broadens permissions" {
 
     var loaded = try load(std.testing.io, tmp.dir, std.testing.allocator, "config.toml");
     defer loaded.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("JetBrains Mono", loaded.value.ui.font_family);
+    try std.testing.expectEqualStrings("Monaco", loaded.value.ui.font_family);
 
     var file = try tmp.dir.openFile(std.testing.io, "config.toml", .{});
     defer file.close(std.testing.io);

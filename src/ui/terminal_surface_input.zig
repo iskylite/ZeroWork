@@ -14,6 +14,14 @@ pub fn localTimestamp(out: *[8]u8, wall_ms: i64) ![]const u8 {
     out.* = .{ @intCast(48 + @divTrunc(time.hour, 10)), @intCast(48 + @mod(time.hour, 10)), ':', @intCast(48 + @divTrunc(time.min, 10)), @intCast(48 + @mod(time.min, 10)), ':', @intCast(48 + @divTrunc(time.sec, 10)), @intCast(48 + @mod(time.sec, 10)) };
     return out;
 }
+pub fn localDateTimestamp(out: *[19]u8, wall_ms: i64) ![]const u8 {
+    const seconds: c_long = @intCast(@divFloor(wall_ms, 1000));
+    var time: Time = undefined;
+    if (localtime_r(&seconds, &time) == null) return error.TimestampUnavailable;
+    const year = time.year + 1900;
+    if (year < 0 or year > 9999) return error.TimestampUnavailable;
+    return std.fmt.bufPrint(out, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2}", .{ @as(u32, @intCast(year)), @as(u32, @intCast(time.month + 1)), @as(u32, @intCast(time.day)), @as(u32, @intCast(time.hour)), @as(u32, @intCast(time.min)), @as(u32, @intCast(time.sec)) });
+}
 pub fn onKey(self: *Surface, key: ui.events.KeyCode, modifiers: ui.events.Modifiers) ui.events.EventResult {
     if (self.preedit.len != 0) return .stop;
     if (self.pending_paste != null or self.paste_requested != null) {
@@ -152,6 +160,12 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
         .scroll => |wheel| {
             self.scrollbar_until = self.cx.frame_time_ms + 900;
             if (self.snapshot == null) return .stop;
+            if (!self.snapshot.?.projection.modes.alternate_screen) {
+                self.pending_scroll -= wheel.dy;
+                self.force_snapshot = true;
+                self.cx.requestRedraw();
+                return .stop;
+            }
             // Zenit preserves AppKit's positive-up delta (as ScrollArea does);
             // Ghostty viewport deltas and terminal wheel encodings use up < 0.
             self.wheel_remainder -= wheel.dy / self.options.row_height;
@@ -166,10 +180,6 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
                     var count: u32 = @intCast(@min(@abs(delta), 64));
                     while (count > 0) : (count -= 1) enqueueKey(self, .{ .key = if (delta < 0) .arrow_up else .arrow_down }) catch |err| self.showError(err);
                 }
-            } else {
-                self.pending_scroll +|= delta;
-                self.force_snapshot = true;
-                self.cx.requestRedraw();
             }
             return .stop;
         },
@@ -402,7 +412,12 @@ fn showPasteModal(self: *Surface) !void {
         const scope = try ui.Scope.init(self.cx.allocator, null, self.cx.owner);
         errdefer scope.dispose();
         const open = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .title = "确认多行粘贴", .open = open, .width = 480, .max_height = 520, .close_on_overlay = false, .on_open_change = self.cx.on(Surface, self, modalChanged) }).mount(scope, self.cx);
+        const modal = try ui.widgets.Modal(.{ .open = open, .width = 480, .max_height = 520, .close_on_overlay = false, .on_open_change = self.cx.on(Surface, self, modalChanged) }).mount(scope, self.cx);
+        const heading = try ui.box(self.cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
+        heading.meta.ownership.meta.test_id = "terminal.paste.heading";
+        try heading.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.clipboard_paste, @import("app_theme.zig").current().warn_ink, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 }));
+        try heading.appendChild(self.cx.allocator, try ui.text(self.cx, "确认多行粘贴", .{ .font_size = 15, .font_weight = 700, .color = @import("app_theme.zig").current().fg_1 }));
+        try modal.body.appendChild(self.cx.allocator, heading);
         try modal.body.appendChild(self.cx.allocator, try ui.text(self.cx, "以下原文将插入当前终端。广播开启时，也会发送给已批准的接收终端；换行可能提交命令，尾部不会额外追加回车。", .{ .font_size = 12, .wrap = .word }));
         const scroll = try ui.widgets.ScrollArea(.{ .height = 260, .direction = .vertical }).mount(scope, self.cx);
         const text = try ui.text(self.cx, "", .{ .font_size = 12, .use_monospace_font = true, .wrap = .word });
@@ -439,7 +454,7 @@ pub fn buildDocument(self: *Surface) !void {
             self.caret_byte = @intCast(self.document.items.len);
             try self.document.appendSlice(self.cx.allocator, self.preedit);
         }
-        if (row.viewport_y + 1 < snapshot.projection.rows) try self.document.append(self.cx.allocator, '\n');
+        if (@as(usize, row.viewport_y) + 1 < snapshot.projection.visible_rows.len) try self.document.append(self.cx.allocator, '\n');
     }
 }
 pub fn frameForRange(self: *Surface, start: u32, _: u32, out: *ui.types.A11yRect) bool {
@@ -467,7 +482,7 @@ pub fn frameForRange(self: *Surface, start: u32, _: u32, out: *ui.types.A11yRect
             offset += 1;
         }
     }
-    out.* = .{ .x = rect.x + self.contentPadding().left + self.bodyX() + col * self.options.cell_width, .y = rect.y + self.contentPadding().top + @as(f32, @floatFromInt(row)) * self.options.row_height, .width = self.options.cell_width, .height = self.options.row_height };
+    out.* = .{ .x = rect.x + self.contentPadding().left + self.bodyX() + col * self.options.cell_width, .y = rect.y + self.contentPadding().top + self.presentationY(row), .width = self.options.cell_width, .height = self.options.row_height };
     return true;
 }
 pub fn rangeAtPoint(self: *Surface, x: f32, y: f32, start: *u32, end: *u32) bool {

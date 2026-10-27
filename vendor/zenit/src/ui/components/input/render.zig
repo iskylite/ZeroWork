@@ -463,12 +463,14 @@ pub fn inputBeforeRender(node: *Node) void {
             const content_changed = state.syncDisplayTextContent();
             var text = text_nd.getText() orelse old_text;
             const has_content = state.hasVisualValue();
-            const new_color = if (state.has_error)
+            // A required-but-empty field still displays a placeholder, not an
+            // invalid entered value. Keep that example visually neutral.
+            const new_color = if (!has_content)
+                (state.placeholder_color orelse state.tokens.tokens.color.fg_secondary)
+            else if (state.has_error)
                 state.tokens.tokens.color.danger
-            else if (has_content)
-                state.tokens.tokens.color.fg_primary
             else
-                (state.placeholder_color orelse state.tokens.tokens.color.fg_secondary);
+                state.tokens.tokens.color.fg_primary;
             const new_line_height = if (state.font_size > 0 and state.line_height > 0)
                 state.line_height / state.font_size
             else

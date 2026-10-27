@@ -26,7 +26,10 @@ pub const Dialog = struct {
         self.modal.dialog.meta.ownership.meta.test_id = "settings.ai.delete.dialog";
         self.modal.dialog.setStyleInline(cx.allocator, .{ .width = .{ .px = 390 }, .height = .{ .px = 206 }, .direction = .column, .padding = .{}, .gap = 0, .background = S.theme.current().overlay, .border = .{ .radius = 14 }, .overflow_hidden = true });
         self.modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .min_height = 0, .flex = 1, .direction = .column, .gap = 0, .padding = .{} });
-        const header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 60 }, .padding = .{ .left = 20, .right = 20, .top = 16, .bottom = 10 }, .direction = .row, .align_items = .center, .flex_shrink = 0 }, .{});
+        const header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 60 }, .padding = .{ .left = 20, .right = 20, .top = 16, .bottom = 10 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
+        const title_icon = try ui.iconTint(cx, ui.icons.trash_2, S.theme.current().danger_ink, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        title_icon.meta.ownership.meta.test_id = "settings.ai.delete.title.icon";
+        try header.appendChild(cx.allocator, title_icon);
         try header.appendChild(cx.allocator, try ui.textStyled(cx, S.title, if (target.model == null) "删除服务提供方？" else "删除模型？"));
         try self.modal.body.appendChild(cx.allocator, header);
         const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);

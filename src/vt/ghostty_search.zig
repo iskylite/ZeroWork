@@ -86,14 +86,23 @@ pub fn capture(adapter: anytype, allocator: std.mem.Allocator) !search.Document 
                 bg = if (old == 0) rgba(colors.foreground) else old;
             }
             if (style.invisible) fg = if (bg == 0) rgba(colors.background) else bg;
-            try spans.append(allocator, .{ .start = @intCast(start), .end = @intCast(text.items.len), .row = @intCast(rows.items.len), .col = col, .width = if (wide == c.GHOSTTY_CELL_WIDE_WIDE) 2 else 1, .color = fg, .bg = bg, .flags = @as(u32, @intFromBool(style.bold)) | (@as(u32, @intFromBool(style.italic)) << 1) | (@as(u32, @intFromBool(style.underline != 0)) << 2) });
-            if (utf8.len > 0 or wraps or bg != 0 or style.inverse or style.underline != 0) {
+            try search.appendSpan(allocator, &spans, text.items, .{ .start = @intCast(start), .end = @intCast(text.items.len), .row = @intCast(rows.items.len), .col = col, .width = if (wide == c.GHOSTTY_CELL_WIDE_WIDE) 2 else 1, .color = fg, .bg = bg, .flags = @as(u32, @intFromBool(style.bold)) | (@as(u32, @intFromBool(style.italic)) << 1) | (@as(u32, @intFromBool(style.underline != 0)) << 2), .native_cell = nativeStyle(style) });
+            if (utf8.len > 0 or wraps or bg != 0 or style.inverse or style.underline != 0 or style.overline or style.strikethrough) {
                 text_end = text.items.len;
                 spans_end = spans.items.len;
             }
         }
         text.shrinkRetainingCapacity(text_end);
         spans.shrinkRetainingCapacity(spans_end);
+        // A trailing blank can have extended an existing ASCII run, so trim
+        // that run as well as the array before publishing its byte bounds.
+        if (spans.items.len > spans_start) {
+            const tail = &spans.items[spans.items.len - 1];
+            if (tail.ascii_run and tail.end > text_end) {
+                tail.width -= @intCast(tail.end - text_end);
+                tail.end = @intCast(text_end);
+            }
+        }
         const screen_row: i64 = @as(i64, @intCast(bar.offset)) + y;
         if (screen_row < 0 or screen_row >= bar.total) return error.InvalidSearchProjection;
         try rows.append(allocator, .{ .id = id.bits, .logical_id = logical_id, .screen_row = @intCast(screen_row), .start = @intCast(row_start), .end = @intCast(text_end) });
@@ -114,5 +123,24 @@ fn packColor(color: c.GhosttyStyleColor, colors: c.GhosttyRenderStateColors) u32
         c.GHOSTTY_STYLE_COLOR_PALETTE => rgba(colors.palette[color.value.palette]),
         c.GHOSTTY_STYLE_COLOR_RGB => rgba(color.value.rgb),
         else => 0,
+    };
+}
+
+// Preserve the full terminal style for pixel-scroll rows outside the live
+// viewport. The legacy text/search flags intentionally cover only three bits.
+fn styleColor(value: c.GhosttyStyleColor) @import("snapshot.zig").Color {
+    return switch (value.tag) {
+        c.GHOSTTY_STYLE_COLOR_PALETTE => if (value.value.palette < 16) .{ .ansi = @intCast(value.value.palette) } else .{ .indexed = value.value.palette },
+        c.GHOSTTY_STYLE_COLOR_RGB => .{ .rgb = (@as(u24, value.value.rgb.r) << 16) | (@as(u24, value.value.rgb.g) << 8) | value.value.rgb.b },
+        else => .default,
+    };
+}
+fn nativeStyle(style: c.GhosttyStyle) @import("snapshot.zig").Cell {
+    return .{
+        .foreground = styleColor(style.fg_color),
+        .background = styleColor(style.bg_color),
+        .underline_color = styleColor(style.underline_color),
+        .underline = @intCast(style.underline),
+        .attributes = (@as(u16, @intFromBool(style.bold)) << 0) | (@as(u16, @intFromBool(style.italic)) << 1) | (@as(u16, @intFromBool(style.underline != 0)) << 2) | (@as(u16, @intFromBool(style.blink)) << 3) | (@as(u16, @intFromBool(style.inverse)) << 4) | (@as(u16, @intFromBool(style.strikethrough)) << 5) | (@as(u16, @intFromBool(style.faint)) << 6) | (@as(u16, @intFromBool(style.invisible)) << 7) | (@as(u16, @intFromBool(style.overline)) << 8),
     };
 }

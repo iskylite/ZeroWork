@@ -1,5 +1,9 @@
 const std = @import("std");
 
+pub const default_width: f32 = 238;
+pub const minimum_width: f32 = 220;
+pub const maximum_width: f32 = 480;
+
 pub const Asset = struct { id: u32, name: []const u8, host: []const u8, group: []const u8 = "" };
 
 pub const Model = struct {
@@ -7,7 +11,8 @@ pub const Model = struct {
     assets: std.ArrayList(Asset) = .empty,
     filtered: std.ArrayList(usize) = .empty,
     collapsed: bool = false,
-    expanded_width: f32 = 300,
+    expanded_width: f32 = default_width,
+    initial_width_pending: bool = true,
     user_collapsed: ?bool = null,
     committed_collapsed: ?bool = null,
     session_count: usize = 0,
@@ -38,6 +43,16 @@ pub const Model = struct {
     }
     pub fn width(self: Model) f32 {
         return if (self.collapsed) 0 else self.expanded_width;
+    }
+
+    pub fn alignInitialWidth(self: *Model, local_right: f32, sidebar_left: f32, window_width: f32) bool {
+        if (!self.initial_width_pending or !std.math.isFinite(local_right) or local_right <= sidebar_left) return false;
+        const maximum = @min(maximum_width, @max(minimum_width, window_width - 480));
+        const target_width = std.math.clamp(local_right - sidebar_left, minimum_width, maximum);
+        self.initial_width_pending = false;
+        const changed = @abs(target_width - self.expanded_width) > 0.5;
+        self.expanded_width = target_width;
+        return changed;
     }
 
     /// Session changes never override the user's sidebar choice.
@@ -94,5 +109,21 @@ test "sidebar sessions and resize preserve the explicit visibility choice" {
     try std.testing.expect(model.collapsed);
     model.applyCommittedPreference(false, 1440);
     try std.testing.expect(!model.collapsed);
-    try std.testing.expectEqual(@as(f32, 300), model.width());
+    try std.testing.expectEqual(default_width, model.width());
+}
+
+test "sidebar initial width aligns once and preserves a later manual width" {
+    var model = Model.init(std.testing.allocator);
+    defer model.deinit();
+    try std.testing.expectEqual(default_width, model.width());
+    try std.testing.expect(model.alignInitialWidth(402, 4, 1440));
+    try std.testing.expectEqual(@as(f32, 398), model.width());
+    model.expanded_width = 275;
+    try std.testing.expect(!model.alignInitialWidth(242, 4, 1440));
+    try std.testing.expectEqual(@as(f32, 275), model.width());
+
+    var narrow = Model.init(std.testing.allocator);
+    defer narrow.deinit();
+    try std.testing.expect(narrow.alignInitialWidth(600, 4, 860));
+    try std.testing.expectEqual(@as(f32, 380), narrow.width());
 }

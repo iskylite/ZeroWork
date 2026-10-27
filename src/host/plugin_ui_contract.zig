@@ -36,6 +36,11 @@ pub const EditorMount = struct {
     editor_id: u64 = 0,
     connection_configs: ?@import("connection_config_resolver.zig").Resolver = null,
 };
+pub const ModalPresentation = struct {
+    width: f32,
+    title: []const u8,
+    warning: bool = false,
+};
 pub const EditorInstance = struct {
     context: *anyopaque,
     vtable: *const VTable,
@@ -48,6 +53,8 @@ pub const EditorInstance = struct {
         /// Optional presentation preference for a compact confirmation state.
         /// The host owns centering, viewport clamping and the modal itself.
         preferred_modal_height: ?*const fn (*anyopaque) ?f32 = null,
+        /// Provider-owned confirmation copy and size; host still owns the shell.
+        modal_presentation: ?*const fn (*anyopaque) ModalPresentation = null,
         /// Retain the editor scope and draft while a portaled child replaces
         /// the parent's visible dialog. Host evaluates this at layout safety.
         parent_presentation_visible: ?*const fn (*anyopaque) bool = null,

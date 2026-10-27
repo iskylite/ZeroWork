@@ -102,3 +102,6 @@ playwright-report/
 /docs/DEVELOPMENT/UI_INTEGRATION_PROGRESS.md
 /docs/UI_V3/AI_REPLICA_COVERAGE.md
 /docs/UI_V3/COVERAGE.md
+
+# Session notice validation screenshots.
+/docs/UI_V3/workspace/session-notice/*reference.png

@@ -102,7 +102,7 @@ pub const View = struct {
         const theme = try self.action(scope, "全局主题 · 应用与全部终端", "local.status.theme", ui.icons.palette, hooks.theme == null, showTheme);
         self.theme_button = theme.button;
         self.theme_icon = theme.icon;
-        self.layoutForWidth(@max(0, cx.viewport.width - 16));
+        self.layoutForWidth(@max(0, cx.viewport.width - 2 * @import("shell_styles.zig").outer));
         return self;
     }
 
@@ -288,7 +288,7 @@ test "Local status uses exact public widget geometry and real detail triggers" {
     try view.update(testUpdate());
     view.layoutForWidth(1424);
     cx.layout();
-    try std.testing.expectApproxEqAbs(@as(f32, 32), view.root.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 30), view.root.globalRect().h, 0.01);
     const Expected = struct { node: *ui.Node, x: f32, width: f32 };
     const expected = [_]Expected{
         .{ .node = view.identity_button, .x = 0, .width = 112 },
@@ -300,7 +300,7 @@ test "Local status uses exact public widget geometry and real detail triggers" {
     for (expected) |item| {
         const rect = item.node.globalRect();
         try std.testing.expectApproxEqAbs(item.x, rect.x, 0.01);
-        try std.testing.expectApproxEqAbs(@as(f32, 3), rect.y, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 2), rect.y, 0.01);
         try std.testing.expectApproxEqAbs(item.width, rect.w, 0.01);
         try std.testing.expectApproxEqAbs(@as(f32, 26), rect.h, 0.01);
     }
@@ -323,7 +323,7 @@ test "Local status uses exact public widget geometry and real detail triggers" {
 test "Local status owns displayed cwd and keeps narrow actions reachable without invented values" {
     const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();
-    cx.setViewport(464, 32); // 480px window with the common 8px outer inset.
+    cx.setViewport(464, 32); // Exercise a narrow status bar.
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
     const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
     defer scope.dispose();

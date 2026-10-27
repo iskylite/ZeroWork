@@ -35,9 +35,9 @@ try{
  await waitFor(async()=>content(await vis('workspace.pane')).includes('sshrecords')||null,30000);await sleep(600);
  for(const [index,cmd] of ['ts','ts','ts'].entries()){await command(cmd);if(index===1){assert.equal((await query('terminal.command.time')).filter(shown).length,2);assert.equal((await query('terminal.timestamp')).filter(shown).length,0);}await sleep(1100)}
  const clocks=(await query('terminal.command.time')).filter(shown);
- assert.equal(clocks.length,3);const times=clocks.map(n=>n.text);assert.equal(new Set(times).size,3);times.forEach(t=>assert(/^\d{2}:\d{2}:\d{2}\.\d{3}$/.test(t)));
+ assert.equal(clocks.length,3);const times=clocks.map(n=>n.text);assert.equal(new Set(times).size,3);times.forEach(t=>assert(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(t)));
  const gutter=(await query('terminal.timestamp')).filter(shown);
- for(const clock of clocks){const aligned=gutter.find(t=>Math.abs(t.rect.y-clock.rect.y)<1);assert(aligned);assert.equal(aligned.text,clock.text.slice(0,8));}
+ for(const clock of clocks){const aligned=gutter.find(t=>Math.abs(t.rect.y-clock.rect.y)<1);assert(aligned);assert.equal(aligned.text,clock.text.slice(11));}
  await capture('builtin-timestamps');await writeFile(join(out,'timestamps.json'),JSON.stringify({clocks,gutter},null,2));
  report.checks.push('Three real SSH builtins keep distinct execution timestamps; header and gutter agree and align; right header remains visible when gutter is toggled');report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await capture('failure').catch(()=>{});process.exitCode=1}

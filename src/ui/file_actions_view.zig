@@ -91,9 +91,12 @@ pub const View = struct {
         self.rows = self.content;
         self.chrome.meta.ownership.meta.test_id = if (self.history) "files.history.menu" else "files.context.menu";
         if (self.history) {
+            const header = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
+            try self.content.appendChild(self.cx.allocator, header);
+            try header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.history, S.theme.current().accent, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
             const heading = try ui.textStyled(self.cx, S.heading, if (self.pane.side == .local) "本地路径历史" else "远程路径历史");
             heading.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 24 }, .flex_shrink = 0 });
-            try self.content.appendChild(self.cx.allocator, heading);
+            try header.appendChild(self.cx.allocator, heading);
             var row_count: usize = @max(1, frozen.history.len);
             for (frozen.history) |item| if (!item.succeeded) {
                 row_count += 1;

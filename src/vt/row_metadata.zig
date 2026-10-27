@@ -128,6 +128,16 @@ pub const Store = struct {
         }
         self.record(terminal, row, wall_ms, true);
     }
+    pub fn annotateSearch(self: *Store, terminal: c.GhosttyTerminal, rows: []@import("search_snapshot.zig").Row) void {
+        self.refresh();
+        const alternate = native_view.alternate(terminal);
+        var logical: u32 = 0;
+        for (rows) |*row| {
+            if (!(native_view.continuation(terminal, row.screen_row) catch false)) logical = row.screen_row;
+            if (self.find(alternate, logical)) |entry| row.timestamp_ms = entry.submitted_ms orelse entry.received_ms;
+        }
+    }
+
     pub fn annotate(self: *Store, terminal: c.GhosttyTerminal, rows: []model.Row, viewport_offset: u64) void {
         self.refresh();
         const alternate = native_view.alternate(terminal);

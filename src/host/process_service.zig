@@ -80,6 +80,7 @@ pub const Service = struct {
         copyCwd: *const fn (*anyopaque, identity.SessionHandle, std.mem.Allocator) anyerror!?[]u8,
         closeRiskSnapshot: *const fn (*anyopaque, identity.SessionHandle, std.mem.Allocator) anyerror!CloseRiskSnapshot,
         terminalService: *const fn (*anyopaque, host.ServiceHandle) anyerror!terminal.Service,
+        configureScrollback: *const fn (*anyopaque, u32) void,
         configureRecording: *const fn (*anyopaque, RecordingOptions) anyerror!void,
         applyRecordingRetention: *const fn (*anyopaque, u64, u16) void,
         readOutput: *const fn (*anyopaque, identity.SessionHandle, []u8) anyerror!terminal.Read,
@@ -118,6 +119,9 @@ pub const Service = struct {
     }
     pub fn terminalService(self: *Service, binding: host.ServiceHandle) anyerror!terminal.Service {
         return self.vtable.terminalService(self.context, binding);
+    }
+    pub fn configureScrollback(self: *Service, limit: u32) void {
+        self.vtable.configureScrollback(self.context, limit);
     }
     pub fn configureRecording(self: *Service, options: RecordingOptions) anyerror!void {
         return self.vtable.configureRecording(self.context, options);
@@ -176,6 +180,9 @@ pub const Service = struct {
             fn terminalService(raw: *anyopaque, binding: host.ServiceHandle) anyerror!terminal.Service {
                 return get(raw).terminalService(binding);
             }
+            fn configureScrollback(raw: *anyopaque, limit: u32) void {
+                get(raw).configureScrollback(limit);
+            }
             fn configureRecording(raw: *anyopaque, options: RecordingOptions) anyerror!void {
                 return get(raw).configureRecording(options);
             }
@@ -197,7 +204,7 @@ pub const Service = struct {
             fn execSnapshot(raw: *anyopaque, handle: ExecHandle, allocator: std.mem.Allocator) anyerror!ExecSnapshot {
                 return get(raw).execSnapshot(handle, allocator);
             }
-            const vtable: VTable = .{ .destroy = @This().destroy, .adapter = @This().adapter, .shutdownStep = @This().shutdownStep, .drain = @This().drain, .retire = @This().retire, .processSnapshot = @This().processSnapshot, .cwdSnapshot = @This().cwdSnapshot, .copyCwd = @This().copyCwd, .closeRiskSnapshot = @This().closeRiskSnapshot, .terminalService = @This().terminalService, .configureRecording = @This().configureRecording, .applyRecordingRetention = @This().applyRecordingRetention, .readOutput = @This().readOutput, .startExec = @This().startExec, .cancelExec = @This().cancelExec, .retireExec = @This().retireExec, .execSnapshot = @This().execSnapshot };
+            const vtable: VTable = .{ .destroy = @This().destroy, .adapter = @This().adapter, .shutdownStep = @This().shutdownStep, .drain = @This().drain, .retire = @This().retire, .processSnapshot = @This().processSnapshot, .cwdSnapshot = @This().cwdSnapshot, .copyCwd = @This().copyCwd, .closeRiskSnapshot = @This().closeRiskSnapshot, .terminalService = @This().terminalService, .configureScrollback = @This().configureScrollback, .configureRecording = @This().configureRecording, .applyRecordingRetention = @This().applyRecordingRetention, .readOutput = @This().readOutput, .startExec = @This().startExec, .cancelExec = @This().cancelExec, .retireExec = @This().retireExec, .execSnapshot = @This().execSnapshot };
         };
         const self = try service_allocator.create(Service);
         self.* = .{ .allocator = service_allocator, .context = implementation, .vtable = &Forward.vtable };

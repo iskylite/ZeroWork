@@ -8,7 +8,7 @@ const themes = @import("config/theme_registry.zig");
 const material = @import("config/background_asset.zig");
 
 fn metrics(size: f32) appearance.Typography {
-    return .{ .requested_family = "JetBrains Mono", .actual_family = "Menlo", .size = size, .weight = 400, .family_id = 1, .cell_width = 8.4, .ascent = 12, .descent = 3, .fallback = true };
+    return .{ .requested_family = "Monaco", .actual_family = "Menlo", .size = size, .weight = 400, .family_id = 1, .cell_width = 8.4, .ascent = 12, .descent = 3, .fallback = true };
 }
 
 fn testAsset(draft_id: u64, revision: u64, path: []const u8) !material.Prepared {
@@ -37,7 +37,7 @@ test "appearance publishes revisions once after shared Save and merges an immedi
     var preview = try appearance.prepare(std.testing.allocator, &registry, &immediate, null, metrics(14), null, null);
     defer preview.deinit();
     try std.testing.expect(state.snapshot == null);
-    try std.testing.expectApproxEqAbs(@as(f32, 22), preview.layout.line_pixels, 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 21), preview.layout.line_pixels, 0.00001);
     try state.commit(std.testing.io, tmp.dir, &registry, &target, &immediate, &preview, null);
     const theme_revision = state.theme_revision;
     const material_revision = state.material_revision;
@@ -185,6 +185,9 @@ test "appearance materials preserve precise defaults escaped path axes and fract
     defer tmp.cleanup();
     var value: config.Config = .{};
     try std.testing.expectEqualStrings("dark", value.ui.theme);
+    try std.testing.expectEqualStrings("Monaco", value.ui.font_family);
+    try std.testing.expectEqual(@as(u8, 14), value.ui.font_size);
+    try std.testing.expectEqual(@as(f32, 1.5), value.ui.line_height);
     try std.testing.expectEqualStrings("sauber", config.resetDefaults().ui.theme);
     value.ui.materials = .{ .blur_px = 96, .background = .{ .path = "/tmp/图;#\"\\\n.png", .fit = .tile, .alignment_x = .right, .alignment_y = .bottom, .transparency = 12.5 } };
     try store.save(std.testing.io, tmp.dir, "config.toml", value);
@@ -192,7 +195,7 @@ test "appearance materials preserve precise defaults escaped path axes and fract
     defer loaded.deinit(std.testing.allocator);
     try std.testing.expectEqualDeep(value.ui.materials, loaded.value.ui.materials);
     try std.testing.expectEqual(value.ui.line_height, loaded.value.ui.line_height);
-    try std.testing.expectApproxEqAbs(@as(f32, 22), @as(f32, 14) * loaded.value.ui.line_height, 0.00001);
+    try std.testing.expectApproxEqAbs(@as(f32, 21), @as(f32, 14) * loaded.value.ui.line_height, 0.00001);
 }
 
 fn themeSource() ![]u8 {

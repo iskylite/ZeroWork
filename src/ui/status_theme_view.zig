@@ -59,6 +59,7 @@ pub const View = struct {
     anchor_inset: f32 = 0,
     list_height: f32 = -1,
     dirty: bool = true,
+    focus_current: bool = false,
     paint_revision: u32 = 0,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, registry: *themes.Registry, hooks: Hooks) !*View {
@@ -173,6 +174,7 @@ pub const View = struct {
         self.status_top = status_top;
         self.anchor_inset = rect.y - status_top;
         self.anchor_rect = .{ .x = rect.x, .y = status_top, .w = rect.w, .h = 0 };
+        self.focus_current = true;
         self.open.set(true);
         try self.flush();
     }
@@ -218,12 +220,9 @@ pub const View = struct {
             self.rows.clearRetainingCapacity();
             const rows_scope = try self.scope.childScope();
             self.row_scope = rows_scope;
-            // The committed selection remains visible even if it was far
-            // down the real library. No other records are omitted.
-            if (self.registry.get(self.current)) |record| if (record.staged_for == null) try self.appendRow(rows_scope, record, true);
             for (self.registry.records.items) |*record| {
-                if (record.staged_for != null or std.mem.eql(u8, record.id, self.current)) continue;
-                try self.appendRow(rows_scope, record, false);
+                if (record.staged_for != null) continue;
+                try self.appendRow(rows_scope, record, std.mem.eql(u8, record.id, self.current));
             }
             // Popover owns the measured width and placement after opening.
             // Retheming must not restore .fill and restart native remeasurement.
@@ -253,6 +252,20 @@ pub const View = struct {
             self.scroll.container.setStyle(self.cx.allocator, .height, .{ .px = list_height });
         }
         const total_height = if (self.rows.items.len == 0) 0 else @as(f32, @floatFromInt(self.rows.items.len)) * S.row_height + @as(f32, @floatFromInt(self.rows.items.len - 1)) * S.row_gap;
+        if (self.focus_current) {
+            self.focus_current = false;
+            for (self.rows.items, 0..) |row, index| {
+                if (!std.mem.eql(u8, row.id, self.current)) continue;
+                // Fixed row geometry lets opening locate the selection before
+                // the first layout, without moving it in the registry order.
+                self.scroll.state.content_height = total_height;
+                self.scroll.state.viewport_height = list_height;
+                const y = @as(f32, @floatFromInt(index)) * (S.row_height + S.row_gap);
+                ui.widgets.scroll_area.setScrollY(self.scroll.state, self.scroll.content, y - (list_height - S.row_height) / 2);
+                self.cx.setFocus(row.button);
+                break;
+            }
+        }
         const width = @min(S.width, @max(0, self.cx.viewport.width - 16));
         const center = self.anchor_rect.x + self.anchor_rect.w / 2;
         const left = std.math.clamp(center - width / 2, 8, @max(8, self.cx.viewport.width - width - 8));
@@ -480,6 +493,29 @@ test "global theme popover renders the real registry in a bounded scroll area" {
     try std.testing.expect(view.scroll.container.globalRect().h <= 340);
     try std.testing.expect(view.manage_button.globalRect().y >= view.scroll.container.globalRect().y + view.scroll.container.globalRect().h);
     for (view.rows.items) |row| try std.testing.expect(registry.get(row.id) != null);
+    // A late selection keeps registry order and is focused/visible on every open.
+    const last_id = registry.records.items[registry.records.items.len - 1].id;
+    try view.update(last_id, registry.revision, 2);
+    try view.flush();
+    testFrame(cx);
+    for (registry.records.items, view.rows.items) |record, row| try std.testing.expectEqualStrings(record.id, row.id);
+    view.hide();
+    try view.show(trigger, 860);
+    testFrame(cx);
+    const selected = view.rows.items[view.rows.items.len - 1].button;
+    try std.testing.expect(cx.isFocused(selected));
+    const viewport = view.scroll.container.globalRect();
+    const selected_rect = selected.globalRect();
+    try std.testing.expect(selected_rect.y >= viewport.y - 0.1);
+    try std.testing.expect(selected_rect.y + selected_rect.h <= viewport.y + viewport.h + 0.1);
+    ui.widgets.scroll_area.setScrollY(view.scroll.state, view.scroll.content, 0);
+    try view.flush();
+    try std.testing.expectEqual(@as(f32, 0), view.scroll.state.scroll_y);
+    view.hide();
+    try view.show(trigger, 860);
+    testFrame(cx);
+    try std.testing.expect(view.scroll.state.scroll_y > 0);
+    try std.testing.expect(cx.isFocused(selected));
     // A compact window shrinks the list viewport; it retains every record.
     cx.setViewport(480, 270);
     trigger.setStyleInline(allocator, .{ .inset = .{ .left = .{ .px = 430 }, .top = .{ .px = 233 } } });
@@ -539,7 +575,8 @@ test "global theme selection waits for committed update and keeps save errors in
     try view.flush();
     testFrame(cx);
     try std.testing.expectEqualStrings("light", view.current);
-    try std.testing.expectEqualStrings("light", view.rows.items[0].id);
+    try std.testing.expectEqualStrings("dark", view.rows.items[0].id);
+    try std.testing.expectEqualStrings("light", view.rows.items[1].id);
     try std.testing.expect(view.requested == null and view.feedback == .applied);
     try std.testing.expectError(error.StaleConfigRevision, view.update("dark", registry.revision, 1));
     const stale = view.rows.items[1];

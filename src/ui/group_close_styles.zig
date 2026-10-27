@@ -11,7 +11,7 @@ pub fn slot(y: f32, height: f32) ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 12 }, .top = .{ .px = y } }, .width = .{ .px = 456 }, .height = .{ .px = height }, .flex_shrink = 0 };
 }
 pub fn title() ui.TextStyle {
-    return .{ .font_size = 13, .font_weight = 500, .color = theme.current().fg_1, .line_height = 20.0 / 13.0 };
+    return .{ .font_size = 13, .font_weight = 700, .color = theme.current().fg_1, .line_height = 20.0 / 13.0 };
 }
 pub fn text(strong: bool) ui.TextStyle {
     return .{ .font_size = 12, .color = if (strong) theme.current().fg_1 else theme.current().fg_2, .line_height = 1.5, .wrap = .word };

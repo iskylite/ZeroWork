@@ -1,12 +1,14 @@
-//! V3 content-edge entry: 88×24 hit target, 72×12 recess and three 3px status dots.
+//! Compact entry in the gap immediately below the title bar.
 const ui = @import("ui");
 const T = @import("app_theme.zig");
+pub const width: f32 = 120;
+pub const height: f32 = 6;
 pub const State = enum { idle, working, approval, success, failed };
 pub fn trigger() ui.BoxStyle {
-    return .{ .position = .absolute, .width = .{ .px = 88 }, .height = .{ .px = 24 }, .padding = .{}, .background = ui.Color.TRANSPARENT, .align_items = .center, .justify = .center, .z_index = 199, .corner_radius = 7, .flex_shrink = 0 };
+    return .{ .position = .absolute, .width = .{ .px = width }, .height = .{ .px = height }, .padding = .{}, .background = ui.Color.TRANSPARENT, .align_items = .center, .justify = .center, .z_index = 199, .corner_radius = 3, .flex_shrink = 0 };
 }
 pub fn lip(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = 72 }, .height = .{ .px = 12 }, .padding = .{}, .direction = .row, .justify = .center, .align_items = .center, .gap = 4, .background = T.current().surface_2, .gradient = glassGradient(false), .glass = T.overlayGlass(), .corner_radius = 7, .flex_shrink = 0 };
+    return .{ .width = .{ .px = width }, .height = .{ .px = height }, .padding = .{}, .direction = .row, .justify = .center, .align_items = .center, .gap = 4, .background = T.current().surface_2, .gradient = glassGradient(false), .glass = T.overlayGlass(), .border = .{ .width = 0, .radius = 3 }, .inset_shadows = ui.InsetShadowList.of(&.{ .{ .offset_y = 1, .blur = 2, .color = ui.Color.rgba(255, 255, 255, 32) }, .{ .offset_y = -1, .blur = 2, .color = ui.Color.rgba(0, 0, 0, 28) } }), .flex_shrink = 0 };
 }
 fn glassGradient(active: bool) ui.Gradient {
     const surface = T.current().surface_2;

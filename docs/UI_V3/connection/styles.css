@@ -42,3 +42,27 @@ body.editor-only #app>.titlebar,body.editor-only #app>.layout,body.editor-only #
 .route-hop>.v3-select-host{width:100%;height:34px;display:block;background:transparent;border-radius:0;color:var(--fg);font-size:12px}.route-hop>.v3-select-host button{width:100%;height:34px;min-height:34px;padding:0 10px;justify-content:space-between}
 
 .auth-options{display:flex;align-items:center;gap:12px;min-height:32px;flex-wrap:wrap}.auth-options label{display:flex;align-items:center;gap:6px;white-space:nowrap}.auth-options input[type=radio]{width:14px;height:14px;margin:0;accent-color:var(--accent,#407bdd)}
+
+.fields .credential-row{display:flex;flex-direction:row;justify-content:flex-start;align-items:center;gap:12px;flex-wrap:wrap}.fields .credential-row .credential-choice{margin:0;flex:none}.credential-row .credential-hint{margin:0;font-size:10.5px;line-height:16px}.trust-title-icon{width:18px;height:18px;vertical-align:middle;margin-right:8px;fill:none;stroke:var(--warn,#f59e0b);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+ .trust-title-icon.changed{stroke:var(--danger,#ef4444)}
+
+.heading-icon{width:18px;height:18px;vertical-align:middle;margin-right:8px;fill:none;stroke:var(--accent);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+/* Password persistence belongs beside the password input, only in password mode. */
+.fields .password-row{display:flex;flex-direction:row;align-items:flex-end;gap:16px}.password-row>.field{flex:1;min-width:0}.fields .password-row .credential-choice{height:34px;margin:0;flex:none}.fields input:not([type=radio]):not([type=checkbox]){font-size:11px;line-height:16px}.fields input::placeholder{color:var(--muted);opacity:1}.fields input:placeholder-shown{color:var(--fg)}
+
+/* Compact connection target and paired advanced settings. */
+.target-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px;grid-column:1/-1}
+.modal details .fields>.check{height:34px;align-self:start;margin-top:21.5px}
+.modal details textarea{min-height:80px;height:80px;line-height:18px}
+
+.field .inline-hint{margin-left:8px;font-size:10px;color:var(--muted)}
+
+/* Keep scrollbar chrome outside the form's content edge. */
+.modal-body{padding-right:40px}
+body.compact .modal-body{padding-right:34px}
+.compression-field .compression-radios{height:34px;min-height:34px;font-size:12px;color:var(--fg);flex-wrap:nowrap}
+
+/* Radio selection is shown by the circle, without a rectangular focus fill. */
+.auth-options label,.auth-options label:focus-within{background:transparent;box-shadow:none}
+.auth-options input[type=radio]:focus,.auth-options input[type=radio]:focus-visible{background:transparent;border-color:transparent;outline:0;box-shadow:none}

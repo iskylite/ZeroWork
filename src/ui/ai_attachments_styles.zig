@@ -72,7 +72,7 @@ pub fn heading(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 24 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 4 };
 }
 pub fn headingText(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11.5, .font_weight = 500, .line_height = 18.0 / 11.5, .color = theme.current().fg_1 };
+    return .{ .font_size = 13, .font_weight = 700, .line_height = 18.0 / 13.0, .color = theme.current().fg_1 };
 }
 pub fn identity(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 32 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 4, .padding = .{ .left = 8, .right = 6 }, .background = theme.current().well, .border = .{ .radius = 8 } };

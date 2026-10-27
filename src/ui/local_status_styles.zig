@@ -3,7 +3,7 @@ pub const theme = @import("app_theme.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 
 // Bridge: Local 444:179999; shared collapsed identity 358:1459369.
-pub const height: f32 = 32;
+pub const height: f32 = 30;
 pub const chip_height: f32 = 26;
 pub const gap: f32 = 6;
 pub const identity_width: f32 = 112;
@@ -15,11 +15,11 @@ pub const right_padding: f32 = 12;
 
 pub fn bar() ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .fill(), .height = .{ .px = height }, .direction = .row, .align_items = .center, .gap = gap, .padding = .{ .right = right_padding }, .background = c.surface_1, .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 2, .blur = 4.4, .color = c.shadow }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = height }, .direction = .row, .align_items = .center, .gap = gap, .padding = .{ .right = right_padding }, .background = c.surface_1, .inset_shadow = @import("shell_styles.zig").cardHighlight(), .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 2, .blur = 4.4, .color = c.shadow }, .flex_shrink = 0 };
 }
 pub fn barPaint() ui.BoxStyle {
     const c = theme.current();
-    return .{ .background = c.surface_1, .shadow = .{ .offset_y = 2, .blur = 4.4, .color = c.shadow } };
+    return .{ .background = c.surface_1, .inset_shadow = @import("shell_styles.zig").cardHighlight(), .shadow = .{ .offset_y = 2, .blur = 4.4, .color = c.shadow } };
 }
 pub fn chip(width: f32) ButtonStyle {
     return .{ .width = .{ .px = width }, .height = .{ .px = chip_height }, .direction = .row, .justify = .start, .align_items = .center, .gap = 0, .padding = .{}, .flex_shrink = 0, .background = ui.Color.TRANSPARENT, .corner_radius = 7, .border_width = 0 };

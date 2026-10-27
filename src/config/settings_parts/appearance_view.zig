@@ -198,7 +198,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     if (query.len == 0 or binding.matches(query, "外观 主题 theme 主题库")) try root.appendChild(cx.allocator, try themeSection(cx, bound));
     if (query.len == 0 or binding.matches(query, "背景 图片 材质 模糊 透明度 fit 对齐 blur_px background enabled path alignment_x alignment_y transparency")) try root.appendChild(cx.allocator, try materialSection(cx, bound));
     if (query.len == 0 or binding.matches(query, "字体 字号 行高 光标 font cursor font_family font_size font_weight line_height cursor_style")) try root.appendChild(cx.allocator, try fontSection(cx, bound));
-    if (query.len == 0 or binding.matches(query, "终端 工作区 时间戳 侧栏 高亮 补全 timestamp_gutter sidebar_collapsed input_line_highlight completion enabled")) try root.appendChild(cx.allocator, try aidsSection(cx, bound));
+    if (query.len == 0 or binding.matches(query, "终端 工作区 最大显示行数 回滚 scrollback_limit 时间戳 侧栏 高亮 补全 timestamp_gutter sidebar_collapsed input_line_highlight completion enabled")) try root.appendChild(cx.allocator, try aidsSection(cx, bound));
     if (root.children.items.len == 0) try root.appendChild(cx.allocator, try ui.textStyled(cx, S.note, "没有匹配的设置"));
     return root;
 }
@@ -976,7 +976,7 @@ fn toggle(cx: *ui.Cx, bound: *binding.Binding, key: binding.Key, label: []const 
     return button;
 }
 fn aidsSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
-    const section = try card(cx, bound, "终端与工作区", "辅助显示与侧栏", ui.icons.terminal, 3, "settings.appearance.aids");
+    const section = try card(cx, bound, "终端与工作区", "辅助显示、回滚缓冲与侧栏", ui.icons.terminal, 3, "settings.appearance.aids");
     for ([_]struct { label: []const u8, key: binding.Key, help: ?[]const u8 }{
         .{ .label = "时间戳侧栏", .key = .{ .section = "ui", .key = "timestamp_gutter" }, .help = "显示输出时间，不包含在复制的终端内容中。" },
         .{ .label = "应用命令补全", .key = .{ .section = "completion", .key = "enabled" }, .help = null },
@@ -987,6 +987,9 @@ fn aidsSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try control.appendChild(cx.allocator, try toggle(cx, bound, field.key, field.label));
         try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, field.label, field.help, control));
     }
+    const limit = try Field.create(cx, bound, .{ .section = "ui", .key = "scrollback_limit" }, 120, 32);
+    try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "终端最大显示行数", "默认 25000 行；0 表示不限制。同步应用到已打开的本地终端和继承全局配置的 SSH 终端。", limit.input.input_container));
+    try section.body.appendChild(cx.allocator, limit.error_box);
     if (bound.hooks.appearance) |h| if (h.registry.get(bound.controller.model.value.ui.theme)) |record| try section.body.appendChild(cx.allocator, try miniPreview(cx, record, bound.controller.model.value.ui.timestamp_gutter, bound.controller.model.value.ui.input_line_highlight, bound.controller.model.value.ui.sidebar_collapsed));
     return section.root;
 }

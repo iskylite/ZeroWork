@@ -20,6 +20,7 @@ pub const View = struct {
     desired_height: f32 = 0,
     detail: *ui.Node,
     dialog: *ui.Node,
+    title_icon: *ui.Node = undefined,
     control_styles: [2]*ui.Signal(ui.BoxStyle),
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, _: *ui.Node, hooks: Hooks) !*View {
         const open = try scope.createSignal(bool, false);
@@ -41,7 +42,13 @@ pub const View = struct {
         modal.dialog.setStyleInline(cx.allocator, S.dialog());
         modal.dialog.meta.ownership.meta.test_id = "ai.session.close.confirmation";
         modal.body.setStyleInline(cx.allocator, S.body());
-        try modal.body.appendChild(cx.allocator, try ui.textStyled(cx, titleStyle, "关闭此 AI 会话？"));
+        const heading = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .align_items = .center, .gap = 8 }, .{});
+        const heading_icon = try ui.iconTint(cx, ui.icons.circle_alert, T.current().warn_ink, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+        self.title_icon = heading_icon;
+        heading_icon.meta.ownership.meta.test_id = "ai.session.close.icon";
+        try heading.appendChild(cx.allocator, heading_icon);
+        try heading.appendChild(cx.allocator, try ui.textStyled(cx, titleStyle, "关闭此 AI 会话？"));
+        try modal.body.appendChild(cx.allocator, heading);
         self.detail = try ui.textStyled(cx, detailStyle, "将停止关联的任务、工具和请求。");
         try modal.body.appendChild(cx.allocator, self.detail);
         const actions = try ui.box(cx, S.actions(), .{});
@@ -80,6 +87,7 @@ pub const View = struct {
     }
     pub fn confirm(self: *View, id: u64) void {
         self.pending = id;
+        _ = self.title_icon.setTint(T.current().warn_ink);
         self.dialog.setStyleInline(self.cx.allocator, S.dialog());
         self.control_styles[0].set(S.control(false));
         self.control_styles[1].set(S.control(true));
@@ -139,10 +147,12 @@ pub const View = struct {
         try self.content.appendChild(self.cx.allocator, heading);
         try self.content.appendChild(self.cx.allocator, try ui.box(self.cx, .{ .height = .{ .px = 0 }, .flex_shrink = 0 }, .{}));
         if (entries.len == 0) {
+            const empty_row = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 33 }, .padding = .{ .left = 14, .right = 14 }, .flex_shrink = 0 }, .{});
             const empty = try ui.text(self.cx, "暂无已保存对话。新建会话时，当前对话和草稿会保留在这里。", .{ .font_size = 10, .line_height = 1.65, .color = T.current().fg_2, .wrap = .word });
             empty.meta.ownership.meta.test_id = "ai.sessions.empty";
-            empty.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16.5 } });
-            try self.content.appendChild(self.cx.allocator, empty);
+            empty.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 33 } });
+            try empty_row.appendChild(self.cx.allocator, empty);
+            try self.content.appendChild(self.cx.allocator, empty_row);
         }
         self.highlighted.set(0);
         for (entries) |entry| if (entry.active) {
@@ -192,7 +202,7 @@ pub const View = struct {
             try row.appendChild(self.cx.allocator, remove);
             try self.content.appendChild(self.cx.allocator, row);
         }
-        self.desired_height = @min(160, 34 + if (entries.len == 0) @as(f32, 20) else @as(f32, @floatFromInt(entries.len)) * 30 + @as(f32, @floatFromInt(entries.len - 1)) * 2);
+        self.desired_height = @min(160, 34 + if (entries.len == 0) @as(f32, 37) else @as(f32, @floatFromInt(entries.len)) * 30 + @as(f32, @floatFromInt(entries.len - 1)) * 2);
         self.surface.setStyleInline(self.cx.allocator, .{ .height = .{ .px = self.desired_height }, .display = .flex });
         ui.widgets.setScrollY(self.scroll.state, self.scroll.content, 0);
         self.open.set(true);

@@ -125,15 +125,10 @@ fn mountSetup(cx: *ui.Cx, scope: *ui.Scope, actions: Actions) !*ui.Node {
     title.meta.ownership.meta.test_id = "ai.empty.title";
     try root.appendChild(cx.allocator, title);
     try root.appendChild(cx.allocator, try ui.text(cx, "添加并启用一个模型服务提供方。", S.setupDescription()));
-    const handlers = [_]*const fn (*anyopaque) void{ actions.settings, actions.ollama };
-    const labels = [_][]const u8{ "配置 AI 服务", "配置本地模型" };
-    const ids = [_][]const u8{ "ai.empty.settings", "ai.empty.ollama" };
-    for (handlers, labels, ids, 0..) |run, label, id, i| {
-        const click = try scope.createState(Click, .{ .context = actions.context, .run = run });
-        const button = try ui.widgets.Button(.{ .label = label, .variant = @as(ui.widgets.button.ButtonVariant, if (i == 0) .primary else .ghost), .base_style = S.setupAction(i == 0), .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
-        button.meta.ownership.meta.test_id = id;
-        try root.appendChild(cx.allocator, button);
-    }
+    const click = try scope.createState(Click, .{ .context = actions.context, .run = actions.settings });
+    const button = try ui.widgets.Button(.{ .label = "配置 AI 服务", .variant = .primary, .base_style = S.setupAction(true), .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+    button.meta.ownership.meta.test_id = "ai.empty.settings";
+    try root.appendChild(cx.allocator, button);
     const layout = try scope.createState(SetupLayout, .{ .cx = cx, .root = root });
     try cx.addAfterLayoutHook(layout, SetupLayout.frame);
     try scope.onCleanup(SetupLayout, layout, SetupLayout.release);

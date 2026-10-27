@@ -22,6 +22,7 @@ pub fn install(app_domain: *application.Domain, windows: *zenit.MultiWindowApp) 
 
 fn route(path: []const u8, body: []const u8, _: []u8) ?[]const u8 {
     if (!zenit.test_harness.enabled) return null;
+    if (std.mem.eql(u8, path, "/zerowork/terminal")) return terminalRoute(body);
     if (!std.mem.eql(u8, path, "/zerowork/windows")) return null;
     const app_domain = domain orelse return "{\"ok\":false}";
     const windows = runtime orelse return "{\"ok\":false}";
@@ -165,4 +166,42 @@ test "content input event sequence starts at one and never wraps" {
     try std.testing.expectEqual(@as(u64, 1), try nextInputSequence(0));
     try std.testing.expectEqual(@as(u64, 2), try nextInputSequence(1));
     try std.testing.expectError(error.InputSequenceExhausted, nextInputSequence(std.math.maxInt(u64)));
+}
+
+fn terminalRoute(body: []const u8) []const u8 {
+    const app_domain = domain orelse return "{\"ok\":false}";
+    const Input = struct { action: []const u8 = "metrics", path: []const u8 = "", format: []const u8 = "txt_cast", window: u64 = 0 };
+    var parsed = std.json.parseFromSlice(Input, app_domain.allocator, body, .{}) catch return "{\"ok\":false,\"error\":\"InvalidCommand\"}";
+    defer parsed.deinit();
+    const command = parsed.value;
+    const host = for (app_domain.attachments.items) |candidate| {
+        if (command.window == 0 or @backingInt(candidate.window_id) == command.window) break candidate;
+    } else return "{\"ok\":false,\"error\":\"WindowMissing\"}";
+    const workspace = host.workspace;
+    const index = workspace.active_tab orelse return "{\"ok\":false,\"error\":\"TabMissing\"}";
+    const view = workspace.tabs.items[index].terminal orelse return "{\"ok\":false,\"error\":\"TerminalMissing\"}";
+    const surface = view.terminal_surface orelse return "{\"ok\":false,\"error\":\"SurfaceMissing\"}";
+    const Jobs = @import("session_export_jobs.zig");
+    const manager = Jobs.Manager.forCx(workspace.cx);
+    if (std.mem.eql(u8, command.action, "export")) {
+        const exports = manager orelse return "{\"ok\":false,\"error\":\"ExportUnavailable\"}";
+        const format = @import("session_export.zig").Format.parse(command.format) catch return "{\"ok\":false,\"error\":\"InvalidFormat\"}";
+        const lease = surface.service.recordingLease() catch return "{\"ok\":false,\"error\":\"RecordingUnavailable\"}";
+        exports.start(.{ .live = lease }, format, command.path) catch return "{\"ok\":false,\"error\":\"ExportStartFailed\"}";
+    }
+    var writer = std.Io.Writer.fixed(&response_buffer);
+    const cached = surface.composite.cached;
+    std.json.Stringify.value(.{
+        .ok = true,
+        .history_bytes = view.history.bytes,
+        .history_frames = view.history.frames.items.len,
+        .history_latest_wire_bytes = if (view.history.latest()) |last| last.wire.len else 0,
+        .composite_bytes = if (cached) |doc| doc.text.len + doc.rows.len * @sizeOf(@import("../vt/search_snapshot.zig").Row) + doc.spans.len * @sizeOf(@import("../vt/search_snapshot.zig").Span) else 0,
+        .composite_full_rebuilds = surface.composite.full_rebuilds,
+        .composite_tail_updates = surface.composite.tail_updates,
+        .export_running = if (manager) |exports| exports.job != null else false,
+        .exports_completed = if (manager) |exports| exports.completed else 0,
+        .export_error = if (manager) |exports| if (exports.last_failure) |err| @errorName(err) else @as(?[]const u8, null) else null,
+    }, .{}, &writer) catch return "{\"ok\":false}";
+    return writer.buffered();
 }
