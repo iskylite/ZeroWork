@@ -75,9 +75,11 @@ pub const View = struct {
         self.root.setStyleInline(cx.allocator, S.panel());
         const heading = try ui.box(cx, S.heading(), .{});
         try self.root.appendChild(cx.allocator, heading);
-        const title = try ui.text(cx, "通知", .{ .font_size = 12, .font_weight = 600, .color = theme.current().fg_1 });
+        try heading.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.bell, theme.current().accent_ink, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
+        const title = try ui.text(cx, "通知", .{ .font_size = 13, .font_weight = 600, .color = theme.current().fg_1 });
         try heading.appendChild(cx.allocator, title);
         self.count = try ui.text(cx, "0", S.text(true));
+        self.count.setStyleInline(cx.allocator, .{ .padding = .{ .left = 7, .right = 7 }, .background = theme.current().selection, .border = .{ .radius = 6 } });
         self.count.meta.ownership.meta.test_id = "notifications.history.count";
         try heading.appendChild(cx.allocator, self.count);
         try heading.appendChild(cx.allocator, try ui.spacer(cx));
@@ -93,7 +95,7 @@ pub const View = struct {
         self.scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 320 }, .flex_shrink = 0 });
         self.scroll.content.setStyleInline(cx.allocator, S.column());
         try self.root.appendChild(cx.allocator, self.scroll.container);
-        const policy = try ui.text(cx, "最近 100 条 · 本次运行", .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = theme.current().fg_2, .selectable = false });
+        const policy = try ui.text(cx, "仅保留本次运行的最近 100 条", .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = theme.current().fg_2, .selectable = false });
         policy.setStyleInline(cx.allocator, S.policy());
         try self.root.appendChild(cx.allocator, policy);
         self.failure = try ui.text(cx, "该操作已不可用，请回到会话查看。", S.text(true));
@@ -142,9 +144,13 @@ pub const View = struct {
         var count_buffer: [16]u8 = undefined;
         try self.count.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "{d}", .{records.len}));
         if (records.len == 0) {
-            const empty = try ui.text(self.cx, "暂无通知", S.text(true));
-            empty.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 66 }, .padding = .{ .top = 24, .bottom = 24 }, .flex_shrink = 0 });
+            const empty = try ui.box(self.cx, S.empty(), .{});
             empty.meta.ownership.meta.test_id = "notifications.history.empty";
+            const mark = try ui.box(self.cx, .{ .width = .{ .px = 40 }, .height = .{ .px = 40 }, .align_items = .center, .justify = .center, .background = theme.current().selection, .border = .{ .radius = 12 }, .flex_shrink = 0 }, .{});
+            try mark.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.bell, theme.current().accent_ink, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 } }));
+            try empty.appendChild(self.cx.allocator, mark);
+            try empty.appendChild(self.cx.allocator, try ui.text(self.cx, "暂无通知", .{ .font_size = 13, .font_weight = 500, .color = theme.current().fg_1 }));
+            try empty.appendChild(self.cx.allocator, try ui.text(self.cx, "连接与传输的重要动态会显示在这里", S.text(true)));
             try self.scroll.content.appendChild(self.cx.allocator, empty);
         }
         var i = records.len;
@@ -230,6 +236,11 @@ pub const View = struct {
         return .done;
     }
     fn update(self: *View) !void {
+        // Blur-only changes do not change palette equality. Keep the retained
+        // popover in sync without rebuilding its content or blurring foreground.
+        const glass = theme.overlayGlass();
+        if (self.root.style.backdrop_blur() != glass.backdrop_blur)
+            self.root.setStyleInline(self.cx.allocator, .{ .glass = glass });
         const colors = theme.current();
         if (!std.meta.eql(self.colors, colors)) {
             @import("quick_connect_styles.zig").repaint(self.root, self.colors);

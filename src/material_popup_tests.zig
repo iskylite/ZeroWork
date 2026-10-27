@@ -340,5 +340,6 @@ test "material retained tab and recorder overlays update alpha and blur independ
         try std.testing.expectEqual(theme.current().well, well.getBackground());
         try std.testing.expectEqual(ink, label.getText().?.color);
         try std.testing.expectEqual(ids, .{ color.chrome.id, rename.dialog.id, dialog.id });
+        try std.testing.expectEqual(theme.current().surface_2, @import("ui/notification_history_styles.zig").policy().background);
     }
 }

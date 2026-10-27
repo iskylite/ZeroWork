@@ -176,7 +176,7 @@ test "notification history compact rows retain full long detail behind an explic
         _ = cx.render();
     }
     const card = historyNode(view.root, "notifications.history.record").?;
-    try std.testing.expectEqual(@as(f32, 58), card.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 68), card.globalRect().h);
     try std.testing.expect(historyNode(view.root, "notifications.history.details") == null);
     var expand = historyNode(view.root, "notifications.history.expand").?;
     var rect = expand.globalRect();
@@ -198,11 +198,44 @@ test "notification history compact rows retain full long detail behind an explic
         _ = cx.render();
     }
     try std.testing.expect(historyNode(view.root, "notifications.history.details") == null);
-    try std.testing.expectEqual(@as(f32, 58), historyNode(view.root, "notifications.history.record").?.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 68), historyNode(view.root, "notifications.history.record").?.globalRect().h);
 }
 
 fn historyNode(root: *ui.Node, id: []const u8) ?*ui.Node {
     if (root.meta.ownership.meta.test_id) |value| if (std.mem.eql(u8, value, id)) return root;
     for (root.children.items) |child| if (historyNode(child, id)) |found| return found;
     return null;
+}
+
+test "notification history background blur follows material changes without replacing content" {
+    const theme = @import("ui/app_theme.zig");
+    const saved = theme.materialParameters();
+    defer _ = theme.setMaterialParameters(saved.transparency, saved.blur);
+    _ = theme.setMaterialParameters(0, 0);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{}, .{}) };
+    defer notice.coordinator.deinit();
+    const trigger = try ui.widgets.Button(.{ .label = "通知" }).mount(scope, cx);
+    try cx.root.?.appendChild(a, trigger);
+    const view = try @import("ui/notification_history.zig").View.mount(cx, scope, &notice, trigger);
+    const root_id = view.root.id;
+    try std.testing.expectEqual(@as(f32, 12), view.root.style.backdrop_blur());
+    view.open.set(true);
+    for ([_]f32{ 0, 8, 24, 0 }) |blur| {
+        _ = theme.setMaterialParameters(0, blur);
+        for (0..8) |_| {
+            cx.layout();
+            _ = cx.render();
+        }
+        try std.testing.expectEqual(@max(12, blur), view.root.style.backdrop_blur());
+        try std.testing.expectEqual(root_id, view.root.id);
+        try std.testing.expectEqual(theme.current().overlay, view.root.getBackground());
+        try std.testing.expectEqual(theme.current().fg_1, view.root.children.items[0].children.items[1].getText().?.color);
+        try std.testing.expect(historyNode(view.root, "notifications.history.empty") != null);
+    }
 }

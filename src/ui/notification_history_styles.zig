@@ -1,15 +1,15 @@
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 pub const width: f32 = 360;
-pub const collapsed_height: f32 = 58;
+pub const collapsed_height: f32 = 152;
 pub fn panel() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(1), .gap = 0, .background = theme.current().overlay, .border = .{ .width = 1, .color = theme.current().border, .radius = 10 }, .shadow = .{ .offset_y = 16, .blur = 40, .color = theme.current().shadow }, .hit_behavior = .@"opaque", .overflow = .hidden };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(1), .gap = 0, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 1, .color = theme.current().border, .radius = 14 }, .shadow = .{ .offset_y = 16, .blur = 40, .color = theme.current().shadow }, .hit_behavior = .@"opaque", .overflow = .hidden };
 }
 pub fn row() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 2, .padding = .{ .top = 8, .bottom = 8, .left = 12, .right = 12 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 4, .padding = .{ .top = 12, .bottom = 12, .left = 16, .right = 16 }, .flex_shrink = 0 };
 }
 pub fn heading() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 40 }, .padding = .{ .left = 12, .right = 12 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 48 }, .padding = .{ .left = 16, .right = 16 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
 }
 pub fn text(secondary: bool) ui.TextStyle {
     return .{ .font_size = if (secondary) 11 else 12, .font_weight = if (secondary) 400 else 500, .line_height = if (secondary) 18.0 / 11.0 else 1.5, .color = if (secondary) theme.current().fg_2 else theme.current().fg_1, .wrap = .none, .text_overflow = .ellipsis, .selectable = false };
@@ -27,5 +27,9 @@ pub fn column() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 0, .flex_shrink = 0 };
 }
 pub fn policy() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .padding = .{ .top = 6, .bottom = 8, .left = 12, .right = 12 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 32 }, .background = theme.current().surface_2, .padding = .{ .top = 8, .bottom = 8, .left = 16, .right = 16 }, .flex_shrink = 0 };
+}
+
+pub fn empty() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 152 }, .direction = .column, .align_items = .center, .justify = .center, .gap = 8, .flex_shrink = 0 };
 }
