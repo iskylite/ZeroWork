@@ -16,7 +16,7 @@ logs/
 .dsh-computer-use/
 zig-pkg/
 
-# Local test runs and design scratch exports; curated evidence lives in docs/.
+# Local test runs and design scratch exports.
 /artifacts/
 /screenshots/
 
@@ -69,3 +69,25 @@ docs/SPEC/_legacy
 /*-before.png
 *.private.json
 *.private.toml
+
+# Generated validation records, screenshots and output stay local.
+output/
+verification/
+validation/
+evidence/
+artifacts/
+screenshots/
+test-results/
+playwright-report/
+/docs/UI_V3/reference/
+/docs/UI_V3/**/*-preview.png
+/docs/DEVELOPMENT/COMPLETION_STATIC_TABLE_AUDIT.md
+/docs/DEVELOPMENT/UI_ACCEPTANCE.json
+/docs/DEVELOPMENT/UI_ALIGNMENT_FIXES_20261021.md
+/docs/DEVELOPMENT/UI_CONTROL_AUDIT_20261026.md
+/docs/DEVELOPMENT/UI_SEMANTIC_REVIEW.md
+/docs/DEVELOPMENT/V0.2_LIVE_ACCEPTANCE.md
+/docs/DEVELOPMENT/V3_REVIEW_IMPLEMENTATION_DIFF_20261026.md
+/docs/UI_V3/AUDIT.md
+/docs/UI_V3/REVIEW_20261026.md
+/docs/UI_V3/REVIEW_FOLLOWUP_20261026.md
