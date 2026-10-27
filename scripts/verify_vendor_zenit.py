@@ -7,7 +7,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VENDOR = ROOT / "vendor" / "zenit"
 EXPECTED_COUNT = 3505
-EXPECTED_SHA256 = "d417156edf6a76521934524fa94e9abc025aac9fee31e5a60b492a8042780e8a"
+EXPECTED_SHA256 = "516beafc155b2738f45d188621160d23b34eb37394c40696eec61bbd5695c4ff"
 
 paths = subprocess.check_output(
     ["git", "ls-files", "--cached", "--others", "--exclude-standard", "vendor/zenit"], cwd=ROOT, text=True

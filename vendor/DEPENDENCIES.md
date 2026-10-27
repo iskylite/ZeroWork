@@ -5,17 +5,19 @@
 - Upstream: https://github.com/version-next/zenit
 - Revision: `9c1ba9bfea58210404e447b04b6ff25b6442f0ff`
 - Package: `zenit` (`dev/zig-0.17.0`, complete source snapshot tracked by ZeroWork)
-- Local patch revision: `2026-10-27-neutral-empty-input-placeholder` (optional `width`/`wrap`; upstream revision and license unchanged)
+- Local patch revision: `2026-10-27-editable-text-metrics` (optional `width`/`wrap`; upstream revision and license unchanged)
 - Minimum Zig: `0.17.0`
 - License: GPL-3.0-only (commercial alternative documented upstream)
 - Canonical source files: `3505` (tracked sources plus declared working-tree additions)
-- Canonical tracked-tree SHA-256: `d417156edf6a76521934524fa94e9abc025aac9fee31e5a60b492a8042780e8a`
+- Canonical tracked-tree SHA-256: `516beafc155b2738f45d188621160d23b34eb37394c40696eec61bbd5695c4ff`
 - Hash algorithm: sort and deduplicate `git ls-files --cached --others --exclude-standard vendor/zenit`; for each path hash big-endian u64 path length, path relative to `vendor/zenit`, big-endian u64 content length, then raw content bytes
 - Project decision: GPL-3.0-only use authorized for current development; distribution obligations remain active.
 
 The upstream `LICENSE`, `LICENSING.md`, source, and package metadata are retained under `vendor/zenit/`. Do not update this tree without recording a new fixed revision and reviewing its license and build contract.
 
-Latest local patch keeps placeholders visually neutral for required-but-empty inputs; existing mouse-move hit-count accounting before drag callbacks is retained. No API, toolchain or license changes.
+Latest local patch synchronizes single-line input caret, selection and hit testing with the inherited font size and weight used by rendering, including explicitly selected font families, monospace and italic faces. Multiline editable rows pin the font size, weight and line height used by caret measurement; wrapping and virtual row pitch follow programmatic metric changes. No API, toolchain or license changes.
+
+The previous local patch keeps placeholders visually neutral for required-but-empty inputs; existing mouse-move hit-count accounting before drag callbacks is retained. No API, toolchain or license changes.
 
 Local adaptations are included in the canonical hash: bounded/wrapping Tooltip content through public optional properties (defaults preserve the existing API and behavior), native close confirmation/commit/completion and IME handling, rendering and hit-test fixes, idle interaction-geometry drainage, material subtree cache ranges, safe focus cleanup, legacy hidden-control window configuration, fixed ASCII grid positioning for explicitly configured terminal faces, and the compile-time automation boundary that removes all process environment overrides from formal macOS App builds. The upstream repository metadata is not required for building this snapshot. Run `python3 scripts/verify_vendor_zenit.py` to verify the exact vendored tree.
 

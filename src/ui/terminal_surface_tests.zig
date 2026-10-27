@@ -580,6 +580,11 @@ test "terminal surface prepared registry face keeps glyph IME metrics and grid s
     try std.testing.expectApproxEqAbs(2 * cell_width, surface.measured("MM"), 0.001);
     try std.testing.expect(!surface.preedit_node.getText().?.use_monospace_font);
     try std.testing.expectEqual(@as(u16, 42), surface.preedit_node.getText().?.font_family);
+    try std.testing.expectApproxEqAbs(cell_width, surface.preedit_node.getText().?.monospace_char_width, 0.001);
+    surface.setPreedit("Wi中😀");
+    try std.testing.expectApproxEqAbs(2 * cell_width, surface.measured("Wi"), 0.001);
+    try std.testing.expectApproxEqAbs(cell_width, surface.preedit_node.getText().?.monospace_char_width, 0.001);
+    surface.setPreedit("MM");
     const glyph = surface.rows.items[0].glyphs.items[0].node;
     try std.testing.expect(!glyph.getText().?.use_monospace_font);
     try std.testing.expectEqual(@as(u16, 42), glyph.getText().?.font_family);

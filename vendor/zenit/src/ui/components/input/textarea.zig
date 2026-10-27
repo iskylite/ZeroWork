@@ -1671,7 +1671,7 @@ fn textareaRenderItem(item_node: *Node, index: usize, cx: *Cx, user_context: ?*a
     }
     const has_content = state.doc.totalLength() > 0 or state.hasImePreedit();
 
-    @import("row_text.zig").set(item_node, cx, line_content, if (has_content) state.tokens.tokens.color.fg_primary else state.tokens.tokens.color.fg_secondary, state.font_size) catch {
+    @import("row_text.zig").setEditable(item_node, cx, line_content, if (has_content) state.tokens.tokens.color.fg_primary else state.tokens.tokens.color.fg_secondary, state.font_size, state.font_weight, state.line_height) catch {
         state.dirty = true;
         @import("row_text.zig").retry(cx, state.input_container_node orelse item_node);
         return;
@@ -1852,6 +1852,20 @@ fn textareaBeforeRender(node: *Node) void {
             .range_at_point = textareaA11yRangeAtPoint,
         };
     }
+
+    // Keep wrapping and virtual row pitch in step with programmatic font changes.
+    if (state.wrap_map.font_size != state.font_size or state.wrap_map.font_weight != state.font_weight or state.wrap_map.char_width != state.char_width) {
+        state.wrap_map.font_size = state.font_size;
+        state.wrap_map.font_weight = state.font_weight;
+        state.wrap_map.char_width = state.char_width;
+        state.wrap_map.rebuildAll(state.doc);
+        state.dirty = true;
+    }
+    if (state.vl_state) |list| if (list.props.item_height != state.line_height) {
+        list.props.item_height = state.line_height;
+        virtual_list.updateItemCount(list, list.item_count);
+        state.dirty = true;
+    };
 
     // Metrics sync
     const coords = editable_block.computeRenderCoords(node, state.padding_h, state.padding_v);

@@ -318,7 +318,16 @@ test "AI composer usage and ring reflect only provided measurements and source l
     f.click(f.view.buttons[4]);
     const menu = find(f.cx.root.?, "ai.usage.menu").?;
     try std.testing.expectEqual(@as(f32, 344), menu.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 276), menu.globalRect().h);
+    // The current compaction layout increased the base height from 232 to 268.
+    // Base 268 + one usage part 24 + the redaction row 20 = 312.
+    try std.testing.expectEqual(@as(f32, 312), menu.globalRect().h);
+    const status = find(menu, "ai.usage.compaction.status").?.globalRect();
+    const action_button = find(menu, "ai.usage.compaction.start").?.globalRect();
+    const bounds = menu.globalRect();
+    try std.testing.expectEqual(@as(f32, 84), status.h);
+    try std.testing.expect(status.y >= bounds.y + 14);
+    try std.testing.expect(status.y + status.h <= action_button.y);
+    try std.testing.expect(action_button.y + action_button.h <= bounds.y + bounds.h - 14);
     var found = false;
     for (f.cx.display_list.items.items) |item| if (item == .arc and item.arc.header.node_id == f.view.ring.id and ui.Color.eql(item.arc.color, Styles.theme.current().accent)) {
         found = true;

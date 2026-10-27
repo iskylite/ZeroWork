@@ -8,6 +8,8 @@ const core = @import("../../core.zig");
 const text_core = @import("text_core");
 const grapheme = text_core.grapheme;
 
+pub const Font = struct { family_id: u16 = 0, monospace: bool = false, italic: bool = false };
+
 pub fn visualCaretX(
     cx: *core.Cx,
     text: []const u8,
@@ -15,21 +17,35 @@ pub fn visualCaretX(
     font_size: f32,
     font_weight: u16,
 ) ?f32 {
+    return visualCaretXWithFont(cx, text, position, font_size, font_weight, .{});
+}
+
+pub fn visualCaretXWithFont(cx: *core.Cx, text: []const u8, position: text_core.TextPosition, font_size: f32, font_weight: u16, font: Font) ?f32 {
     const line = cx.text.visualLine(.{
         .text = text,
         .font_family = "system",
         .font_size = font_size,
         .font_weight = font_weight,
+        .font_family_id = font.family_id,
+        .use_monospace = font.monospace,
+        .use_italic = font.italic,
     }) catch return null;
     return (line.positionToCaret(position) catch return null).x.value;
 }
 
 pub fn visualPositionForX(cx: *core.Cx, text: []const u8, x: f32, font_size: f32, font_weight: u16) ?text_core.TextPosition {
+    return visualPositionForXWithFont(cx, text, x, font_size, font_weight, .{});
+}
+
+pub fn visualPositionForXWithFont(cx: *core.Cx, text: []const u8, x: f32, font_size: f32, font_weight: u16, font: Font) ?text_core.TextPosition {
     const line = cx.text.visualLine(.{
         .text = text,
         .font_family = "system",
         .font_size = font_size,
         .font_weight = font_weight,
+        .font_family_id = font.family_id,
+        .use_monospace = font.monospace,
+        .use_italic = font.italic,
     }) catch return null;
     return line.xToPosition(.{ .value = @max(x, 0) });
 }
@@ -258,6 +274,10 @@ pub fn utf8MeasuredAdvance(text: []const u8, char_width: f32, font_size: f32, fo
 /// Failure (NoFontProvider / FontLookupFailed / OOM) silent fallback to platform bridge
 /// or ASCII estimate, avoid caller error handling.
 pub fn utf8MeasuredAdvanceCx(cx_ref: ?*core.Cx, text: []const u8, char_width: f32, font_size: f32, font_weight: u16) f32 {
+    return utf8MeasuredAdvanceCxWithFont(cx_ref, text, char_width, font_size, font_weight, .{});
+}
+
+pub fn utf8MeasuredAdvanceCxWithFont(cx_ref: ?*core.Cx, text: []const u8, char_width: f32, font_size: f32, font_weight: u16, font: Font) f32 {
     if (text.len == 0) return 0;
     if (cx_ref) |cx| {
         if (cx.text.shapeText(.{
@@ -265,12 +285,17 @@ pub fn utf8MeasuredAdvanceCx(cx_ref: ?*core.Cx, text: []const u8, char_width: f3
             .font_family = "system",
             .font_size = font_size,
             .font_weight = font_weight,
-            .use_italic = false,
+            .font_family_id = font.family_id,
+            .use_monospace = font.monospace,
+            .use_italic = font.italic,
         })) |run| {
             return run.total_advance;
         } else |_| {
             // shape failure (typical NoFontProvider / FontLookupFailed) -> degrade
         }
+    }
+    if (font.monospace) {
+        return utf8EstimatedAdvance(text, char_width);
     }
     if (measureTextWidthPlatform(text, font_size, font_weight)) |w| return w;
     return utf8EstimatedAdvance(text, char_width);
@@ -281,6 +306,10 @@ pub fn utf8MeasuredAdvancePrefix(text: []const u8, end_bytes: usize, char_width:
 }
 
 pub fn utf8MeasuredAdvancePrefixCx(cx_ref: ?*core.Cx, text: []const u8, end_bytes: usize, char_width: f32, font_size: f32, font_weight: u16) f32 {
+    return utf8MeasuredAdvancePrefixCxWithFont(cx_ref, text, end_bytes, char_width, font_size, font_weight, .{});
+}
+
+pub fn utf8MeasuredAdvancePrefixCxWithFont(cx_ref: ?*core.Cx, text: []const u8, end_bytes: usize, char_width: f32, font_size: f32, font_weight: u16, font: Font) f32 {
     const end = @min(end_bytes, text.len);
     if (cx_ref) |cx| {
         const line = cx.text.visualLine(.{
@@ -288,15 +317,18 @@ pub fn utf8MeasuredAdvancePrefixCx(cx_ref: ?*core.Cx, text: []const u8, end_byte
             .font_family = "system",
             .font_size = font_size,
             .font_weight = font_weight,
-        }) catch return utf8MeasuredAdvanceCx(cx_ref, text[0..end], char_width, font_size, font_weight);
+            .font_family_id = font.family_id,
+            .use_monospace = font.monospace,
+            .use_italic = font.italic,
+        }) catch return utf8MeasuredAdvanceCxWithFont(cx_ref, text[0..end], char_width, font_size, font_weight, font);
         const clamped = text_core.text_coordinates.clampByteOffset(text, .{ .value = end }, .nearest);
         const position = text_core.TextPosition{ .byte = clamped, .affinity = .downstream };
         const stop = line.positionToCaret(position) catch
             line.positionToCaret(.{ .byte = clamped, .affinity = .upstream }) catch
-            return utf8MeasuredAdvanceCx(cx_ref, text[0..end], char_width, font_size, font_weight);
+            return utf8MeasuredAdvanceCxWithFont(cx_ref, text[0..end], char_width, font_size, font_weight, font);
         return stop.x.value;
     }
-    return utf8MeasuredAdvanceCx(cx_ref, text[0..end], char_width, font_size, font_weight);
+    return utf8MeasuredAdvanceCxWithFont(cx_ref, text[0..end], char_width, font_size, font_weight, font);
 }
 
 pub fn utf8ByteOffsetForMeasuredX(text: []const u8, target_x: f32, char_width: f32, font_size: f32, font_weight: u16) usize {
@@ -304,6 +336,10 @@ pub fn utf8ByteOffsetForMeasuredX(text: []const u8, target_x: f32, char_width: f
 }
 
 pub fn utf8ByteOffsetForMeasuredXCx(cx_ref: ?*core.Cx, text: []const u8, target_x: f32, char_width: f32, font_size: f32, font_weight: u16) usize {
+    return utf8ByteOffsetForMeasuredXCxWithFont(cx_ref, text, target_x, char_width, font_size, font_weight, .{});
+}
+
+pub fn utf8ByteOffsetForMeasuredXCxWithFont(cx_ref: ?*core.Cx, text: []const u8, target_x: f32, char_width: f32, font_size: f32, font_weight: u16, font: Font) usize {
     if (!usePlatformTextMeasure() and cx_ref == null) {
         return utf8ByteOffsetForEstimatedX(text, target_x, char_width);
     }
@@ -315,6 +351,9 @@ pub fn utf8ByteOffsetForMeasuredXCx(cx_ref: ?*core.Cx, text: []const u8, target_
             .font_family = "system",
             .font_size = font_size,
             .font_weight = font_weight,
+            .font_family_id = font.family_id,
+            .use_monospace = font.monospace,
+            .use_italic = font.italic,
         }) catch null;
         if (line) |visual| {
             return visual.xToPosition(.{ .value = @max(target_x, 0) }).byte.value;
@@ -330,7 +369,7 @@ pub fn utf8ByteOffsetForMeasuredXCx(cx_ref: ?*core.Cx, text: []const u8, target_
     var cursor = grapheme.BoundaryCursor.init(text);
     while (i < text.len) {
         const next = cursor.next(i);
-        const next_advance = utf8MeasuredAdvancePrefixCx(cx_ref, text, next, char_width, font_size, font_weight);
+        const next_advance = utf8MeasuredAdvancePrefixCxWithFont(cx_ref, text, next, char_width, font_size, font_weight, font);
         if (target_x <= next_advance) {
             return if (target_x - previous_advance < next_advance - target_x) i else next;
         }

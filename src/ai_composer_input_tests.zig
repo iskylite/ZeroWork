@@ -218,3 +218,42 @@ test "AI composer empty states mount real shortcuts and configuration actions wi
     f.settle();
     try std.testing.expectEqual(@as(usize, 1), actions.clicks);
 }
+
+test "multiline input uses the same typography for painted rows caret wrapping and scrolling" {
+    for ([_]bool{ false, true }) |borderless| {
+        var f: Fixture = undefined;
+        try f.init(borderless);
+        defer f.deinit();
+        // Reproduce a form supplying a different inherited font from the editor.
+        f.input.input.setStyleInline(a, .{ .font_size = 28, .font_weight = 700 });
+        f.input.state.font_size = 17;
+        f.input.state.font_weight = 600;
+        f.input.state.line_height = 25;
+        f.input.state.char_width = 10;
+        f.value.set("Wi中😀 abcdefghijklmnopqrstuvwxyz\nsecond line\nthird line");
+        f.cx.setFocus(f.input.input);
+        f.settle();
+        const state = f.input.state;
+        try std.testing.expectEqual(@as(f32, 17), state.wrap_map.font_size);
+        try std.testing.expectEqual(@as(u16, 600), state.wrap_map.font_weight);
+        try std.testing.expectEqual(@as(f32, 25), state.vl_state.?.props.item_height);
+        var count: usize = 0;
+        for (state.vl_state.?.pool_nodes) |row| {
+            const text = row.getText() orelse continue;
+            try std.testing.expectEqual(@as(f32, 17), row.resolveTextFontSize().?);
+            try std.testing.expectEqual(@as(u16, 600), row.resolveTextFontWeight().?);
+            try std.testing.expectApproxEqAbs(@as(f32, 25.0 / 17.0), text.line_height, 0.001);
+            count += 1;
+        }
+        try std.testing.expect(count > 0);
+        try std.testing.expectApproxEqAbs(@as(f32, 23), state.cursor_node.?.globalRect().h, 0.01);
+        // A parent style change must not silently change the row's font.
+        f.input.input.setStyleInline(a, .{ .font_size = 32, .font_weight = 300 });
+        f.settle();
+        for (state.vl_state.?.pool_nodes) |row| {
+            if (row.getText() == null) continue;
+            try std.testing.expectEqual(@as(f32, 17), row.resolveTextFontSize().?);
+            try std.testing.expectEqual(@as(u16, 600), row.resolveTextFontWeight().?);
+        }
+    }
+}

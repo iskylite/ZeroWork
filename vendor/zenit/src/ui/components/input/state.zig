@@ -211,6 +211,7 @@ pub const TextInputState = struct {
     char_width: f32 = 7.8,
     /// Text font weight (400=regular, 500=medium, 700=bold)
     font_weight: u16 = 400,
+    measured_font: text_utils.Font = .{},
     /// Text font size cache
     font_size: f32 = 13.0,
     /// Horizontal padding cache
@@ -657,14 +658,7 @@ pub const TextInputState = struct {
         const segment = display_doc.getText()[seg.start..seg.end];
         const local_cursor = @min(cursor_byte -| seg.start, segment.len);
 
-        var cursor_x = text_utils.utf8MeasuredAdvancePrefixCx(
-            self.cx_ref,
-            segment,
-            local_cursor,
-            self.char_width,
-            self.font_size,
-            self.font_weight,
-        );
+        var cursor_x = text_utils.utf8MeasuredAdvancePrefixCxWithFont(self.cx_ref, segment, local_cursor, self.char_width, self.font_size, self.font_weight, self.textFont());
         var underline_start_x = cursor_x;
         var underline_end_x = cursor_x;
         if (self.cx_ref) |cx| {
@@ -1007,7 +1001,7 @@ pub const TextInputState = struct {
         {
             return self.cached_star_advance;
         }
-        const adv = text_utils.utf8MeasuredAdvanceCx(self.cx_ref, "*", self.char_width, self.font_size, self.font_weight);
+        const adv = text_utils.utf8MeasuredAdvanceCxWithFont(self.cx_ref, "*", self.char_width, self.font_size, self.font_weight, self.textFont());
         self.cached_star_advance = adv;
         self.cached_star_font_size = self.font_size;
         self.cached_star_font_weight = self.font_weight;
@@ -1022,6 +1016,15 @@ pub const TextInputState = struct {
         return text_utils.utf8GraphemeLen(self.preeditText()[0..@min(end_byte, self.ime_preedit_len)]);
     }
 
+    pub fn textFont(self: *const TextInputState) text_utils.Font {
+        if (self.text_display_node) |node| if (node.getText()) |text| return .{
+            .family_id = text.font_family,
+            .monospace = text.use_monospace_font,
+            .italic = text.use_italic_font,
+        };
+        return .{};
+    }
+
     pub fn visualCursorAdvance(self: *const TextInputState) f32 {
         if (self.input_type == .password) {
             const star = @constCast(self).singleStarAdvance();
@@ -1032,40 +1035,19 @@ pub const TextInputState = struct {
         if (self.cx_ref) |cx| {
             const display = @constCast(self).buildDisplayText(null);
             const display_byte = @min(self.cursor_pos + self.effectiveImeCursorOffset(), display.len);
-            if (text_utils.visualCaretX(cx, display, .{
+            if (text_utils.visualCaretXWithFont(cx, display, .{
                 .byte = .{ .value = display_byte },
                 .affinity = if (self.hasImePreedit()) .downstream else self.cursor_affinity,
-            }, self.font_size, self.font_weight)) |x| return x;
+            }, self.font_size, self.font_weight, self.textFont())) |x| return x;
         }
         const base_adv = if (self.cx_ref) |cx|
-            text_utils.visualCaretX(cx, self.singleLineBuffer()[0..self.buffer_len], .{
+            text_utils.visualCaretXWithFont(cx, self.singleLineBuffer()[0..self.buffer_len], .{
                 .byte = .{ .value = self.cursor_pos },
                 .affinity = self.cursor_affinity,
-            }, self.font_size, self.font_weight) orelse text_utils.utf8MeasuredAdvancePrefixCx(
-                self.cx_ref,
-                self.singleLineBuffer()[0..self.buffer_len],
-                self.cursor_pos,
-                self.char_width,
-                self.font_size,
-                self.font_weight,
-            )
+            }, self.font_size, self.font_weight, self.textFont()) orelse text_utils.utf8MeasuredAdvancePrefixCxWithFont(self.cx_ref, self.singleLineBuffer()[0..self.buffer_len], self.cursor_pos, self.char_width, self.font_size, self.font_weight, self.textFont())
         else
-            text_utils.utf8MeasuredAdvancePrefixCx(
-                null,
-                self.singleLineBuffer()[0..self.buffer_len],
-                self.cursor_pos,
-                self.char_width,
-                self.font_size,
-                self.font_weight,
-            );
-        const preedit_adv = text_utils.utf8MeasuredAdvancePrefixCx(
-            self.cx_ref,
-            self.preeditText(),
-            self.effectiveImeCursorOffset(),
-            self.char_width,
-            self.font_size,
-            self.font_weight,
-        );
+            text_utils.utf8MeasuredAdvancePrefixCxWithFont(null, self.singleLineBuffer()[0..self.buffer_len], self.cursor_pos, self.char_width, self.font_size, self.font_weight, self.textFont());
+        const preedit_adv = text_utils.utf8MeasuredAdvancePrefixCxWithFont(self.cx_ref, self.preeditText(), self.effectiveImeCursorOffset(), self.char_width, self.font_size, self.font_weight, self.textFont());
         return base_adv + preedit_adv;
     }
 
@@ -1076,10 +1058,10 @@ pub const TextInputState = struct {
         }
         if (self.hasImePreedit()) {
             const display = @constCast(self).buildDisplayText(null);
-            return text_utils.utf8MeasuredAdvanceCx(self.cx_ref, display, self.char_width, self.font_size, self.font_weight);
+            return text_utils.utf8MeasuredAdvanceCxWithFont(self.cx_ref, display, self.char_width, self.font_size, self.font_weight, self.textFont());
         }
-        return text_utils.utf8MeasuredAdvanceCx(self.cx_ref, self.singleLineBuffer()[0..self.buffer_len], self.char_width, self.font_size, self.font_weight) +
-            text_utils.utf8MeasuredAdvanceCx(self.cx_ref, self.preeditText(), self.char_width, self.font_size, self.font_weight);
+        return text_utils.utf8MeasuredAdvanceCxWithFont(self.cx_ref, self.singleLineBuffer()[0..self.buffer_len], self.char_width, self.font_size, self.font_weight, self.textFont()) +
+            text_utils.utf8MeasuredAdvanceCxWithFont(self.cx_ref, self.preeditText(), self.char_width, self.font_size, self.font_weight, self.textFont());
     }
 
     pub fn imePreeditStartAdvance(self: *const TextInputState) f32 {
@@ -1090,19 +1072,12 @@ pub const TextInputState = struct {
         }
         if (self.cx_ref) |cx| {
             const display = @constCast(self).buildDisplayText(null);
-            if (text_utils.visualCaretX(cx, display, .{
+            if (text_utils.visualCaretXWithFont(cx, display, .{
                 .byte = .{ .value = @min(self.cursor_pos, display.len) },
                 .affinity = self.cursor_affinity,
-            }, self.font_size, self.font_weight)) |x| return x;
+            }, self.font_size, self.font_weight, self.textFont())) |x| return x;
         }
-        return text_utils.utf8MeasuredAdvancePrefixCx(
-            self.cx_ref,
-            self.singleLineBuffer()[0..self.buffer_len],
-            self.cursor_pos,
-            self.char_width,
-            self.font_size,
-            self.font_weight,
-        );
+        return text_utils.utf8MeasuredAdvancePrefixCxWithFont(self.cx_ref, self.singleLineBuffer()[0..self.buffer_len], self.cursor_pos, self.char_width, self.font_size, self.font_weight, self.textFont());
     }
 
     pub fn imePreeditAdvance(self: *const TextInputState) f32 {
@@ -1111,13 +1086,7 @@ pub const TextInputState = struct {
             const preedit_cp = self.maskedCpForPreeditPrefix(self.ime_preedit_len);
             return star * @as(f32, @floatFromInt(preedit_cp));
         }
-        return text_utils.utf8MeasuredAdvanceCx(
-            self.cx_ref,
-            self.preeditText(),
-            self.char_width,
-            self.font_size,
-            self.font_weight,
-        );
+        return text_utils.utf8MeasuredAdvanceCxWithFont(self.cx_ref, self.preeditText(), self.char_width, self.font_size, self.font_weight, self.textFont());
     }
 
     pub fn hasVisualValue(self: *const TextInputState) bool {
@@ -1271,13 +1240,7 @@ pub const TextInputState = struct {
             }
 
             const step = boundaries.next(i) - i;
-            const advance = text_utils.utf8MeasuredAdvanceCx(
-                self.cx_ref,
-                text[i .. i + step],
-                self.char_width,
-                self.font_size,
-                self.font_weight,
-            );
+            const advance = text_utils.utf8MeasuredAdvanceCxWithFont(self.cx_ref, text[i .. i + step], self.char_width, self.font_size, self.font_weight, self.textFont());
             if (self.shouldSoftWrap() and pos.x > 0 and pos.x + advance > self.input_inner_w) {
                 pos.row += 1;
                 pos.x = 0;
@@ -1317,14 +1280,7 @@ pub const TextInputState = struct {
                     return seg.start + position.byte.value;
                 }
                 // Font provider unavailable: keep the grapheme-safe fallback.
-                return seg.start + text_utils.utf8ByteOffsetForMeasuredXCx(
-                    self.cx_ref,
-                    seg_text,
-                    target_x,
-                    self.char_width,
-                    self.font_size,
-                    self.font_weight,
-                );
+                return seg.start + text_utils.utf8ByteOffsetForMeasuredXCxWithFont(self.cx_ref, seg_text, target_x, self.char_width, self.font_size, self.font_weight, self.textFont());
             }
         }
 
@@ -1372,13 +1328,7 @@ pub const TextInputState = struct {
             }
 
             const step = boundaries.next(i) - i;
-            const advance = text_utils.utf8MeasuredAdvanceCx(
-                self.cx_ref,
-                text[i .. i + step],
-                self.char_width,
-                self.font_size,
-                self.font_weight,
-            );
+            const advance = text_utils.utf8MeasuredAdvanceCxWithFont(self.cx_ref, text[i .. i + step], self.char_width, self.font_size, self.font_weight, self.textFont());
             if (line_x > 0 and line_x + advance > self.input_inner_w and out_len < out.len) {
                 out[out_len] = '\n';
                 out_len += 1;
@@ -1826,18 +1776,18 @@ pub const TextInputState = struct {
             const n = @min(grapheme_count, mask_buf.len);
             @memset(mask_buf[0..n], '*');
             const mask = mask_buf[0..n];
-            const mask_byte = text_utils.utf8ByteOffsetForMeasuredXCx(self.cx_ref, mask, target_x, self.char_width, self.font_size, self.font_weight);
+            const mask_byte = text_utils.utf8ByteOffsetForMeasuredXCxWithFont(self.cx_ref, mask, target_x, self.char_width, self.font_size, self.font_weight, self.textFont());
             // mask is ASCII, one byte per source grapheme.
             return text_utils.utf8ByteOffsetForGraphemeIndex(buffer_text, mask_byte);
         }
         const text = self.getText();
         if (self.cx_ref) |cx| {
-            if (text_utils.visualPositionForX(cx, text, target_x, self.font_size, self.font_weight)) |position| {
+            if (text_utils.visualPositionForXWithFont(cx, text, target_x, self.font_size, self.font_weight, self.textFont())) |position| {
                 self.cursor_affinity = position.affinity;
                 return position.byte.value;
             }
         }
-        return text_utils.utf8ByteOffsetForMeasuredXCx(self.cx_ref, text, target_x, self.char_width, self.font_size, self.font_weight);
+        return text_utils.utf8ByteOffsetForMeasuredXCxWithFont(self.cx_ref, text, target_x, self.char_width, self.font_size, self.font_weight, self.textFont());
     }
 
     pub fn hitTestCursorPosAt(self: *TextInputState, global_x: f32, global_y: f32) usize {
@@ -2770,14 +2720,7 @@ pub const TextInputState = struct {
                             self.cursor_affinity = position.affinity;
                         } else {
                             const seg_text = doc.getText()[seg.start..seg.end];
-                            self.cursor_pos = seg.start + text_utils.utf8ByteOffsetForMeasuredXCx(
-                                self.cx_ref,
-                                seg_text,
-                                cur_x,
-                                self.char_width,
-                                self.font_size,
-                                self.font_weight,
-                            );
+                            self.cursor_pos = seg.start + text_utils.utf8ByteOffsetForMeasuredXCxWithFont(self.cx_ref, seg_text, cur_x, self.char_width, self.font_size, self.font_weight, self.textFont());
                             self.cursor_affinity = .downstream;
                         }
                     }

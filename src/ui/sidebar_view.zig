@@ -390,9 +390,9 @@ pub const HostRow = struct {
         self.dot = try ui.iconTint(cx, data.icon orelse @import("session_icon.zig").resolve(data.kind), ui.Color.WHITE, S.icon(18));
         self.dot.meta.ownership.meta.test_id = "sidebar.host.icon";
         try content.appendChild(cx.allocator, self.dot);
-        const metadata = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 6, .min_width = 0 }, .{});
+        const metadata = try ui.box(cx, .{ .width = .{ .grow = .{ .min = 0 } }, .flex_shrink = 1, .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 6, .min_width = 0 }, .{});
         const name = try ui.text(cx, data.name, S.text(12, 500, false));
-        name.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .min_width = 0, .flex_shrink = 1, .overflow_hidden = true });
+        name.setStyleInline(cx.allocator, .{ .width = .{ .grow = .{ .min = 0 } }, .max_width = cx.text.measureTextWidth(data.name, 12, 500, false), .min_width = 0, .flex_shrink = 1, .overflow_hidden = true });
         self.name = name;
         try metadata.appendChild(cx.allocator, name);
         const tag = try ui.box(cx, .{ .height = .{ .px = 12 }, .padding = .{ .left = 3, .right = 3 }, .margin = .{ .top = 8 }, .direction = .row, .align_items = .center, .justify = .center, .background = T.current().well, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
@@ -410,11 +410,13 @@ pub const HostRow = struct {
         var metadata_viewport = S.titleViewport();
         metadata_viewport.height = .{ .px = 24 };
         identity_hint.wrapper.setStyleInline(cx.allocator, metadata_viewport);
-        identity_hint.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill() });
+        identity_hint.trigger.setStyleInline(cx.allocator, .{ .width = .{ .grow = .{ .min = 0 } }, .height = .fill(), .min_width = 0, .flex_shrink = 1, .overflow = .hidden });
         try content.appendChild(cx.allocator, identity_hint.wrapper);
+        const trailing = try ui.box(cx, .{ .width = .{ .fit = .{} }, .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 4, .flex_shrink = 0 }, .{});
+        try content.appendChild(cx.allocator, trailing);
         const tail = try ui.box(cx, S.tail(), .{});
         tail.meta.ownership.meta.test_id = "sidebar.host.tail";
-        try content.appendChild(cx.allocator, tail);
+        try trailing.appendChild(cx.allocator, tail);
         const route = try ui.box(cx, S.route(), .{});
         // Direct connections leave the fixed trailing slot quiet; route detail stays in the host tooltip.
         if (data.supports_route) {
@@ -449,7 +451,7 @@ pub const HostRow = struct {
         self.menu_trigger = edit_button;
         // The complete host menu remains available on right click.
 
-        try content.appendChild(cx.allocator, actions);
+        try trailing.appendChild(cx.allocator, actions);
         self.marker = try ui.box(cx, S.marker(), .{});
         try node.appendChild(cx.allocator, self.marker);
         const hovered = try ui.hooks.useHover(scope, node);

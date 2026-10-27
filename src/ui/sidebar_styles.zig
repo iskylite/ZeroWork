@@ -72,13 +72,13 @@ pub fn content() ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 9 }, .min_width = 0 };
 }
 pub fn titleViewport() ui.BoxStyle {
-    return .{ .height = .{ .px = 18 }, .width = .fill(), .flex = 1, .min_width = 0, .overflow = .hidden, .align_items = .center };
+    return .{ .height = .{ .px = 18 }, .width = .{ .grow = .{ .min = 0 } }, .flex = 1, .flex_shrink = 1, .min_width = 0, .overflow = .hidden, .align_items = .center };
 }
 pub fn tail() ui.BoxStyle {
     return .{ .width = .{ .px = tail_width }, .height = .{ .px = action_size }, .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .flex_shrink = 0 };
 }
 pub fn route() ui.BoxStyle {
-    return .{ .width = .{ .px = 36 }, .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 28 }, .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .flex_shrink = 0 };
 }
 pub fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };

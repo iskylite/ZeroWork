@@ -42,8 +42,8 @@ fn applyA11yScroll(state: *TextInputState) void {
         virtual_list.scrollIndexIntoView(list, row, if (request.align_top) .start else .end);
     } else {
         const offset: usize = if (request.align_top) request.start else request.end;
-        const x = if (state.cx_ref) |cx| text_utils.visualCaretX(cx, text, .{ .byte = .{ .value = offset }, .affinity = .downstream }, state.font_size, state.font_weight) orelse return else text_utils.utf8MeasuredAdvancePrefixCx(null, text, offset, state.char_width, state.font_size, state.font_weight);
-        const width = text_utils.utf8MeasuredAdvanceCx(state.cx_ref, text, state.char_width, state.font_size, state.font_weight);
+        const x = if (state.cx_ref) |cx| text_utils.visualCaretXWithFont(cx, text, .{ .byte = .{ .value = offset }, .affinity = .downstream }, state.font_size, state.font_weight, state.textFont()) orelse return else text_utils.utf8MeasuredAdvancePrefixCxWithFont(null, text, offset, state.char_width, state.font_size, state.font_weight, state.textFont());
+        const width = text_utils.utf8MeasuredAdvanceCxWithFont(state.cx_ref, text, state.char_width, state.font_size, state.font_weight, state.textFont());
         state.scroll_x = std.math.clamp(x - (if (request.align_top) @as(f32, 0) else state.input_inner_w), 0, @max(@as(f32, 0), width - state.input_inner_w));
     }
 }
@@ -116,7 +116,7 @@ fn a11yGeometry(context: *anyopaque, allocator: std.mem.Allocator) ![]core.A11yP
         }
     } else if (state.getText().len > 0) {
         const cx = state.cx_ref orelse return error.AccessibilityLayoutPending;
-        const line = try cx.text.visualLine(.{ .text = state.getText(), .font_family = "system", .font_size = state.font_size, .font_weight = state.font_weight });
+        const line = try cx.text.visualLine(.{ .text = state.getText(), .font_family = "system", .font_size = state.font_size, .font_weight = state.font_weight, .font_family_id = state.textFont().family_id, .use_monospace = state.textFont().monospace, .use_italic = state.textFont().italic });
         try appendA11yGeometry(allocator, &output, line, 0, state.container_x + state.padding_h - state.scroll_x, if (state.text_display_node) |node| node.globalRect().y else state.container_y + state.padding_v, state.line_height);
     }
     return output.toOwnedSlice(allocator);
@@ -208,7 +208,7 @@ fn a11yCaretGeometry(context: *anyopaque, allocator: std.mem.Allocator) ![]core.
         }
     } else {
         const cx = state.cx_ref orelse return error.AccessibilityLayoutPending;
-        const line = try cx.text.visualLine(.{ .text = state.getText(), .font_family = "system", .font_size = state.font_size, .font_weight = state.font_weight });
+        const line = try cx.text.visualLine(.{ .text = state.getText(), .font_family = "system", .font_size = state.font_size, .font_weight = state.font_weight, .font_family_id = state.textFont().family_id, .use_monospace = state.textFont().monospace, .use_italic = state.textFont().italic });
         try appendA11yCarets(allocator, &output, line, 0, state.container_x + state.padding_h - state.scroll_x, if (state.text_display_node) |node| node.globalRect().y else state.container_y + state.padding_v, state.line_height);
     }
     return output.toOwnedSlice(allocator);
@@ -264,14 +264,14 @@ pub fn a11yTextFrame(context: *anyopaque, start_utf8: u32, end_utf8: u32, out: *
         };
         return true;
     }
-    const start_x = if (state.cx_ref) |cx| text_utils.visualCaretX(cx, text, .{
+    const start_x = if (state.cx_ref) |cx| text_utils.visualCaretXWithFont(cx, text, .{
         .byte = .{ .value = start },
         .affinity = .downstream,
-    }, state.font_size, state.font_weight) orelse text_utils.utf8MeasuredAdvancePrefixCx(state.cx_ref, text, start, state.char_width, state.font_size, state.font_weight) else text_utils.utf8MeasuredAdvancePrefixCx(state.cx_ref, text, start, state.char_width, state.font_size, state.font_weight);
-    const end_x = if (state.cx_ref) |cx| text_utils.visualCaretX(cx, text, .{
+    }, state.font_size, state.font_weight, state.textFont()) orelse text_utils.utf8MeasuredAdvancePrefixCxWithFont(state.cx_ref, text, start, state.char_width, state.font_size, state.font_weight, state.textFont()) else text_utils.utf8MeasuredAdvancePrefixCxWithFont(state.cx_ref, text, start, state.char_width, state.font_size, state.font_weight, state.textFont());
+    const end_x = if (state.cx_ref) |cx| text_utils.visualCaretXWithFont(cx, text, .{
         .byte = .{ .value = end },
         .affinity = .upstream,
-    }, state.font_size, state.font_weight) orelse text_utils.utf8MeasuredAdvancePrefixCx(state.cx_ref, text, end, state.char_width, state.font_size, state.font_weight) else text_utils.utf8MeasuredAdvancePrefixCx(state.cx_ref, text, end, state.char_width, state.font_size, state.font_weight);
+    }, state.font_size, state.font_weight, state.textFont()) orelse text_utils.utf8MeasuredAdvancePrefixCxWithFont(state.cx_ref, text, end, state.char_width, state.font_size, state.font_weight, state.textFont()) else text_utils.utf8MeasuredAdvancePrefixCxWithFont(state.cx_ref, text, end, state.char_width, state.font_size, state.font_weight, state.textFont());
     out.* = .{
         .x = state.container_x + state.padding_h - state.scroll_x + @min(start_x, end_x),
         // A single-line Input centers its line box; use that laid-out origin.
@@ -382,6 +382,26 @@ pub fn syncAccessibilityProps(state: *TextInputState, node: *Node) void {
 /// Input beforeRender hook: cursor blink, selection highlight, drag handling.
 pub fn inputBeforeRender(node: *Node) void {
     const state: *TextInputState = @ptrCast(@alignCast(node.behavior.events.event_context orelse return));
+    // Rendering resolves inherited typography before painting. Use the same
+    // effective font for caret, selection, hit testing and horizontal scrolling.
+    if (!state.multiline) if (state.text_display_node) |display| {
+        const inherited = display.resolveInheritedTextStyle();
+        const text = display.getText();
+        const size = inherited.font_size orelse (if (text) |t| t.font_size else state.font_size);
+        const weight = inherited.font_weight orelse (if (text) |t| t.font_weight else state.font_weight);
+        const font = state.textFont();
+        if (size != state.font_size or weight != state.font_weight or !std.meta.eql(font, state.measured_font)) {
+            const ratio = if (state.font_size > 0) state.line_height / state.font_size else 1.4;
+            state.font_size = size;
+            state.font_weight = weight;
+            state.measured_font = font;
+            state.cached_star_advance = 0;
+            state.line_height = size * ratio;
+            state.char_width = size * 0.6;
+            state.dirty = true;
+            state.updateScrollX();
+        }
+    };
     syncAccessibilityProps(state, node);
     const coords = editable_block.computeRenderCoords(node, state.padding_h, state.padding_v);
 
@@ -580,10 +600,10 @@ pub fn inputBeforeRender(node: *Node) void {
                                 visual_text = state.composeDisplaySegmentWithIme(seg_text, visual_byte);
                                 visual_byte += state.effectiveImeCursorOffset();
                             }
-                            cursor_x_px = text_utils.visualCaretX(cx, visual_text, .{
+                            cursor_x_px = text_utils.visualCaretXWithFont(cx, visual_text, .{
                                 .byte = .{ .value = @min(visual_byte, visual_text.len) },
                                 .affinity = state.cursor_affinity,
-                            }, state.font_size, state.font_weight) orelse cursor_x_px;
+                            }, state.font_size, state.font_weight, state.textFont()) orelse cursor_x_px;
                         }
                         cursor_y = container_inner_y + @as(f32, @floatFromInt(dp.display_line)) * state.line_height;
                         cursor_h = @max(12.0, state.line_height - 2.0);
@@ -940,8 +960,8 @@ fn updateMultilineSelectionNodes(
             } else {
                 // Single-line selection: original logic.
                 const text = state.getText();
-                const start_px_raw = text_utils.utf8MeasuredAdvancePrefixCx(state.cx_ref, text, sel_start, state.char_width, state.font_size, state.font_weight) - state.scroll_x;
-                const end_px_raw = text_utils.utf8MeasuredAdvancePrefixCx(state.cx_ref, text, sel_end, state.char_width, state.font_size, state.font_weight) - state.scroll_x;
+                const start_px_raw = text_utils.utf8MeasuredAdvancePrefixCxWithFont(state.cx_ref, text, sel_start, state.char_width, state.font_size, state.font_weight, state.textFont()) - state.scroll_x;
+                const end_px_raw = text_utils.utf8MeasuredAdvancePrefixCxWithFont(state.cx_ref, text, sel_end, state.char_width, state.font_size, state.font_weight, state.textFont()) - state.scroll_x;
                 const clip_max = @max(@as(f32, 0), state.input_inner_w);
                 const vis_start = std.math.clamp(@min(start_px_raw, end_px_raw), @as(f32, 0), clip_max);
                 const vis_end = std.math.clamp(@max(start_px_raw, end_px_raw), @as(f32, 0), clip_max);
@@ -983,7 +1003,7 @@ fn displayRowTextWidth(state: *TextInputState, row: usize) ?f32 {
     const seg = displaySegRange(doc, info);
     var txt = doc.getText()[seg.start..seg.end];
     while (txt.len > 0 and (txt[txt.len - 1] == ' ' or txt[txt.len - 1] == '\t')) txt = txt[0 .. txt.len - 1];
-    return text_utils.utf8MeasuredAdvancePrefixCx(state.cx_ref, txt, txt.len, state.char_width, state.font_size, state.font_weight);
+    return text_utils.utf8MeasuredAdvancePrefixCxWithFont(state.cx_ref, txt, txt.len, state.char_width, state.font_size, state.font_weight, state.textFont());
 }
 
 /// Multi-line IME preedit underline (old logic, multi-line only).
@@ -1078,6 +1098,9 @@ fn textareaPreeditVisualSpan(
         .font_family = "system",
         .font_size = state.font_size,
         .font_weight = state.font_weight,
+        .font_family_id = state.textFont().family_id,
+        .use_monospace = state.textFont().monospace,
+        .use_italic = state.textFont().italic,
     }) catch return null;
     var storage: [16]SelectionRect = undefined;
     const rects = line.selectionRects(
@@ -1181,7 +1204,7 @@ pub fn textareaRenderItem(item_node: *Node, index: usize, cx: *Cx, user_context:
                 line_content = replacement.compose(line_content, seg.start, "", false, out);
             }
 
-            @import("row_text.zig").set(item_node, cx, line_content, text_color, state.font_size) catch {
+            @import("row_text.zig").setEditable(item_node, cx, line_content, text_color, state.font_size, state.font_weight, state.line_height) catch {
                 state.dirty = true;
                 @import("row_text.zig").retry(cx, state.input_container_node orelse item_node);
                 return;
@@ -1214,7 +1237,7 @@ pub fn textareaRenderItem(item_node: *Node, index: usize, cx: *Cx, user_context:
         if (i == wrapped.len) break;
     }
 
-    @import("row_text.zig").set(item_node, cx, line_content, text_color, state.font_size) catch {
+    @import("row_text.zig").setEditable(item_node, cx, line_content, text_color, state.font_size, state.font_weight, state.line_height) catch {
         state.dirty = true;
         @import("row_text.zig").retry(cx, state.input_container_node orelse item_node);
         return;
@@ -1505,7 +1528,7 @@ test "a11yScrollIntoView horizontal request preserves caret and rejects stale te
     try t.expect(scrollA11yRange(&state, 6, 8, false));
     try t.expectEqual(@as(f32, 0), state.scroll_x);
     applyA11yScroll(&state);
-    const measured = text_utils.utf8MeasuredAdvanceCx(null, state.getText(), state.char_width, state.font_size, state.font_weight);
+    const measured = text_utils.utf8MeasuredAdvanceCxWithFont(null, state.getText(), state.char_width, state.font_size, state.font_weight, state.textFont());
     try t.expectApproxEqAbs(@as(f32, 20), measured - state.scroll_x, 0.01);
     try t.expectEqual(@as(usize, 2), state.cursor_pos);
     try t.expectEqual(@as(?usize, 1), state.selection_anchor);

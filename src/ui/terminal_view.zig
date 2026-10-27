@@ -2373,9 +2373,25 @@ pub const TerminalViewNode = struct {
         panel.setDisplay(.flex);
     }
 
+    fn localInputAdvance(self: *TerminalViewNode, bytes: []const u8) f32 {
+        const text = self.local_input_node.getText() orelse return 0;
+        const style = self.local_input_node.resolveInheritedTextStyle();
+        const size = style.font_size orelse text.font_size;
+        const weight = style.font_weight orelse text.font_weight;
+        if (self.cx.text.font_props_measure_fn) |measure| if (self.cx.text.font_resolve_ctx) |context| {
+            if (measure(context, bytes, size, weight, text.use_italic_font, text.use_monospace_font, text.font_family, text.use_symbols_font, text.monospace_char_width)) |width| return width;
+        };
+        const ascii = for (bytes) |byte| {
+            if (byte >= 0x80) break false;
+        } else true;
+        if (ascii and text.monospace_char_width > 0) return @as(f32, @floatFromInt(bytes.len)) * text.monospace_char_width;
+        const run = self.cx.text.shapeText(.{ .text = bytes, .font_family = "system", .font_family_id = text.font_family, .font_size = size, .font_weight = weight, .use_monospace = text.use_monospace_font, .use_italic = text.use_italic_font }) catch return @as(f32, @floatFromInt(displayCellWidth(bytes))) * self.metrics.cell_width;
+        return run.total_advance;
+    }
+
     fn renderLocalInput(self: *TerminalViewNode) void {
         defer self.renderParameterCandidates();
-        if (self.terminal_surface) |surface| surface.setCommandCaret(if (self.local_editor.active) @intCast(displayCellWidth(self.local_editor.text.items[0..self.local_editor.caret])) else 0);
+        if (self.terminal_surface) |surface| surface.setCommandCaret(if (self.local_editor.active) self.localInputAdvance(self.local_editor.text.items[0..self.local_editor.caret]) else 0);
         if (!self.local_editor.active) {
             const visible = self.local_input_node.style.display != .none;
             hideOverlay(self.local_input_node, &self.local_input_cache);
@@ -2394,7 +2410,7 @@ pub const TerminalViewNode = struct {
         const root = self.root.globalRect();
         const x = self.metrics.origin_x - root.x + @as(f32, @floatFromInt(self.frame_cursor.col)) * self.metrics.cell_width;
         const y = self.metrics.origin_y - root.y + self.presentationRowY(self.frame_cursor.row);
-        placeOverlay(self.local_input_node, &self.local_input_cache, x, y, @as(f32, @floatFromInt(displayCellWidth(display))) * self.metrics.cell_width, self.metrics.cell_height);
+        placeOverlay(self.local_input_node, &self.local_input_cache, x, y, self.localInputAdvance(display), self.metrics.cell_height);
         if (content_changed or !std.meta.eql(previous, self.local_input_cache)) {
             self.local_input_node.markLayoutDirty();
             self.cx.requestRedraw();
@@ -3728,10 +3744,10 @@ pub const TerminalViewNode = struct {
         const root_rect = self.root.globalRect();
         var x = self.metrics.origin_x - root_rect.x + @as(f32, @floatFromInt(cursor.col)) * self.metrics.cell_width;
         var y = self.metrics.origin_y - root_rect.y + self.presentationRowY(cursor.row);
-        if (self.local_editor.active) x += @as(f32, @floatFromInt(displayCellWidth(self.local_editor.text.items[0..self.local_editor.caret]))) * self.metrics.cell_width;
+        if (self.local_editor.active) x += self.localInputAdvance(self.local_editor.text.items[0..self.local_editor.caret]);
         // During IME composition the block cursor sits after the preedit run.
         if (self.preedit) |composition| {
-            x += @as(f32, @floatFromInt(displayCellWidth(composition))) * self.metrics.cell_width;
+            x += self.localInputAdvance(composition);
         }
         var width = self.metrics.cell_width;
         var height = self.metrics.cell_height;
@@ -5609,4 +5625,30 @@ test "terminal scrollback wheel reaches native SSH output without application co
     var native = try adapter.copyProjection(a);
     defer native.deinit(a);
     try std.testing.expectEqual(before.projection.scrollback.viewport_offset, native.scrollback.viewport_offset);
+}
+
+test "custom command input sizes its text and caret advance with the actual painter" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 450);
+    var view = try TerminalViewNode.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    const Painter = struct {
+        calls: usize = 0,
+        fn measure(raw: *anyopaque, content: []const u8, _: f32, _: u16, _: bool, _: bool, _: u16, _: bool, _: f32) ?f32 {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!std.mem.eql(u8, content, "Wi中😀")) return null;
+            self.calls += 1;
+            return 71.25;
+        }
+    };
+    var painter: Painter = .{};
+    cx.text.font_props_measure_fn = Painter.measure;
+    cx.text.font_resolve_ctx = &painter;
+    try view.local_editor.adopt(cx.allocator, "Wi中😀");
+    view.renderLocalInput();
+    try std.testing.expectApproxEqAbs(@as(f32, 71.25), view.local_input_cache.w, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 71.25), view.localInputAdvance(view.local_editor.text.items[0..view.local_editor.caret]), 0.001);
+    try std.testing.expect(painter.calls >= 2);
 }

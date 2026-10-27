@@ -109,7 +109,7 @@ pub const Surface = struct {
     preedit_node: *ui.Node,
     preedit: []u8 = &.{},
     preedit_cursor: u32 = 0,
-    command_caret_cells: u32 = 0,
+    command_caret_advance: f32 = 0,
     document: std.ArrayList(u8) = .empty,
     caret_byte: u32 = 0,
     selection: ?terminal.Selection = null,
@@ -718,9 +718,9 @@ pub const Surface = struct {
             if (glyph.double_underline) |line| line.setDisplay(.none);
         }
     }
-    pub fn setCommandCaret(self: *Surface, cells: u32) void {
-        if (self.command_caret_cells == cells) return;
-        self.command_caret_cells = cells;
+    pub fn setCommandCaret(self: *Surface, advance: f32) void {
+        if (self.command_caret_advance == advance) return;
+        self.command_caret_advance = advance;
         if (self.snapshot != null) self.renderCaret() catch {};
         self.renderPreedit() catch {};
         self.cx.requestRedraw();
@@ -731,7 +731,7 @@ pub const Surface = struct {
         const show = !value.read_only and self.active and cursor.visible and cursor.row < value.projection.visible_rows.len and (self.reduced_motion or !self.focused or self.blink or !value.projection.modes.cursor_blinking);
         self.caret.setDisplay(if (show) .flex else .none);
         if (!show) return;
-        var x = self.contentPadding().left + self.bodyX() + @as(f32, @floatFromInt(cursor.col + self.command_caret_cells)) * self.options.cell_width;
+        var x = self.contentPadding().left + self.bodyX() + @as(f32, @floatFromInt(cursor.col)) * self.options.cell_width + self.command_caret_advance;
         var y = self.presentationY(cursor.row);
         var width = self.options.cell_width;
         var height = self.options.row_height;
@@ -750,6 +750,15 @@ pub const Surface = struct {
         try self.renderPreedit();
     }
     pub fn measured(self: *Surface, bytes: []const u8) f32 {
+        // Use the painter's own font/segment loop, including explicit grid
+        // advances and fallback fonts in mixed CJK/emoji preedit text.
+        if (self.cx.text.font_props_measure_fn) |measure| if (self.cx.text.font_resolve_ctx) |context| {
+            if (measure(context, bytes, self.options.font_size, self.options.weight, false, self.options.family_id == 0, self.options.family_id, false, self.options.cell_width)) |width| return width;
+        };
+        const ascii = for (bytes) |byte| {
+            if (byte >= 0x80) break false;
+        } else true;
+        if (ascii) return @as(f32, @floatFromInt(bytes.len)) * self.options.cell_width;
         if (self.cx.text.shapeText(.{ .text = bytes, .font_family = self.options.family_name, .font_family_id = self.options.family_id, .font_size = self.options.font_size, .font_weight = self.options.weight, .use_monospace = self.options.family_id == 0 })) |run| return run.total_advance else |_| return 0;
     }
     pub fn setPreedit(self: *Surface, bytes: []const u8) void {
@@ -772,6 +781,7 @@ pub const Surface = struct {
         errdefer if (!published) self.cx.allocator.free(spans);
         try props.setContent(self.cx.allocator, self.preedit);
         props.font_size = self.options.font_size;
+        props.monospace_char_width = self.options.cell_width;
         props.font_family = self.options.family_id;
         props.use_monospace_font = self.options.family_id == 0;
         props.font_weight = self.options.weight;
@@ -783,7 +793,7 @@ pub const Surface = struct {
         self.preedit_node.setText(props);
         published = true;
         self.preedit_node.setBackground(self.options.background.withAlpha(@min(self.options.background.a, 64)));
-        try absolute(self.cx, self.preedit_node, self.contentPadding().left + self.bodyX() + @as(f32, @floatFromInt(cursor.col + self.command_caret_cells)) * self.options.cell_width, self.presentationY(cursor.row), @max(self.options.cell_width, self.measured(self.preedit)), self.options.row_height);
+        try absolute(self.cx, self.preedit_node, self.contentPadding().left + self.bodyX() + @as(f32, @floatFromInt(cursor.col)) * self.options.cell_width + self.command_caret_advance, self.presentationY(cursor.row), @max(self.options.cell_width, self.measured(self.preedit)), self.options.row_height);
     }
     pub fn queueText(self: *Surface, bytes: []const u8) !void {
         if (bytes.len == 0) return;

@@ -651,3 +651,86 @@ test "sidebar Rocky discovery replaces cached Linux texture and tab retains stat
     try std.testing.expectEqual(icons.forOs(.rocky).?.icon_id.?, tab.getIcon().?.icon_id);
     try std.testing.expect(ui.Color.eql(status, tab.getIcon().?.tint));
 }
+
+test "reported input typography and narrow host hover geometry" {
+    const h = try H.init();
+    defer h.deinit();
+    const column = try ui.box(h.cx, .{ .width = .{ .px = 194 }, .height = .fill(), .direction = .column }, .{});
+    try h.root.appendChild(h.cx.allocator, column);
+    var capture: Capture = .{};
+    const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "X40-AI01-long-host-name", .detail = "root@host", .route = "本机 → 跳板 → 主机", .hops = 12, .online = true }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu, .action = Capture.hostAction });
+    try column.appendChild(h.cx.allocator, row.node);
+    const input = try ui.widgets.Input(.{ .value = try h.scope.createText("X40-AI01", .{}) }).mountResult(h.scope, h.cx);
+    input.input_container.setStyleInline(h.cx.allocator, .{ .font_size = 12, .font_weight = 500 });
+    input.state.font_size = 11;
+    try column.appendChild(h.cx.allocator, input.node);
+    h.frames();
+    try std.testing.expectEqual(@as(f32, 12), input.state.font_size);
+    try std.testing.expectEqual(@as(u16, 500), input.state.font_weight);
+    for ([_]f32{ 194, 212, 454 }) |width| {
+        column.setStyleInline(h.cx.allocator, .{ .width = .{ .px = width } });
+        h.frames();
+        const rect = row.node.globalRect();
+        h.cx.handleMouseMove(rect.x + 10, rect.y + 10);
+        h.frames();
+        const protocol = find(row.node, "sidebar.host.protocol").?.globalRect();
+        const route = row.route.globalRect();
+        const actions = row.actions.globalRect();
+        try std.testing.expect(row.name.globalRect().w > 0);
+        try std.testing.expect(row.name.globalRect().x + row.name.globalRect().w <= protocol.x + 0.1);
+        try std.testing.expect(protocol.x + protocol.w <= route.x + 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 4), actions.x - (route.x + route.w), 0.1);
+        try std.testing.expect(actions.x + actions.w <= rect.x + rect.w - 8.9);
+        h.cx.handleMouseMove(800, 700);
+        h.frames();
+    }
+}
+
+test "monospace styled input uses the painted font for caret selection scrolling and hit testing" {
+    const NativeSystem = @typeInfo(@typeInfo(@TypeOf(@as(ui.Cx, undefined).text.font_system)).optional.child).pointer.child;
+    var fonts = try NativeSystem.init(std.testing.allocator, std.testing.io);
+    defer fonts.deinit();
+    const h = try H.init();
+    defer h.deinit();
+    h.cx.text.setFontSystem(&fonts);
+    const FontPointer = @typeInfo(@typeInfo(@TypeOf(NativeSystem.findFont)).@"fn".return_type.?).error_union.payload;
+    const mono = try fonts.findFont(.{ .family = "Menlo", .size = 14, .weight = .regular });
+    defer mono.deinit();
+    const proportional = try fonts.findFont(.{ .family = "Helvetica Neue", .size = 14, .weight = .regular });
+    defer proportional.deinit();
+    const Provider = struct {
+        mono: FontPointer,
+        proportional: FontPointer,
+        fn resolve(raw: *anyopaque, options: ui.Cx.ShapeTextOpts) ?FontPointer {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return if (options.use_monospace) self.mono else self.proportional;
+        }
+    };
+    var provider: Provider = .{ .mono = mono, .proportional = proportional };
+    h.cx.text.font_resolve_fn = Provider.resolve;
+    h.cx.text.font_resolve_ctx = &provider;
+
+    const value = try h.scope.createText("WiWi中😀", .{});
+    const input = try ui.widgets.Input(.{ .value = value }).mountResult(h.scope, h.cx);
+    try h.root.appendChild(h.cx.allocator, input.node);
+    const display = input.state.text_display_node.?;
+    var props = display.getText().?;
+    props.use_monospace_font = true;
+    display.setText(props);
+    h.frames();
+    const state = input.state;
+    const line = try h.cx.text.visualLine(.{ .text = value.peek(), .font_family = "system", .font_size = state.font_size, .font_weight = state.font_weight, .use_monospace = true });
+    const end = try line.positionToCaret(.{ .byte = .{ .value = value.peek().len }, .affinity = .downstream });
+    const proportional_line = try h.cx.text.visualLine(.{ .text = value.peek(), .font_family = "system", .font_size = state.font_size, .font_weight = state.font_weight });
+    const proportional_end = try proportional_line.positionToCaret(.{ .byte = .{ .value = value.peek().len }, .affinity = .downstream });
+    try std.testing.expect(@abs(end.x.value - proportional_end.x.value) > 0.5);
+    try std.testing.expectApproxEqAbs(end.x.value, state.visualCursorAdvance(), 0.01);
+    try std.testing.expectApproxEqAbs(end.x.value, state.displayedTextAdvance(), 0.01);
+    h.cx.setFocus(input.input_container);
+    const stop = try line.positionToCaret(.{ .byte = .{ .value = 2 }, .affinity = .downstream });
+    const rect = input.input_container.globalRect();
+    h.cx.handleMouseDown(rect.x + state.padding_h + stop.x.value, rect.y + rect.h / 2, .{});
+    h.cx.handleMouseUp(rect.x + state.padding_h + stop.x.value, rect.y + rect.h / 2);
+    h.frames();
+    try std.testing.expectEqual(@as(usize, 2), state.cursor_pos);
+}

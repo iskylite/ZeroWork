@@ -17,6 +17,24 @@ pub fn set(node: *core.Node, cx: *core.Cx, content: []const u8, color: core.Colo
     node.markRenderDirty();
 }
 
+/// Editable rows must paint with the metrics used for caret and wrapping.
+/// Pin them locally so an enclosing form's typography cannot override them.
+pub fn setEditable(node: *core.Node, cx: *core.Cx, content: []const u8, color: core.Color, font_size: f32, font_weight: u16, line_height: f32) !void {
+    try set(node, cx, content, color, font_size);
+    if (node.style.ext == null or node.style.ext.?.text_font_size != font_size or node.style.ext.?.text_font_weight != font_weight) {
+        node.setStyleInline(cx.allocator, .{ .font_size = font_size, .font_weight = font_weight });
+    }
+    if (node.getText()) |old| {
+        const ratio = if (font_size > 0) line_height / font_size else 1.4;
+        if (old.font_weight != font_weight or old.line_height != ratio) {
+            var text = old;
+            text.font_weight = font_weight;
+            text.line_height = ratio;
+            node.setText(text);
+        }
+    }
+}
+
 /// A failed row copy must be retried even without a further editing event.
 pub fn retry(cx: *core.Cx, node: *core.Node) void {
     node.markLayoutDirty();
