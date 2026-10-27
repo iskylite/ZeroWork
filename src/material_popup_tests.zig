@@ -240,3 +240,44 @@ test "production auth content inherits modal and inline material across retheme 
         }
     }
 }
+
+test "global material component roles preserve theme action hues and material alpha" {
+    const saved_colors = theme.baseColors();
+    const saved_parameters = theme.materialParameters();
+    defer {
+        var tokens: @import("config/theme_registry.zig").UiTokens = undefined;
+        inline for (@typeInfo(@TypeOf(saved_colors)).@"struct".field_names) |field| {
+            const color = @field(saved_colors, field);
+            @field(tokens, field) = (@as(u32, color.r) << 24) | (@as(u32, color.g) << 16) | (@as(u32, color.b) << 8) | color.a;
+        }
+        theme.selectTokens(tokens);
+        _ = theme.setMaterialParameters(saved_parameters.transparency, saved_parameters.blur);
+    }
+    const bubble = @import("ui/ai_assistant_styles.zig");
+    const strip = @import("ui/ai_strip_styles.zig");
+    const recent = @import("ui/ai_empty_styles.zig");
+    const close = @import("ui/local_close_styles.zig");
+    const sessions = @import("ui/ai_sessions_styles.zig");
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        for ([_]f32{ 0, 50, 100 }) |transparency| {
+            _ = theme.setMaterialParameters(transparency, transparency * 0.48);
+            const c = theme.current();
+            const user = bubble.userBubble(572);
+            try std.testing.expectEqual(c.action_accent.withAlpha(c.overlay.a), user.background);
+            try std.testing.expectEqual(c.action_accent.withAlpha(c.overlay.a), user.gradient.?.from);
+            try std.testing.expectEqual(c.action_accent_2.withAlpha(c.overlay.a), user.gradient.?.to);
+            try std.testing.expectEqual(c.surface_2, recent.recent().background);
+            try std.testing.expectEqual(c.surface_2, strip.lip(theme.widgetTheme(theme.currentName())).background);
+            try std.testing.expectEqual(theme.materialParameters().blur, strip.lip(theme.widgetTheme(theme.currentName())).glass.?.backdrop_blur);
+            for ([_]bool{ false, true }) |active| {
+                try std.testing.expectEqual(c.surface_2.a, strip.activeLip(active).gradient.?.from.a);
+                try std.testing.expectEqual(c.surface_2.a, strip.activeLip(active).gradient.?.to.a);
+            }
+            // Destructive actions retain a separate theme warning hue, at full fill.
+            try std.testing.expectEqual(c.action_danger, close.button(112, true).background);
+            try std.testing.expectEqual(c.action_danger, sessions.control(true).background);
+            try std.testing.expectEqual(theme.actionForeground(c.action_danger), sessions.control(true).text_color);
+        }
+    }
+}

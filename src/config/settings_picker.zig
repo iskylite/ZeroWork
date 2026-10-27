@@ -1,7 +1,7 @@
 //! Anchored transient chip editor; all commits enter the owned settings Controller.
 const std = @import("std");
 const ui = @import("ui");
-const design = @import("../ui/design.zig");
+const theme = @import("../ui/app_theme.zig");
 const Controller = @import("settings_controller.zig").Controller;
 const values = @import("settings_values.zig");
 pub const Key = @import("settings_content_view.zig").Key;
@@ -40,14 +40,14 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, overlay_parent: *ui.Node, anchor: *ui
     const self = try cx.allocator.create(Picker);
     self.* = .{ .cx = cx, .scope = scope, .controller = controller, .key = key, .callbacks = callbacks, .anchor_id = anchor.id, .parent_id = overlay_parent.id, .root = undefined, .body = undefined, .error_label = undefined };
     try scope.onCleanup(Picker, self, Picker.cleanup);
-    self.root = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = 8 } }, .width = .{ .px = 220 }, .direction = .column, .gap = 4, .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 }, .background = ui.Color.hex(0xF7FFFB), .border = .{ .width = 0, .color = design.color.border, .radius = 8 }, .shadow = .{ .blur = 20, .offset_y = 8, .color = ui.Color.rgba(0, 0, 0, 35) }, .z_index = 100 }, .{});
+    self.root = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = 8 } }, .width = .{ .px = 220 }, .direction = .column, .gap = 4, .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 }, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .color = theme.current().border, .radius = 8 }, .shadow = .{ .blur = 20, .offset_y = 8, .color = theme.current().shadow }, .z_index = 100 }, .{});
     self.body = try ui.widgets.ScrollArea(.{ .width = 204 }).mount(scope, cx);
     try self.root.appendChild(cx.allocator, self.body.container);
     self.body.container.style.height = .{ .fit = .{} };
     self.body.content.style.gap = 4;
     for (choices(key)) |choice| {
-        const row = try ui.box(cx, .{ .width = .fill(), .padding = .{ .left = 8, .right = 8, .top = 5, .bottom = 5 }, .border = .{ .width = 0, .color = design.color.border, .radius = 5 } }, .{});
-        try row.appendChild(cx.allocator, try ui.text(cx, choice.label, .{ .font_size = 12, .color = design.color.fg }));
+        const row = try ui.box(cx, .{ .width = .fill(), .padding = .{ .left = 8, .right = 8, .top = 5, .bottom = 5 }, .border = .{ .width = 0, .color = theme.current().border, .radius = 5 } }, .{});
+        try row.appendChild(cx.allocator, try ui.textStyled(cx, choiceText, choice.label));
         const click = try cx.allocator.create(ChoiceClick);
         click.* = .{ .picker = self, .value = choice.value };
         try scope.onCleanup(ChoiceClick, click, ChoiceClick.cleanup);
@@ -58,12 +58,26 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, overlay_parent: *ui.Node, anchor: *ui
     if (!std.mem.eql(u8, key.key, "permission_mode") and !std.mem.eql(u8, key.key, "conflict_policy") and !std.mem.eql(u8, key.key, "export_format") and !std.mem.eql(u8, key.key, "cursor_style") and !std.mem.eql(u8, key.key, "socks_bind")) {
         var buffer: [256]u8 = undefined;
         const initial = try editText(controller, key, &buffer);
-        const input = try design.input(cx, scope, .{ .value = initial, .placeholder = "输入数值后按 Enter", .on_submit = cx.on(Picker, self, Picker.onSubmit) }, .{ .font_size = 12, .height = 28 });
+        const field = try ui.widgets.Input(.{ .value = initial, .placeholder = "输入数值后按 Enter", .on_submit = cx.on(Picker, self, Picker.onSubmit), .placeholder_color = theme.current().fg_3 }).mountResult(scope, cx);
+        field.state.font_size = 12;
+        field.state.line_height = 18;
+        field.state.char_width = 7.2;
+        field.state.dirty = true;
+        field.input_container.setStyleInline(cx.allocator, .{ .height = .{ .px = 28 } });
+        const input = field.node;
+        input.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 1 });
         try self.body.content.appendChild(cx.allocator, input);
         self.input_node = findFocusable(input);
     }
-    self.error_label = try ui.text(cx, "", .{ .font_size = 10, .color = design.color.danger });
+    self.error_label = try ui.textStyled(cx, errorText, "");
     try self.body.content.appendChild(cx.allocator, self.error_label);
+    try scope.createEffect(.{ .picker = self, .publication = try cx.themeSignal(scope) }, struct {
+        fn paint(ctx: anytype) void {
+            _ = ctx.publication.get();
+            const picker = ctx.picker;
+            picker.root.setStyleInline(picker.cx.allocator, .{ .background = theme.current().overlay, .glass = theme.overlayGlass(), .shadow = .{ .blur = 20, .offset_y = 8, .color = theme.current().shadow } });
+        }
+    }.paint);
     try cx.addAfterLayoutHook(self, Picker.reposition);
     return self;
 }
@@ -221,4 +235,11 @@ fn findFocusable(node: *ui.Node) ?*ui.Node {
     if (node.behavior.interaction.focusable) return node;
     for (node.children.items) |child| if (findFocusable(child)) |found| return found;
     return null;
+}
+
+fn choiceText(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 12, .color = theme.current().fg_1 };
+}
+fn errorText(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 10, .color = theme.current().danger_ink };
 }

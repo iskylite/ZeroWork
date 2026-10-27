@@ -7,7 +7,7 @@ body[data-theme="light"]{color-scheme:light;--bg-app:#e6e6ea;--surface-1-base:#f
 body[data-theme="sauber"]{color-scheme:light;--bg-app:#d9eccf;--surface-1-base:#f2fdec;--surface-2-base:#ecfbe5;--well-base:#e2f5da;--well-bd:#c9e4bd;--bg-term-base:#ecffe5;--overlay-base:#f3ffef;--card-deep-base:#f7fff2;--card-deep-ft-base:#eefbe8;--hover-base:#dbf0d6;--tab-on-base:#f8fff4;--fg-1:#0f172a;--fg-2:#46604f;--fg-3:#8aa396;--accent-base:#1345f6;--accent-2:#2563eb;--accent-ink:#1345f6;--action-accent:#1345f6;--action-accent-2:#2563eb;--action-danger:#cd473b;--ok:#10b981;--warn:#d49a0c;--danger-base:#dc4c3f;--ok-ink:#0a714f;--warn-ink:#7f5c07;--danger-ink:#ad3c32;--sel-bg:rgb(19 69 246 / 9%);--accent-30:rgb(19 69 246 / 32%);--grip:#b9d6ae;--shadow-float:0 24px 60px #15351d1c,0 8px 24px #15351d0a,0 2px 6px #15351d06;--shadow-1:0 1px 6px #15351d0d;--shadow-tab:0 1px 6px #15351d12}
 :root,body[data-theme]{--bg:var(--bg-app);--panel:var(--surface-1);--card:var(--surface-2);--card-head:var(--surface-2);--terminal:var(--bg-term);--fg:var(--fg-1);--muted:var(--fg-2);--accent:var(--accent-ink);--primary:var(--action-accent);--sel:var(--sel-bg);--good:var(--ok-ink);--danger:var(--danger-ink);--line:color-mix(in srgb,var(--fg-1) 12%,transparent);--shadow:var(--shadow-float);--mono:"JetBrains Mono",Menlo,Monaco,monospace}
 /* Only high-emphasis actions receive a gradient. Ghost/chip surfaces stay neutral. */
-.primary:not(:disabled),.btn-primary:not(:disabled){background:linear-gradient(135deg,var(--action-accent),var(--action-accent-2));color:var(--accent-fg)}
+.primary,.btn-primary{background:linear-gradient(135deg,var(--action-accent),var(--action-accent-2));color:var(--accent-fg)}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:0s!important;transition-duration:0s!important;scroll-behavior:auto!important}}
 
 /* Additional catalog themes share the same semantic roles across modules. */
@@ -25,7 +25,7 @@ button.primary:not(:disabled),a.primary,button.btn-primary:not(:disabled){box-sh
 button.primary:not(:disabled):hover,a.primary:hover,button.btn-primary:not(:disabled):hover{transform:translateY(-1.5px);box-shadow:0 6px 16px var(--accent-30),inset 0 1px 0 rgb(255 255 255 / 18%)}
 button.primary:not(:disabled):active,a.primary:active,button.btn-primary:not(:disabled):active{transform:translateY(0);box-shadow:0 2px 6px var(--accent-30)}
 button.primary:focus-visible,a.primary:focus-visible,button.btn-primary:focus-visible{filter:brightness(1.1)}
-button.danger-solid:not(:disabled){background:var(--action-danger);color:var(--accent-fg);box-shadow:0 3px 10px color-mix(in srgb,var(--action-danger) 22%,transparent)}
+button.danger-solid{background:var(--action-danger);color:var(--accent-fg);box-shadow:0 3px 10px color-mix(in srgb,var(--action-danger) 22%,transparent)}
 button.danger-solid:not(:disabled):hover{transform:translateY(-1px);box-shadow:0 6px 16px color-mix(in srgb,var(--action-danger) 22%,transparent)}
 button.danger-solid:not(:disabled):active{transform:translateY(0);box-shadow:0 2px 6px color-mix(in srgb,var(--action-danger) 22%,transparent)}
 

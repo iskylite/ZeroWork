@@ -1297,7 +1297,7 @@ const AiHost = struct {
             const box = ui.box(cx, if (message.user) @import("ui/ai_assistant_styles.zig").userBubble(bubble_content_width) else @import("ui/ai_assistant_styles.zig").assistantMessage(), .{}) catch return;
             if (message.user) box.meta.ownership.meta.test_id = "ai.message.user.bubble";
             if (message.user) setBubbleCorners(box);
-            const text = if (message.user) ui.text(cx, message.text, .{ .font_size = 11.5, .wrap = .word, .line_height = 17.0 / 11.5, .color = ui.Color.WHITE }) catch return else self.markdown(message.text) catch return;
+            const text = if (message.user) ui.text(cx, message.text, .{ .font_size = 11.5, .wrap = .word, .line_height = 17.0 / 11.5, .color = @import("ui/ai_assistant_styles.zig").userBubbleForeground() }) catch return else self.markdown(message.text) catch return;
             box.appendChild(allocator, text) catch return;
             row.appendChild(allocator, box) catch return;
             conv.appendChild(allocator, row) catch return;
@@ -1314,7 +1314,7 @@ const AiHost = struct {
             setBubbleCorners(inner);
             const bubble_text = ui.text(cx, user_text, .{
                 .font_size = 11.5,
-                .color = ui.Color.WHITE,
+                .color = @import("ui/ai_assistant_styles.zig").userBubbleForeground(),
                 .wrap = .word,
                 .line_height = 17.0 / 11.5,
             }) catch return;

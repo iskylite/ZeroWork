@@ -26,5 +26,5 @@ pub fn text(size: f32, strong: bool) ui.TextStyle {
     return .{ .font_size = size, .font_weight = if (strong) 500 else 400, .color = if (strong) theme.current().fg_1 else theme.current().fg_2, .line_height = (if (size == 11) @as(f32, 16) else 18) / size, .text_overflow = .ellipsis };
 }
 pub fn button(width: f32, danger: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = width }, .height = .{ .px = 30 }, .padding = .{}, .background = if (danger) ui.Color.rgb(0xd5, 0x3d, 0x3d) else theme.current().surface_2, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = width }, .height = .{ .px = 30 }, .padding = .{}, .background = if (danger) theme.current().action_danger else theme.current().surface_2, .text_color = if (danger) theme.actionForeground(theme.current().action_danger) else theme.current().fg_1, .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }

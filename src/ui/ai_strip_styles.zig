@@ -6,10 +6,15 @@ pub fn trigger() ui.BoxStyle {
     return .{ .position = .absolute, .width = .{ .px = 88 }, .height = .{ .px = 24 }, .padding = .{}, .background = ui.Color.TRANSPARENT, .align_items = .center, .justify = .center, .z_index = 199, .corner_radius = 7, .flex_shrink = 0 };
 }
 pub fn lip(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = 72 }, .height = .{ .px = 12 }, .padding = .{}, .direction = .row, .justify = .center, .align_items = .center, .gap = 4, .background = T.current().well, .corner_radius = 7, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 72 }, .height = .{ .px = 12 }, .padding = .{}, .direction = .row, .justify = .center, .align_items = .center, .gap = 4, .background = T.current().surface_2, .gradient = glassGradient(false), .glass = T.overlayGlass(), .corner_radius = 7, .flex_shrink = 0 };
+}
+fn glassGradient(active: bool) ui.Gradient {
+    const surface = T.current().surface_2;
+    const alpha = surface.a;
+    return .{ .from = ui.Color.lerp(surface.withAlpha(255), ui.Color.WHITE, if (active) 0.30 else 0.22).withAlpha(alpha), .to = surface.withAlpha(alpha), .direction = .vertical };
 }
 pub fn activeLip(active: bool) ui.BoxStyle {
-    return .{ .background = if (active) T.current().selection else T.current().well };
+    return .{ .background = T.current().surface_2, .gradient = glassGradient(active) };
 }
 pub fn dot(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = 3 }, .height = .{ .px = 3 }, .background = T.current().accent_ink, .border = .{ .radius = 2 }, .flex_shrink = 0 };
@@ -18,7 +23,7 @@ pub fn color(state: State, index: usize, phase: usize) ui.Color {
     const t = T.current();
     const c = switch (state) {
         .idle => t.accent_ink,
-        .working => if (index == 1) t.accent else if (index == 0) ui.Color.hex(0x06b6d4) else ui.Color.hex(0x8b5cf6),
+        .working => t.accent,
         .approval => t.warn,
         .success => t.ok,
         .failed => t.danger,

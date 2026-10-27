@@ -360,7 +360,7 @@ pub const Binding = struct {
         result.font_weight = 500;
         result.gap = 6;
         result.background = styles.theme.current().action_accent;
-        result.gradient = .{ .from = if (available) styles.theme.current().action_accent else ui.Color.hex(0x7c73fa), .to = if (available) styles.theme.current().action_accent_2 else styles.theme.current().action_accent, .direction = .diagonal };
+        result.gradient = .{ .from = styles.theme.current().action_accent, .to = styles.theme.current().action_accent_2, .direction = .diagonal };
         result.text_color = styles.theme.actionForeground(styles.theme.current().action_accent);
         result.opacity = if (available) 1 else 0.4;
         return result;
@@ -560,7 +560,7 @@ pub const Binding = struct {
             fn run(args: anytype) void {
                 const disabled = args.bound.save_disabled.get();
                 const theme = styles.theme.current();
-                args.node.setStyleInline(args.bound.cx.allocator, .{ .background = theme.action_accent, .gradient = .{ .from = if (disabled) ui.Color.hex(0x7c73fa) else theme.action_accent, .to = if (disabled) theme.action_accent else theme.action_accent_2, .direction = .diagonal }, .opacity = if (disabled) @as(f32, 0.4) else @as(f32, 1) });
+                args.node.setStyleInline(args.bound.cx.allocator, .{ .background = theme.action_accent, .gradient = .{ .from = theme.action_accent, .to = theme.action_accent_2, .direction = .diagonal }, .opacity = if (disabled) @as(f32, 0.4) else @as(f32, 1) });
             }
         }.run);
         try tip.trigger.appendChild(cx.allocator, node);

@@ -48,17 +48,11 @@ pub fn actions() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .justify = .end, .gap = 8 };
 }
 pub fn control(danger: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = if (danger) 96 else 60 }, .height = .{ .px = 28 }, .padding = .{}, .font_size = 11.5, .font_weight = 500, .background = if (danger) dangerBackground() else T.current().surface_2, .text_color = if (danger) ui.Color.WHITE else T.current().fg_1, .corner_radius = 8, .border = .{ .width = 0, .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = if (danger) 96 else 60 }, .height = .{ .px = 28 }, .padding = .{}, .font_size = 11.5, .font_weight = 500, .background = if (danger) dangerBackground() else T.current().surface_2, .text_color = if (danger) T.actionForeground(T.current().action_danger) else T.current().fg_1, .corner_radius = 8, .border = .{ .width = 0, .radius = 8 }, .flex_shrink = 0 };
 }
 
 fn dangerBackground() ui.Color {
-    const base = T.baseColors();
-    if (!ui.Color.eql(base.danger, T.colors(T.currentName()).danger)) return base.danger;
-    return switch (T.currentName()) {
-        .dark => ui.arb.hex(0xd53d3d),
-        .light => ui.arb.hex(0xbb2020),
-        .sauber => ui.arb.hex(0xcd473b),
-    };
+    return T.current().action_danger;
 }
 
 pub fn popover() ui.BoxStyle {

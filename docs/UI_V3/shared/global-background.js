@@ -9,11 +9,20 @@
  if(query.has('material-t'))effective.transparency=clamp(query.get('material-t'),0,100);if(query.has('material-b'))effective.blur=clamp(query.get('material-b'),0,96);
  let fixture=query.get('background')==='continuity';
  document.documentElement.dataset.globalEmbedded=String(embedded);
- const syncScheme=()=>{document.documentElement.style.colorScheme=getComputedStyle(document.body).colorScheme};syncScheme();new MutationObserver(syncScheme).observe(document.body,{attributes:true,attributeFilter:['data-theme']});
+ // Match native bubble ink against the theme overlay after material alpha.
+ function syncBubbleInk(){
+  const styles=getComputedStyle(document.body),rgb=name=>{let hex=styles.getPropertyValue(name).trim().replace('#','');if(hex.length===3)hex=[...hex].map(x=>x+x).join('');return [0,2,4].map(i=>parseInt(hex.slice(i,i+2),16));};
+  const surface=rgb('--overlay-base'),accent=rgb('--action-accent'),alpha=Math.round(255*(1-effective.transparency/100*.65))/255;
+  const paint=surface.map((v,i)=>Math.floor(v+(accent[i]-v)*alpha));
+  const lum=color=>color.reduce((sum,v,i)=>{const x=v/255;return sum+[.2126,.7152,.0722][i]*(x<=.04045?x/12.92:((x+.055)/1.055)**2.4);},0);
+  const l=lum(paint),dark=lum([16,16,20]);
+  document.body.style.setProperty('--bubble-fg',1.05/(l+.05)>=(Math.max(l,dark)+.05)/(Math.min(l,dark)+.05)?'#fff':'#101014');
+ }
+ const syncScheme=()=>{document.documentElement.style.colorScheme=getComputedStyle(document.body).colorScheme;syncBubbleInk()};syncScheme();new MutationObserver(syncScheme).observe(document.body,{attributes:true,attributeFilter:['data-theme']});
  const root=document.querySelector('#desktop,#app,#notes-app,.settings-window');if(!root)return;root.classList.add('zw-background-root');
  let image=null;if(!embedded){const layer=document.createElement('div');layer.className='zw-global-background';layer.ariaHidden='true';image=document.createElement('div');image.className='zw-global-background-image';layer.append(image);root.prepend(layer);}
  const frames=()=>[...document.querySelectorAll('object[data-document-host],iframe')].map(n=>n.contentWindow||n.contentDocument?.defaultView).filter(Boolean);
- function apply(value){effective={...effective,...value,transparency:clamp(value.transparency??effective.transparency,0,100),blur:clamp(value.blur??effective.blur,0,96)};const t=effective.transparency/100,style=document.body.style;style.setProperty('--material-transparency',t);style.setProperty('--material-blur',effective.blur+'px');style.setProperty('--material-scrim-alpha',(1-t)*.25);for(const [role,k]of Object.entries(coefficients))style.setProperty('--'+role+'-alpha',(100*(1-Math.min(1,Math.max(0,t*k)))).toFixed(4)+'%');document.body.dataset.materialTransparency=String(effective.transparency);document.body.dataset.materialBlur=String(effective.blur);
+ function apply(value){effective={...effective,...value,transparency:clamp(value.transparency??effective.transparency,0,100),blur:clamp(value.blur??effective.blur,0,96)};const t=effective.transparency/100,style=document.body.style;style.setProperty('--material-transparency',t);style.setProperty('--material-blur',effective.blur+'px');style.setProperty('--material-scrim-alpha',(1-t)*.25);for(const [role,k]of Object.entries(coefficients))style.setProperty('--'+role+'-alpha',(100*(1-Math.min(1,Math.max(0,t*k)))).toFixed(4)+'%');document.body.dataset.materialTransparency=String(effective.transparency);document.body.dataset.materialBlur=String(effective.blur);syncBubbleInk();
   if(image){const url=fixture?new URL('../assets/backgrounds/continuity.svg',sourceURL).href:effective.imageEnabled&&/^(data:image\/|blob:)/.test(effective.imageURL||'')?effective.imageURL:null;image.style.backgroundImage=url?'url("'+url+'")':'none';image.style.opacity=String(1-t);image.style.filter='blur('+effective.blur+'px)';image.style.backgroundSize=effective.fit==='fit'?'contain':effective.fit==='tile'||effective.fit==='center'?'auto':'cover';image.style.backgroundPosition=(effective.alignment||'center').replace('-',' ');image.style.backgroundRepeat=effective.fit==='tile'?'repeat':'no-repeat';}
   const tControl=document.querySelector('#material-review-transparency'),bControl=document.querySelector('#material-review-blur');if(tControl)tControl.value=effective.transparency;if(bControl)bControl.value=effective.blur;
  }

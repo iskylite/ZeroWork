@@ -55,7 +55,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !
     }
     if (configured) if (actions.history) |run| {
         const click = try scope.createState(Click, .{ .context = actions.context, .run = run });
-        const recent = try ui.widgets.Button(.{ .variant = .ghost, .block = true, .a11y_label = "最近记录 · 全部连接的 AI 会话", .base_style = S.recent(), .hover_style = .{ .background = ui.Color.hex(0x101014) }, .pressed_style = .{ .background = ui.Color.hex(0x101014) }, .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+        const recent = try ui.widgets.Button(.{ .variant = .ghost, .block = true, .a11y_label = "最近记录 · 全部连接的 AI 会话", .base_style = S.recent(), .hover_style = .{ .background = @import("app_theme.zig").current().hover }, .pressed_style = .{ .background = @import("app_theme.zig").current().hover }, .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
         recent.meta.ownership.meta.test_id = "ai.empty.recent";
         for (recent.children.items) |child| child.setDisplay(.none);
         recent.setStyleInline(cx.allocator, .{ .justify = .start, .gap = 6 });

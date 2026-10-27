@@ -1165,7 +1165,7 @@ const ModelNameClamp = struct {
 fn providerBackground(open: bool) ui.Color {
     const c = S.theme.current();
     if (!open) return c.well;
-    return ui.Color.rgba(@intCast((@as(u16, c.well.r) * 62 + @as(u16, c.surface_2.r) * 38) / 100), @intCast((@as(u16, c.well.g) * 62 + @as(u16, c.surface_2.g) * 38) / 100), @intCast((@as(u16, c.well.b) * 62 + @as(u16, c.surface_2.b) * 38) / 100), 255);
+    return ui.Color.lerp(c.well, c.surface_2, 0.38);
 }
 
 fn displayName(p: config.AiProvider) []const u8 {
@@ -1195,4 +1195,17 @@ fn contextText(value: u32, buffer: []u8) ![]const u8 {
     if (value >= 1_000_000) return std.fmt.bufPrint(buffer, "{d:.1}M tokens", .{@as(f64, @floatFromInt(value)) / 1_000_000});
     if (value >= 1000) return std.fmt.bufPrint(buffer, "{d:.0}K tokens", .{@as(f64, @floatFromInt(value)) / 1000});
     return std.fmt.bufPrint(buffer, "{d} tokens", .{value});
+}
+
+test "global material expanded provider preserves mixed surface alpha" {
+    const theme = S.theme;
+    const saved = theme.materialParameters();
+    defer _ = theme.setMaterialParameters(saved.transparency, saved.blur);
+    for ([_]f32{ 0, 50, 100 }) |percent| {
+        _ = theme.setMaterialParameters(percent, 0);
+        const c = theme.current();
+        try std.testing.expectEqual(c.well, providerBackground(false));
+        try std.testing.expectEqual(ui.Color.lerp(c.well, c.surface_2, 0.38), providerBackground(true));
+        if (percent > 0) try std.testing.expect(providerBackground(true).a < 255);
+    }
 }

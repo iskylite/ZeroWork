@@ -29,6 +29,22 @@ test "anchored picker mounts and disposes without borrowed editing buffers" {
     try root.appendChild(cx.allocator, anchor);
     const mounted = try picker.mount(cx, scope, root, anchor, &controller, .{ .section = "ui", .key = "font_family" }, .{ .context = &context, .committed = call, .dismiss = call, .choose_directory = dir });
     try root.appendChild(cx.allocator, mounted.root);
+    const theme = @import("ui/app_theme.zig");
+    const old_theme = theme.currentName();
+    const old_material = theme.materialParameters();
+    defer {
+        theme.select(old_theme);
+        _ = theme.setMaterialParameters(old_material.transparency, old_material.blur);
+    }
+    for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        _ = theme.setMaterialParameters(75, 24);
+        cx.setTheme(theme.widgetTheme(name));
+        cx.layout();
+        _ = cx.render();
+        try std.testing.expectEqual(theme.current().overlay, mounted.root.getBackground());
+        try std.testing.expectEqual(theme.current().fg_1, mounted.body.content.children.items[0].children.items[0].getText().?.color);
+    }
     var font = [_]u8{ 'M', 'e', 'n', 'l', 'o' };
     try picker.commit(&controller, .{ .section = "ui", .key = "font_family" }, &font);
     @memset(&font, 'x');

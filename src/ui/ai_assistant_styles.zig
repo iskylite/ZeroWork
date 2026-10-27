@@ -50,10 +50,16 @@ pub fn userBubbleMaxWidth(content_width: f32) f32 {
     return @max(0, content_width) * 0.75;
 }
 pub fn userBubble(content_width: f32) ui.BoxStyle {
-    // HTML .ap-user-bubble uses this opaque fixed gradient in every theme.
-    // Zenit's public Gradient supports directions rather than CSS angles;
-    // diagonal is the closest available native direction to CSS 115deg.
-    return .{ .max_width = userBubbleMaxWidth(content_width), .padding = .{ .left = 13, .right = 13, .top = 9, .bottom = 9 }, .background = ui.Color.hex(0x5550c5), .gradient = .{ .from = ui.Color.hex(0x5550c5), .to = ui.Color.hex(0x7163e9), .direction = .diagonal }, .border = .{ .width = 0, .radius = 12 }, .corner_radii = .{ .each = .{ 12, 12, 4, 12 } } };
+    // Theme action hue with the global overlay alpha, shared with HTML.
+    const c = theme.current();
+    const start = c.action_accent.withAlpha(theme.materialAlpha("overlay"));
+    const end = c.action_accent_2.withAlpha(start.a);
+    return .{ .max_width = userBubbleMaxWidth(content_width), .padding = .{ .left = 13, .right = 13, .top = 9, .bottom = 9 }, .background = start, .gradient = .{ .from = start, .to = end, .direction = .diagonal }, .border = .{ .width = 0, .radius = 12 }, .corner_radii = .{ .each = .{ 12, 12, 4, 12 } } };
+}
+pub fn userBubbleForeground() ui.Color {
+    const c = theme.baseColors();
+    const alpha = @as(f32, @floatFromInt(theme.materialAlpha("overlay"))) / 255;
+    return theme.actionForeground(ui.Color.lerp(c.overlay, c.action_accent, alpha));
 }
 pub fn messageRow(user: bool) ui.BoxStyle {
     // Align the measured, max-width-clamped bubble on the cross axis. Row
