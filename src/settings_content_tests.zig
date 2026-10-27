@@ -613,12 +613,12 @@ test "global material settings keep flat sections and shared chooser roles while
         const rebuilt = try f.mount();
         try std.testing.expectEqualStrings("97", inputFor(rebuilt, "settings.field.font_size").getText());
         try std.testing.expectEqual(@as(u16, 15), f.controller.model.value.ui.font_size);
-        try std.testing.expectEqual(@as(u8, 255), rebuilt.root.getBackground().a);
+        try std.testing.expectEqual(theme.current().surface_1.a, rebuilt.root.getBackground().a);
         try std.testing.expect(rebuilt.save_button.behavior.interaction.a11y.?.disabled);
     }
 }
 
-test "settings search repaints its retained opaque input after material readiness without losing composition" {
+test "settings search repaints its retained translucent input after material readiness without losing composition" {
     const theme = @import("ui/app_theme.zig");
     const previous_parameters = theme.materialParameters();
     defer _ = theme.setMaterialParameters(previous_parameters.transparency, previous_parameters.blur);
@@ -648,7 +648,7 @@ test "settings search repaints its retained opaque input after material readines
         cx.layout();
         const rect = input.node.globalRect();
         const id = input.input_container.id;
-        try std.testing.expectEqual(@as(u8, 255), input.input_container.getBackground().a);
+        try std.testing.expectEqual(theme.current().well.a, input.input_container.getBackground().a);
         cx.setFocus(input.input_container);
         inputEvent(input.state, .{ .ime_preedit = .{ .text = "ni", .cursor_utf8_offset = 2 } });
         const cursor = input.state.cursor_pos;
@@ -673,7 +673,7 @@ test "settings search repaints its retained opaque input after material readines
         publication.publish(cx, theme.widgetTheme(name));
         view.styles.paintSearch(cx, &input);
         try std.testing.expectEqual(theme.current().well, input.input_container.getBackground());
-        try std.testing.expectEqual(@as(u8, 255), input.input_container.getBackground().a);
+        try std.testing.expectEqual(theme.current().well.a, input.input_container.getBackground().a);
         try std.testing.expect(input.state.imeIsComposing());
     }
 }

@@ -19,10 +19,10 @@ pub fn strip() ui.BoxStyle {
 }
 pub fn tab(width: f32, active: bool) ui.BoxStyle {
     const c = theme.current();
-    return .{ .shadow = if (active) .{ .blur = if (theme.currentName() == .dark) 8 else 6, .offset_y = if (theme.currentName() == .dark) 2 else 1, .color = c.shadow.withAlpha(if (theme.currentName() == .dark) 89 else 18) } else .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .width = .{ .px = width }, .height = .{ .px = height }, .direction = .row, .align_items = .center, .background = if (active) c.tab_on else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 8 }, .flex_shrink = 0 };
+    return .{ .shadow = if (active) .{ .blur = if (theme.currentName() == .dark) 8 else 6, .offset_y = if (theme.currentName() == .dark) 2 else 1, .color = c.shadow.withAlpha(if (theme.currentName() == .dark) 89 else 18) } else .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .width = .{ .px = width }, .height = .{ .px = height }, .direction = .row, .align_items = .center, .background = if (active) c.tab_on else ui.Color.TRANSPARENT, .border = .{ .width = if (active) 1 else 0, .color = c.fg_1.withAlpha(18), .radius = 9 }, .flex_shrink = 0 };
 }
 pub fn underline(width: f32) ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 10 }, .top = .{ .px = height - 3 } }, .width = .{ .px = width - 20 }, .height = .{ .px = 3 }, .background = theme.current().accent, .border = .{ .radius = 1.25 } };
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 12 }, .top = .{ .px = height - 5 } }, .width = .{ .px = width - 24 }, .height = .{ .px = 2 }, .background = theme.current().accent, .border = .{ .radius = 1.25 } };
 }
 pub fn title() ui.TextStyle {
     return .{ .font_size = title_font, .font_weight = title_weight, .color = theme.current().fg_1, .line_height = 1.5, .text_overflow = .ellipsis, .selectable = false };
@@ -31,7 +31,7 @@ pub fn iconSlot() ui.BoxStyle {
     return .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .position = .absolute, .inset = .{ .left = .{ .px = 10 }, .top = .{ .px = (height - 14) / 2 } }, .align_items = .center, .justify = .center, .flex_shrink = 0 };
 }
 pub fn close(width: f32) ui.BoxStyle {
-    return .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .position = .absolute, .inset = .{ .left = .{ .px = width - 26 }, .top = .{ .px = (height - 20) / 2 } }, .padding = .{ .left = 4, .right = 4, .top = 4, .bottom = 4 }, .gap = 0, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 5 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .position = .absolute, .inset = .{ .left = .{ .px = width - 26 }, .top = .{ .px = (height - 20) / 2 } }, .padding = ui.Padding.ZERO, .align_items = .center, .justify = .center, .gap = 0, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 5 }, .flex_shrink = 0 };
 }
 pub fn control(width: f32) ui.BoxStyle {
     return .{ .width = .{ .px = width }, .height = .{ .px = 28 }, .padding = .{}, .border = .{ .radius = 6 }, .flex_shrink = 0 };

@@ -145,9 +145,8 @@ pub const Wizard = struct {
         }
         if (self.plugin_registry.find(self.protocol_id) == null and count != 0) self.protocol_id = self.protocol_options[0].value;
         self.sig_protocol.?.set(if (count == 0) null else self.protocol_id);
-        const close = try ui.widgets.Button(.{ .label = "", .variant = .ghost, .a11y_label = "关闭向导", .on_click = cx.on(Wizard, self, cancel) }).mount(scope, cx);
+        const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 14), .icon_tint = S.theme.current().fg_2, .base_style = .{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .padding = .{}, .background = ui.Color.TRANSPARENT, .corner_radius = 7 }, .a11y_label = "关闭向导", .on_click = cx.on(Wizard, self, cancel) }).mount(scope, cx);
         close.meta.ownership.meta.test_id = "wizard.close";
-        try close.appendChild(self.alloc, try ui.iconTint(cx, ui.icons.x, S.theme.current().fg_2, S.icon(14)));
         try header.appendChild(self.alloc, close);
         try modal.body.appendChild(self.alloc, header);
         const body = try ui.box(cx, S.body(), .{});

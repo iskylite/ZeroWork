@@ -421,6 +421,7 @@ pub const Workspace = struct {
     status_feedback: ?struct { context: *anyopaque, publish: *const fn (*anyopaque, ?identity.ContentOwner, []const u8, StatusKind) void } = null,
     command_output: ?*TerminalViewNode = null,
     creation_group: ?u32 = null,
+    creation_tab_color: ?u32 = null,
     /// Status-bar grid-size label; bound to the active tab's terminal so the
     /// live PTY dimensions (frame_cols/frame_rows) replace the static text.
     grid_node: ?*ui.Node = null,
@@ -1144,6 +1145,7 @@ pub const Workspace = struct {
     pub fn refreshNotificationAttention(_: *Workspace) void {}
 
     fn installTabModel(self: *Workspace, tab: *SessionTab) !void {
+        tab.tab_color = self.creation_tab_color;
         try self.model.append(tab.tab_id, tab.content_owner, tab.titleSlice());
         errdefer self.model.completeClose(tab.tab_id, tab.content_owner) catch {};
         const detail = if (tab.host_snapshot) |saved| blk: {
@@ -1318,10 +1320,9 @@ pub const Workspace = struct {
             title.setStyleInline(self.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 30 }, .top = .{ .px = (tab_styles.height - 18) / 2 } }, .width = .{ .px = width - 62 }, .height = .{ .px = 18 }, .overflow_hidden = true });
             try tab_box.appendChild(self.cx.allocator, title);
             const close_ctx = try self.newTabClickCtx(index);
-            const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = if (group_id != null) "关闭组内全部会话" else "关闭页签", .base_style = tab_styles.close(width), .on_click = ui.Cx.simpleHandler(onCloseTabTrampoline, close_ctx) }).mount(scope, self.cx);
+            const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 12), .icon_tint = self.palette.fg_muted, .a11y_label = if (group_id != null) "关闭组内全部会话" else "关闭页签", .base_style = tab_styles.close(width), .on_click = ui.Cx.simpleHandler(onCloseTabTrampoline, close_ctx) }).mount(scope, self.cx);
             // Button's recipe resolves chrome but does not forward positioning.
             close.setStyleInline(self.allocator, tab_styles.close(width));
-            try close.appendChild(self.allocator, try ui.iconTint(self.cx, ui.icons.x, self.palette.fg_muted, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
             close.meta.ownership.meta.test_id = if (group_id != null) "groups.close" else try std.fmt.bufPrint(&close_ctx.test_id, "tabs.close.{d}", .{@backingInt(model_tab.id)});
             close.behavior.events.capture_context = close_ctx;
             close.behavior.events.on_event_capture = onCloseControlEvent;
@@ -3976,11 +3977,14 @@ pub const Workspace = struct {
         const source = self.tabs.items[index];
         if (source.archived) return error.ArchivedSessionReadOnly;
         const previous_group = self.creation_group;
+        const previous_color = self.creation_tab_color;
+        self.creation_tab_color = source.tab_color;
         const previous_output = self.command_output;
         self.creation_group = self.creationGroupFor(source.id);
         self.command_output = null;
         defer {
             self.creation_group = previous_group;
+            self.creation_tab_color = previous_color;
             self.command_output = previous_output;
         }
         if (source.local) {
@@ -5963,7 +5967,10 @@ test "group session creation new and duplicate preserve group without duplicate 
     const created = workspace.tabs.items[1];
     try std.testing.expect(roster.findById(group).?.contains(created.id));
     try std.testing.expectEqual(workspace.groupTabId(group), workspace.model.tabs.items[workspace.model.indexOf(created.tab_id).?].container);
+    workspace.sessionTab(original).?.tab_color = 0x67b88b;
     try workspace.duplicateSessionFromTab(workspace.tabIndex(original).?);
+    try std.testing.expectEqual(@as(?u32, 0x67b88b), workspace.tabs.items[2].tab_color);
+    try std.testing.expectEqual(@as(?u32, null), workspace.creation_tab_color);
     try std.testing.expectEqual(@as(usize, 2), factory.calls);
     try std.testing.expectEqual(@as(usize, 3), workspace.tabs.items.len);
     try std.testing.expectEqual(@as(usize, 3), roster.findById(group).?.members.items.len);

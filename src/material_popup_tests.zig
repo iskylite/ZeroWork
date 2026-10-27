@@ -269,7 +269,7 @@ test "global material component roles preserve theme action hues and material al
             try std.testing.expectEqual(c.action_accent_2.withAlpha(c.overlay.a), user.gradient.?.to);
             try std.testing.expectEqual(ui.Color.TRANSPARENT, recent.recent().background);
             try std.testing.expectEqual(c.surface_2, strip.lip(theme.widgetTheme(theme.currentName())).background);
-            try std.testing.expectEqual(theme.materialParameters().blur, strip.lip(theme.widgetTheme(theme.currentName())).glass.?.backdrop_blur);
+            try std.testing.expectEqual(@max(12, theme.materialParameters().blur), strip.lip(theme.widgetTheme(theme.currentName())).glass.?.backdrop_blur);
             for ([_]bool{ false, true }) |active| {
                 try std.testing.expectEqual(c.surface_2.a, strip.activeLip(active).gradient.?.from.a);
                 try std.testing.expectEqual(c.surface_2.a, strip.activeLip(active).gradient.?.to.a);

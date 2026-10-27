@@ -2,7 +2,9 @@
 // Shared effective material settings. The image switch never gates surface derivation.
 (()=>{
  const sourceURL=document.currentScript?.src||location.href,query=new URLSearchParams(location.search),embedded=query.has('integrated')||query.has('embed');
- const coefficients={'surface-1':.95,'surface-2':.90,well:.80,overlay:.65,hover:.75,'tab-on':.65,'card-deep':.90,'card-deep-ft':.80};
+ // Final [base transparency P0, slider span D, maximum transparency M].
+ const roles={'surface-1':[0.446777856,0.670166784,0.95],'surface-2':[0.305690112,0.752467968,0.9],'well':[0.211631616,0.728953344,0.8],'overlay':[0.117573120,0.646652160,0.65],'hover':[0.235146240,0.646652160,0.75],'tab-on':[0.164602368,0.599622912,0.65],'card-deep':[0.305690112,0.752467968,0.9],'card-deep-ft':[0.211631616,0.728953344,0.8]};
+ const materialAlpha=(role,t)=>{const [p0,d,m]=roles[role];return Math.round(255*(1-Math.min(m,p0+d*t)))/255;};
  const clamp=(v,min,max)=>Math.max(min,Math.min(max,Number.isFinite(+v)?+v:min));
  const stored=()=>{try{return JSON.parse(localStorage.getItem('zw-settings-v3-design')||'{}').values||{}}catch{return {}}};
  const saved=stored();let effective={transparency:clamp(saved.background_transparency??0,0,100),blur:clamp(saved.blur_px??0,0,96),imageEnabled:!!saved.background_enabled,imageURL:/^(data:image\/|blob:)/.test(saved.background_path||'')?saved.background_path:'',fit:saved.background_fit||'fill',alignment:saved.background_alignment||'center'};
@@ -12,7 +14,7 @@
  // Match native bubble ink against the theme overlay after material alpha.
  function syncBubbleInk(){
   const styles=getComputedStyle(document.body),rgb=name=>{let hex=styles.getPropertyValue(name).trim().replace('#','');if(hex.length===3)hex=[...hex].map(x=>x+x).join('');return [0,2,4].map(i=>parseInt(hex.slice(i,i+2),16));};
-  const surface=rgb('--overlay-base'),accent=rgb('--action-accent'),alpha=Math.round(255*(1-effective.transparency/100*.65))/255;
+  const surface=rgb('--overlay-base'),accent=rgb('--action-accent'),alpha=materialAlpha('overlay',effective.transparency/100);
   const paint=surface.map((v,i)=>Math.floor(v+(accent[i]-v)*alpha));
   const lum=color=>color.reduce((sum,v,i)=>{const x=v/255;return sum+[.2126,.7152,.0722][i]*(x<=.04045?x/12.92:((x+.055)/1.055)**2.4);},0);
   const l=lum(paint),dark=lum([16,16,20]);
@@ -22,7 +24,7 @@
  const root=document.querySelector('#desktop,#app,#notes-app,.settings-window');if(!root)return;root.classList.add('zw-background-root');
  let image=null;if(!embedded){const layer=document.createElement('div');layer.className='zw-global-background';layer.ariaHidden='true';image=document.createElement('div');image.className='zw-global-background-image';layer.append(image);root.prepend(layer);}
  const frames=()=>[...document.querySelectorAll('object[data-document-host],iframe')].map(n=>n.contentWindow||n.contentDocument?.defaultView).filter(Boolean);
- function apply(value){effective={...effective,...value,transparency:clamp(value.transparency??effective.transparency,0,100),blur:clamp(value.blur??effective.blur,0,96)};const t=effective.transparency/100,style=document.body.style;style.setProperty('--material-transparency',t);style.setProperty('--material-blur',effective.blur+'px');style.setProperty('--material-scrim-alpha',(1-t)*.25);for(const [role,k]of Object.entries(coefficients))style.setProperty('--'+role+'-alpha',(100*(1-Math.min(1,Math.max(0,t*k)))).toFixed(4)+'%');document.body.dataset.materialTransparency=String(effective.transparency);document.body.dataset.materialBlur=String(effective.blur);syncBubbleInk();
+ function apply(value){effective={...effective,...value,transparency:clamp(value.transparency??effective.transparency,0,100),blur:clamp(value.blur??effective.blur,0,96)};const t=effective.transparency/100,style=document.body.style;style.setProperty('--material-transparency',t);style.setProperty('--material-blur',effective.blur+'px');style.setProperty('--overlay-blur',Math.max(12,effective.blur)+'px');style.setProperty('--material-scrim-alpha',(1-t)*.25);for(const role of Object.keys(roles))style.setProperty('--'+role+'-alpha',(100*materialAlpha(role,t)).toFixed(4)+'%');document.body.dataset.materialTransparency=String(effective.transparency);document.body.dataset.materialBlur=String(effective.blur);syncBubbleInk();
   if(image){const url=fixture?new URL('../assets/backgrounds/continuity.svg',sourceURL).href:effective.imageEnabled&&/^(data:image\/|blob:)/.test(effective.imageURL||'')?effective.imageURL:null;image.style.backgroundImage=url?'url("'+url+'")':'none';image.style.opacity=String(1-t);image.style.filter='blur('+effective.blur+'px)';image.style.backgroundSize=effective.fit==='fit'?'contain':effective.fit==='tile'||effective.fit==='center'?'auto':'cover';image.style.backgroundPosition=(effective.alignment||'center').replace('-',' ');image.style.backgroundRepeat=effective.fit==='tile'?'repeat':'no-repeat';}
   const tControl=document.querySelector('#material-review-transparency'),bControl=document.querySelector('#material-review-blur');if(tControl)tControl.value=effective.transparency;if(bControl)bControl.value=effective.blur;
  }

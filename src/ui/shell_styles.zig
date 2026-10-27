@@ -2,10 +2,11 @@ const std = @import("std");
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 
-pub const outer: f32 = 8;
-pub const gap: f32 = outer;
-pub const title_height: f32 = 40;
-pub const status_height: f32 = 30;
+// Final shell geometry in macOS points: outer 5, gap 8, title 36, status 26.
+pub const outer: f32 = 5;
+pub const gap: f32 = 8;
+pub const title_height: f32 = @import("v3_geometry.zig").title_height;
+pub const status_height: f32 = @import("v3_geometry.zig").status_height;
 pub const sidebar_width: f32 = @import("sidebar_model.zig").default_width;
 pub const sidebar_collapsed: f32 = 0;
 pub const card_radius: f32 = 11;

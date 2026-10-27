@@ -41,8 +41,10 @@ var material_visible: bool = false;
 var material_transparency: f32 = 0;
 var material_blur: f32 = 0;
 
-/// Ratios of the global transparency, not independent surface opacity values.
-/// Overlay retains at least 35% paint; stacked controls share the window material.
+/// Maximum background transparency by role, not opacity and not tree opacity.
+/// Lower layers reveal more of the shared window backdrop; overlays stay readable.
+/// Current visual contract and native captures: docs/UI_V3/LAYER_MATERIALS.md.
+/// Each role keeps its readable minimum opacity at the slider limit.
 pub const material_ratio = struct {
     pub const surface_1: f32 = 0.95;
     pub const surface_2: f32 = 0.90;
@@ -64,26 +66,62 @@ pub fn setMaterialParameters(transparency: f32, blur: f32) bool {
 pub fn materialParameters() struct { transparency: f32, blur: f32 } {
     return .{ .transparency = material_transparency, .blur = material_blur };
 }
+/// Final T=0 background values (transparency P; alpha8 is opacity):
+/// role        P before quantization    alpha8   actual opacity
+/// surface_1   44.67778560%              141      55.294118%
+/// surface_2   30.56901120%              177      69.411765%
+/// well        21.16316160%              201      78.823529%
+/// overlay     11.75731200%              225      88.235294%
+/// hover       23.51462400%              195      76.470588%
+/// tab_on      16.46023680%              213      83.529412%
+pub const material_transparency_base = struct {
+    pub const surface_1: f32 = 0.446777856;
+    pub const surface_2: f32 = 0.305690112;
+    pub const well: f32 = 0.211631616;
+    pub const overlay: f32 = 0.117573120;
+    pub const hover: f32 = 0.235146240;
+    pub const tab_on: f32 = 0.164602368;
+};
+
+/// Final transparency increment across the full slider range, capped per role.
+pub const material_transparency_span = struct {
+    pub const surface_1: f32 = 0.670166784;
+    pub const surface_2: f32 = 0.752467968;
+    pub const well: f32 = 0.728953344;
+    pub const overlay: f32 = 0.646652160;
+    pub const hover: f32 = 0.646652160;
+    pub const tab_on: f32 = 0.599622912;
+};
 pub fn materialAlpha(comptime role: []const u8) u8 {
-    return @intFromFloat(@round(255 * (1 - material_transparency / 100 * @field(material_ratio, role))));
+    const base = @field(material_transparency_base, role);
+    const span = @field(material_transparency_span, role);
+    const transparency = @min(@field(material_ratio, role), base + span * material_transparency / 100);
+    // Apply background alpha only; text, icons and subtree opacity stay intact.
+    return @intFromFloat(@round(255 * (1 - transparency)));
 }
+/// Blur already-painted window content behind overlays, never their foreground.
+/// Even when the configured background blur is zero, use 12 logical px to suppress
+/// lower-layer text ghosting. This samples app content, not the desktop.
 pub fn overlayGlass() ui.GlassParams {
-    return .{ .backdrop_blur = material_blur, .capture_current_target = false, .glass_intensity = 0, .specular_opacity = 0, .refraction_level = 0, .warp_gain = 0 };
+    return .{ .backdrop_blur = @max(12, material_blur), .capture_current_target = false, .glass_intensity = 0, .specular_opacity = 0, .refraction_level = 0, .warp_gain = 0 };
 }
 
 test "global material parameters derive role ratios with readable overlay at endpoints" {
     const saved = materialParameters();
     defer _ = setMaterialParameters(saved.transparency, saved.blur);
-    for ([_]f32{ 0, 25, 75, 100 }) |percent| {
+    for ([_]f32{ 0, 25, 75, 100 }, [_]u8{ 225, 184, 101, 89 }) |percent, overlay_alpha| {
         _ = setMaterialParameters(percent, percent * 0.5);
-        try std.testing.expectEqual(@as(u8, @intFromFloat(@round(255 * (1 - percent / 100 * 0.65)))), current().overlay.a);
+        try std.testing.expectEqual(overlay_alpha, current().overlay.a);
         try std.testing.expect(current().overlay.a >= 89);
-        try std.testing.expectEqual(percent * 0.5, overlayGlass().backdrop_blur);
+        try std.testing.expect(current().surface_1.a < current().surface_2.a);
+        try std.testing.expect(current().surface_2.a < current().well.a);
+        try std.testing.expect(current().well.a < current().overlay.a);
+        try std.testing.expectEqual(@max(12, percent * 0.5), overlayGlass().backdrop_blur);
         try std.testing.expectEqual(current().overlay, widgetTheme(currentName()).tokens.color.tooltip_bg);
     }
     _ = setMaterialParameters(75, 0);
-    try std.testing.expectEqual(@as(f32, 0), overlayGlass().backdrop_blur);
-    try std.testing.expectEqual(@as(u8, 131), current().overlay.a);
+    try std.testing.expectEqual(@as(f32, 12), overlayGlass().backdrop_blur);
+    try std.testing.expectEqual(@as(u8, 101), current().overlay.a);
 }
 
 /// Tracks actual image visibility for host/preview bookkeeping only. It never
@@ -326,7 +364,8 @@ fn widgetTokensFrom(c: Colors, dark: bool) ui.ThemeTokens {
     t.bg_secondary = c.surface_2;
     t.bg_tertiary = c.overlay;
     t.bg_hover = c.hover;
-    t.bg_active = c.selection;
+    // Action focus/press uses a neutral surface; selection stays with tabs and choices.
+    t.bg_active = c.hover;
     t.bg_inset = c.well;
     t.fg_primary = c.fg_1;
     t.fg_secondary = c.fg_2;
@@ -440,6 +479,7 @@ test "all V3 themes publish independent filled action and readable state roles" 
         try std.testing.expectEqual(c.surface_2, widget.checkbox_disabled_bg);
         try std.testing.expectEqual(c.well, widget.input_bg);
         try std.testing.expectEqual(c.selection, widget.list_selection_bg);
+        try std.testing.expectEqual(c.hover, widget.bg_active);
         if (!std.mem.eql(u8, id, "dark") and !std.mem.eql(u8, id, "light") and !std.mem.eql(u8, id, "sauber"))
             try std.testing.expect(!ui.Color.eql(c.action_accent, c.accent));
     }

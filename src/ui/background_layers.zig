@@ -218,6 +218,6 @@ test "global material publication updates retained popup blur including zero wit
         _ = theme.setMaterialParameters(75, blur);
         publication.publish(cx, theme.widgetTheme(theme.currentName()));
         _ = cx.render();
-        try std.testing.expectEqual(blur, popup.style.backdrop_blur());
+        try std.testing.expectEqual(@max(12, blur), popup.style.backdrop_blur());
     }
 }
