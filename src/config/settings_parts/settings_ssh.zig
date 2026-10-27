@@ -4,11 +4,12 @@ const binding = @import("../settings_content_view.zig");
 const config = @import("../config.zig");
 const controls = @import("settings_controls.zig");
 
-const terms = [_]ui.widgets.SelectOption{
-    .{ .value = "xterm-256color", .label = "xterm-256color" },
-    .{ .value = "xterm", .label = "xterm" },
-    .{ .value = "vt100", .label = "vt100" },
-    .{ .value = "__custom", .label = "自定义…" },
+const terminal_types = @import("../../vt/terminal_type.zig");
+const terms = blk: {
+    var result: [terminal_types.builtin.len + 1]ui.widgets.SelectOption = undefined;
+    for (terminal_types.builtin, 0..) |entry, i| result[i] = .{ .value = entry.name, .label = entry.name, .test_id = std.fmt.comptimePrint("settings.term.option.{s}", .{entry.name}) };
+    result[terminal_types.builtin.len] = .{ .value = "__custom", .label = "自定义 TERM 声明…", .test_id = "settings.term.option.custom" };
+    break :blk result;
 };
 const binds = [_]ui.widgets.SelectOption{
     .{ .value = "127.0.0.1", .label = "127.0.0.1" },
@@ -26,7 +27,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         @memcpy(term_options[0..terms.len], &terms);
         const current_term = bound.controller.model.value.ssh.term;
         var known_term = false;
-        for (terms[0..3]) |option| if (std.mem.eql(u8, current_term, option.value)) {
+        for (terms[0..terminal_types.builtin.len]) |option| if (std.mem.eql(u8, current_term, option.value)) {
             known_term = true;
             break;
         };
@@ -34,7 +35,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             const text = try controls.owned(bound.scope, current_term);
             term_options[terms.len] = .{ .value = text, .label = text };
         }
-        try section.select(.{ .section = "ssh", .key = "term" }, "默认终端类型", "", term_options[0 .. terms.len + @intFromBool(!known_term)], null);
+        try section.select(.{ .section = "ssh", .key = "term" }, "默认终端类型", "内置类型已做兼容性验证。自定义仅声明 TERM 名称，需远端提供对应终端描述。用于新连接和重连。", term_options[0 .. terms.len + @intFromBool(!known_term)], null);
         try section.toggle(.{ .section = "ssh", .key = "compression" }, "SSH 压缩", "", null);
     }
     if (binding.matches(query, "断线 自动重连 最大次数 退避 输入缓存 auto_reconnect reconnect_max reconnect_backoff buffer_input")) {

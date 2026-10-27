@@ -87,6 +87,9 @@ The native Zenit app opens saved connections and Quick Connect targets through i
 To create an installation image, run the packaging script separately:
 
 ```sh
+# First use only: create and retain a local self-signed identity
+python3 scripts/macos_signing.py setup
+
 # Write to dist/ by default
 sh scripts/package_macos.sh
 
@@ -94,9 +97,11 @@ sh scripts/package_macos.sh
 sh scripts/package_macos.sh /absolute/path/to/output
 ```
 
-The script verifies the Zenit vendor sources, builds the SSH static dependencies if needed, and creates `ZeroWork.app` from a `ReleaseFast` build with test mode disabled. It adds the icon and required resources, applies a local ad-hoc signature, and verifies both the signature and the DMG. The outputs are `ZeroWork-<version>-arm64.dmg` and its `.dmg.sha256` checksum file. The `.app` bundle is inside the DMG, and the temporary packaging directory is removed on exit. The script refuses to overwrite an existing DMG at the same path; remove the old image or use another output directory before repackaging.
+The script checks the saved signing identity before building, verifies the Zenit vendor sources, builds the SSH static dependencies if needed, and creates `ZeroWork.app` from a `ReleaseFast` build with test mode disabled. It adds the icon and required resources, signs with the persistent local self-signed identity, and verifies both the signature and the DMG. The outputs are `ZeroWork-<version>-arm64.dmg` and its `.dmg.sha256` checksum file. The `.app` bundle is inside the DMG, and the temporary packaging directory is removed on exit. The script refuses to overwrite an existing DMG at the same path; remove the old image or use another output directory before repackaging.
 
-To verify installation, open the DMG, drag `ZeroWork.app` into Applications, eject the installation image, and launch the app from Applications. **Direct execution, successful packaging, and verification after installation are three separate checks.** The script currently uses a local ad-hoc signature. Developer ID signing, notarization, and installation checks on a clean machine must be completed separately for distribution.
+The signing private key stays in the current user's Keychain; only the public certificate and fingerprint are stored in `~/Library/Application Support/com.zerowork.signing/`. Repeated setup reuses the same identity. If it is missing, restore the original identity instead of generating a replacement. macOS may request authorization during setup or signing. Packaging uses only the saved identity and does not fall back to ad-hoc signing. Saved application credentials continue to use Keychain. A stable signing identity does not guarantee that existing Keychain access will never require authorization again.
+
+To verify installation, open the DMG, drag `ZeroWork.app` into Applications, eject the installation image, and launch the app from Applications. **Direct execution, successful packaging, and verification after installation are three separate checks.** Self-signing does not provide Developer ID signing or Apple notarization. Those steps and installation checks on a clean machine must be completed separately for distribution.
 
 ## Privacy and credentials
 

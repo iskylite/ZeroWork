@@ -25,6 +25,16 @@ pub const History = struct {
         self.* = .{};
     }
 
+    /// An inline text edit keeps tool roles/results intact. A snapshot that
+    /// predates the submission or has already compacted it is left untouched.
+    pub fn editedUser(self: *const History, allocator: std.mem.Allocator, index: usize, original: []const u8, edited: []const u8) !?History {
+        if (index >= self.messages.len or self.messages[index].role != .user or !std.mem.eql(u8, self.messages[index].content, original)) return null;
+        const messages = try allocator.dupe(provider.Message, self.messages);
+        defer allocator.free(messages);
+        messages[index].content = edited;
+        return try History.copy(allocator, messages, "");
+    }
+
     /// Atomic replacement: failure retains the prior owned transcript. Callers
     /// must surface capture failures instead of silently dropping a tool turn.
     pub fn copy(allocator: std.mem.Allocator, source: []const provider.Message, final_text: []const u8) !History {

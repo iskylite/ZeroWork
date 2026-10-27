@@ -145,3 +145,27 @@ body[data-integrated-settings] .future-only{display:none}
 .semantic-heading{display:flex;align-items:center;gap:8px;font-weight:700}.semantic-heading>span:first-child{display:flex;color:var(--accent)}.semantic-heading svg{width:18px;height:18px;flex-shrink:0}.semantic-heading.danger>span:first-child{color:var(--danger)}
 
 .semantic-heading.danger{color:var(--fg)}
+
+/* Settings hierarchy and compact model metadata. */
+.card-fold h2,.group-heading h2{font-size:14px;font-weight:700;line-height:20px}
+.model-capabilities h3{font-size:14px;font-weight:700;line-height:20px;padding-bottom:10px;margin-bottom:4px;border-bottom:1px solid var(--hover)}
+.model-capabilities .field-row{min-height:42px;padding:5px 0}
+.model-capabilities .field-label label{display:flex;align-items:center;gap:6px}
+.source-indicator{display:inline-flex;width:18px;height:18px;vertical-align:middle;color:var(--muted);border-radius:4px}
+.source-indicator svg{width:14px;height:14px}.source-indicator.api{color:var(--good)}.source-indicator.missing{color:var(--warn,#f59e0b)}
+.source-indicator:focus-visible{outline:2px solid var(--accent)}
+.model-capabilities .reasoning-options{background:var(--well);border-radius:7px;padding:10px;margin:0}
+.model-capabilities .reasoning-options>label:first-child{display:flex;justify-content:space-between;padding-top:0;margin:0 0 8px;font-size:11px;line-height:16px}
+.model-capabilities .effort-options{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;padding:0}
+.model-capabilities .effort-options label{display:flex;align-items:center;gap:8px;height:30px;box-sizing:border-box;margin:0;padding:0 8px;background:var(--card);border-radius:6px;font-size:11px}
+.model-dialog .checkbox-row{min-height:30px;margin-top:12px}
+
+/* Shared setting hierarchy: expanded cards focus on their fields. */
+.card-header:has(.card-fold[aria-expanded="true"]){border-bottom:1px solid var(--hover)}
+.card-fold[aria-expanded="true"]{min-height:48px;padding-top:12px;padding-bottom:12px}
+.field-heading{display:flex;align-items:center;gap:4px;min-width:0}
+.setting-hint{position:relative;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;padding:0;border-radius:5px;color:var(--muted);vertical-align:middle;flex-shrink:0}
+.setting-hint svg{width:14px;height:14px}.setting-hint.timing{color:var(--accent)}
+.setting-hint .hint-text{display:none;position:absolute;left:0;bottom:calc(100% + 6px);width:260px;padding:8px 10px;white-space:normal;text-align:left;font-size:11px;font-weight:400;line-height:16px;color:var(--fg);background:var(--card);border:1px solid var(--hover);border-radius:8px;z-index:30;box-shadow:var(--shadow)}
+.setting-hint:hover .hint-text,.setting-hint:focus .hint-text{display:block}
+.setting-hint:focus-visible{outline:2px solid var(--accent)}

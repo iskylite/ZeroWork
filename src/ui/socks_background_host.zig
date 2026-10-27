@@ -66,7 +66,7 @@ pub const Host = struct {
         self.pending = null;
         if (!std.mem.eql(u8, bind, "0.0.0.0")) return;
         pending.options.listener.exposure_confirmed = true;
-        self.begin(pending) catch |err| self.workspace.status(@errorName(err));
+        self.begin(pending) catch |err| self.workspace.statusFailure(@errorName(err));
     }
     fn cancelExposure(raw: *anyopaque) void {
         cast(raw).pending = null;
@@ -112,17 +112,17 @@ pub const Host = struct {
             return;
         };
         switch (requested) {
-            .stop => self.model.stop(owner) catch |err| self.workspace.status(@errorName(err)),
-            .reconnect => self.model.reconnect(owner) catch |err| self.workspace.status(@errorName(err)),
+            .stop => self.model.stop(owner) catch |err| self.workspace.statusFailure(@errorName(err)),
+            .reconnect => self.model.reconnect(owner) catch |err| self.workspace.statusFailure(@errorName(err)),
             .open_terminal => {
                 _ = self.workspace.registry.get(row.source) catch |err| {
-                    self.workspace.status(@errorName(err));
+                    self.workspace.statusFailure(@errorName(err));
                     return;
                 };
                 const index = self.workspace.registry.indexOf(row.source.id) orelse return;
                 // A new interactive owner is created by the normal factory.
                 // The no-shell background owner is never attached to a Tab.
-                self.workspace.newSession(index) catch |err| self.workspace.status(@errorName(err));
+                self.workspace.newSession(index) catch |err| self.workspace.statusFailure(@errorName(err));
             },
         }
         self.cx.scheduleRedrawAfterNs(10 * std.time.ns_per_ms);

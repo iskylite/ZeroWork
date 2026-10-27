@@ -118,7 +118,7 @@ test "native provider cards use V3 header field grid and a single model row" {
     try std.testing.expectApproxEqAbs(@as(f32, 14), kind.x - name.x - name.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 552), endpoint.w, 0.1);
     try std.testing.expect(hasText(f.mounted.root, "已启用"));
-    try std.testing.expect(hasText(f.mounted.root, "API Key 存储于 macOS 钥匙串"));
+    try std.testing.expectEqualStrings("API Key 存储于 macOS 钥匙串", byId(f.mounted.root, "settings.ai.provider.0.keychain").?.behavior.interaction.a11y.?.label.?);
     try std.testing.expect(!f.controller.model.dirty);
 }
 

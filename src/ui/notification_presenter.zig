@@ -20,6 +20,7 @@ const Slot = struct {
     footer: *ui.Node,
     status_tag: *ui.Node,
     status_label: *ui.Node,
+    countdown: *ui.Node,
     close: *ui.Node,
     actions: [3]Action,
     action_row: *ui.Node,
@@ -121,9 +122,13 @@ pub const Presenter = struct {
             const status_label = try ui.textStyled(cx, S.line, "");
             try status_tag.appendChild(cx.allocator, status_label);
             try footer.appendChild(cx.allocator, status_tag);
+            const countdown = try ui.textStyled(cx, S.line, "");
+            countdown.meta.ownership.meta.test_id = "notifications.countdown";
+            countdown.setStyleInline(cx.allocator, .{ .width = .{ .px = 64 }, .min_width = 64, .height = .{ .px = 18 }, .flex_shrink = 0 });
             const action_row = try ui.boxStyled(cx, S.actions, .{});
             try footer.appendChild(cx.allocator, action_row);
-            slot.* = .{ .presenter = self, .root = card, .icons = icons, .title = title, .detail = detail, .source = source, .footer = footer, .status_tag = status_tag, .status_label = status_label, .close = close, .action_row = action_row, .actions = undefined };
+            try action_row.appendChild(cx.allocator, countdown);
+            slot.* = .{ .presenter = self, .root = card, .icons = icons, .title = title, .detail = detail, .source = source, .footer = footer, .status_tag = status_tag, .status_label = status_label, .countdown = countdown, .close = close, .action_row = action_row, .actions = undefined };
             card.behavior.events.on_hover = cx.on(Slot, slot, Slot.enter);
             card.behavior.events.on_leave = cx.on(Slot, slot, Slot.leave);
             inline for (&slot.actions, 0..) |*action, j| {
@@ -161,6 +166,7 @@ pub const Presenter = struct {
             slot.title.setTextColor(colors.fg_1);
             slot.source.setTextColor(colors.fg_2);
             slot.detail.setTextColor(colors.fg_2);
+            slot.countdown.setTextColor(colors.fg_2);
             for (slot.actions, 0..) |action, index| action.label.setTextColor(if (index == 0) theme.actionForeground(colors.action_accent) else colors.fg_1);
         };
         var records: [3]*const notifications.NotificationRecord = undefined;
@@ -179,7 +185,7 @@ pub const Presenter = struct {
             const tagged = structured or record.event.actions.len > 0;
             const compact = record.event.actions.len > 0;
             slot.action_row.setStyle(self.cx.allocator, .flex_wrap, if (record.event.actions.len > 1) .wrap else .no_wrap);
-            const action_width = @max(1, width - 26 - (if (tagged) @as(f32, 76) else 0));
+            const action_width = @max(1, width - 26 - (if (tagged) @as(f32, 76) else 0) - (if (!record.persistent()) @as(f32, 68) else 0));
             for (&slot.actions) |*action| {
                 action.root.setStyle(self.cx.allocator, .max_width, action_width);
                 action.label.setStyle(self.cx.allocator, .max_width, @max(1, action_width - 20));
@@ -218,7 +224,7 @@ pub const Presenter = struct {
                 slot.status_tag.setStyleInline(self.cx.allocator, S.statusTag(@backingInt(record.event.severity)));
                 slot.status_label.setTextColor(S.statusInk(@backingInt(record.event.severity)));
                 slot.status_tag.setDisplay(if (tagged) .flex else .none);
-                slot.footer.setDisplay(if (tagged or record.event.actions.len > 0) .flex else .none);
+                slot.footer.setDisplay(if (tagged or !record.persistent()) .flex else .none);
                 slot.detail.setDisplay(if (record.event.detail.len != 0) .flex else .none);
                 for (slot.icons, 0..) |icon, j| icon.setDisplay(if (j == @backingInt(record.event.severity)) .flex else .none);
                 for (&slot.actions, 0..) |*action, j| {
@@ -230,17 +236,28 @@ pub const Presenter = struct {
                     action.root.behavior.interaction.a11y = .{ .role = .button, .label = action.label.getText().?.content };
                     action.root.setDisplay(.flex);
                 }
-                slot.action_row.setDisplay(if (record.event.actions.len == 0) .none else .flex);
+                slot.action_row.setDisplay(if (record.event.actions.len == 0 and record.persistent()) .none else .flex);
+            }
+            slot.countdown.setDisplay(if (record.persistent()) .none else .flex);
+            if (!record.persistent()) {
+                var remaining: [64]u8 = undefined;
+                const text = try std.fmt.bufPrint(&remaining, "{d} 秒后关闭", .{(record.remaining_ms + 999) / 1000});
+                try slot.countdown.setTextContent(self.cx.allocator, text);
             }
             const background = if (active_owner) |owner| !owner.eql(record.event.owner.content) else true;
-            const source = if (record.owner_ended) "所属会话已结束" else if ((background or structured) and !std.mem.eql(u8, record.event.owner_name, record.event.object_name)) record.event.owner_name else "";
+            const source = if (record.owner_ended or background or structured) record.event.owner_name else "";
             var metadata_buffer: [1536]u8 = undefined;
             const object = record.event.object_name;
             const metadata = if (source.len > 0 and object.len > 0)
                 try std.fmt.bufPrint(&metadata_buffer, "{s} · {s}", .{ source, object })
             else if (source.len > 0) source else object;
-            try setLine(self.cx, slot.source, metadata);
-            slot.source.setDisplay(if (metadata.len == 0) .none else .flex);
+            var ended_buffer: [1600]u8 = undefined;
+            const identified = if (record.owner_ended)
+                try std.fmt.bufPrint(&ended_buffer, "{s} · 所属会话已结束", .{if (metadata.len == 0) "会话" else metadata})
+            else
+                metadata;
+            try setLine(self.cx, slot.source, identified);
+            slot.source.setDisplay(if (identified.len == 0) .none else .flex);
             slot.root.setDisplay(.flex);
         }
         // Measure the currently visible slots. Text/width changes settle after

@@ -74,7 +74,7 @@ pub fn footer(_: *const ui.ThemeTokens) ui.BoxStyle {
     return style;
 }
 pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 13, .font_weight = 600, .line_height = 20.0 / 13.0, .color = theme.current().fg_1 };
+    return .{ .font_size = 14, .font_weight = 700, .line_height = 20.0 / 14.0, .color = theme.current().fg_1 };
 }
 
 // Frozen V3 shared fields use 52px minimum rows and 220 × 32px controls;
@@ -230,15 +230,15 @@ pub fn sectionHeading(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .fit = .{} }, .direction = .column, .gap = 2 };
 }
 pub fn sectionTitle(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .min_width = 0, .height = .{ .px = geometry.section_title_line }, .flex_shrink = 0, .font_size = 13, .font_weight = 650 };
+    return .{ .width = .fill(), .min_width = 0, .height = .{ .px = geometry.section_title_line }, .flex_shrink = 0, .font_size = 14, .font_weight = 700 };
 }
-pub fn summaryHeader(has_summary: bool) ui.BoxStyle {
+pub fn summaryHeader(expanded: bool, has_summary: bool) ui.BoxStyle {
     var style = sectionHeader(undefined);
     style.background = theme.current().surface_2;
-    style.border = .{ .width = 0, .side_widths = .{ 0, 0, 0, 0 }, .radius = 11 };
+    style.border = .{ .width = 0, .side_widths = .{ 0, 0, if (expanded) @as(f32, 1) else 0, 0 }, .color = theme.current().hover, .radius = 0 };
     style.overflow_hidden = true;
     style.height = .{ .fit = .{} };
-    style.min_height = if (has_summary) geometry.section_summary_header else 60;
+    style.min_height = if (!expanded and has_summary) geometry.section_summary_header else 48;
     style.padding = .{ .left = 15, .right = 15, .top = 12, .bottom = 12 };
     style.gap = 10;
     return style;
@@ -375,7 +375,7 @@ pub fn modelCapabilities() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 0, .padding = ui.Padding.all(12), .background = theme.current().surface_2, .border = .{ .radius = 9 }, .flex_shrink = 0 };
 }
 pub fn modelCapabilityRow() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 53 }, .direction = .row, .align_items = .center, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 42 }, .direction = .row, .align_items = .center, .flex_shrink = 0 };
 }
 
 /// Keep stock control labels on the application's theme after its style bindings settle.
@@ -383,4 +383,17 @@ pub fn modelCapabilityRow() ui.BoxStyle {
 pub fn paintControlText(node: *ui.Node) void {
     if (node.getText()) |text| if (!@import("std").meta.eql(text.color, theme.current().fg_1)) node.setTextColor(theme.current().fg_1);
     for (node.children.items) |child| paintControlText(child);
+}
+
+pub fn blockTitle(t: *const ui.ThemeTokens) ui.TextStyle {
+    return title(t);
+}
+pub fn modelCapabilityHeading() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 31 }, .margin = .{ .bottom = 4 }, .padding = .{ .bottom = 10 }, .border = .{ .width = 0, .side_widths = .{ 0, 0, 1, 0 }, .color = theme.current().hover }, .flex_shrink = 0 };
+}
+pub fn modelEffortBody() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .padding = ui.Padding.all(10), .background = theme.current().well, .border = .{ .radius = 7 }, .flex_shrink = 0 };
+}
+pub fn modelEffortOption() ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .height = .{ .px = 30 }, .padding = .{ .left = 8, .right = 8 }, .gap = 8, .align_items = .center, .background = theme.current().surface_2, .border = .{ .radius = 6 }, .flex_shrink = 0 };
 }

@@ -14,6 +14,7 @@ const Fixture = struct {
     root: *ui.Node,
     notice_host: host.Host,
     view: *presenter.Presenter = undefined,
+    history: ?*@import("ui/notification_history.zig").View = null,
     obstacle: *ui.Node,
     result: *ui.Node,
     operation: u64 = 0,
@@ -116,8 +117,19 @@ const Fixture = struct {
     }
     fn frame(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *Fixture = @ptrCast(@alignCast(raw));
-        const rect = self.obstacle.globalRect();
-        self.view.update((host.localClock() catch return .done).monotonic_ms, true, owner, .{ .content = self.root.globalRect(), .avoid = if (self.covered) &.{rect} else &.{} }) catch {};
+        var avoid: [2]ui.ComputedRect = undefined;
+        var count: usize = 0;
+        if (self.covered) {
+            avoid[count] = self.obstacle.globalRect();
+            count += 1;
+        }
+        // Match the application's host: an open notification list is an
+        // overlay obstacle, including for persistent failure toasts.
+        if (self.history) |history| if (history.open.peek()) {
+            avoid[count] = history.root.globalRect();
+            count += 1;
+        };
+        self.view.update((host.localClock() catch return .done).monotonic_ms, true, owner, .{ .content = self.root.globalRect(), .avoid = avoid[0..count] }) catch {};
         return .done;
     }
     fn cleanup(self: *Fixture) void {
@@ -143,6 +155,11 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     try self.notice_host.coordinator.registerDefinition(.{ .id = "fixture.feedback", .category = .operation_result, .default_channels = .{ .system = false, .attention = false } });
     _ = try self.notice_host.registerWindow(.{ .context = self, .owns = Fixture.owns, .activate = Fixture.activate, .feedback = Fixture.feedback, .owner_name = Fixture.ownerName });
     self.view = try presenter.Presenter.mount(cx, scope, &self.notice_host, @fromBackingInt(1));
+    const bell = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.bell, .a11y_label = "通知", .variant = .ghost }).mount(scope, cx);
+    bell.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 12 }, .top = .{ .px = 6 } }, .width = .{ .px = 30 }, .height = .{ .px = 28 } });
+    bell.meta.ownership.meta.test_id = "toolbar.notifications";
+    try root.appendChild(cx.allocator, bell);
+    self.history = try @import("ui/notification_history.zig").View.mount(cx, scope, &self.notice_host, bell);
     const row = try ui.box(cx, .{ .direction = .row, .gap = 12 }, .{});
     const Spec = struct { label: []const u8, id: []const u8, callback: *const fn (*Fixture) void };
     inline for ([_]Spec{ .{ .label = "命令失败", .id = "fixture.command-error", .callback = Fixture.commandHint }, .{ .label = "典型通知", .id = "fixture.scenes", .callback = Fixture.scenes }, .{ .label = "完成与取消", .id = "fixture.outcomes", .callback = Fixture.outcomes }, .{ .label = "长消息", .id = "fixture.long", .callback = Fixture.long }, .{ .label = "普通消息", .id = "fixture.normal", .callback = Fixture.normal }, .{ .label = "带查看动作", .id = "fixture.action", .callback = Fixture.actionable }, .{ .label = "错误消息", .id = "fixture.error", .callback = Fixture.failure }, .{ .label = "切换遮挡", .id = "fixture.cover", .callback = Fixture.toggle }, .{ .label = "就地确认", .id = "fixture.local", .callback = Fixture.local } }) |spec| {

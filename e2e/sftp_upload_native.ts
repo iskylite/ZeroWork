@@ -140,9 +140,9 @@ try {
   const fileTab=(await tabs()).find(n=>n.test_id!==localTab).test_id;
   const authenticatedHosts=await readFile(join(data,"hosts.toml"),"utf8");
   report.fixture_credentials_migrated=authenticatedHosts!==fixture;
-  const path=inside(await visible("files.local"),"files.path"); await clickNode(path,"Navigate local card to owned upload source");assert((await key("a",{cmd:true})).ok);assert((await type_(local)).ok);assert((await key("return")).ok);
+  const path=inside(await visible("files.local"),"files.path.edit"); await clickNode(path,"Edit local breadcrumb path");await visible("files.path");assert((await key("a",{cmd:true})).ok);assert((await type_(local)).ok);assert((await key("return")).ok);
   const row=await waitFor(async()=>nodes(await visible("files.local")).find(n=>n.test_id==="files.row"&&inside(n,"files.row.name")?.text===filename)??null,15000);
-  assert.equal(text(inside(await visible("files.remote"),"files.path")),"/fixture");
+  assert.equal(text(inside(await visible("files.remote"),"files.breadcrumb")),"fixture");
   for(const [width,height] of [[1440,900],[860,480]]){
     await resizeWindow(width,height);await sleep(180);
     const panes=[await visible("files.local"),await visible("files.remote")];
@@ -165,8 +165,10 @@ try {
   const proof=await waitFor(async()=>{const current=await traces();const accepted=current.find(t=>t.trace_prefix==="FILE_TRANSFER_ENQUEUED"&&t.owner_id===attached.owner.session_id);if(!accepted)return null;assert.equal(accepted.md5_check,true);const backend=current.find(t=>t.trace_prefix==="FILE_TRANSFER_VERIFICATION"&&t.binding_id===accepted.binding_id&&t.engine_state==="succeeded"&&t.verification_state==="passed");const manager=current.find(t=>t.trace_prefix==="FILE_TRANSFER_MANAGER_VERIFICATION"&&t.job===accepted.job&&t.state==="succeeded"&&t.verification_state==="passed");return backend&&manager?{enqueued:accepted,backend,manager}:null;},45000);
   const actual=await readFile(join(peerOut,"actual-upload.bin"));assert.deepEqual(actual,payload);const md5=createHash("md5").update(payload).digest("hex");for(const value of [proof.backend,proof.manager]){assert.equal(value.source_md5,md5);assert.equal(value.target_md5,md5);}report.actual_transfer=proof;report.upload={source:join(local,filename),target:destination,bytes:actual.length,sha256:createHash("sha256").update(actual).digest("hex"),md5};
   await click("toolbar.transfers");const completed=await waitFor(async()=>{const current=await visible("transfer.manager");return nodes(current).find(n=>n.test_id==="transfer.task"&&text(n).includes(filename)&&text(n).includes("已完成"))??null;},15000);
-  await clickNode(inside(completed,"transfer.task.expand"),"Inspect actual successful original upload job");await waitFor(async()=>{const current=await visible("transfer.manager");return text(current).includes(destination)&&text(current).includes(`任务 #${proof.enqueued.job}`)?current:null;},10000);await capture("04-upload-full-md5-manager-completed");
-  await click("transfer.task.events");
+  assert.equal(text(inside(completed,"transfer.task.location")),destination);
+  assert(text(inside(completed,"transfer.task.owner")).includes(`#${attached.owner.session_id}`));
+  await capture("04-upload-full-md5-manager-completed");
+  await clickNode(inside(completed,"transfer.task.events"),"Inspect original upload job events");
   const events = await visible("transfer.events.dialog");
   const eventContent = text(await visible("transfer.events.entries"));
   assert(eventContent.includes("入队") && eventContent.includes("已完成"));

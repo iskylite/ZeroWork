@@ -3,13 +3,16 @@ const ui = @import("ui");
 const theme = @import("app_theme.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 pub fn list(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .padding = .{ .right = 12 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .padding = .{}, .flex_shrink = 0 };
 }
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 216 }, .direction = .column, .flex_shrink = 0, .background = theme.current().surface_1, .border = .{ .radius = 11 }, .shadows = ui.ShadowList.of(&.{.{ .color = theme.current().shadow, .blur = 3, .offset_y = 1 }}), .overflow = .hidden };
+    return .{ .width = .fill(), .height = .{ .px = 216 }, .direction = .column, .flex_shrink = 0, .background = theme.current().surface_1, .border = .{ .width = 0, .radius = 9 }, .overflow = .hidden };
 }
 pub fn header(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 12 }, .gap = 6, .flex_shrink = 0, .background = theme.current().well, .border = .{ .radius = 11 } };
+    return .{ .width = .fill(), .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .justify = .start, .padding = .{ .left = 10, .right = 12 }, .gap = 6, .flex_shrink = 0, .background = theme.current().surface_1, .border = .{ .radius = 11 } };
+}
+pub fn headerButton() ButtonStyle {
+    return .{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 10, .right = 12 }, .gap = 6, .background = ui.Color.TRANSPARENT, .corner_radius = 9, .flex_shrink = 0 };
 }
 pub fn body(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 150 }, .flex_shrink = 0 };

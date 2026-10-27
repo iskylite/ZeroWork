@@ -314,11 +314,15 @@ test "sidebar native retained chrome and rows follow three themes and global mat
         try std.testing.expectEqual(ui.Color.TRANSPARENT, v.search_box.getBackground());
         try std.testing.expectEqual(T.current().selection, row.node.getBackground());
         try std.testing.expectEqual(node_id, row.node.id);
+        try std.testing.expectEqual(T.current().surface_2, find(v.root, "sidebar.footer.new").?.getBackground());
+        try std.testing.expectEqual(T.current().well, find(v.root, "sidebar.empty.new").?.getBackground());
     }
     _ = T.setMaterialVisible(true);
     publication.publish(h.cx, T.widgetTheme(T.currentName()));
     h.frames();
     try std.testing.expect(v.root.getBackground().a < 255);
+    try std.testing.expectEqual(T.current().surface_2, find(v.root, "sidebar.footer.new").?.getBackground());
+    try std.testing.expectEqual(T.current().well, find(v.root, "sidebar.empty.new").?.getBackground());
     try std.testing.expect(v.search_box.getBackground().a < 255);
     try std.testing.expectEqual(T.current().fg_1, row.name.getText().?.color);
 }

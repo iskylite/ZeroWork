@@ -5,21 +5,27 @@
 - Upstream: https://github.com/version-next/zenit
 - Revision: `9c1ba9bfea58210404e447b04b6ff25b6442f0ff`
 - Package: `zenit` (`dev/zig-0.17.0`, complete source snapshot tracked by ZeroWork)
-- Local patch revision: `2026-10-27-editable-text-metrics` (optional `width`/`wrap`; upstream revision and license unchanged)
+- Local patch revision: `2026-10-27-terminal-idle-capacity` (upstream revision and license unchanged)
 - Minimum Zig: `0.17.0`
 - License: GPL-3.0-only (commercial alternative documented upstream)
 - Canonical source files: `3505` (tracked sources plus declared working-tree additions)
-- Canonical tracked-tree SHA-256: `516beafc155b2738f45d188621160d23b34eb37394c40696eec61bbd5695c4ff`
+- Canonical tracked-tree SHA-256: `e83da1af280a16df2aaf5bb2494813d26124c950c139b2763e4686f542b0cc0d`
 - Hash algorithm: sort and deduplicate `git ls-files --cached --others --exclude-standard vendor/zenit`; for each path hash big-endian u64 path length, path relative to `vendor/zenit`, big-endian u64 content length, then raw content bytes
 - Project decision: GPL-3.0-only use authorized for current development; distribution obligations remain active.
 
 The upstream `LICENSE`, `LICENSING.md`, source, and package metadata are retained under `vendor/zenit/`. Do not update this tree without recording a new fixed revision and reviewing its license and build contract.
 
-Latest local patch synchronizes single-line input caret, selection and hit testing with the inherited font size and weight used by rendering, including explicitly selected font families, monospace and italic faces. Multiline editable rows pin the font size, weight and line height used by caret measurement; wrapping and virtual row pitch follow programmatic metric changes. No API, toolchain or license changes.
+Latest local patch adds `Cx.trimIdleRenderCapacity` for idle windows: it releases spare display-item capacity, defers arena shrinking until the normal frame boundary, and preserves live replay payloads and reusable font/GPU caches. Frame and display-list scratch use page-backed allocation. Opt-in frame profiling also attributes after-layout callbacks and renderer setup/text warming; formal builds retain the existing automation boundary.
+
+The preceding local patch drains continuous native mouse-drag motion in the same bounded event batch as hover motion, preventing one rendered frame per queued drag position. Button, key and text boundaries retain native order. No API, toolchain or license changes.
+
+The preceding local patch synchronizes single-line input caret, selection and hit testing with the inherited font size and weight used by rendering, including explicitly selected font families, monospace and italic faces. Multiline editable rows pin the font size, weight and line height used by caret measurement; wrapping and virtual row pitch follow programmatic metric changes. No API, toolchain or license changes.
 
 The previous local patch keeps placeholders visually neutral for required-but-empty inputs; existing mouse-move hit-count accounting before drag callbacks is retained. No API, toolchain or license changes.
 
 Local adaptations are included in the canonical hash: bounded/wrapping Tooltip content through public optional properties (defaults preserve the existing API and behavior), native close confirmation/commit/completion and IME handling, rendering and hit-test fixes, idle interaction-geometry drainage, material subtree cache ranges, safe focus cleanup, legacy hidden-control window configuration, fixed ASCII grid positioning for explicitly configured terminal faces, and the compile-time automation boundary that removes all process environment overrides from formal macOS App builds. The upstream repository metadata is not required for building this snapshot. Run `python3 scripts/verify_vendor_zenit.py` to verify the exact vendored tree.
+
+Terminal acceptance additionally extends only the compile-time test Harness: mouse requests can specify left/middle/right buttons and key names resolve the existing KeyCode enum, allowing F1–F12 and editing keys through the production dispatcher. No VT injection or screen-state override is added; formal builds retain their existing automation boundary. No toolchain or license changes.
 
 ## Planned VT dependency
 

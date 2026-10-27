@@ -309,11 +309,11 @@ test "appearance geometry uses V3 card padding and 32 pixel field controls" {
     const family = byId(mounted.root, "settings.field.font_family").?.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 626), font.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 390), family.x - font.x, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 72.5), family.y - font.y, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 58), family.y - font.y, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 220), family.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 32), family.h, 0.1);
     const material = byId(mounted.root, "settings.appearance.materials").?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 62), byId(mounted.root, "settings.materials.header").?.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 48), byId(mounted.root, "settings.materials.header").?.globalRect().h, 0.1);
     for ([_][]const u8{ "fit", "alignment" }) |field| {
         var buffer: [80]u8 = undefined;
         const control = byId(mounted.root, try std.fmt.bufPrint(&buffer, "settings.field.{s}", .{field})).?.globalRect();
@@ -749,12 +749,12 @@ test "native settings SSH uses precise accordion and inline control geometry" {
     const reconnect = byId(mounted.root, "settings.ssh.reconnect").?;
     const keepalive = byId(mounted.root, "settings.field.keepalive_sec").?;
     try std.testing.expectApproxEqAbs(@as(f32, 626), connection.globalRect().w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 279), connection.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 264), connection.globalRect().h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 62), reconnect.globalRect().h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 220), keepalive.globalRect().w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 32), keepalive.globalRect().h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 390), keepalive.globalRect().x - connection.globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 72.5), keepalive.globalRect().y - connection.globalRect().y, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 58), keepalive.globalRect().y - connection.globalRect().y, 0.1);
     try std.testing.expect(!byId(mounted.root, "settings.ssh.reconnect.header").?.behavior.interaction.a11y.?.expanded.?);
     try std.testing.expectEqualStrings("30", inputFor(mounted, "settings.field.keepalive_sec").getText());
     try std.testing.expect(!f.controller.model.dirty);
@@ -930,17 +930,19 @@ test "native settings data actions use host availability and leave the draft int
     try std.testing.expect(f.controller.model.dirty);
 }
 
-test "native settings field help is an inline description without a focus stealing action" {
+test "native settings explanations use focusable hints without changing the draft" {
     var f: AppearanceFixture = undefined;
     try f.init();
     defer f.deinit();
     f.controller.model.selectPage(2);
     f.controller.folded_sections = 0;
     const mounted = try f.mount();
-    const help = byId(mounted.root, "settings.help.content.totp_autofill").?;
-    try std.testing.expect(help.getText().?.content.len != 0);
-    try std.testing.expect(!help.behavior.interaction.focusable);
-    try std.testing.expect(byId(mounted.root, "settings.help.totp_autofill") == null);
+    const marker = byId(mounted.root, "settings.help.totp_autofill").?;
+    try std.testing.expect(marker.behavior.interaction.focusable);
+    try std.testing.expect(marker.behavior.interaction.a11y.?.label.?.len != 0);
+    try std.testing.expectEqual(@as(usize, 1), nonemptyTexts(byId(mounted.root, "settings.row.totp_autofill").?));
+    f.cx.setFocus(marker);
+    try std.testing.expect(mounted.consumeEscape());
     try std.testing.expect(!mounted.consumeEscape());
     try std.testing.expect(!f.controller.model.dirty);
 }
@@ -961,7 +963,7 @@ fn expectCleanSectionHeaders(node: *ui.Node) !void {
         if (std.mem.endsWith(u8, id, ".header")) {
             if (sectionSummary(node)) |value| {
                 try std.testing.expect(value.getText() != null);
-                const shown = value.getText().?.content.len != 0;
+                const shown = value.getText().?.content.len != 0 and !(node.behavior.interaction.a11y.?.expanded orelse false);
                 try std.testing.expectEqual(if (shown) ui.types.Display.flex else ui.types.Display.none, value.style.display);
                 try std.testing.expectEqual(@as(usize, if (shown) 2 else 1), nonemptyTexts(node));
                 // Title + summary form the flexible middle column, leaving the
@@ -981,7 +983,7 @@ fn expectCleanSectionHeaders(node: *ui.Node) !void {
     for (node.children.items) |child| try expectCleanSectionHeaders(child);
 }
 
-test "native settings section headers retain V3 descriptions while actual fields remain editable" {
+test "native settings expanded headers hide repeated summaries while fields remain editable" {
     for (0..8) |index| {
         var f: AppearanceFixture = undefined;
         try f.init();
@@ -1019,7 +1021,7 @@ test "native settings section headers retain readable collapsed summaries across
         if (index == 0) {
             const selected = f.registry.get(f.controller.model.value.ui.theme).?.theme.name;
             try std.testing.expectEqualStrings(selected, byId(mounted.root, "settings.appearance.themes.summary").?.getText().?.content);
-            try std.testing.expectEqualStrings("辅助显示与侧栏", byId(mounted.root, "settings.appearance.aids.summary").?.getText().?.content);
+            try std.testing.expectEqualStrings("辅助显示、回滚缓冲与侧栏", byId(mounted.root, "settings.appearance.aids.summary").?.getText().?.content);
         }
         if (index == 7) {
             const value = byId(mounted.root, "settings.data.history.summary").?;
@@ -1045,7 +1047,7 @@ test "native settings unit suffixes stay outside editable numeric values" {
     replaceInput(input, "128");
     try std.testing.expectEqual(@as(u16, 128), f.controller.model.value.log.ring_mb);
     try std.testing.expectEqualStrings("缓冲、快照与保留策略", byId(mounted.root, "settings.data.history.summary").?.getText().?.content);
-    try std.testing.expectEqual(ui.types.Display.flex, byId(mounted.root, "settings.data.history.summary").?.style.display);
+    try std.testing.expectEqual(ui.types.Display.none, byId(mounted.root, "settings.data.history.summary").?.style.display);
 }
 
 // Presentation rounding must never write the rounded value back without input.

@@ -11,6 +11,9 @@ const S = @import("terminal_styles.zig");
 const records_style = @import("builtin_records_styles.zig");
 const input = @import("terminal_surface_input.zig");
 const blink_half_period_ms = 550;
+// Viewport cell arrays are large and short-lived. Keep them out of malloc's
+// small-region high-water caches so retiring a pane actually releases pages.
+const snapshot_allocator = std.heap.page_allocator;
 
 pub const Options = struct {
     grouped: bool = false,
@@ -27,19 +30,22 @@ pub const Options = struct {
     highlight: bool,
     cursor_style: enum { block, bar, underline },
 };
-const Glyph = struct { node: *ui.Node, overline: *ui.Node, double_underline: ?*ui.Node = null };
+const Glyph = struct { node: *ui.Node, overline: ?*ui.Node = null, double_underline: ?*ui.Node = null };
 const Row = struct {
     root: *ui.Node,
     test_id: []u8,
-    time: *ui.Node,
-    record_time: *ui.Node,
+    time: ?*ui.Node = null,
+    record_time: ?*ui.Node = null,
     selected: *ui.Node,
-    marker: *ui.Node,
-    status_icon: *ui.Node,
-    article: *ui.Node,
+    marker: ?*ui.Node = null,
+    status_icon: ?*ui.Node = null,
+    article: ?*ui.Node = null,
     layout: @import("terminal_record_geometry.zig").Layout = .{},
     glyphs: std.ArrayList(Glyph) = .empty,
     hash: u64 = 0,
+    pending_hash: ?u64 = null,
+    pending_col: usize = 0,
+    pending_glyphs: usize = 0,
     content_id: ?vt.RowId = null,
 };
 const Pending = union(enum) { bytes: []u8, key: terminal.KeyEvent, mouse: terminal.MouseRequest };
@@ -99,6 +105,10 @@ pub const Surface = struct {
     focused: bool = false,
     blink: bool = true,
     blink_running: bool = false,
+    glyphs_pending: bool = false,
+    input_during_hydration: u64 = 0,
+    glyph_budget_frame: u64 = std.math.maxInt(u64),
+    glyph_budget_remaining: usize = 24,
     reduced_motion: bool = false,
     last_blink: f64 = 0,
     error_message: ?[]const u8 = null,
@@ -115,8 +125,10 @@ pub const Surface = struct {
     selection: ?terminal.Selection = null,
     released_anchors: std.ArrayList(terminal.Anchor) = .empty,
     dragging: bool = false,
+    drag_origin: ui.Point = .{ .x = 0, .y = 0 },
     rectangle: bool = false,
     mouse_reporting: bool = false,
+    reported_button: @FieldType(terminal.MouseEvent, "button") = .none,
     wheel_remainder: f32 = 0,
     pending_scroll: f32 = 0,
     scrollbar: ?*ui.Node = null,
@@ -206,7 +218,7 @@ pub const Surface = struct {
         self.recovered_input.deinit(self.cx.allocator);
         self.document.deinit(self.cx.allocator);
         for (self.rows.items) |*row| row.glyphs.deinit(self.cx.allocator);
-        if (self.snapshot) |*value| value.deinit(self.cx.allocator);
+        if (self.snapshot) |*value| value.deinit(snapshot_allocator);
         self.cx.allocator.free(self.options.family_name);
         if (self.root.parent) |parent| self.cx.detachChild(parent, self.root);
         self.cx.destroyDetached(self.root);
@@ -302,7 +314,8 @@ pub const Surface = struct {
             }
             return err;
         };
-        var changed = self.force_snapshot or self.snapshot == null;
+        defer if (self.composite.search_task != null) self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+        var changed = self.force_snapshot or self.snapshot == null or self.composite.searchReady();
         if (slot.acknowledge(self.slot_generation)) |generation| {
             self.slot_generation = generation;
             changed = true;
@@ -328,7 +341,7 @@ pub const Surface = struct {
             current.eof_seen = status.eof_seen;
         }
         if (changed) update: {
-            const next = self.service.snapshot(self.cx.allocator) catch |err| {
+            const next = self.service.snapshot(snapshot_allocator) catch |err| {
                 self.force_snapshot = true;
                 if (err == error.WorkerBusy or err == error.SnapshotUnavailable or err == error.StaleProjection) {
                     self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
@@ -338,17 +351,17 @@ pub const Surface = struct {
             };
             if (!next.owner.eql(self.owner)) {
                 var stale = next;
-                stale.deinit(self.cx.allocator);
+                stale.deinit(snapshot_allocator);
                 return error.StaleOwner;
             }
             if (self.requested_theme) |theme| if (next.applied_theme_revision != theme.revision) {
                 var deferred = next;
-                deferred.deinit(self.cx.allocator);
+                deferred.deinit(snapshot_allocator);
                 self.force_snapshot = true;
                 changed = false;
                 break :update;
             };
-            if (self.snapshot) |*old| old.deinit(self.cx.allocator);
+            if (self.snapshot) |*old| old.deinit(snapshot_allocator);
             self.snapshot = next;
             self.displayed_theme = self.requested_theme;
             self.next_input = @max(self.next_input, next.input_revision +| 1);
@@ -413,7 +426,7 @@ pub const Surface = struct {
             self.blink = !self.blink;
             changed = true;
         }
-        if (changed or was_focused != self.focused) try self.render(now);
+        if (changed or was_focused != self.focused or self.glyphs_pending) try self.render(now);
         if (blink_running) {
             const remaining = @max(1, blink_half_period_ms - (self.cx.frame_time_ms - self.last_blink));
             self.cx.scheduleRedrawAfterNs(@intFromFloat(remaining * std.time.ns_per_ms));
@@ -451,6 +464,14 @@ pub const Surface = struct {
         return if (self.options.timestamps) S.gutter else 0;
     }
     fn render(self: *Surface, _: i64) !void {
+        if (self.glyph_budget_frame != self.cx.frame_count) {
+            self.glyph_budget_frame = self.cx.frame_count;
+            // The first frame also pays for cold fonts and row layout. Later
+            // frames can fill larger batches without repeating that work.
+            self.glyph_budget_remaining = if (self.glyphs_pending) 96 else 24;
+        }
+        self.glyphs_pending = false;
+        defer if (self.glyphs_pending) self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
         const projection = &self.snapshot.?.projection;
         // OSC default-background changes affect cell color resolution, while the
         // terminal canvas always exposes the shared application background.
@@ -465,29 +486,11 @@ pub const Surface = struct {
             const root = try ui.boxStyled(self.cx, S.row, .{});
             errdefer self.cx.destroyDetached(root);
             root.meta.ownership.meta.test_id = test_id;
-            const article = try ui.box(self.cx, .{ .position = .absolute, .border = .{ .radius = 8 }, .hit_behavior = .pass_through }, .{});
-            article.meta.ownership.meta.test_id = "terminal.command.article";
-            try root.appendChild(self.cx.allocator, article);
-            const time = try ui.textStyled(self.cx, S.timestamp, "");
-            time.meta.ownership.meta.test_id = "terminal.timestamp";
-            try root.appendChild(self.cx.allocator, time);
-            const record_time = try ui.textStyled(self.cx, records_style.recordTime, "");
-            record_time.meta.ownership.meta.test_id = "terminal.command.time";
-            try root.appendChild(self.cx.allocator, record_time);
-            const marker = try ui.textStyled(self.cx, records_style.markerText, "ZeroWork");
-            marker.setStyleInline(self.cx.allocator, records_style.markerBox(self.cx.tokens));
-            marker.meta.ownership.meta.test_id = "terminal.command.source";
-            marker.setDisplay(.none);
-            try root.appendChild(self.cx.allocator, marker);
-            const status_icon = try ui.textStyled(self.cx, records_style.resultText, "");
-            status_icon.meta.ownership.meta.test_id = "terminal.command.state";
-            status_icon.setDisplay(.none);
-            try root.appendChild(self.cx.allocator, status_icon);
             const selected = try leaf(self.cx, S.selection(self.cx.tokens));
             (try selected.style.ensureExtFallible(self.cx.allocator)).z_index = 4;
             try root.appendChild(self.cx.allocator, selected);
             try self.viewport.appendChild(self.cx.allocator, root);
-            self.rows.appendAssumeCapacity(.{ .root = root, .test_id = test_id, .time = time, .record_time = record_time, .selected = selected, .marker = marker, .status_icon = status_icon, .article = article });
+            self.rows.appendAssumeCapacity(.{ .root = root, .test_id = test_id, .selected = selected });
         }
         while (self.rows.items.len > projection.visible_rows.len) {
             var row = self.rows.pop().?;
@@ -523,11 +526,18 @@ pub const Surface = struct {
             const row_y = self.presentationY(value.viewport_y);
             try absolute(self.cx, row.root, self.contentPadding().left, row_y, row_width, self.options.row_height);
             const first_article = value.application_record_id != 0 and (value.viewport_y == 0 or projection.visible_rows[value.viewport_y - 1].application_record_id != value.application_record_id);
-            row.article.setDisplay(if (first_article) .flex else .none);
             if (first_article) {
-                row.article.setBackground(records_style.tint(if (value.application_state == 2) 3 else value.application_kind));
-                try absolute(self.cx, row.article, -@import("terminal_record_geometry.zig").padding_inline, value.presentation.article_y - row_y, row_width + 2 * @import("terminal_record_geometry.zig").padding_inline, value.presentation.article_height);
-            }
+                if (row.article == null) {
+                    const article = try ui.box(self.cx, .{ .position = .absolute, .border = .{ .radius = 8 }, .hit_behavior = .pass_through }, .{});
+                    errdefer self.cx.destroyDetached(article);
+                    article.meta.ownership.meta.test_id = "terminal.command.article";
+                    try row.root.insertChildBefore(self.cx.allocator, article, row.root.children.items[0]);
+                    row.article = article;
+                }
+                row.article.?.setDisplay(.flex);
+                row.article.?.setBackground(records_style.tint(if (value.application_state == 2) 3 else value.application_kind));
+                try absolute(self.cx, row.article.?, -@import("terminal_record_geometry.zig").padding_inline, value.presentation.article_y - row_y, row_width + 2 * @import("terminal_record_geometry.zig").padding_inline, value.presentation.article_height);
+            } else if (row.article) |article| article.setDisplay(.none);
             const current = !self.snapshot.?.read_only and projection.cursor.visible and value.viewport_y == projection.cursor.row;
             row.root.setBackground(if (value.application_record_id == 0 and current and self.options.highlight) S.inputHighlight(self.cx.tokens) else ui.Color.TRANSPARENT);
             const cells = projection.cells[value.cell_start .. value.cell_start + value.cell_count];
@@ -537,37 +547,41 @@ pub const Surface = struct {
             const stamp = value.submitted_wallclock_ms orelse value.received_wallclock_ms;
             const header = value.application_kind == 1 and value.id[1] == 0;
             try self.renderTime(row, if (has_text and (value.application_record_id == 0 or header)) stamp else null);
-            row.record_time.setDisplay(if (header and stamp != null) .flex else .none);
             if (header and stamp != null) {
+                const time = try self.rowText(row, "record_time", records_style.recordTime, "", "terminal.command.time");
+                time.setDisplay(.flex);
                 var clock: [19]u8 = undefined;
                 const text = try input.localDateTimestamp(&clock, stamp.?);
-                try row.record_time.setTextContent(self.cx.allocator, text);
-                row.record_time.setTextColor(@import("app_theme.zig").current().fg_3);
-                var time_props = row.record_time.getText().?;
+                try time.setTextContent(self.cx.allocator, text);
+                time.setTextColor(@import("app_theme.zig").current().fg_3);
+                var time_props = time.getText().?;
                 time_props.line_height = self.options.row_height / time_props.font_size;
-                row.record_time.setText(time_props);
-                try absolute(self.cx, row.record_time, @max(self.bodyX(), row_width - 160), 0, 160, self.options.row_height);
-            }
-            row.marker.setDisplay(if (value.application_kind == 1 and value.id[1] == 0 and projection.cols > self.composite.command_inset_cells + 5) .flex else .none);
-            if (value.application_kind == 1) {
-                row.marker.setBackground(@import("app_theme.zig").current().accent.withAlpha(31));
-                var marker_props = row.marker.getText().?;
+                time.setText(time_props);
+                try absolute(self.cx, time, @max(self.bodyX(), row_width - 160), 0, 160, self.options.row_height);
+            } else if (row.record_time) |time| time.setDisplay(.none);
+            if (header and projection.cols > self.composite.command_inset_cells + 5) {
+                const marker = try self.rowText(row, "marker", records_style.markerText, "ZeroWork", "terminal.command.source");
+                marker.setStyleInline(self.cx.allocator, records_style.markerBox(self.cx.tokens));
+                marker.setDisplay(.flex);
+                marker.setBackground(@import("app_theme.zig").current().accent.withAlpha(31));
+                var marker_props = marker.getText().?;
                 marker_props.color = @import("app_theme.zig").current().accent_ink;
-                row.marker.setText(marker_props);
-                records_style.place(self.cx, row.marker, self.bodyX(), 2, records_style.marker_width, records_style.marker_height);
-            }
-            row.status_icon.setDisplay(if (value.application_kind >= 2 and value.id[1] == (1 << 32)) .flex else .none);
-            if (value.application_kind >= 2) {
-                try row.status_icon.setTextContent(self.cx.allocator, switch (value.application_kind) {
+                marker.setText(marker_props);
+                records_style.place(self.cx, marker, self.bodyX(), 2, records_style.marker_width, records_style.marker_height);
+            } else if (row.marker) |marker| marker.setDisplay(.none);
+            if (value.application_kind >= 2 and value.id[1] == (1 << 32)) {
+                const icon = try self.rowText(row, "status_icon", records_style.resultText, "", "terminal.command.state");
+                icon.setDisplay(.flex);
+                try icon.setTextContent(self.cx.allocator, switch (value.application_kind) {
                     2 => "✓",
                     3 => "!",
                     else => "…",
                 });
-                var props = row.status_icon.getText().?;
+                var props = icon.getText().?;
                 props.color = records_style.resultColor(value.application_kind);
-                row.status_icon.setText(props);
-                records_style.place(self.cx, row.status_icon, self.bodyX(), 0, records_style.result_icon_width, self.options.row_height);
-            }
+                icon.setText(props);
+                records_style.place(self.cx, icon, self.bodyX(), 0, records_style.result_icon_width, self.options.row_height);
+            } else if (row.status_icon) |icon| icon.setDisplay(.none);
             var hash = std.hash.Wyhash.init(0);
             hash.update(std.mem.asBytes(&value.id));
             for (cells) |cell| {
@@ -582,14 +596,21 @@ pub const Surface = struct {
                     hash.update(std.mem.asBytes(&self.focused));
                 }
             }
-            std.hash.autoHash(&hash, .{ @as(u32, @bitCast(row_width)), row.record_time.style.display != .none });
+            std.hash.autoHash(&hash, .{ @as(u32, @bitCast(row_width)), row.record_time != null and row.record_time.?.style.display != .none });
             std.hash.autoHash(&hash, @as(u32, @bitCast(value.presentation.shift_x)));
             std.hash.autoHash(&hash, projection.colors);
             std.hash.autoHash(&hash, projection.modes.reverse_colors);
             std.hash.autoHash(&hash, .{ @as(u32, @bitCast(self.options.font_size)), @as(u32, @bitCast(self.options.row_height)), @as(u32, @bitCast(self.options.cell_width)), self.options.family_id, self.options.weight, self.options.foreground, self.options.background, self.options.timestamps });
-            if (row.hash != hash.final()) {
-                try self.renderGlyphs(row, cells, projection);
-                row.hash = hash.final();
+            if (row.hash != hash.final() or row.pending_hash != null) {
+                if (row.pending_hash != hash.final()) {
+                    row.pending_hash = hash.final();
+                    row.pending_col = 0;
+                    row.pending_glyphs = 0;
+                }
+                if (try self.renderGlyphs(row, cells, projection)) {
+                    row.hash = hash.final();
+                    row.pending_hash = null;
+                }
             }
         }
         try self.renderSelection();
@@ -598,37 +619,51 @@ pub const Surface = struct {
         self.cx.requestRedraw();
     }
     fn renderTime(self: *Surface, row: *Row, timestamp: ?i64) !void {
-        row.time.setDisplay(if (self.options.timestamps and timestamp != null) .flex else .none);
-        if (!self.options.timestamps or timestamp == null) return;
+        if (!self.options.timestamps or timestamp == null) {
+            if (row.time) |time| time.setDisplay(.none);
+            return;
+        }
+        const time = try self.rowText(row, "time", S.timestamp, "", "terminal.timestamp");
+        time.setDisplay(.flex);
         var bytes: [8]u8 = undefined;
         const stamp = try input.localTimestamp(&bytes, timestamp.?);
-        if (row.time.getText()) |props| if (!std.mem.eql(u8, props.content, stamp)) try row.time.setTextContent(self.cx.allocator, stamp);
-        var props = row.time.getText().?;
+        if (time.getText()) |props| if (!std.mem.eql(u8, props.content, stamp)) try time.setTextContent(self.cx.allocator, stamp);
+        var props = time.getText().?;
         if (props.font_family != self.options.family_id or props.use_monospace_font != (self.options.family_id == 0)) {
             props.font_family = self.options.family_id;
             props.use_monospace_font = self.options.family_id == 0;
-            row.time.setText(props);
+            time.setText(props);
         }
-        var aligned = row.time.getText().?;
+        var aligned = time.getText().?;
         aligned.line_height = self.options.row_height / aligned.font_size;
-        row.time.setText(aligned);
-        try absolute(self.cx, row.time, S.timestamp_x, S.timestamp_y, S.timestamp_width, self.options.row_height);
+        time.setText(aligned);
+        try absolute(self.cx, time, S.timestamp_x, S.timestamp_y, S.timestamp_width, self.options.row_height);
+    }
+    fn rowText(self: *Surface, row: *Row, comptime field: []const u8, comptime style: anytype, content: []const u8, test_id: []const u8) !*ui.Node {
+        if (@field(row, field)) |node| return node;
+        const node = try ui.textStyled(self.cx, style, content);
+        errdefer self.cx.destroyDetached(node);
+        node.meta.ownership.meta.test_id = test_id;
+        try row.root.appendChild(self.cx.allocator, node);
+        @field(row, field) = node;
+        return node;
     }
     pub fn presentationY(self: *const Surface, index: usize) f32 {
         if (self.snapshot) |snap| if (index < snap.projection.visible_rows.len) return @import("terminal_record_geometry.zig").rowY(snap.projection.visible_rows[index].presentation, index, self.options.row_height);
         return @as(f32, @floatFromInt(index)) * self.options.row_height;
     }
-    fn renderGlyphs(self: *Surface, row: *Row, cells: []const vt.Cell, projection: *const vt.Projection) !void {
-        var used: usize = 0;
-        var col: usize = 0;
+    fn renderGlyphs(self: *Surface, row: *Row, cells: []const vt.Cell, projection: *const vt.Projection) !bool {
+        var used = row.pending_glyphs;
+        var col = row.pending_col;
+        var complete = true;
         while (col < cells.len) {
             const cell = cells[col];
             const start = col;
             col += 1;
-            if (row.record_time.style.display != .none and self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(start + 1)) * self.options.cell_width > row.root.style.width.px - 164) continue;
+            if (row.record_time != null and row.record_time.?.style.display != .none and self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(start + 1)) * self.options.cell_width > row.root.style.width.px - 164) continue;
             if (cell.width == .wide_tail) continue;
             var text = projection.grapheme(cell);
-            if (text.len == 0 and cell.background == .default and cell.attributes == 0) continue;
+            if (text.len == 0 and cell.background == .default and cell.attributes == 0 and !projection.modes.reverse_colors) continue;
             // Keep complex graphemes at their exact VT columns. Adjacent ASCII
             // cells share one native text run instead of two nodes per cell.
             // fixed advance preserves the terminal grid even for ligatures.
@@ -638,12 +673,19 @@ pub const Surface = struct {
                 while (col < cells.len and col - start < ascii.len) : (col += 1) {
                     const next = cells[col];
                     if (!asciiCell(next, projection) or !sameCellStyle(cell, next)) break;
-                    if (row.record_time.style.display != .none and self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(col + 1)) * self.options.cell_width > row.root.style.width.px - 164) break;
+                    if (row.record_time != null and row.record_time.?.style.display != .none and self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(col + 1)) * self.options.cell_width > row.root.style.width.px - 164) break;
                     ascii[col - start] = projection.grapheme(next)[0];
                 }
                 text = ascii[0 .. col - start];
             }
             if (used == row.glyphs.items.len) {
+                if (self.glyph_budget_remaining == 0 and row.layout.article_height > 0) {
+                    self.glyphs_pending = true;
+                    col = start;
+                    complete = false;
+                    break;
+                }
+                if (row.layout.article_height > 0) self.glyph_budget_remaining -|= 1;
                 try row.glyphs.ensureUnusedCapacity(self.cx.allocator, 1);
                 const node = try ui.text(self.cx, "", .{ .selectable = false });
                 errdefer {
@@ -651,25 +693,21 @@ pub const Surface = struct {
                     self.cx.destroyDetached(node);
                 }
                 try row.root.appendChild(self.cx.allocator, node);
-                const overline = try leaf(self.cx, self.options.foreground);
-                errdefer {
-                    if (overline.parent) |parent| self.cx.detachChild(parent, overline);
-                    self.cx.destroyDetached(overline);
-                }
-                try row.root.appendChild(self.cx.allocator, overline);
-                row.glyphs.appendAssumeCapacity(.{ .node = node, .overline = overline });
+                row.glyphs.appendAssumeCapacity(.{ .node = node });
             }
             const glyph = &row.glyphs.items[used];
-            var fg = resolveColor(cell.foreground, ui.Color.hex(projection.colors.foreground), projection.colors);
-            var bg = resolveColor(cell.background, ui.Color.hex(projection.colors.background), projection.colors);
-            if ((cell.attributes & (1 << 4) != 0) != projection.modes.reverse_colors) std.mem.swap(ui.Color, &fg, &bg);
+            var fg = resolveColor(cell.foreground, ui.Color.hex(if (projection.modes.reverse_colors) projection.colors.background else projection.colors.foreground), projection.colors);
+            var bg = resolveColor(cell.background, ui.Color.hex(if (projection.modes.reverse_colors) projection.colors.foreground else projection.colors.background), projection.colors);
+            if (cell.attributes & (1 << 4) != 0) std.mem.swap(ui.Color, &fg, &bg);
             if (cell.attributes & (1 << 6) != 0) fg.a = @intCast(@as(u16, fg.a) / 2);
-            if (cell.attributes & (1 << 7) != 0) fg = bg;
-            if (cell.attributes & (1 << 3) != 0 and self.focused and !self.reduced_motion and !self.blink) fg = bg;
+            const hide_ink = cell.attributes & (1 << 7) != 0 or
+                (cell.attributes & (1 << 3) != 0 and self.focused and !self.reduced_motion and !self.blink);
+            if (hide_ink) fg.a = 0;
             var props = glyph.node.getText().?;
-            const spans = try self.cx.allocator.alloc(ui.types.TextSpan, 1);
+            const decorated = cell.attributes & (1 << 5) != 0 or (cell.underline != 0 and cell.underline != 2);
+            const spans: []ui.types.TextSpan = if (decorated) try self.cx.allocator.alloc(ui.types.TextSpan, 1) else &.{};
             var published = false;
-            errdefer if (!published) self.cx.allocator.free(spans);
+            errdefer if (!published and spans.len > 0) self.cx.allocator.free(spans);
             try props.setContent(self.cx.allocator, if (text.len == 0) " " else text);
             props.font_size = self.options.font_size;
             props.line_height = self.options.row_height / self.options.font_size;
@@ -680,14 +718,14 @@ pub const Surface = struct {
             props.monospace_char_width = self.options.cell_width;
             props.strikethrough = cell.attributes & (1 << 5) != 0;
             props.color = fg;
-            spans[0] = .{ .start = 0, .end = @intCast(props.content.len), .underline = cell.underline != 0 and cell.underline != 2, .underline_color = resolveColor(cell.underline_color, fg, projection.colors), .underline_style = switch (cell.underline) {
+            if (spans.len > 0) spans[0] = .{ .start = 0, .end = @intCast(props.content.len), .strikethrough = props.strikethrough, .underline = cell.underline != 0 and cell.underline != 2, .underline_color = if (hide_ink) ui.Color.TRANSPARENT else resolveColor(cell.underline_color, fg, projection.colors), .underline_style = switch (cell.underline) {
                 3 => .wavy,
                 4 => .dotted,
                 5 => .dashed,
                 else => .solid,
             }, .underline_thickness = 1 };
             props.spans = spans;
-            props.spans_owned = true;
+            props.spans_owned = spans.len > 0;
             glyph.node.setText(props);
             published = true;
             glyph.node.setBackground(if (cell.background == .default and cell.attributes & (1 << 4) == 0 and !projection.modes.reverse_colors) ui.Color.TRANSPARENT else bg);
@@ -695,9 +733,17 @@ pub const Surface = struct {
             const x = self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(start)) * self.options.cell_width;
             const width = self.options.cell_width * @as(f32, @floatFromInt(if (cell.width == .wide_lead) @as(usize, 2) else col - start));
             try absolute(self.cx, glyph.node, x, 0, width, self.options.row_height);
-            glyph.overline.setDisplay(if (cell.attributes & (1 << 8) != 0) .flex else .none);
-            glyph.overline.setBackground(fg);
-            try absolute(self.cx, glyph.overline, x, 1, width, 1);
+            if (cell.attributes & (1 << 8) != 0 and glyph.overline == null) {
+                const line = try leaf(self.cx, fg);
+                errdefer self.cx.destroyDetached(line);
+                try row.root.appendChild(self.cx.allocator, line);
+                glyph.overline = line;
+            }
+            if (glyph.overline) |line| {
+                line.setDisplay(if (cell.attributes & (1 << 8) != 0) .flex else .none);
+                line.setBackground(fg);
+                try absolute(self.cx, line, x, 1, width, 1);
+            }
             if (cell.underline == 2 and glyph.double_underline == null) {
                 const line = try leaf(self.cx, ui.Color.TRANSPARENT);
                 errdefer self.cx.destroyDetached(line);
@@ -706,7 +752,7 @@ pub const Surface = struct {
             }
             if (glyph.double_underline) |line| {
                 line.setDisplay(if (cell.underline == 2) .flex else .none);
-                const color = resolveColor(cell.underline_color, fg, projection.colors);
+                const color = if (hide_ink) ui.Color.TRANSPARENT else resolveColor(cell.underline_color, fg, projection.colors);
                 line.setStyleInline(self.cx.allocator, .{ .border_top_width = 1, .border_bottom_width = 1, .border_top_color = color, .border_bottom_color = color });
                 try absolute(self.cx, line, x, self.options.row_height - 5, width, 4);
             }
@@ -714,9 +760,12 @@ pub const Surface = struct {
         }
         for (row.glyphs.items[used..]) |glyph| {
             glyph.node.setDisplay(.none);
-            glyph.overline.setDisplay(.none);
+            if (glyph.overline) |line| line.setDisplay(.none);
             if (glyph.double_underline) |line| line.setDisplay(.none);
         }
+        row.pending_col = col;
+        row.pending_glyphs = used;
+        return complete;
     }
     pub fn setCommandCaret(self: *Surface, advance: f32) void {
         if (self.command_caret_advance == advance) return;
@@ -736,8 +785,12 @@ pub const Surface = struct {
         var width = self.options.cell_width;
         var height = self.options.row_height;
         if (self.preedit.len != 0) x += self.measured(self.preedit[0..self.preedit_cursor]);
-        switch (self.options.cursor_style) {
-            .block => {},
+        switch (if (self.displayed_theme != null) cursor.shape else switch (self.options.cursor_style) {
+            .block => @as(@FieldType(@import("../vt/engine.zig").Cursor, "shape"), .block),
+            .bar => .bar,
+            .underline => .underline,
+        }) {
+            .block, .hollow => {},
             .bar => width = 2,
             .underline => {
                 height = 2;
@@ -930,14 +983,9 @@ pub const Surface = struct {
         const status = try self.service.status();
         if (!status.owner.eql(self.owner)) return error.StaleOwner;
         if (!ui.platform_services.clipboardSetText(self.cx.system_sdk, text)) return error.ClipboardUnavailable;
-        // Clipboard success belongs to the window's single notification stream.
-        // Existing inline validation stays attached to its input location.
-        self.feedback.publish(self.feedback.context, self.cx, self.owner, "选区已复制") catch |err| {
-            std.log.debug("terminal copy feedback unavailable: {s}", .{@errorName(err)});
-        };
     }
     fn publishFeedback(_: ?*anyopaque, cx: *ui.Cx, owner: identity.SessionHandle, summary: []const u8) !void {
-        try @import("plugin_window_host.zig").Host.publishFeedback(cx, owner, summary);
+        try @import("plugin_window_host.zig").Host.publishFailure(cx, owner, summary);
     }
     // Input, selection and IME callbacks are below; they use only this binding.
     fn onKey(key: ui.events.KeyCode, modifiers: ui.events.Modifiers, raw: ?*anyopaque) ui.events.EventResult {
@@ -958,6 +1006,7 @@ pub const Surface = struct {
         const self: *Surface = @ptrCast(@alignCast(node.behavior.events.event_context orelse return));
         self.dragging = false;
         self.mouse_reporting = false;
+        self.reported_button = .none;
     }
     pub fn releaseAnchorLater(self: *Surface, anchor: terminal.Anchor) void {
         self.service.releaseAnchor(anchor) catch |err| {
@@ -979,9 +1028,11 @@ pub const Surface = struct {
         }
         switch (event) {
             .text_input => |value| if (self.preedit.len == 0 and self.pending_paste == null and self.paste_requested == null) {
+                if (self.glyphs_pending and value.text.len > 0) self.input_during_hydration +|= 1;
                 if (self.enhancement) |handler| if (handler.text(handler.context, value.text)) return .stop;
             },
             .ime_commit => |value| if (self.pending_paste == null and self.paste_requested == null) {
+                if (self.glyphs_pending and value.text.len > 0) self.input_during_hydration +|= 1;
                 self.setPreedit("");
                 if (self.enhancement) |handler| if (handler.text(handler.context, value.text)) return .stop;
             },

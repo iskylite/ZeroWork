@@ -5,16 +5,18 @@ const std = @import("std");
 const auth = @import("../../proto/ssh/auth_challenge.zig");
 const shared = @import("../../host/challenge_host.zig");
 const host_key = @import("../../ui/host_key_confirmation.zig");
-pub const Details = struct { display_name: []const u8 = "", private_key_path: []const u8 = "", host_key: ?host_key.Request = null };
+pub const Details = struct { allow_save_password: bool = false, display_name: []const u8 = "", private_key_path: []const u8 = "", host_key: ?host_key.Request = null };
 pub const Callbacks = struct {
     context: *anyopaque,
     submit: *const fn (*anyopaque, auth.RequestIdentity, auth.Reply) anyerror!void,
+    save_password: ?*const fn (*anyopaque, auth.Snapshot, []const u8) anyerror!void = null,
     cancel: *const fn (*anyopaque, auth.RequestIdentity) void,
 };
 pub const Bridge = struct {
     current: ?auth.Snapshot = null,
     host: ?*shared.Host = null,
     forwarded: bool = false,
+    password_save_failed: bool = false,
     pub fn owner(request: auth.RequestIdentity) shared.Owner {
         return .{ .operation = request.key };
     }
@@ -28,6 +30,7 @@ pub const Bridge = struct {
         if (self.current) |request| if (self.host) |host| host.retire(owner(request.identity), request.identity.request_id, generation(request.identity));
         self.current = null;
         self.forwarded = false;
+        self.password_save_failed = false;
     }
     pub fn sync(self: *Bridge, host: *shared.Host, incoming: ?auth.Snapshot, details: Details, callbacks: Callbacks, now_ms: u64) !void {
         self.host = host;
@@ -45,6 +48,15 @@ pub const Bridge = struct {
                     .host_key_changed => if (answer.value == .fields and answer.value.fields.len == 1) .{ .replace_host_key = answer.value.fields[0] } else return error.InvalidChallengeResponse,
                     else => if (answer.value == .fields) .{ .answers = answer.value.fields } else return error.InvalidChallengeResponse,
                 };
+                if (answer.save_password and current.kind == .password and answer.value == .fields and answer.value.fields.len == 1) {
+                    const save = callbacks.save_password orelse return error.PasswordPersistenceUnavailable;
+                    save(callbacks.context, current, answer.value.fields[0]) catch |err| {
+                        self.clear();
+                        self.password_save_failed = true;
+                        return err;
+                    };
+                    self.password_save_failed = false;
+                }
                 try callbacks.submit(callbacks.context, id, reply);
                 self.forwarded = true;
                 return;
@@ -73,7 +85,8 @@ pub const Bridge = struct {
         const allocator = arena.allocator();
         const endpoint = request.endpoint();
         const source = try std.fmt.allocPrint(allocator, "{s} · {s}@{s}:{d} · 第 {d} 跳", .{ if (details.display_name.len == 0) endpoint.host else details.display_name, endpoint.user, endpoint.host, endpoint.port, request.identity.hop_index + 1 });
-        var payload: shared.Payload = .{ .title = title(request.kind), .source_name = source, .detail = if (request.state == .failed) "认证未通过，请核对后重新填写；取消会停止本次连接。" else "仅用于当前连接；取消会停止本次认证。", .submit_label = submitLabel(request.kind) };
+        var payload: shared.Payload = .{ .allow_save_password = details.allow_save_password and request.kind == .password, .title = title(request.kind), .source_name = source, .detail = if (request.state == .failed) "认证未通过，请核对后重新填写；取消会停止本次连接。" else if (details.allow_save_password and request.kind == .password) "可选择保存密码供下次连接使用；取消会停止本次认证。" else "仅用于当前连接；取消会停止本次认证。", .submit_label = submitLabel(request.kind) };
+        if (self.password_save_failed and request.kind == .password) payload.detail = "密码保存失败。请解锁或授权系统钥匙串后重试，也可取消勾选保存密码后仅连接本次。";
         var fields: [auth.max_prompts]shared.Field = undefined;
         const kind: shared.Kind = switch (request.kind) {
             .host_key_unknown, .host_key_changed => .trust_material,

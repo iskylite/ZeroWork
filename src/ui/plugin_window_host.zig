@@ -185,6 +185,17 @@ pub const Host = struct {
         };
         return error.PluginWindowUnavailable;
     }
+    pub fn publishFailure(cx: *ui.Cx, owner: identity.SessionHandle, summary: []const u8) !void {
+        for (windows) |window| if (window) |self| if (self.cx == cx) {
+            if (self.closed or self.shutdown_prepared or self.application.sessions.queryState(owner) == null) return error.StaleHostContext;
+            const host = self.notification_host orelse return error.NotificationHostUnavailable;
+            const window_id = self.notification_window orelse return error.NotificationWindowUnavailable;
+            try host.publishFeedbackSeverity(window_id, .{ .session = owner }, summary, .failure);
+            self.cx.requestRedraw();
+            return;
+        };
+        return error.PluginWindowUnavailable;
+    }
     fn contextFor(raw: *anyopaque, owner: identity.SessionHandle, key: operation.OperationKey, target: contexts.Target) !contexts.HostContext {
         const domain: *application.Domain = @ptrCast(@alignCast(raw));
         for (windows) |maybe| if (maybe) |window| if (window.application.domain == domain and window.application.window_id == target.window_id) return window.createContext(owner, key, target);

@@ -39,7 +39,7 @@ pub const Editor = struct {
     catalog_active: ?usize = null,
     catalog_custom: ?*ui.Node = null,
     capability_known: [2]bool = @splat(false),
-    capability_sources: [2]?*ui.Node = @splat(null),
+    capability_sources: [2]?*SourceIndicator = @splat(null),
     catalog_popup: ?ui.widgets.popover.PopoverResult = null,
     catalog_options: ?*ui.Node = null,
     catalog_scroll: ?ui.widgets.ScrollAreaResult = null,
@@ -48,7 +48,7 @@ pub const Editor = struct {
     test_status: ?*ui.Node = null,
     test_button: ?*ui.Node = null,
     test_signature: ?u64 = null,
-    context_source: ?*ui.Node = null,
+    context_source: ?*SourceIndicator = null,
     save_button: ?*ui.Node = null,
 
     pub fn mount(cx: *ui.Cx, parent: *ui.Scope, provider: usize, index: ?usize, name: []const u8, model: config.AiModel, candidates: []const config.AiModel, hooks: Hooks) !*Editor {
@@ -103,19 +103,29 @@ pub const Editor = struct {
         try self.modelChoice(scroll.content);
         self.inputs[1] = try self.field(scroll.content, "上下文窗口 *", self.context, "settings.ai.model.context");
         const capabilities = try ui.box(cx, S.modelCapabilities(), .{});
-        try capabilities.appendChild(cx.allocator, try ui.text(cx, "模型能力", .{ .font_size = 12, .font_weight = 600, .line_height = 20.0 / 12.0, .color = S.theme.current().fg_1 }));
+        const capability_heading = try ui.box(cx, S.modelCapabilityHeading(), .{});
+        capability_heading.meta.ownership.meta.test_id = "settings.ai.model.capabilities.heading";
+        try capability_heading.appendChild(cx.allocator, try ui.textStyled(cx, S.blockTitle, "模型能力"));
+        try capabilities.appendChild(cx.allocator, capability_heading);
         try self.capability(capabilities, "推理能力", "settings.ai.model.reasoning", .reasoning, model.reasoning);
-        self.effort_body = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .padding = .{ .left = 10, .right = 10, .bottom = 12, .top = 4 }, .background = S.theme.current().well, .border = .{ .radius = 7 }, .flex_shrink = 0 }, .{});
-        try self.effort_body.appendChild(cx.allocator, try ui.textStyled(cx, S.note, "支持的推理档位 · 可多选"));
-        const efforts = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .flex_wrap = .wrap, .gap = 5, .flex_shrink = 0 }, .{});
-        for ([_][]const u8{ "low", "medium", "high", "xhigh", "max", "none", "ultra" }, 0..) |label, i| {
+        self.effort_body = try ui.box(cx, S.modelEffortBody(), .{});
+        const effort_heading = try ui.box(cx, .{ .width = .fill(), .direction = .row, .align_items = .center }, .{});
+        try effort_heading.appendChild(cx.allocator, try ui.textStyled(cx, S.note, "推理等级"));
+        try effort_heading.appendChild(cx.allocator, try ui.spacer(cx));
+        try effort_heading.appendChild(cx.allocator, try ui.textStyled(cx, S.note, "可多选"));
+        try self.effort_body.appendChild(cx.allocator, effort_heading);
+        const efforts = try ui.grid(cx, .{ .columns = &.{ .{ .fr = 1 }, .{ .fr = 1 }, .{ .fr = 1 }, .{ .fr = 1 } }, .rows = &.{ .{ .px = 30 }, .{ .px = 30 } }, .column_gap = 6, .row_gap = 6, .height = .{ .px = 66 } }, .{});
+        efforts.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 0 });
+        efforts.meta.ownership.meta.test_id = "settings.ai.model.efforts";
+        // Display in strength order while preserving the stored effort indices.
+        const labels = [_][]const u8{ "low", "medium", "high", "xhigh", "max", "none", "ultra" };
+        for ([_]usize{ 5, 0, 1, 2, 3, 4, 6 }) |i| {
             self.efforts[i] = try scope.createSignal(bool, model.efforts[i]);
-            const check = try ui.widgets.Checkbox(.{ .checked = self.efforts[i], .label = label, .box_size = @as(f32, 12), .label_font_size = @as(f32, 11) }).mount(scope, cx);
+            const check = try ui.widgets.Checkbox(.{ .checked = self.efforts[i], .label = labels[i], .box_size = @as(f32, 12), .label_font_size = @as(f32, 11) }).mount(scope, cx);
+            check.setStyleInline(cx.allocator, S.modelEffortOption());
             self.checks[i] = check;
             check.meta.ownership.meta.test_id = ([_][]const u8{ "settings.ai.model.effort.low", "settings.ai.model.effort.medium", "settings.ai.model.effort.high", "settings.ai.model.effort.xhigh", "settings.ai.model.effort.max", "settings.ai.model.effort.none", "settings.ai.model.effort.ultra" })[i];
-            const option = try ui.box(cx, .{ .width = .{ .fit = .{} }, .height = .{ .fit = .{} }, .padding = .{ .left = 8, .right = 8, .top = 7, .bottom = 7 }, .background = S.theme.current().surface_2, .border = .{ .radius = 6 }, .flex_shrink = 0 }, .{});
-            try option.appendChild(cx.allocator, check);
-            try efforts.appendChild(cx.allocator, option);
+            try efforts.appendChild(cx.allocator, check);
         }
         try self.effort_body.appendChild(cx.allocator, efforts);
         self.effort_body.setDisplay(if (model.reasoning) .flex else .none);
@@ -142,8 +152,8 @@ pub const Editor = struct {
         try test_row.appendChild(cx.allocator, test_button);
         try scroll.content.appendChild(cx.allocator, test_row);
         const default_value = try scope.createSignal(bool, model.default);
-        const default_check = try ui.widgets.Checkbox(.{ .checked = ui.split(default_value, cx.on(Editor, self, setDefault)), .label = "设为此服务提供方的默认模型", .box_size = @as(f32, 13), .label_font_size = @as(f32, 12) }).mount(scope, cx);
-        default_check.setStyleInline(cx.allocator, .{ .height = .{ .px = 16.5 }, .margin = .{ .top = 1 }, .flex_shrink = 0 });
+        const default_check = try ui.widgets.Checkbox(.{ .checked = default_value, .on_change = cx.on(Editor, self, setDefault), .label = "设为此服务提供方的默认模型", .box_size = @as(f32, 13), .label_font_size = @as(f32, 12) }).mount(scope, cx);
+        default_check.setStyleInline(cx.allocator, .{ .height = .{ .px = 30 }, .margin = .{ .top = 1 }, .flex_shrink = 0 });
         self.checks[7] = default_check;
         default_check.meta.ownership.meta.test_id = "settings.ai.model.default";
         try scroll.content.appendChild(cx.allocator, default_check);
@@ -246,7 +256,7 @@ pub const Editor = struct {
             var buffer: [32]u8 = undefined;
             const context = std.fmt.bufPrint(&buffer, "{d}", .{candidate.context_window}) catch return;
             self.context.set(if (candidate.context_window == 0) "" else controls.owned(self.scope, context) catch return);
-            if (self.context_source) |source| source.setTextContent(self.cx.allocator, if (candidate.context_window == 0) "接口未返回，请补充" else "接口已返回") catch {};
+            if (self.context_source) |source| source.set(if (candidate.context_window == 0) .missing else .api);
             for (self.efforts, candidate.efforts) |value, enabled| value.set(enabled);
             self.effort_body.setDisplay(if (candidate.reasoning) .flex else .none);
             if (self.capability_values[0]) |value| value.set(if (!self.capability_known[0]) "unknown" else if (candidate.reasoning) "yes" else "no");
@@ -461,7 +471,7 @@ pub const Editor = struct {
         for (self.efforts) |effort| effort.set(false);
         self.effort_body.setDisplay(.none);
         self.context.set("");
-        if (self.context_source) |source| source.setTextContent(self.cx.allocator, "接口未返回，请补充") catch {};
+        if (self.context_source) |source| source.set(.missing);
         self.capability_known = @splat(false);
         self.refreshCapabilitySources(false);
         for (self.capability_values) |value| if (value) |v| v.set("unknown");
@@ -519,15 +529,14 @@ pub const Editor = struct {
         self.cx.requestRedraw();
     }
     fn contextEdited(self: *Editor, _: []const u8) void {
-        if (self.context_source) |source| source.setTextContent(self.cx.allocator, "手动设置") catch {};
+        if (self.context_source) |source| source.set(.manual);
     }
     fn field(self: *Editor, parent: *ui.Node, label: []const u8, value: *ui.Signal([]const u8), id: []const u8) !ui.widgets.input.InputResult {
         const group = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 6, .flex_shrink = 0 }, .{});
         const heading = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 18 }, .direction = .row, .gap = 6, .align_items = .center }, .{});
         try heading.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.label, label));
-        const source = try ui.textStyled(self.cx, S.note, if (self.index != null) "手动设置" else "接口未返回，请补充");
+        const source = try SourceIndicator.mount(self, heading, if (self.index != null) .manual else .missing, "settings.ai.model.context.source");
         self.context_source = source;
-        try heading.appendChild(self.cx.allocator, source);
         try group.appendChild(self.cx.allocator, heading);
         var input = try ui.widgets.Input(.{ .value = value, .placeholder = "例如 128000", .append_text = "tokens", .on_change = self.cx.on(Editor, self, contextEdited) }).mountResult(self.scope, self.cx);
         input.input_container.setStyleInline(self.cx.allocator, S.providerInput(0, 32));
@@ -539,7 +548,7 @@ pub const Editor = struct {
         return input;
     }
     fn refreshCapabilitySources(self: *Editor, from_api: bool) void {
-        for (self.capability_sources, self.capability_known) |source, known| if (source) |node| node.setTextContent(self.cx.allocator, if (!known) "接口未返回，请补充" else if (from_api) "接口已返回" else "手动设置") catch {};
+        for (self.capability_sources, self.capability_known) |source, known| if (source) |node| node.set(if (!known) .missing else if (from_api) .api else .manual);
     }
     const Capability = struct {
         editor: *Editor,
@@ -549,7 +558,7 @@ pub const Editor = struct {
             if (std.mem.eql(u8, selected, "unknown")) return;
             const capability_index: usize = if (self.kind == .reasoning) 0 else 1;
             self.editor.capability_known[capability_index] = true;
-            if (self.editor.capability_sources[capability_index]) |source| source.setTextContent(self.editor.cx.allocator, "手动设置") catch {};
+            if (self.editor.capability_sources[capability_index]) |source| source.set(.manual);
             const enabled = std.mem.eql(u8, selected, "yes");
             switch (self.kind) {
                 .reasoning => {
@@ -562,23 +571,71 @@ pub const Editor = struct {
     };
     fn capability(self: *Editor, parent: *ui.Node, label: []const u8, id: []const u8, kind: @FieldType(Capability, "kind"), enabled: bool) !void {
         const row = try ui.box(self.cx, S.modelCapabilityRow(), .{});
-        const identity = try ui.box(self.cx, .{ .height = .{ .fit = .{} }, .direction = .column, .gap = 3 }, .{});
+        const identity = try ui.box(self.cx, .{ .height = .{ .fit = .{} }, .direction = .row, .gap = 6, .align_items = .center }, .{});
         try identity.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.label, label));
         const capability_index: usize = if (kind == .reasoning) 0 else 1;
-        const source = try ui.textStyled(self.cx, S.note, if (self.capability_known[capability_index]) "手动设置" else "接口未返回，请补充");
+        const source = try SourceIndicator.mount(self, identity, if (self.capability_known[capability_index]) .manual else .missing, try controls.stableId(self.scope, id, ".source"));
         self.capability_sources[capability_index] = source;
-        try identity.appendChild(self.cx.allocator, source);
         try row.appendChild(self.cx.allocator, identity);
         try row.appendChild(self.cx.allocator, try ui.spacer(self.cx));
         const state = try self.scope.createState(Capability, .{ .editor = self, .kind = kind });
         const value = try self.scope.createSignal(?[]const u8, if (!self.capability_known[capability_index]) "unknown" else if (enabled) "yes" else "no");
         self.capability_values[if (kind == .reasoning) 0 else 1] = value;
-        const select = try ui.widgets.Select(.{ .value = ui.split(value, self.cx.on(Capability, state, Capability.changed)), .width = @as(f32, 170), .options = &[_]ui.widgets.SelectOption{ .{ .value = "unknown", .label = "未返回，请选择", .disabled = true }, .{ .value = "yes", .label = "支持", .test_id = if (kind == .reasoning) "settings.ai.model.reasoning.yes" else "settings.ai.model.vision.yes" }, .{ .value = "no", .label = "不支持", .test_id = if (kind == .reasoning) "settings.ai.model.reasoning.no" else "settings.ai.model.vision.no" } } }).mount(self.scope, self.cx);
+        const select = try ui.widgets.Select(.{ .value = value, .on_change = self.cx.on(Capability, state, Capability.changed), .width = @as(f32, 170), .options = &[_]ui.widgets.SelectOption{ .{ .value = "unknown", .label = "未返回，请选择", .disabled = true }, .{ .value = "yes", .label = "支持", .test_id = if (kind == .reasoning) "settings.ai.model.reasoning.yes" else "settings.ai.model.vision.yes" }, .{ .value = "no", .label = "不支持", .test_id = if (kind == .reasoning) "settings.ai.model.reasoning.no" else "settings.ai.model.vision.no" } } }).mount(self.scope, self.cx);
         self.select_open[if (kind == .reasoning) 0 else 1] = select.open;
         select.trigger.setStyleInline(self.cx.allocator, S.providerInput(170, 32));
         select.content_slot.setStyleInline(self.cx.allocator, .{ .font_size = 12, .font_weight = 400 });
         select.trigger.meta.ownership.meta.test_id = id;
         try row.appendChild(self.cx.allocator, select.wrapper);
         try parent.appendChild(self.cx.allocator, row);
+    }
+};
+
+/// Compact metadata provenance; icon shape and a tooltip supplement its color.
+const SourceIndicator = struct {
+    const Kind = enum { api, manual, missing };
+    icons: [3]*ui.Node,
+    text: *ui.Signal([]const u8),
+    open: *ui.Signal(bool),
+    trigger: *ui.Node,
+    fn mount(editor: *Editor, parent: *ui.Node, kind: Kind, id: []const u8) !*SourceIndicator {
+        const cx = editor.cx;
+        const scope = editor.scope;
+        const self = try scope.createState(SourceIndicator, .{ .icons = undefined, .text = try scope.createText("", .{}), .open = try scope.createSignal(bool, false), .trigger = undefined });
+        const tip = try ui.widgets.Tooltip(.{ .text = self.text, .open = self.open, .open_delay_ms = 450, .background = S.theme.current().overlay, .text_color = S.theme.current().fg_1, .font_size = 11 }).mount(scope, cx);
+        tip.content.meta.ownership.meta.test_id = try controls.stableId(scope, id, ".tooltip");
+        self.trigger = tip.trigger;
+        tip.trigger.meta.ownership.meta.test_id = id;
+        tip.trigger.setStyleInline(cx.allocator, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .align_items = .center, .justify = .center, .flex_shrink = 0 });
+        tip.trigger.setFocusable(true);
+        tip.trigger.behavior.events.on_focus = .{ .callback = focus, .context = self };
+        tip.trigger.behavior.events.on_blur = .{ .callback = blur, .context = self };
+        const assets = [_]ui.SvgAsset{ ui.icons.circle_check, ui.icons.pencil, ui.icons.circle_alert };
+        const colors = S.theme.current();
+        for (assets, [_]ui.Color{ colors.ok, colors.fg_2, colors.warn_ink }, 0..) |asset, color, i| {
+            self.icons[i] = try ui.iconTint(cx, asset, color, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
+            try tip.trigger.appendChild(cx.allocator, self.icons[i]);
+        }
+        self.set(kind);
+        try parent.appendChild(cx.allocator, tip.wrapper);
+        return self;
+    }
+    fn set(self: *SourceIndicator, kind: Kind) void {
+        const label: []const u8 = switch (kind) {
+            .api => "接口已返回",
+            .manual => "手动设置",
+            .missing => "接口未返回，请补充",
+        };
+        self.text.set(label);
+        self.trigger.behavior.interaction.a11y = .{ .label = label };
+        for (self.icons, 0..) |icon, i| icon.setDisplay(if (i == @backingInt(kind)) .flex else .none);
+    }
+    fn focus(raw: *anyopaque) void {
+        const self: *SourceIndicator = @ptrCast(@alignCast(raw));
+        self.open.set(true);
+    }
+    fn blur(raw: *anyopaque) void {
+        const self: *SourceIndicator = @ptrCast(@alignCast(raw));
+        self.open.set(false);
     }
 };

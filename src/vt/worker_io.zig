@@ -28,6 +28,9 @@ pub const WorkerIo = struct {
     timeline: ?*Timeline = null,
     checkpoint: ?*CheckpointController = null,
     stream_offset: u64 = 0,
+    reply_buffer: [4096]u8 = undefined,
+    reply_len: usize = 0,
+    reply_offset: usize = 0,
     timestamp_ctx: ?*anyopaque = null,
     timestamp_fn: ?TimestampFn = null,
     closed: bool = false,
@@ -155,8 +158,31 @@ pub const WorkerIo = struct {
     fn onWritable(ctx: *anyopaque) !void {
         const self: *WorkerIo = @ptrCast(@alignCast(ctx));
         if (self.closed) return;
-        const result = try pumpInputBatch(self.input, self.writer, self.write_buffer, 4);
-        std.log.debug("[worker_io] pump written={d} state={s}", .{ result.written, @tagName(result.state) });
+        try self.pumpWrites();
+    }
+
+    pub fn repliesPending(self: *const WorkerIo) bool {
+        return self.reply_offset < self.reply_len;
+    }
+    /// Replies share the sole SSH writer, not the UI/reconnect input queue.
+    /// Finish a started reply before keys; drain queued user bytes before
+    /// starting a reply so UTF-8 and bracketed pastes are never bisected.
+    pub fn pumpWrites(self: *WorkerIo) !void {
+        if (self.closed) return;
+        if (!self.repliesPending()) {
+            if (self.input.pending() != 0) {
+                _ = try pumpInputBatch(self.input, self.writer, self.write_buffer, 4);
+                if (self.input.pending() != 0) return;
+            }
+            self.reply_len = try self.feed.engine.readReply(&self.reply_buffer);
+            self.reply_offset = 0;
+        }
+        if (self.repliesPending()) {
+            const bytes = self.reply_buffer[self.reply_offset..self.reply_len];
+            const count = try self.writer.write(bytes);
+            if (count > bytes.len) return error.InvalidWriteCount;
+            self.reply_offset += count;
+        }
     }
 
     /// Worker-step probe, run unconditionally: one non-blocking read even
@@ -175,6 +201,10 @@ pub const WorkerIo = struct {
 
     pub fn resetTransport(self: *WorkerIo, reader: ChannelReader, writer: ChannelWriter) void {
         if (self.output_filter) |filter| if (filter.finish) |finish| finish(filter.context, self) catch {};
+        self.reply_offset = 0;
+        self.reply_len = 0;
+        // Old peer queries never become input to a successor shell.
+        while ((self.feed.engine.readReply(&self.reply_buffer) catch 0) != 0) {}
         self.reader = reader;
         self.writer = writer;
         self.closed = false;
@@ -200,6 +230,13 @@ const FakeEngine = struct {
     fed: [16]u8 = undefined,
     fed_len: usize = 0,
     fail_feed: bool = false,
+    replies: []const u8 = "",
+    pub fn readReply(self: *FakeEngine, buffer: []u8) !usize {
+        const count = @min(self.replies.len, buffer.len);
+        @memcpy(buffer[0..count], self.replies[0..count]);
+        self.replies = self.replies[count..];
+        return count;
+    }
     pub fn destroy(_: *FakeEngine) void {}
     pub fn feed(self: *FakeEngine, bytes: []const u8) !@import("engine.zig").FeedResult {
         if (self.fail_feed) return error.VtFeedFailed;
@@ -223,7 +260,8 @@ const FakeEngine = struct {
 const FakeChannel = struct {
     output: []const u8,
     eof: bool = false,
-    sent: [16]u8 = undefined,
+    sent: [128]u8 = undefined,
+    write_limit: usize = std.math.maxInt(usize),
     sent_len: usize = 0,
     pub fn read(ctx: *anyopaque, buffer: []u8) !Read {
         const self: *FakeChannel = @ptrCast(@alignCast(ctx));
@@ -235,9 +273,10 @@ const FakeChannel = struct {
     }
     pub fn write(ctx: *anyopaque, bytes: []const u8) !usize {
         const self: *FakeChannel = @ptrCast(@alignCast(ctx));
-        @memcpy(self.sent[self.sent_len .. self.sent_len + bytes.len], bytes);
-        self.sent_len += bytes.len;
-        return bytes.len;
+        const count = @min(bytes.len, self.write_limit);
+        @memcpy(self.sent[self.sent_len .. self.sent_len + count], bytes[0..count]);
+        self.sent_len += count;
+        return count;
     }
 };
 
@@ -388,4 +427,37 @@ test "worker IO probe propagates parser errors instead of dropping output silent
         .write_buffer = &write_buffer,
     };
     try std.testing.expectError(error.VtFeedFailed, worker.pollChannelRead());
+}
+
+test "worker IO sends VT replies through partial writes without bisecting paste or replaying old replies" {
+    const a = std.testing.allocator;
+    var engine: FakeEngine = .{ .replies = "\x1b[1;1R" };
+    var input = try InputQueue.init(a, 128);
+    defer input.deinit(a);
+    const paste = "\x1b[200~ABC\x1b[201~";
+    try input.push(paste);
+    var channel: FakeChannel = .{ .output = "", .write_limit = 2 };
+    var read_buffer: [16]u8 = undefined;
+    var write_buffer: [16]u8 = undefined;
+    var worker: WorkerIo = .{ .feed = .{ .engine = VtEngine.from(FakeEngine, &engine) }, .input = &input, .reader = .{ .ctx = &channel, .read_fn = FakeChannel.read }, .writer = .{ .ctx = &channel, .write_fn = FakeChannel.write }, .read_buffer = &read_buffer, .write_buffer = &write_buffer };
+    var inserted = false;
+    for (0..32) |_| {
+        try worker.pumpWrites();
+        if (!inserted and input.pending() == 0 and worker.repliesPending()) {
+            inserted = true;
+            try input.push("KEY");
+            channel.write_limit = 0;
+            const previous = channel.sent_len;
+            try worker.pumpWrites();
+            try std.testing.expectEqual(previous, channel.sent_len);
+            try std.testing.expect(worker.repliesPending());
+            channel.write_limit = 2;
+        }
+    }
+    try std.testing.expect(inserted);
+    try std.testing.expectEqualStrings(paste ++ "\x1b[1;1RKEY", channel.sent[0..channel.sent_len]);
+    engine.replies = "OLD_PEER_QUERY_REPLY";
+    worker.resetTransport(worker.reader, worker.writer);
+    try worker.pumpWrites();
+    try std.testing.expectEqualStrings(paste ++ "\x1b[1;1RKEY", channel.sent[0..channel.sent_len]);
 }

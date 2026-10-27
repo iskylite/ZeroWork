@@ -132,6 +132,10 @@ pub fn detail() ui.BoxStyle {
     return .{ .width = .{ .px = 344 }, .height = .{ .px = 128 }, .min_height = 128, .direction = .column, .padding = .{ .top = 10, .bottom = 14, .left = 14, .right = 14 }, .gap = 0, .background = theme.current().overlay, .border = .{ .radius = 14 }, .shadow = .{ .offset_y = 4, .blur = 10, .color = theme.current().shadow.withAlpha(if (theme.currentName() == .dark) 51 else if (theme.currentName() == .light) 18 else 20) } };
 }
 pub fn repaint(node: *ui.Node, old: theme.Colors) void {
+    // Button owns reactive styles, including the in-flight background color.
+    // An imperative repaint becomes an inline override and can pin an
+    // interpolated old-theme color above its base_style signal forever.
+    if (node.meta.ownership.meta.component_name) |name| if (std.mem.eql(u8, name, "Button")) return;
     node.setBackground(remap(node.getBackground(), old));
     node.setBorderColor(remap(node.style.border.color, old));
     if (node.getText()) |value| node.setTextColor(remap(value.color, old));

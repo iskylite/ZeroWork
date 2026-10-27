@@ -42,7 +42,7 @@ pub const Owner = union(enum) {
 pub const Kind = enum { secret_input, trust_material, choice };
 pub const Option = struct { value: []const u8, label: []const u8 };
 pub const Field = struct { label: []const u8, secret: bool = true, max_bytes: usize = 8192, confirmation: ?[]const u8 = null };
-pub const Payload = struct { title: []const u8, detail: []const u8 = "", source_name: []const u8 = "", material: []const u8 = "", choices: []const Option = &.{}, fields: []const Field = &.{}, submit_label: []const u8 = "确认" };
+pub const Payload = struct { allow_save_password: bool = false, title: []const u8, detail: []const u8 = "", source_name: []const u8 = "", material: []const u8 = "", choices: []const Option = &.{}, fields: []const Field = &.{}, submit_label: []const u8 = "确认" };
 pub const State = enum { pending, answered, withdrawn, timed_out, cancelled };
 pub const View = struct { owner: Owner, request_id: u64, generation: u64, kind: Kind, payload: Payload, deadline: u64, state: State = .pending, background: bool = false };
 pub const Reply = union(enum) { secret_input: []const u8, trust_material: bool, choice: []const u8, fields: []const []const u8 };
@@ -52,6 +52,7 @@ pub const Answer = struct {
     request_id: u64,
     generation: u64,
     value: Reply,
+    save_password: bool = false,
     pub fn deinit(self: *Answer) void {
         switch (self.value) {
             .secret_input => |secret| {
@@ -187,6 +188,12 @@ pub const Host = struct {
         try self.answers.ensureUnusedCapacity(self.allocator, 1);
         const value = try self.answer(owner, request_id, generation, reply, now_ms);
         self.answers.appendAssumeCapacity(value);
+    }
+    pub fn submitPasswordAnswer(self: *Host, owner_value: Owner, request_id: u64, generation: u64, reply: Reply, now_ms: u64, remember: bool) !void {
+        const record = self.find(owner_value, request_id, generation) orelse return error.ChallengeMismatch;
+        if (remember and !record.view.payload.allow_save_password) return error.InvalidChallengeResponse;
+        try self.submitAnswer(owner_value, request_id, generation, reply, now_ms);
+        self.answers.items[self.answers.items.len - 1].save_password = remember;
     }
     pub fn stateFor(self: *const Host, owner_value: anytype, request_id: u64, generation: u64) ?State {
         const owner = Owner.from(owner_value);
@@ -355,4 +362,18 @@ test "trust replacement requires exact confirmation and closing session retires 
     host.retireOwner(session);
     try std.testing.expectEqual(@as(usize, 0), host.records.items.len);
     try std.testing.expectEqual(@as(usize, 0), host.answers.items.len);
+}
+
+test "password persistence requires an explicit eligible challenge" {
+    var host = Host.init(std.testing.allocator);
+    defer host.deinit();
+    const owner: Owner = .{ .session = .{ .session_id = @fromBackingInt(90), .generation = 1 } };
+    try host.offer(owner, 1, 1, .secret_input, .{ .title = "password", .allow_save_password = true, .fields = &.{.{ .label = "Password" }} }, 100);
+    try host.submitPasswordAnswer(owner, 1, 1, .{ .fields = &.{"fixture-secret"} }, 1, true);
+    var answer = host.takeAnswer(owner, 1, 1).?;
+    defer answer.deinit();
+    try std.testing.expect(answer.save_password);
+    try host.offer(owner, 2, 1, .secret_input, .{ .title = "OTP", .fields = &.{.{ .label = "OTP" }} }, 100);
+    try std.testing.expectError(error.InvalidChallengeResponse, host.submitPasswordAnswer(owner, 2, 1, .{ .fields = &.{"123456"} }, 1, true));
+    try std.testing.expectEqual(State.pending, host.stateFor(owner, 2, 1).?);
 }

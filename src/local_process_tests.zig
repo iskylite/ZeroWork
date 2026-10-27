@@ -186,6 +186,29 @@ test "real login PTYs have independent owners, cwd, winsize, EAGAIN and reaped t
     try std.testing.expectEqual(@as(c_int, -1), std.c.waitpid(child_pid, &status, std.c.W.NOHANG));
 }
 
+test "PTY kernel exec closes high descriptors without changing parent ownership" {
+    var sandbox = try Sandbox.init();
+    defer sandbox.deinit();
+    const original = std.c.open("/dev/null", .{ .ACCMODE = .RDONLY });
+    try std.testing.expect(original >= 0);
+    defer _ = std.c.close(original);
+    const high = std.c.fcntl(original, std.c.F.DUPFD, @as(c_int, 4096));
+    try std.testing.expect(high >= 4096);
+    defer _ = std.c.close(high);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.fcntl(high, std.c.F.GETFD, @as(c_int, 0)));
+    var failure: pty.Failure = .{};
+    var session = try pty.Session.start(allocator, owner(98), key(98), .{ .initial_cwd = sandbox.path }, &failure);
+    defer finishSession(&session) catch @panic("descriptor PTY cleanup incomplete");
+    const command = try std.fmt.allocPrint(allocator, "stty -echo; if [[ -e /dev/fd/{d} ]]; then printf '\\106\\104\\137\\114\\105\\101\\113\\012'; else printf '\\106\\104\\137\\103\\114\\117\\123\\105\\104\\012'; fi\r", .{high});
+    defer allocator.free(command);
+    try writeAll(&session, command);
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    try waitText(&session, &output, "FD_CLOSED");
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "FD_LEAK") == null);
+    try std.testing.expect(std.c.fcntl(high, std.c.F.GETFD, @as(c_int, 0)) >= 0);
+}
+
 test "PTY close signals only owned foreground/background groups and preserves another session" {
     var sandbox = try Sandbox.init();
     defer sandbox.deinit();

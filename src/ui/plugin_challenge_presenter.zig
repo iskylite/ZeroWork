@@ -50,6 +50,8 @@ pub const Presenter = struct {
     input: ui.widgets.input.InputResult = undefined,
     fields: [16]FieldControl = undefined,
     fields_scroll: *ui.Node = undefined,
+    save_password: *ui.Signal(bool) = undefined,
+    remember: *ui.Node = undefined,
     prefill_window: ?u64 = null,
     prefill_expires_ns: ?i128 = null,
     prefill_guard: ?PrefillGuard = null,
@@ -114,6 +116,10 @@ pub const Presenter = struct {
             try form_scroll.content.appendChild(cx.allocator, root);
             root.setDisplay(.none);
         }
+        self.save_password = try scope.createSignal(bool, false);
+        self.remember = try ui.widgets.Checkbox(.{ .checked = self.save_password, .label = "保存密码，下次连接自动使用", .box_size = @as(f32, 14), .label_font_size = @as(f32, 11) }).mount(scope, cx);
+        self.remember.meta.ownership.meta.test_id = "plugin.challenge.remember";
+        try self.modal.body.appendChild(cx.allocator, self.remember);
         const scroll = try ui.widgets.ScrollArea(.{ .height = 180 }).mount(scope, cx);
         self.choice_scroll = scroll.container;
         scroll.content.setStyleInline(cx.allocator, S.stack());
@@ -129,6 +135,7 @@ pub const Presenter = struct {
         }
         self.problem = try label(cx, self.modal.body, "", S.text(11, 400, false));
         self.problem.meta.ownership.meta.test_id = "plugin.challenge.error";
+        self.problem.setDisplay(.none);
         const footer = try ui.box(cx, S.footer(), .{});
         try self.modal.body.appendChild(cx.allocator, footer);
         const cancel_button = try ui.widgets.Button(.{ .label = "取消", .variant = .secondary, .on_click = cx.on(Presenter, self, cancel) }).mount(scope, cx);
@@ -167,6 +174,8 @@ pub const Presenter = struct {
         }
         const view = chosen orelse return;
         self.clearInput();
+        self.save_password.set(false);
+        self.remember.setDisplay(if (view.payload.allow_save_password) .flex else .none);
         self.current = .{ .owner = view.owner, .request_id = view.request_id, .generation = view.generation, .kind = view.kind, .field_count = view.payload.fields.len, .choice_count = view.payload.choices.len };
         try self.title.setTextContent(self.cx.allocator, view.payload.title);
         self.title_icon.setDisplay(if (view.kind == .trust_material or view.kind == .secret_input) .flex else .none);
@@ -175,6 +184,7 @@ pub const Presenter = struct {
         const tint = if (changed_key) S.theme.current().danger_ink else if (view.kind == .trust_material) S.theme.current().warn_ink else S.theme.current().accent;
         if (icon.icon_id) |id| if (icon.pickRep(18)) |rep| self.title_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = tint });
         try self.detail.setTextContent(self.cx.allocator, view.payload.detail);
+        self.detail.setDisplay(if (view.payload.detail.len == 0) .none else .flex);
         try self.source.setTextContent(self.cx.allocator, if (view.background and view.payload.source_name.len == 0) "来自后台会话的请求" else view.payload.source_name);
         self.source.setDisplay(if (view.background or view.payload.source_name.len > 0) .flex else .none);
         try self.material.setTextContent(self.cx.allocator, view.payload.material);
@@ -182,7 +192,8 @@ pub const Presenter = struct {
         self.material_scroll.setStyle(self.cx.allocator, .height, .{ .px = @min(120, @max(60, self.cx.viewport.height - 460)) });
         self.input.node.setDisplay(if (view.kind == .secret_input and view.payload.fields.len == 0) .flex else .none);
         self.fields_scroll.setDisplay(if (view.payload.fields.len != 0) .flex else .none);
-        self.fields_scroll.setStyle(self.cx.allocator, .height, .{ .px = @min(@as(f32, @floatFromInt(view.payload.fields.len)) * 84, @max(120, self.cx.viewport.height - 320)) });
+        self.fields_scroll.setStyle(self.cx.allocator, .height, .{ .fit = .{} });
+        self.fields_scroll.setStyle(self.cx.allocator, .max_height, @max(120, self.cx.viewport.height - 320));
         for (&self.fields, 0..) |*field, i| {
             if (i >= view.payload.fields.len) {
                 field.root.setDisplay(.none);
@@ -287,7 +298,7 @@ pub const Presenter = struct {
     }
     fn send(self: *Presenter, current: Current, reply: challenge.Reply) void {
         const ns = @import("../platform/realtime.zig").monotonicNs();
-        self.host.submitAnswer(current.owner, current.request_id, current.generation, reply, @intCast(@max(0, ns) / std.time.ns_per_ms)) catch |err| {
+        self.host.submitPasswordAnswer(current.owner, current.request_id, current.generation, reply, @intCast(@max(0, ns) / std.time.ns_per_ms), self.remember.style.display != .none and self.save_password.peek()) catch |err| {
             self.clearInput();
             self.fail(@errorName(err));
             return;
@@ -338,6 +349,7 @@ pub const Presenter = struct {
         for (&self.fields) |*field| wipe(&field.input);
         wipe(&self.input);
         self.problem.setTextContent(self.cx.allocator, "") catch {};
+        self.problem.setDisplay(.none);
     }
     fn wipe(input: *ui.widgets.input.InputResult) void {
         secureOnDispose(input);
@@ -358,6 +370,7 @@ pub const Presenter = struct {
     }
     fn fail(self: *Presenter, message: []const u8) void {
         self.problem.setTextContent(self.cx.allocator, message) catch {};
+        self.problem.setDisplay(if (message.len == 0) .none else .flex);
         self.cx.requestRedraw();
     }
 };

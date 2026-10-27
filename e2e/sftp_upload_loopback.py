@@ -93,6 +93,16 @@ class Files(base.Files):
                 return paramiko.SFTP_NO_SUCH_FILE
         return Handle(self, flags)
 
-base.State, base.Files = State, Files
+class Server(base.Server):
+    def check_channel_exec_request(self, channel, command):
+        # Production probes the peer OS on its directory transport. Reject
+        # execution, but distinguish this exact read-only probe from other execs.
+        if command == b'sh -c "uname -s; cat /etc/os-release" || cmd /c ver':
+            self.state.record(self.connection, 'OS_PROBE')
+            return False
+        return super().check_channel_exec_request(channel, command)
+
+
+base.State, base.Files, base.Server = State, Files, Server
 if __name__ == '__main__':
     base.main()

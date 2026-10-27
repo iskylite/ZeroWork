@@ -104,6 +104,17 @@ fn documentSource(raw: *anyopaque) !terminal.Service {
     native.document_source = .{ .adapter = &native.worker.vt, .owner = key.owner.session, .timeline = native.worker.timelinePtr(), .validator = .{ .context = native, .check = validateDocument } };
     return native.document_source.?.service();
 }
+fn terminalService(raw: *anyopaque) !terminal.Service {
+    const native = get(raw);
+    if (native.torn_down) return error.SessionClosed;
+    const key = try native.worker.replay.notificationKey();
+    if (key.owner != .session) return error.StaleOwner;
+    if (native.terminal_provider == null or !native.terminal_provider.?.source.owner.eql(key.owner.session)) {
+        if (native.terminal_provider) |*provider| provider.deinit();
+        native.terminal_provider = @import("terminal_service.zig").Provider.init(native, key.owner.session);
+    }
+    return native.terminal_provider.?.service();
+}
 fn osDetection(raw: *anyopaque) service.OsDetection {
     const worker = get(raw).workerPtr();
     return .{ .kind = worker.detected_os.load(.acquire), .pending = !worker.os_probe_finished.load(.acquire) };
@@ -168,4 +179,4 @@ fn encodeKey(raw: *anyopaque, event: terminal.KeyEvent, allocator: std.mem.Alloc
     if (native.torn_down or !isConnected(raw)) return error.SessionClosed;
     return native.workerPtr().vt.encodeKey(event, allocator);
 }
-const vtable: service.Runtime.VTable = .{ .osDetection = osDetection, .documentSource = documentSource, .encodeKey = encodeKey, .releaseStep = releaseStep, .cleanupReleased = cleanupReleased, .reconnectSnapshot = reconnectSnapshot, .requestReconnect = requestReconnect, .acknowledgeAttached = acknowledgeAttached, .isAttached = isAttached, .isConnected = isConnected, .markAttached = markAttached, .setScrollbackLimit = setScrollbackLimit, .setInputBufferEnabled = setInputBufferEnabled, .copyCwd = copyCwd, .requestCurrentDirectory = requestCurrentDirectory, .searchText = searchText, .readLines = readLines, .readonlyProvider = readonlyProvider, .notificationSnapshot = notificationSnapshot, .execService = execService, .transferService = transferService, .forwardService = forwardService, .exportTimeline = exportTimeline, .captureExport = captureExport, .sourceVersion = sourceVersion, .captureAiSelection = captureAiSelection, .semanticSequence = semanticSequence, .copyProjection = copyProjection, .hasJoined = hasJoined, .isStopping = isStopping, .hasFailed = hasFailed, .textSlot = textSlot, .reconnectState = reconnectState, .inputFreeCapacity = inputFreeCapacity, .requestResize = requestResize, .searchViewportOffset = searchViewportOffset, .locateSearchRow = locateSearchRow, .copySelection = copySelection, .pushInputFrom = pushInputFrom, .allowsBufferedOrdinaryInput = allowsBufferedOrdinaryInput, .discardBufferedInput = discardBufferedInput, .notificationPublication = notificationPublication };
+const vtable: service.Runtime.VTable = .{ .osDetection = osDetection, .documentSource = documentSource, .terminalService = terminalService, .encodeKey = encodeKey, .releaseStep = releaseStep, .cleanupReleased = cleanupReleased, .reconnectSnapshot = reconnectSnapshot, .requestReconnect = requestReconnect, .acknowledgeAttached = acknowledgeAttached, .isAttached = isAttached, .isConnected = isConnected, .markAttached = markAttached, .setScrollbackLimit = setScrollbackLimit, .setInputBufferEnabled = setInputBufferEnabled, .copyCwd = copyCwd, .requestCurrentDirectory = requestCurrentDirectory, .searchText = searchText, .readLines = readLines, .readonlyProvider = readonlyProvider, .notificationSnapshot = notificationSnapshot, .execService = execService, .transferService = transferService, .forwardService = forwardService, .exportTimeline = exportTimeline, .captureExport = captureExport, .sourceVersion = sourceVersion, .captureAiSelection = captureAiSelection, .semanticSequence = semanticSequence, .copyProjection = copyProjection, .hasJoined = hasJoined, .isStopping = isStopping, .hasFailed = hasFailed, .textSlot = textSlot, .reconnectState = reconnectState, .inputFreeCapacity = inputFreeCapacity, .requestResize = requestResize, .searchViewportOffset = searchViewportOffset, .locateSearchRow = locateSearchRow, .copySelection = copySelection, .pushInputFrom = pushInputFrom, .allowsBufferedOrdinaryInput = allowsBufferedOrdinaryInput, .discardBufferedInput = discardBufferedInput, .notificationPublication = notificationPublication };

@@ -494,6 +494,7 @@ pub const DisplayList = struct {
     /// rebuilt or been replaced. Keep text slices and path geometry with the
     /// list rather than borrowing them from mutable producer storage.
     payload_arena: std.heap.ArenaAllocator,
+    idle_payload_limit: ?usize = null,
 
     pub fn init(allocator: Allocator) DisplayList {
         return .{
@@ -515,7 +516,24 @@ pub const DisplayList = struct {
 
     pub fn clear(self: *DisplayList) void {
         self.items.clearRetainingCapacity();
-        _ = self.payload_arena.reset(.retain_capacity);
+        _ = self.payload_arena.reset(if (self.idle_payload_limit) |limit| .{ .retain_with_limit = limit } else .retain_capacity);
+        self.idle_payload_limit = null;
+    }
+
+    /// Preserve the live replay and its owned payload; release only spare
+    /// item capacity. Payload pages can shrink at the next normal clear.
+    pub fn trimIdleCapacity(self: *DisplayList, retain_bytes: usize) usize {
+        self.idle_payload_limit = retain_bytes;
+        const target = @max(self.items.items.len, retain_bytes / @sizeOf(DisplayItem));
+        if (self.items.capacity <= target *| 2) return 0;
+        const replacement = self.allocator.alloc(DisplayItem, target) catch return 0;
+        @memcpy(replacement[0..self.items.items.len], self.items.items);
+        const old_bytes = self.items.capacity * @sizeOf(DisplayItem);
+        const len = self.items.items.len;
+        self.items.deinit(self.allocator);
+        self.items = .fromOwnedSlice(replacement);
+        self.items.items.len = len;
+        return old_bytes - target * @sizeOf(DisplayItem);
     }
 
     pub fn append(self: *DisplayList, item: DisplayItem) !void {

@@ -24,9 +24,13 @@ case "$INSTANCE_NAME" in ''|.|..|*[!A-Za-z0-9._-]*) echo "Instance name must con
 case "$BUNDLE_ID" in ''|*[!A-Za-z0-9.-]*) echo "Invalid bundle identifier" >&2; exit 2 ;; esac
 case "$DATA_DIR" in ''|/*) ;; *) echo "Data directory must be absolute" >&2; exit 2 ;; esac
 cd "$ROOT"
-zig build -j2 --summary all
+SIGNING_IDENTITY=$(python3 scripts/macos_signing.py identity)
 mkdir -p "$ROOT/dist/ui-check-builds"
 STAGE=$(mktemp -d "$ROOT/dist/ui-check-builds/build.XXXXXXXX")
+# A different bundle ID does not isolate Keychain. Overrides are honored only
+# by test-mode builds; always pair that mode with an explicit instance root.
+if [ -z "$DATA_DIR" ]; then DATA_DIR="$STAGE/data"; fi
+zig build -j2 -Dtest-mode=true --summary all
 APP="$STAGE/$INSTANCE_NAME.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/assets/macos/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
@@ -53,7 +57,7 @@ if data_dir:
 with (Path(app) / 'Contents/Info.plist').open('wb') as f:
     plistlib.dump(plist, f)
 PY
-codesign --force --deep --sign - "$APP"
+codesign --force --deep --sign "$SIGNING_IDENTITY" --identifier "$BUNDLE_ID" "$APP"
 codesign --verify --deep --strict "$APP"
 python3 - "$APP" "$BUNDLE_ID" "$DATA_DIR" <<'PY'
 import hashlib, json, subprocess, sys
@@ -69,7 +73,9 @@ manifest = {
     'entry_point': 'src/main.zig',
     'bundle_path': str(app),
     'bundle_identifier': sys.argv[2],
-    'data_directory': sys.argv[3] or None,
+    'data_directory': sys.argv[3],
+    'test_mode': True,
+    'credential_scope': 'isolated-instance',
     'binary_sha256': hash_file(exe),
     'unsigned_source_sha256': hash_file(source),
     'copy_verified_before_signing': True,

@@ -111,6 +111,8 @@ pub const BellReceipt = struct { duplicate: bool, sound: Receipt };
 
 pub const Coordinator = struct {
     pub const bell_interval_ms: u64 = 1000;
+    pub const history_limit: usize = 100;
+    history_revision: u64 = 0,
     allocator: std.mem.Allocator,
     policy: Policy,
     policy_revision: u64 = 1,
@@ -131,6 +133,7 @@ pub const Coordinator = struct {
         try self.registerDefinition(.{ .id = "host.reconnect", .category = .connection_change });
         try self.registerDefinition(.{ .id = "host.ai_ready", .category = .attention });
         try self.registerDefinition(.{ .id = "host.feedback", .category = .operation_result, .default_channels = .{ .attention = false } });
+        try self.registerDefinition(.{ .id = "host.command_error", .category = .operation_result, .default_channels = .{ .in_app = false, .system = false, .attention = false } });
         return self;
     }
     pub fn deinit(self: *Coordinator) void {
@@ -226,6 +229,8 @@ pub const Coordinator = struct {
             var replacement = try copyNotification(self.allocator, event, record.fact_id, clock.monotonic_ms);
             replacement.presentation = record.presentation;
             replacement.owner_ended = record.owner_ended;
+            replacement.history_read = false;
+            self.history_revision +|= 1;
             // Reconcile persistent unknown/error in place. A dismissed toast
             // remains dismissed; updates never steal focus or recreate it.
             replacement.system = record.system;
@@ -239,13 +244,14 @@ pub const Coordinator = struct {
             if (record.system.disposition == .not_applicable) self.deliverNotification(record, definition, clock);
             return .{ .fact_id = record.fact_id, .duplicate = false, .updated = true };
         };
-        if (self.notification_records.items.len >= 256) return error.NotificationHistoryFull;
         if (self.next_fact >= (@as(u64, 1) << 63)) return error.NotificationIdentityExhausted;
         var record = try copyNotification(self.allocator, event, self.next_fact, clock.monotonic_ms);
         errdefer record.arena.deinit();
         try self.notification_records.ensureUnusedCapacity(self.allocator, 1);
         if (!definition.default_channels.in_app) record.presentation = .hidden;
+        if (self.notification_records.items.len >= history_limit) self.removeHistoryAt(0);
         self.notification_records.appendAssumeCapacity(record);
+        self.history_revision +|= 1;
         const fact_id = self.next_fact;
         self.next_fact += 1;
         if (definition.default_channels.in_app) self.enqueue(fact_id);
@@ -255,6 +261,25 @@ pub const Coordinator = struct {
         }
         self.deliverNotification(&self.notification_records.items[self.notification_records.items.len - 1], definition, clock);
         return .{ .fact_id = fact_id, .duplicate = false, .updated = false };
+    }
+    fn removeHistoryAt(self: *Coordinator, index: usize) void {
+        var removed = self.notification_records.orderedRemove(index);
+        self.dequeue(removed.fact_id);
+        removed.arena.deinit();
+    }
+    pub fn clearHistory(self: *Coordinator) void {
+        while (self.notification_records.items.len > 0) self.removeHistoryAt(self.notification_records.items.len - 1);
+        self.history_revision +|= 1;
+    }
+    pub fn unreadHistoryCount(self: *const Coordinator) usize {
+        var count: usize = 0;
+        for (self.notification_records.items) |record| if (!record.history_read) {
+            count += 1;
+        };
+        return count;
+    }
+    pub fn readHistory(self: *Coordinator) void {
+        for (self.notification_records.items) |*record| record.history_read = true;
     }
     fn deliverNotification(self: *Coordinator, record: *NotificationRecord, definition: NotificationDefinition, clock: Clock) void {
         if (!definition.default_channels.system or definition.system_policy == null) return;
@@ -286,6 +311,7 @@ pub const Coordinator = struct {
     pub fn ownerEnded(self: *Coordinator, owner: Owner) void {
         for (self.notification_records.items) |*record| if (record.event.owner.content.eql(owner)) {
             record.owner_ended = true;
+            self.history_revision +|= 1;
         };
     }
     pub fn moveOwner(self: *Coordinator, owner: Owner, window_id: u64) void {
@@ -580,6 +606,7 @@ pub const NotificationRecord = struct {
     last_tick_ms: u64,
     paused: bool = false,
     owner_ended: bool = false,
+    history_read: bool = false,
     pub fn persistent(self: NotificationRecord) bool {
         return self.event.phase == .failed or self.event.phase == .outcome_unknown or self.event.severity == .failure or self.event.severity == .warning;
     }

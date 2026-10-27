@@ -61,6 +61,10 @@ pub const View = struct {
     result_label: *ui.Node,
     scroll: ui.widgets.ScrollAreaResult,
     empty_area: *ui.Node,
+    empty_icon: *ui.Node = undefined,
+    empty_search_icon: *ui.Node = undefined,
+    empty_title: *ui.Node = undefined,
+    empty_help: *ui.Node = undefined,
     leading_spacer: *ui.Node,
     middle_spacer: *ui.Node,
     temporary_area: *ui.Node,
@@ -136,10 +140,17 @@ pub const View = struct {
         try self.body.appendChild(cx.allocator, self.empty_area);
         const empty_card = try ui.box(cx, S.noMatch(), .{});
         try self.empty_area.appendChild(cx.allocator, empty_card);
-        try empty_card.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.search_x, S.theme.current().fg_2, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 }));
+        self.empty_icon = try ui.iconTint(cx, ui.icons.server, S.theme.current().fg_2, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        self.empty_search_icon = try ui.iconTint(cx, ui.icons.search_x, S.theme.current().fg_2, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        try empty_card.appendChild(cx.allocator, self.empty_icon);
+        try empty_card.appendChild(cx.allocator, self.empty_search_icon);
         const empty_title = try label(cx, empty_card, "未找到匹配的主机", 12, 500, false);
+        self.empty_title = empty_title;
+        empty_title.meta.ownership.meta.test_id = "quick.empty.title";
         empty_title.setStyleInline(cx.allocator, S.line(21));
         const empty_help = try label(cx, empty_card, "可修改关键词，或输入 user@host:port 临时连接。", 11, 400, true);
+        self.empty_help = empty_help;
+        empty_help.meta.ownership.meta.test_id = "quick.empty.help";
         empty_help.setStyleInline(cx.allocator, S.line(16));
         const clear = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 16), .variant = .secondary, .a11y_label = "清空搜索", .base_style = S.clearButton(), .on_click = cx.on(View, self, clearSearch) }).mount(popup.scope, cx);
         clear.setStyleInline(cx.allocator, S.clearPlacement());
@@ -380,8 +391,13 @@ pub const View = struct {
             self.disabled.set(invalid);
         }
         const no_match = self.mode == .saved and self.matches.items.len == 0;
-        self.clear.setDisplay(if (no_match) .flex else .none);
-        self.input.input_container.setStyleInline(self.cx.allocator, S.queryInput(no_match));
+        const searching = std.mem.trim(u8, query, " \t\r\n").len > 0;
+        self.empty_icon.setDisplay(if (searching) .none else .flex);
+        self.empty_search_icon.setDisplay(if (searching) .flex else .none);
+        try self.empty_title.setTextContent(self.cx.allocator, if (searching) "未找到匹配的主机" else "还没有保存的主机");
+        try self.empty_help.setTextContent(self.cx.allocator, if (searching) "可修改关键词，或输入 user@host:port 临时连接。" else "新建主机配置，或输入 user@host:port 临时连接。");
+        self.clear.setDisplay(if (searching) .flex else .none);
+        self.input.input_container.setStyleInline(self.cx.allocator, S.queryInput(searching));
         self.saved_area.setDisplay(if (self.mode == .saved and !no_match) .flex else .none);
         self.empty_area.setDisplay(if (no_match) .flex else .none);
         self.hint.setDisplay(if (no_match) .none else .flex);

@@ -248,3 +248,9 @@ body:not([data-functional-component]) .app-window[data-size=compact]{width:860px
 
 /* Semantic overlay headings share the native title hierarchy. */
 .semantic-heading{display:flex;align-items:center;gap:8px;font-weight:700}.semantic-heading>svg{width:18px;height:18px;flex-shrink:0;color:var(--accent)}.semantic-heading.warning>svg{color:var(--warn,#f59e0b)}.semantic-heading.danger>svg{color:var(--danger)}
+
+/* Context usage: the only compression control sits beside the usage track. */
+.context-usage-summary{display:flex;align-items:center;gap:8px;font-size:11px;margin-top:8px;color:var(--muted)}.context-usage-summary strong{color:var(--text)}.context-usage-bar-row{display:flex;align-items:center;gap:8px;margin:6px 0}.context-usage-track{flex:1;min-width:0;height:4px;border-radius:2px;background:var(--well);overflow:hidden}.context-usage-track i{display:block;height:100%;background:var(--accent)}.context-usage-bar-row .icon-btn{width:24px;height:24px;border-radius:8px;flex:none;color:var(--accent-ink,var(--accent));background:var(--sel);border:1px solid var(--sel)}.context-usage-bar-row svg{width:16px;height:16px}
+
+/* Measure the welcome viewport without changing transcript alignment or scrolling. */
+.assistant-body{container-name:ai-welcome;container-type:size}

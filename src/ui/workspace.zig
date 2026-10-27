@@ -415,9 +415,10 @@ pub const Workspace = struct {
     pending_split: ?struct { group: u32, session: SessionId, revision: u64 } = null,
 
     terminal_area: *ui.Node,
+    history_card_host: ?*ui.Node = null,
     empty_state: *ui.Node,
     status_node: ?*ui.Node = null,
-    status_feedback: ?struct { context: *anyopaque, publish: *const fn (*anyopaque, []const u8) void } = null,
+    status_feedback: ?struct { context: *anyopaque, publish: *const fn (*anyopaque, ?identity.ContentOwner, []const u8, StatusKind) void } = null,
     command_output: ?*TerminalViewNode = null,
     creation_group: ?u32 = null,
     /// Status-bar grid-size label; bound to the active tab's terminal so the
@@ -640,7 +641,7 @@ pub const Workspace = struct {
                 self.logHostSelection(index, "double-click connect");
                 self.selected_host = index;
                 self.refreshSelection();
-                self.openSession(index) catch |err| self.status(@errorName(err));
+                self.openSession(index) catch |err| self.statusFailure(@errorName(err));
                 return .handled;
             },
             else => return .ignored,
@@ -813,7 +814,7 @@ pub const Workspace = struct {
             // Persistence succeeded. Do not turn a paint/allocation failure
             // into an action failure that would invite duplicating the write.
             applog.warn(.ui, "asset saved; sidebar refresh failed: {s}", .{@errorName(err)});
-            self.status("配置已保存，列表刷新失败");
+            self.statusFailure("配置已保存，列表刷新失败");
         };
         return result;
     }
@@ -881,12 +882,23 @@ pub const Workspace = struct {
         try store.saveHosts(self.io, std.Io.Dir.cwd(), self.hosts_path, self.registry);
     }
 
+    pub const StatusKind = enum { info, failure };
+
     pub fn status(self: *Workspace, text: []const u8) void {
+        self.statusWithKind(text, .info);
+    }
+    pub fn statusFailure(self: *Workspace, text: []const u8) void {
+        self.statusWithKind(text, .failure);
+    }
+    pub fn reportFailure(self: *Workspace, owner: identity.ContentOwner, text: []const u8) void {
+        if (self.status_feedback) |feedback| feedback.publish(feedback.context, owner, text, .failure);
+    }
+    fn statusWithKind(self: *Workspace, text: []const u8, kind: StatusKind) void {
         if (self.command_output) |terminal| {
             terminal.showCommandMessage(text);
             return;
         }
-        if (self.status_feedback) |feedback| feedback.publish(feedback.context, text);
+        if (self.status_feedback) |feedback| feedback.publish(feedback.context, if (self.active_tab) |index| (if (index < self.tabs.items.len) self.tabs.items[index].content_owner else null) else null, text, kind);
         const target = self.status_node orelse return;
         target.setTextContent(self.allocator, text) catch return;
         target.markRenderDirty();
@@ -1046,7 +1058,7 @@ pub const Workspace = struct {
         const index = sidebarIndex(cell) orelse return;
         cell.workspace.selected_host = index;
         cell.workspace.refreshSelection();
-        cell.workspace.newSession(index) catch |err| cell.workspace.status(@errorName(err));
+        cell.workspace.newSession(index) catch |err| cell.workspace.statusFailure(@errorName(err));
     }
     fn onSidebarMenu(raw: *anyopaque, node: *ui.Node) void {
         const cell: *ClickCtx = @ptrCast(@alignCast(raw));
@@ -1463,12 +1475,12 @@ pub const Workspace = struct {
             if (self.confirming_id != null or self.host_key_job != null or self.auth_job != null) return .ignored;
             if (self.model.active) |id| if (self.groupIdByTab(id)) |group| {
                 if (self.groupClosing(group)) return .ignored;
-                self.beginRenamePresentation(id) catch |err| self.status(@errorName(err));
+                self.beginRenamePresentation(id) catch |err| self.statusFailure(@errorName(err));
                 return .stop;
             };
             if (self.active_tab) |index| if (index < self.tabs.items.len and !self.tabs.items[index].closing) {
                 if (self.tabs.items[index].terminal != null and self.tabs.items[index].terminal.?.preedit != null) return .ignored;
-                self.beginRenameTab(self.tabs.items[index].id) catch |err| self.status(@errorName(err));
+                self.beginRenameTab(self.tabs.items[index].id) catch |err| self.statusFailure(@errorName(err));
                 return .stop;
             };
             return .ignored;
@@ -1839,7 +1851,10 @@ pub const Workspace = struct {
 
     fn restoreGroupRoots(self: *Workspace) void {
         for (self.tabs.items) |tab| {
-            if (tab.terminal) |*terminal| terminal.setGrouped(false);
+            if (tab.terminal) |*terminal| {
+                terminal.setHistoryHost(null) catch {};
+                terminal.setGrouped(false);
+            }
             if (tab.root.parent != self.terminal_area) {
                 if (tab.root.parent) |parent| self.cx.detachChild(parent, tab.root);
                 self.terminal_area.appendChild(self.allocator, tab.root) catch {};
@@ -2145,7 +2160,7 @@ pub const Workspace = struct {
                     };
                 } else if (tab.failed or (tab.local and tab.local_state == .failed)) {
                     self.pending_split = null;
-                    self.status("新分栏启动失败，原组布局已保留");
+                    self.statusFailure("新分栏启动失败，原组布局已保留");
                 }
             } else self.pending_split = null;
         }
@@ -2175,7 +2190,7 @@ pub const Workspace = struct {
         if (!self.group_present_pending) return false;
         self.group_present_pending = false;
         if (self.active_group_view) |id| if (self.groupView(id)) |view| {
-            self.presentGroup(view) catch |err| self.status(@errorName(err));
+            self.presentGroup(view) catch |err| self.statusFailure(@errorName(err));
             return true;
         };
         return false;
@@ -2243,7 +2258,7 @@ pub const Workspace = struct {
         for (group.members.items) |member| if (self.captureGroupCloseMember(member.pane_id)) |captured| {
             view.close.?.append(self.allocator, captured) catch return;
         };
-        self.showGroupCloseDialog(view, false) catch |err| self.status(@errorName(err));
+        self.showGroupCloseDialog(view, false) catch |err| self.statusFailure(@errorName(err));
     }
 
     fn cancelGroupClose(self: *Workspace, id: u32) void {
@@ -2273,7 +2288,7 @@ pub const Workspace = struct {
         const plan = if (view.close) |*p| p else return;
         if (plan.phase == .partial) {
             plan.prepareRetry(group.membership_revision) catch |err| {
-                self.status(@errorName(err));
+                self.statusFailure(@errorName(err));
                 return;
             };
             // Reprepare only original failed/cancelled handles. A replacement
@@ -2502,6 +2517,7 @@ pub const Workspace = struct {
         };
         const terminal = if (self.tabs.items[index].terminal) |*value| value else null;
         if (terminal) |value| {
+            value.setHistoryHost(self.history_card_host) catch {};
             value.grid_status_node = self.grid_node;
             value.grid_label_shown = false;
         } // force one rewrite from the new tab
@@ -2665,7 +2681,7 @@ pub const Workspace = struct {
                 .rejected => {
                     tab.closing = false;
                     self.abortCloseBatch();
-                    self.status("关闭失败：会话状态已变化，请重试；连接资源尚未确认释放。");
+                    self.statusFailure("关闭失败：会话状态已变化，请重试；连接资源尚未确认释放。");
                 },
             }
             return;
@@ -2712,7 +2728,10 @@ pub const Workspace = struct {
         // nodes. The hook used to keep running until app exit, and its next
         // frame after runtime cleanup read a destroyed TextSlot / detached
         // node tree (assertOwnedByActiveWorld SIGSEGV).
-        if (tab.terminal) |*terminal| terminal.removeFrameHook(self.cx);
+        if (tab.terminal) |*terminal| {
+            terminal.removeFrameHook(self.cx);
+            if (tab.runtime != null) terminal.releaseCommandDocument();
+        }
         if (tab.root.parent) |parent| self.cx.detachChild(parent, tab.root);
         // Member teardown only (idempotent): the runtime struct stays alive
         // until its scope cleanup entry destroys it at app dispose —
@@ -3016,6 +3035,23 @@ pub const Workspace = struct {
         }
         if (self.external_auth) |external| return external.pending(external.context);
         return null;
+    }
+
+    pub fn saveAuthenticationPassword(self: *Workspace, request: auth_challenge.Snapshot, password: []const u8) !void {
+        if (request.kind != .password) return error.InvalidChallengeResponse;
+        const frozen = self.authenticationHostFor(request.identity) orelse return error.StaleAuthentication;
+        var transaction = try store.HostsTransaction.init(self.allocator, &self.registry);
+        defer transaction.deinit();
+        const candidate = &transaction.candidate.?;
+        const index = candidate.indexOf(frozen.connection_id) orelse return error.InvalidHost;
+        var host = candidate.hosts[index];
+        if (host.auth_mode != .password or host.port != frozen.port or
+            !std.mem.eql(u8, host.host, frozen.host) or !std.mem.eql(u8, host.user, frozen.user)) return error.RevisionConflict;
+        const owner = host.owner();
+        host.password = password;
+        host.auth_mode = .password;
+        _ = try candidate.update(owner, host);
+        try transaction.commit(self.io, std.Io.Dir.cwd(), self.hosts_path, &self.registry);
     }
 
     pub fn submitAuthentication(self: *Workspace, request: auth_challenge.RequestIdentity, reply: auth_challenge.Reply) !void {
@@ -3446,8 +3482,8 @@ pub const Workspace = struct {
     /// entered for this connection are copied by SessionHost, never persisted.
     pub fn newSessionWithCredentials(self: *Workspace, owner: identity.AssetOwner, password: ?[]const u8, key_passphrase: ?[]const u8) !void {
         var host = try self.registry.get(owner);
-        host.password = password;
-        host.key_passphrase = key_passphrase;
+        if (password) |value| host.password = value;
+        if (key_passphrase) |value| host.key_passphrase = value;
         const index = self.registry.indexOf(owner.id) orelse return error.InvalidHost;
         try self.identities.appendHosts(self.allocator, self.registry.hosts.len);
         try self.createSession(host, self.hostId(index).?, index, "");
@@ -3687,10 +3723,10 @@ pub const Workspace = struct {
         self.requestCloseTab(index);
     }
     fn retryLocalStart(cell: *ClickCtx) void {
-        cell.workspace.retryLocalSession(cell.session_id orelse return) catch |err| cell.workspace.status(@errorName(err));
+        cell.workspace.retryLocalSession(cell.session_id orelse return) catch |err| cell.workspace.statusFailure(@errorName(err));
     }
     fn newLocalFromEnded(cell: *ClickCtx) void {
-        cell.workspace.newLocalSession(null) catch |err| cell.workspace.status(@errorName(err));
+        cell.workspace.newLocalSession(null) catch |err| cell.workspace.statusFailure(@errorName(err));
     }
 
     pub fn bindLocalTerminal(self: *Workspace, id: SessionId, handle: identity.SessionHandle, service: terminal_service.Service) !void {
@@ -4062,7 +4098,7 @@ pub const Workspace = struct {
     fn reconnectRemoteNotice(raw: *anyopaque, id: u64) void {
         const self: *Workspace = @ptrCast(@alignCast(raw));
         const index = self.tabIndex(id) orelse return;
-        self.reconnectTab(index) catch |err| self.status(@errorName(err));
+        self.reconnectTab(index) catch |err| self.statusFailure(@errorName(err));
     }
 
     fn closeRemoteNotice(raw: *anyopaque, id: u64) void {
@@ -4163,7 +4199,7 @@ pub const Workspace = struct {
             self.connect_jobs.appendAssumeCapacity(job);
             self.rebuildTabBar() catch {};
             self.selectTab(tab_index);
-            self.status(@errorName(err));
+            self.statusFailure(@errorName(err));
             return;
         };
         self.connect_jobs.appendAssumeCapacity(job);
@@ -4233,8 +4269,8 @@ pub const Workspace = struct {
             const target = tab.?;
             if (job.err) |err| {
                 target.failed = true;
-                var buffer: [128]u8 = undefined;
-                const text = std.fmt.bufPrint(&buffer, "连接失败: {s}", .{@errorName(err)}) catch "连接失败";
+                var buffer: [768]u8 = undefined;
+                const text = std.fmt.bufPrint(&buffer, "{s} · 会话 {d} 连接失败: {s}", .{ target.titleSlice(), target.id, @errorName(err) }) catch "连接失败";
                 target.terminal.?.setOutput(self.cx, text) catch {};
                 if (self.active_tab == self.tabIndex(target.id)) self.status(text);
                 self.notifyConnectionFailure(job, text);
@@ -4355,6 +4391,7 @@ pub const Workspace = struct {
     }
 
     fn notifyConnectionFailure(self: *Workspace, job: *ConnectJob, message: []const u8) void {
+        if (self.findTicket(job.ticket)) |tab| self.reportFailure(tab.content_owner, message);
         if (self.session_bridge.failed) |failed| failed(self.session_bridge.context, job.ticket.session_id, job.ticket.generation, message);
     }
 
@@ -5909,7 +5946,7 @@ test "group session creation new and duplicate preserve group without duplicate 
             _ = try self.workspace.createLocalSessionDirect(.{ .session_id = @fromBackingInt(50 + self.calls) });
             self.workspace.status("连接中…");
         }
-        fn feedbackStatus(raw: *anyopaque, _: []const u8) void {
+        fn feedbackStatus(raw: *anyopaque, _: ?identity.ContentOwner, _: []const u8, _: Workspace.StatusKind) void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             self.feedback += 1;
         }

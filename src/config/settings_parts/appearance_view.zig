@@ -209,7 +209,6 @@ fn themeSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const record = if (host) |h| h.registry.get(c.model.value.ui.theme) else null;
     const selected_name = if (record) |r| r.theme.name else c.model.value.ui.theme;
     const section = try card(cx, bound, "主题", selected_name, ui.icons.palette, 0, "settings.appearance.themes");
-    section.header.setStyleInline(cx.allocator, .{ .min_height = 54, .padding = .{ .left = 15, .right = 15, .top = 8, .bottom = 8 } });
     const row = try ui.boxStyled(cx, S.materialRow, .{});
     row.setStyleInline(cx.allocator, .{ .height = .{ .px = 30 }, .min_height = 30, .padding = .{ .top = 4 } });
     row.style.gap = 8;
@@ -695,15 +694,9 @@ fn fieldProblem(key: binding.Key, problem: anyerror) []const u8 {
 fn fieldRow(cx: *ui.Cx, bound: *binding.Binding, label: []const u8, help: ?[]const u8, control: *ui.Node) !*ui.Node {
     const row = try ui.boxStyled(cx, S.row, .{});
     const left = try ui.boxStyled(cx, S.labelGroup, .{});
-    const text = try ui.textStyled(cx, S.label, label);
-    textFill(text);
-    try left.appendChild(cx.allocator, text);
-    if (help) |message| {
-        const detail = try ui.textStyled(cx, S.base.sectionSummary, try owned(bound.scope, message));
-        detail.style.width = .fill();
-        detail.setStyleInline(cx.allocator, .{ .max_width = 360 });
-        try left.appendChild(cx.allocator, detail);
-    }
+    left.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 4 });
+    try left.appendChild(cx.allocator, try ui.textStyled(cx, S.label, label));
+    if (help) |message| try left.appendChild(cx.allocator, try controls.inlineHint(cx, bound, try id(bound.scope, "settings.appearance.help.", label), message, ui.icons.circle_help, S.theme.current().fg_2));
     try row.appendChild(cx.allocator, left);
     try row.appendChild(cx.allocator, control);
     if (control.style.width == .px and control.style.width.px > 100) try Responsive.mount(cx, bound.scope, control, 220, 210);
@@ -856,21 +849,22 @@ fn cursorField(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     row.style.padding.bottom = 12;
     const labels = try ui.boxStyled(cx, S.labelGroup, .{});
     try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.label, "光标样式"));
-    try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.base.sectionSummary, "选择形状，在下方终端中查看。"));
+    labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 4 });
+    try labels.appendChild(cx.allocator, try controls.inlineHint(cx, bound, "settings.appearance.help.cursor_style", "选择形状，在下方终端中查看。", ui.icons.circle_help, S.theme.current().fg_2));
     try row.appendChild(cx.allocator, labels);
     const select = try bound.scope.allocator.create(CursorSelect);
     select.* = .{ .bound = bound };
     try bound.scope.onCleanup(CursorSelect, select, CursorSelect.cleanup);
     const group = try ui.widgets.RadioGroup(.{ .options = &cursor_options, .value = @as(?[]const u8, bound.controller.model.value.ui.cursor_style), .horizontal = true, .disabled = disabled(bound), .on_change = cx.on(CursorSelect, select, CursorSelect.change) }).mount(bound.scope, cx);
-    group.setStyleInline(cx.allocator, .{ .height = .{ .px = 40 }, .direction = .row, .gap = 20, .align_items = .center, .flex_shrink = 0 });
+    group.setStyleInline(cx.allocator, .{ .width = .{ .px = 220 }, .height = .{ .px = 40 }, .direction = .row, .gap = 6, .align_items = .center, .flex_shrink = 0 });
     group.meta.ownership.meta.test_id = "settings.field.cursor_style";
     for (group.children.items, cursor_options) |radio, option| {
         const selected = std.mem.eql(u8, option.value, bound.controller.model.value.ui.cursor_style);
-        radio.setStyleInline(cx.allocator, .{ .height = .{ .px = 40 }, .gap = 7, .align_items = .center, .flex_shrink = 0 });
+        radio.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 40 }, .gap = 4, .align_items = .center, .flex_shrink = 0 });
         // Preserve the widget-owned circle: selection effects still refer to it.
         // The cursor sample communicates shape, while the circle communicates choice.
         const circle = radio.children.items[0];
-        circle.setStyleInline(cx.allocator, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .background = if (selected) S.theme.current().accent_ink else ui.Color.TRANSPARENT, .border = .{ .width = 1.5, .color = if (selected) S.theme.current().accent_ink else S.theme.current().fg_2, .radius = 9 } });
+        circle.setStyleInline(cx.allocator, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .background = if (selected) S.theme.current().accent_ink else ui.Color.TRANSPARENT, .border = .{ .width = 1.5, .color = if (selected) S.theme.current().accent_ink else S.theme.current().fg_2, .radius = 6 } });
         const label = radio.children.items[1];
         if (label.getText()) |old| {
             var props = old;
@@ -878,10 +872,11 @@ fn cursorField(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
             props.color = S.theme.current().fg_1;
             label.setText(props);
         }
-        const demo = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 24 }, .align_items = .center, .justify = .center, .background = S.theme.current().surface_2, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
+        const demo = try ui.box(cx, .{ .width = .{ .px = 14 }, .height = .{ .px = 24 }, .align_items = .center, .justify = .center, .background = S.theme.current().surface_2, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
         try demo.appendChild(cx.allocator, try cursorShape(cx, option.value));
         try radio.insertChildBefore(cx.allocator, demo, label);
     }
+    try Responsive.mount(cx, bound.scope, group, 220, 210);
     try row.appendChild(cx.allocator, group);
     return row;
 }
@@ -988,7 +983,7 @@ fn aidsSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, field.label, field.help, control));
     }
     const limit = try Field.create(cx, bound, .{ .section = "ui", .key = "scrollback_limit" }, 120, 32);
-    try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "终端最大显示行数", "默认 25000 行；0 表示不限制。同步应用到已打开的本地终端和继承全局配置的 SSH 终端。", limit.input.input_container));
+    try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "终端最大显示行数", "默认 25000 行；0 表示不限制。同步应用到已打开的本地终端和继承全局配置的 SSH 终端。", limit.input.node));
     try section.body.appendChild(cx.allocator, limit.error_box);
     if (bound.hooks.appearance) |h| if (h.registry.get(bound.controller.model.value.ui.theme)) |record| try section.body.appendChild(cx.allocator, try miniPreview(cx, record, bound.controller.model.value.ui.timestamp_gutter, bound.controller.model.value.ui.input_line_highlight, bound.controller.model.value.ui.sidebar_collapsed));
     return section.root;
@@ -1005,7 +1000,7 @@ fn materialSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     // The enable control is a sibling of the Accordion trigger. Its click must
     // not bubble into folding; both controls keep their stock keyboard handling.
     section.root.setStyleInline(cx.allocator, .{ .position = .relative });
-    toggle_node.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 36 }, .top = .{ .px = 22 } } });
+    toggle_node.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 36 }, .top = .{ .px = if (bound.controller.search_query.len != 0 or bound.controller.folded_sections & (@as(u64, 1) << 1) == 0) @as(f32, 15) else 22 } } });
     section.header.children.items[1].style.padding.right = 46;
     try section.root.appendChild(cx.allocator, toggle_node);
     const root = section.body;
@@ -1104,7 +1099,10 @@ fn sliderRow(cx: *ui.Cx, bound: *binding.Binding, label: []const u8, key: bindin
     const row = try ui.boxStyled(cx, S.row, .{});
     const labels = try ui.boxStyled(cx, S.labelGroup, .{});
     try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.label, label));
-    if (step == 0) try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.base.sectionSummary, "数值越大，图片越透明。"));
+    if (step == 0) {
+        labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 4 });
+        try labels.appendChild(cx.allocator, try controls.inlineHint(cx, bound, "settings.appearance.help.transparency", "数值越大，图片越透明。", ui.icons.circle_help, S.theme.current().fg_2));
+    }
     try row.appendChild(cx.allocator, labels);
     const controls_group = try ui.box(cx, .{ .width = .{ .px = 350 }, .height = .{ .px = 32 }, .direction = .row, .gap = 12, .align_items = .center, .flex_shrink = 0 }, .{});
     try Responsive.mount(cx, bound.scope, controls_group, 350, 250);
@@ -1231,7 +1229,9 @@ fn appIconSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     row.style.padding.top = 12;
     row.style.padding.bottom = 12;
     const labels = try ui.boxStyled(cx, S.labelGroup, .{});
+    labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 4 });
     try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.label, "图标背景"));
+    try labels.appendChild(cx.allocator, try controls.inlineHint(cx, bound, "settings.appearance.help.icon_background", "保存后切换 Dock，重启后保留。Finder 与启动台使用默认透明图标。", ui.icons.circle_help, S.theme.current().fg_2));
 
     try row.appendChild(cx.allocator, labels);
     const select = try bound.scope.allocator.create(AppIconSelect);
@@ -1248,8 +1248,5 @@ fn appIconSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     }
     try row.appendChild(cx.allocator, group);
     try section.body.appendChild(cx.allocator, row);
-    const help = try ui.text(cx, "保存后切换 Dock，重启后保留。Finder 与启动台使用默认透明图标。", .{ .wrap = .word, .font_size = 11, .line_height = 18.0 / 11.0, .color = S.theme.current().fg_2 });
-    help.setStyleInline(cx.allocator, .{ .width = .fill(), .margin = .{ .bottom = 8 } });
-    try section.body.appendChild(cx.allocator, help);
     return section.root;
 }

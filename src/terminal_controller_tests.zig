@@ -394,3 +394,36 @@ test "terminal logical row wall-clock metadata survives reflow and fixes actual 
     try std.testing.expectEqualStrings("abcdefghij", lines.lines[0]);
     try std.testing.expectEqualStrings("next", lines.lines[1]);
 }
+
+test "built-in terminal types preserve negotiated input and scope vt100 function aliases" {
+    const input = @import("vt/input_event.zig");
+    const types = @import("vt/terminal_type.zig");
+    const keys = [_]input.Key{ .f5, .f6, .f7, .f8, .f9, .f10 };
+    const xterm_bytes = [_][]const u8{ "\x1b[15~", "\x1b[17~", "\x1b[18~", "\x1b[19~", "\x1b[20~", "\x1b[21~" };
+    const legacy_bytes = [_][]const u8{ "\x1bOt", "\x1bOu", "\x1bOv", "\x1bOl", "\x1bOw", "\x1bOx" };
+    for ([_][]const u8{ "xterm-256color", "xterm", "vt100", "vt100-custom", "screen-256color" }) |name| {
+        var vt = try Adapter.init(std.testing.allocator, 3, 30);
+        defer vt.destroy();
+        vt.configureTerminalType(name);
+        for (keys, 0..) |key, i| {
+            const bytes = try vt.encodeKey(.{ .key = key }, std.testing.allocator);
+            defer std.testing.allocator.free(bytes);
+            try std.testing.expectEqualStrings(if (types.classify(name) == .vt100) legacy_bytes[i] else xterm_bytes[i], bytes);
+        }
+        // RIS keeps the chosen compatibility policy; program protocols win.
+        _ = try vt.feed("\x1bc");
+        const reset = try vt.encodeKey(.{ .key = .f5 }, std.testing.allocator);
+        defer std.testing.allocator.free(reset);
+        try std.testing.expectEqualStrings(if (types.classify(name) == .vt100) legacy_bytes[0] else xterm_bytes[0], reset);
+        const modified = try vt.encodeKey(.{ .key = .f5, .modifiers = .{ .shift = true } }, std.testing.allocator);
+        defer std.testing.allocator.free(modified);
+        try std.testing.expectEqualStrings("\x1b[15;2~", modified);
+        const released = try vt.encodeKey(.{ .key = .f5, .action = .release }, std.testing.allocator);
+        defer std.testing.allocator.free(released);
+        try std.testing.expectEqual(@as(usize, 0), released.len);
+        _ = try vt.feed("\x1b[>1u");
+        const negotiated = try vt.encodeKey(.{ .key = .f5 }, std.testing.allocator);
+        defer std.testing.allocator.free(negotiated);
+        try std.testing.expect(!std.mem.eql(u8, legacy_bytes[0], negotiated));
+    }
+}

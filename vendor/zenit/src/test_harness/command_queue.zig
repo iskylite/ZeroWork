@@ -202,6 +202,7 @@ pub const AppRoutePayload = struct {
 };
 
 pub const MousePayload = struct {
+    button: @import("ui").events.MouseButton = .left,
     x: f32 = 0,
     y: f32 = 0,
     shift: bool = false,

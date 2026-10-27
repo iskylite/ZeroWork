@@ -40,6 +40,7 @@ pub const Controls = struct {
 
 pub const Message = struct {
     user: bool,
+    turn: ?@import("conversation_turn.zig").Turn = null,
     text: []u8,
     wire_text: ?[]u8 = null,
     attachments: ?@import("local_text_attachments.zig").Bundle = null,
@@ -52,10 +53,13 @@ pub const Message = struct {
         errdefer if (wire) |value| allocator.free(value);
         var attachments = if (self.attachments) |bundle| try bundle.retain() else null;
         errdefer if (attachments) |*bundle| bundle.deinit();
-        return .{ .user = self.user, .text = text, .wire_text = wire, .attachments = attachments, .images = if (self.images) |bundle| try bundle.retain() else null };
+        var images = if (self.images) |bundle| try bundle.retain() else null;
+        errdefer if (images) |*bundle| bundle.deinit();
+        return .{ .user = self.user, .turn = if (self.turn) |*turn| try turn.clone(allocator) else null, .text = text, .wire_text = wire, .attachments = attachments, .images = images };
     }
 
     pub fn deinit(self: *Message, allocator: std.mem.Allocator) void {
+        if (self.turn) |*turn| turn.deinit(allocator);
         allocator.free(self.text);
         if (self.wire_text) |wire| allocator.free(wire);
         if (self.attachments) |*bundle| bundle.deinit();
@@ -74,6 +78,7 @@ pub const State = struct {
     history: std.ArrayList(Message) = .empty,
     wire_history: @import("wire_history.zig").History = .{},
     stream: cards.Stream,
+    current_turn: @import("conversation_turn.zig").Turn = .{},
     last_user_text: ?[]u8 = null,
     last_user_wire: ?[]u8 = null,
     last_user_attachments: ?@import("local_text_attachments.zig").Bundle = null,
@@ -82,6 +87,7 @@ pub const State = struct {
     model: @import("float_model.zig").Model = .{},
     controls: Controls = .{},
     pub fn deinit(self: *State, allocator: std.mem.Allocator) void {
+        self.current_turn.deinit(allocator);
         for (self.history.items) |*message| message.deinit(allocator);
         self.history.deinit(allocator);
         self.wire_history.deinit();

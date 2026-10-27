@@ -306,8 +306,9 @@ pub fn build(b: *std.Build) void {
 
     // Local process/VT integration stays headless and uses isolated test data.
     const local_tests_step = b.step("test-local", "Run real local PTY, terminal controller and adapter tests");
+    const local_test_filter = b.option([]const u8, "local-test-filter", "Run only matching local terminal tests");
     for ([_][]const u8{ "src/local_process_tests.zig", "src/terminal_controller_tests.zig", "src/local_adapter_tests.zig", "src/local_trusted_edit_tests.zig" }) |source| {
-        const local_tests = b.addTest(.{ .root_module = b.createModule(.{
+        const local_tests = b.addTest(.{ .filters = if (local_test_filter) |filter| &.{filter} else &.{}, .root_module = b.createModule(.{
             .root_source_file = b.path(source),
             .target = target,
             .optimize = optimize,
@@ -351,7 +352,11 @@ pub fn build(b: *std.Build) void {
             trusted_run.addFileArg(runner);
             local_tests_step.dependOn(&trusted_run.step);
             b.step("test-trusted-edit", "Run isolated real ZSH trusted editing tests").dependOn(&trusted_run.step);
-        } else local_tests_step.dependOn(&b.addRunArtifact(local_tests).step);
+        } else {
+            const local_run = b.addRunArtifact(local_tests);
+            local_tests_step.dependOn(&local_run.step);
+            if (std.mem.eql(u8, source, "src/local_adapter_tests.zig")) b.step("test-local-adapter", "Run local PTY adapter regressions").dependOn(&local_run.step);
+        }
     }
 
     const notification_preview = b.addExecutable(.{ .name = "notification-preview", .root_module = b.createModule(.{

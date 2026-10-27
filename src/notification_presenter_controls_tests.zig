@@ -99,9 +99,110 @@ test "notification host retains structured details and dispatches built-in actio
     try std.testing.expectEqualStrings("文件传输失败", facts[0].event.title);
     try std.testing.expectEqualStrings("连接超时", facts[1].event.detail);
     try std.testing.expectEqual(.warning, facts[2].event.severity);
-    try std.testing.expectEqualStrings("文件传输已取消", facts[3].event.title);
+    // Explicit cancellation is silent: no application fact, system delivery
+    // record, or queued toast is added by publishTransfer.
+    try std.testing.expectEqual(@as(usize, 3), facts.len);
+    try std.testing.expectEqual(@as(usize, 3), notice.coordinator.records.items.len);
+    try std.testing.expectEqual(@as(usize, 3), notice.coordinator.presentation_count);
+    for (facts) |fact| try std.testing.expect(fact.event.operation_id != 4);
     for ([_]host.notifications.Kind{ .transfer_done, .reconnect, .ai_ready }, 0..) |kind, index| {
         try notice.dispatchAction(facts[index].fact_id, 0);
         try std.testing.expectEqual(kind, probe.kind.?);
     }
+}
+
+test "notification history evicts oldest facts without rejecting new ones and retains dismissed content" {
+    var coordinator = try host.notifications.Coordinator.init(a, .{}, .{});
+    defer coordinator.deinit();
+    const owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(1) } };
+    var first: u64 = 0;
+    for (0..105) |index| {
+        const published = try coordinator.publishNotification(.{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = index + 1, .event_revision = 1, .phase = .succeeded, .title = "Retained" }, .{ .monotonic_ms = index, .local_minute = 0 });
+        if (index == 0) first = published.fact_id;
+        coordinator.dismissNotification(published.fact_id);
+    }
+    try std.testing.expectEqual(@as(usize, 100), coordinator.notification_records.items.len);
+    try std.testing.expect(coordinator.recordFor(first) == null);
+    try std.testing.expectEqual(@as(u64, 6), coordinator.notification_records.items[0].event.operation_id);
+    try std.testing.expectEqual(@as(usize, 100), coordinator.unreadHistoryCount());
+    coordinator.readHistory();
+    try std.testing.expectEqual(@as(usize, 0), coordinator.unreadHistoryCount());
+    coordinator.clearHistory();
+    try std.testing.expectEqual(@as(usize, 0), coordinator.notification_records.items.len);
+    try std.testing.expectEqual(@as(usize, 0), coordinator.presentation_count);
+}
+
+test "notification countdown follows actual timer pauses and excludes persistent errors" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    var notice_host: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{}, .{}) };
+    defer notice_host.coordinator.deinit();
+    const view = try Presenter.mount(cx, scope, &notice_host, @fromBackingInt(1));
+    const owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(1) } };
+    _ = try notice_host.coordinator.publishNotification(.{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 1, .event_revision = 1, .phase = .succeeded, .title = "Done", .actions = &.{.{ .kind = .view_result, .label = "View" }} }, .{ .monotonic_ms = 0, .local_minute = 0 });
+    const placement = @import("ui/notification_presenter.zig").Placement{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } };
+    try view.update(0, true, owner, placement);
+    try view.update(2300, true, owner, placement);
+    try std.testing.expectEqualStrings("6 秒后关闭", view.slots[0].countdown.getText().?.content);
+    view.slots[0].hovered = true;
+    try view.update(7300, true, owner, placement);
+    try std.testing.expectEqualStrings("6 秒后关闭", view.slots[0].countdown.getText().?.content);
+    _ = try notice_host.coordinator.publishNotification(.{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 2, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Failed" }, .{ .monotonic_ms = 7300, .local_minute = 0 });
+    try view.update(7300, true, owner, placement);
+    try std.testing.expect(view.slots[0].countdown.style.display == .none);
+}
+
+test "notification history compact rows retain full long detail behind an explicit expandable control" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{}, .{}) };
+    defer notice.coordinator.deinit();
+    const trigger = try ui.widgets.Button(.{ .label = "通知" }).mount(scope, cx);
+    try cx.root.?.appendChild(a, trigger);
+    const view = try @import("ui/notification_history.zig").View.mount(cx, scope, &notice, trigger);
+    const detail = cycled("complete retained long notification detail ", 4096);
+    _ = try notice.coordinator.publishNotification(.{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = .{ .session = .{ .session_id = @fromBackingInt(1) } } }, .operation_id = 1, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Failure", .detail = &detail }, .{ .local_minute = 0, .monotonic_ms = 0 });
+    view.open.set(true);
+    for (0..8) |_| {
+        cx.layout();
+        _ = cx.render();
+    }
+    const card = historyNode(view.root, "notifications.history.record").?;
+    try std.testing.expectEqual(@as(f32, 58), card.globalRect().h);
+    try std.testing.expect(historyNode(view.root, "notifications.history.details") == null);
+    var expand = historyNode(view.root, "notifications.history.expand").?;
+    var rect = expand.globalRect();
+    cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    for (0..8) |_| {
+        cx.layout();
+        _ = cx.render();
+    }
+    const details = historyNode(view.root, "notifications.history.details").?;
+    try std.testing.expectEqualStrings(&detail, details.children.items[0].getText().?.content);
+    try std.testing.expect(details.globalRect().h > view.scroll.container.globalRect().h);
+    try std.testing.expect(view.scroll.container.globalRect().h <= 320);
+    expand = historyNode(view.root, "notifications.history.expand").?;
+    try std.testing.expectEqual(expand, cx.focused_node.?);
+    rect = expand.globalRect();
+    cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    for (0..8) |_| {
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expect(historyNode(view.root, "notifications.history.details") == null);
+    try std.testing.expectEqual(@as(f32, 58), historyNode(view.root, "notifications.history.record").?.globalRect().h);
+}
+
+fn historyNode(root: *ui.Node, id: []const u8) ?*ui.Node {
+    if (root.meta.ownership.meta.test_id) |value| if (std.mem.eql(u8, value, id)) return root;
+    for (root.children.items) |child| if (historyNode(child, id)) |found| return found;
+    return null;
 }

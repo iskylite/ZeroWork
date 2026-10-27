@@ -164,6 +164,7 @@ pub const SessionRuntime = struct {
     /// task's receipt proves they are freed. The scope owns the struct itself.
     torn_down: bool = false,
     document_source: ?@import("terminal_document_source.zig").Source = null,
+    terminal_provider: ?@import("../plugins/ssh/terminal_service.zig").Provider = null,
     log_directory: ?std.Io.Dir = null,
     checkpoint_path: []u8,
     raw_path: []u8,
@@ -302,6 +303,7 @@ pub const SessionRuntime = struct {
 
     pub fn releaseStep(self: *SessionRuntime, archive: ?ArchiveRequest) ReleaseReceipt {
         if (self.release.state.load(.acquire) == .idle) {
+            if (self.terminal_provider) |*provider| provider.deinit();
             self.archive_request = archive;
             self.cancelOwnedWork();
             self.torn_down = true;

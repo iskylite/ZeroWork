@@ -20,6 +20,8 @@ pub const Record = struct {
     error_code: ?[]const u8 = null,
     error_status: ?loop.Status = null,
     dispatched: bool,
+    total_elapsed_ms: ?u64 = null,
+    decision: ?bool = null,
     expanded: bool = false,
     selected: usize = 0,
     test_id: [96]u8 = @splat(0),
@@ -62,6 +64,74 @@ pub const Store = struct {
         }
         self.records.deinit(self.allocator);
         self.* = undefined;
+    }
+    fn releaseRecord(self: *Store, record: *Record) void {
+        for (record.images) |ref| {
+            var owned = ref;
+            owned.release();
+        }
+        record.arena.deinit();
+        self.allocator.destroy(record);
+    }
+    fn recount(self: *Store) void {
+        self.retained_bytes = 0;
+        for (self.records.items) |record| {
+            self.retained_bytes += record.name.len + record.arguments.len * 2 + record.call_id.len + 1024;
+            for (record.targets) |target| self.retained_bytes += target.result.stdout.len + target.result.stderr.len + target.label.len + (if (target.result.cwd) |cwd| cwd.len else 0) + (if (target.result.error_code) |code| code.len else 0);
+            for (record.images) |ref| if (ref.content()) |content| {
+                self.retained_bytes += content.bytes.len + content.pixels.len;
+            };
+        }
+    }
+    pub fn keepTurns(self: *Store, messages: []const @import("assistant_store.zig").Message) void {
+        var i = self.records.items.len;
+        while (i > 0) {
+            i -= 1;
+            const record = self.records.items[i];
+            var keep = false;
+            for (messages) |m| if (m.turn) |turn| if (turn.id == record.turn_id) {
+                keep = true;
+                break;
+            };
+            if (!keep) self.releaseRecord(self.records.orderedRemove(i));
+        }
+        self.recount();
+    }
+    pub fn cloneTurns(self: *Store, messages: []const @import("assistant_store.zig").Message) !Store {
+        var result = Store.init(self.allocator);
+        errdefer result.deinit();
+        try result.records.ensureTotalCapacity(self.allocator, self.records.items.len);
+        for (self.records.items) |record| {
+            var keep = false;
+            for (messages) |m| if (m.turn) |turn| if (turn.id == record.turn_id) {
+                keep = true;
+                break;
+            };
+            if (!keep) continue;
+            var targets: [scope.max_targets]loop.TargetResult = undefined;
+            var sources: [scope.max_targets]Source = undefined;
+            var count: usize = 0;
+            for (record.targets, 0..) |target, i| {
+                targets[i] = target.result;
+                if (target.source) |owner| {
+                    sources[count] = .{ .owner = owner, .label = target.label };
+                    count += 1;
+                }
+            }
+            const copy = try result.copyRecord(.{ .key = .{ .owner = record.owner, .turn_id = record.turn_id, .call_id = record.call_id }, .name = record.name, .arguments = record.arguments, .arguments_hash = record.arguments_hash, .dispatched = record.dispatched, .outcome = .{ .targets = targets[0..record.targets.len] } }, sources[0..count]);
+            result.records.appendAssumeCapacity(copy);
+            const a = copy.arena.allocator();
+            copy.images = try a.dupe(@import("image_attachments.zig").ContentRef, record.images);
+            for (copy.images) |ref| _ = ref.retain();
+            copy.error_code = if (record.error_code) |code| try a.dupe(u8, code) else null;
+            copy.error_status = record.error_status;
+            copy.expanded = record.expanded;
+            copy.total_elapsed_ms = record.total_elapsed_ms;
+            copy.decision = record.decision;
+            for (copy.targets, record.targets) |*target, original| target.operation_id = original.operation_id;
+        }
+        result.recount();
+        return result;
     }
     fn contains(self: *const Store, owner: scope.Owner, turn_id: u64, call_id: []const u8) bool {
         for (self.records.items) |record| if (record.owner.eql(owner) and record.turn_id == turn_id and std.mem.eql(u8, record.call_id, call_id)) return true;

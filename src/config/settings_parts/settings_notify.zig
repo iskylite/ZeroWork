@@ -19,7 +19,12 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         const labels = try ui.boxStyled(cx, controls.S.fieldLabel, .{});
         try labels.appendChild(cx.allocator, try ui.textStyled(cx, controls.S.label, "系统通知权限"));
         const help = if (bound.hooks.authorization_help) |read| read(bound.hooks.context) else "当前无法使用系统通知。";
-        try labels.appendChild(cx.allocator, try ui.textStyled(cx, controls.S.note, help));
+        const status = permissionStatus(help);
+        const status_row = try ui.box(cx, .{ .direction = .row, .align_items = .center, .gap = 4 }, .{});
+        try status_row.appendChild(cx.allocator, try ui.textStyled(cx, controls.S.note, status));
+        try status_row.appendChild(cx.allocator, try controls.inlineHint(cx, bound, "settings.notifications.permission.info", help, ui.icons.info, controls.S.theme.current().fg_2));
+        labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 8 });
+        try labels.appendChild(cx.allocator, status_row);
         try row.appendChild(cx.allocator, labels);
         const tip = try ui.widgets.Tooltip(.{ .text = "当前版本尚未提供测试通知", .open_delay_ms = 450 }).mount(bound.scope, cx);
         const button = try ui.widgets.Button(.{ .label = "测试通知", .disabled = true, .a11y_label = "当前版本尚未提供测试通知", .variant = .secondary, .base_style = controls.S.actionControl(false) }).mount(bound.scope, cx);
@@ -40,4 +45,14 @@ fn quietSummary(value: config.Config, buffer: []u8) ![]const u8 {
     const time = value.notify.quiet_hours;
     if (time.len != 11) return time;
     return std.fmt.bufPrint(buffer, "{s}–{s}", .{ time[0..5], time[6..11] });
+}
+
+fn permissionStatus(help: []const u8) []const u8 {
+    if (std.mem.indexOf(u8, help, "均关闭") != null) return "系统显示已关闭";
+    if (std.mem.indexOf(u8, help, "已被拒绝") != null) return "已拒绝";
+    if (std.mem.indexOf(u8, help, "临时授权") != null) return "临时授权";
+    if (std.mem.indexOf(u8, help, "已获授权") != null) return "已允许";
+    if (std.mem.indexOf(u8, help, "尚未授权") != null) return "未授权";
+    if (std.mem.indexOf(u8, help, "正在查询") != null) return "查询中…";
+    return "不可用";
 }

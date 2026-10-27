@@ -2,10 +2,10 @@
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 pub fn root(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .direction = .column, .gap = 8 };
+    return .{ .width = .fill(), .direction = .column, .align_items = .center, .gap = 12, .flex_shrink = 0 };
 }
 pub fn row(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .max_width = 560, .direction = .row, .align_items = .center, .gap = 6 };
+    return .{ .width = .fill(), .max_width = 440, .direction = .row, .align_items = .center, .gap = 8 };
 }
 pub fn status(configured: bool) ui.TextStyle {
     return .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = if (configured) theme.current().accent else theme.current().warn };
@@ -33,8 +33,14 @@ pub fn success() ui.Color {
 pub fn label() ui.TextStyle {
     return .{ .font_size = 11, .line_height = 16.0 / 11.0, .color = ink(), .selectable = false };
 }
+pub fn welcomeTitle(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 15, .font_weight = 600, .line_height = 22.0 / 15.0, .color = ink() };
+}
+pub fn recentGroup(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .max_width = 440, .direction = .column, .gap = 2, .margin = .{ .top = 4 }, .flex_shrink = 0 };
+}
 pub fn recent() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 34 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 6, .padding = .{ .left = 11, .right = 11 }, .border = .{ .width = 0, .radius = 9 }, .background = theme.current().surface_2, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{ .left = 0, .right = 0 }, .border = .{ .width = 0, .radius = 5 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
 }
 
 pub fn accentInk() ui.Color {

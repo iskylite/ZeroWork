@@ -22,7 +22,7 @@ fn nextValue(value: config.Config, entry: @TypeOf(schema.fields[0])) !values.Val
         .{ .section = "ui", .key = "theme", .text = "light" },
         .{ .section = "ui", .key = "font_family", .text = "Menlo" },
         .{ .section = "ui", .key = "font_weight", .text = "bold" },
-        .{ .section = "ui", .key = "cursor_style", .text = "bar" },
+        .{ .section = "ui", .key = "cursor_style", .text = "block" },
         .{ .section = "ssh", .key = "term", .text = "vt100" },
         .{ .section = "ssh", .key = "reconnect_backoff", .text = "[2,3,5,8,13]" },
         .{ .section = "ssh", .key = "socks_bind", .text = "0.0.0.0" },

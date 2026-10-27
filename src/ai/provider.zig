@@ -69,7 +69,7 @@ pub const ChatRequest = struct {
     retry_after_ms: ?*?u32 = null,
 };
 pub const Delta = union(enum) { text: []const u8, thinking: []const u8, tool_plan: struct { call_id: ?[]const u8, name: ?[]const u8 = null, index: u32 = 0, arguments: []const u8 }, done, err: []const u8 };
-pub const ChatStats = struct { input_tokens: u32 = 0, output_tokens: u32 = 0 };
+pub const ChatStats = struct { input_tokens: u32 = 0, output_tokens: u32 = 0, usage_reported: bool = true };
 pub const Provider = struct {
     ctx: *anyopaque,
     chat: *const fn (*anyopaque, ChatRequest, *const fn (*anyopaque, Delta) void, *anyopaque) anyerror!ChatStats,

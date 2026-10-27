@@ -144,6 +144,10 @@ pub fn capture(adapter: anytype, allocator: std.mem.Allocator) !model.Projection
     if (c.ghostty_render_state_get(adapter.render_state, c.GHOSTTY_RENDER_STATE_DATA_COLORS, @ptrCast(&native_colors)) != c.GHOSTTY_SUCCESS) return error.GhosttyProjectionFailed;
     var colors: model.Colors = .{ .foreground = rgb(native_colors.foreground), .background = rgb(native_colors.background), .cursor = if (native_colors.cursor_has_value) rgb(native_colors.cursor) else null, .palette = undefined };
     for (native_colors.palette, 0..) |value, i| colors.palette[i] = rgb(value);
+    // Ghostty render colors already apply DECSCNM. Our transport-neutral
+    // projection keeps logical defaults plus the reverse_colors mode so the
+    // common renderer can invert explicit palette/RGB cells consistently too.
+    if (mode(adapter.terminal, 5, false)) std.mem.swap(u24, &colors.foreground, &colors.background);
     var native_cursor: c.GhosttyRenderStateCursor = .{ .size = @sizeOf(c.GhosttyRenderStateCursor) };
     if (c.ghostty_render_state_get(adapter.render_state, c.GHOSTTY_RENDER_STATE_DATA_CURSOR, @ptrCast(&native_cursor)) == c.GHOSTTY_SUCCESS) {
         cursor.visible = native_cursor.viewport_has_value and native_cursor.visible;

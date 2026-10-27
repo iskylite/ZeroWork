@@ -12,6 +12,7 @@ pub const Window = struct {
     activate: *const fn (*anyopaque, notifications.Target) bool,
     feedback: *const fn (*anyopaque, []const u8) void,
     owner_name: ?*const fn (*anyopaque, ContentOwner) []const u8 = null,
+    result_presented: ?*const fn (*anyopaque, notifications.Kind, ContentOwner) bool = null,
     transfer_presented: ?*const fn (*anyopaque, u64) bool = null,
 };
 pub const ReconnectResult = enum { disconnected, recovered, failed };
@@ -146,6 +147,7 @@ pub const Host = struct {
         };
     }
     pub fn publishAi(self: *Host, owner: ContentOwner, operation_id: u64, turn_id: u64, completion: AiCompletion) !void {
+        if (completion.result == .cancelled) return;
         try self.publishLegacy(.{
             .event_id = 0,
             .kind = .ai_ready,
@@ -175,6 +177,7 @@ pub const Host = struct {
         } });
     }
     pub fn publishTransfer(self: *Host, owner: ContentOwner, job: u64, attempt: u64, completion: TransferCompletion) !void {
+        if (completion.result == .cancelled) return;
         try self.publishLegacy(.{
             .event_id = 0,
             .kind = .transfer_done,
@@ -233,6 +236,19 @@ pub const Host = struct {
         if (self.next_event == 0) return error.NotificationEventIdentityExhausted;
         var event = value;
         event.event_id = self.next_event;
+        var already_presented = false;
+        if (event.result == .succeeded or event.result == .recovered) {
+            const target: notifications.Target = .{ .owner = event.owner, .kind = event.kind, .operation_id = event.operation_id, .attempt_or_turn_id = event.attempt_or_turn_id };
+            for (self.windows.items) |window| {
+                if (!window.value.owns(window.value.context, target)) continue;
+                if (window.value.result_presented) |is_presented| already_presented = is_presented(window.value.context, event.kind, event.owner);
+                if (event.kind == .transfer_done) if (window.value.transfer_presented) |is_presented| {
+                    already_presented = already_presented or is_presented(window.value.context, event.operation_id);
+                };
+                break;
+            }
+        }
+        event.system_enabled = event.system_enabled and !already_presented;
         const clock = try localClock();
         const published = try self.coordinator.publish(event, clock);
         const target = self.coordinator.records.items[published.record_index].target();
@@ -249,6 +265,12 @@ pub const Host = struct {
                 .reconnect => "查看连接",
                 .ai_ready => "查看对话",
             } }};
+            if (event.kind == .reconnect) {
+                for (self.coordinator.notification_records.items) |record| {
+                    if (std.mem.eql(u8, record.event.definition_id, definition_id) and record.event.owner.content.eql(event.owner))
+                        self.coordinator.dismissNotification(record.fact_id);
+                }
+            }
             const presentation = try self.coordinator.publishNotification(.{
                 .definition_id = definition_id,
                 .owner = .{ .window_id = @backingInt(window.id), .content = event.owner },
@@ -275,9 +297,7 @@ pub const Host = struct {
                 .owner_name = if (window.value.owner_name) |resolve| bounded(resolve(window.value.context, event.owner), 256) else "",
                 .actions = &actions,
             }, clock);
-            if (event.kind == .transfer_done) if (window.value.transfer_presented) |is_presented| {
-                if (is_presented(window.value.context, event.operation_id)) self.coordinator.dismissNotification(presentation.fact_id);
-            };
+            if (already_presented) self.coordinator.dismissNotification(presentation.fact_id);
             break;
         };
         if (@import("../platform/runtime_mode.zig").automation) {
@@ -319,16 +339,23 @@ pub const Host = struct {
         };
         return self.coordinator.publishNotification(gated, try localClock());
     }
-    /// Brief host feedback shares the ordinary notification presenter. It does
-    /// not mark background attention or request a system notification.
+    /// Ordinary feedback stays local. Only explicit warnings/failures enter
+    /// the notification presenter; they never request a system notification.
     pub fn publishFeedback(self: *Host, window_id: WindowId, owner: ContentOwner, summary: []const u8) !void {
         return self.publishFeedbackSeverity(window_id, owner, summary, .info);
     }
     /// Callers with structured failure results preserve that severity instead
     /// of reducing errors to ordinary timed feedback.
     pub fn publishFeedbackSeverity(self: *Host, window_id: WindowId, owner: ContentOwner, summary: []const u8, severity: notifications.Severity) !void {
+        if (severity == .info or severity == .success) return;
+        for (self.coordinator.notification_records.items) |record| {
+            if (record.presentation != .hidden and record.event.owner.window_id == @backingInt(window_id) and record.event.owner.content.eql(owner) and record.event.severity == severity and
+                std.mem.eql(u8, record.event.definition_id, "host.feedback") and std.mem.eql(u8, record.event.title, summary)) return;
+        }
         if (self.next_feedback == 0) return error.NotificationEventIdentityExhausted;
-        _ = try self.publish(.{ .definition_id = "host.feedback", .owner = .{ .window_id = @backingInt(window_id), .content = owner }, .operation_id = self.next_feedback, .event_revision = 1, .phase = if (severity == .failure) .failed else .succeeded, .severity = severity, .title = summary, .system_enabled = false });
+        const window = self.windowFor(window_id) orelse return error.NotificationWindowClosed;
+        const owner_name = if (window.owner_name) |resolve| resolve(window.context, owner) else "";
+        _ = try self.publish(.{ .owner_name = bounded(owner_name, 256), .definition_id = "host.feedback", .owner = .{ .window_id = @backingInt(window_id), .content = owner }, .operation_id = self.next_feedback, .event_revision = 1, .phase = if (severity == .failure) .failed else .succeeded, .severity = severity, .title = summary, .system_enabled = false });
         self.next_feedback = if (self.next_feedback == std.math.maxInt(u64)) 0 else self.next_feedback + 1;
     }
     pub fn setWindowFocus(self: *Host, window_id: WindowId, focused: bool) void {

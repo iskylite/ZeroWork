@@ -75,11 +75,6 @@ fn mountList(cx: *ui.Cx, bound: *binding.Binding, root: *ui.Node) !void {
                 try section.body.appendChild(cx.allocator, try preferenceRow(cx, bound, entry.id, field));
             };
         }
-        if (group_matches != 0) {
-            const note = try ui.text(cx, if (origin == .builtin) "内置协议随应用管理。" else "插件随应用管理。", .{ .font_size = 11, .line_height = 18.0 / 11.0, .color = S.theme.current().fg_2 });
-            note.style.margin = .{ .top = 8, .bottom = 8 };
-            try section.body.appendChild(cx.allocator, note);
-        }
         matched += group_matches;
         if (group_matches != 0 or bound.controller.search_query.len == 0) try root.appendChild(cx.allocator, section.root) else cx.destroyDetached(section.root);
     }
@@ -178,8 +173,9 @@ fn preferenceRow(cx: *ui.Cx, bound: *binding.Binding, plugin_id: []const u8, fie
     try root.appendChild(cx.allocator, row);
     const labels = try ui.boxStyled(cx, S.fieldLabel, .{});
     try row.appendChild(cx.allocator, labels);
+    labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 4 });
     try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.label, field.label));
-    try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.note, if (field.apply_timing == .next_connection) "下次连接生效" else "保存后生效"));
+    try labels.appendChild(cx.allocator, try controls.inlineHint(cx, bound, try pluginId(bound.scope, plugin_id, try controls.stableId(bound.scope, field.key, ".timing")), if (field.apply_timing == .next_connection) "下次连接生效" else "保存后生效", if (field.apply_timing == .next_connection) ui.icons.clock_3 else ui.icons.circle_check, if (field.apply_timing == .next_connection) S.theme.current().accent_ink else S.theme.current().fg_2));
     const message = try ui.textStyled(cx, S.note, "");
     message.setDisplay(.none);
     try root.appendChild(cx.allocator, message);

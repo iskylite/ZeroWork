@@ -3,8 +3,16 @@
 #include <signal.h>
 #include <sys/wait.h>
 static void test_opened(int fd, const char *name);
+static const char *test_default_identity(void);
+#define ZW_SCOPE_DEFAULT_CREDENTIAL_IDENTITY test_default_identity()
 #define ZW_SCOPE_TEST_OPENED(fd, name) test_opened(fd, name)
 #include "data_scope_lock.c"
+
+static const char *test_default_identity(void) {
+    const char *identity = getenv("ZW_SCOPE_TEST_IDENTITY");
+    assert(identity && identity[0] == '/');
+    return identity;
+}
 
 static int pause_opened;
 static char executable[PATH_MAX];
@@ -75,6 +83,9 @@ int main(int argc, char **argv) {
     assert(realpath(argv[0], executable));
     char scratch[] = "/private/tmp/zerowork-scope-test-XXXXXX";
     assert(mkdtemp(scratch));
+    // Children inherit this run-unique default-vault identity. Real apps and
+    // parallel test runs keep their own locks, even while this test is active.
+    assert(setenv("ZW_SCOPE_TEST_IDENTITY", scratch, 1) == 0);
     char a[PATH_MAX], b[PATH_MAX], alias[PATH_MAX], sentinel[PATH_MAX];
     snprintf(a, sizeof(a), "%s/scope-a", scratch);
     snprintf(b, sizeof(b), "%s/scope-b", scratch);

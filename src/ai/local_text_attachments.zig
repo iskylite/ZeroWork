@@ -324,6 +324,22 @@ pub const Draft = struct {
         for (self.candidates.items) |*item| item.reference.release();
         self.candidates.clearRetainingCapacity();
     }
+    pub fn restore(self: *Draft, bundle: *const Bundle) !void {
+        if (!self.owner.eql(bundle.owner)) return error.StaleAttachmentBundle;
+        if (self.epoch == std.math.maxInt(u64)) return error.AttachmentEpochExhausted;
+        var next = try Draft.init(self.allocator, self.owner);
+        errdefer next.deinit();
+        next.epoch = self.epoch + 1;
+        next.next_id = self.next_id;
+        for (bundle.items) |item| {
+            const ticket = try next.begin();
+            var ref = item.reference.retain();
+            defer ref.release();
+            _ = try next.complete(ticket, &ref);
+        }
+        self.deinit();
+        self.* = next;
+    }
     pub fn freeze(self: *const Draft) !Bundle {
         if (self.pending.items.len != 0) return error.AttachmentsProcessing;
         const items = try self.allocator.alloc(Item, self.items.items.len);

@@ -62,3 +62,20 @@ pub fn messageCloseHover() ui.BoxStyle {
 pub fn messageIcon() ui.Style {
     return .{ .width = .{ .px = message_icon_size }, .height = .{ .px = message_icon_size }, .flex_shrink = 0 };
 }
+
+/// In-flow history controls: a fixed-height card above the terminal viewport.
+pub fn historyCard(_: *const ui.ThemeTokens) ui.BoxStyle {
+    const c = theme.current();
+    return .{
+        .height = .{ .px = 44 },
+        .width = .fill(),
+        .flex_shrink = 0,
+        .direction = .row,
+        .align_items = .center,
+        .gap = 12,
+        .padding = .{ .left = 14, .right = 14 },
+        .margin = .{ .bottom = 8 },
+        .background = c.overlay,
+        .border = .{ .width = 1, .color = c.border, .radius = 10 },
+    };
+}

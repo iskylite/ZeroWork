@@ -25,7 +25,7 @@ test "plugin V3 reads registered metadata and detail actions preserve draft" {
     defer controller.deinit();
     const entries = [_]registry.PluginManifest{
         .{ .id = "ssh", .display_name = "SSH", .plugin_version = "9.8.7", .origin = .builtin, .workspace_kind = "terminal", .content_renderer = "terminal" },
-        .{ .id = "probe", .display_name = "Real registered probe", .plugin_version = "0.3.1", .origin = .bundled, .workspace_kind = "canvas", .content_renderer = "canvas" },
+        .{ .id = "probe", .display_name = "Real registered probe", .plugin_version = "0.3.1", .origin = .bundled, .workspace_kind = "canvas", .content_renderer = "canvas", .settings_section = .{ .fields = &.{.{ .key = "show_grid", .label = "显示网格", .kind = .boolean, .default_value = "true", .apply_timing = .next_connection }} } },
     };
     controller.plugin_page.registry_source = .{ .published = .{ .entries = &entries, .renderers = &.{} } };
     controller.model.selectPage(5);
@@ -33,6 +33,10 @@ test "plugin V3 reads registered metadata and detail actions preserve draft" {
     var context: u8 = 0;
     const content = try view.mountContent(cx, scope, &controller, .{ .context = &context, .changed = changed, .request_edit = request, .action = action });
     try cx.root.?.appendChild(cx.allocator, content);
+    const timing = byId(content, "settings.plugin.probe.show_grid.timing").?;
+    try std.testing.expect(timing.behavior.interaction.focusable);
+    try std.testing.expectEqualStrings("下次连接生效", timing.behavior.interaction.a11y.?.label.?);
+    try std.testing.expect(!hasText(content, "下次连接生效"));
     const row = byId(content, "settings.plugin.ssh.row").?;
     try std.testing.expectEqual(@as(f32, 66), row.style.height.px);
     try std.testing.expectEqualStrings("远程终端、认证与端口转发", byId(content, "settings.plugin.ssh.description").?.getText().?.content);

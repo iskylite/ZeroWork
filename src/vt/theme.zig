@@ -2,6 +2,8 @@
 //! effective RGB defaults/OSC overrides; selection remains UI decoration.
 pub const Theme = struct {
     revision: u64,
+    cursor_shape: enum { block, bar, underline } = .block,
+    cursor_blinking: bool = true,
     foreground: u32,
     background: u32,
     cursor: u32,

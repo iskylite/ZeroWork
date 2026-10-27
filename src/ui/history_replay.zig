@@ -11,7 +11,7 @@ pub const Timeline = struct {
     selected: ?usize = null,
     history_id: ?@import("../host/identity.zig").HistoryId = null,
     pub const PresentationRow = struct { layout: @import("terminal_record_geometry.zig").Layout = .{}, y: u16, id: @import("../vt/snapshot.zig").RowId, kind: u8, state: u8, timestamp: ?i64 };
-    pub const Entry = struct { time_ms: i64, wire: []u8, presentation: []PresentationRow = &.{}, search: ?@import("../vt/search_snapshot.zig").Document = null };
+    pub const Entry = struct { time_ms: i64, wire: []u8, presentation: []PresentationRow = &.{}, search: ?@import("../vt/search_snapshot.zig").Document = null, search_allocator: ?std.mem.Allocator = null };
     pub fn projectionStorageBytes(projection: *const @import("../vt/snapshot.zig").Projection) usize {
         var text_bytes: usize = projection.visible_rows.len -| 1;
         var spans: usize = 0;
@@ -76,7 +76,7 @@ pub const Timeline = struct {
         for (self.frames.items) |*entry| {
             self.allocator.free(entry.wire);
             if (entry.presentation.len > 0) self.allocator.free(entry.presentation);
-            if (entry.search) |*document| document.deinit(self.allocator);
+            if (entry.search) |*document| document.deinit(entry.search_allocator orelse self.allocator);
         }
         self.frames.deinit(self.allocator);
     }
@@ -102,24 +102,28 @@ pub const Timeline = struct {
             if (oldest.search) |document| self.bytes -= document.text.len + document.rows.len * @sizeOf(@import("../vt/search_snapshot.zig").Row) + document.spans.len * @sizeOf(@import("../vt/search_snapshot.zig").Span);
             self.allocator.free(oldest.wire);
             var removed = oldest;
-            if (removed.search) |*document| document.deinit(self.allocator);
+            if (removed.search) |*document| document.deinit(removed.search_allocator orelse self.allocator);
             if (self.selected) |index| if (index > remove_index) {
                 self.selected = index - 1;
             };
         }
     }
     pub fn attachSearch(self: *Timeline, document: @import("../vt/search_snapshot.zig").Document) void {
+        self.attachSearchWithAllocator(document, self.allocator);
+    }
+    pub fn attachSearchWithAllocator(self: *Timeline, document: @import("../vt/search_snapshot.zig").Document, allocator: std.mem.Allocator) void {
         if (!self.canAttachSearch(document)) {
             var rejected = document;
-            rejected.deinit(self.allocator);
+            rejected.deinit(allocator);
             return;
         }
         const last = &self.frames.items[self.frames.items.len - 1];
         if (last.search) |*old| {
             self.bytes -= searchBytes(old.*);
-            old.deinit(self.allocator);
+            old.deinit(last.search_allocator orelse self.allocator);
         }
         last.search = document;
+        last.search_allocator = allocator;
         self.bytes += searchBytes(document);
         self.trim();
     }
@@ -263,7 +267,7 @@ test "timeline projected history coalesces styles and ignores cursor-only duplic
     defer timeline.deinit();
     try std.testing.expect(try timeline.appendProjectionChanged(100, &projection));
     const wire = text_frame.decode(timeline.latest().?.wire).?;
-    try std.testing.expectEqual(@as(usize, 1), wire.spans.len);
+    try std.testing.expectEqual(@as(usize, 2), wire.spans.len);
     try std.testing.expect(timeline.latest().?.wire.len < 256);
     projection.cursor.col = 0;
     try std.testing.expect(!try timeline.appendProjectionChanged(200, &projection));
@@ -285,4 +289,46 @@ test "timeline rejects an optional full index larger than the history budget" {
     try std.testing.expect(timeline.latest().?.search == null);
     try std.testing.expectEqual(wire.len, timeline.bytes);
     try std.testing.expectEqualStrings("a", text_frame.decode(timeline.latest().?.wire).?.text);
+}
+
+test "timeline owns page-backed search copies through eviction and teardown" {
+    const a = std.testing.allocator;
+    const pages = std.heap.page_allocator;
+    const search = @import("../vt/search_snapshot.zig");
+    var timeline = Timeline.init(a, 64);
+    defer timeline.deinit();
+    var wire: [text_frame.header_bytes + 1]u8 = undefined;
+    text_frame.encodeHeader(wire[0..text_frame.header_bytes], .{}, 1, 1, 0, 1);
+    wire[text_frame.header_bytes] = 'a';
+    for (0..2) |i| {
+        try timeline.append(@intCast(i), &wire);
+        timeline.attachSearchWithAllocator(.{ .source_version = i + 1, .alternate_screen = false, .text = try pages.dupe(u8, "12345678901234567890123456789012"), .rows = try pages.alloc(search.Row, 0), .spans = try pages.alloc(search.Span, 0) }, pages);
+    }
+    try std.testing.expectEqual(@as(usize, 1), timeline.frames.items.len);
+    try std.testing.expectEqual(@as(u64, 2), timeline.latest().?.search.?.source_version);
+}
+
+test "timeline projected styles preserve inverse top header and literal colors" {
+    const a = std.testing.allocator;
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 2, 12);
+    defer adapter.destroy();
+    _ = try adapter.feed("\x1b[7mPID USER\x1b[0m\r\n\x1b[38;2;0;0;0;48;2;255;255;255mX");
+    var projection = try adapter.copyProjection(a);
+    defer projection.deinit(a);
+    var timeline = Timeline.init(a, 1024 * 1024);
+    defer timeline.deinit();
+    try timeline.appendProjection(100, &projection);
+    const wire = text_frame.decode(timeline.latest().?.wire).?;
+    try std.testing.expectEqual(@as(usize, 2), wire.spans.len);
+    try std.testing.expectEqual((@as(u32, projection.colors.background) << 8) | 255, wire.spans[0].color);
+    try std.testing.expectEqual((@as(u32, projection.colors.foreground) << 8) | 255, wire.spans[0].bg);
+    try std.testing.expectEqual(@as(u32, 0x000000ff), wire.spans[1].color);
+    try std.testing.expectEqual(@as(u32, 0xffffffff), wire.spans[1].bg);
+    projection.modes.reverse_colors = true;
+    try timeline.appendProjection(200, &projection);
+    const reversed = text_frame.decode(timeline.latest().?.wire).?;
+    // Cell inverse and screen inverse cancel for the header.
+    try std.testing.expectEqual(@as(u32, 0), reversed.spans[0].start);
+    try std.testing.expectEqual((@as(u32, projection.colors.foreground) << 8) | 255, reversed.spans[0].color);
+    try std.testing.expectEqual((@as(u32, projection.colors.background) << 8) | 255, reversed.spans[0].bg);
 }

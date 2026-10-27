@@ -9,6 +9,7 @@ zig-out/
 /exports
 /figma-review
 /logs
+/output
 
 # Local run/build artifacts
 dist/

@@ -174,6 +174,25 @@ fn terminalRoute(body: []const u8) []const u8 {
     var parsed = std.json.parseFromSlice(Input, app_domain.allocator, body, .{}) catch return "{\"ok\":false,\"error\":\"InvalidCommand\"}";
     defer parsed.deinit();
     const command = parsed.value;
+    if (std.mem.eql(u8, command.action, "memory")) {
+        var writer = std.Io.Writer.fixed(&response_buffer);
+        var capacity: usize = 0;
+        var scratch_capacity: usize = 0;
+        var pending = false;
+        for (app_domain.attachments.items) |host| {
+            const cx = host.workspace.cx;
+            const display = cx.display_list.memoryStats();
+            capacity += display.item_capacity_bytes;
+            scratch_capacity += display.item_capacity_bytes + display.payload_capacity_bytes + cx.frame_arena.queryCapacity();
+            pending = pending or cx.idle_scratch_limit != null or cx.display_list.idle_payload_limit != null;
+        }
+        var cpu_max: u64 = 0;
+        if (runtime) |windows| for (app_domain.attachments.items) |host| {
+            if (findNative(windows, host.workspace.cx)) |app| cpu_max = @max(cpu_max, app.renderer.timing_ring.cpuPercentile(100));
+        };
+        std.json.Stringify.value(.{ .ok = true, .background_search_tasks = @import("../vt/search_task.zig").live_count.load(.monotonic), .idle_reclaim_runs = app_domain.idle_reclaim_runs, .idle_reclaim_running = pending, .idle_trimmed_bytes = app_domain.idle_trimmed_bytes, .display_capacity_bytes = capacity, .scratch_capacity_bytes = scratch_capacity, .cpu_max_us = cpu_max }, .{}, &writer) catch return "{\"ok\":false}";
+        return writer.buffered();
+    }
     const host = for (app_domain.attachments.items) |candidate| {
         if (command.window == 0 or @backingInt(candidate.window_id) == command.window) break candidate;
     } else return "{\"ok\":false,\"error\":\"WindowMissing\"}";
@@ -181,6 +200,13 @@ fn terminalRoute(body: []const u8) []const u8 {
     const index = workspace.active_tab orelse return "{\"ok\":false,\"error\":\"TabMissing\"}";
     const view = workspace.tabs.items[index].terminal orelse return "{\"ok\":false,\"error\":\"TerminalMissing\"}";
     const surface = view.terminal_surface orelse return "{\"ok\":false,\"error\":\"SurfaceMissing\"}";
+    if (std.mem.eql(u8, command.action, "profile")) {
+        const app = findNative(runtime.?, workspace.cx) orelse return "{\"ok\":false}";
+        const p = workspace.cx.perf;
+        var writer = std.Io.Writer.fixed(&response_buffer);
+        std.json.Stringify.value(.{ .ok = true, .frame = workspace.cx.frame_count, .timing = app.renderer.last_frame_stats, .before_render_us = p.before_render_us, .inner_layout_us = p.inner_layout_us, .render_node_us = p.render_node_us, .slow_hook_us = p.slow_hook_us, .slow_hook = p.slow_hook_name[0..p.slow_hook_name_len], .compose_us = surface.composite.profile_compose_us, .compose_rows = surface.composite.last_composed_rows, .refresh_calls = view.profile_refresh_calls, .refresh_us = view.profile_refresh_us, .surface_us = view.profile_surface_us, .history_us = view.profile_history_us }, .{}, &writer) catch return "{\"ok\":false}";
+        return writer.buffered();
+    }
     const Jobs = @import("session_export_jobs.zig");
     const manager = Jobs.Manager.forCx(workspace.cx);
     if (std.mem.eql(u8, command.action, "export")) {
@@ -199,6 +225,21 @@ fn terminalRoute(body: []const u8) []const u8 {
         .composite_bytes = if (cached) |doc| doc.text.len + doc.rows.len * @sizeOf(@import("../vt/search_snapshot.zig").Row) + doc.spans.len * @sizeOf(@import("../vt/search_snapshot.zig").Span) else 0,
         .composite_full_rebuilds = surface.composite.full_rebuilds,
         .composite_tail_updates = surface.composite.tail_updates,
+        .composite_incremental_rebuilds = surface.composite.incremental_rebuilds,
+        .composite_background_scans = surface.composite.background_scans,
+        .composite_synchronous_scans = surface.composite.synchronous_scans,
+        .composite_source_complete = surface.composite.source_complete,
+        .composite_search_pending = surface.composite.search_task != null,
+        .composite_last_composed_rows = surface.composite.last_composed_rows,
+        .glyphs_pending = surface.glyphs_pending,
+        .input_during_hydration = surface.input_during_hydration,
+        .glyph_nodes = blk: {
+            var count: usize = 0;
+            for (surface.rows.items) |row| count += row.glyphs.items.len;
+            break :blk count;
+        },
+        .record_count = surface.composite.records.items.len,
+        .frame = workspace.cx.frame_count,
         .export_running = if (manager) |exports| exports.job != null else false,
         .exports_completed = if (manager) |exports| exports.completed else 0,
         .export_error = if (manager) |exports| if (exports.last_failure) |err| @errorName(err) else @as(?[]const u8, null) else null,

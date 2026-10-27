@@ -25,6 +25,8 @@ pub const SearchSnapshot = struct {
         self.document.deinit(allocator);
     }
 };
+pub const SearchTask = @import("../vt/search_task.zig").Task;
+pub const SearchTail = struct { start_row: u32, version: u64, max_rows: u16 };
 
 pub const Read = union(enum) { bytes: usize, would_block, eof };
 pub const Write = union(enum) { bytes: usize, would_block };
@@ -165,6 +167,8 @@ pub const Service = struct {
         trusted_outcome: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!?trusted_edit.Outcome = null,
         trusted_cancel: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!void = null,
         search_snapshot: ?*const fn (*anyopaque, session.ServiceHandle, std.mem.Allocator) anyerror!SearchSnapshot = null,
+        search_async: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!*SearchTask = null,
+        search_tail: ?*const fn (*anyopaque, session.ServiceHandle, SearchTail, std.mem.Allocator) anyerror!SearchSnapshot = null,
     };
     pub fn trustedSnapshot(self: Service, allocator: std.mem.Allocator) !?trusted_edit.Snapshot {
         const call = self.vtable.trusted_snapshot orelse return null;
@@ -238,6 +242,14 @@ pub const Service = struct {
     pub fn searchSnapshot(self: Service, allocator: std.mem.Allocator) !SearchSnapshot {
         const capture = self.vtable.search_snapshot orelse return error.SearchUnavailable;
         return capture(self.context, self.binding, allocator);
+    }
+    pub fn beginSearch(self: Service) !*SearchTask {
+        const call = self.vtable.search_async orelse return error.SearchAsyncUnavailable;
+        return call(self.context, self.binding);
+    }
+    pub fn searchTail(self: Service, request: SearchTail, allocator: std.mem.Allocator) !SearchSnapshot {
+        const call = self.vtable.search_tail orelse return error.FullSearchRequired;
+        return call(self.context, self.binding, request, allocator);
     }
     pub fn setTheme(self: Service, theme: Theme) !void {
         if (theme.revision == 0) return error.InvalidTheme;

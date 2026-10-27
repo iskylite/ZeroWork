@@ -3,12 +3,17 @@ const c = @import("generated_ghostty_vt");
 const input = @import("input_event.zig");
 
 pub fn key(terminal: c.GhosttyTerminal, event: input.KeyEvent, allocator: std.mem.Allocator) ![]u8 {
+    return keyForType(terminal, event, allocator, .xterm_256color);
+}
+pub fn keyForType(terminal: c.GhosttyTerminal, event: input.KeyEvent, allocator: std.mem.Allocator, terminal_type: @import("terminal_type.zig").Type) ![]u8 {
     @setEvalBranchQuota(10000);
     if (event.utf8.len > 4096 or !std.unicode.utf8ValidateSlice(event.utf8)) return error.InvalidInput;
     var encoder: c.GhosttyKeyEncoder = null;
     if (c.ghostty_key_encoder_new(null, &encoder) != c.GHOSTTY_SUCCESS) return error.InputEncodingFailed;
     defer c.ghostty_key_encoder_free(encoder);
     c.ghostty_key_encoder_setopt_from_terminal(encoder, terminal);
+    var option_as_alt: c.GhosttyOptionAsAlt = c.GHOSTTY_OPTION_AS_ALT_TRUE;
+    c.ghostty_key_encoder_setopt(encoder, c.GHOSTTY_KEY_ENCODER_OPT_MACOS_OPTION_AS_ALT, @ptrCast(&option_as_alt));
     var native: c.GhosttyKeyEvent = null;
     if (c.ghostty_key_event_new(null, &native) != c.GHOSTTY_SUCCESS) return error.InputEncodingFailed;
     defer c.ghostty_key_event_free(native);
@@ -31,6 +36,21 @@ pub fn key(terminal: c.GhosttyTerminal, event: input.KeyEvent, allocator: std.me
     errdefer allocator.free(buffer);
     var count: usize = 0;
     if (c.ghostty_key_encoder_encode(encoder, native, buffer.ptr, buffer.len, &count) != c.GHOSTTY_SUCCESS) return error.InputEncodingFailed;
+    var kitty_flags: u8 = 0;
+    _ = c.ghostty_terminal_get(terminal, c.GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, @ptrCast(&kitty_flags));
+    if (count > 0 and kitty_flags == 0) if (@import("terminal_type.zig").legacyFunctionKey(terminal_type, event)) |bytes| {
+        @memcpy(buffer[0..bytes.len], bytes);
+        count = bytes.len;
+    };
+    // xterm-256color kf15/kf27/kf39/kf51/kf63 use modified SS3 F3
+    // (CSI 1;modifier R). Ghostty's legacy encoder emits CSI 13;modifier~.
+    // Keep negotiated Kitty protocol untouched.
+    if (event.key == .f3 and count >= 7 and std.mem.startsWith(u8, buffer[0..count], "\x1b[13;") and buffer[count - 1] == '~') {
+        @memcpy(buffer[0..4], "\x1b[1;");
+        std.mem.copyForwards(u8, buffer[4 .. count - 2], buffer[5 .. count - 1]);
+        buffer[count - 2] = 'R';
+        count -= 1;
+    }
     return allocator.realloc(buffer, count);
 }
 fn upper(comptime text: []const u8) [text.len]u8 {

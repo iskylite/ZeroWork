@@ -16,6 +16,12 @@
 #define ZW_SCOPE_TEST_OPENED(fd, name) ((void)0)
 #endif
 
+// Tests override this identity at compile time; production always uses the
+// fixed credential service identity, independent of runtime environment.
+#ifndef ZW_SCOPE_DEFAULT_CREDENTIAL_IDENTITY
+#define ZW_SCOPE_DEFAULT_CREDENTIAL_IDENTITY "com.zerowork.app.default-credential-vault"
+#endif
+
 enum { ZW_SCOPE_OK = 0, ZW_SCOPE_BUSY = 1, ZW_SCOPE_UNSAFE = 2, ZW_SCOPE_FAILURE = 3 };
 struct scope_file { int fd; char name[128]; };
 struct scope_lock { int parent; size_t count; struct scope_file files[2]; };
@@ -39,8 +45,8 @@ static int scope_runtime_dir(void) {
 static int scope_name(const char *directory, int global_default, char out[128]) {
     unsigned char digest[CC_SHA256_DIGEST_LENGTH];
     if (global_default) {
-        const char identity[] = "com.zerowork.app.default-credential-vault";
-        CC_SHA256(identity, sizeof(identity) - 1, digest);
+        const char *identity = ZW_SCOPE_DEFAULT_CREDENTIAL_IDENTITY;
+        CC_SHA256(identity, (CC_LONG)strlen(identity), digest);
     } else {
         // Paths rejects traversal and lifecycle rejects all symlink components.
         // Folding also serializes spelling aliases on case-insensitive APFS.

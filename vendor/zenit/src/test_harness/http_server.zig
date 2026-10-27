@@ -528,6 +528,7 @@ fn parseMousePayload(body: []const u8) ?MousePayload {
     return .{
         .x = x,
         .y = y,
+        .button = if (findJsonString(body, "button")) |value| std.meta.stringToEnum(@import("ui").events.MouseButton, value) orelse return null else .left,
         .shift = std.mem.indexOf(u8, body, "\"shift\"") != null,
         .ctrl = std.mem.indexOf(u8, body, "\"ctrl\"") != null,
         .alt = std.mem.indexOf(u8, body, "\"alt\"") != null,

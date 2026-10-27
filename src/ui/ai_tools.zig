@@ -30,6 +30,7 @@ const ControllerExchange = struct {
 };
 pub const Bridge = struct {
     allocator: std.mem.Allocator,
+    events: ?*@import("../ai/step_events.zig").Mailbox = null,
     children: std.ArrayList(*Child) = .empty,
     captured_scope: ?scope.Scope = null,
     table: ?tools.RequestTable = null,
@@ -169,8 +170,40 @@ pub const Bridge = struct {
             self.mutex.unlock();
         }
         for (self.children.items) |child| child.invocation_context.cancel = cancel;
+        self.emitStep(invocation, .running, "");
         const runtime: tools.Runtime = .{ .context = self, .live_scope = liveScope, .live_members = liveMembers, .current_policy = currentPolicy, .now_ms = timeNow, .approval = askApproval, .operations = self.operationHistory(), .invoke = invoke };
-        return runtime.execute(invocation, allocator, cancel);
+        const results = runtime.execute(invocation, allocator, cancel) catch |err| {
+            self.emitStep(invocation, if (err == error.CancelledBeforeDispatch or (if (cancel) |token| token.isCancelled() else false)) .cancelled else .failed, @errorName(err));
+            return err;
+        };
+        var detail: std.ArrayList(u8) = .empty;
+        defer detail.deinit(allocator);
+        var phase: @import("../ai/step_events.zig").Phase = .succeeded;
+        for (results) |result| {
+            if (result.status != .succeeded) phase = if (result.status == .rejected) .rejected else if (result.status == .cancelled_unsent) .cancelled else .failed;
+            const label = std.fmt.allocPrint(allocator, "#{d} · {s}\n", .{ @backingInt(result.receipt.owner.session_id), @tagName(result.status) }) catch "";
+            defer if (label.len != 0) allocator.free(label);
+            detail.appendSlice(allocator, label) catch {};
+            for (result.blocks) |block| switch (block) {
+                .text, .structured => |bytes| {
+                    detail.appendSlice(allocator, bytes) catch {};
+                    detail.append(allocator, '\n') catch {};
+                },
+                else => {},
+            };
+        }
+        self.emitStep(invocation, phase, detail.items);
+        return results;
+    }
+    fn emitStep(self: *Bridge, invocation: tools.DynamicInvocation, phase: @import("../ai/step_events.zig").Phase, detail: []const u8) void {
+        const events = self.events orelse return;
+        const name = invocation.parsed.entry.definition.id;
+        const args = invocation.parsed.json.value;
+        const command = if (args == .object) blk: {
+            for ([_][]const u8{ "command", "path" }) |key| if (args.object.get(key)) |value| if (value == .string) break :blk value.string;
+            break :blk invocation.arguments;
+        } else invocation.arguments;
+        events.push(.{ .call_id = invocation.call_id, .name = name, .command = command, .detail = detail, .phase = phase, .at_ms = @intCast(timeNow(self)) }) catch {};
     }
     fn liveScope(raw: *anyopaque) !scope.Scope {
         const self: *Bridge = @ptrCast(@alignCast(raw));
@@ -205,6 +238,7 @@ pub const Bridge = struct {
         self.sequence = try identity.advance(self.sequence +| @intFromBool(self.sequence == 0));
         var exchange: ApprovalExchange = .{ .invocation = invocation, .ticket = ticket, .sequence = self.sequence };
         self.pending = &exchange;
+        self.emitStep(invocation, .approval, "等待用户确认");
         @import("../ai/tool_trace.zig").emit(.{ .event = "dynamic_approval_pending", .call_id = invocation.call_id, .tool_id = invocation.parsed.entry.definition.id, .owner = invocation.table.captured_scope.owner, .sequence = exchange.sequence, .arguments_hash = std.fmt.bytesToHex(ticket.arguments_hash, .lower), .expires_at_ms = ticket.expires_at_ms });
         self.mutex.unlock();
         defer {
@@ -256,6 +290,7 @@ pub const Bridge = struct {
         const current = self.pending orelse return error.StaleApproval;
         if (current.sequence != sequence or current.decision != .pending or !std.mem.eql(u8, &hash, &current.ticket.arguments_hash) or timeNow(self) >= current.ticket.expires_at_ms or self.stopped.load(.acquire)) return error.StaleApproval;
         current.decision = if (approved) .approved else .rejected;
+        self.emitStep(current.invocation, if (approved) .approved else .rejected, if (approved) "用户已批准" else "用户已拒绝");
         @import("../ai/tool_trace.zig").emit(.{ .event = "dynamic_approval_decision", .call_id = current.invocation.call_id, .tool_id = current.invocation.parsed.entry.definition.id, .sequence = sequence, .approved = approved, .arguments_hash = std.fmt.bytesToHex(hash, .lower) });
     }
     fn invoke(raw: *anyopaque, target: tools.TargetBinding, request: tools.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !tools.ToolResult {

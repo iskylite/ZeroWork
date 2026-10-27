@@ -15,7 +15,12 @@ pub const Callbacks = struct {
 pub const Choice = struct { label: []const u8, value: []const u8 };
 const fonts = [_]Choice{ .{ .label = "JetBrains Mono", .value = "JetBrains Mono" }, .{ .label = "Menlo", .value = "Menlo" }, .{ .label = "Monaco", .value = "Monaco" } };
 const cursors = [_]Choice{ .{ .label = "█ Block", .value = "block" }, .{ .label = "▏ Bar", .value = "bar" }, .{ .label = "▁ Underline", .value = "underline" } };
-const terms = [_]Choice{ .{ .label = "xterm-256color", .value = "xterm-256color" }, .{ .label = "xterm", .value = "xterm" }, .{ .label = "vt100", .value = "vt100" } };
+const terms = blk: {
+    const builtins = @import("../vt/terminal_type.zig").builtin;
+    var result: [builtins.len]Choice = undefined;
+    for (builtins, 0..) |entry, i| result[i] = .{ .label = entry.name, .value = entry.name };
+    break :blk result;
+};
 const binds = [_]Choice{ .{ .label = "127.0.0.1", .value = "127.0.0.1" }, .{ .label = "0.0.0.0", .value = "0.0.0.0" } };
 const permissions = [_]Choice{ .{ .label = "确认后执行", .value = "confirm" }, .{ .label = "自动执行", .value = "auto" } };
 const formats = [_]Choice{ .{ .label = ".txt / .cast", .value = "txt_cast" }, .{ .label = ".txt", .value = "txt" }, .{ .label = ".cast", .value = "cast" } };
@@ -58,7 +63,13 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, overlay_parent: *ui.Node, anchor: *ui
     if (!std.mem.eql(u8, key.key, "permission_mode") and !std.mem.eql(u8, key.key, "conflict_policy") and !std.mem.eql(u8, key.key, "export_format") and !std.mem.eql(u8, key.key, "cursor_style") and !std.mem.eql(u8, key.key, "socks_bind")) {
         var buffer: [256]u8 = undefined;
         const initial = try editText(controller, key, &buffer);
-        const field = try ui.widgets.Input(.{ .value = initial, .placeholder = "输入数值后按 Enter", .on_submit = cx.on(Picker, self, Picker.onSubmit), .placeholder_color = theme.current().fg_3 }).mountResult(scope, cx);
+        if (std.mem.eql(u8, key.key, "term")) {
+            const note = try ui.text(cx, "自定义仅声明 TERM 名称，不保证对应终端兼容。", .{ .font_size = 12, .color = theme.current().fg_2, .wrap = .word });
+            note.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 0 });
+            note.meta.ownership.meta.test_id = "settings.term.custom.note";
+            try self.body.content.appendChild(cx.allocator, note);
+        }
+        const field = try ui.widgets.Input(.{ .value = initial, .placeholder = if (std.mem.eql(u8, key.key, "term")) "输入 TERM 名称后按 Enter" else "输入数值后按 Enter", .on_submit = cx.on(Picker, self, Picker.onSubmit), .placeholder_color = theme.current().fg_3 }).mountResult(scope, cx);
         field.state.font_size = 12;
         field.state.line_height = 18;
         field.state.char_width = 7.2;

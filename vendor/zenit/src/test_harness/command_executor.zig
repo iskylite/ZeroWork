@@ -523,7 +523,7 @@ fn executeCommand(queue: *CommandQueue, cmd_in: TestCommand) bool {
                     ctx.handleMouseDown(c.x, c.y, c.modifiers());
                     if (ctx.close_requested) break;
                     ctx.updateAutomationCursor(c.x, c.y, true);
-                    ctx.handleMouseUpEx(c.x, c.y, .left, c.modifiers());
+                    ctx.handleMouseUpEx(c.x, c.y, c.button, c.modifiers());
                     ctx.updateAutomationCursor(c.x, c.y, false);
                 }
                 queue.result.setJson("{\"ok\":true}");
@@ -602,7 +602,7 @@ fn executeCommand(queue: *CommandQueue, cmd_in: TestCommand) bool {
         },
         .mouse_down => |c| {
             if (getCtx()) |ctx| {
-                ctx.handleMouseDown(c.x, c.y, c.modifiers());
+                ctx.handleMouseDownEx(c.x, c.y, c.button, c.modifiers());
                 ctx.updateAutomationCursor(c.x, c.y, true);
                 queue.result.setJson("{\"ok\":true}");
             } else {
@@ -624,7 +624,7 @@ fn executeCommand(queue: *CommandQueue, cmd_in: TestCommand) bool {
             if (getCtx()) |ctx| {
                 // Must use Ex with modifiers: handleMouseUp hardcodes `.{}`, e2e can never cover
                 // 'modifiers on up' path (mouse_up modifiers=false bug hidden this way).
-                ctx.handleMouseUpEx(c.x, c.y, .left, c.modifiers());
+                ctx.handleMouseUpEx(c.x, c.y, c.button, c.modifiers());
                 ctx.updateAutomationCursor(c.x, c.y, false);
                 queue.result.setJson("{\"ok\":true}");
             } else {
@@ -1622,6 +1622,7 @@ fn parseKeyName(name: []const u8) KeyCode {
     if (std.mem.eql(u8, name, "down")) return .down;
     if (std.mem.eql(u8, name, "home")) return .home;
     if (std.mem.eql(u8, name, "end")) return .end;
+    if (std.meta.stringToEnum(KeyCode, name)) |code| return code;
     // Character key.
     if (name.len == 1) {
         const c = name[0];

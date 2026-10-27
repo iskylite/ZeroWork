@@ -129,7 +129,8 @@ pub fn render(self: *Cx) []const display_list_mod.DisplayItem {
         }
     }
     // reset frame arena, free all prior-frame temp alloc
-    _ = self.frame_arena.reset(.retain_capacity);
+    _ = self.frame_arena.reset(if (self.idle_scratch_limit) |limit| .{ .retain_with_limit = limit } else .retain_capacity);
+    self.idle_scratch_limit = null;
     self.perf.resetFrame();
     // gesture_arena tick, long_press time-related recognizer advance by this.
     // must call before render pass; else long_press began emit then dispatch
@@ -513,7 +514,13 @@ fn runAfterLayoutHooks(self: *Cx, partial: *PartialInteractionRoots) AfterLayout
         while (self.after_layout_cursor.? < self.after_layout_hooks.items.len) {
             const h = self.after_layout_hooks.items[self.after_layout_cursor.?];
             self.after_layout_cursor.? += 1;
+            const profile = @import("zenit_environment").has("ZENIT_FRAME_PROFILE");
+            var hook_timer = if (profile) startPerfTimer(self) else undefined;
             if (h.run(h.ctx, round, last_round) == .needs_layout) again = true;
+            if (profile) {
+                const us = hook_timer.read() / 1000;
+                if (us > 500) std.debug.print("AFTER_LAYOUT_PROFILE frame={d} round={d} callback=0x{x} anchor=0x{x} us={d}\n", .{ self.frame_count, round, @intFromPtr(h.run), @intFromPtr(&ensureBeforeRenderTicked), us });
+            }
         }
         self.after_layout_cursor = saved_cursor;
         self.owner.endBatch();

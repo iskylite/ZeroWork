@@ -124,6 +124,8 @@ const Entry = struct {
     controller: ?Controller = null,
     process: ?pty.Session = null,
     recording: ?*recording_mod.Recording = null,
+    search_task: ?*terminal.SearchTask = null,
+    search_active: std.atomic.Value(bool) = .init(false),
     pending_scrollback_limit: std.atomic.Value(u64) = .init(0),
     recording_retention_days: std.atomic.Value(u16) = .init(14),
     recording_error: ?[]const u8 = null,
@@ -170,7 +172,7 @@ const Entry = struct {
         if (self.recording) |recording| recording.deinit();
         if (self.options.recording) |recording| if (recording.directory) |directory| self.allocator.free(directory);
         if (self.vt) |*vt| vt.destroy();
-        if (self.projection) |*value| value.deinit(self.allocator);
+        if (self.projection) |*value| value.deinit(std.heap.page_allocator);
         self.text.deinit(self.allocator);
         self.output.deinit(self.allocator);
         self.wakeup.deinit();
@@ -179,7 +181,7 @@ const Entry = struct {
         self.allocator.destroy(self);
     }
     fn receipt(self: *const Entry) host.CloseReceipt {
-        return if (!self.worker_done or self.thread != null) .awaiting else self.cleanup;
+        return if (!self.worker_done or self.thread != null or self.search_active.load(.acquire)) .awaiting else self.cleanup;
     }
     fn completeWrite(self: *Entry, state: @FieldType(terminal.WriteReceipt, "state")) void {
         const write = self.writes.orderedRemove(0);
@@ -304,6 +306,7 @@ pub const LocalAdapter = struct {
                 continue;
             }
             const done = entry.worker_done;
+            if (entry.search_task) |task| task.cancelled.store(true, .release);
             entry.mutex.unlock();
             if (done) if (entry.thread) |thread| {
                 thread.join();
@@ -394,15 +397,18 @@ pub const LocalAdapter = struct {
                 thread.join();
                 entry.thread = null;
             };
-            if (done) if (entry.controller) |*controller| {
-                // Once joined, projection ownership transfers to this thread
-                // so a backpressured EOF frame can still reach its consumer.
-                applyTheme(entry);
-                applyScrollbackLimit(entry);
-                refreshProjection(entry);
-                controller.retryPublication(nowMs());
-                if (controller.publicationPending() or entry.requested_theme != null) pending = true;
-            };
+            if (done and entry.mutex.tryLock()) {
+                defer entry.mutex.unlock();
+                if (entry.controller) |*controller| {
+                    // Once joined, projection ownership transfers to this thread
+                    // so a backpressured EOF frame can still reach its consumer.
+                    applyTheme(entry);
+                    applyScrollbackLimit(entry);
+                    refreshProjection(entry);
+                    controller.retryPublication(nowMs());
+                    if (controller.publicationPending() or entry.requested_theme != null) pending = true;
+                }
+            } else if (done) pending = true;
             if (failure) |value| if (!entry.failure_published) {
                 _ = try session_host.failed(entry.handle, entry.key, value);
                 entry.failure_published = true;
@@ -590,7 +596,7 @@ pub const LocalAdapter = struct {
         return .{ .handle = handle, .stdout = stdout, .stderr = try allocator.dupe(u8, job.stderr.items), .exit = job.exit, .cancelled = job.cancelled, .timed_out = job.timed_out, .truncated = job.truncated, .cleanup = job.cleanup, .done = job.done };
     }
 
-    const service_vtable: terminal.Service.VTable = .{ .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .export_recording = serviceExportRecording, .recording_lease = serviceRecordingLease, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel };
+    const service_vtable: terminal.Service.VTable = .{ .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .search_async = serviceSearchAsync, .search_tail = serviceSearchTail, .export_recording = serviceExportRecording, .recording_lease = serviceRecordingLease, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel };
     fn serviceTrustedSnapshot(raw: *anyopaque, binding: host.ServiceHandle, allocator: std.mem.Allocator) !?terminal.trusted_edit.Snapshot {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));
         const entry = try self.resolve(binding, .terminal, true);
@@ -816,7 +822,7 @@ pub const LocalAdapter = struct {
         if (!entry.mutex.tryLock()) return error.WorkerBusy;
         defer entry.mutex.unlock();
         try inputGate(entry, request.input_sequence, request.mode_revision);
-        if (request.event.button == .right or request.event.button == .middle or request.event.modifiers.alt) return error.ReservedApplicationGesture;
+        if (request.event.modifiers.alt) return error.ReservedApplicationGesture;
         const bytes = try entry.controller.?.encodeMouse(entry.handle, request.mode_revision, request.geometry_revision, request.event, self.allocator);
         errdefer self.allocator.free(bytes);
         return queueEncoded(entry, request.input_sequence, request.mode_revision, bytes, false);
@@ -895,7 +901,70 @@ pub const LocalAdapter = struct {
         defer entry.mutex.unlock();
         return .{ .owner = entry.handle, .document = try entry.controller.?.searchSnapshot(entry.handle, allocator) };
     }
+    fn serviceSearchTail(raw: *anyopaque, binding: host.ServiceHandle, request: terminal.SearchTail, allocator: std.mem.Allocator) !terminal.SearchSnapshot {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, false);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        return .{ .owner = entry.handle, .document = try entry.vt.?.searchTail(allocator, request.start_row, request.max_rows, request.version) };
+    }
+    fn serviceSearchAsync(raw: *anyopaque, binding: host.ServiceHandle) !*terminal.SearchTask {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, false);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        if (entry.search_active.load(.acquire)) return error.WorkerBusy;
+        if (entry.close_requested.load(.acquire)) return error.SessionClosed;
+        const task = try terminal.SearchTask.create(entry.handle);
+        entry.search_task = task;
+        entry.search_active.store(true, .release);
+        const thread = std.Thread.spawn(.{}, searchWorker, .{entry}) catch |err| {
+            entry.search_task = null;
+            entry.search_active.store(false, .release);
+            task.release();
+            task.release();
+            return err;
+        };
+        thread.detach();
+        return task;
+    }
 };
+
+fn searchWorker(entry: *Entry) void {
+    const work = @import("../vt/search_task.zig");
+    entry.mutex.lock();
+    const task = entry.search_task.?;
+    var result: ?work.Result = null;
+    var failure: ?anyerror = null;
+    capture: {
+        if (task.cancelled.load(.acquire) or entry.close_requested.load(.acquire)) {
+            failure = error.Cancelled;
+            break :capture;
+        }
+        var projection = entry.controller.?.copyProjection(entry.handle, work.allocator) catch |err| {
+            failure = err;
+            break :capture;
+        };
+        defer projection.deinit(work.allocator);
+        const snapshot = entry.controller.?.searchSnapshot(entry.handle, work.allocator) catch |err| {
+            failure = err;
+            break :capture;
+        };
+        result = .{ .owner = entry.handle, .document = snapshot, .shape = work.Shape.from(&projection) };
+    }
+    if (task.cancelled.load(.acquire)) {
+        if (result) |*value| value.document.deinit(work.allocator);
+        result = null;
+        failure = error.Cancelled;
+    }
+    task.finish(result, failure);
+    entry.search_task = null;
+    entry.search_active.store(false, .release);
+    entry.mutex.unlock();
+    // Entry may be retired after unlocking. Only task-owned data is used now.
+    task.release();
+    @import("../platform/presentation_wakeup.zig").notify();
+}
 
 fn pause() void {
     const delay: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
@@ -938,6 +1007,7 @@ fn run(entry: *Entry) void {
         startFailure(entry, .{ .domain = .plugin, .code = "LocalTerminalInitFailed", .stage = "terminal", .cleanup = .released, .safe_message = "无法初始化本地终端" });
         return;
     };
+    entry.vt.?.configureTerminalType(entry.options.term);
     entry.vt.?.setScrollbackLimit(entry.options.scrollback_limit) catch {
         startFailure(entry, .{ .domain = .plugin, .code = "ScrollbackConfigurationFailed", .stage = "terminal", .cleanup = .released, .safe_message = "无法设置终端显示行数" });
         return;
@@ -1200,11 +1270,11 @@ fn refreshProjection(entry: *Entry) void {
         feed.republish_pending = true;
         return;
     }
-    const value = entry.controller.?.copyProjection(entry.handle, entry.allocator) catch |err| {
+    const value = entry.controller.?.copyProjection(entry.handle, std.heap.page_allocator) catch |err| {
         entry.snapshot_error = @errorName(err);
         return;
     };
-    if (entry.projection) |*old| old.deinit(entry.allocator);
+    if (entry.projection) |*old| old.deinit(std.heap.page_allocator);
     entry.projection = value;
     entry.projection_output_sequence = entry.controller.?.status().output_sequence;
     entry.projection_geometry_revision = entry.geometry.revision;

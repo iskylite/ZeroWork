@@ -91,7 +91,12 @@ pub const Host = struct {
             return;
         };
         if (current.attached) {
+            const restore_focus = self.progress.isVisible() or self.bridge.current != null;
             self.hide();
+            if (restore_focus) if (self.workspace.active_tab) |index| {
+                const tab = self.workspace.tabs.items[index];
+                if (tab.terminal) |*terminal| terminal.focus();
+            };
             return;
         }
         const challenge = if (pending) |request| (if (request.identity.key.eql(key)) pending else null) else null;
@@ -121,7 +126,7 @@ pub const Host = struct {
     fn showAuthentication(self: *Host, request: auth.Snapshot) !void {
         const host = self.workspace.authenticationHostFor(request.identity) orelse return error.StaleAuthentication;
         const ns = @import("../platform/realtime.zig").monotonicNs();
-        try self.bridge.sync(&self.challenges.host, request, .{ .display_name = host.name, .private_key_path = host.identity_file orelse "", .host_key = self.workspace.authenticationHostKey(request.identity) }, .{ .context = self, .submit = submitAuthentication, .cancel = cancelAuthentication }, @intCast(@max(0, ns) / std.time.ns_per_ms));
+        try self.bridge.sync(&self.challenges.host, request, .{ .allow_save_password = @backingInt(host.connection_id) != 0, .display_name = host.name, .private_key_path = host.identity_file orelse "", .host_key = self.workspace.authenticationHostKey(request.identity) }, .{ .context = self, .submit = submitAuthentication, .save_password = savePassword, .cancel = cancelAuthentication }, @intCast(@max(0, ns) / std.time.ns_per_ms));
         if (self.workspace.authenticationTotp(request.identity, self.totp_clock.now()) catch null) |proposed| {
             var value = proposed;
             defer value.deinit();
@@ -181,6 +186,10 @@ pub const Host = struct {
     fn hide(self: *Host) void {
         self.bridge.clear();
         self.progress.hide();
+    }
+    fn savePassword(raw: *anyopaque, request: auth.Snapshot, password: []const u8) !void {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        try self.workspace.saveAuthenticationPassword(request, password);
     }
     fn submitAuthentication(raw: *anyopaque, request: auth.RequestIdentity, reply: auth.Reply) !void {
         const self: *Host = @ptrCast(@alignCast(raw));

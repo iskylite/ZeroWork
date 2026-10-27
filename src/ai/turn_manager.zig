@@ -131,6 +131,7 @@ pub const Manager = struct {
             const stats = try self.runRound(p, current);
             total.input_tokens +|= stats.input_tokens;
             total.output_tokens +|= stats.output_tokens;
+            total.usage_reported = total.usage_reported and stats.usage_reported;
             if (self.pending_tools.items.len == 0 or self.tool_run == null) {
                 try self.turn.done();
                 try self.audit_log.append(.{ .timestamp_ms = self.timestamp_ms, .turn_id = self.turn_id, .command = self.command, .verdict = "stream_done", .target = request.model });
@@ -170,6 +171,19 @@ pub const Manager = struct {
 
     pub fn cooldownRemainingMs(self: *const Manager) u64 {
         return self.cooldown_deadline_ms -| monotonicMs();
+    }
+
+    /// Idle UI rollback releases discarded provider/tool context while keeping
+    /// the already prepared next-request policy and tool host configuration.
+    pub fn discardTranscript(self: *Manager) void {
+        self.clearToolRun();
+        self.clearPending();
+        self.round_text.clearRetainingCapacity();
+        self.reasoning.clearRetainingCapacity();
+        self.cards.clearRetainingCapacity();
+        self.open_text_card = null;
+        self.last_error = null;
+        self.saw_done = false;
     }
 
     fn clearToolRun(self: *Manager) void {
@@ -282,7 +296,7 @@ pub const Manager = struct {
             if (delta != .done) self.last_error = "delta after completed provider round";
             return;
         }
-        if (self.observer) |observer| observer.delta(observer.context, delta) catch {
+        if (delta != .tool_plan) if (self.observer) |observer| observer.delta(observer.context, delta) catch {
             self.last_error = "live output delivery failed";
         };
         switch (delta) {
@@ -439,6 +453,7 @@ pub const Manager = struct {
         }
         if (arguments.len + tool.arguments.items.len > 64 * 1024) return error.ToolArgumentsTooLarge;
         try tool.arguments.appendSlice(self.allocator, arguments);
+        if (self.observer) |observer| try observer.delta(observer.context, .{ .tool_plan = .{ .index = index, .call_id = tool.call_id, .name = tool.name, .arguments = tool.arguments.items } });
     }
 
     fn flushTools(self: *Manager) !void {

@@ -175,7 +175,7 @@ pub const Host = struct {
         const tab = self.workspace.tabs.items[index];
         if (tab.content_owner != .session or tab.local or tab.file_scope != null) return;
         const snapshot = self.application.sshConnectionDetails(tab.content_owner.session) catch |err| {
-            self.workspace.status(@errorName(err));
+            self.workspace.statusFailure(@errorName(err));
             return;
         };
         self.logs.hide();
@@ -183,7 +183,7 @@ pub const Host = struct {
         self.ssh_status.info.dismiss();
         self.ssh_status.detail.hide();
         self.capture(snapshot);
-        self.view.show(snapshot, self.trigger, self.status_bar.globalRect().y) catch |err| self.workspace.status(@errorName(err));
+        self.view.show(snapshot, self.trigger, self.status_bar.globalRect().y) catch |err| self.workspace.statusFailure(@errorName(err));
     }
 
     fn hook(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {

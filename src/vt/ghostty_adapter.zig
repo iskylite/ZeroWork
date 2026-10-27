@@ -21,6 +21,8 @@ fn wallClockMs() i64 {
 /// ZeroWork keeps its stable VtEngine contract for the worker/UI boundary.
 pub const Adapter = struct {
     allocator: std.mem.Allocator,
+    terminal_type: @import("terminal_type.zig").Type = .xterm_256color,
+    search_scratch: @import("../platform/snapshot_scratch.zig").Scratch = .{},
     terminal: c.GhosttyTerminal,
     render_state: c.GhosttyRenderState,
     rows: u16,
@@ -94,6 +96,7 @@ pub const Adapter = struct {
         self.allocator.free(self.cells);
         c.ghostty_render_state_free(self.render_state);
         c.ghostty_terminal_free(self.terminal);
+        self.search_scratch.deinit();
         self.* = undefined;
     }
 
@@ -366,6 +369,13 @@ pub const Adapter = struct {
         const background = themeRgb(theme.background);
         const cursor = themeRgb(theme.cursor);
         if (c.ghostty_terminal_set(self.terminal, c.GHOSTTY_TERMINAL_OPT_COLOR_FOREGROUND, @ptrCast(&foreground)) != c.GHOSTTY_SUCCESS or c.ghostty_terminal_set(self.terminal, c.GHOSTTY_TERMINAL_OPT_COLOR_BACKGROUND, @ptrCast(&background)) != c.GHOSTTY_SUCCESS or c.ghostty_terminal_set(self.terminal, c.GHOSTTY_TERMINAL_OPT_COLOR_CURSOR, @ptrCast(&cursor)) != c.GHOSTTY_SUCCESS) return error.ThemeUnavailable;
+        var cursor_style: c.GhosttyTerminalCursorStyle = switch (theme.cursor_shape) {
+            .block => c.GHOSTTY_TERMINAL_CURSOR_STYLE_BLOCK,
+            .bar => c.GHOSTTY_TERMINAL_CURSOR_STYLE_BAR,
+            .underline => c.GHOSTTY_TERMINAL_CURSOR_STYLE_UNDERLINE,
+        };
+        var cursor_blink = theme.cursor_blinking;
+        if (c.ghostty_terminal_set(self.terminal, c.GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE, @ptrCast(&cursor_style)) != c.GHOSTTY_SUCCESS or c.ghostty_terminal_set(self.terminal, c.GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_BLINK, @ptrCast(&cursor_blink)) != c.GHOSTTY_SUCCESS) return error.ThemeUnavailable;
         defer self.refreshVersions();
         try self.refreshLocked();
     }
@@ -389,7 +399,15 @@ pub const Adapter = struct {
     pub fn encodeKey(self: *Adapter, event: @import("input_event.zig").KeyEvent, allocator: std.mem.Allocator) ![]u8 {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
-        return @import("ghostty_input.zig").key(self.terminal, event, allocator);
+        return self.encodeKeyLocked(event, allocator);
+    }
+    /// Configure before handing this adapter to its worker/UI owners.
+    pub fn configureTerminalType(self: *Adapter, name: []const u8) void {
+        self.terminal_type = @import("terminal_type.zig").classify(name);
+    }
+    /// Caller holds mutex across mode validation and queue admission.
+    pub fn encodeKeyLocked(self: *Adapter, event: @import("input_event.zig").KeyEvent, allocator: std.mem.Allocator) ![]u8 {
+        return @import("ghostty_input.zig").keyForType(self.terminal, event, allocator, self.terminal_type);
     }
     pub fn encodeMouse(self: *Adapter, event: @import("input_event.zig").MouseEvent, allocator: std.mem.Allocator) ![]u8 {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
@@ -432,6 +450,14 @@ pub const Adapter = struct {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
         const document = try @import("ghostty_search.zig").capture(self, allocator);
+        self.row_metadata.annotateSearch(self.terminal, document.rows);
+        return document;
+    }
+    pub fn searchTail(self: *Adapter, allocator: std.mem.Allocator, start: u32, max_rows: u16, version: u64) !@import("search_snapshot.zig").Document {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.mutex.unlock();
+        if (self.version != version) return error.StaleProjection;
+        const document = try @import("ghostty_search.zig").captureRange(self, allocator, start, max_rows);
         self.row_metadata.annotateSearch(self.terminal, document.rows);
         return document;
     }

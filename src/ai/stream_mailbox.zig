@@ -1,11 +1,12 @@
 //! Worker-to-UI owned text batches. Neither thread borrows the other's bytes.
 const std = @import("std");
-pub const Batch = struct { reset: bool, bytes: []u8 };
+pub const Batch = struct { reset: bool, bytes: []u8, thinking: []u8 };
 pub const Mailbox = struct {
     allocator: std.mem.Allocator,
     mutex: std.atomic.Mutex = .unlocked,
     pending: std.ArrayList(u8) = .empty,
     reset_pending: bool = false,
+    thinking: std.ArrayList(u8) = .empty,
     total_bytes: usize = 0,
     pub const limit = 8 * 1024 * 1024;
     pub fn init(allocator: std.mem.Allocator) Mailbox {
@@ -18,6 +19,7 @@ pub const Mailbox = struct {
         self.lock();
         defer self.mutex.unlock();
         self.pending.clearRetainingCapacity();
+        self.thinking.clearRetainingCapacity();
         self.total_bytes = 0;
         self.reset_pending = true;
     }
@@ -28,26 +30,37 @@ pub const Mailbox = struct {
         try self.pending.appendSlice(self.allocator, bytes);
         self.total_bytes += bytes.len;
     }
+    pub fn appendThinking(self: *Mailbox, bytes: []const u8) !void {
+        self.lock();
+        defer self.mutex.unlock();
+        if (bytes.len > limit -| self.total_bytes) return error.StreamTooLarge;
+        try self.thinking.appendSlice(self.allocator, bytes);
+        self.total_bytes += bytes.len;
+    }
     pub fn drain(self: *Mailbox) !?Batch {
         self.lock();
         defer self.mutex.unlock();
-        if (!self.reset_pending and self.pending.items.len == 0) return null;
+        if (!self.reset_pending and self.pending.items.len == 0 and self.thinking.items.len == 0) return null;
+        const thinking = try self.thinking.toOwnedSlice(self.allocator);
+        errdefer self.allocator.free(thinking);
         const bytes = try self.pending.toOwnedSlice(self.allocator);
         const reset_pending = self.reset_pending;
         self.reset_pending = false;
-        return .{ .reset = reset_pending, .bytes = bytes };
+        return .{ .reset = reset_pending, .bytes = bytes, .thinking = thinking };
     }
     /// Terminal owner calls this only after joining the producer.
     pub fn discard(self: *Mailbox) void {
         self.lock();
         defer self.mutex.unlock();
         self.pending.clearRetainingCapacity();
+        self.thinking.clearRetainingCapacity();
         self.reset_pending = false;
         self.total_bytes = 0;
     }
     /// Caller joins the producer before teardown.
     pub fn deinit(self: *Mailbox) void {
         self.pending.deinit(self.allocator);
+        self.thinking.deinit(self.allocator);
     }
 };
 
@@ -60,6 +73,7 @@ test "stream mailbox copies worker fragments and resets retry output atomically"
     @memset(&source, 'x');
     const first = (try mailbox.drain()).?;
     defer std.testing.allocator.free(first.bytes);
+    defer std.testing.allocator.free(first.thinking);
     try std.testing.expect(first.reset);
     try std.testing.expectEqualStrings("first", first.bytes);
     try mailbox.append("stale");
@@ -67,6 +81,7 @@ test "stream mailbox copies worker fragments and resets retry output atomically"
     try mailbox.append("retry");
     const second = (try mailbox.drain()).?;
     defer std.testing.allocator.free(second.bytes);
+    defer std.testing.allocator.free(second.thinking);
     try std.testing.expect(second.reset);
     try std.testing.expectEqualStrings("retry", second.bytes);
     try std.testing.expect((try mailbox.drain()) == null);
@@ -77,6 +92,7 @@ test "stream mailbox copies worker fragments and resets retry output atomically"
     try mailbox.append("next");
     const next = (try mailbox.drain()).?;
     defer std.testing.allocator.free(next.bytes);
+    defer std.testing.allocator.free(next.thinking);
     try std.testing.expect(!next.reset);
     try std.testing.expectEqualStrings("next", next.bytes);
 }
@@ -128,6 +144,7 @@ test "stream mailbox delivers before producer EOF and cancellation joins before 
         }
         const first = (try mailbox.drain()).?;
         defer std.testing.allocator.free(first.bytes);
+        defer std.testing.allocator.free(first.thinking);
         try std.testing.expect(first.reset);
         try std.testing.expectEqualStrings("first", first.bytes);
         // This assertion is deterministic: the producer cannot finish until
@@ -141,6 +158,7 @@ test "stream mailbox delivers before producer EOF and cancellation joins before 
         if (!stop) {
             const final = (try mailbox.drain()).?;
             defer std.testing.allocator.free(final.bytes);
+            defer std.testing.allocator.free(final.thinking);
             try std.testing.expect(!final.reset);
             try std.testing.expectEqualStrings("last", final.bytes);
         }

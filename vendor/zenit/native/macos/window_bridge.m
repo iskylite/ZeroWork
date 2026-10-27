@@ -6334,7 +6334,14 @@ static void pumpAppEventsWithTimeout(uint32_t timeout_ms) {
             if (event.type == NSEventTypeMouseMoved || event.type == NSEventTypeLeftMouseDragged || event.type == NSEventTypeRightMouseDragged || event.type == NSEventTypeOtherMouseDragged) {
                 [target.metalView presentDesiredCursor];
             }
-            if (event.type != NSEventTypeMouseMoved) break;
+            // Drag motion is a position update just like hover motion. Drain
+            // it in the same bounded batch so high-rate pointer input cannot
+            // queue one rendered frame per historical drag position. Button,
+            // key and text events still return immediately in native order.
+            if (event.type != NSEventTypeMouseMoved &&
+                event.type != NSEventTypeLeftMouseDragged &&
+                event.type != NSEventTypeRightMouseDragged &&
+                event.type != NSEventTypeOtherMouseDragged) break;
         }
 
         // same as macos_poll_events: fill updateWindows, else

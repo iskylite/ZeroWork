@@ -131,10 +131,32 @@ pub const Store = struct {
     pub fn annotateSearch(self: *Store, terminal: c.GhosttyTerminal, rows: []@import("search_snapshot.zig").Row) void {
         self.refresh();
         const alternate = native_view.alternate(terminal);
-        var logical: u32 = 0;
+        // The complete snapshot already identifies soft-wrapped logical rows.
+        // Sort the bounded timestamp entries once, then merge forward instead
+        // of resolving a grid reference and scanning all entries for each row.
+        var order: [1024]u16 = undefined;
+        var count: usize = 0;
+        for (self.entries.items, 0..) |entry, i| if (entry.alternate == alternate and entry.row != null) {
+            order[count] = @intCast(i);
+            count += 1;
+        };
+        std.mem.sort(u16, order[0..count], @as([]const Entry, self.entries.items), struct {
+            fn less(entries: []const Entry, a: u16, b: u16) bool {
+                const ar = entries[a].row.?;
+                const br = entries[b].row.?;
+                return ar < br or ar == br and a < b;
+            }
+        }.less);
+        var next: usize = 0;
+        var logical_id: ?model.RowId = null;
+        var found: ?u16 = null;
         for (rows) |*row| {
-            if (!(native_view.continuation(terminal, row.screen_row) catch false)) logical = row.screen_row;
-            if (self.find(alternate, logical)) |entry| row.timestamp_ms = entry.submitted_ms orelse entry.received_ms;
+            if (logical_id == null or !std.meta.eql(logical_id.?, row.logical_id)) {
+                logical_id = row.logical_id;
+                while (next < count and self.entries.items[order[next]].row.? < row.screen_row) next += 1;
+                found = if (next < count and self.entries.items[order[next]].row.? == row.screen_row) order[next] else null;
+            }
+            if (found) |i| row.timestamp_ms = self.entries.items[i].submitted_ms orelse self.entries.items[i].received_ms;
         }
     }
 

@@ -138,6 +138,10 @@ pub const Domain = struct {
     dispatcher: commands.Dispatcher,
     operation_history: @import("../host/operation_store.zig").Store,
     attachments: std.ArrayList(*ApplicationHost) = .empty,
+    idle_memory: @import("../platform/idle_memory.zig").Policy = .{},
+    idle_trimmed_bytes: usize = 0,
+    idle_input_epoch: u64 = 0,
+    idle_reclaim_runs: u64 = 0,
     has_file_plugin: bool,
     backgrounds: ?*background.Host = null,
     tasks: ?*@import("../host/application_task_domain.zig").Domain = null,
@@ -924,6 +928,32 @@ pub const ApplicationHost = struct {
     }
 
     pub fn safeTick(self: *ApplicationHost) !bool {
+        // Domain-only hosts have no Cx. Render-cache policy starts only after
+        // the application installs the window's presentation callbacks.
+        if (self.installed) {
+            const now: u64 = @intCast(@import("../platform/realtime.zig").monotonicNs());
+            var input_epoch: u64 = 0;
+            for (self.domain.attachments.items) |host| if (host.installed) {
+                input_epoch +%= host.workspace.cx.input_epoch;
+            };
+            if (self.domain.idle_input_epoch != input_epoch) {
+                self.domain.idle_input_epoch = input_epoch;
+                self.domain.idle_memory.noteInput(now);
+            }
+            const has_views = for (self.domain.attachments.items) |host| {
+                if (host.installed and host.workspace.tabs.items.len != 0) break true;
+            } else false;
+            switch (self.domain.idle_memory.observe(has_views, now)) {
+                .none => {},
+                .wait => |delay| self.workspace.cx.scheduleRedrawAfterNs(delay),
+                .reclaim => {
+                    for (self.domain.attachments.items) |host| if (host.installed) {
+                        self.domain.idle_trimmed_bytes += host.workspace.cx.trimIdleRenderCapacity(64 * 1024);
+                    };
+                    self.domain.idle_reclaim_runs += 1;
+                },
+            }
+        }
         self.local_adapter.configureScrollback(self.workspace.app_config.ui.scrollback_limit);
         self.local_adapter.applyRecordingRetention(self.workspace.app_config.config_revision, self.workspace.app_config.log.retention_days);
         var background_pending = false;
@@ -1457,6 +1487,20 @@ pub const ApplicationHost = struct {
         const self: *ApplicationHost = @ptrCast(@alignCast(context orelse return error.MissingApplicationHost));
         if (self.workspace.shutting_down or self.windowClosePending()) return error.WorkspaceClosed;
         const mapping = self.findLegacyId(id) orelse return error.StaleSession;
+        if (mapping.source) |source| {
+            const frozen = source.value;
+            var host = frozen.host;
+            if (self.workspace.registry.indexOf(host.connection_id)) |index| {
+                const saved = self.workspace.registry.hosts[index];
+                if (saved.auth_mode == host.auth_mode and saved.port == host.port and
+                    std.mem.eql(u8, saved.host, host.host) and std.mem.eql(u8, saved.user, host.user))
+                {
+                    if (saved.password) |password| host.password = password;
+                }
+            }
+            _ = try self.create(host, frozen.host_id, frozen.source_index, "");
+            return;
+        }
         const manifest = self.sessions.manifestFor(mapping.handle) orelse return error.UnknownPlugin;
         const request_key = try self.dispatcher.issue();
         const value = self.sessions.connectionEnvelope(mapping.handle) orelse return error.ConnectionEnvelopeUnavailable;

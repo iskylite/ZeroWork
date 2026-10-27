@@ -40,7 +40,7 @@ test "tool result view shows actual mixed target facts after source ledger destr
     }
     try std.testing.expectEqual(@as(f32, 32), card.globalRect().h);
     try std.testing.expect(!store.records.items[0].expanded);
-    find(card, "ai.tool.result.disclosure").?.behavior.events.on_click.?.invoke();
+    find(card, "ai.tool.result.disclosure").?.parent.?.behavior.events.on_click.?.invoke();
     for (0..4) |_| {
         cx.advanceFrameClock();
         cx.layout();
@@ -48,13 +48,13 @@ test "tool result view shows actual mixed target facts after source ledger destr
     }
     try std.testing.expectEqual(@as(f32, 216), card.globalRect().h);
     const card_rect = card.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 560), card_rect.w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 572), card_rect.w, 0.1);
     const title_rect = find(root, "ai.tool.result.title").?.globalRect();
     const summary_rect = find(root, "ai.tool.result.status").?.globalRect();
     const elapsed_rect = find(root, "ai.tool.result.elapsed").?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 58), title_rect.x - card_rect.x, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 38), title_rect.x - card_rect.x, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 84), title_rect.w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 148), summary_rect.x - card_rect.x, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 128), summary_rect.x - card_rect.x, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 44), elapsed_rect.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 12), card_rect.x + card_rect.w - elapsed_rect.x - elapsed_rect.w, 0.1);
     const target_button = find(root, "ai.tool.result.target.101").?;
@@ -71,14 +71,16 @@ test "tool result view shows actual mixed target facts after source ledger destr
     // Attach before assertions so any failure still destroys the complete native tree.
     try root.appendChild(a, state.root);
     const disclosure = find(state.root, "ai.tool.result.disclosure").?;
-    try std.testing.expectEqual(.flex, state.status_icon.?.style.display);
-    try std.testing.expectEqual(.flex, state.disclosure_icon.?.style.display);
-    disclosure.behavior.events.on_hover.?.invoke();
-    try std.testing.expectEqual(.flex, state.status_icon.?.style.display);
-    try std.testing.expectEqual(.flex, state.disclosure_icon.?.style.display);
-    disclosure.behavior.events.on_leave.?.invoke();
-    try std.testing.expectEqual(.flex, state.status_icon.?.style.display);
-    try std.testing.expectEqual(.flex, state.disclosure_icon.?.style.display);
+    try std.testing.expectEqual(@as(f32, 1), state.status_icon.?.getOpacity());
+    try std.testing.expectEqual(@as(f32, 0), state.disclosure_icon.?.getOpacity());
+    disclosure.parent.?.behavior.events.on_hover.?.invoke();
+    cx.layout();
+    try std.testing.expectEqual(@as(f32, 0), state.status_icon.?.getOpacity());
+    try std.testing.expectEqual(@as(f32, 1), state.disclosure_icon.?.getOpacity());
+    disclosure.parent.?.behavior.events.on_leave.?.invoke();
+    cx.layout();
+    try std.testing.expectEqual(@as(f32, 1), state.status_icon.?.getOpacity());
+    try std.testing.expectEqual(@as(f32, 0), state.disclosure_icon.?.getOpacity());
 
     try state.select(1);
     try std.testing.expectEqualStrings("actual partial output", state.stdout.getText().?.content);

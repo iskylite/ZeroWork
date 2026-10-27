@@ -481,7 +481,7 @@ pub const ProviderView = struct {
         }
         const actions = try row(self.cx, 35);
         actions.style.padding.top = 10;
-        try actions.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, if (p.enabled) "" else "配置完成后，使用卡片右上角开关启用。"));
+        if (!p.enabled) try actions.appendChild(self.cx.allocator, try self.tooltipOnly(ui.icons.circle_help, "配置完成后，使用卡片右上角开关启用。", 20, try self.id(i, null, "enable_help")));
         try actions.appendChild(self.cx.allocator, try ui.spacer(self.cx));
         try actions.appendChild(self.cx.allocator, try self.textAction(if (self.controller.ai_fields.new_provider == i) .cancel_provider else .delete_provider, i, if (self.controller.ai_fields.new_provider == i) "取消新增" else "删除服务提供方", null, true));
         try result.body.appendChild(self.cx.allocator, actions);
@@ -492,8 +492,7 @@ pub const ProviderView = struct {
         const label_row = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .gap = 8 }, .{});
         try label_row.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.label, title));
         if (field == .api_key) {
-            try label_row.appendChild(self.cx.allocator, try ui.spacer(self.cx));
-            try label_row.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, "API Key 存储于 macOS 钥匙串"));
+            try label_row.appendChild(self.cx.allocator, try self.tooltipOnly(ui.icons.lock, "API Key 存储于 macOS 钥匙串", 18, try self.id(i, null, "keychain")));
         }
         try r.appendChild(self.cx.allocator, label_row);
         const input_wrapper = try self.input(.{ .provider = i, .field = field }, placeholder, 0, 32);
@@ -776,9 +775,13 @@ pub const ProviderView = struct {
         try self.bindTipFocus(button, tip.open.?);
         return tip.wrapper;
     }
-    fn tooltipOnly(self: *ProviderView, icon: ui.SvgAsset, help: []const u8, size: f32) !*ui.Node {
+    fn tooltipOnly(self: *ProviderView, icon: ui.SvgAsset, help: []const u8, size: f32, test_id: []const u8) !*ui.Node {
         const tip = try self.tooltip(help);
-        const button = try ui.widgets.Button(.{ .icon_asset = icon, .icon_only = true, .icon_size = @as(f32, 16), .a11y_label = help, .base_style = S.button(size, false), .hover_style = S.buttonHover() }).mount(self.render_scope.?, self.cx);
+        var style = S.button(size, false);
+        style.background = ui.Color.TRANSPARENT;
+        const button = try ui.widgets.Button(.{ .icon_asset = icon, .icon_only = true, .icon_size = @as(f32, 14), .a11y_label = help, .variant = .ghost, .base_style = style, .hover_style = S.buttonHover() }).mount(self.render_scope.?, self.cx);
+        button.meta.ownership.meta.test_id = test_id;
+        tip.content.meta.ownership.meta.test_id = try controls.stableId(self.render_scope.?, test_id, ".tooltip");
         try tip.trigger.appendChild(self.cx.allocator, button);
         try self.bindTipFocus(button, tip.open.?);
         return tip.wrapper;

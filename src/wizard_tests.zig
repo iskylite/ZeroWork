@@ -268,6 +268,7 @@ test "wizard modal and scroll viewport fit initial short window and resized narr
     var wizard: mod.RemoteEditor = .{};
     try root.appendChild(cx.allocator, try wizard.mount(cx, scope));
     wizard.show();
+    SaveFixture.activate(findId(wizard.root.?, "wizard.advanced.toggle").?);
     for (0..3) |_| {
         cx.layout();
         _ = wizard.updateViewport();
@@ -433,7 +434,8 @@ test "wizard pending probe disables actual editors steps and saves while cancell
     try std.testing.expect(f.wizard.locked.?.get());
     for (f.wizard.inputs.items) |input| try std.testing.expect(input.state.disabled);
     try std.testing.expect(!f.wizard.strict_checkbox.?.behavior.interaction.focusable);
-    try std.testing.expect(f.wizard.compression_checkbox.?.behavior.interaction.a11y.?.disabled);
+    for (f.wizard.compression_checkbox.?.children.items) |choice|
+        try std.testing.expect(choice.behavior.interaction.a11y.?.disabled);
     try std.testing.expect(!f.wizard.cancel_btn.?.behavior.interaction.a11y.?.disabled);
     for ([_][]const u8{ "wizard.step.identity", "wizard.review.modify", "wizard.back", "wizard.save_only", "wizard.save" }) |id| SaveFixture.activate(findId(f.wizard.root.?, id).?);
     try std.testing.expect(!findId(f.wizard.root.?, "wizard.auth").?.behavior.interaction.focusable);
@@ -789,7 +791,7 @@ test "SFTP wizard review exposes the same identity and value fields without a su
     feedbackFrames(&f);
     const icon = findId(f.wizard.root.?, "wizard.protocol.icon").?;
     const summary_icon = findId(f.wizard.root.?, "wizard.review.summary.icon").?;
-    try std.testing.expectEqual(ui.icons.folder_open.icon_id.?, icon.getIcon().?.icon_id);
+    try std.testing.expectEqual(ui.icons.plug.icon_id.?, icon.getIcon().?.icon_id);
     try std.testing.expectEqual(ui.icons.folder_open.icon_id.?, summary_icon.getIcon().?.icon_id);
     try std.testing.expectEqualStrings("SFTP", f.wizard.summary_values[0].?.getText().?.content);
     try std.testing.expectEqualStrings("target", f.wizard.summary_name.?.getText().?.content);
@@ -1125,7 +1127,7 @@ test "wizard V3 group select retains registry empty groups and replaced snapshot
     f.wizard.loadDraft(.{ .name = "target", .host = "target.example", .user = "ops" });
     f.wizard.show();
     feedbackFrames(&f);
-    const group = findId(f.wizard.root.?, "wizard.group").?;
+    const group = findId(f.wizard.root.?, "wizard.group.pick").?;
     f.cx.setFocus(group);
     f.cx.handleKeyDown(.down, .{});
     feedbackFrames(&f);
@@ -1189,11 +1191,16 @@ test "wizard checkbox labels keep app contrast in light theme after real toggles
     f.wizard.show();
     feedbackFrames(&f);
     SaveFixture.activate(findId(f.wizard.root.?, "wizard.advanced.toggle").?);
-    for ([_]*ui.Node{ f.wizard.remember_checkbox.?, f.wizard.compression_checkbox.? }) |checkbox| {
-        SaveFixture.activate(checkbox);
+    SaveFixture.activate(f.wizard.remember_checkbox.?);
+    feedbackFrames(&f);
+    try std.testing.expectEqual(theme.current().fg_1, findText(f.wizard.remember_checkbox.?, "保存密码").?.getText().?.color);
+    for ([_][]const u8{ "disabled", "enabled" }) |suffix| {
+        const id = try std.fmt.allocPrint(a, "wizard.compression.{s}", .{suffix});
+        defer a.free(id);
+        const choice = findId(f.wizard.root.?, id).?;
+        SaveFixture.activate(choice);
         feedbackFrames(&f);
-        const label = findText(checkbox, if (checkbox == f.wizard.remember_checkbox.?) "保存密码，下次连接自动使用" else "SSH 传输压缩").?;
-        try std.testing.expectEqual(theme.current().fg_1, label.getText().?.color);
+        try std.testing.expectEqual(theme.current().fg_1, findText(choice, if (std.mem.eql(u8, suffix, "enabled")) "开启" else "关闭").?.getText().?.color);
     }
 }
 
@@ -1210,29 +1217,30 @@ test "wizard revised browser field typography and advanced host policy geometry"
     try std.testing.expectEqual(@as(f32, 6), name.style.padding.top);
     try std.testing.expectEqual(@as(f32, 1), name.style.border.width);
     for (f.wizard.field_feedback.items) |feedback| if (feedback.input.input_container == name) {
-        try std.testing.expectEqual(@as(f32, 12), feedback.input.state.font_size);
-        try std.testing.expectEqual(@as(f32, 18), feedback.input.state.line_height);
-        try std.testing.expectEqual(@as(f32, 12), feedback.input.state.text_display_node.?.getText().?.font_size);
+        try std.testing.expectEqual(@as(f32, 11), feedback.input.state.font_size);
+        try std.testing.expectEqual(@as(f32, 16), feedback.input.state.line_height);
+        try std.testing.expectEqual(@as(f32, 11), feedback.input.state.text_display_node.?.getText().?.font_size);
         try std.testing.expectApproxEqAbs(@as(f32, 55.5), feedback.group.globalRect().h, 0.01);
         try std.testing.expectApproxEqAbs(@as(f32, 16.5), feedback.group.children.items[0].globalRect().h, 0.01);
         try std.testing.expectEqual(@as(f32, 5), feedback.group.style.gap);
     };
     const body = f.wizard.advanced_body.?.globalRect();
     const summary = findId(f.wizard.root.?, "wizard.advanced.toggle").?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 350), body.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 310), body.h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 18), summary.h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 12), body.y - summary.y - summary.h, 0.01);
     const timeout = f.wizard.connect_timeout_fact.?;
     try std.testing.expectEqual(@as(f32, 12), timeout.getText().?.font_size);
     try std.testing.expectEqual(@as(f32, 1.5), timeout.getText().?.line_height);
-    try std.testing.expectApproxEqAbs(@as(f32, 348), timeout.parent.?.globalRect().w, 0.01);
+    // The form reserves 40px on the right for scrollbar chrome (24px on the left).
+    try std.testing.expectApproxEqAbs(@as(f32, (760 - 24 - 40 - 16) / 2), timeout.parent.?.globalRect().w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 34), timeout.parent.?.globalRect().h, 0.01);
     const area = f.wizard.startup_textarea.?;
     try std.testing.expectEqual(@as(f32, 12), area.state.font_size);
     try std.testing.expectEqual(@as(f32, 18), area.state.line_height);
     try std.testing.expectEqual(@as(f32, 11), area.state.padding_h);
     try std.testing.expectEqual(@as(f32, 9), area.state.padding_v);
-    try std.testing.expectApproxEqAbs(@as(f32, 120), area.input.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 80), area.input.globalRect().h, 0.01);
 }
 
 test "wizard route choices disable identities selected by other hops" {

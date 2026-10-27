@@ -23,7 +23,9 @@ pub const Client = struct {
             var capture = Capture{ .sink = sink, .ctx = sink_ctx, .stats = .{} };
             const actual = try self.client.chatWithStats(self.config, request, Capture.receive, &capture);
             // Providers without usage retain the legacy byte-count estimate.
-            return actual orelse capture.stats;
+            if (actual) |stats| return stats;
+            capture.stats.usage_reported = false;
+            return capture.stats;
         }
 
         fn models(ctx: *anyopaque, allocator: std.mem.Allocator) ![]provider.ModelInfo {

@@ -892,6 +892,9 @@ pub const AppRenderer = struct {
                 .total_frame_us = elapsed,
             });
             cx.frame_perf.pushFrameTotalUs(elapsed);
+            if (@import("zenit_environment").has("ZENIT_FRAME_PROFILE")) {
+                std.debug.print("FRAME_PROFILE frame={d} cpu={d} layout={d} gen={d} gpu={d} before={d} initial={d} tick={d} post={d} index={d} node={d} encode={d}\n", .{ cx.frame_count, self.last_frame_stats.cpu_frame_us, self.last_frame_stats.layout_us, self.last_frame_stats.render_gen_us, self.last_frame_stats.gpu_encode_us, cx.perf.before_render_us, cx.perf.br_initial_layout_us, cx.perf.br_tick_us, cx.perf.br_post_layout_us, cx.perf.br_index_us, cx.perf.render_node_us, self.last_frame_stats.encode_us });
+            }
         };
         errdefer {
             self.frame_damage.invalidate();
@@ -1026,10 +1029,16 @@ pub const AppRenderer = struct {
                 }
             }
         };
+        const setup_start = if (@import("zenit_environment").has("ZENIT_FRAME_PROFILE")) @import("zenit_time").Instant.now(cx.io) catch null else null;
         var enc = self.createEncoder();
         defer enc.deinit();
         enc.beginFrame(viewport_width, viewport_height, scale);
+        const warm_start = if (setup_start != null) @import("zenit_time").Instant.now(cx.io) catch null else null;
         if (self.config.prewarm_text) try enc.prewarmDisplay(cx);
+        if (setup_start != null) {
+            const warm_end = @import("zenit_time").Instant.now(cx.io) catch null;
+            std.debug.print("SETUP_PROFILE frame={d} setup={d} prewarm={d}\n", .{ cx.frame_count, timerDelta(setup_start, warm_start), timerDelta(warm_start, warm_end) });
+        }
 
         // 3. Prepare GPU submit.
         // Completed timing commands still retain their presented drawable.

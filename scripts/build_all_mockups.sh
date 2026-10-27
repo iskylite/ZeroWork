@@ -11,8 +11,11 @@ KEEP="${1:-}"
 FAIL=0
 FAILED=""
 
-for html in docs/SPEC/html/mockup-*.html; do
-  name=$(basename "$html" .html | sed 's/^mockup-//')
+for source in tools/mockups/*.zig; do
+  [ -f "$source" ] || { echo "No mockup sources found" >&2; exit 1; }
+  stem=$(basename "$source" .zig)
+  case "$stem" in common|runner) continue ;; esac
+  name=$(printf '%s' "$stem" | tr '_' '-')
   if zig build mockup -Dmockup="$name" >/tmp/mockup-build-$name.log 2>&1; then
     echo "OK   $name"
   else

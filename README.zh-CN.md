@@ -87,6 +87,9 @@ node e2e/reported_ui_regressions.ts /tmp/zerowork-ui-check
 需要安装包时单独执行：
 
 ```sh
+# 首次使用：创建并保存本地自签名身份，后续复用
+python3 scripts/macos_signing.py setup
+
 # 默认输出到 dist/
 sh scripts/package_macos.sh
 
@@ -94,9 +97,11 @@ sh scripts/package_macos.sh
 sh scripts/package_macos.sh /absolute/path/to/output
 ```
 
-脚本先检查 Zenit vendor 源码，在需要时构建 SSH 静态依赖，然后以关闭测试模式的 `ReleaseFast` 构建生成 `ZeroWork.app`，加入图标和必要资源，执行本机 ad-hoc 签名、签名校验和 DMG 校验。输出为 `ZeroWork-<版本>-arm64.dmg` 及其 `.dmg.sha256` 校验文件；`.app` 位于 DMG 内，临时打包目录会在退出时清理。脚本拒绝覆盖同路径的已有 DMG，重新打包时应先清理旧包或使用另一个输出目录。
+脚本在构建前检查已保存的签名身份，检查 Zenit vendor 源码，在需要时构建 SSH 静态依赖，然后以关闭测试模式的 `ReleaseFast` 构建生成 `ZeroWork.app`，加入图标和必要资源，使用长期复用的本地自签名身份签名，执行签名校验和 DMG 校验。输出为 `ZeroWork-<版本>-arm64.dmg` 及其 `.dmg.sha256` 校验文件；`.app` 位于 DMG 内，临时打包目录会在退出时清理。脚本拒绝覆盖同路径的已有 DMG，重新打包时应先清理旧包或使用另一个输出目录。
 
-验证安装链路时，打开 DMG，将 `ZeroWork.app` 拖入「应用程序」，弹出安装盘，再从「应用程序」启动并检查。**直接运行构建产物、打包成功、安装后运行验证是三个不同的验证步骤。** 当前脚本使用本机 ad-hoc 签名；正式分发的 Developer ID 签名、公证与干净机器安装检查仍需单独完成。
+签名私钥保存在当前用户的钥匙串中；`~/Library/Application Support/com.zerowork.signing/` 仅保存公开证书和指纹。重复执行 setup 会复用原身份；身份缺失时应恢复原身份，不应重新生成替代。首次配置或签名时 macOS 可能要求授权。打包仅使用已保存的固定身份，不会回退到 ad-hoc 签名。应用凭据继续使用现有钥匙串存储；固定签名身份不保证旧凭据永远无需再次授权。
+
+验证安装链路时，打开 DMG，将 `ZeroWork.app` 拖入「应用程序」，弹出安装盘，再从「应用程序」启动并检查。**直接运行构建产物、打包成功、安装后运行验证是三个不同的验证步骤。** 自签名不等于 Developer ID 签名或 Apple 公证；正式分发的签名、公证与干净机器安装检查仍需单独完成。
 
 ## 隐私与凭据
 

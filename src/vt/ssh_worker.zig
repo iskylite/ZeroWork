@@ -150,6 +150,7 @@ pub const SshWorker = struct {
         errdefer closeSessionForRollback(&session);
         var vt = try VtAdapter.init(allocator, options.rows, options.cols);
         errdefer vt.destroy();
+        vt.configureTerminalType(options.term);
         try vt.setScrollbackLimit(runtime.scrollback orelse 25000);
         // The UI consumes the text slot only; the dirty-page slot is an
         // optional FeedBridge feature and stays unwired here because nobody
@@ -346,6 +347,7 @@ pub const SshWorker = struct {
         // happened to send a packet and wake the remote. One non-blocking
         // read per 50ms step costs ~1µs idle.
         try self.io.pollChannelRead();
+        try self.io.pumpWrites();
         if (self.io.closed) return self.finishShellStep();
         try self.session.stepRtt(realtime.monotonicNs());
         try self.exec_bridge.step();
@@ -395,7 +397,7 @@ pub const SshWorker = struct {
             _ = self.replay.attached(&self.input, self.options.operation_key, replay_mod.InputMode.from(self.vt.snapshot().modes)) catch false;
         }
         _ = self.replay.snapshot(&self.input);
-        const needs_write = self.input.pending() != 0;
+        const needs_write = self.input.pending() != 0 or self.io.repliesPending();
         const next_interest = @import("worker_interest.zig").Interest{ .read = true, .write = needs_write };
         if (!std.meta.eql(self.loop.interest, next_interest)) {
             std.log.debug("[worker] interest change write={} pending={d}", .{ next_interest.write, self.input.pending() });

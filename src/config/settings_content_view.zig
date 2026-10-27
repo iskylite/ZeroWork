@@ -187,7 +187,7 @@ pub fn mountPage(cx: *ui.Cx, scope: *ui.Scope, controller: *Controller, hooks: H
     try heading.appendChild(cx.allocator, try ui.text(cx, if (searching) "搜索结果" else controller.model.page().name, .{ .font_size = 13, .font_weight = 700, .line_height = 20.0 / 13.0, .color = styles.theme.current().fg_1 }));
     try heading.appendChild(cx.allocator, try ui.text(cx, if (searching) "在全部设置分类中查找，输入内容不会改变折叠偏好。" else controller.model.page().description, .{ .font_size = 11, .color = styles.theme.current().fg_2 }));
     try header.appendChild(cx.allocator, heading);
-    const help_text = if (controller.model.page_index == 6 and hooks.authorization_help != null) hooks.authorization_help.?(hooks.context) else controller.model.page().description;
+    const help_text = controller.model.page().description;
     const help = try ui.widgets.Tooltip(.{ .text = help_text, .open_delay_ms = 450 }).mount(scope, cx);
     help.content.meta.ownership.meta.test_id = "settings.help.content";
     const help_button = try ui.widgets.Button(.{ .icon_asset = ui.icons.circle_help, .icon_only = true, .a11y_label = "分类帮助", .variant = .ghost, .base_style = styles.fieldHelpButton(), .hover_style = styles.buttonHover() }).mount(scope, cx);

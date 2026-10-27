@@ -372,10 +372,17 @@ test "notification process host sends only released final AI and each transfer i
     _ = try host.poll();
     try std.testing.expectEqual(.scheduled, host.coordinator.records.items[0].system.disposition);
     try host.publishAi(target.owner, 2, 2, .{ .result = .unverified, .resources_released = true });
+    const before_cancel = host.coordinator.records.items.len;
     try host.publishAi(target.owner, 3, 3, .{ .result = .cancelled, .resources_released = true });
+    try std.testing.expectEqual(before_cancel, host.coordinator.records.items.len);
     try host.publishTransfer(target.owner, 1, 1, .{ .result = .succeeded, .resources_released = true, .notify_complete = false });
     try std.testing.expectEqual(@as(usize, 1), fake.sends);
-    try std.testing.expectEqual(.disabled, host.coordinator.records.items[3].system.disposition);
+    const transfer_record = for (host.coordinator.records.items) |record| {
+        if (record.event.kind == .transfer_done and record.event.owner.eql(target.owner) and
+            record.event.operation_id == 1 and record.event.attempt_or_turn_id == 1) break record;
+    } else return error.TestExpectedTransferNotification;
+    try std.testing.expect(!transfer_record.event.system_enabled);
+    try std.testing.expectEqual(.disabled, transfer_record.system.disposition);
     try host.updatePolicy(.{ .transfer_done = false, .quiet_hours = "00:00-00:00" });
     try host.publishTransfer(target.owner, 2, 1, .{ .result = .succeeded, .resources_released = true, .notify_complete = true });
     try std.testing.expectEqual(@as(usize, 1), fake.sends);
@@ -463,7 +470,7 @@ test "notification permission feedback retains waiting and native failure indepe
     try std.testing.expectEqual(@as(i64, 1), host.last_failure.?.code);
 }
 
-test "host feedback shares notification facts without system send or background attention" {
+test "ordinary feedback stays quiet and explicitly typed failure retains severity independent of title" {
     var fake: Fake = .{};
     const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
     defer host.destroy();
@@ -471,10 +478,15 @@ test "host feedback shares notification facts without system send or background 
     const id = try host.registerWindow(window.callbacks());
     host.setWindowFocus(id, false);
     try host.publishFeedback(id, target.owner, "已复制");
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.notification_records.items.len);
+    try host.publishFeedbackSeverity(id, target.owner, "X40 · 会话 3 连接失败: ChallengeTimeout", .failure);
+    try host.publishFeedbackSeverity(id, target.owner, "X40 · 会话 3 连接失败: ChallengeTimeout", .failure);
     try std.testing.expectEqual(@as(usize, 1), host.coordinator.notification_records.items.len);
     const fact = host.coordinator.notification_records.items[0];
     try std.testing.expectEqualStrings("host.feedback", fact.event.definition_id);
-    try std.testing.expectEqualStrings("已复制", fact.event.title);
+    try std.testing.expectEqualStrings("X40 · 会话 3 连接失败: ChallengeTimeout", fact.event.title);
+    try std.testing.expectEqual(.failure, fact.event.severity);
+    try std.testing.expectEqual(.failed, fact.event.phase);
     try std.testing.expect(!fact.event.system_enabled);
     try std.testing.expect(!host.coordinator.hasDot(target.owner));
     try std.testing.expectEqual(@as(usize, 0), fake.sends);
@@ -505,4 +517,46 @@ test "notification closing window revokes borrowed action handlers and preserves
     try std.testing.expectError(error.NotificationOwnerEnded, host.dispatchAction(publication.fact_id, 0));
     try std.testing.expectEqual(@as(usize, 1), handler.calls);
     try std.testing.expectEqual(notifications.Phase.outcome_unknown, host.coordinator.recordFor(publication.fact_id).?.event.phase);
+}
+
+test "visible results stay quiet while background results and failures remain available" {
+    const Presented = struct {
+        fn result(_: *anyopaque, _: notifications.Kind, _: notifications.Owner) bool {
+            return true;
+        }
+    };
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
+    defer host.destroy();
+    fake.push(.{ .kind = 1, .result = 1, .request_id = fake.last_query, .settings = authorized });
+    _ = try host.poll();
+    var window: WindowProbe = .{};
+    var callbacks = window.callbacks();
+    callbacks.result_presented = Presented.result;
+    _ = try host.registerWindow(callbacks);
+    try host.publishAi(target.owner, 10, 1, .{ .result = .succeeded, .resources_released = true, .final_answer = true });
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.presentation_count);
+    try std.testing.expectEqual(@as(usize, 0), fake.sends);
+    host.windows.items[0].value.result_presented = null;
+    try host.publishAi(target.owner, 11, 1, .{ .result = .succeeded, .resources_released = true, .final_answer = true });
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.presentation_count);
+    try std.testing.expectEqual(@as(usize, 1), fake.sends);
+    host.windows.items[0].value.result_presented = Presented.result;
+    try host.publishAi(target.owner, 12, 1, .{ .result = .failed, .resources_released = true });
+    try std.testing.expectEqual(@as(usize, 2), host.coordinator.presentation_count);
+    try host.publishAi(target.owner, 13, 1, .{ .result = .cancelled, .resources_released = true });
+    try std.testing.expectEqual(@as(usize, 2), host.coordinator.presentation_count);
+}
+
+test "reconnect attempts replace previous notices for the same session" {
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
+    defer host.destroy();
+    var window: WindowProbe = .{};
+    _ = try host.registerWindow(window.callbacks());
+    try host.publishReconnect(target.owner, 50, 1, .disconnected);
+    try host.publishReconnect(target.owner, 50, 2, .failed);
+    try host.publishReconnect(target.owner, 50, 3, .failed);
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.presentation_count);
+    try std.testing.expectEqual(@as(u64, 3), host.coordinator.notification_records.items[2].event.attempt_id);
 }

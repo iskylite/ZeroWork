@@ -145,9 +145,8 @@ pub const View = struct {
         try heading.appendChild(self.cx.allocator, try ui.spacer(self.cx));
         try heading.appendChild(self.cx.allocator, close);
         try self.content.appendChild(self.cx.allocator, heading);
-        try self.content.appendChild(self.cx.allocator, try ui.box(self.cx, .{ .height = .{ .px = 0 }, .flex_shrink = 0 }, .{}));
         if (entries.len == 0) {
-            const empty_row = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 33 }, .padding = .{ .left = 14, .right = 14 }, .flex_shrink = 0 }, .{});
+            const empty_row = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 33 }, .padding = .{ .left = 8, .right = 8 }, .flex_shrink = 0 }, .{});
             const empty = try ui.text(self.cx, "暂无已保存对话。新建会话时，当前对话和草稿会保留在这里。", .{ .font_size = 10, .line_height = 1.65, .color = T.current().fg_2, .wrap = .word });
             empty.meta.ownership.meta.test_id = "ai.sessions.empty";
             empty.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 33 } });
@@ -202,7 +201,7 @@ pub const View = struct {
             try row.appendChild(self.cx.allocator, remove);
             try self.content.appendChild(self.cx.allocator, row);
         }
-        self.desired_height = @min(160, 34 + if (entries.len == 0) @as(f32, 37) else @as(f32, @floatFromInt(entries.len)) * 30 + @as(f32, @floatFromInt(entries.len - 1)) * 2);
+        self.desired_height = @min(160, 38 + if (entries.len == 0) @as(f32, 33) else @as(f32, @floatFromInt(entries.len)) * 30 + @as(f32, @floatFromInt(entries.len - 1)) * 2);
         self.surface.setStyleInline(self.cx.allocator, .{ .height = .{ .px = self.desired_height }, .display = .flex });
         ui.widgets.setScrollY(self.scroll.state, self.scroll.content, 0);
         self.open.set(true);

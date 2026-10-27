@@ -137,8 +137,17 @@ pub fn usageColor(index: usize) ui.Color {
         else => colors.ok_ink,
     };
 }
+pub fn compactionButton() ui.BoxStyle {
+    var style = iconButton(8);
+    style.background = theme.current().selection;
+    style.border = .{ .width = 1, .radius = 8, .color = theme.current().selection };
+    return style;
+}
+pub fn usageTrackRow() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
+}
 pub fn usageTrack() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 4 }, .direction = .row, .gap = 1, .background = theme.current().well, .border = .{ .radius = 2 }, .overflow = .hidden, .flex_shrink = 0, .margin = .{ .bottom = 4 } };
+    return .{ .width = .fill(), .height = .{ .px = 4 }, .direction = .row, .gap = 1, .background = theme.current().well, .border = .{ .radius = 2 }, .overflow = .hidden, .flex = 1, .min_width = 0 };
 }
 pub fn usageSegment(ratio: f32, index: usize) ui.BoxStyle {
     return .{ .width = .{ .percent = ratio * 100 }, .height = .fill(), .background = usageColor(index), .flex_shrink = 0 };
@@ -233,22 +242,4 @@ pub fn modelMarkerText() ui.TextStyle {
     value.color = theme.current().accent;
     value.text_align = .center;
     return value;
-}
-
-// The usage panel owns the full-width native action, matching its option rows.
-pub fn compactionButton() ui.BoxStyle {
-    var style = option(28, false);
-    style.width = .{ .px = 112 };
-    style.flex_shrink = 0;
-    return style;
-}
-
-pub fn compactionStatus() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 84 }, .direction = .row, .background = theme.current().well, .border = .{ .radius = 8 }, .overflow = .hidden, .margin = .{ .top = 8, .left = 1, .right = 1 }, .flex_shrink = 0 };
-}
-pub fn compactionStatusBody() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .direction = .column, .padding = .{ .top = 10, .bottom = 10, .left = 12, .right = 12 }, .gap = 4 };
-}
-pub fn compactionFooter() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .justify = .end, .align_items = .center, .gap = 8, .flex_shrink = 0 };
 }

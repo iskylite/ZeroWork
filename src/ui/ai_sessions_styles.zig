@@ -7,15 +7,15 @@ pub fn listSurface() ui.BoxStyle {
         .max_height = 160,
         .flex_shrink = 0,
         .display = .flex,
-        .background = ui.Color.TRANSPARENT,
-        .corner_radius = 0,
+        .background = T.current().well,
+        .corner_radius = 10,
     };
 }
 pub fn menu() ui.BoxStyle {
-    return .{ .width = .fill(), .direction = .column, .padding = .{ .top = 4, .bottom = 4 }, .gap = 2 };
+    return .{ .width = .fill(), .direction = .column, .padding = ui.Padding.all(6), .gap = 2 };
 }
 pub fn heading() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 24 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 14, .right = 14 } };
+    return .{ .width = .fill(), .height = .{ .px = 24 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 8, .right = 8 } };
 }
 pub fn rowBackground(active: bool, hovered: bool) ui.BoxStyle {
     return .{ .background = if (hovered) T.current().hover else if (active) T.current().accent.withAlpha(24) else ui.Color.TRANSPARENT, .corner_radius = 7 };
@@ -24,7 +24,7 @@ pub fn actionHover(danger: bool) ui.BoxStyle {
     return .{ .background = if (danger) T.current().danger.withAlpha(20) else T.current().hover, .corner_radius = 5 };
 }
 pub fn row() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 14, .right = 14 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 8, .right = 8 }, .flex_shrink = 0 };
 }
 pub fn text(primary: bool) ui.TextStyle {
     return .{ .font_size = if (primary) 11.5 else 10.5, .font_weight = if (primary) 500 else 400, .line_height = if (primary) 16.0 / 11.5 else 14.0 / 10.5, .color = if (primary) T.current().fg_1 else T.current().fg_2, .text_overflow = .ellipsis };

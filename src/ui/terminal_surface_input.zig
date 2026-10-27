@@ -4,6 +4,11 @@ const ui = @import("ui");
 const terminal = @import("../host/terminal_service.zig");
 const Surface = @import("terminal_surface.zig").Surface;
 const absolute = @import("terminal_surface.zig").absolute;
+const ascii_bytes: [128]u8 = blk: {
+    var value: [128]u8 = undefined;
+    for (&value, 0..) |*byte, i| byte.* = @intCast(i);
+    break :blk value;
+};
 const Time = extern struct { sec: c_int, min: c_int, hour: c_int, day: c_int, month: c_int, year: c_int, week_day: c_int, year_day: c_int, daylight: c_int, offset: c_long, zone: ?[*:0]const u8 };
 extern "c" fn localtime_r(*const c_long, *Time) ?*Time;
 pub fn localTimestamp(out: *[8]u8, wall_ms: i64) ![]const u8 {
@@ -51,7 +56,7 @@ pub fn onKey(self: *Surface, key: ui.events.KeyCode, modifiers: ui.events.Modifi
     const ascii = asciiFor(key);
     // The mailbox owns queued bytes; avoid storing this stack slice in a key.
     // Control-letter encoding needs only the stable physical key/codepoint.
-    enqueueKey(self, .{ .key = mapped, .modifiers = mods(modifiers), .unshifted_codepoint = ascii }) catch |err| self.showError(err);
+    enqueueKey(self, .{ .key = mapped, .modifiers = mods(modifiers), .unshifted_codepoint = ascii, .utf8 = if (modifiers.alt and ascii > 0 and ascii < 128) ascii_bytes[ascii..][0..1] else "" }) catch |err| self.showError(err);
     return .stop;
 }
 fn enqueueKey(self: *Surface, event: terminal.KeyEvent) !void {
@@ -99,6 +104,18 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
         },
         .mouse_down => |mouse| {
             self.cx.setFocus(self.host);
+            if (reportsMouse(self) and !mouse.modifiers.alt) {
+                const button: @FieldType(terminal.MouseEvent, "button") = switch (mouse.button) {
+                    .left => .left,
+                    .right => .right,
+                    .middle => .middle,
+                };
+                mouseReport(self, .press, button, mouse.x, mouse.y, mouse.modifiers) catch |err| self.showError(err);
+                self.mouse_reporting = true;
+                self.reported_button = button;
+                self.cx.setPointerCapture(self.host);
+                return .stop;
+            }
             switch (mouse.button) {
                 .right => {
                     pasteClipboard(self);
@@ -113,36 +130,48 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
                 },
                 .left => {},
             }
-            if (reportsMouse(self) and !mouse.modifiers.alt) {
-                mouseReport(self, .press, .left, mouse.x, mouse.y, mouse.modifiers) catch |err| self.showError(err);
-                self.mouse_reporting = true;
-                self.cx.setPointerCapture(self.host);
-                return .stop;
-            }
             clearSelection(self);
             self.rectangle = mouse.modifiers.alt;
-            beginSelection(self, mouse.x, mouse.y) catch |err| self.showError(err);
-            self.dragging = self.selection != null;
-            if (self.dragging) self.cx.setPointerCapture(self.host);
+            // A focus click does not select text. Only create versioned anchors
+            // once the pointer actually drags, avoiding stale-frame errors on clicks.
+            self.drag_origin = .{ .x = mouse.x, .y = mouse.y };
+            self.dragging = true;
+            self.cx.setPointerCapture(self.host);
             return .stop;
         },
         .mouse_move => |mouse| {
             if (self.mouse_reporting or (reportsMouse(self) and self.snapshot.?.projection.modes.mouse_tracking == .any)) {
-                mouseReport(self, .motion, if (self.mouse_reporting) .left else .none, mouse.x, mouse.y, mouse.modifiers) catch |err| self.showError(err);
+                mouseReport(self, .motion, if (self.mouse_reporting) self.reported_button else .none, mouse.x, mouse.y, mouse.modifiers) catch |err| self.showError(err);
                 return .stop;
             }
             if (self.dragging) {
+                if (self.selection == null) {
+                    if (@abs(mouse.x - self.drag_origin.x) < 3 and @abs(mouse.y - self.drag_origin.y) < 3) return .stop;
+                    beginSelection(self, self.drag_origin.x, self.drag_origin.y) catch |err| {
+                        if (err == error.StaleProjection) {
+                            self.force_snapshot = true;
+                            self.cx.requestRedraw();
+                        } else self.showError(err);
+                        return .stop;
+                    };
+                }
                 updateSelection(self, mouse.x, mouse.y) catch |err| self.showError(err);
                 return .stop;
             }
         },
-        .mouse_up => |mouse| if (mouse.button == .left) {
+        .mouse_up => |mouse| {
+            if (!self.mouse_reporting and mouse.button != .left) return .ignored;
             defer self.cx.releasePointerCapture();
             if (self.mouse_reporting) {
-                mouseReport(self, .release, .left, mouse.x, mouse.y, mouse.modifiers) catch |err| self.showError(err);
+                mouseReport(self, .release, self.reported_button, mouse.x, mouse.y, mouse.modifiers) catch |err| self.showError(err);
                 self.mouse_reporting = false;
+                self.reported_button = .none;
             }
             if (self.dragging) {
+                if (self.selection == null) {
+                    self.dragging = false;
+                    return .stop;
+                }
                 updateSelection(self, mouse.x, mouse.y) catch |err| {
                     self.dragging = false;
                     self.showError(err);
@@ -160,7 +189,7 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
         .scroll => |wheel| {
             self.scrollbar_until = self.cx.frame_time_ms + 900;
             if (self.snapshot == null) return .stop;
-            if (!self.snapshot.?.projection.modes.alternate_screen) {
+            if (!self.snapshot.?.projection.modes.alternate_screen and (!reportsMouse(self) or wheel.modifiers.alt)) {
                 self.pending_scroll -= wheel.dy;
                 self.force_snapshot = true;
                 self.cx.requestRedraw();
@@ -172,8 +201,8 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
             const delta: i32 = @intFromFloat(@trunc(self.wheel_remainder));
             if (delta == 0) return .stop;
             self.wheel_remainder -= @floatFromInt(delta);
-            if (self.snapshot.?.projection.modes.alternate_screen) {
-                if (reportsMouse(self)) {
+            {
+                if (reportsMouse(self) and !wheel.modifiers.alt) {
                     var count: u32 = @intCast(@min(@abs(delta), 64));
                     while (count > 0) : (count -= 1) mouseReport(self, .press, if (delta < 0) .four else .five, wheel.x, wheel.y, wheel.modifiers) catch |err| self.showError(err);
                 } else if (self.snapshot.?.projection.modes.alternate_scroll) {

@@ -79,8 +79,7 @@ pub fn settingsBody(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .row, .gap = 10, .padding = .{ .left = 14, .right = 14, .bottom = 12 } };
 }
 pub fn settingsNavigation(_: *const ui.ThemeTokens) ui.BoxStyle {
-    const c = theme.current();
-    return .{ .width = .{ .px = @import("v3_geometry.zig").settings_sidebar }, .height = .fill(), .flex_shrink = 0, .direction = .column, .padding = .{ .top = 4 }, .gap = 6, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .side_widths = .{ 0, 1, 0, 0 }, .color = c.fg_1.withAlpha(31), .radius = 0 } };
+    return .{ .width = .{ .px = @import("v3_geometry.zig").settings_sidebar }, .height = .fill(), .flex_shrink = 0, .direction = .column, .padding = .{ .top = 4 }, .gap = 6, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .radius = 0 } };
 }
 pub fn settingsContent(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .direction = .column };

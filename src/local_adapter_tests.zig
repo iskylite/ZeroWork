@@ -898,3 +898,95 @@ test "local recording saved retention reaches active owner and retries a busy dr
     try rig.close(accepted.handle);
     try std.testing.expectError(error.FileNotFound, sandbox.tmp.dir.openFile(std.testing.io, "logs/history/older-retention.cast", .{}));
 }
+
+test "local async retained search captures and cancels with real owner cleanup" {
+    var sandbox = try Sandbox.init();
+    defer sandbox.deinit();
+    var rig = try Rig.init();
+    defer rig.deinit();
+    const accepted = try rig.sessions.create(.{ .local = .{} }, target);
+    const service = try rig.ready(accepted);
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    _ = try write(service, .{ .input_sequence = 1, .bytes = "for i in {1..2000}; do print SEARCH_ROW_$i; done; print ASYNC_''SEARCH_READY\n" });
+    try waitText(&rig, service, &output, "ASYNC_SEARCH_READY");
+    const task = start: while (true) {
+        const value = service.beginSearch() catch |err| {
+            if (err != error.WorkerBusy) return err;
+            try rig.tick();
+            pause();
+            continue;
+        };
+        break :start value;
+    };
+    const until = native.zw_local_monotonic_ms() + 5000;
+    while (!task.done.load(.acquire)) {
+        try rig.tick();
+        rig.discard();
+        pause();
+        if (native.zw_local_monotonic_ms() >= until) return error.SearchTimeout;
+    }
+    try std.testing.expect(task.failure == null);
+    var result = task.take().?;
+    task.release();
+    defer result.document.deinit(@import("vt/search_task.zig").allocator);
+    try std.testing.expect(result.owner.eql(accepted.handle));
+    try std.testing.expect(std.mem.indexOf(u8, result.document.text, "SEARCH_ROW_2000") != null);
+    const cancelled = start: while (true) {
+        const value = service.beginSearch() catch |err| {
+            if (err != error.WorkerBusy) return err;
+            try rig.tick();
+            pause();
+            continue;
+        };
+        break :start value;
+    };
+    cancelled.cancelled.store(true, .release);
+    cancelled.release();
+    try rig.close(accepted.handle);
+    rig.consumers.clearRetainingCapacity();
+    try rig.adapter.retire(accepted.handle);
+}
+
+test "built-in terminal types use actual local PTY TERM and legacy plus numeric keypad input" {
+    var sandbox = try Sandbox.init();
+    defer sandbox.deinit();
+    const Key = @import("vt/input_event.zig").Key;
+    const keys = [_]Key{ .f5, .f6, .f7, .f8, .f9, .f10, .numpad_0, .numpad_1, .numpad_2, .numpad_3, .numpad_4, .numpad_5, .numpad_6, .numpad_7, .numpad_8, .numpad_9, .numpad_decimal, .numpad_enter };
+    const keypad = "\x1bOp\x1bOq\x1bOr\x1bOs\x1bOt\x1bOu\x1bOv\x1bOw\x1bOx\x1bOy\x1bOn\x1bOM";
+    for (@import("vt/terminal_type.zig").builtin) |entry| for ([_]bool{ false, true }) |application| {
+        var rig = try Rig.initWithOptions(.{ .term = entry.name });
+        defer rig.deinit();
+        const accepted = try rig.sessions.create(.{ .local = .{ .initial_cwd = sandbox.path } }, target);
+        const service = try rig.ready(accepted);
+        const function_bytes = if (entry.kind == .vt100) "\x1bOt\x1bOu\x1bOv\x1bOl\x1bOw\x1bOx" else "\x1b[15~\x1b[17~\x1b[18~\x1b[19~\x1b[20~\x1b[21~";
+        const expected = try std.mem.concat(allocator, u8, &.{ function_bytes, if (application) keypad else "0123456789.\r" });
+        defer allocator.free(expected);
+        const command = try std.fmt.allocPrint(allocator, "python3 -c 'import os,tty,sys,select,time,termios; f=0; old=termios.tcgetattr(f); tty.setraw(f); os.write(1,b\"{s}\"); print(\"PROFILE_\"+os.environ[\"TERM\"]+\"_READY\",flush=True); data=b\"\"; deadline=time.monotonic()+10\nwhile len(data)<{d} and time.monotonic()<deadline:\n if select.select([f],[],[],0.1)[0]: data+=os.read(f,4096)\ntermios.tcsetattr(f,termios.TCSANOW,old); print(\"INPUT_\"+data.hex(),flush=True)'\n", .{ if (application) "\\x1b=\\x1b[?1035l" else "\\x1b>", expected.len });
+        defer allocator.free(command);
+        _ = try write(service, .{ .input_sequence = 1, .bytes = command });
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(allocator);
+        const ready = try std.fmt.allocPrint(allocator, "PROFILE_{s}_READY", .{entry.name});
+        defer allocator.free(ready);
+        try waitText(&rig, service, &output, ready);
+        for (keys, 0..) |key, i| {
+            const until = native.zw_local_monotonic_ms() + 5000;
+            while (true) {
+                _ = service.writeKey(.{ .input_sequence = i + 2, .mode_revision = (try status(service)).mode_revision, .event = .{ .key = key } }) catch |err| {
+                    if (err != error.WorkerBusy or native.zw_local_monotonic_ms() >= until) return err;
+                    pause();
+                    continue;
+                };
+                break;
+            }
+        }
+        const hex = try allocator.alloc(u8, expected.len * 2);
+        defer allocator.free(hex);
+        for (expected, 0..) |byte, i| _ = try std.fmt.bufPrint(hex[i * 2 ..][0..2], "{x:0>2}", .{byte});
+        const received = try std.fmt.allocPrint(allocator, "INPUT_{s}", .{hex});
+        defer allocator.free(received);
+        try waitText(&rig, service, &output, received);
+        try rig.close(accepted.handle);
+    };
+}

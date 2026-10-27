@@ -198,7 +198,7 @@ pub const Host = struct {
         if (value.phase != .ready or self.proxy_probe != null) return;
         const target = self.backend.exitHost(value.owner) orelse return;
         self.proxy_probe = Probe.Job.start(self.allocator, .{ .local_port = value.local_port, .target_host = target.host, .target_port = target.port }) catch |err| {
-            self.workspace.status(@errorName(err));
+            self.workspace.statusFailure(@errorName(err));
             return;
         };
         self.probe_owner = value.owner;
@@ -455,7 +455,7 @@ pub const Host = struct {
         self.bindings.ensureUnusedCapacity(self.allocator, 1) catch return;
         const desired = self.desiredForward(legacy);
         _ = self.backend.start(owner, .{ .exit_index = host.socks_exit, .listener = .{ .mode = if (desired) |d| d.mode else .socks5, .target = if (desired) |d| d.target else .{}, .requested_port = host.socks_port, .bind127 = std.mem.eql(u8, host.socks_bind, "127.0.0.1"), .exposure_confirmed = exposed, .max_connections = host.socks_max_connections } }) catch |err| {
-            self.workspace.status(@errorName(err));
+            self.workspace.statusFailure(@errorName(err));
             return;
         };
         var recorded = false;

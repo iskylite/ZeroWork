@@ -641,7 +641,7 @@ pub const View = struct {
                     style.min_height = panel_height;
                 }
                 if (kind == .usage) if (self.source) |source| if (source.value.usage) |usage| {
-                    const panel_height = @min(@as(f32, 268) + @as(f32, @floatFromInt(usage.parts.len)) * 24 + (if (usage.redacted != null) @as(f32, 20) else 0), @max(0, self.cx.viewport.height - 16));
+                    const panel_height = @min(@as(f32, 116) + @as(f32, @floatFromInt(usage.parts.len)) * 26, @max(0, self.cx.viewport.height - 16));
                     style.height = .{ .px = panel_height };
                     style.min_height = panel_height;
                     style.max_height = panel_height;
@@ -990,6 +990,7 @@ pub const View = struct {
         var limit_buffer: [24]u8 = undefined;
         _ = try self.label(summary, try std.fmt.bufPrint(&buffer, "{s}{s} / {s}", .{ if (usage.estimated) "~" else "", try tokenText(&used_buffer, usage.used_tokens), try tokenText(&limit_buffer, usage.limit_tokens) }), S.text(11.5, 500, 18, false), S.label(112, 18));
         try self.usage_body.appendChild(self.cx.allocator, summary);
+        const track_row = try ui.box(self.cx, S.usageTrackRow(), .{});
         const track = try ui.box(self.cx, S.usageTrack(), .{});
         track.meta.ownership.meta.test_id = "ai.usage.track";
         var remaining: f32 = 1;
@@ -999,7 +1000,22 @@ pub const View = struct {
             try track.appendChild(self.cx.allocator, try ui.box(self.cx, S.usageSegment(ratio, index), .{}));
             remaining -= ratio;
         }
-        try self.usage_body.appendChild(self.cx.allocator, track);
+        try track_row.appendChild(self.cx.allocator, track);
+        const running = usage.compaction == .running;
+        const action_label: []const u8 = if (running) "取消压缩" else switch (usage.compaction) {
+            .failed => "压缩失败，点击重试",
+            .cancelled => "已取消压缩，点击重新压缩",
+            .succeeded => if (usage.can_compact) "上下文已压缩，点击再次压缩" else "上下文已压缩",
+            else => if (usage.can_compact) "压缩上下文" else "对话较短，无需压缩",
+        };
+        const choice = try self.usage_scope.?.createState(Choice, .{ .view = self, .kind = .usage, .action = if (running) .cancel_compaction else .compact_context });
+        const disabled = try self.usage_scope.?.createSignal(bool, !running and !usage.can_compact);
+        const button = try ui.widgets.Button(.{ .a11y_label = action_label, .icon_only = true, .icon_asset = if (running) ui.icons.x else ui.icons.get("minimize-2").?, .icon_size = @as(f32, 16), .icon_tint = S.theme.current().accent_ink, .variant = .ghost, .disabled = disabled, .base_style = S.compactionButton(), .hover_style = S.hover(), .on_click = self.cx.on(Choice, choice, Choice.choose) }).mount(self.usage_scope.?, self.cx);
+        button.meta.ownership.meta.test_id = if (running) "ai.usage.compaction.cancel" else "ai.usage.compaction.start";
+        const hint = try ui.widgets.Tooltip(.{ .text = action_label, .open_delay_ms = 450 }).mount(self.usage_scope.?, self.cx);
+        try hint.trigger.appendChild(self.cx.allocator, button);
+        try track_row.appendChild(self.cx.allocator, hint.wrapper);
+        try self.usage_body.appendChild(self.cx.allocator, track_row);
         for (usage.parts, 0..) |part, index| {
             const row = try ui.box(self.cx, S.usageRow(), .{});
             try row.appendChild(self.cx.allocator, try ui.box(self.cx, S.usageSwatch(index), .{}));
@@ -1008,46 +1024,7 @@ pub const View = struct {
             value.meta.ownership.meta.test_id = "ai.usage.part.value";
             try self.usage_body.appendChild(self.cx.allocator, row);
         }
-        if (usage.estimated) _ = try self.label(self.usage_body, "估算", S.text(10, 400, 14, true), S.flexibleLabel(14));
-        if (usage.redacted) |redacted| _ = try self.label(self.usage_body, if (redacted) "身份脱敏已开启" else "身份脱敏已关闭", S.text(10, 400, 14, true), S.flexibleLabel(14));
-        var metrics_buffer: [160]u8 = undefined;
-        const state_label: []const u8 = switch (usage.compaction) {
-            .idle => if (usage.can_compact) "保留目标、约束与最近对话，历史消息仍可查看。" else "对话较短，无需压缩。",
-            .running => "正在整理目标、约束、执行结果与待办…",
-            .succeeded => try std.fmt.bufPrint(&metrics_buffer, "历史输入：{d} → {d} tokens（估算）\n历史与附件保留；后续使用摘要 + 最近两轮。", .{ usage.compaction_before, usage.compaction_after }),
-            .failed => "压缩失败，原上下文已保留，可重试。",
-            .cancelled => "已取消压缩，原上下文未改变。",
-        };
-        const status_card = try ui.box(self.cx, S.compactionStatus(), .{});
-        status_card.meta.ownership.meta.test_id = "ai.usage.compaction.status";
-        const tint = switch (usage.compaction) {
-            .failed => S.theme.current().danger,
-            .succeeded => S.theme.current().ok_ink,
-            else => S.theme.current().accent,
-        };
-        try status_card.appendChild(self.cx.allocator, try ui.box(self.cx, .{ .width = .{ .px = 2 }, .height = .fill(), .background = tint, .flex_shrink = 0 }, .{}));
-        const status_body = try ui.box(self.cx, S.compactionStatusBody(), .{});
-        try status_card.appendChild(self.cx.allocator, status_body);
-        _ = try self.label(status_body, switch (usage.compaction) {
-            .idle => "压缩上下文",
-            .running => "正在压缩上下文",
-            .succeeded => "上下文已压缩",
-            .failed => "上下文压缩失败",
-            .cancelled => "已取消压缩",
-        }, S.text(11, 600, 16, false), S.flexibleLabel(16));
-        var status_style = S.text(11, 400, 16, true);
-        status_style.wrap = .word;
-        _ = try self.label(status_body, state_label, status_style, .{ .width = .fill(), .height = .{ .px = 32 }, .flex_shrink = 0 });
-        try self.usage_body.appendChild(self.cx.allocator, status_card);
-        const running = usage.compaction == .running;
-        const choice = try self.usage_scope.?.createState(Choice, .{ .view = self, .kind = .usage, .action = if (running) .cancel_compaction else .compact_context });
-        const disabled = try self.usage_scope.?.createSignal(bool, !running and !usage.can_compact);
-        const button = try ui.widgets.Button(.{ .label = if (running) "取消压缩" else if (usage.compaction == .failed) "重试压缩" else if (usage.compaction == .cancelled) "重新压缩" else "压缩上下文", .variant = .secondary, .disabled = disabled, .base_style = S.compactionButton(), .on_click = self.cx.on(Choice, choice, Choice.choose) }).mount(self.usage_scope.?, self.cx);
-        button.meta.ownership.meta.test_id = if (running) "ai.usage.compaction.cancel" else "ai.usage.compaction.start";
-        const footer = try ui.box(self.cx, S.compactionFooter(), .{});
-        try footer.appendChild(self.cx.allocator, button);
-        try self.usage_body.appendChild(self.cx.allocator, footer);
-        const desired_height = @min(@as(f32, 268) + @as(f32, @floatFromInt(usage.parts.len)) * 24 + (if (usage.redacted != null) @as(f32, 20) else 0), @max(0, self.cx.viewport.height - 16));
+        const desired_height = @min(@as(f32, 116) + @as(f32, @floatFromInt(usage.parts.len)) * 26, @max(0, self.cx.viewport.height - 16));
         self.popups[@backingInt(S.Kind.usage)].widget.chrome.setStyleInline(self.cx.allocator, .{ .height = .{ .px = desired_height }, .min_height = desired_height, .max_height = desired_height });
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {

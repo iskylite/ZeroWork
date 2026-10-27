@@ -95,6 +95,9 @@ pub const View = struct {
             const hint = self.model.pending.?;
             const preview = try policy.outputPreview(self.cx.allocator, projection);
             defer self.cx.allocator.free(preview);
+            if (self.handler) |handler| if (handler.on_notice) |publish| publish(handler.context, hint, preview) catch |err| {
+                std.log.debug("command failure history unavailable: {s}", .{@errorName(err)});
+            };
             const command_text = try std.fmt.allocPrint(self.cx.allocator, "命令  {s}", .{if (hint.command.len == 0) "（未提供）" else hint.command});
             defer self.cx.allocator.free(command_text);
             const output_text = try std.fmt.allocPrint(self.cx.allocator, "输出  {s}", .{if (preview.len == 0) "命令未返回错误详情" else preview});

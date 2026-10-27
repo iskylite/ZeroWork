@@ -688,6 +688,7 @@ pub const Cx = struct {
     /// tiers correct). Frame-level arena allocator, reset each frame, for temporary computation
     /// (avoid heap fragmentation).
     frame_arena: std.heap.ArenaAllocator,
+    idle_scratch_limit: ?usize = null,
     deferred_epoch: @import("zenit_time").Instant,
     deferred_scheduler: DeferredScheduler,
     /// One-shot timer (setTimer). When due, wakes frame loop and fires at render start.
@@ -1005,7 +1006,7 @@ pub const Cx = struct {
             .owner = owner,
             .lifetime_token = lifetime_token,
             .lowering = .{},
-            .frame_arena = std.heap.ArenaAllocator.init(allocator),
+            .frame_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator),
             .deferred_epoch = try @import("zenit_time").Instant.now(io),
             .deferred_scheduler = DeferredScheduler.init(allocator, io),
             .node_registry = NodeRegistry.init(allocator),
@@ -1013,7 +1014,7 @@ pub const Cx = struct {
             .svg_textures = svg_texture_store.SvgTextureStore.init(allocator),
             .scene_runtime = scene_runtime_mod.SceneRuntime.init(allocator),
             .property_tree = property_tree_mod.PropertyTree.init(allocator),
-            .display_list = display_list_mod.DisplayList.init(allocator),
+            .display_list = display_list_mod.DisplayList.init(std.heap.page_allocator),
             .text_blob_store = text_blob_mod.BlobStore.init(allocator),
             .world = world.World.init(allocator),
             .layer_tree = layer_tree.LayerTree.init(allocator, .{}),
@@ -2802,6 +2803,16 @@ pub const Cx = struct {
         self.beginActiveUse();
         defer self.endActiveUse();
         return cx_render.render(self);
+    }
+
+    /// Call after a large view retires and the window has become idle. Keep
+    /// live commands, fonts and node caches; reset scratch at its normal frame
+    /// boundary so no encoder/paint payload can outlive its storage.
+    pub fn trimIdleRenderCapacity(self: *Cx, retain_bytes: usize) usize {
+        const released = self.display_list.trimIdleCapacity(retain_bytes);
+        self.idle_scratch_limit = retain_bytes;
+        self.scheduleRedrawAfterNs(1);
+        return released;
     }
 
     /// Encoder consumes paint_table.DisplayItem. Lowering phase already double-writes to

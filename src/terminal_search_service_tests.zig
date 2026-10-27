@@ -97,3 +97,45 @@ test "search snapshot ASCII runs keep exact columns, styled blanks and Unicode b
     try std.testing.expect(document.spans[0].columns(6, 10) == null);
     try std.testing.expect(std.mem.indexOf(u8, document.text, "界e\u{301}👩‍💻 xyz") != null);
 }
+
+test "search snapshot large ASCII history fits a bounded index allocation budget" {
+    var adapter = try Adapter.init(a, 3, 80);
+    defer adapter.destroy();
+    try adapter.setScrollbackLimit(5000);
+    for (0..2000) |i| {
+        var line: [80]u8 = undefined;
+        _ = try adapter.feed(try std.fmt.bufPrint(&line, "row-{d:0>4} abcdefghijklmnopqrstuvwxyz0123456789\r\n", .{i}));
+    }
+    const buffer = try a.alloc(u8, 2 * 1024 * 1024);
+    defer a.free(buffer);
+    var bounded = std.heap.FixedBufferAllocator.init(buffer);
+    var document = try adapter.searchSnapshot(bounded.allocator());
+    defer document.deinit(bounded.allocator());
+    try std.testing.expect(document.spans.len < 2100);
+    const at = std.mem.indexOf(u8, document.text, "row-1999").?;
+    try std.testing.expectEqual(@as(u16, 7), document.spanAt(at + 7).?.col);
+    try std.testing.expect(std.mem.indexOf(u8, document.text, "row-0000") != null);
+}
+
+test "search snapshot timestamps follow logical wraps and submission precedence" {
+    const Clock = struct {
+        var current: i64 = 1234;
+        fn now() i64 {
+            return current;
+        }
+    };
+    var adapter = try Adapter.init(a, 3, 8);
+    defer adapter.destroy();
+    adapter.wall_clock_ms = Clock.now;
+    _ = try adapter.feed("abcdefghijklmnopq\r\nnext");
+    Clock.current = 5678;
+    adapter.recordSubmission();
+    var document = try adapter.searchSnapshot(a);
+    defer document.deinit(a);
+    const first = document.rows[document.spanAt(0).?.row];
+    for (document.rows) |row| if (std.meta.eql(row.logical_id, first.logical_id)) {
+        try std.testing.expectEqual(@as(?i64, 1234), row.timestamp_ms);
+    };
+    const last = document.rows[document.spanAt(std.mem.indexOf(u8, document.text, "next").?).?.row];
+    try std.testing.expectEqual(@as(?i64, 5678), last.timestamp_ms);
+}

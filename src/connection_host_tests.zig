@@ -8,6 +8,8 @@ const OperationKey = @import("host/operation.zig").OperationKey;
 const clock = @import("platform/realtime.zig");
 const c = @import("generated_ssh_session");
 const a = std.testing.allocator;
+extern "c" fn setenv([*:0]const u8, [*:0]const u8, c_int) c_int;
+extern "c" fn unsetenv([*:0]const u8) c_int;
 
 const Socket = struct {
     fd: c_int,
@@ -37,8 +39,10 @@ const Fixture = struct {
     config: Config = .{},
     tmp: @TypeOf(std.testing.tmpDir(.{})),
     path: [:0]const u8,
+    directory: [:0]u8,
+    previous_zdotdir: ?[:0]u8 = null,
     fn init(self: *Fixture) !void {
-        self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .scope = undefined, .workspace = undefined, .application = undefined, .host = undefined, .tmp = std.testing.tmpDir(.{}), .path = undefined };
+        self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .scope = undefined, .workspace = undefined, .application = undefined, .host = undefined, .tmp = std.testing.tmpDir(.{}), .path = undefined, .directory = undefined };
         self.cx.setViewport(1100, 720);
         self.cx.root = try ui.box(self.cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
         self.scope = try ui.Scope.init(a, null, self.cx.owner);
@@ -49,6 +53,16 @@ const Fixture = struct {
         }
         try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = "hosts.toml", .data = "" });
         self.path = try self.tmp.dir.realPathFileAlloc(std.testing.io, "hosts.toml", a);
+        self.directory = try self.tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+        // Authentication UI tests own their real shells' startup configuration;
+        // user login hooks must not spawn unrelated jobs during fixture teardown.
+        try self.tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".zshenv", .data = "setopt NO_RCS\nPROMPT=''\nRPROMPT=''\n" });
+        self.previous_zdotdir = if (std.c.getenv("ZDOTDIR")) |value| try a.dupeSentinel(u8, std.mem.span(value), 0) else null;
+        if (setenv("ZDOTDIR", self.directory.ptr, 1) != 0) {
+            if (self.previous_zdotdir) |value| a.free(value);
+            return error.EnvironmentFailed;
+        }
+        errdefer self.restoreShellEnvironment();
         self.config.ssh.connect_timeout_sec = 2;
         self.config.ssh.auto_reconnect = false;
         self.workspace = try Workspace.init(a, self.cx, self.scope, std.testing.io, &self.config, self.path, nodes[0], nodes[1], nodes[2], nodes[3]);
@@ -80,8 +94,16 @@ const Fixture = struct {
         self.cx.clearFocus();
         self.scope.dispose();
         self.cx.deinit();
+        self.restoreShellEnvironment();
+        a.free(self.directory);
         a.free(self.path);
         self.tmp.cleanup();
+    }
+    fn restoreShellEnvironment(self: *Fixture) void {
+        if (self.previous_zdotdir) |value| {
+            if (setenv("ZDOTDIR", value.ptr, 1) != 0) @panic("Connection fixture could not restore ZDOTDIR");
+            a.free(value);
+        } else if (unsetenv("ZDOTDIR") != 0) @panic("Connection fixture could not restore ZDOTDIR");
     }
 };
 
@@ -401,4 +423,28 @@ test "connection host shared OTP prefill waits for confirmation preserves manual
     try std.testing.expect(service.host.takeAnswer(owner, 2, 2) == null);
     try std.testing.expectEqualStrings("", view.fields[0].input.state.getText());
     service.host.retire(owner, 2, 2);
+}
+
+test "password challenge fits its visible fields without empty error rows" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const key: OperationKey = .{ .owner = .app, .operation_id = 101, .attempt_id = 1 };
+    const service = f.host.challenges;
+    const view = service.view;
+    try service.host.offer(key, 1, 1, .secret_input, .{ .title = "SSH 密码认证", .allow_save_password = true, .fields = &.{.{ .label = "Password:" }} }, std.math.maxInt(u64));
+    for (0..3) |_| try f.tick();
+    const row = view.fields[0].root.globalRect();
+    const field_area = view.fields_scroll.globalRect();
+    const remember = view.remember.globalRect();
+    try std.testing.expectApproxEqAbs(row.h, field_area.h, 1);
+    try std.testing.expect(remember.y - (row.y + row.h) <= 8);
+    try std.testing.expectEqual(.none, view.problem.style.display);
+    service.host.retire(key, 1, 1);
+    const prompts: [8]@import("host/challenge_host.zig").Field = @splat(.{ .label = "Additional authentication field" });
+    f.cx.setViewport(700, 440);
+    try service.host.offer(key, 2, 1, .secret_input, .{ .title = "Additional authentication", .fields = &prompts }, std.math.maxInt(u64));
+    for (0..3) |_| try f.tick();
+    try std.testing.expect(view.fields_scroll.globalRect().h <= 120.5);
+    try std.testing.expect(view.fields[7].root.globalRect().y > view.fields_scroll.globalRect().y + view.fields_scroll.globalRect().h);
 }

@@ -1,6 +1,10 @@
 const ui = @import("ui");
 const S = @import("ai_empty_styles.zig");
+pub const Recent = struct { id: u64, title: []const u8 };
 pub const Actions = struct {
+    logo_texture: ?u32 = null,
+    recent: []const Recent = &.{},
+    select: ?*const fn (*anyopaque, u64) void = null,
     context: *anyopaque,
     summarize: *const fn (*anyopaque) void,
     logs: *const fn (*anyopaque) void,
@@ -19,6 +23,12 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !
     if (!configured) return mountSetup(cx, scope, actions);
     const root = try ui.boxStyled(cx, S.root, .{});
     root.meta.ownership.meta.test_id = if (configured) "ai.empty.configured" else "ai.empty.unconfigured";
+    const logo = try ui.image(cx, actions.logo_texture orelse 0, .{ .width = .{ .px = 88 }, .height = .{ .px = 88 }, .flex_shrink = 0 });
+    logo.meta.ownership.meta.test_id = "ai.empty.logo";
+    try root.appendChild(cx.allocator, logo);
+    const title = try ui.textStyled(cx, S.welcomeTitle, "有什么可以帮你？");
+    title.meta.ownership.meta.test_id = "ai.empty.title";
+    try root.appendChild(cx.allocator, title);
     const status = try ui.boxStyled(cx, S.statusRow, .{});
     status.setDisplay(if (configured) .none else .flex);
     try status.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (configured) "circle-check" else "triangle-alert").?, S.status(configured).color, S.icon()));
@@ -45,7 +55,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !
             const label_node = try ui.text(cx, label, starter_text);
             label_node.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .margin = .{ .right = 12 } });
             try button.appendChild(cx.allocator, label_node);
-            try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("info").?, S.muted(), .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
+            try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("arrow-up-right").?, S.muted(), .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
             const hint = try ui.widgets.Tooltip(.{ .text = if (i == 0) "填入问题，发送后分析所选文字或最近输出。" else "选择日志文件，预览后附加到问题。" }).mount(scope, cx);
             hint.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
             hint.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 30 }, .min_width = 0 });
@@ -53,52 +63,42 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !
             try row.appendChild(cx.allocator, hint.wrapper);
         } else try row.appendChild(cx.allocator, button);
     }
-    if (configured) if (actions.history) |run| {
-        const click = try scope.createState(Click, .{ .context = actions.context, .run = run });
-        const recent = try ui.widgets.Button(.{ .variant = .ghost, .block = true, .a11y_label = "最近记录 · 全部连接的 AI 会话", .base_style = S.recent(), .hover_style = .{ .background = @import("app_theme.zig").current().hover }, .pressed_style = .{ .background = @import("app_theme.zig").current().hover }, .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+    if (actions.recent.len > 0 and actions.select != null) {
+        const recent = try ui.boxStyled(cx, S.recentGroup, .{});
         recent.meta.ownership.meta.test_id = "ai.empty.recent";
-        for (recent.children.items) |child| child.setDisplay(.none);
-        recent.setStyleInline(cx.allocator, .{ .justify = .start, .gap = 6 });
-        const toggle = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0, .align_items = .center, .justify = .center }, .{});
-        try recent.appendChild(cx.allocator, toggle);
-        const status_icon = try ui.iconTint(cx, @import("file_workspace_title_icons.zig").status_check, S.success(), .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
-        status_icon.meta.ownership.meta.test_id = "ai.empty.recent.status";
-        try toggle.appendChild(cx.allocator, status_icon);
-        var chevron_style = S.label();
-        chevron_style.font_size = 18;
-        chevron_style.line_height = 22.0 / 18.0;
-        chevron_style.color = S.muted();
-        chevron_style.text_align = .center;
-        const chevron = try ui.text(cx, "›", chevron_style);
-        chevron.setStyleInline(cx.allocator, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0 });
-        chevron.meta.ownership.meta.test_id = "ai.empty.recent.disclosure";
-        chevron.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .top = .{ .px = 0 }, .left = .{ .px = 0 } }, .opacity = 0 });
-        try toggle.appendChild(cx.allocator, chevron);
-        const hovered = try ui.hooks.useHover(scope, recent);
-        const focus = try ui.hooks.useFocusState(scope, cx, recent);
-        try scope.createEffect(.{ .cx = cx, .hovered = hovered, .focused = focus.visible, .status = status_icon, .disclosure = chevron }, struct {
-            fn paint(ctx: anytype) void {
-                const show = ctx.hovered.get() or ctx.focused.get();
-                ctx.status.setStyleInline(ctx.cx.allocator, .{ .opacity = if (show) 0 else 1 });
-                ctx.disclosure.setStyleInline(ctx.cx.allocator, .{ .opacity = if (show) 1 else 0 });
-            }
-        }.paint);
-        var strong = S.label();
-        strong.font_weight = 600;
-        const recent_title = try ui.text(cx, "最近记录", strong);
-        recent_title.setStyleInline(cx.allocator, .{ .width = .{ .px = 84 }, .flex_shrink = 0 });
-        try recent.appendChild(cx.allocator, recent_title);
-        var muted = S.label();
-        muted.color = S.muted();
-        try recent.appendChild(cx.allocator, try ui.text(cx, "全部连接的 AI 会话", muted));
+        try recent.appendChild(cx.allocator, try ui.text(cx, "最近会话", .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = S.muted() }));
+        for (actions.recent[0..@min(2, actions.recent.len)]) |entry| {
+            const click = try scope.createState(RecentClick, .{ .context = actions.context, .select = actions.select.?, .id = entry.id });
+            const button = try ui.widgets.Button(.{ .label = entry.title, .variant = .ghost, .block = true, .base_style = S.recent(), .on_click = cx.on(RecentClick, click, RecentClick.run) }).mount(scope, cx);
+            button.meta.ownership.meta.test_id = "ai.empty.recent.link";
+            for (button.children.items) |child| child.setDisplay(.none);
+            try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("message-circle").?, S.muted(), S.icon()));
+            const text = try ui.text(cx, entry.title, S.label());
+            text.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0, .overflow_hidden = true });
+            try button.appendChild(cx.allocator, text);
+            try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("arrow-up-right").?, S.muted(), S.icon()));
+            try recent.appendChild(cx.allocator, button);
+        }
         try root.appendChild(cx.allocator, recent);
-    };
+    }
+    const layout = try scope.createState(SetupLayout, .{ .cx = cx, .root = root, .logo = logo });
+    try cx.addAfterLayoutHook(layout, SetupLayout.frame);
+    try scope.onCleanup(SetupLayout, layout, SetupLayout.release);
     return root;
 }
+const RecentClick = struct {
+    context: *anyopaque,
+    select: *const fn (*anyopaque, u64) void,
+    id: u64,
+    fn run(self: *RecentClick) void {
+        self.select(self.context, self.id);
+    }
+};
 
 const SetupLayout = struct {
     cx: *ui.Cx,
     root: *ui.Node,
+    logo: ?*ui.Node = null,
     fn release(self: *SetupLayout) void {
         self.cx.removeAfterLayoutHook(self);
     }
@@ -108,6 +108,15 @@ const SetupLayout = struct {
         while (ancestor) |node| : (ancestor = node.parent) {
             if (node.tag != .scroll) continue;
             const available = node.globalRect().h;
+            if (self.logo) |logo| {
+                const size: f32 = if (available < 260) 56 else 88;
+                const gap: f32 = if (available < 260) 8 else 12;
+                if (@abs(logo.globalRect().h - size) > 0.1 or self.root.style.gap != gap) {
+                    logo.setStyleInline(self.cx.allocator, .{ .width = .{ .px = size }, .height = .{ .px = size } });
+                    self.root.setStyleInline(self.cx.allocator, .{ .gap = gap });
+                    return .needs_layout;
+                }
+            }
             const natural = self.root.globalRect().h - self.root.style.padding.top - self.root.style.padding.bottom;
             const inset = @max(0, (available - natural) / 2);
             if (@abs(self.root.style.padding.top - inset) < 0.1) return .done;

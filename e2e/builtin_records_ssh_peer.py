@@ -36,11 +36,14 @@ port = listener.getsockname()[1]
 (out / "ready.json").write_text(json.dumps(dict(port=port, user="records-fixture", password="records-secret", known_host=f"[127.0.0.1]:{port} {key.get_name()} {key.get_base64()}\n")))
 
 class Server(paramiko.ServerInterface):
-    def __init__(self): self.shell = threading.Event(); self.size = (100, 30); self.master = None
+    def __init__(self): self.shell = threading.Event(); self.size = (100, 30); self.master = None; self.term = ""
     def get_allowed_auths(self, _): return "password"
     def check_auth_password(self, user, password): return paramiko.AUTH_SUCCESSFUL if (user,password)==("records-fixture","records-secret") else paramiko.AUTH_FAILED
     def check_channel_request(self, kind, _): return paramiko.OPEN_SUCCEEDED if kind=="session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
-    def check_channel_pty_request(self, channel, term, width, height, *rest): self.size=(width,height); return True
+    def check_channel_pty_request(self, channel, term, width, height, *rest):
+        self.size=(width,height); self.term=term.decode("ascii")
+        (out / "pty-request.json").write_text(json.dumps(dict(term=self.term,cols=width,rows=height)))
+        return True
     def check_channel_window_change_request(self, channel, width, height, *rest):
         self.size=(width,height)
         if self.master is not None:
@@ -120,7 +123,10 @@ def serve(connection, index):
             return
         master, slave = os.openpty(); server.master=master
         fcntl.ioctl(master,termios.TIOCSWINSZ,struct.pack("HHHH",server.size[1],server.size[0],0,0))
-        process=subprocess.Popen(["/bin/zsh","-i"],stdin=slave,stdout=slave,stderr=slave,start_new_session=True,cwd=root,env={**os.environ,"HOME":str(out),"ZDOTDIR":str(out),"TERM":"xterm-256color"})
+        def own_tty():
+            os.setsid()
+            fcntl.ioctl(slave,termios.TIOCSCTTY,0)
+        process=subprocess.Popen(["/bin/zsh","-i"],stdin=slave,stdout=slave,stderr=slave,preexec_fn=own_tty,cwd=root,env={**os.environ,"HOME":str(out),"ZDOTDIR":str(out),"TERM":server.term})
         os.close(slave)
         received=bytearray()
         with (out / f"received-{index}.bin").open("wb") as audit:

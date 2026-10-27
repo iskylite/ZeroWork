@@ -10,6 +10,10 @@ comptime {
 }
 test {
     _ = @import("terminal_search_service_tests.zig");
+    _ = @import("ui/history_replay.zig");
+    _ = @import("platform/snapshot_scratch.zig");
+    _ = @import("vt/search_task.zig");
+    _ = @import("platform/idle_memory.zig");
     _ = @import("ui/remote_session_notice.zig");
     _ = @import("ui_constraint_tests.zig");
     _ = @import("record_cleanup_ui_tests.zig");
@@ -38,6 +42,7 @@ test {
     _ = @import("settings_runtime_consumer_tests.zig");
     _ = @import("ui/session_export_jobs.zig");
     _ = @import("terminal_surface_tests.zig");
+    _ = @import("ssh_terminal_service_tests.zig");
     _ = @import("ui/background_layers.zig");
     _ = @import("background_surface_tests.zig");
     _ = @import("socks_info_theme_tests.zig");
@@ -125,4 +130,8 @@ test {
 
 test {
     _ = @import("broadcast_view_tests.zig");
+}
+
+test {
+    _ = @import("ai_conversation_tests.zig");
 }

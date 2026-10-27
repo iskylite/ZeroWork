@@ -67,7 +67,7 @@ pub fn field(w: ?f32) ui.BoxStyle {
 }
 // zenit draws borders inside the box; include the CSS 1px border in content insets.
 pub fn input() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 34 }, .padding = .{ .left = 11, .right = 11, .top = 6, .bottom = 6 }, .background = theme.current().well, .border = .{ .radius = 8, .width = 1, .color = ui.Color.TRANSPARENT }, .font_size = 12 };
+    return .{ .width = .fill(), .height = .{ .px = 34 }, .padding = .{ .left = 11, .right = 11, .top = 6, .bottom = 6 }, .background = theme.current().well, .border = .{ .radius = 8, .width = 1, .color = ui.Color.TRANSPARENT }, .font_size = 11 };
 }
 pub fn button(w: f32, h: f32, primary: bool) ui.BoxStyle {
     return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .direction = .row, .align_items = .center, .justify = .center, .gap = 6, .background = if (primary) theme.current().action_accent else theme.current().well, .gradient = if (primary) .{ .from = theme.current().action_accent, .to = theme.current().action_accent_2, .direction = .diagonal } else null, .border = .{ .radius = 8 }, .flex_shrink = 0 };

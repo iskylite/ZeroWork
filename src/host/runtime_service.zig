@@ -41,6 +41,7 @@ pub const Runtime = struct {
         captureAiSelection: *const fn (*anyopaque, std.mem.Allocator, identity.SessionHandle, @import("../vt/engine.zig").Selection, u64) anyerror!@import("ai_terminal_selection.zig").Captured,
         semanticSequence: *const fn (*anyopaque) u64,
         documentSource: ?*const fn (*anyopaque) anyerror!terminal.Service = null,
+        terminalService: ?*const fn (*anyopaque) anyerror!terminal.Service = null,
         copyProjection: *const fn (*anyopaque, std.mem.Allocator) anyerror!@import("../vt/snapshot.zig").Projection,
         hasJoined: *const fn (*anyopaque) bool,
         isStopping: *const fn (*anyopaque) bool,
@@ -91,6 +92,10 @@ pub const Runtime = struct {
     pub fn mountTerminal(self: *Runtime, view: *@import("../ui/terminal_view.zig").TerminalViewNode, status: *@import("ui").Node) !void {
         if (self.torn_down) return error.SessionClosed;
         view.bindWorker(self);
+        if (self.vtable.terminalService) |call| {
+            const live = try call(self.context);
+            try view.bindTerminalService(live);
+        }
         const cx = view.cx;
         const scratch = try cx.allocator.alloc(u8, @import("../vt/text_slot.zig").TextSlot.default_capacity);
         errdefer cx.allocator.free(scratch);

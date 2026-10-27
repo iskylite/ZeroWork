@@ -156,7 +156,7 @@ function checkLongLine(value: Row[], payload: string, cols: number): void {
   const count = Math.ceil(payload.length / cols), wrapped = value.slice(first, first + count);
   assert.equal(wrapped.map((row) => row.text).join(""), payload, "Resize must preserve exactly one logical line, without loss, duplication or UI-created wrapping");
   for (let i = 0; i < wrapped.length; i++) {
-    assert.equal(wrapped[i].glyphs.length, Math.min(cols, payload.length - i * cols), "Only VT cell wrapping may split the ASCII line");
+    assert.equal(wrapped[i].glyphs.reduce((cells, glyph) => cells + (glyph.text?.length ?? 0), 0), Math.min(cols, payload.length - i * cols), "Only VT cell wrapping may split the ASCII line");
     assert(wrapped[i].glyphs.every((glyph) => Math.abs(glyph.rect.y - wrapped[i].rect.y) < 0.5 && Math.abs(glyph.rect.h - wrapped[i].rect.h) < 0.5), "Glyphs must stay on their published VT row");
     assert(wrapped[i].glyphs.every((glyph) => glyph.rect.x >= wrapped[i].rect.x - 0.5 && glyph.rect.x + glyph.rect.w <= wrapped[i].rect.x + wrapped[i].rect.w + 0.5), "Glyph rectangles must remain inside their row");
   }
@@ -187,7 +187,8 @@ try {
   await verifyStdout("colors-unicode", colorRaw, colorBytes);
   const colored = await waitText("RENDER_COLOR_DONE"), unicode = colored.find((row) => row.text.startsWith("UNICODE "));
   assert(unicode && unicode.text === "UNICODE U|A界e\u0301🧪👩‍💻Z|", "Unicode must reach the actual owned grapheme projection without replacement text");
-  const cell = unicode.glyphs.find((glyph) => glyph.text === "Z")!.rect.w;
+  const asciiTail = unicode.glyphs.find((glyph) => glyph.text === "Z|")!;
+  const cell = asciiTail.rect.w / 2;
   for (const [grapheme, cells] of [["界", 2], ["e\u0301", 1], ["🧪", 2], ["👩‍💻", 2]] as const) {
     const glyph = unicode.glyphs.filter((value) => value.text === grapheme);
     assert.equal(glyph.length, 1, `${grapheme} must be one published grapheme node`);

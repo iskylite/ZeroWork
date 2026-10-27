@@ -8,7 +8,7 @@ pub const Mock = struct {
         const self: *Mock = @ptrCast(@alignCast(ctx));
         sink(sink_ctx, .{ .text = self.response });
         sink(sink_ctx, .done);
-        return .{ .output_tokens = @intCast(self.response.len) };
+        return .{ .output_tokens = @intCast(self.response.len), .usage_reported = false };
     }
     pub fn models(ctx: *anyopaque, allocator: std.mem.Allocator) ![]provider.ModelInfo {
         _ = ctx;

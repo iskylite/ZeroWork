@@ -36,9 +36,10 @@ fn shortcutRow(cx: *ui.Cx, bound: *binding.Binding, parent: *ui.Node, label: []c
     const row = try ui.boxStyled(cx, S.fieldRow, .{});
     row.meta.ownership.meta.test_id = try controls.stableId(bound.scope, "settings.key.row.", @tagName(actions[0]));
     const labels = try ui.boxStyled(cx, S.fieldLabel, .{});
+    labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 4 });
     try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.label, label));
     if (actions[0] == .recent_tab or actions[0] == .accept_completion) {
-        try labels.appendChild(cx.allocator, try ui.text(cx, "保留给应用，不可修改", .{ .font_size = 11, .line_height = 16.0 / 11.0, .color = S.theme.current().fg_2 }));
+        try labels.appendChild(cx.allocator, try controls.inlineHint(cx, bound, try controls.stableId(bound.scope, "settings.key.fixed.", @tagName(actions[0])), "保留给应用，不可修改", ui.icons.lock, S.theme.current().fg_2));
     }
     try row.appendChild(cx.allocator, labels);
     const group = try ui.boxStyled(cx, S.shortcutGroup, .{});

@@ -138,12 +138,28 @@ static int spawn_pty(pid_t *pid, int slave, int cwd_fd, char **argv, char **env,
     if (configure_fd(status[0], 0) < 0 || configure_fd(status[1], 0) < 0) {
         int saved = errno; close(status[0]); close(status[1]); return saved;
     }
-    long descriptor_limit = sysconf(_SC_OPEN_MAX);
-    if (descriptor_limit < 0 || descriptor_limit > INT_MAX) {
-        close(status[0]); close(status[1]); return EMFILE;
+    /* Prepare the exec policy before fork. Darwin's SETEXEC replaces this
+     * child in place; CLOEXEC_DEFAULT closes even descriptors inherited from
+     * other libraries/threads. Iterating OPEN_MAX here used a million close()
+     * calls on systems with a large descriptor limit. Only stdio is inherited. */
+    posix_spawn_file_actions_t exec_actions;
+    posix_spawnattr_t exec_attr;
+    int saved = posix_spawn_file_actions_init(&exec_actions);
+    if (saved) { close(status[0]); close(status[1]); return saved; }
+    saved = posix_spawnattr_init(&exec_attr);
+    if (saved) { posix_spawn_file_actions_destroy(&exec_actions); close(status[0]); close(status[1]); return saved; }
+    saved = posix_spawnattr_setflags(&exec_attr, POSIX_SPAWN_SETEXEC | POSIX_SPAWN_CLOEXEC_DEFAULT);
+    for (int fd = 0; !saved && fd < 3; ++fd) saved = posix_spawn_file_actions_adddup2(&exec_actions, fd, fd);
+    if (saved) {
+        posix_spawnattr_destroy(&exec_attr); posix_spawn_file_actions_destroy(&exec_actions);
+        close(status[0]); close(status[1]); return saved;
     }
     pid_t child = fork();
-    if (child < 0) { int saved = errno; close(status[0]); close(status[1]); return saved; }
+    if (child < 0) {
+        saved = errno;
+        posix_spawnattr_destroy(&exec_attr); posix_spawn_file_actions_destroy(&exec_actions);
+        close(status[0]); close(status[1]); return saved;
+    }
     if (child == 0) {
         close(status[0]);
         sigset_t mask;
@@ -156,13 +172,15 @@ static int spawn_pty(pid_t *pid, int slave, int cwd_fd, char **argv, char **env,
         }
         if (setsid() < 0 || ioctl(slave, TIOCSCTTY, 0) < 0 || tcsetpgrp(slave, getpid()) < 0) child_failed(status[1], 2);
         if (fchdir(cwd_fd) < 0) child_failed(status[1], 1);
-        for (int fd = 0; fd < 3; ++fd) if (dup2(slave, fd) < 0) child_failed(status[1], 2);
-        /* Close every inherited application fd, including ones that were not
-         * marked CLOEXEC by another library or opened by another app thread. */
-        for (int fd = 3; fd < descriptor_limit; ++fd) if (fd != status[1]) close(fd);
-        execve("/bin/zsh", argv, env);
+        for (int fd = 0; fd < 3; ++fd) {
+            if (dup2(slave, fd) < 0 || fcntl(fd, F_SETFD, 0) < 0) child_failed(status[1], 2);
+        }
+        pid_t unused;
+        errno = posix_spawn(&unused, "/bin/zsh", &exec_actions, &exec_attr, argv, env);
         child_failed(status[1], 4);
     }
+    posix_spawnattr_destroy(&exec_attr);
+    posix_spawn_file_actions_destroy(&exec_actions);
     close(status[1]);
     ZW_LOCAL_FAILURE failure;
     ssize_t count;

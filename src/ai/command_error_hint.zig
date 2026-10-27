@@ -16,6 +16,7 @@ pub const Handler = struct {
     context: ?*anyopaque = null,
     /// Borrowed immutable strings are valid for this synchronous call only.
     on_open: *const fn (?*anyopaque, Hint) anyerror!void,
+    on_notice: ?*const fn (?*anyopaque, Hint, []const u8) anyerror!void = null,
 };
 
 pub const Model = struct {

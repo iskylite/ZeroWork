@@ -50,11 +50,12 @@ pub const State = struct {
         const self = try scope.createState(State, .{ .cx = cx, .scope = scope, .record = record, .root = undefined, .body = undefined, .footer = undefined, .identity = undefined, .metadata = undefined, .stdout = undefined, .stderr = undefined, .feedback = undefined, .stdout_scroll = undefined, .stderr_scroll = undefined });
         self.root = try ui.boxStyled(cx, S.card, .{});
         self.root.meta.ownership.meta.test_id = record.testId();
-        const header = try ui.boxStyled(cx, S.header, .{});
+        const header = try ui.widgets.Button(.{ .label = "", .variant = .ghost, .a11y_label = "展开或收起步骤", .base_style = S.headerButton() }).mount(scope, cx);
+        header.setStyleInline(cx.allocator, S.header(cx.tokens));
+        for (header.children.items) |child| child.setDisplay(.none);
         try self.root.appendChild(cx.allocator, header);
-        const disclosure = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.chevron_down, .icon_size = @as(f32, 14), .a11y_label = "展开或收起执行结果", .base_style = S.button(22), .on_click = cx.on(State, self, toggle) }).mount(scope, cx);
+        const disclosure = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0 }, .{});
         disclosure.meta.ownership.meta.test_id = "ai.tool.result.disclosure";
-        for (disclosure.children.items) |child| child.setDisplay(.none);
         var all_succeeded = record.targets.len > 0;
         var unknown = false;
         var cancelled = false;
@@ -64,26 +65,35 @@ pub const State = struct {
             cancelled = cancelled or target.result.status == .cancelled or target.result.status == .timed_out;
         }
         const palette = @import("app_theme.zig").current();
-        header.setStyleInline(cx.allocator, .{ .background = (if (all_succeeded) palette.ok else if (unknown) palette.warn else if (cancelled) palette.fg_3 else palette.danger).withAlpha(20) });
+        header.setStyleInline(cx.allocator, .{ .background = palette.surface_1 });
         self.status_icon = try ui.iconTint(cx, if (all_succeeded) ui.icons.check else if (unknown) ui.icons.get("circle-help").? else if (cancelled) ui.icons.get("square").? else ui.icons.get("circle-alert").?, if (all_succeeded) palette.ok else if (unknown) palette.warn else palette.fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
         self.disclosure_icon = try ui.iconTint(cx, ui.icons.chevron_down, palette.fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
-        self.disclosure_icon.?.setDisplay(.flex);
-        try header.appendChild(cx.allocator, self.status_icon.?);
+        self.disclosure_icon.?.setOpacityRaw(0);
+        self.status_icon.?.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 4 }, .top = .{ .px = 4 } } });
+        self.disclosure_icon.?.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 4 }, .top = .{ .px = 4 } } });
+        try disclosure.appendChild(cx.allocator, self.status_icon.?);
         try disclosure.appendChild(cx.allocator, self.disclosure_icon.?);
-        ui.hooks.setHoverHandler(disclosure, true, cx.on(State, self, hoverDisclosure));
-        ui.hooks.setHoverHandler(disclosure, false, cx.on(State, self, leaveDisclosure));
+        const hovered = try ui.hooks.useHover(scope, header);
+        const focused = try ui.hooks.useFocusState(scope, cx, header);
+        try scope.createEffect(.{ .hovered = hovered, .focused = focused.visible, .state = self }, struct {
+            fn run(ctx: anytype) void {
+                if (ctx.hovered.get() or ctx.focused.get()) ctx.state.hoverDisclosure() else ctx.state.leaveDisclosure();
+            }
+        }.run);
         try header.appendChild(cx.allocator, disclosure);
         const title = try ui.textStyled(cx, S.title, toolTitle(record.name));
         title.setStyleInline(cx.allocator, S.headerTitle(cx.tokens));
         title.meta.ownership.meta.test_id = "ai.tool.result.title";
         try header.appendChild(cx.allocator, title);
         var summary: [256]u8 = undefined;
-        const status = try ui.textStyled(cx, S.targetText, record.summary(&summary));
+        const projection = if (record.decision) |approved| std.fmt.bufPrint(&summary, "{s} · {s}", .{ if (approved) "已批准" else "已拒绝", record.command }) catch record.command else record.command;
+        const status = try ui.text(cx, projection, .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = palette.fg_2, .text_overflow = .ellipsis });
         status.setStyleInline(cx.allocator, S.headerSummary(cx.tokens));
         status.meta.ownership.meta.test_id = "ai.tool.result.status";
         try header.appendChild(cx.allocator, status);
         var elapsed_ms: u64 = 0;
         for (record.targets) |target| elapsed_ms +|= target.result.elapsed_ms;
+        elapsed_ms = record.total_elapsed_ms orelse elapsed_ms;
         var elapsed_buf: [32]u8 = undefined;
         const elapsed = if (elapsed_ms == 0) "—" else if (elapsed_ms < 1000) try std.fmt.bufPrint(&elapsed_buf, "{d}ms", .{elapsed_ms}) else try std.fmt.bufPrint(&elapsed_buf, "{d:.1}s", .{@as(f64, @floatFromInt(elapsed_ms)) / 1000});
         const elapsed_node = try ui.textStyled(cx, S.elapsed, elapsed);
@@ -184,11 +194,12 @@ pub const State = struct {
         self.copy_stderr_button = copy_stderr;
         copy_stderr.meta.ownership.meta.test_id = "ai.tool.result.copy_stderr";
         try self.footer.appendChild(cx.allocator, copy_stderr);
+        _ = ui.clickable(header, cx.on(State, self, toggle));
         try self.select(record.selected);
         self.applyExpanded();
         return self;
     }
-    fn appendImage(self: *State, reference: @import("../ai/image_attachments.zig").ContentRef, app: ?*@import("zenit_app").App) !void {
+    pub fn appendImage(self: *State, reference: @import("../ai/image_attachments.zig").ContentRef, app: ?*@import("zenit_app").App) !void {
         const content = reference.content() orelse return error.EmptyAttachmentResult;
         const preview = try self.scope.createState(ImagePreview, .{ .app = app, .reference = reference.retain() });
         try self.scope.onCleanup(ImagePreview, preview, ImagePreview.cleanup);
@@ -268,13 +279,13 @@ pub const State = struct {
         self.root.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (self.record.expanded) 216 else 32 } });
     }
     fn hoverDisclosure(self: *State) void {
-        self.status_icon.?.setDisplay(.flex);
-        self.disclosure_icon.?.setDisplay(.flex);
+        self.status_icon.?.setOpacityRaw(0);
+        self.disclosure_icon.?.setOpacityRaw(1);
         self.cx.requestRedraw();
     }
     fn leaveDisclosure(self: *State) void {
-        self.status_icon.?.setDisplay(.flex);
-        self.disclosure_icon.?.setDisplay(.flex);
+        self.status_icon.?.setOpacityRaw(1);
+        self.disclosure_icon.?.setOpacityRaw(0);
         self.cx.requestRedraw();
     }
     fn toggle(self: *State) void {

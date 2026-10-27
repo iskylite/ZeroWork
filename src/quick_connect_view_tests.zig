@@ -319,3 +319,17 @@ test "quick connect native theme material changes preserve active draft and sele
     }
     try std.testing.expectEqual(@as(usize, 0), probe.saved_count);
 }
+
+test "quick connect initial empty state distinguishes absent saved hosts from failed search" {
+    var probe: Probe = .{};
+    const h = try H.init(&probe);
+    defer h.deinit();
+    try h.view.update(2, &.{});
+    h.frames();
+    try std.testing.expectEqualStrings("还没有保存的主机", h.view.empty_title.getText().?.content);
+    try std.testing.expect(h.view.clear.style.display == .none);
+    h.query("missing");
+    try std.testing.expectEqualStrings("未找到匹配的主机", h.view.empty_title.getText().?.content);
+    try std.testing.expect(h.view.clear.style.display == .flex);
+    try std.testing.expectEqual(@as(usize, 0), probe.saved_count + probe.temporary_count);
+}

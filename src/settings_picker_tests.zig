@@ -152,3 +152,31 @@ test "short picker scroll exposes final choice and numeric input receives focus"
     }
     try std.testing.expect(cx.focus_manager.getFocused() == numeric.input_node.?);
 }
+
+test "built-in terminal types share picker choices and custom TERM is an explicit declaration" {
+    const choices = picker.choices(.{ .section = "ssh", .key = "term" });
+    const builtins = @import("vt/terminal_type.zig").builtin;
+    try std.testing.expectEqual(builtins.len, choices.len);
+    for (builtins, choices) |entry, choice| try std.testing.expectEqualStrings(entry.name, choice.value);
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    const root = try ui.box(cx, .{}, .{});
+    cx.root = root;
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    var controller = try Controller.init(std.testing.allocator, .{});
+    defer controller.deinit();
+    var context: u8 = 0;
+    const anchor = try ui.box(cx, .{}, .{});
+    try root.appendChild(cx.allocator, anchor);
+    const mounted = try picker.mount(cx, scope, root, anchor, &controller, .{ .section = "ssh", .key = "term" }, .{ .context = &context, .committed = call, .dismiss = call, .choose_directory = dir });
+    try root.appendChild(cx.allocator, mounted.root);
+    var notes: usize = 0;
+    for (mounted.body.content.children.items) |node| if (node.meta.ownership.meta.test_id) |id| {
+        if (std.mem.eql(u8, id, "settings.term.custom.note")) notes += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 1), notes);
+    try picker.commit(&controller, .{ .section = "ssh", .key = "term" }, "screen-256color");
+    try std.testing.expectEqualStrings("screen-256color", controller.model.value.ssh.term);
+    try std.testing.expectEqual(.custom, @import("vt/terminal_type.zig").classify(controller.model.value.ssh.term));
+}

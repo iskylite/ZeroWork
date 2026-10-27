@@ -318,16 +318,14 @@ test "AI composer usage and ring reflect only provided measurements and source l
     f.click(f.view.buttons[4]);
     const menu = find(f.cx.root.?, "ai.usage.menu").?;
     try std.testing.expectEqual(@as(f32, 344), menu.globalRect().w);
-    // The current compaction layout increased the base height from 232 to 268.
-    // Base 268 + one usage part 24 + the redaction row 20 = 312.
-    try std.testing.expectEqual(@as(f32, 312), menu.globalRect().h);
-    const status = find(menu, "ai.usage.compaction.status").?.globalRect();
+    try std.testing.expectEqual(@as(f32, 142), menu.globalRect().h);
+    try std.testing.expect(find(menu, "ai.usage.compaction.status") == null);
+    const track = find(menu, "ai.usage.track").?.globalRect();
     const action_button = find(menu, "ai.usage.compaction.start").?.globalRect();
-    const bounds = menu.globalRect();
-    try std.testing.expectEqual(@as(f32, 84), status.h);
-    try std.testing.expect(status.y >= bounds.y + 14);
-    try std.testing.expect(status.y + status.h <= action_button.y);
-    try std.testing.expect(action_button.y + action_button.h <= bounds.y + bounds.h - 14);
+    try std.testing.expectEqual(@as(f32, 24), action_button.w);
+    try std.testing.expectEqual(@as(f32, 24), action_button.h);
+    try std.testing.expectApproxEqAbs(track.x + track.w + 8, action_button.x, 0.1);
+    try std.testing.expectApproxEqAbs(track.y + track.h / 2, action_button.y + action_button.h / 2, 0.1);
     var found = false;
     for (f.cx.display_list.items.items) |item| if (item == .arc and item.arc.header.node_id == f.view.ring.id and ui.Color.eql(item.arc.color, Styles.theme.current().accent)) {
         found = true;
@@ -520,9 +518,7 @@ test "AI composer context compaction emits captured start and cancel with acknow
     try f.view.update(snapshot);
     f.settle();
     f.click(f.view.buttons[4]);
-    const status_card = find(f.cx.root.?, "ai.usage.compaction.status").?;
-    try std.testing.expectEqual(@as(f32, 314), status_card.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 84), status_card.globalRect().h);
+    try std.testing.expect(find(f.cx.root.?, "ai.usage.compaction.status") == null);
     f.enter(find(f.cx.root.?, "ai.usage.compaction.start").?);
     try std.testing.expectEqual(@as(usize, 1), f.calls);
     try std.testing.expect(f.last.?.action == .compact_context);

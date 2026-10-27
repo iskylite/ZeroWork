@@ -24,20 +24,20 @@ fn inputPresentation(key: Key, label: []const u8) struct { label: []const u8, un
 pub fn sectionHeader(cx: *ui.Cx, scope: *ui.Scope, result: ui.widgets.AccordionItemResult, icon: ui.SvgAsset, expanded: bool, summary: []const u8, id: []const u8) !*ui.Node {
     result.item.setStyleInline(cx.allocator, S.sectionState(expanded));
     result.item.setBorderWidth(0);
-    result.header.setStyleInline(cx.allocator, S.summaryHeader(summary.len != 0));
+    result.header.setStyleInline(cx.allocator, S.summaryHeader(expanded, summary.len != 0));
     result.header.setBorderWidth(0);
 
     result.header.removeChild(result.chevron);
     result.header.removeChild(result.title);
-    try result.header.appendChild(cx.allocator, try ui.iconTintStyled(cx, icon, S.theme.current().fg_2, S.sectionIcon(undefined)));
+    try result.header.appendChild(cx.allocator, try ui.iconTintStyled(cx, icon, S.theme.current().accent_ink, S.sectionIcon(undefined)));
     const heading = try ui.boxStyled(cx, S.sectionHeading, .{});
     try result.header.appendChild(cx.allocator, heading);
     result.title.setStyleInline(cx.allocator, S.sectionTitle(undefined));
     if (result.title.getText()) |old| {
         var text = old;
-        text.font_size = 13;
-        text.font_weight = 650;
-        text.line_height = 20.0 / 13.0;
+        text.font_size = 14;
+        text.font_weight = 700;
+        text.line_height = 20.0 / 14.0;
         text.color = S.theme.current().fg_1;
         result.title.setText(text);
     }
@@ -45,7 +45,7 @@ pub fn sectionHeader(cx: *ui.Cx, scope: *ui.Scope, result: ui.widgets.AccordionI
     const summary_node = try ui.textStyled(cx, S.sectionSummary, try owned(scope, summary));
     summary_node.style.width = .fill();
     summary_node.setStyleInline(cx.allocator, .{ .min_width = 0 });
-    summary_node.setDisplay(if (summary.len != 0) .flex else .none);
+    summary_node.setDisplay(if (!expanded and summary.len != 0) .flex else .none);
     summary_node.meta.ownership.meta.test_id = try stableId(scope, id, ".summary");
     try heading.appendChild(cx.allocator, summary_node);
     result.chevron.setStyleInline(cx.allocator, S.sectionChevron(undefined));
@@ -197,8 +197,8 @@ pub const Section = struct {
         const text = if (self.summary) |render| render(self.page.bound.controller.model.value, &buffer) catch self.description else self.description;
         self.summary_node.setTextContent(self.page.cx.allocator, text) catch {};
         const expanded = self.expanded.peek();
-        self.summary_node.setDisplay(if (text.len != 0) .flex else .none);
-        self.header.setStyleInline(self.page.cx.allocator, S.summaryHeader(text.len != 0));
+        self.summary_node.setDisplay(if (!expanded and text.len != 0) .flex else .none);
+        self.header.setStyleInline(self.page.cx.allocator, S.summaryHeader(expanded, text.len != 0));
         self.root.setStyleInline(self.page.cx.allocator, S.sectionState(expanded));
         self.root.setBorderWidth(0);
         self.header.setBorderWidth(0);
@@ -346,12 +346,27 @@ pub const Section = struct {
         if (!self.matchesField(label, "", "")) return;
         const row = try plainRow(self.page.cx, label);
         var style = S.value(undefined);
-        style.wrap = .word;
+        const is_path = std.mem.startsWith(u8, value, "/") or std.mem.startsWith(u8, value, "~/");
+        style.wrap = if (is_path) .none else .word;
+        style.text_overflow = if (is_path) .ellipsis else .clip;
         style.text_align = .end;
         const text = try ui.text(self.page.cx, try owned(self.page.bound.scope, value), style);
         text.setStyleInline(self.page.cx.allocator, .{ .width = .{ .px = 220 }, .flex_shrink = 0, .min_width = 0 });
         try self.page.fixed_controls.append(self.page.bound.scope.allocator, text);
-        try row.appendChild(self.page.cx.allocator, text);
+        if (is_path) {
+            const tip = try ui.widgets.Tooltip(.{ .text = try owned(self.page.bound.scope, value), .width = @as(f32, S.geometry.help_width), .wrap = .char, .open_delay_ms = 450, .background = S.theme.current().overlay, .text_color = S.theme.current().fg_1 }).mount(self.page.bound.scope, self.page.cx);
+            tip.trigger.setFocusable(true);
+            tip.trigger.behavior.interaction.a11y = .{ .label = try owned(self.page.bound.scope, value) };
+            const focus = try self.page.bound.scope.createState(HintFocus, .{ .open = tip.open.? });
+            tip.trigger.behavior.events.on_focus = .{ .callback = HintFocus.focus, .context = focus };
+            tip.trigger.behavior.events.on_blur = .{ .callback = HintFocus.blur, .context = focus };
+            try self.page.bound.registerTooltip(tip.open.?);
+            const path_id = try stableId(self.page.bound.scope, "settings.path.", label);
+            tip.trigger.meta.ownership.meta.test_id = path_id;
+            tip.content.meta.ownership.meta.test_id = try stableId(self.page.bound.scope, path_id, ".tooltip");
+            try tip.trigger.appendChild(self.page.cx.allocator, text);
+            try row.appendChild(self.page.cx.allocator, tip.wrapper);
+        } else try row.appendChild(self.page.cx.allocator, text);
         try self.body.appendChild(self.page.cx.allocator, row);
     }
 };
@@ -387,11 +402,12 @@ const Field = struct {
         self.root.meta.ownership.meta.test_id = try stableId(page.bound.scope, "settings.row.", key.key);
         self.error_label.meta.ownership.meta.test_id = try stableId(page.bound.scope, "settings.error.", key.key);
         const labels = try ui.boxStyled(page.cx, S.fieldLabel, .{});
-        const title = try ui.textStyled(page.cx, S.label, label);
-        title.style.width = .fill();
-        title.style.flex = 1;
-        try labels.appendChild(page.cx.allocator, title);
-        if (help.len != 0) {
+        const critical = std.mem.eql(u8, key.key, "redact_ip") or std.mem.eql(u8, key.key, "buffer_input") or std.mem.eql(u8, key.key, "socks_bind") or std.mem.eql(u8, key.key, "permission_mode");
+        const heading = try ui.box(page.cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 4, .min_width = 0 }, .{});
+        try heading.appendChild(page.cx.allocator, try ui.textStyled(page.cx, S.label, label));
+        if (help.len != 0 and !critical) try heading.appendChild(page.cx.allocator, try helpButton(page, key, help));
+        try labels.appendChild(page.cx.allocator, heading);
+        if (help.len != 0 and critical) {
             const detail = try ui.textStyled(page.cx, S.sectionSummary, try owned(page.bound.scope, help));
             detail.style.width = .fill();
             detail.setStyleInline(page.cx.allocator, .{ .max_width = 360 });
@@ -508,28 +524,42 @@ const Help = struct {
     }
 };
 fn helpButton(page: *Page, key: Key, text: []const u8) !*ui.Node {
-    const open = try page.bound.scope.createSignal(bool, false);
-    const tip = try ui.widgets.Tooltip(.{ .text = text, .open = open, .position = .top, .open_delay_ms = 450, .background = S.theme.current().overlay, .text_color = S.theme.current().fg_1, .font_size = 10.5 }).mount(page.bound.scope, page.cx);
-    tip.content.setStyleInline(page.cx.allocator, S.fieldHelp(undefined));
-    tip.content.meta.ownership.meta.test_id = try stableId(page.bound.scope, "settings.help.content.", key.key);
-    for (tip.content.children.items) |label| if (label.getText()) |old| {
-        var props = old;
-        props.wrap = .word;
-        props.line_height = 16.0 / 10.5;
-        label.setText(props);
-        label.style.width = .fill();
-    };
-    const node = try ui.widgets.Button(.{ .icon_asset = ui.icons.circle_help, .icon_only = true, .icon_size = @as(f32, 16), .a11y_label = text, .variant = .ghost, .disabled = page.bound.controller.state() == .saving, .base_style = S.fieldHelpButton(), .hover_style = S.buttonHover() }).mount(page.bound.scope, page.cx);
-    node.meta.ownership.meta.test_id = try stableId(page.bound.scope, "settings.help.", key.key);
-    const focus = try page.bound.scope.allocator.create(Help);
-    focus.* = .{ .page = page, .open = open };
-    try page.bound.scope.onCleanup(Help, focus, Help.cleanup);
-    node.behavior.events.on_focus = .{ .callback = Help.focus, .context = focus };
-    node.behavior.events.on_blur = .{ .callback = Help.blur, .context = focus };
-    try page.bound.registerTooltip(open);
-    try tip.trigger.appendChild(page.cx.allocator, node);
+    return inlineHint(page.cx, page.bound, try stableId(page.bound.scope, "settings.help.", key.key), text, ui.icons.circle_help, S.theme.current().fg_2);
+}
+
+/// Shared explanatory/state marker for all settings pages. Full text stays
+/// available on hover, focus and click; Escape is handled by the settings host.
+pub fn inlineHint(cx: *ui.Cx, bound: *binding.Binding, id: []const u8, text: []const u8, asset: ui.SvgAsset, color: ui.Color) !*ui.Node {
+    const open = try bound.scope.createSignal(bool, false);
+    const tip = try ui.widgets.Tooltip(.{ .text = try owned(bound.scope, text), .open = open, .width = @as(f32, S.geometry.help_width), .wrap = .word, .position = .top, .open_delay_ms = 450, .background = S.theme.current().overlay, .text_color = S.theme.current().fg_1, .font_size = 11 }).mount(bound.scope, cx);
+    tip.content.meta.ownership.meta.test_id = try stableId(bound.scope, id, ".tooltip");
+    const state = try bound.scope.createState(HintFocus, .{ .open = open });
+    var style = S.fieldHelpButton();
+    style.width = .{ .px = 20 };
+    style.height = .{ .px = 20 };
+    style.text_color = color;
+    const node = try ui.widgets.Button(.{ .icon_asset = asset, .icon_only = true, .icon_size = @as(f32, 14), .a11y_label = try owned(bound.scope, text), .variant = .ghost, .disabled = bound.controller.state() == .saving, .base_style = style, .hover_style = S.buttonHover(), .on_click = cx.on(HintFocus, state, HintFocus.show) }).mount(bound.scope, cx);
+    node.meta.ownership.meta.test_id = id;
+    node.behavior.events.on_focus = .{ .callback = HintFocus.focus, .context = state };
+    node.behavior.events.on_blur = .{ .callback = HintFocus.blur, .context = state };
+    try bound.registerTooltip(open);
+    try tip.trigger.appendChild(cx.allocator, node);
     return tip.wrapper;
 }
+const HintFocus = struct {
+    open: *ui.Signal(bool),
+    fn show(self: *@This()) void {
+        self.open.set(true);
+    }
+    fn focus(raw: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.open.set(true);
+    }
+    fn blur(raw: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.open.set(false);
+    }
+};
 const ActionClick = struct {
     page: *Page,
     action: binding.Action,
