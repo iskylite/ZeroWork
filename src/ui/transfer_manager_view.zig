@@ -716,7 +716,8 @@ pub const Panel = struct {
         self.counts_row.setDisplay(if (self.options.presentation != .session_tray and has_tasks) .flex else .none);
         self.footer_rate.setDisplay(if (has_tasks) .flex else .none);
         try self.footer_label.setTextContent(self.cx.allocator, scope_label);
-        self.footer_label.setDisplay(if (self.options.presentation != .session_tray) .flex else .none);
+        self.footer_label.setDisplay(.none);
+        self.foot.setDisplay(if (has_tasks and self.options.presentation != .session_tray) .flex else .none);
         try self.format(self.footer_rate, "{d} 进行中 · {d:.1} MiB/s · {d} 等待", .{ self.counts.active, @as(f64, @floatFromInt(self.counts.speed_bps)) / 1048576, self.counts.waiting });
         self.search_node.setDisplay(if (self.search_visible) .flex else .none);
         self.filters_node.setDisplay(if (self.filter_visible) .flex else .none);

@@ -85,8 +85,8 @@ test "transfer projection global popover stays in current Cx hides without nativ
     try std.testing.expectApproxEqAbs(@as(f32, 272), bounds.h, 0.01);
     try std.testing.expectApproxEqAbs(trigger.y + trigger.h + 8, bounds.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 12), 1440 - bounds.x - bounds.w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 134), p.list.container.globalRect().y - bounds.y, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 84), p.list.container.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 96) + @import("ui/workspace_tab_styles.zig").height, p.list.container.globalRect().y - bounds.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 122) - @import("ui/workspace_tab_styles.zig").height, p.list.container.globalRect().h, 0.01);
     try std.testing.expect(p.foot.style.display != .none);
     try std.testing.expect(text(p.head, "传输任务") != null);
     try std.testing.expect(text(p.head, "本会话传输") == null);
@@ -254,8 +254,8 @@ test "transfer projection exact window and session geometry uses actual widgets"
     h.frames();
     try std.testing.expectApproxEqAbs(@as(f32, 840), p.root.globalRect().w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 578), p.root.globalRect().h, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 134), p.list.container.globalRect().y - p.root.globalRect().y, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 390), p.list.container.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 96) + @import("ui/workspace_tab_styles.zig").height, p.list.container.globalRect().y - p.root.globalRect().y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 428) - @import("ui/workspace_tab_styles.zig").height, p.list.container.globalRect().h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 530), p.foot.globalRect().y - p.root.globalRect().y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 76), id(p.root, "transfer.task").?.globalRect().h, 0.01);
     try std.testing.expectEqual(@as(@TypeOf(p.notice.parent.?.style.display), .none), p.notice.parent.?.style.display);
@@ -263,11 +263,11 @@ test "transfer projection exact window and session geometry uses actual widgets"
     h.frames();
     try std.testing.expectEqual(@as(@TypeOf(p.notice.parent.?.style.display), .flex), p.notice.parent.?.style.display);
     try std.testing.expectEqualStrings("原会话已关闭，等待重新绑定", p.notice.getText().?.content);
-    try std.testing.expectApproxEqAbs(@as(f32, 170), p.list.container.globalRect().y - p.root.globalRect().y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 132) + @import("ui/workspace_tab_styles.zig").height, p.list.container.globalRect().y - p.root.globalRect().y, 0.01);
     try p.update(.{ .revision = 3, .rows = &.{row(1, 101, .running)} });
     h.frames();
     try std.testing.expectEqual(@as(@TypeOf(p.notice.parent.?.style.display), .none), p.notice.parent.?.style.display);
-    try std.testing.expectApproxEqAbs(@as(f32, 134), p.list.container.globalRect().y - p.root.globalRect().y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 96) + @import("ui/workspace_tab_styles.zig").height, p.list.container.globalRect().y - p.root.globalRect().y, 0.01);
     click(h, id(p.root, "transfer.window.minimize").?);
     try std.testing.expectEqual(V.WindowAction.minimize, c.window.?);
     click(h, id(p.root, "transfer.window.close").?);
