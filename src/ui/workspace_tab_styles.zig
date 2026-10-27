@@ -68,7 +68,7 @@ pub fn tuneInput(input: *ui.widgets.input.InputResult) void {
 // Figma Local Bridge 236:547754: anchored 320x172 editor, header36,
 // content at12,40, input at0,21, footer at0,89.
 pub fn renameDialog(has_error: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = rename_width }, .height = .{ .px = rename_height + @as(f32, if (has_error) 24 else 0) }, .padding = ui.Padding.all(0), .background = theme.current().overlay, .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 12, .blur = 24, .color = theme.current().shadow } };
+    return .{ .width = .{ .px = rename_width }, .height = .{ .px = rename_height + @as(f32, if (has_error) 24 else 0) }, .padding = ui.Padding.all(0), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 12, .blur = 24, .color = theme.current().shadow } };
 }
 pub fn renameBody() ui.BoxStyle {
     return .{ .padding = ui.Padding.all(0), .width = .fill(), .height = .fill(), .direction = .column, .gap = 0 };

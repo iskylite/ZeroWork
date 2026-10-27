@@ -16,6 +16,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, _: *ui.Node, _: *ui.Node, map: *keys.
     self.portaled = modal.portaled;
     self.root.meta.ownership.meta.test_id = "settings.keybinding.overlay";
     modal.dialog.meta.ownership.meta.test_id = "settings.keybinding.dialog";
+    try theme.bindMaterial(cx, scope, modal.dialog, "overlay");
     if (modal.dialog.behavior.interaction.a11y) |*a| a.label = "录制快捷键";
     modal.dialog.setStyleInline(cx.allocator, .{ .padding = .{}, .gap = 0, .border = .{ .width = 0, .radius = 14 } });
     modal.body.setStyleInline(cx.allocator, .{ .padding = .{}, .gap = 0, .width = .fill(), .min_height = 0, .direction = .column });
@@ -39,6 +40,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, _: *ui.Node, _: *ui.Node, map: *keys.
     try body.content.appendChild(cx.allocator, try ui.text(cx, actionName(action), .{ .font_size = 12, .line_height = 20.0 / 12.0, .color = c.fg_2 }));
     const well = try ui.box(cx, .{ .width = .fill(), .padding = .{ .top = 24, .right = 24, .bottom = 24, .left = 24 }, .align_items = .center, .justify = .center, .background = c.well, .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
     well.meta.ownership.meta.test_id = "settings.keybinding.capture";
+    try theme.bindMaterial(cx, scope, well, "well");
     self.capture = try ui.text(cx, "请按下快捷键组合", .{ .font_size = 20, .color = c.fg_1 });
     self.capture.meta.ownership.meta.test_id = "settings.keybinding.recorded";
     try well.appendChild(cx.allocator, self.capture);

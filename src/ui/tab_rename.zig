@@ -56,6 +56,7 @@ pub const Editor = struct {
         self.overlay = popup.wrapper;
         self.dialog.setStyleInline(cx.allocator, styles.renameDialog(self.has_error));
         self.dialog.meta.ownership.meta.test_id = "tabs.rename";
+        try theme.bindMaterial(cx, scope, self.dialog, "overlay");
         self.body.setStyleInline(cx.allocator, styles.renameBody());
         const header = try ui.box(cx, styles.renameHeader(), .{});
         try header.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.pencil, c.accent, styles.renameIcon()));

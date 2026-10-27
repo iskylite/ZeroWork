@@ -92,7 +92,7 @@ body:has(.api-demo-bar:not([style*="display: none"])) .settings-window{height:mi
 
 /* V3 review: exact parent 860×480 inset, stable logical typography. */
 #settings-preview-size{font-size:11px;height:28px;padding:3px 7px;background:var(--well);border:0;border-radius:7px;color:var(--muted)}body.compact-review .settings-window{width:828px;min-width:0;height:432px;min-height:0}.compact-review .settings-layout{gap:10px}.compact-review .settings-layout>aside{width:168px}.compact-review .field-control{width:210px}.compact-review .field-control select,.compact-review .field-control .unit-input{width:210px}.compact-review .field-control:has(.range-control){width:250px}.compact-review .range-control{width:250px}.compact-review .range-control .unit-input{width:80px}.compact-review .settings-window .search{width:245px}.compact-review .model-dialog{max-height:calc(var(--app-height) - 16px)}
-.modal,.choice-menu,.app-tooltip,.toast{background:var(--overlay);backdrop-filter:blur(var(--material-blur,0px))}input[aria-invalid=true],.field-control input.invalid{box-shadow:none;background:color-mix(in srgb,var(--danger-base) 10%,var(--well))}
+.modal,.choice-menu,.app-tooltip,.toast{background:var(--overlay);backdrop-filter:blur(var(--overlay-blur,12px))}input[aria-invalid=true],.field-control input.invalid{box-shadow:none;background:color-mix(in srgb,var(--danger-base) 10%,var(--well))}
 
 .switch{width:30px;height:18px;padding:2px}.switch span{width:14px;height:14px}.switch.on span{transform:translateX(12px)}.switch:focus-visible{box-shadow:none}.card-header>.header-switch{top:calc(50% - 9px)}.icon-btn{width:24px;height:24px;min-height:24px}.icon-btn svg{width:14px;height:14px}
 

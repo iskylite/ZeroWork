@@ -33,6 +33,7 @@ pub const View = struct {
         self.chrome = popup.chrome;
         self.chrome.meta.ownership.meta.test_id = "tabs.color";
         self.chrome.setStyleInline(cx.allocator, panel());
+        try theme.bindMaterial(cx, popup.scope, self.chrome, "overlay");
         const body = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 12 }, .{});
         try popup.content.appendChild(cx.allocator, body);
         const heading = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 26 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .top = 2 }, .flex_shrink = 0 }, .{});
@@ -109,5 +110,5 @@ fn find(node: *ui.Node, id: u32) ?*ui.Node {
 // Zenit paints the 1px border without adding it to Yoga padding. HTML uses
 // border-box: 14px padding + 1px border, so native content starts at 15px.
 fn panel() ui.BoxStyle {
-    return .{ .width = .{ .px = 344 }, .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(15), .background = theme.current().overlay, .border = .{ .width = 1, .color = theme.current().border, .radius = 11 }, .shadow = .{ .blur = 24, .offset_y = 8, .color = theme.current().shadow } };
+    return .{ .width = .{ .px = 344 }, .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(15), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 1, .color = theme.current().border, .radius = 11 }, .shadow = .{ .blur = 24, .offset_y = 8, .color = theme.current().shadow } };
 }

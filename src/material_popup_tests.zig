@@ -281,3 +281,64 @@ test "global material component roles preserve theme action hues and material al
         }
     }
 }
+
+fn findTestId(node: *ui.Node, id: []const u8) ?*ui.Node {
+    if (node.meta.ownership.meta.test_id) |value| if (std.mem.eql(u8, value, id)) return node;
+    for (node.children.items) |child| if (findTestId(child, id)) |result| return result;
+    return null;
+}
+
+test "material retained tab and recorder overlays update alpha and blur independently" {
+    const saved = theme.materialParameters();
+    const old_name = theme.currentName();
+    defer {
+        _ = theme.setMaterialParameters(saved.transparency, saved.blur);
+        theme.select(old_name);
+    }
+    theme.select(.dark);
+    _ = theme.setMaterialParameters(0, 0);
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(1440, 900);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const publication = try cx.bindState(shell.ThemePublication, .{});
+    publication.publish(cx, theme.widgetTheme(.dark));
+    const Hooks = struct {
+        fn color(_: *anyopaque, _: u64, _: u32) bool {
+            return true;
+        }
+        fn rename(_: *anyopaque, _: u64, _: []const u8) bool {
+            return true;
+        }
+        fn cancel(_: *anyopaque, _: u64) void {}
+        fn changed(_: *anyopaque) void {}
+    };
+    var context: u8 = 0;
+    const color = try @import("ui/tab_color_picker.zig").View.mount(cx, scope, .{ .context = &context, .commit = Hooks.color });
+    try cx.root.?.appendChild(a, color.root);
+    const rename = try @import("ui/tab_rename.zig").Editor.mount(cx, scope, 1, "Session", .{ .context = &context, .commit = Hooks.rename, .cancel = Hooks.cancel });
+    var map: @import("config/keybindings.zig").Map = .{};
+    const recorder = try @import("config/keybinding_picker.zig").mount(cx, scope, cx.root.?, cx.root.?, &map, "new_tab", .{ .context = &context, .changed = Hooks.changed, .dismiss = Hooks.changed });
+    if (!recorder.portaled) try cx.root.?.appendChild(a, recorder.root);
+    const dialog = findTestId(cx.root.?, "settings.keybinding.dialog").?;
+    const well = findTestId(cx.root.?, "settings.keybinding.capture").?;
+    const label = findTestId(cx.root.?, "settings.keybinding.recorded").?;
+    const ink = label.getText().?.color;
+    const ids = .{ color.chrome.id, rename.dialog.id, dialog.id };
+    // Include blur-only publication and all alpha endpoints, retaining the nodes.
+    for ([_]f32{ 0, 0, 0, 25, 75, 100, 0 }, [_]f32{ 0, 8, 24, 24, 24, 96, 0 }) |t, b| {
+        _ = theme.setMaterialParameters(t, b);
+        publication.publish(cx, theme.widgetTheme(theme.currentName()));
+        _ = frame(cx);
+        for ([_]*ui.Node{ color.chrome, rename.dialog, dialog }) |node| {
+            try std.testing.expectEqual(theme.current().overlay, node.getBackground());
+            try std.testing.expectEqual(@max(12, b), node.style.backdrop_blur());
+        }
+        try std.testing.expectEqual(theme.current().well, well.getBackground());
+        try std.testing.expectEqual(ink, label.getText().?.color);
+        try std.testing.expectEqual(ids, .{ color.chrome.id, rename.dialog.id, dialog.id });
+    }
+}

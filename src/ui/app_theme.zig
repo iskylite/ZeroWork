@@ -99,6 +99,18 @@ pub fn materialAlpha(comptime role: []const u8) u8 {
     // Apply background alpha only; text, icons and subtree opacity stay intact.
     return @intFromFloat(@round(255 * (1 - transparency)));
 }
+/// Keep retained surface paint in sync with the same publication as widget tokens.
+/// Only overlay surfaces filter the backdrop; foreground opacity is untouched.
+pub fn bindMaterial(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, comptime role: []const u8) !void {
+    try scope.createEffect(.{ .cx = cx, .node = node, .publication = try cx.themeSignal(scope) }, struct {
+        fn paint(ctx: anytype) void {
+            _ = ctx.publication.get();
+            ctx.node.setBackground(@field(current(), role));
+            if (comptime std.mem.eql(u8, role, "overlay")) ctx.node.setStyleInline(ctx.cx.allocator, .{ .glass = overlayGlass() });
+        }
+    }.paint);
+}
+
 /// Blur already-painted window content behind overlays, never their foreground.
 /// Even when the configured background blur is zero, use 12 logical px to suppress
 /// lower-layer text ghosting. This samples app content, not the desktop.

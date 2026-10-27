@@ -1273,6 +1273,7 @@ pub const Workspace = struct {
             const tooltip = try ui.widgets.Tooltip(.{ .text = full_name, .position = .bottom_start, .open_delay_ms = 450, .background = app_theme.current().overlay, .text_color = app_theme.current().fg_1, .font_size = 11 }).mount(scope, self.cx);
             tooltip.content.meta.ownership.meta.test_id = "tabs.tooltip";
             tooltip.content.setStyleInline(self.allocator, tab_styles.tooltip());
+            try app_theme.bindMaterial(self.cx, scope, tooltip.content, "overlay");
             for (tooltip.content.children.items) |label| if (label.getText()) |old| {
                 var text_style = old;
                 text_style.wrap = .word;
@@ -2031,8 +2032,9 @@ pub const Workspace = struct {
             header_style.margin = .{};
             header_style.padding = .{ .left = 11, .right = 11, .top = 5, .bottom = 5 };
             header_style.gap = 8;
-            header_style.background = app_theme.current().surface_1.withAlpha(179);
+            header_style.background = app_theme.current().surface_1;
             const header = try ui.box(self.cx, header_style, .{});
+            try app_theme.bindMaterial(self.cx, scope, header, "surface_1");
             header.meta.ownership.meta.test_id = "groups.pane.header";
             var grip_style = group_styles.control();
             grip_style.width = .{ .px = 13 };
@@ -2803,7 +2805,8 @@ pub const Workspace = struct {
             .width = .{ .px = 430 },
             .direction = .column,
             .gap = 10,
-            .background = ui.Color.rgba(248, 255, 251, 242),
+            .background = app_theme.current().overlay,
+            .glass = app_theme.overlayGlass(),
             .padding = .{ .top = 22, .bottom = 22, .left = 26, .right = 26 },
             .border = .{ .width = 0, .color = ui.Color.rgba(19, 69, 246, 26), .radius = 12 },
             .shadow = .{ .blur = 44, .offset_y = 16, .color = ui.Color.rgba(15, 23, 42, 36) },
@@ -2855,6 +2858,7 @@ pub const Workspace = struct {
         try self.terminal_area.appendChild(cx.allocator, scrim);
         self.host_key_root = scrim;
         self.host_key_card = card;
+        try app_theme.bindMaterial(cx, self.scope, card, "overlay");
         self.host_key_detail = detail;
         self.host_key_changed_button = changed_button;
     }
@@ -3209,7 +3213,7 @@ pub const Workspace = struct {
 
     /// One-shot mount of the close-confirmation overlay onto terminal_area:
     /// an absolute, centered, high-z scrim with a translucent background
-    /// plus the white rounded card. Hidden right away; showing it later only
+    /// plus the themed overlay card. Hidden right away; showing it later only
     /// rewrites the dynamic texts and flips display.
     fn mountCloseConfirm(self: *Workspace) !void {
         if (self.confirm_root != null) return;
@@ -3232,7 +3236,8 @@ pub const Workspace = struct {
         const card = try ui.box(cx, .{
             .width = .{ .px = 420 },
             .direction = .column,
-            .background = .WHITE,
+            .background = app_theme.current().overlay,
+            .glass = app_theme.overlayGlass(),
             .border = .{ .width = 0, .color = p.border, .radius = 12 },
             .padding = ui.Padding.all(20),
             .shadow = .{ .blur = 28, .offset_y = 10, .color = ui.Color.rgba(15, 23, 42, 70) },
@@ -3353,6 +3358,7 @@ pub const Workspace = struct {
         try self.terminal_area.appendChild(allocator, scrim);
         self.confirm_root = scrim;
         self.confirm_card = card;
+        try app_theme.bindMaterial(cx, self.scope, card, "overlay");
         self.confirm_title = title;
     }
 
@@ -5986,4 +5992,56 @@ test "group session creation new and duplicate preserve group without duplicate 
     try std.testing.expectEqual(created.tab_id, workspace.model.active.?);
     workspace.command_output = null;
     workspace.status_feedback = null;
+}
+
+test "material workspace confirmation cards retain overlay alpha and blur across publication" {
+    const a = std.testing.allocator;
+    const previous = app_theme.materialParameters();
+    const old_name = app_theme.currentName();
+    defer {
+        _ = app_theme.setMaterialParameters(previous.transparency, previous.blur);
+        app_theme.select(old_name);
+    }
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(1440, 900);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    cx.root = root;
+    const config: config_mod.Config = .{};
+    var workspace: Workspace = .{
+        .allocator = a,
+        .cx = cx,
+        .scope = scope,
+        .io = std.testing.io,
+        .app_config = &config,
+        .palette = Palette.fromTheme(),
+        .registry = .{ .arena = std.heap.ArenaAllocator.init(a), .hosts = &.{} },
+        .hosts_path = "",
+        .sidebar_list = root,
+        .tab_bar = root,
+        .model = .{ .allocator = a, .window = @fromBackingInt(1), .workspace = @fromBackingInt(1) },
+        .terminal_area = root,
+        .empty_state = root,
+    };
+    defer workspace.registry.arena.deinit();
+    defer workspace.confirm_risk_rows.deinit(a);
+    try workspace.mountCloseConfirm();
+    try workspace.mountHostKeyConfirm();
+    const ids = .{ workspace.confirm_card.?.id, workspace.host_key_card.?.id };
+    const publication = try cx.bindState(@import("shell_styles.zig").ThemePublication, .{});
+    for ([_]app_theme.Name{ .dark, .light, .sauber }) |name| {
+        app_theme.select(name);
+        for ([_]f32{ 0, 25, 75, 100, 0 }, [_]f32{ 0, 8, 24, 96, 0 }) |t, b| {
+            _ = app_theme.setMaterialParameters(t, b);
+            publication.publish(cx, app_theme.widgetTheme(name));
+            _ = cx.render();
+            for ([_]*ui.Node{ workspace.confirm_card.?, workspace.host_key_card.? }) |card| {
+                try std.testing.expectEqual(app_theme.current().overlay, card.getBackground());
+                try std.testing.expectEqual(@max(12, b), card.style.backdrop_blur());
+            }
+            try std.testing.expectEqual(ids, .{ workspace.confirm_card.?.id, workspace.host_key_card.?.id });
+        }
+    }
 }
