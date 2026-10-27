@@ -8747,7 +8747,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     empty_guide.meta.ownership.meta.test_id = "workspace.empty";
     const empty_icon_box = try ui.boxStyled(cx, shell_styles.emptyIcon, .{});
     empty_icon_box.meta.ownership.meta.test_id = "workspace.empty.icon";
-    const empty_icon = try ui.box(cx, .{ .width = .{ .px = 56 }, .height = .{ .px = 56 }, .flex_shrink = 0 }, .{});
+    const empty_icon = try ui.box(cx, .{ .width = .{ .px = 88 }, .height = .{ .px = 88 }, .flex_shrink = 0 }, .{});
     try empty_icon_box.appendChild(cx.allocator, empty_icon);
     try empty_guide.appendChild(cx.allocator, empty_icon_box);
     const empty_title = try ui.textStyled(cx, shell_styles.emptyTitle, "打开终端，开始工作");

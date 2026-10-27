@@ -217,7 +217,7 @@ pub fn emptyDescription(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 1.65, .color = theme.current().fg_2 };
 }
 pub fn emptyIcon(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = 56 }, .height = .{ .px = 56 }, .margin = .{ .bottom = 3 }, .flex_shrink = 0, .align_items = .center, .justify = .center };
+    return .{ .width = .{ .px = 88 }, .height = .{ .px = 88 }, .margin = .{ .bottom = 3 }, .flex_shrink = 0, .align_items = .center, .justify = .center };
 }
 pub fn emptyButton(primary: bool) ui.BoxStyle {
     const c = theme.current();
