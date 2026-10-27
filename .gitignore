@@ -91,3 +91,14 @@ playwright-report/
 /docs/UI_V3/AUDIT.md
 /docs/UI_V3/REVIEW_20261026.md
 /docs/UI_V3/REVIEW_FOLLOWUP_20261026.md
+
+# Local temporary files and historical verification summaries.
+/tmp/
+/temp/
+*.tmp
+*.bak
+/docs/DEVELOPMENT/UI_BASELINE.json
+/docs/DEVELOPMENT/REPOSITORY_CLEANUP.md
+/docs/DEVELOPMENT/UI_INTEGRATION_PROGRESS.md
+/docs/UI_V3/AI_REPLICA_COVERAGE.md
+/docs/UI_V3/COVERAGE.md
