@@ -17,11 +17,17 @@ const Authority = struct {
         return .{ .context = self, .registration = .{ .plugin_id = .ssh, .workspace_kind = .terminal, .services = plugins.builtin_descriptors[1].services }, .vtable = &.{ .create = create, .cancel = cancel, .close = close, .release_stale = stale } };
     }
     fn create(_: *anyopaque, _: sessions.CreateRequest) !void {}
-    fn cancel(_: *anyopaque, _: sessions.OperationKey) sessions.CloseReceipt { return .released; }
+    fn cancel(_: *anyopaque, _: sessions.OperationKey) sessions.CloseReceipt {
+        return .released;
+    }
     fn close(raw: *anyopaque, _: sessions.SessionHandle, _: sessions.OperationKey) !sessions.CloseReceipt {
         const self: *Authority = @ptrCast(@alignCast(raw));
         if (self.thread) |thread| thread.stopAndJoin();
-        return if (self.worker) |worker| switch (worker.releaseConnection()) { .released => .released, .awaiting => .awaiting, .unknown => .unknown } else .released;
+        return if (self.worker) |worker| switch (worker.releaseConnection()) {
+            .released => .released,
+            .awaiting => .awaiting,
+            .unknown => .unknown,
+        } else .released;
     }
     fn stale(_: *anyopaque, _: sessions.SessionHandle, _: sessions.OperationKey) void {}
     fn service(raw: *anyopaque, binding: sessions.ServiceHandle, exit: ?usize) !*Forward.Service {
@@ -40,11 +46,20 @@ const Trust = struct {
         return if (std.mem.eql(u8, host, "127.0.0.1") and std.mem.eql(u8, value.fingerprint, self.fingerprint)) .trust_once else .reject_unknown;
     }
 };
-fn pause() void { var empty: [1]std.c.pollfd = undefined; _ = std.c.poll(&empty, 0, 2); }
-fn exists(io: std.Io, path: []const u8) bool { std.Io.Dir.cwd().access(io, path, .{}) catch return false; return true; }
-fn write(io: std.Io, path: []const u8, value: []const u8) !void { try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = value }); }
+fn pause() void {
+    var empty: [1]std.c.pollfd = undefined;
+    _ = std.c.poll(&empty, 0, 2);
+}
+fn exists(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
+}
+fn write(io: std.Io, path: []const u8, value: []const u8) !void {
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = value });
+}
 pub fn main(init: std.process.Init) !void {
-    var args = init.minimal.args.iterate(); _ = args.next();
+    var args = init.minimal.args.iterate();
+    _ = args.next();
     const mode = args.next() orelse return error.MissingMode;
     const controls = args.next() orelse return error.MissingControls;
     const fingerprint = args.next() orelse return error.MissingFingerprint;
@@ -63,7 +78,8 @@ pub fn main(init: std.process.Init) !void {
     if (!std.fs.path.isAbsolute(controls)) return error.OwnedControlsRequired;
     const reconnect = std.mem.eql(u8, mode, "reconnect");
     const parent_close = std.mem.eql(u8, mode, "parent-close") or std.mem.eql(u8, mode, "parent-open-close");
-    var arena = std.heap.ArenaAllocator.init(init.gpa); defer arena.deinit();
+    var arena = std.heap.ArenaAllocator.init(init.gpa);
+    defer arena.deinit();
     const a = arena.allocator();
     const ready_path = try std.fs.path.join(a, &.{ controls, "ready.json" });
     const pause_path = try std.fs.path.join(a, &.{ controls, "pause" });
@@ -71,10 +87,13 @@ pub fn main(init: std.process.Init) !void {
     const resume_path = try std.fs.path.join(a, &.{ controls, "resume" });
     const resumed_path = try std.fs.path.join(a, &.{ controls, "resumed.json" });
     const stop_path = try std.fs.path.join(a, &.{ controls, "stop" });
-    var library = try ssh.Library.init(); defer library.deinit();
-    var store = try @import("proto/ssh/host_key_store.zig").HostKeyStore.load(init.io, std.Io.Dir.cwd(), init.gpa, try std.fs.path.join(a, &.{ controls, "known_hosts" })); defer store.deinit();
+    var library = try ssh.Library.init();
+    defer library.deinit();
+    var store = try @import("proto/ssh/host_key_store.zig").HostKeyStore.load(init.io, std.Io.Dir.cwd(), init.gpa, try std.fs.path.join(a, &.{ controls, "known_hosts" }));
+    defer store.deinit();
     var authority: Authority = .{};
-    var domain = try sessions.SessionHost.init(init.gpa, &.{authority.interface()}); defer domain.deinit();
+    var domain = try sessions.SessionHost.init(init.gpa, &.{authority.interface()});
+    defer domain.deinit();
     const target: sessions.AttachmentTarget = .{ .window_id = @fromBackingInt(1), .workspace_id = @fromBackingInt(1) };
     var route_spec: [2]sessions.RouteHop = undefined;
     for (0..jump_count) |index| route_spec[index] = .{ .display_name = if (index == 0) "owned first jump" else "owned second jump", .endpoint = .{ .host = "127.0.0.1", .port = jump_ports[index], .user = "shared-fixture" }, .auth = .{ .password = "shared-secret" } };
@@ -93,7 +112,8 @@ pub fn main(init: std.process.Init) !void {
     }
     const worker = try Worker.init(init.gpa, &library, target_options, .{ .connect_timeout_ms = 3000, .keepalive_sec = 0, .auto_reconnect = false, .jump_options = if (jump_count == 0) &.{} else route_options[0 .. jump_count + 1] });
     const thread = try WorkerThread.start(init.gpa, worker);
-    authority.worker = worker; authority.thread = thread;
+    authority.worker = worker;
+    authority.thread = thread;
     var worker_disposed = false;
     defer if (!worker_disposed) {
         for (worker.forward_services[0..worker.forward_count]) |service| if (service) |value| value.requestClose();
@@ -107,7 +127,10 @@ pub fn main(init: std.process.Init) !void {
     var backend_disposed = false;
     defer if (!backend_disposed) {
         const cleanup_until = clock.monotonicNs() + 3 * std.time.ns_per_s;
-        while (backend.shutdownStep() == .awaiting and clock.monotonicNs() < cleanup_until) { _ = backend.safeTick() catch false; pause(); }
+        while (backend.shutdownStep() == .awaiting and clock.monotonicNs() < cleanup_until) {
+            _ = backend.safeTick() catch false;
+            pause();
+        }
         if (backend.shutdownStep() != .released) {
             thread.stopAndJoin();
             _ = worker.releaseConnection();
@@ -120,13 +143,22 @@ pub fn main(init: std.process.Init) !void {
     var frame_generation: u64 = 0;
     var shell_bytes: usize = 0;
     var heartbeats: usize = 0;
-    var ready = false; var paused = false; var resumed = false; var granted = false; var stopping = false;
-    var local_port: u16 = 0; var heartbeat_at = clock.monotonicNs(); var stop_started: i128 = 0;
+    var ready = false;
+    var paused = false;
+    var resumed = false;
+    var granted = false;
+    var stopping = false;
+    var local_port: u16 = 0;
+    var heartbeat_at = clock.monotonicNs();
+    var stop_started: i128 = 0;
     var close_key: ?sessions.OperationKey = null;
     const deadline = clock.monotonicNs() + 20 * std.time.ns_per_s;
     while (clock.monotonicNs() < deadline) {
         _ = try backend.safeTick();
-        if (try worker.text.take(frame_generation, frames)) |frame| { frame_generation = frame.generation; shell_bytes += frame.text.len; }
+        if (try worker.text.take(frame_generation, frames)) |frame| {
+            frame_generation = frame.generation;
+            shell_bytes += frame.text.len;
+        }
         const runtime = thread.reconnectSnapshot();
         if (ready and reconnect and !paused and exists(init.io, pause_path) and runtime.cleanup == .released and (runtime.phase == .waiting or runtime.phase == .ended)) {
             if (!try domain.transportLost(accepted.handle, accepted.operation, .{ .domain = .transport, .code = "owned_disconnect", .cleanup = .released, .safe_message = "owned peer closed its transport" })) return error.LossReceiptRejected;
@@ -149,7 +181,10 @@ pub fn main(init: std.process.Init) !void {
                 worker.pushInput("TTY_HEARTBEAT\r\n") catch |err| {
                     // The real attached receipt schedules replay's input gate
                     // in the next owner tick. Application input waits for it.
-                    if (err == error.DisconnectedApplicationInput) { pause(); continue; }
+                    if (err == error.DisconnectedApplicationInput) {
+                        pause();
+                        continue;
+                    }
                     return err;
                 };
                 heartbeats += 1;
@@ -163,7 +198,8 @@ pub fn main(init: std.process.Init) !void {
                     ready = true;
                 }
                 if (ready and !stopping and exists(init.io, stop_path)) {
-                    stopping = true; stop_started = clock.monotonicNs();
+                    stopping = true;
+                    stop_started = clock.monotonicNs();
                     if (parent_close) close_key = try domain.requestClose(accepted.handle, .{ .release_forwards = .{ .context = &authority, .run = Authority.releaseForwards } }) else _ = backend.requestStop(accepted.handle);
                 }
                 if (stopping and value.cleanup == .released) {
@@ -181,9 +217,12 @@ pub fn main(init: std.process.Init) !void {
     if (parent_close) {
         if (domain.queryState(accepted.handle).?.lifecycle != .closed) return error.ParentClosePending;
         _ = try backend.safeTick();
-        try backend.deinit(); backend_disposed = true;
-        thread.deinit(); worker_disposed = true;
-        authority.worker = null; authority.thread = null;
+        try backend.deinit();
+        backend_disposed = true;
+        thread.deinit();
+        worker_disposed = true;
+        authority.worker = null;
+        authority.thread = null;
         try write(init.io, try std.fs.path.join(a, &.{ controls, "runner-report.json" }), try std.fmt.allocPrint(a, "{{\"real_worker_thread\":true,\"real_shared_host\":true,\"same_native_session\":true,\"parent_close_under_withheld_ack\":{},\"parent_close_under_withheld_open\":{},\"tty_after_forward_stop\":false,\"active\":{d},\"bytes_up\":{d},\"bytes_down\":{d},\"stop_ms\":{d},\"forward_cleanup_released\":true,\"parent_cleanup_released\":true}}\n", .{ std.mem.eql(u8, mode, "parent-close"), std.mem.eql(u8, mode, "parent-open-close"), final.stats.connections_active, final.stats.bytes_up, final.stats.bytes_down, stop_ms }));
         std.debug.print("PASS worker-parent-close withheld_ack=true cleanup=released\n", .{});
         return;
@@ -194,17 +233,23 @@ pub fn main(init: std.process.Init) !void {
     while (clock.monotonicNs() < tail_deadline) {
         if (try worker.text.take(frame_generation, frames)) |frame| {
             frame_generation = frame.generation;
-            if (std.mem.indexOf(u8, frame.text, "AFTER_SOCKS_STOP") != null) { marker_seen = true; break; }
+            if (std.mem.indexOf(u8, frame.text, "AFTER_SOCKS_STOP") != null) {
+                marker_seen = true;
+                break;
+            }
         }
         pause();
     }
     if (!marker_seen or thread.hasFailed()) return error.ParentPtyNotUsable;
     _ = try backend.safeTick();
-    try backend.deinit(); backend_disposed = true;
+    try backend.deinit();
+    backend_disposed = true;
     _ = try domain.requestClose(accepted.handle, .{});
     if (domain.queryState(accepted.handle).?.lifecycle != .closed) return error.ParentClosePending;
-    thread.deinit(); worker_disposed = true;
-    authority.worker = null; authority.thread = null;
+    thread.deinit();
+    worker_disposed = true;
+    authority.worker = null;
+    authority.thread = null;
     const report = try std.fmt.allocPrint(a, "{{\"real_worker_thread\":true,\"real_shared_host\":true,\"jump_count\":{d},\"exit_index\":{d},\"same_native_session\":true,\"original_domain_forward_binding\":true,\"controller_thread_separate\":true,\"tty_bytes_during_forward\":{d},\"tty_heartbeat_writes\":{d},\"tty_after_forward_stop\":true,\"pause_and_resume\":{},\"local_port\":{d},\"port_preserved\":{},\"active\":{d},\"bytes_up\":{d},\"bytes_down\":{d},\"stop_ms\":{d},\"forward_cleanup_released\":true,\"parent_cleanup_released\":true}}\n", .{ jump_count, exit_index orelse jump_count, shell_bytes, heartbeats, resumed, local_port, resumed, final.stats.connections_active, final.stats.bytes_up, final.stats.bytes_down, stop_ms });
     try write(init.io, try std.fs.path.join(a, &.{ controls, "runner-report.json" }), report);
     std.debug.print("PASS worker-shared-forward {s} same_session=true tty_after_stop=true cleanup=released\n", .{mode});

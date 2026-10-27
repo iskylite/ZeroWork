@@ -1,4 +1,4 @@
-//! Figma 415:1898195/415:1898241: 32 header +150 body +34 fixed actions.
+//! Step cards: 32px header, content-fit body capped at 150px, 34px result actions.
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
@@ -6,7 +6,7 @@ pub fn list(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .padding = .{}, .flex_shrink = 0 };
 }
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 216 }, .direction = .column, .flex_shrink = 0, .background = theme.current().surface_1, .border = .{ .width = 0, .radius = 9 }, .overflow = .hidden };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .flex_shrink = 0, .background = theme.current().surface_1, .border = .{ .width = 0, .radius = 9 }, .overflow = .hidden };
 }
 pub fn header(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .justify = .start, .padding = .{ .left = 10, .right = 12 }, .gap = 6, .flex_shrink = 0, .background = theme.current().surface_1, .border = .{ .radius = 11 } };
@@ -15,7 +15,7 @@ pub fn headerButton() ButtonStyle {
     return .{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 10, .right = 12 }, .gap = 6, .background = ui.Color.TRANSPARENT, .corner_radius = 9, .flex_shrink = 0 };
 }
 pub fn body(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 150 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{ .max = 150 } }, .flex_shrink = 0 };
 }
 pub fn content(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .left = 12, .right = 12, .top = 4, .bottom = 6 }, .gap = 4, .flex_shrink = 0 };
@@ -37,6 +37,13 @@ pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
 }
 pub fn output(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 16.0 / 11.0, .wrap = .none, .use_monospace_font = true, .color = theme.current().fg_1 };
+}
+// Preserve explicit output newlines. Width is measured from the longest line,
+// so long lines keep horizontal scrolling instead of wrapping to the card.
+pub fn multilineOutput(tokens: *const ui.ThemeTokens) ui.TextStyle {
+    var style = output(tokens);
+    style.wrap = .word;
+    return style;
 }
 pub fn button(size: f32) ButtonStyle {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .flex_shrink = 0, .corner_radius = 6, .background = ui.Color.TRANSPARENT };

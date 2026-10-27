@@ -55,7 +55,7 @@ try{
  await click('wizard.auth');await click('wizard.auth.key');await click('wizard.key_path');await click('wizard.name');await visible('wizard.key_path.error');await capture('04-key-error');
  await click('wizard.auth');await click('wizard.auth.password');assert(!(await current('wizard.key_path.error')));
  await click('wizard.next.identity');await click('wizard.next.route');await capture('05-review-after-recovery');
- await click('wizard.cancel');await click('wizard.discard.confirm');await closed();await click('sidebar.empty.new');
+ await click('wizard.cancel');await closed();await click('sidebar.empty.new');
  await resizeWindow(860,480);await click('wizard.name');await key('return');
  await visible('wizard.name.error');await visible('wizard.host.error');await visible('wizard.user.error');await visible('wizard.step.identity.check');await capture('06-errors-compact');
  const dialog=await visible('wizard.dialog'),footer=await visible('wizard.footer');assert(footer.rect.y+footer.rect.h<=480);

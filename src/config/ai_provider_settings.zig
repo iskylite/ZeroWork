@@ -9,6 +9,7 @@ const controls = @import("settings_parts/settings_controls.zig");
 const S = @import("settings_styles.zig");
 const ModelEditor = @import("ai_model_editor.zig").Editor;
 const Discovery = @import("../ai/model_discovery.zig").Service;
+const Brand = @import("../ui/ai_brand.zig");
 const DeleteDialog = @import("provider_delete_dialog.zig");
 
 pub const Hooks = struct {
@@ -391,12 +392,8 @@ pub const ProviderView = struct {
         result.header.removeChild(result.chevron);
         result.chevron.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
         try result.header.appendChild(self.cx.allocator, result.chevron);
-        const logo = try ui.box(self.cx, .{ .width = .{ .px = 30 }, .height = .{ .px = 30 }, .align_items = .center, .justify = .center, .background = S.theme.current().selection, .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
-        try logo.appendChild(self.cx.allocator, try ui.text(self.cx, switch (p.kind) {
-            .anthropic => "A",
-            .ollama => "O",
-            .openai_compat => "AI",
-        }, .{ .font_size = 11, .font_weight = 600, .color = S.theme.current().accent_ink }));
+        const logo = try Brand.mount(self.cx, Brand.provider(displayName(p), p.endpoint), displayName(p), 30);
+        logo.meta.ownership.meta.test_id = try self.id(i, null, "logo");
         try result.header.appendChild(self.cx.allocator, logo);
         const heading = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 3 }, .{});
         if (result.title.getText()) |old| {
@@ -534,12 +531,18 @@ pub const ProviderView = struct {
         const model = self.controller.model.value.ai.providers[i].models[j];
         const root = try ui.box(self.cx, S.modelListRow(), .{});
         root.meta.ownership.meta.test_id = try self.id(i, j, "card");
+        const logo = try Brand.mount(self.cx, Brand.model(model.id), Brand.basename(model.id), 30);
+        logo.meta.ownership.meta.test_id = try self.id(i, j, "logo");
+        try root.appendChild(self.cx.allocator, logo);
+        const info = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 2 }, .{});
+        try root.appendChild(self.cx.allocator, info);
         const model_name = try controls.owned(self.render_scope.?, model.id);
         const edit = try self.click(.edit_model, i, j);
         var name_style = S.textButton();
         name_style.width = .fill();
         name_style.flex = 0;
-        name_style.min_width = 56;
+        name_style.min_width = 0;
+        name_style.height = .{ .px = 18 };
         name_style.padding = .{};
         name_style.justify = .start;
         name_style.background = ui.Color.TRANSPARENT;
@@ -552,12 +555,14 @@ pub const ProviderView = struct {
         try name.appendChild(self.cx.allocator, name_text);
         const name_tip = try self.tooltip(model_name);
         name_tip.content.meta.ownership.meta.test_id = try self.id(i, j, "name.tooltip");
-        name_tip.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .fit = .{} }, .flex = 0, .min_width = 56, .max_width = 224, .overflow_hidden = true });
-        try ModelNameClamp.mount(self.cx, self.render_scope.?, root, name_tip.wrapper, model_name);
+        name_tip.wrapper.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .height = .{ .px = 18 }, .overflow_hidden = true });
         name_tip.trigger.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try name_tip.trigger.appendChild(self.cx.allocator, name);
         try self.bindTipFocus(name, name_tip.open.?);
-        try root.appendChild(self.cx.allocator, name_tip.wrapper);
+        try info.appendChild(self.cx.allocator, name_tip.wrapper);
+        const metadata = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 16 }, .direction = .row, .align_items = .center, .gap = 8, .min_width = 0, .overflow_hidden = true }, .{});
+        metadata.meta.ownership.meta.test_id = try self.id(i, j, "metadata");
+        try info.appendChild(self.cx.allocator, metadata);
         var buffer: [32]u8 = undefined;
         const context_tip = try self.tooltip(try numberText(model.context_window, &buffer));
         const window = try ui.text(self.cx, try controls.owned(self.render_scope.?, try contextText(model.context_window, &buffer)), .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = S.theme.current().fg_2, .text_overflow = .ellipsis });
@@ -565,10 +570,10 @@ pub const ProviderView = struct {
         context_tip.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .fit = .{} }, .min_width = 0 });
         context_tip.trigger.setStyleInline(self.cx.allocator, .{ .width = .{ .fit = .{} }, .min_width = 0 });
         try context_tip.trigger.appendChild(self.cx.allocator, window);
-        try root.appendChild(self.cx.allocator, context_tip.wrapper);
-        if (model.reasoning) try root.appendChild(self.cx.allocator, try self.capabilityIcon("brain", "支持推理"));
-        if (model.vision) try root.appendChild(self.cx.allocator, try self.capabilityIcon("image", "支持图片输入"));
-        try root.appendChild(self.cx.allocator, try ui.spacer(self.cx));
+        try metadata.appendChild(self.cx.allocator, context_tip.wrapper);
+        if (model.reasoning) try metadata.appendChild(self.cx.allocator, try ui.text(self.cx, "推理", .{ .font_size = 10.5, .color = S.theme.current().fg_2, .line_height = 16.0 / 10.5 }));
+        if (model.vision) try metadata.appendChild(self.cx.allocator, try ui.text(self.cx, "识图", .{ .font_size = 10.5, .color = S.theme.current().fg_2, .line_height = 16.0 / 10.5 }));
+        if (!model.reasoning and !model.vision) try metadata.appendChild(self.cx.allocator, try ui.text(self.cx, "仅文本", .{ .font_size = 10.5, .color = S.theme.current().fg_2, .line_height = 16.0 / 10.5 }));
         try root.appendChild(self.cx.allocator, try self.iconButton(.default_model, i, j, ui.icons.star, if (model.default) "默认模型" else "设为默认模型", 28, model.default, model.default or !self.savedEligible(i, j)));
         try root.appendChild(self.cx.allocator, try self.iconButton(.edit_model, i, j, ui.icons.pencil, "编辑模型", 24, false, false));
         try root.appendChild(self.cx.allocator, try self.iconButton(.delete_model, i, j, ui.icons.trash_2, "删除模型前须选择默认替代项", 24, false, self.modelProtected(i, j)));
@@ -1140,31 +1145,6 @@ fn tuneProviderText(node: *ui.Node) void {
     for (node.children.items) |child| tuneProviderText(child);
 }
 
-const ModelNameClamp = struct {
-    cx: *ui.Cx,
-    scope: *ui.Scope,
-    row_node: *ui.Node,
-    name_node: *ui.Node,
-    natural_width: f32,
-    fn mount(cx: *ui.Cx, scope: *ui.Scope, row_node: *ui.Node, name_node: *ui.Node, text: []const u8) !void {
-        const self = try scope.allocator.create(ModelNameClamp);
-        self.* = .{ .cx = cx, .scope = scope, .row_node = row_node, .name_node = name_node, .natural_width = @max(56, @ceil(cx.text.measureTextWidth(text, 12, 500, false)) + 2) };
-        try scope.onCleanup(ModelNameClamp, self, cleanup);
-        try cx.addAfterLayoutHook(self, layout);
-    }
-    fn cleanup(self: *ModelNameClamp) void {
-        self.cx.removeAfterLayoutHook(self);
-        self.scope.allocator.destroy(self);
-    }
-    fn layout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
-        const self: *ModelNameClamp = @ptrCast(@alignCast(raw));
-        const width = @min(self.natural_width, @max(56, (self.row_node.globalRect().w - 20) * 0.4));
-        if (self.name_node.style.width == .px and @abs(self.name_node.style.width.px - width) < 0.1) return .done;
-        self.name_node.setStyleInline(self.cx.allocator, .{ .width = .{ .px = width }, .max_width = width });
-        return .needs_layout;
-    }
-};
-
 fn providerBackground(open: bool) ui.Color {
     const c = S.theme.current();
     if (!open) return c.well;
@@ -1195,9 +1175,9 @@ fn numberText(value: u32, buffer: []u8) ![]const u8 {
 }
 
 fn contextText(value: u32, buffer: []u8) ![]const u8 {
-    if (value >= 1_000_000) return std.fmt.bufPrint(buffer, "{d:.1}M tokens", .{@as(f64, @floatFromInt(value)) / 1_000_000});
-    if (value >= 1000) return std.fmt.bufPrint(buffer, "{d:.0}K tokens", .{@as(f64, @floatFromInt(value)) / 1000});
-    return std.fmt.bufPrint(buffer, "{d} tokens", .{value});
+    if (value >= 1_000_000) return std.fmt.bufPrint(buffer, "{d:.1}M 上下文", .{@as(f64, @floatFromInt(value)) / 1_000_000});
+    if (value >= 1000) return std.fmt.bufPrint(buffer, "{d:.0}K 上下文", .{@as(f64, @floatFromInt(value)) / 1000});
+    return std.fmt.bufPrint(buffer, "{d} 上下文", .{value});
 }
 
 test "global material expanded provider preserves mixed surface alpha" {

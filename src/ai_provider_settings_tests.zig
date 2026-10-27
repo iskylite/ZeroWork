@@ -109,7 +109,7 @@ test "native provider cards use V3 header field grid and a single model row" {
     try std.testing.expectApproxEqAbs(@as(f32, 580), first.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 64), header.h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 64), second.h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 44), model.h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 60), model.h, 0.1);
     const name = byId(f.mounted.root, "settings.ai.provider.0.name").?.globalRect();
     const kind = byId(f.mounted.root, "settings.ai.provider.0.kind").?.globalRect();
     const endpoint = byId(f.mounted.root, "settings.ai.provider.0.endpoint").?.globalRect();

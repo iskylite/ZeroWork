@@ -560,7 +560,14 @@ fn modeCard(self: *View, parent: *ui.Node, title: []const u8, detail: []const u8
     const node = try button(self, parent, title, action, id, 140);
     const highlight = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .right = .{ .px = 0 }, .top = .{ .px = 0 }, .bottom = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .background = S.theme.current().selection, .border = .{ .radius = 9 }, .hit_behavior = .pass_through }, .{});
     try node.appendChild(self.cx.allocator, highlight);
-    self.mode_highlights[switch (action) { .mode_socks5 => @as(usize, 0), .mode_local => 1, .mode_remote => 2, else => unreachable }] = highlight;
+    self.mode_highlights[
+        switch (action) {
+            .mode_socks5 => @as(usize, 0),
+            .mode_local => 1,
+            .mode_remote => 2,
+            else => unreachable,
+        }
+    ] = highlight;
     const content = try ui.box(self.cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .gap = 4, .min_width = 0 }, .{});
     const name = try ui.text(self.cx, title, S.text(11, 700, false));
     name.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 } });

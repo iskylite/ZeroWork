@@ -55,7 +55,10 @@ const Receipt = struct {
 test "global appearance retained local close follows hidden and visible theme publication without resolving" {
     const previous = theme.currentName();
     const material = theme.materialVisible();
-    defer { theme.select(previous); _ = theme.setMaterialVisible(material); }
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialVisible(material);
+    }
     theme.select(.dark);
     _ = theme.setMaterialVisible(false);
     const w = try Window.init();
@@ -94,7 +97,10 @@ test "global appearance retained local close follows hidden and visible theme pu
 test "global appearance transfer confirmation repaint keeps captured intent and edited options" {
     const previous = theme.currentName();
     const material = theme.materialVisible();
-    defer { theme.select(previous); _ = theme.setMaterialVisible(material); }
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialVisible(material);
+    }
     theme.select(.dark);
     _ = theme.setMaterialVisible(false);
     const w = try Window.init();
@@ -150,7 +156,10 @@ test "global appearance worker frame default text repaints while ANSI and archiv
     const Styled = @import("vt/text_projection_styled.zig");
     const previous = theme.currentName();
     const material = theme.materialVisible();
-    defer { theme.select(previous); _ = theme.setMaterialVisible(material); }
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialVisible(material);
+    }
     theme.select(.dark);
     _ = theme.setMaterialVisible(false);
     const w = try Window.init();

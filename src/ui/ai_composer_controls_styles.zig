@@ -54,9 +54,10 @@ pub fn chipLabel(kind: Kind) ui.BoxStyle {
 pub fn chipChevron(kind: Kind) ui.BoxStyle {
     return if (kind == .permission) slot(78, 6, 12, 12) else slot(if (kind == .effort) 62 else 170, 7, 10, 10);
 }
-pub fn modelVision() ui.BoxStyle {
-    return .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 };
+pub fn modelBrand() ui.BoxStyle {
+    return .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 };
 }
+
 fn slot(x: f32, y: f32, slot_width: f32, slot_height: f32) ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = x }, .top = .{ .px = y } }, .width = .{ .px = slot_width }, .height = .{ .px = slot_height }, .flex_shrink = 0, .min_width = 0 };
 }
@@ -215,7 +216,7 @@ pub fn naturalChip() ui.BoxStyle {
     return result;
 }
 pub fn compactModelWidth(model_width: f32, effort_width: f32, vision: bool) f32 {
-    return 32 + (if (vision) @as(f32, 16) else 0) + model_width + (if (effort_width > 0) effort_width + 4 else 0);
+    return 32 + (if (vision) @as(f32, 20) else 0) + model_width + (if (effort_width > 0) effort_width + 4 else 0);
 }
 pub fn compactModelLabel(width_value: f32, _: bool) ui.BoxStyle {
     return .{ .position = .relative, .inset = .{}, .width = .{ .px = width_value }, .height = .{ .px = 14 }, .max_width = 100, .min_width = 0, .overflow = .hidden, .flex_shrink = 1 };

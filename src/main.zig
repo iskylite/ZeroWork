@@ -1142,7 +1142,12 @@ const AiHost = struct {
         const controls = try self.selectedControls();
         var config = runtime.value;
         if (self.native_binding != null) {
-            if (try self.model_discovery.poll(config.ai, config.config_revision, @intCast(wallClockMsTransfer() / 1000))) self.composer_hash = null;
+            if (try self.model_discovery.poll(config.ai, config.config_revision, @intCast(wallClockMsTransfer() / 1000))) {
+                self.composer_hash = null;
+                // Discovery can make a configured model ready without a saved
+                // config revision. Rebuild the welcome state at the safe point too.
+                self.conversation_dirty = true;
+            }
             self.cx.scheduleRedrawAfterNs(if (self.model_discovery.busy()) 33 * 1000000 else @as(u64, @import("ai/model_catalog.zig").refresh_seconds) * 1000000000);
         }
         config.ai = self.effectiveAi();
@@ -1387,7 +1392,7 @@ const AiHost = struct {
         if (turn.thinking.items.len > 0) {
             const text = std.mem.trim(u8, turn.thinking.items, " \t\r\n");
             const last_line = if (std.mem.lastIndexOfScalar(u8, text, '\n')) |offset| text[offset + 1 ..] else text;
-            try parent.appendChild(self.allocator, try view.mount(self.cx, self.conversation_scope.?, .{ .title = "思考", .projection = last_line, .detail = text, .phase = if (turn.thinking_ended_ms != null or turn.ended_at_ms != null) .succeeded else .running, .elapsed_ms = (turn.thinking_ended_ms orelse now) -| (turn.thinking_started_ms orelse now), .expanded = &turn.thinking_expanded, .test_id = "ai.thinking", .on_toggle = self.cx.on(AiHost, self, pauseConversationFollow) }));
+            try parent.appendChild(self.allocator, try view.mount(self.cx, self.conversation_scope.?, .{ .title = "思考", .projection = last_line, .detail = text, .copy_detail = false, .phase = if (turn.thinking_ended_ms != null or turn.ended_at_ms != null) .succeeded else .running, .elapsed_ms = (turn.thinking_ended_ms orelse now) -| (turn.thinking_started_ms orelse now), .expanded = &turn.thinking_expanded, .test_id = "ai.thinking", .on_toggle = self.cx.on(AiHost, self, pauseConversationFollow) }));
         }
         for (turn.steps.items) |*step| {
             var found = false;
@@ -1611,6 +1616,11 @@ const AiHost = struct {
         var controls: @import("ai/assistant_store.zig").Controls = .{ .permission = current_controls.permission, .effort = current_controls.effort, .thinking = current_controls.thinking };
         defer controls.deinit(self.allocator);
         try controls.setModel(self.allocator, current_controls.model);
+        // Hover previews start with an unlisted conversation. Forking must
+        // retain its source in the list before selecting the new branch.
+        if (self.display_conversation) |id| if (self.assistant_states.?.find(id)) |source| {
+            source.listed = true;
+        };
         const saved = try self.assistant_states.?.create(owner);
         saved.controls = controls;
         controls = .{};
@@ -1907,14 +1917,14 @@ const AiHost = struct {
         if (self.currentScope() == null) return;
         self.syncOwner() catch return;
         if (!self.controller.model.visible) self.captureTerminalFocus();
+        if (self.display_conversation) |id| if (self.assistant_states) |*store| {
+            if (store.find(id)) |state| state.listed = true;
+        };
         if (self.dock.mode == .preview and self.controller.model.visible) {
             self.dock.pin();
             return;
         }
         self.dock.toggle();
-        if (self.display_conversation) |id| if (self.assistant_states) |*store| {
-            if (store.find(id)) |state| state.listed = true;
-        };
         if (self.controller.model.visible) {
             self.collapse();
             return;
@@ -6519,8 +6529,7 @@ const AppNavHost = struct {
                     if (ai_geometry_changed) card.markLayoutDirty();
                 }
                 if (ai.conversation_viewport) |viewport| {
-                    if (ai.sessions_view) |view| view.fitWithin(rect.height - 54 - composer_height - 96);
-                    const desired_height = @max(0, rect.height - 54 - composer_height - (if (ai.sessions_view) |view| view.height() else @as(f32, 0)));
+                    const desired_height = @max(0, rect.height - 54 - composer_height);
                     if (viewport.style.height != .px or @abs(viewport.style.height.px - desired_height) > 0.5) {
                         viewport.style.height = .{ .px = desired_height };
                         viewport.markLayoutDirty();
@@ -8481,7 +8490,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     }
 
     ai_host.sessions_view = try @import("ui/ai_sessions_view.zig").View.mount(cx, scope, ai_sessions, .{ .context = ai_host, .select = AiHost.selectConversation, .request_close = AiHost.requestConversationClose, .remove = AiHost.deleteConversation });
-    try ai_card_box.insertChildBefore(cx.allocator, ai_host.sessions_view.?.root, ai_scroll.container);
+    try ai_header.appendChild(cx.allocator, ai_host.sessions_view.?.root);
     ai_host.panel_hover = try ui.hooks.useHover(scope, ai_card_box);
     ai_card_box.behavior.events.on_event_capture = AiHost.panelCapture;
     ai_card_box.behavior.events.capture_context = ai_host;

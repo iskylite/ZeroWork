@@ -56,7 +56,7 @@ try{
  await edit('wizard.name','encoding-test');await edit('wizard.host','127.0.0.1');await edit('wizard.user','tester');
  await click('wizard.identity.toggle');await click('wizard.advanced.toggle');
  const before=await inputState('wizard.encoding');await edit('wizard.encoding','GB18030');
- assert.equal((await inputState('wizard.encoding')).buffer,'UTF-8');report.checks.push('UTF-8 readonly capability prevents unsupported edit');await cap('01-encoding-readonly');await resizeWindow(860,480);await cap('01b-encoding-compact');await resizeWindow(1440,900);await key('escape');await click('wizard.discard.confirm');
+ assert.equal((await inputState('wizard.encoding')).buffer,'UTF-8');report.checks.push('UTF-8 readonly capability prevents unsupported edit');await cap('01-encoding-readonly');await resizeWindow(860,480);await cap('01b-encoding-compact');await resizeWindow(1440,900);await key('escape');
  await click('workspace.empty.local');await visible('terminal.surface');await click('toolbar.ai');
  await submit('controlled first question');await approve(0);await recovery();assert.equal(await count(),1);await cap('02-recovery-original');
  // Retain a separate next draft and prove editing does not request or execute.

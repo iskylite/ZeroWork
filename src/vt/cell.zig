@@ -51,7 +51,7 @@ pub const Attr = enum(u4) {
 };
 
 pub fn attrMask(attr: Attr) u16 {
-    return @as(u16, 1) << @intFromEnum(attr);
+    return @as(u16, 1) << @backingInt(attr);
 }
 
 test "cell has exact stable sixteen byte layout" {

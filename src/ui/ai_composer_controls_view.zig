@@ -204,9 +204,8 @@ pub const View = struct {
     usage_body: *ui.Node = undefined,
     usage_scope: ?*ui.Scope = null,
     ring: *ui.Node = undefined,
-    model_vision: *ui.Node = undefined,
-    model_text_icon: *ui.Node = undefined,
-    model_vision_hint: ui.widgets.TooltipResult = undefined,
+    model_brand: *ui.Node = undefined,
+    model_brand_hash: ?u64 = null,
     focus_pending: ?S.Kind = null,
     colors: S.theme.Colors,
     last_error: ?anyerror = null,
@@ -255,20 +254,9 @@ pub const View = struct {
             if (index != 2) try button.appendChild(cx.allocator, self.icons[index]);
             if (index == 1 or index == 3 or index == 4) self.icons[index].setStyleInline(cx.allocator, S.chipIcon(@fromBackingInt(@intCast(index))));
             if (index == 2) {
-                self.model_vision_hint = try ui.widgets.Tooltip(.{ .text = "支持图片输入与识图" }).mount(scope, cx);
-                self.model_vision_hint.wrapper.setStyleInline(cx.allocator, S.modelVision());
-                self.model_vision_hint.trigger.setStyleInline(cx.allocator, S.visionTarget());
-                self.model_vision_hint.content.meta.ownership.meta.test_id = "ai.composer.model.vision.tooltip";
-                self.model_vision = try ui.iconTint(cx, ui.icons.get("image").?, S.theme.current().fg_3, S.icon(12));
-                self.model_vision.meta.ownership.meta.test_id = "ai.composer.model.vision";
-                try self.model_vision_hint.trigger.appendChild(cx.allocator, self.model_vision);
-                try button.appendChild(cx.allocator, self.model_vision_hint.wrapper);
-                self.model_text_icon = try ui.iconTint(cx, ui.icons.get("brain").?, S.theme.current().fg_3, S.icon(12));
-                self.model_text_icon.setStyleInline(cx.allocator, S.modelVision());
-                self.model_text_icon.meta.ownership.meta.test_id = "ai.composer.model.text";
-                self.model_text_icon.behavior.interaction.a11y = .{ .role = .img, .label = "仅文本输入" };
-                self.model_text_icon.setDisplay(.none);
-                try button.appendChild(cx.allocator, self.model_text_icon);
+                self.model_brand = try ui.box(cx, S.modelBrand(), .{});
+                self.model_brand.meta.ownership.meta.test_id = "ai.composer.model.logo";
+                try button.appendChild(cx.allocator, self.model_brand);
             }
             if (index == 1 or index == 2 or index == 3 or index == 4) {
                 const text = try self.label(button, if (index == 1) "执行权限" else if (index == 2) "未配置模型" else if (index == 3) "推理设置" else "—", S.text(10, 400, 14, true), S.chipLabel(@fromBackingInt(@intCast(index))));
@@ -436,6 +424,8 @@ pub const View = struct {
             row.meta.ownership.meta.test_id = "ai.model.provider";
             const collapsed = self.providerCollapsed(model.key.provider_id);
             try row.appendChild(cx.allocator, try ui.iconTint(cx, if (collapsed) ui.icons.chevron_right else ui.icons.chevron_down, S.theme.current().fg_2, S.icon(12)));
+            const brand = @import("ai_brand.zig");
+            try row.appendChild(cx.allocator, try brand.mount(cx, brand.provider(model.key.provider_id, ""), model.key.provider_id, 16));
             _ = try self.label(row, model.key.provider_id, S.text(10, 400, 12, true), S.flexibleLabel(12));
             return row;
         }
@@ -482,6 +472,10 @@ pub const View = struct {
             try marker.appendChild(cx.allocator, try ui.box(cx, S.modelMarkerDot(), .{}));
         }
         try button.appendChild(cx.allocator, marker);
+        const brand = @import("ai_brand.zig");
+        const logo = try brand.mount(cx, brand.model(id.peek()), brand.basename(id.peek()), 20);
+        logo.meta.ownership.meta.test_id = "ai.model.logo";
+        try button.appendChild(cx.allocator, logo);
         const name = try self.label(button, id.peek(), S.text(11, 400, 13, false), S.flexibleLabel(13));
         name.setTextColor(if (model.enabled) S.theme.current().fg_1 else S.theme.current().fg_3);
         var context_buffer: [32]u8 = undefined;
@@ -823,6 +817,23 @@ pub const View = struct {
         self.model_settings.setDisplay(if (!available and self.callbacks.open_settings != null) .flex else .none);
         try self.model_empty.setTextContent(self.cx.allocator, "暂无已配置模型");
     }
+    fn refreshModelBrand(self: *View, id: ?[]const u8) !void {
+        const brand = @import("ai_brand.zig");
+        self.model_brand.setDisplay(if (id != null) .flex else .none);
+        var hash = std.hash.Wyhash.init(0);
+        hash.update(id orelse "");
+        std.hash.autoHash(&hash, S.theme.current().fg_1);
+        std.hash.autoHash(&hash, S.theme.current().hover);
+        if (self.model_brand_hash == hash.final()) return;
+        const next = if (id) |name| try brand.mount(self.cx, brand.model(name), brand.basename(name), 16) else null;
+        while (self.model_brand.children.items.len > 0) {
+            const child = self.model_brand.children.items[0];
+            self.cx.detachChild(self.model_brand, child);
+            self.cx.destroyDetached(child);
+        }
+        if (next) |node| try self.model_brand.appendChild(self.cx.allocator, node);
+        self.model_brand_hash = hash.final();
+    }
     fn refresh(self: *View) !void {
         const colors = S.theme.current();
         const source = if (self.source) |*source| &source.value else null;
@@ -884,19 +895,13 @@ pub const View = struct {
             if (self.labels[index]) |label_node| label_node.setTextColor(if (self.disabled[index].peek()) colors.fg_3 else colors.fg_2);
         }
         for (self.chevrons) |icon_node| _ = icon_node.setTint(colors.fg_2);
-        const has_vision = current != null and current.?.vision;
-        self.model_vision_hint.wrapper.setDisplay(if (has_vision) .flex else .none);
-        if (!has_vision) if (self.model_vision_hint.open) |open| open.set(false);
-        self.model_text_icon.setDisplay(if (current != null and !has_vision) .flex else .none);
-        _ = self.model_text_icon.setTint(if (current != null and current.?.enabled) colors.fg_2 else colors.fg_3);
         const has_modality = current != null;
-        _ = self.model_vision.setTint(if (current != null and current.?.enabled) colors.fg_2 else colors.fg_3);
-        self.model_vision.behavior.interaction.a11y = .{ .role = .img, .label = "支持图片输入与识图" };
         const permission = if (source) |value| permissionLabel(value.permission) else "执行权限";
         try self.labels[1].?.setTextContent(self.cx.allocator, permission);
         if (self.buttons[1].behavior.interaction.a11y) |*attrs| attrs.label = self.labels[1].?.getText().?.content;
         setAsset(self.icons[1], if (source != null and source.?.permission == .auto) "shield-check" else "hand", 12, if (editable) colors.fg_2 else colors.fg_3);
         const full_model_name = if (current) |item| item.key.model_id else if (source) |value| if (value.current) |key| key.model_id else "未配置模型" else "未配置模型";
+        try self.refreshModelBrand(if (current) |item| item.key.model_id else null);
         var model_label_buffer: [512]u8 = undefined;
         var displayed_model_name = full_model_name;
         if (self.cx.text.measureTextWidth(full_model_name, 10, 400, false) > 100) {

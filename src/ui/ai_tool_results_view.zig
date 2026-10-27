@@ -100,7 +100,7 @@ pub const State = struct {
         elapsed_node.setStyleInline(cx.allocator, S.elapsedSlot(cx.tokens));
         elapsed_node.meta.ownership.meta.test_id = "ai.tool.result.elapsed";
         try header.appendChild(cx.allocator, elapsed_node);
-        const body = try ui.widgets.ScrollArea(.{ .direction = .vertical, .height = 150 }).mount(scope, cx);
+        const body = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
         self.body = body.container;
         self.body.setStyleInline(cx.allocator, S.body(cx.tokens));
         self.body.meta.ownership.meta.test_id = "ai.tool.result.details";
@@ -157,27 +157,27 @@ pub const State = struct {
         self.stdout_label = try ui.textStyled(cx, S.text, if (legacy) "标准输出" else "结果内容");
         self.stdout_label.?.meta.ownership.meta.test_id = "ai.tool.result.output_label";
         try body.content.appendChild(cx.allocator, self.stdout_label.?);
-        const stdout = try ui.widgets.ScrollArea(.{ .direction = .both, .height = 104, .rubber_band_x = false }).mount(scope, cx);
+        const stdout = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .rubber_band_x = false }).mount(scope, cx);
         self.stdout_scroll = stdout.state;
         self.stdout_viewport = stdout.container;
         stdout.container.setStyleInline(cx.allocator, S.outputViewport(cx.tokens));
         stdout.container.meta.ownership.meta.test_id = "ai.tool.result.stdout_scroll";
         stdout.content.setStyleInline(cx.allocator, S.outputContent(cx.tokens));
         try body.content.appendChild(cx.allocator, stdout.container);
-        self.stdout = try ui.textStyled(cx, S.output, "");
+        self.stdout = try ui.textStyled(cx, S.multilineOutput, "");
         self.stdout.meta.ownership.meta.test_id = "ai.tool.result.stdout";
         try stdout.content.appendChild(cx.allocator, self.stdout);
         self.stderr_label = try ui.textStyled(cx, S.text, if (legacy) "错误输出" else "错误详情");
         self.stderr_label.?.meta.ownership.meta.test_id = "ai.tool.result.error_label";
         try body.content.appendChild(cx.allocator, self.stderr_label.?);
-        const stderr = try ui.widgets.ScrollArea(.{ .direction = .both, .height = 104, .rubber_band_x = false }).mount(scope, cx);
+        const stderr = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .rubber_band_x = false }).mount(scope, cx);
         self.stderr_scroll = stderr.state;
         self.stderr_viewport = stderr.container;
         stderr.container.setStyleInline(cx.allocator, S.outputViewport(cx.tokens));
         stderr.container.meta.ownership.meta.test_id = "ai.tool.result.stderr_scroll";
         stderr.content.setStyleInline(cx.allocator, S.outputContent(cx.tokens));
         try body.content.appendChild(cx.allocator, stderr.container);
-        self.stderr = try ui.textStyled(cx, S.output, "");
+        self.stderr = try ui.textStyled(cx, S.multilineOutput, "");
         self.stderr.meta.ownership.meta.test_id = "ai.tool.result.stderr";
         try stderr.content.appendChild(cx.allocator, self.stderr);
         self.footer = try ui.boxStyled(cx, S.footer, .{});
@@ -261,8 +261,8 @@ pub const State = struct {
         self.copy_stderr_button.?.setDisplay(if (stderr.len == 0) .none else .flex);
         const out_lines = 1 + std.mem.count(u8, std.mem.trimEnd(u8, stdout, "\r\n"), "\n");
         const err_lines = 1 + std.mem.count(u8, std.mem.trimEnd(u8, stderr, "\r\n"), "\n");
-        self.stdout_viewport.?.setStyleInline(self.cx.allocator, .{ .height = .{ .px = @min(104, @as(f32, @floatFromInt(out_lines)) * 16 + 8) } });
-        self.stderr_viewport.?.setStyleInline(self.cx.allocator, .{ .height = .{ .px = @min(104, @as(f32, @floatFromInt(err_lines)) * 16 + 8) } });
+        self.stdout_viewport.?.setStyleInline(self.cx.allocator, .{ .height = .{ .px = @as(f32, @floatFromInt(out_lines)) * 16 + 8 } });
+        self.stderr_viewport.?.setStyleInline(self.cx.allocator, .{ .height = .{ .px = @as(f32, @floatFromInt(err_lines)) * 16 + 8 } });
         self.stdout_scroll.scroll_x = 0;
         self.stderr_scroll.scroll_x = 0;
         self.stdout_scroll.scroll_y = 0;
@@ -276,7 +276,7 @@ pub const State = struct {
         }
         self.body.setDisplay(if (self.record.expanded) .flex else .none);
         self.footer.setDisplay(if (self.record.expanded) .flex else .none);
-        self.root.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (self.record.expanded) 216 else 32 } });
+        self.root.setStyleInline(self.cx.allocator, .{ .height = .{ .fit = .{} } });
     }
     fn hoverDisclosure(self: *State) void {
         self.status_icon.?.setOpacityRaw(0);

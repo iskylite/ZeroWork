@@ -242,8 +242,13 @@ const DetailHover = struct {
     close: ?ui.Handler(void),
     show: ?ui.Handler(void),
     deadline: ?i128 = null,
-    fn enter(self: *DetailHover) void { self.deadline = null; }
-    fn triggerEnter(self: *DetailHover) void { self.enter(); if (self.show) |show| show.invoke(); }
+    fn enter(self: *DetailHover) void {
+        self.deadline = null;
+    }
+    fn triggerEnter(self: *DetailHover) void {
+        self.enter();
+        if (self.show) |show| show.invoke();
+    }
     fn leave(self: *DetailHover) void {
         self.deadline = @import("../platform/realtime.zig").monotonicNs() + 250 * std.time.ns_per_ms;
         self.cx.scheduleRedrawAfterNs(250 * std.time.ns_per_ms);
@@ -252,8 +257,10 @@ const DetailHover = struct {
         const self: *DetailHover = @ptrCast(@alignCast(node.meta.ownership.debug_slots.state_ptrs[0].?));
         if (self.deadline) |deadline| {
             const now = @import("../platform/realtime.zig").monotonicNs();
-            if (now >= deadline) { self.deadline = null; if (self.close) |close| close.invoke(); }
-            else self.cx.scheduleRedrawAfterNs(@intCast(deadline - now));
+            if (now >= deadline) {
+                self.deadline = null;
+                if (self.close) |close| close.invoke();
+            } else self.cx.scheduleRedrawAfterNs(@intCast(deadline - now));
         }
     }
 };
@@ -767,7 +774,10 @@ pub const Panel = struct {
             if (choice.scope == .sessions) continue;
             if (choice.scope != .all) {
                 var has_tasks = false;
-                for (source.value.rows) |task_| if (belongs(choice.scope, task_.target.owner)) { has_tasks = true; break; };
+                for (source.value.rows) |task_| if (belongs(choice.scope, task_.target.owner)) {
+                    has_tasks = true;
+                    break;
+                };
                 if (!has_tasks) continue;
             }
             const state = try scope.createState(Control, .{ .panel = self, .kind = .choice, .choice = i });

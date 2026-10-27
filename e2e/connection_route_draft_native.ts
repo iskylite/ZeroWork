@@ -85,7 +85,7 @@ try{
  await resizeWindow(1440,900);await capture('07-restored-route-standard');
  await click('wizard.next.route');await capture('08-restored-review-standard');
  assert.match(text(await visible('wizard.review.route')),/Jump A/);assert.match(text(await visible('wizard.review.route')),/Jump B/);
- await click('wizard.cancel');await click('wizard.discard.confirm');await closed();
+ await click('wizard.cancel');await closed();
  report.checks=['Fresh production wizard opens at 1440×900 and 860×480','14px checkbox and advanced host-key policy retained','Two independent jump selections and compact 34px selectors','Direct access hides the route and excludes it from review','Switching back restores both hops and their order','Restored route review and fixed footer remain usable at both sizes'];report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await screenshot(join(out,'failure.png')).catch(()=>{});throw e;}
 finally{await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));child.kill('SIGTERM');await ended;await log.close();await rm(isolated,{recursive:true,force:true});}

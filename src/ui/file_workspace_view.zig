@@ -1148,7 +1148,10 @@ const Control = struct {
                 if (self.pane.view.callbacks.current_stamp) |query| self.pane.refresh_receipt = .{ .stamp = query(self.pane.view.callbacks.context, self.pane.side), .anchor = anchor };
             },
             .recover => try self.pane.emit(.recover),
-            .context => { self.pane.context_anchor = null; try self.pane.emit(.{ .context = selection }); },
+            .context => {
+                self.pane.context_anchor = null;
+                try self.pane.emit(.{ .context = selection });
+            },
             .new_folder => if (fresh(p) and p.writable and p.can_mkdir) {
                 try self.pane.emit(.new_folder);
             },

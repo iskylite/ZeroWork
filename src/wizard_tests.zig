@@ -499,9 +499,6 @@ test "wizard pending cancellation retains exact stamp and gate until released co
     const generation = f.wizard.test_generation;
     f.wizard.setTestResult(.pending);
     SaveFixture.activate(f.wizard.cancel_btn.?);
-    try std.testing.expect(f.wizard.discard_open);
-    try std.testing.expectEqual(@as(usize, 0), f.cancel_calls);
-    SaveFixture.activate(f.wizard.discard_confirm.?);
     try std.testing.expectEqual(@as(usize, 1), f.cancel_calls);
     try std.testing.expect(f.wizard.cancel_requested);
     try std.testing.expect(f.wizard.isVisible());
@@ -569,10 +566,7 @@ test "wizard modal Escape consumes active IME composition before closing the dra
     try std.testing.expect(f.wizard.isVisible());
     try std.testing.expectEqualStrings("target", f.wizard.sig_name.?.get());
     f.cx.handleKeyDown(.escape, .{});
-    try std.testing.expect(f.wizard.isVisible());
-    try std.testing.expect(f.wizard.discard_open);
-    try std.testing.expectEqual(@as(usize, 0), f.cancel_calls);
-    SaveFixture.activate(f.wizard.discard_confirm.?);
+    try std.testing.expectEqual(@as(usize, 1), f.cancel_calls);
     try std.testing.expect(!f.wizard.isVisible());
 }
 
@@ -833,7 +827,7 @@ test "SFTP wizard unavailable test text fits its prototype action and direct ret
     try std.testing.expectEqual(@as(usize, 0), f.calls);
 }
 
-test "wizard discard confirmation preserves exact draft and step until explicit choice" {
+test "wizard cancel closes directly and clears draft without saving" {
     var f: SaveFixture = undefined;
     try f.init(.ssh);
     defer f.deinit();
@@ -844,28 +838,6 @@ test "wizard discard confirmation preserves exact draft and step until explicit 
     }
     const generation = f.wizard.test_generation;
     f.wizard.cancel();
-    f.cx.layout();
-    try std.testing.expect(f.wizard.discard_open);
-    try std.testing.expect(f.wizard.isVisible());
-    try std.testing.expectEqual(@as(f32, 192), f.wizard.modal.?.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 440), f.wizard.modal.?.globalRect().w);
-    try std.testing.expectEqualStrings("放弃未保存的连接？", f.wizard.title.?.getText().?.content);
-    try std.testing.expectEqual(@as(usize, 0), f.cancel_calls);
-    try std.testing.expect(!f.wizard.canSave());
-    SaveFixture.activate(f.wizard.discard_continue.?);
-    try std.testing.expect(!f.wizard.discard_open);
-    try std.testing.expectEqual(mod.Step.confirm, f.wizard.step);
-    try std.testing.expectEqual(generation, f.wizard.test_generation);
-    try std.testing.expectEqualStrings(before.name, f.wizard.currentDraft().name);
-    try std.testing.expectEqualStrings(before.key_passphrase.?, f.wizard.currentDraft().key_passphrase.?);
-    try std.testing.expectEqualStrings(before.startup_commands[0], f.wizard.currentDraft().startup_commands[0]);
-    try std.testing.expectEqualSlices(@TypeOf(before.route[0]), before.route, f.wizard.currentDraft().route);
-    f.wizard.cancel();
-    f.wizard.cancel(); // Escape/close returns to editing, never confirms destruction.
-    try std.testing.expect(!f.wizard.discard_open);
-    try std.testing.expectEqual(@as(usize, 0), f.cancel_calls);
-    f.wizard.cancel();
-    SaveFixture.activate(f.wizard.discard_confirm.?);
     try std.testing.expect(!f.wizard.isVisible());
     try std.testing.expectEqual(@as(usize, 1), f.cancel_calls);
     try std.testing.expectEqual(@as(usize, 0), f.commits);
@@ -877,22 +849,20 @@ test "wizard discard confirmation preserves exact draft and step until explicit 
     try std.testing.expect(!f.wizard.setTestResultForDraft(generation, before.draft_id, before.revision, .{ .ok = "stale result" }));
 }
 
-test "wizard incomplete input requires discard choice but empty draft closes directly" {
+test "wizard partial and empty drafts both close directly" {
     var f: SaveFixture = undefined;
     try f.init(.ssh);
     defer f.deinit();
     f.wizard.loadDraft(.{ .name = "unfinished" });
     f.wizard.show();
     f.wizard.cancel();
-    try std.testing.expect(f.wizard.discard_open);
-    SaveFixture.activate(f.wizard.discard_continue.?);
-    try std.testing.expectEqual(mod.Step.protocol, f.wizard.step);
-    try std.testing.expectEqualStrings("unfinished", f.wizard.currentDraft().name);
-    f.wizard.loadDraft(.{});
-    f.wizard.cancel();
-    try std.testing.expect(!f.wizard.discard_open);
     try std.testing.expect(!f.wizard.isVisible());
+    try std.testing.expectEqualStrings("", f.wizard.currentDraft().name);
     try std.testing.expectEqual(@as(usize, 1), f.cancel_calls);
+    f.wizard.show();
+    f.wizard.cancel();
+    try std.testing.expect(!f.wizard.isVisible());
+    try std.testing.expectEqual(@as(usize, 2), f.cancel_calls);
 }
 
 test "SSH wizard review initially exposes identity row and modify returns without altering route" {
@@ -1088,7 +1058,6 @@ test "wizard unchecked and cancelled passwords never enter credential storage" {
     f.wizard.loadDraft(.{ .name = "cancelled", .host = "secret.example", .user = "ops", .password = "cancel-this", .save_password = true });
     f.wizard.show();
     f.wizard.cancel();
-    SaveFixture.activate(findId(f.wizard.root.?, "wizard.discard.confirm").?);
     try std.testing.expectEqual(commits, f.commits);
 }
 

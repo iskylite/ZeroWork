@@ -156,7 +156,10 @@ pub fn reserveRemovals(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir
         for (paths[0..index]) |previous| {
             const prior_key = try referenceKey(allocator, io, dir, previous);
             defer allocator.free(prior_key);
-            if (std.mem.eql(u8, key, prior_key)) { duplicate = true; break; }
+            if (std.mem.eql(u8, key, prior_key)) {
+                duplicate = true;
+                break;
+            }
         }
         if (!duplicate) result.guards.appendAssumeCapacity(try reserveRemoval(allocator, io, dir, path));
     }
@@ -218,8 +221,9 @@ pub const Archive = struct {
         try line.appendSlice(self.allocator, old);
         var writer = std.Io.Writer.fixed(&buf);
         try writer.print("{d}\t{d}\t{d}\t{d}\t{d}\t{s}\t{s}\t{s}\t{s}\t{d}\n", .{
-            entry.id, entry.started_ms, entry.ended_ms, entry.duration_ms,
-            entry.exit_code orelse -2147483648, sanitize(entry.host), sanitize(entry.user), sanitize(entry.cast_path), if (entry.source_kind) |kind| @tagName(kind) else "", entry.saved_connection_id orelse 0,
+            entry.id,                                             entry.started_ms,                   entry.ended_ms,       entry.duration_ms,
+            entry.exit_code orelse -2147483648,                   sanitize(entry.host),               sanitize(entry.user), sanitize(entry.cast_path),
+            if (entry.source_kind) |kind| @tagName(kind) else "", entry.saved_connection_id orelse 0,
         });
         try line.appendSlice(self.allocator, writer.buffered());
         var atomic = try self.dir.createFileAtomic(self.io, self.index_path, .{ .permissions = @as(std.Io.File.Permissions, @fromBackingInt(0o600)), .make_path = true, .replace = true });
@@ -276,7 +280,10 @@ pub const Archive = struct {
         // Complete every fallible allocation before unlinking any recording.
         try kept.ensureTotalCapacity(self.allocator, entries.items.len);
         var guards: std.ArrayList(RemovalGuard) = .empty;
-        defer { for (guards.items) |*guard| guard.deinit(); guards.deinit(self.allocator); }
+        defer {
+            for (guards.items) |*guard| guard.deinit();
+            guards.deinit(self.allocator);
+        }
         try guards.ensureTotalCapacity(self.allocator, entries.items.len);
         var atomic = try self.dir.createFileAtomic(self.io, self.index_path, .{ .permissions = @as(std.Io.File.Permissions, @fromBackingInt(0o600)), .make_path = true, .replace = true });
         defer atomic.deinit(self.io);
@@ -286,10 +293,16 @@ pub const Archive = struct {
                 if (reserveRemoval(self.allocator, self.io, self.dir, entry.cast_path)) |guard| {
                     guards.appendAssumeCapacity(guard);
                 } else |err| switch (err) {
-                    error.RecordBusy => { kept.appendAssumeCapacity(entry); continue; },
+                    error.RecordBusy => {
+                        kept.appendAssumeCapacity(entry);
+                        continue;
+                    },
                     else => return err,
                 }
-            } else { kept.appendAssumeCapacity(entry); continue; }
+            } else {
+                kept.appendAssumeCapacity(entry);
+                continue;
+            }
             // Guard setup is completed for every candidate before mutation.
         }
         // Reservations hold through the atomic index replacement. No new
@@ -297,7 +310,10 @@ pub const Archive = struct {
         for (entries.items) |entry| {
             var reserved = entry.ended_ms < cutoff;
             if (reserved) for (kept.items) |item| {
-                if (item.cast_path.ptr == entry.cast_path.ptr) { reserved = false; break; }
+                if (item.cast_path.ptr == entry.cast_path.ptr) {
+                    reserved = false;
+                    break;
+                }
             };
             if (!reserved) continue;
             const remove = if (self.dir.deleteFile(self.io, entry.cast_path)) |_| true else |err| err == error.FileNotFound;
@@ -306,7 +322,7 @@ pub const Archive = struct {
                 if (localStem(entry.cast_path)) |stem| {
                     var buffer: [std.fs.max_path_bytes]u8 = undefined;
                     for ([_][]const u8{ ".raw", ".checkpoint" }) |suffix| {
-                        const path = try std.fmt.bufPrint(&buffer, "logs/{s}{s}", .{stem, suffix});
+                        const path = try std.fmt.bufPrint(&buffer, "logs/{s}{s}", .{ stem, suffix });
                         self.dir.deleteFile(self.io, path) catch |err| if (err != error.FileNotFound) return err;
                     }
                 }
@@ -374,7 +390,11 @@ pub const Archive = struct {
     /// an archive index for a view/controller use this instead of duplicating
     /// the ownership rules.
     pub fn freeEntries(self: *Archive, entries: *std.ArrayList(Entry)) void {
-        for (entries.items) |entry| { self.allocator.free(entry.host); self.allocator.free(entry.user); self.allocator.free(entry.cast_path); }
+        for (entries.items) |entry| {
+            self.allocator.free(entry.host);
+            self.allocator.free(entry.user);
+            self.allocator.free(entry.cast_path);
+        }
         entries.deinit(self.allocator);
     }
 };
@@ -393,30 +413,45 @@ fn parseIdentity(fields: *std.mem.SplitIterator(u8, .scalar)) ?ParsedIdentity {
     return .{ .kind = kind, .connection_id = if (id == 0) null else id };
 }
 
-fn sanitize(value: []const u8) []const u8 { return value; }
+fn sanitize(value: []const u8) []const u8 {
+    return value;
+}
 fn validateField(value: []const u8) !void {
     if (value.len == 0) return error.InvalidArchiveField;
     for (value) |byte| if (byte == '\t' or byte == '\n' or byte == '\r') return error.InvalidArchiveField;
 }
-fn parseU64(v: []const u8) ?u64 { return std.fmt.parseInt(u64, v, 10) catch null; }
-fn parseI64(v: []const u8) ?i64 { return std.fmt.parseInt(i64, v, 10) catch null; }
-fn validatePath(path: []const u8) !void { if (path.len == 0 or path[0] == '/') return error.InvalidArchivePath; var it = std.mem.splitScalar(u8, path, '/'); while (it.next()) |part| if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return error.InvalidArchivePath; }
+fn parseU64(v: []const u8) ?u64 {
+    return std.fmt.parseInt(u64, v, 10) catch null;
+}
+fn parseI64(v: []const u8) ?i64 {
+    return std.fmt.parseInt(i64, v, 10) catch null;
+}
+fn validatePath(path: []const u8) !void {
+    if (path.len == 0 or path[0] == '/') return error.InvalidArchivePath;
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |part| if (part.len == 0 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return error.InvalidArchivePath;
+}
 
 test "archive index tolerates partial lines and prunes cast files" {
-    var tmp = std.testing.tmpDir(.{}); defer tmp.cleanup();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
     var archive = Archive{ .allocator = std.testing.allocator, .io = std.testing.io, .dir = tmp.dir };
     try archive.append(.{ .id = 1, .started_ms = 0, .ended_ms = 1, .duration_ms = 1, .host = "h", .user = "u", .cast_path = "logs/history/a.cast" });
     try tmp.dir.createDirPath(std.testing.io, "logs/history");
-    var f = try tmp.dir.createFile(std.testing.io, "logs/history/a.cast", .{}); f.close(std.testing.io);
+    var f = try tmp.dir.createFile(std.testing.io, "logs/history/a.cast", .{});
+    f.close(std.testing.io);
     var idx = try tmp.dir.openFile(std.testing.io, "logs/history/index.tsv", .{ .mode = .write_only });
     idx.close(std.testing.io);
     const prior = try tmp.dir.readFileAlloc(std.testing.io, "logs/history/index.tsv", std.testing.allocator, .limited(4096));
     defer std.testing.allocator.free(prior);
     var merged = try std.testing.allocator.alloc(u8, prior.len + 7);
     defer std.testing.allocator.free(merged);
-    @memcpy(merged[0..prior.len], prior); @memcpy(merged[prior.len..], "partial");
+    @memcpy(merged[0..prior.len], prior);
+    @memcpy(merged[prior.len..], "partial");
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "logs/history/index.tsv", .data = merged });
-    var loaded = try archive.load(std.testing.allocator); defer archive.freeEntries(&loaded); try std.testing.expectEqual(@as(usize, 1), loaded.items.len);
+    var loaded = try archive.load(std.testing.allocator);
+    defer archive.freeEntries(&loaded);
+    try std.testing.expectEqual(@as(usize, 1), loaded.items.len);
     try std.testing.expectEqual(@as(usize, 1), try archive.prune(1, std.time.ms_per_day + 10));
     try std.testing.expectError(error.FileNotFound, tmp.dir.openFile(std.testing.io, "logs/history/a.cast", .{}));
 }
@@ -500,8 +535,7 @@ test "archive reads legacy and stable identities and cleanup preserves identity 
     defer tmp.cleanup();
     var archive: Archive = .{ .allocator = std.testing.allocator, .io = std.testing.io, .dir = tmp.dir };
     try tmp.dir.createDirPath(std.testing.io, "logs/history");
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = archive.index_path, .data =
-        "1\t1\t2\t1\t0\tsame\tu\tlogs/history/1.cast\n" ++
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = archive.index_path, .data = "1\t1\t2\t1\t0\tsame\tu\tlogs/history/1.cast\n" ++
         "8\t1\t2\t1\t0\tsame\tu\tlogs/history/8.cast\tssh\n" ++
         "9\t1\t2\t1\t0\tsame\tu\tlogs/history/9.cast\tlocal\t99\n" });
     try archive.append(.{ .id = 2, .started_ms = 3, .ended_ms = 4, .duration_ms = 1, .host = "same", .user = "u", .cast_path = "logs/history/2.cast", .source_kind = .ssh, .saved_connection_id = 42 });

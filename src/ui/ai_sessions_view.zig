@@ -22,20 +22,18 @@ pub const View = struct {
     dialog: *ui.Node,
     title_icon: *ui.Node = undefined,
     control_styles: [2]*ui.Signal(ui.BoxStyle),
-    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, _: *ui.Node, hooks: Hooks) !*View {
+    pub fn mount(cx: *ui.Cx, scope: *ui.Scope, anchor: *ui.Node, hooks: Hooks) !*View {
         const open = try scope.createSignal(bool, false);
         const confirmation = try scope.createSignal(bool, false);
-        const scroll = try ui.widgets.ScrollArea(.{ .height = 168, .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .node = anchor }, .position = .bottom_end, .offset = .{ .static = 6 }, .width = 440, .max_height = 160, .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .viewport_padding = 8 }).mount(scope, cx);
+        popup.wrapper.setStyleInline(cx.allocator, .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 }, .flex_shrink = 0 });
+        popup.chrome.setStyleInline(cx.allocator, S.popover());
+        const scroll = try ui.widgets.ScrollArea(.{ .height = 168, .direction = .vertical, .rubber_band_y = false }).mount(popup.scope, cx);
         scroll.container.setStyleInline(cx.allocator, S.listSurface());
         scroll.content.setStyleInline(cx.allocator, S.menu());
         scroll.container.meta.ownership.meta.test_id = "ai.sessions.menu";
-        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .hooks = hooks, .open = open, .confirmation = confirmation, .highlighted = try scope.createSignal(u64, 0), .content = scroll.content, .root = scroll.container, .surface = scroll.container, .scroll = scroll, .detail = undefined, .dialog = undefined, .control_styles = .{ try scope.createSignal(ui.BoxStyle, S.control(false)), try scope.createSignal(ui.BoxStyle, S.control(true)) } });
-        try scope.createEffect(.{ .view = self }, struct {
-            fn run(ctx: anytype) void {
-                ctx.view.root.setDisplay(if (ctx.view.open.get()) .flex else .none);
-                ctx.view.cx.requestRedraw();
-            }
-        }.run);
+        try popup.content.appendChild(cx.allocator, scroll.container);
+        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .confirmation = confirmation, .highlighted = try scope.createSignal(u64, 0), .content = scroll.content, .root = popup.wrapper, .surface = scroll.container, .scroll = scroll, .detail = undefined, .dialog = undefined, .control_styles = .{ try scope.createSignal(ui.BoxStyle, S.control(false)), try scope.createSignal(ui.BoxStyle, S.control(true)) } });
         const modal = try ui.widgets.Modal(.{ .open = confirmation, .width = 320, .max_height = 220, .background = T.current().overlay }).mount(scope, cx);
         if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         self.dialog = modal.dialog;
@@ -228,14 +226,6 @@ pub const View = struct {
                 break;
             }
         }
-    }
-    pub fn fitWithin(self: *View, available: f32) void {
-        const next = @min(self.desired_height, @max(0, available));
-        if (self.surface.style.height != .px or @abs(self.surface.style.height.px - next) > 0.5)
-            self.surface.setStyleInline(self.cx.allocator, .{ .height = .{ .px = next } });
-    }
-    pub fn height(self: *View) f32 {
-        return if (self.open.peek()) self.surface.style.height.px else 0;
     }
     fn phaseTestId(phase: @import("../ai/assistant_store.zig").Phase) []const u8 {
         return switch (phase) {

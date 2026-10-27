@@ -33,7 +33,7 @@ try{
  }
  await click('toolbar.new_session');assert.equal((await nodes('session.menu.more.host')).length,0,'More must reopen collapsed');const recent=await nodes('session.menu.saved');assert.equal(recent.length,3);assert.deepEqual(recent.map(text),['review-host-04','review-host-03','review-host-02']);await cap('plus-recent-three');await key('escape');
  report.checks.push('Flyout clicks each open a new tab; recent list contains the last three real selected host identities in newest-first order.');
- await click('toolbar.new_session');await click('session.menu.new_sftp');assert((await nodes('wizard.cancel')).length);await cap('new-sftp');await key('escape');await sleep(80);if((await nodes('wizard.discard.confirm')).length)await click('wizard.discard.confirm');
+ await click('toolbar.new_session');await click('session.menu.new_sftp');assert((await nodes('wizard.cancel')).length);await cap('new-sftp');await key('escape');await sleep(80);
  await resizeWindow(860,480);await click('toolbar.new_session');await click('session.menu.more');await cap('compact-more');await key('escape');await key('escape');
  report.checks.push('Dedicated SFTP creation opens its editor; More remains accessible in 860×480.');report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await cap('failure').catch(()=>{});throw e;}

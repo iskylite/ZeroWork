@@ -141,10 +141,17 @@ pub const View = struct {
         const well = try ui.box(self.cx, V3.path(), .{});
         try field.appendChild(self.cx.allocator, well);
         const value = try v3Label(self.cx, well, "", 11, 400, false, id, 16);
-        if (value.getText()) |props| { var next = props; next.use_monospace_font = true; next.text_overflow = .ellipsis_smart; value.setText(next); }
+        if (value.getText()) |props| {
+            var next = props;
+            next.use_monospace_font = true;
+            next.text_overflow = .ellipsis_smart;
+            value.setText(next);
+        }
         return value;
     }
-    fn openChanged(self: *View, value: bool) void { if (!value) self.dismiss(); }
+    fn openChanged(self: *View, value: bool) void {
+        if (!value) self.dismiss();
+    }
     fn submit(self: *View) void {
         if (!self.shown) return;
         const frozen = self.frozen orelse return;

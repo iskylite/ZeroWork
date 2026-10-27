@@ -10,7 +10,7 @@ fn find(node: *ui.Node, id: []const u8) ?*ui.Node {
     for (node.children.items) |child| if (find(child, id)) |result| return result;
     return null;
 }
-test "tool result view shows actual mixed target facts after source ledger destruction with fixed internal scrolling" {
+test "tool result view shows actual mixed target facts after source ledger destruction with bounded internal scrolling" {
     var store = facts.Store.init(a);
     defer store.deinit();
     var run = loop.Loop.init(a, .{ .owner = .{ .group = 7 }, .members = .{} }, 4, .{});
@@ -159,4 +159,57 @@ test "tool result view companion Markdown preserves code blank lines without cha
     const displayed = try @import("ui/ai_message_view.zig").preserveCodeLines(a, input);
     defer a.free(displayed);
     try std.testing.expectEqualStrings("before\n\n```sh\necho a\n \necho b\n```\n\nafter", displayed);
+}
+
+test "tool result view fits short and empty results and scrolls long output in one vertical viewport" {
+    var store = facts.Store.init(a);
+    defer store.deinit();
+    var run = loop.Loop.init(a, .{ .owner = .{ .session = 101 }, .members = .{} }, 4, .{});
+    defer run.deinit();
+    const long_output = try std.mem.join(a, "\n", &@as([30][]const u8, @splat("long output line")));
+    defer a.free(long_output);
+    const outcome = try loop.Outcome.copy(a, &.{
+        .{ .session_id = 101, .status = .succeeded, .stdout = "ok" },
+        .{ .session_id = 102, .status = .succeeded, .stdout = long_output },
+        .{ .session_id = 103, .status = .succeeded },
+    });
+    try run.records.append(run.arena.allocator(), .{ .key = .{ .owner = .{ .session = 101 }, .turn_id = 4, .call_id = "sizing" }, .name = "read_remote_file", .arguments = "{}", .arguments_hash = @splat(0), .dispatched = true, .outcome = outcome });
+    _ = try store.capture(&run, &.{});
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 500);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .{ .px = 572 }, .height = .fill(), .direction = .column }, .{});
+    const record = store.records.items[0];
+    record.expanded = true;
+    const state = try View.State.mount(cx, scope, record);
+    try cx.root.?.appendChild(a, state.root);
+    cx.layout();
+    // A single selected target is displayed; target selectors still consume real space.
+    try std.testing.expect(state.root.globalRect().h <= 216);
+    try state.select(1);
+    cx.layout();
+    try std.testing.expectApproxEqAbs(@as(f32, 216), state.root.globalRect().h, 0.1);
+    try std.testing.expect(state.stdout_viewport.?.globalRect().h > state.body.globalRect().h);
+    try std.testing.expect(state.stdout.globalRect().h >= 30 * 16);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), state.stdout_scroll.content_height - state.stdout_scroll.viewport_height, 0.1);
+    try state.select(2);
+    cx.layout();
+    try std.testing.expectEqual(.none, state.stdout_viewport.?.style.display);
+    try std.testing.expectEqual(.none, state.copy_stdout_button.?.style.display);
+    try std.testing.expectEqual(.none, state.copy_stderr_button.?.style.display);
+    // Hide the extra target selectors to check the common single-target layout too.
+    find(state.root, "ai.tool.result.target.102").?.setDisplay(.none);
+    find(state.root, "ai.tool.result.target.103").?.setDisplay(.none);
+    cx.layout();
+    const empty_height = state.root.globalRect().h;
+    try std.testing.expect(empty_height < 216);
+    try state.select(0);
+    cx.layout();
+    try std.testing.expect(state.root.globalRect().h > empty_height);
+    try std.testing.expect(state.root.globalRect().h < 216);
+    find(state.root, "ai.tool.result.disclosure").?.parent.?.behavior.events.on_click.?.invoke();
+    cx.layout();
+    try std.testing.expectApproxEqAbs(@as(f32, 32), state.root.globalRect().h, 0.1);
 }

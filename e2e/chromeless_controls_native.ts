@@ -96,7 +96,6 @@ try {
   await visible('wizard.name.error');
   await capture('07-wizard-error-text', ['wizard.name', 'wizard.name.error']);
   await click('wizard.cancel');
-  if ((await query('wizard.discard.confirm')).some(shown)) await click('wizard.discard.confirm');
   await click('workspace.empty.local'); await visible('terminal.surface');
   await key('r', { cmd: true, shift: true }); await visible('tabs.rename.input');
   await field('tabs.rename.input', '08-tab-rename');

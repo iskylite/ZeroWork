@@ -109,7 +109,7 @@ try{
  await waitFor(async()=>/\b\d+ms\b/.test(content((await query('connection.details')).find(shown)))||null,15000);await capture('09-real-chain-sample');
  const chainFooter=await visible('connection.details.footer');chain=await visible('connection.details');assert(chainFooter.rect.y+chainFooter.rect.h<=chain.rect.y+chain.rect.h);
  await click('connection.details.edit');await visible('wizard.name');assert(content(await visible('wizard.title')).includes('编辑连接'));const wizardBounds=await screenPos('wizard.dialog');assert(wizardBounds.w>0&&wizardBounds.h>0);assert(content(await visible('wizard.name')).includes('Statusbar Loopback'));assert(!(await query('connection.details')).some(shown));await capture('10-chain-edit-captured-host');
- await click('wizard.cancel');if((await query('wizard.discard.confirm')).some(shown))await click('wizard.discard.confirm');await waitFor(async()=>!(await query('wizard.name')).some(shown)||null);
+ await click('wizard.cancel');await waitFor(async()=>!(await query('wizard.name')).some(shown)||null);
  report.checks.push('Chain node list, captured fingerprint/cipher detail, minimum layout, real SSH CHANNEL sampling and editing original connection all passed.');
  report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await capture('failure').catch(()=>{});throw e}

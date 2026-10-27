@@ -117,12 +117,12 @@ test "AI composer controls match the V3 compact row and retain the host send slo
     try std.testing.expectEqual(@as(f32, 28), f.send.globalRect().h);
     try std.testing.expectApproxEqAbs(row.x + 40, f.view.icons[1].globalRect().x, 0.1);
     try std.testing.expectApproxEqAbs(row.x + 56, f.view.labels[1].?.globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(row.x + 162, f.view.labels[2].?.globalRect().x, 0.1);
-    const vision = find(f.view.buttons[2], "ai.composer.model.vision") orelse return error.MissingVisionIcon;
-    try std.testing.expectEqual(@as(f32, 12), vision.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 12), vision.globalRect().h);
-    try std.testing.expectApproxEqAbs(row.x + 146, vision.globalRect().x, 0.1);
-    try std.testing.expectEqualStrings("支持图片输入与识图", vision.behavior.interaction.a11y.?.label.?);
+    try std.testing.expectApproxEqAbs(row.x + 166, f.view.labels[2].?.globalRect().x, 0.1);
+    const logo = find(f.view.buttons[2], "ai.composer.model.logo") orelse return error.MissingModelLogo;
+    try std.testing.expectEqual(@as(f32, 16), logo.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 16), logo.globalRect().h);
+    try std.testing.expectApproxEqAbs(row.x + 146, logo.globalRect().x, 0.1);
+    try std.testing.expect(hasText(logo, "A"));
     try std.testing.expectEqual(@as(f32, 12), f.view.icons[1].globalRect().w);
     try std.testing.expectEqual(@as(f32, 10), f.view.labels[2].?.getText().?.font_size);
     try std.testing.expectEqual(@as(u16, 400), f.view.labels[2].?.getText().?.font_weight);
@@ -167,22 +167,33 @@ test "AI composer grouped model list uses configured capabilities and a captured
     try std.testing.expectEqual(.none, f.view.labels[3].?.style.display);
 }
 
-test "AI composer vision icon follows selected model capability" {
+test "AI composer brand follows selected model and clears without a model" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
-    const icon = f.view.model_vision;
-    try std.testing.expectEqual(ui.icons.get("image").?.icon_id.?, icon.getIcon().?.icon_id);
+    f.models[0].id = "grok/grok-4.7";
+    f.models[1].id = "team/claude-sonnet-4-5";
     var next = f.snapshot();
-    next.current = .{ .provider_id = "lab", .model_id = "quiet" };
-    next.effort = null;
+    next.revision = 2;
+    next.current = .{ .provider_id = "lab", .model_id = f.models[0].id };
     try f.view.update(next);
     f.settle();
-    try std.testing.expectEqual(.none, f.view.model_vision_hint.wrapper.style.display);
-    try std.testing.expectEqual(.flex, f.view.model_text_icon.style.display);
-    try std.testing.expectEqual(ui.icons.get("brain").?.icon_id.?, f.view.model_text_icon.getIcon().?.icon_id);
-    try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + 24, f.view.labels[2].?.globalRect().x, 0.1);
-    try std.testing.expect(!f.view.model_vision_hint.open.?.peek());
+    const marks = @import("ui/ai_brand_assets.zig");
+    try std.testing.expectEqual(marks.grok.icon_id.?, f.view.model_brand.children.items[0].children.items[0].getIcon().?.icon_id);
+    next.current = .{ .provider_id = "lab", .model_id = f.models[1].id };
+    try f.view.update(next);
+    f.settle();
+    try std.testing.expectEqual(marks.anthropic.icon_id.?, f.view.model_brand.children.items[0].children.items[0].getIcon().?.icon_id);
+    f.models[1].id = "团队自建模型";
+    next.revision = 3;
+    next.current = .{ .provider_id = "lab", .model_id = f.models[1].id };
+    try f.view.update(next);
+    f.settle();
+    try std.testing.expect(hasText(f.view.model_brand, "团"));
+    try f.view.update(null);
+    f.settle();
+    try std.testing.expectEqual(.none, f.view.model_brand.style.display);
+    try std.testing.expectEqual(@as(usize, 0), f.view.model_brand.children.items.len);
 }
 
 test "AI composer permission labels preserve real confirm and auto modes and only update on host acknowledgement" {

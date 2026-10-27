@@ -8,6 +8,7 @@ pub const Props = struct {
     title: []const u8,
     projection: []const u8,
     detail: []const u8,
+    copy_detail: bool = true,
     phase: events.Phase,
     elapsed_ms: u64,
     expanded: *bool,
@@ -96,14 +97,19 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
     clock.meta.ownership.meta.test_id = "ai.step.elapsed";
     try header.appendChild(cx.allocator, clock);
     try root.appendChild(cx.allocator, header);
-    const scroll = try ui.widgets.ScrollArea(.{ .height = 150, .direction = .vertical }).mount(scope, cx);
-    scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 150 }, .flex_shrink = 0 });
+    const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
+    scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{ .max = 150 } }, .flex_shrink = 0 });
     scroll.content.setStyleInline(cx.allocator, S.content(cx.tokens));
     const text = try ui.text(cx, props.detail, .{ .font_size = 11, .wrap = .word, .line_height = 16.0 / 11.0, .color = palette.fg_2 });
     try scroll.content.appendChild(cx.allocator, text);
-    const copy = try scope.createState(Copy, .{ .cx = cx, .text = try scope.createText(props.detail, .{}) });
-    const copy_button = try ui.widgets.Button(.{ .label = "复制", .variant = .ghost, .on_click = cx.on(Copy, copy, Copy.run) }).mount(scope, cx);
-    try scroll.content.appendChild(cx.allocator, copy_button);
+    scroll.container.meta.ownership.meta.test_id = "ai.step.details";
+    text.meta.ownership.meta.test_id = "ai.step.detail";
+    if (props.copy_detail and props.detail.len > 0) {
+        const copy = try scope.createState(Copy, .{ .cx = cx, .text = try scope.createText(props.detail, .{}) });
+        const copy_button = try ui.widgets.Button(.{ .label = "复制", .variant = .ghost, .on_click = cx.on(Copy, copy, Copy.run) }).mount(scope, cx);
+        copy_button.meta.ownership.meta.test_id = "ai.step.copy";
+        try scroll.content.appendChild(cx.allocator, copy_button);
+    }
     scroll.container.setDisplay(if (props.expanded.*) .flex else .none);
     try root.appendChild(cx.allocator, scroll.container);
     const state = try scope.createState(State, .{ .cx = cx, .props = props, .root = root, .body = scroll.container, .status = status, .chevron = chevron, .clock = clock, .mounted_ms = @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)) });

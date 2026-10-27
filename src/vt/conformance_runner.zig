@@ -108,18 +108,24 @@ const Probe = struct {
     versions: [1]u64 = .{1},
     cells: [8]@import("cell.zig").Cell = .{
         @import("cell.zig").Cell.fromCodepoint('o'), @import("cell.zig").Cell.fromCodepoint('k'), .{}, .{},
-        .{}, .{}, .{}, .{},
+        .{},                                         .{},                                         .{}, .{},
     },
     pub fn destroy(_: *Probe) void {}
-    pub fn feed(_: *Probe, _: []const u8) !@import("engine.zig").FeedResult { return .{ .dirty_pages = &.{}, .cursor_moved = true, .bell = false }; }
+    pub fn feed(_: *Probe, _: []const u8) !@import("engine.zig").FeedResult {
+        return .{ .dirty_pages = &.{}, .cursor_moved = true, .bell = false };
+    }
     pub fn resize(_: *Probe, _: u16, _: u16) !void {}
-    pub fn snapshot(_: *Probe) @import("engine.zig").Snapshot { return .{ .cols = 4, .rows = 2, .cursor = .{}, .page_versions = &.{1}, .scroll_offset = 0 }; }
+    pub fn snapshot(_: *Probe) @import("engine.zig").Snapshot {
+        return .{ .cols = 4, .rows = 2, .cursor = .{}, .page_versions = &.{1}, .scroll_offset = 0 };
+    }
     pub fn lineAt(self: *Probe, row: u64) ?@import("engine.zig").LineView {
         if (row >= 2) return null;
         const start: usize = @intCast(row * 4);
         return .{ .abs_row = row, .cells = self.cells[start .. start + 4], .received_at_ms = 0 };
     }
-    pub fn selectionText(_: *Probe, _: @import("engine.zig").Selection, _: @import("engine.zig").CopyMode, allocator: std.mem.Allocator) ![]u8 { return allocator.dupe(u8, ""); }
+    pub fn selectionText(_: *Probe, _: @import("engine.zig").Selection, _: @import("engine.zig").CopyMode, allocator: std.mem.Allocator) ![]u8 {
+        return allocator.dupe(u8, "");
+    }
     pub fn setOscCallback(_: *Probe, _: ?@import("engine.zig").OscCallback) void {}
 };
 

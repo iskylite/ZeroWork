@@ -80,7 +80,7 @@ try{
  await click('wizard.route.remove.0');assert.match(text(await visible('wizard.route.hop.0')),/Jump A/);assert(!(await current('wizard.route.hop.1')));
  await resizeWindow(1440,900);await capture('06-route-standard');await click('wizard.next.route');await capture('07-review-standard');
  assert.match(text(await visible('wizard.review.options')),/2/);await resizeWindow(860,480);await capture('08-review-compact');
- await click('wizard.cancel');await click('wizard.discard.confirm');await closed();
+ await click('wizard.cancel');await closed();
  report.checks=['14px password checkbox toggles through native widget','Host key policy is exclusively inside Advanced','Host key selector opens and retains strict policy','Compression and multiline startup survive review','Standard and compact form footer and scroll verified','Independent jump selectors and unavailable duplicate option','Up/down reorders actual selected identities','Remove shifts remaining hop','Per-node review opens in both window sizes'];report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await screenshot(join(out,'failure.png')).catch(()=>{});throw e;}
 finally{await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));child.kill('SIGTERM');await ended;await log.close();await rm(isolated,{recursive:true,force:true});}

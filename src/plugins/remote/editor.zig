@@ -385,13 +385,6 @@ pub const RemoteEditor = struct {
     logs_open: ?*ui.Signal(bool) = null,
     header: ?*ui.Node = null,
     title: ?*ui.Node = null,
-    discard_open: bool = false,
-    discard_card: ?*ui.Node = null,
-    discard_scroll: ?ui.widgets.ScrollAreaResult = null,
-    discard_status: ?*ui.Node = null,
-    discard_continue: ?*ui.Node = null,
-    discard_confirm: ?*ui.Node = null,
-    discard_footer: ?*ui.Node = null,
     body: ?*ui.Node = null,
     footer: ?*ui.Node = null,
     back_btn: ?*ui.Node = null,
@@ -812,13 +805,6 @@ pub const RemoteEditor = struct {
         self.step2_scroll_state = self.scrolls[1].?.state;
         self.step1_scroll_content = self.scrolls[0].?.content;
         self.step2_scroll_content = self.scrolls[1].?.content;
-        self.discard_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
-        self.discard_scroll.?.container.setStyleInline(self.alloc, S.scroll());
-        self.discard_scroll.?.container.meta.ownership.meta.test_id = "wizard.discard";
-        self.discard_card = try mountDiscard(self);
-        try self.discard_scroll.?.content.appendChild(self.alloc, self.discard_card.?);
-        self.discard_scroll.?.content.setStyleInline(self.alloc, S.stack(cx.tokens));
-        try body.appendChild(self.alloc, self.discard_scroll.?.container);
         try modal.body.appendChild(self.alloc, body);
         const footer = try ui.box(cx, S.footer(), .{});
         self.footer = footer;
@@ -832,11 +818,6 @@ pub const RemoteEditor = struct {
         self.next2_btn = try action(self, footer, "下一步", "wizard.next.route", 64, 34, true, self.next2_disabled, onNext2Click, null);
         self.save_btn = try action(self, footer, "保存并连接", "wizard.save", 88, 34, true, self.open_disabled, onSaveClick, null);
         try modal.body.appendChild(self.alloc, footer);
-        const discard_footer = try ui.box(cx, S.discardFooter(), .{});
-        self.discard_footer = discard_footer;
-        self.discard_continue = try action(self, discard_footer, "继续编辑", "wizard.discard.continue", 92, 34, false, null, onContinueEditing, null);
-        self.discard_confirm = try action(self, discard_footer, "放弃草稿", "wizard.discard.confirm", 92, 34, true, null, onDiscardConfirmed, null);
-        try modal.body.appendChild(self.alloc, discard_footer);
         self.step = .protocol;
         try self.setAssets(self.assets);
         self.syncAll();
@@ -927,7 +908,7 @@ pub const RemoteEditor = struct {
             area.state.viewport_height = area.container.globalRect().h;
             ui.widgets.scrollIntoView(area.state, area.content, group, .nearest);
         }
-        if (self.test_reveal_pending and self.step == .confirm and !self.discard_open) {
+        if (self.test_reveal_pending and self.step == .confirm) {
             self.test_reveal_pending = false;
             const area = self.scrolls[2].?;
             area.state.content_height = area.content.globalRect().h;
@@ -982,7 +963,7 @@ pub const RemoteEditor = struct {
         };
         const available_w = @max(1, self.cx.viewport.width - 32);
         const available_h = @max(1, self.cx.viewport.height - @as(f32, if (compact) 48 else 32));
-        const width = @min(if (self.discard_open) S.discard_width else S.width, available_w);
+        const width = @min(S.width, available_w);
         const desired_h = self.preferredModalHeight();
         const height = @min(@min(desired_h, S.max_height), available_h);
         const changed = self.viewport_width != width or self.viewport_height != height or self.viewport_step != self.step;
@@ -999,8 +980,8 @@ pub const RemoteEditor = struct {
         return changed or geometry_changed;
     }
 
-    pub fn preferredModalHeight(self: *const RemoteEditor) f32 {
-        return if (self.discard_open) S.discard_height else S.max_height;
+    pub fn preferredModalHeight(_: *const RemoteEditor) f32 {
+        return S.max_height;
     }
 
     /// Presents the host's current global defaults. These are read-only facts,
@@ -1429,7 +1410,6 @@ pub const RemoteEditor = struct {
     /// 打开向导（回到第 1 步；已填字段保留便于修改）。
     pub fn show(self: *RemoteEditor) void {
         const r = self.root orelse return;
-        self.discard_open = false;
         self.step = .protocol;
         self.syncAll();
         self.applyStep();
@@ -1724,12 +1704,7 @@ pub const RemoteEditor = struct {
     // ── 步进与刷新 ───────────────────────────────────────────────────
 
     fn applyStep(self: *RemoteEditor) void {
-        if (self.protocol_header) |node| node.setDisplay(if (self.discard_open) .none else .flex);
-        if (self.stepper) |stepper| stepper.setDisplay(if (self.discard_open) .none else .flex);
-        self.discard_scroll.?.container.setDisplay(if (self.discard_open) .flex else .none);
-        self.discard_footer.?.setDisplay(if (self.discard_open) .flex else .none);
-        self.footer.?.setDisplay(if (self.discard_open) .none else .flex);
-        for (self.scrolls, 0..) |slot, i| if (slot) |scroll| scroll.container.setDisplay(if (!self.discard_open and i == @backingInt(self.step)) .flex else .none);
+        for (self.scrolls, 0..) |slot, i| if (slot) |scroll| scroll.container.setDisplay(if (i == @backingInt(self.step)) .flex else .none);
         const review = self.step == .confirm;
         self.back_btn.?.setDisplay(if (self.step != .protocol) .flex else .none);
         self.next1_btn.?.setDisplay(if (self.step == .protocol) .flex else .none);
@@ -1851,12 +1826,11 @@ pub const RemoteEditor = struct {
         self.res_text.?.setTextColor(color);
         self.res_text.?.setTextContent(self.alloc, line) catch {};
         self.refreshTestProjection() catch {};
-        self.refreshDiscard();
         self.refreshValidity();
     }
 
     pub fn canSave(self: *RemoteEditor) bool {
-        if (self.saving or self.discard_open or self.test_kind == .pending or self.on_result == null or !self.validDraft()) return false;
+        if (self.saving or self.test_kind == .pending or self.on_result == null or !self.validDraft()) return false;
         _ = self.currentDraft().toHostConfig() catch return false;
         return true;
     }
@@ -1895,7 +1869,7 @@ pub const RemoteEditor = struct {
         if (self.next2_disabled) |v| v.set(busy or !self.validDraft());
         self.paintButtons();
         const editing = self.source_owner != null;
-        if (self.title) |title| title.setTextContent(self.alloc, if (self.discard_open) (if (editing) "放弃未保存的更改？" else "放弃未保存的连接？") else if (editing) "编辑连接" else "新建连接") catch {};
+        if (self.title) |title| title.setTextContent(self.alloc, if (editing) "编辑连接" else "新建连接") catch {};
         self.refreshProtocolAppearance();
         for (self.buttons.items) |button| {
             if (button.node == self.save_only_btn) {
@@ -2009,52 +1983,12 @@ pub const RemoteEditor = struct {
         self.goBack();
     }
 
-    fn onCancelClick(self: *RemoteEditor) void {
-        if (self.saving or self.cancel_requested) return;
-        if (self.discard_open) {
-            self.onContinueEditing();
-            return;
-        }
-        if (!self.hasDraftInput()) {
-            self.onDiscardConfirmed();
-            return;
-        }
-        self.discard_open = true;
-        self.refreshDiscard();
-        self.applyStep();
-        self.cx.setFocus(self.discard_continue.?);
-    }
-
-    fn hasDraftInput(self: *RemoteEditor) bool {
-        const d = self.currentDraft();
-        if (d.name.len != 0 or d.host.len != 0 or d.user.len != 0 or d.password != null or d.key_path != null or d.key_passphrase != null or d.group != null) return true;
-        return d.protocol != .ssh or d.auth != .password or d.port != 22 or !d.keepalive or d.compression or !d.strict_host_key_checking or d.socks_enabled or d.route.len != 0 or d.startup_commands.len != 0 or !std.mem.eql(u8, d.encoding, "UTF-8") or !std.mem.eql(u8, d.terminal_type, "xterm-256color") or d.scrollback != 25000;
-    }
-
-    fn onContinueEditing(self: *RemoteEditor) void {
-        if (self.cancel_requested) return;
-        self.discard_open = false;
-        self.applyStep();
-        self.cx.setFocus(self.cancel_btn.?);
-    }
-
-    fn refreshDiscard(self: *RemoteEditor) void {
-        const status: []const u8 = if (self.test_source != null and self.test_source.?.value.cleanup == .unknown)
-            "未保存的内容将丢失；测试清理状态尚未确认。"
-        else if (self.test_kind == .pending)
-            "未保存的内容将丢失，正在进行的测试也会取消。"
-        else
-            "未保存的内容将丢失。";
-        if (self.discard_status) |node| node.setTextContent(self.alloc, status) catch {};
-    }
-
     fn finishDiscard(self: *RemoteEditor) void {
-        self.discard_open = false;
         self.hide();
         self.loadDraft(.{});
     }
 
-    fn onDiscardConfirmed(self: *RemoteEditor) void {
+    fn onCancelClick(self: *RemoteEditor) void {
         if (self.saving or self.cancel_requested) return;
         const wait_for_release = self.test_kind == .pending;
         if (self.on_result) |cb| _ = cb(self.result_ctx, .cancelled) catch |err| {
@@ -2065,7 +1999,6 @@ pub const RemoteEditor = struct {
         if (wait_for_release and self.test_kind == .pending and self.on_result != null) {
             // Retain the exact probe stamp until the host publishes its final
             // released result. Advancing it now would strand the pending lock.
-            self.discard_open = false;
             self.applyStep();
             self.cancel_requested = true;
             self.res_text.?.setTextContent(self.alloc, "正在取消测试 · 等待资源释放") catch {};
@@ -2183,7 +2116,7 @@ pub const RemoteEditor = struct {
 
     fn refreshProtocolAppearance(self: *RemoteEditor) void {
         const asset = if (self.protocol == .sftp) ui.icons.folder_open else ui.icons.terminal;
-        if (self.protocol_icon) |icon| paintIcon(icon, if (self.discard_open) ui.icons.circle_alert else ui.icons.plug, 18, if (self.discard_open) S.theme.current().warn_ink else S.theme.current().accent);
+        if (self.protocol_icon) |icon| paintIcon(icon, ui.icons.plug, 18, S.theme.current().accent);
         if (self.protocol_select_icon) |icon| paintIcon(icon, asset, 16, S.theme.current().fg_2);
         if (self.summary_icon) |icon| paintIcon(icon, asset, 20, S.theme.current().accent);
     }
@@ -2208,7 +2141,7 @@ pub const RemoteEditor = struct {
     }
 
     fn isLocked(self: *const RemoteEditor) bool {
-        return self.saving or self.test_kind == .pending or self.discard_open;
+        return self.saving or self.test_kind == .pending;
     }
 
     fn openChanged(self: *RemoteEditor, value: bool) void {
@@ -2560,10 +2493,6 @@ pub const RemoteEditor = struct {
     fn paintButtons(self: *RemoteEditor) void {
         for (self.buttons.items) |button| {
             var style = if (button.width == 0) S.disclosure() else S.button(button.width, button.height, button.primary);
-            if (button.node == self.discard_confirm) {
-                style.background = S.theme.current().action_danger;
-                style.gradient = .{ .from = S.theme.current().action_danger, .to = S.theme.current().action_danger, .direction = .diagonal };
-            }
             const review_link = if (button.node.meta.ownership.meta.test_id) |id| std.mem.eql(u8, id, "wizard.review.modify") or std.mem.eql(u8, id, "wizard.review.route.modify") else false;
             if (button.quiet or review_link) style.background = ui.Color.TRANSPARENT;
             const is_disabled = if (button.disabled) |disabled| disabled.peek() else false;
@@ -2600,7 +2529,6 @@ pub const RemoteEditor = struct {
         self.painted_colors = colors;
         if (self.stepper) |stepper| stepper.setBackground(S.theme.current().well);
         if (self.footer) |footer| footer.setBackground(S.theme.current().surface_2);
-        if (self.discard_footer) |footer| footer.setBackground(ui.Color.TRANSPARENT);
         self.modal.?.setBackground(S.theme.current().overlay);
         if (self.route_empty_hint) |node| node.setTextColor(S.theme.current().danger_ink);
         for (self.jump_rows) |node| if (node) |row| row.setBackground(ui.Color.TRANSPARENT);
@@ -2608,7 +2536,6 @@ pub const RemoteEditor = struct {
             _ = icon.setTint(S.theme.current().fg_3);
         };
         if (self.review_test_card) |card| card.setBackground(S.theme.current().well);
-        if (self.discard_card) |card| card.setBackground(ui.Color.TRANSPARENT);
         for (self.inputs.items) |input| {
             input.input_container.setStyleInline(self.alloc, S.input());
             input.state.tokens = self.cx.tokens;
@@ -2625,9 +2552,6 @@ pub const RemoteEditor = struct {
         }
         if (self.copy_dialog) |dialog| dialog.setBackground(S.theme.current().overlay);
         if (self.title) |title| title.setTextColor(S.theme.current().fg_1);
-        if (self.discard_card) |card| for (card.children.items) |child| {
-            if (child.getText() != null) child.setTextColor(S.theme.current().fg_2);
-        };
         if (self.summary_card) |card| card.setBackground(S.theme.current().well);
         if (self.summary_route_card) |card| card.setBackground(S.theme.current().well);
         self.paintSteps();
@@ -3280,15 +3204,6 @@ fn mountRoutePreview(w: *RemoteEditor, index: usize) !*ui.Node {
         w.topo_user = preview.users[9];
     }
     return scroll.container;
-}
-
-fn mountDiscard(w: *RemoteEditor) !*ui.Node {
-    const content = try ui.box(w.cx, S.discardCard(), .{});
-    w.discard_status = try ui.text(w.cx, "未保存的内容将丢失。", S.discardText(true));
-    w.discard_status.?.meta.ownership.meta.test_id = "wizard.discard.status";
-    w.discard_status.?.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0 });
-    try content.appendChild(w.alloc, w.discard_status.?);
-    return content;
 }
 
 fn mountReview(w: *RemoteEditor) !*ui.Node {

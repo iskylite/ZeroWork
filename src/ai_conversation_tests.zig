@@ -42,7 +42,7 @@ test "AI conversation renders Markdown tables and live thought disclosure at nat
     const markdown = try @import("ui/ai_message_view.zig").mountWithWidth(cx, scope, "## 系统时间\n\n| 项目 | 值 |\n| --- | --- |\n| 时间 | **16:17** |\n\n```sh\ndate\n```", 572);
     try root.appendChild(a, markdown);
     var expanded = false;
-    const card = try @import("ui/ai_step_view.zig").mount(cx, scope, .{ .title = "思考", .projection = "核对当前时间", .detail = "provider thinking", .phase = .running, .elapsed_ms = 1200, .expanded = &expanded, .test_id = "ai.thinking" });
+    const card = try @import("ui/ai_step_view.zig").mount(cx, scope, .{ .title = "思考", .projection = "核对当前时间", .detail = "provider thinking", .copy_detail = false, .phase = .running, .elapsed_ms = 1200, .expanded = &expanded, .test_id = "ai.thinking" });
     try root.appendChild(a, card);
     for (0..3) |_| {
         cx.advanceFrameClock();
@@ -59,8 +59,37 @@ test "AI conversation renders Markdown tables and live thought disclosure at nat
         _ = cx.render();
     }
     try std.testing.expect(expanded);
-    try std.testing.expect(card.globalRect().h >= 182);
+    try std.testing.expectApproxEqAbs(@as(f32, 58), card.globalRect().h, 0.1);
+    try std.testing.expect(find(card, "ai.step.copy") == null);
     try std.testing.expectEqualStrings("核对当前时间", find(card, "ai.step.projection").?.getText().?.content);
+    const detail = find(card, "ai.step.detail").?;
+    try detail.setTextContent(a, "first line\nsecond line\nthird line");
+    cx.layout();
+    try std.testing.expectApproxEqAbs(@as(f32, 90), card.globalRect().h, 0.1);
+    const wrapped = try std.mem.join(a, " ", &@as([16][]const u8, @splat("wrapped thinking")));
+    defer a.free(wrapped);
+    try detail.setTextContent(a, wrapped);
+    root.setStyleInline(a, .{ .width = .{ .px = 180 } });
+    cx.layout();
+    const narrow_height = card.globalRect().h;
+    try std.testing.expect(narrow_height > 90 and narrow_height <= 182);
+    root.setStyleInline(a, .{ .width = .{ .px = 572 } });
+    cx.layout();
+    try std.testing.expect(card.globalRect().h < narrow_height);
+    const long_thinking = try std.mem.join(a, "\n", &@as([30][]const u8, @splat("long thinking line")));
+    defer a.free(long_thinking);
+    try detail.setTextContent(a, long_thinking);
+    cx.layout();
+    const viewport = find(card, "ai.step.details").?;
+    try std.testing.expectApproxEqAbs(@as(f32, 150), viewport.globalRect().h, 0.1);
+    try std.testing.expect(detail.globalRect().h > viewport.globalRect().h);
+    header.behavior.events.on_click.?.invoke();
+    cx.layout();
+    try std.testing.expectApproxEqAbs(@as(f32, 32), card.globalRect().h, 0.1);
+    header.behavior.events.on_click.?.invoke();
+    try detail.setTextContent(a, "");
+    cx.layout();
+    try std.testing.expect(card.globalRect().h < 70);
 }
 test "AI conversation attachment restore retains captured content after old turn is released" {
     const files = @import("ai/local_text_attachments.zig");

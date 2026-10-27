@@ -7,8 +7,12 @@ pub const Input = struct {
     buffer: [max_bytes]u8 = undefined,
     len: usize = 0,
 
-    pub fn clear(self: *Input) void { self.len = 0; }
-    pub fn text(self: *const Input) []const u8 { return self.buffer[0..self.len]; }
+    pub fn clear(self: *Input) void {
+        self.len = 0;
+    }
+    pub fn text(self: *const Input) []const u8 {
+        return self.buffer[0..self.len];
+    }
     pub fn lineCount(self: Input) usize {
         if (self.len == 0) return 0;
         var count: usize = 1;
@@ -17,7 +21,7 @@ pub const Input = struct {
         }
         return count;
     }
-    pub fn append(self: *Input, bytes: []const u8) error{InputTooLong,TooManyLines}!void {
+    pub fn append(self: *Input, bytes: []const u8) error{ InputTooLong, TooManyLines }!void {
         var lines = self.lineCount();
         for (bytes) |byte| {
             if (byte == '\n') {

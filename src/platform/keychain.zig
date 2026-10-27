@@ -52,4 +52,6 @@ pub fn erase(service: [:0]const u8) !void {
 }
 
 /// Explicit user-requested startup recovery; ordinary reads remain noninteractive.
-pub fn authorize(service: [:0]const u8) !void { try check(zw_credentials_authorize(service)); }
+pub fn authorize(service: [:0]const u8) !void {
+    try check(zw_credentials_authorize(service));
+}

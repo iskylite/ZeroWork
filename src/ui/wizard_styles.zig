@@ -199,23 +199,6 @@ pub fn readonlyValue(_: *const ui.ThemeTokens) ui.TextStyle {
     return style;
 }
 
-// Compact discard confirmation: one consequence and two adjacent actions.
-pub const discard_width: f32 = 440;
-pub const discard_height: f32 = 192;
-pub fn discardCard() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .top = 10, .bottom = 12 }, .background = ui.Color.TRANSPARENT, .min_width = 0 };
-}
-pub fn discardFooter() ui.BoxStyle {
-    var value = row(62);
-    value.padding = .{ .left = 20, .right = 20, .top = 14, .bottom = 14 };
-    value.justify = .end;
-    value.gap = 8;
-    return value;
-}
-pub fn discardText(_: bool) ui.TextStyle {
-    return .{ .font_size = 12, .font_weight = 400, .line_height = 1.5, .color = theme.current().fg_2, .wrap = .word };
-}
-
 pub fn topFade(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
     return .{ .width = .fill(), .height = .{ .px = 72 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .gradient = .{ .from = c.well_border.withAlpha(48), .to = c.overlay.withAlpha(0) }, .border = .{ .radius = 14 }, .hit_behavior = .pass_through };

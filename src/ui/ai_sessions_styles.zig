@@ -7,7 +7,7 @@ pub fn listSurface() ui.BoxStyle {
         .max_height = 160,
         .flex_shrink = 0,
         .display = .flex,
-        .background = T.current().well,
+        .background = ui.Color.TRANSPARENT,
         .corner_radius = 10,
     };
 }
@@ -56,5 +56,5 @@ fn dangerBackground() ui.Color {
 }
 
 pub fn popover() ui.BoxStyle {
-    return .{ .width = .{ .px = 344 }, .direction = .column, .padding = ui.Padding.all(15), .background = T.current().overlay, .border = .{ .width = 0, .radius = 11 }, .shadow = .{ .color = T.current().shadow, .blur = 24, .offset_y = 12 } };
+    return .{ .width = .{ .px = 440 }, .direction = .column, .padding = .{}, .background = T.current().overlay, .border = .{ .width = 0, .radius = 11 }, .shadow = .{ .color = T.current().shadow, .blur = 24, .offset_y = 12 } };
 }

@@ -129,7 +129,9 @@ const SetupLayout = struct {
 fn mountSetup(cx: *ui.Cx, scope: *ui.Scope, actions: Actions) !*ui.Node {
     const root = try ui.box(cx, S.setup(), .{});
     root.meta.ownership.meta.test_id = "ai.empty.unconfigured";
-    try root.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.sparkles, S.accentInk(), .{ .width = .{ .px = 30 }, .height = .{ .px = 30 }, .flex_shrink = 0 }));
+    const logo = try ui.image(cx, actions.logo_texture orelse 0, .{ .width = .{ .px = 88 }, .height = .{ .px = 88 }, .flex_shrink = 0 });
+    logo.meta.ownership.meta.test_id = "ai.empty.logo";
+    try root.appendChild(cx.allocator, logo);
     const title = try ui.text(cx, "配置模型，开始对话", S.setupTitle());
     title.meta.ownership.meta.test_id = "ai.empty.title";
     try root.appendChild(cx.allocator, title);
@@ -138,7 +140,7 @@ fn mountSetup(cx: *ui.Cx, scope: *ui.Scope, actions: Actions) !*ui.Node {
     const button = try ui.widgets.Button(.{ .label = "配置 AI 服务", .variant = .primary, .base_style = S.setupAction(true), .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
     button.meta.ownership.meta.test_id = "ai.empty.settings";
     try root.appendChild(cx.allocator, button);
-    const layout = try scope.createState(SetupLayout, .{ .cx = cx, .root = root });
+    const layout = try scope.createState(SetupLayout, .{ .cx = cx, .root = root, .logo = logo });
     try cx.addAfterLayoutHook(layout, SetupLayout.frame);
     try scope.onCleanup(SetupLayout, layout, SetupLayout.release);
     return root;

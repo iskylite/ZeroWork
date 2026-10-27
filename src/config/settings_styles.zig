@@ -352,7 +352,7 @@ pub fn sectionSummary(_: *const ui.ThemeTokens) ui.TextStyle {
 
 // Frozen V3 model row and native dialog layout.
 pub fn modelListRow() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 44 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 10, .right = 10, .top = 6, .bottom = 6 }, .background = theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 60 }, .direction = .row, .align_items = .center, .gap = 10, .padding = .{ .left = 10, .right = 10, .top = 10, .bottom = 10 }, .background = theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn modelDialogHeader() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 67 }, .direction = .row, .align_items = .center, .padding = .{ .left = 20, .right = 20, .top = 16, .bottom = 10 }, .flex_shrink = 0 };

@@ -103,9 +103,9 @@ fn modalPresentation(raw: *anyopaque) contract.ModalPresentation {
     const remote_editor = self.editor;
     const editing = remote_editor.source_owner != null;
     return .{
-        .width = if (remote_editor.discard_open) @import("../../ui/wizard_styles.zig").discard_width else @import("../../ui/wizard_styles.zig").width,
-        .title = if (remote_editor.discard_open) (if (editing) "放弃未保存的更改？" else "放弃未保存的连接？") else if (editing) "编辑连接" else "新建连接",
-        .warning = remote_editor.discard_open,
+        .width = @import("../../ui/wizard_styles.zig").width,
+        .title = if (editing) "编辑连接" else "新建连接",
+        .warning = false,
     };
 }
 fn parentPresentationVisible(raw: *anyopaque) bool {
