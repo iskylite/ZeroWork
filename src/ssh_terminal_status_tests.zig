@@ -20,7 +20,6 @@ const key: Details.OperationKey = .{ .owner = .{ .session = .{ .session_id = @fr
 const Fixture = struct {
     cx: *ui.Cx,
     view: View,
-    adapter: Adapter,
     worker: Worker,
     thread: Thread,
     native_runtime: @import("ui/session_runtime.zig").SessionRuntime = undefined,
@@ -29,14 +28,15 @@ const Fixture = struct {
     seen: u64 = 0,
     scratch: []u8,
     fn init(self: *Fixture) !void {
-        self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .view = undefined, .adapter = try Adapter.init(a, 35, 138), .worker = undefined, .thread = undefined, .feed = undefined, .scratch = try a.alloc(u8, Slot.default_capacity) };
+        self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .view = undefined, .worker = undefined, .thread = undefined, .feed = undefined, .scratch = try a.alloc(u8, Slot.default_capacity) };
         self.cx.setViewport(1200, 760);
         self.view = try View.mount(self.cx);
         self.cx.root = self.view.root;
+        self.worker.vt = try Adapter.init(a, 35, 138);
         self.worker.text = try Slot.init(a, Slot.default_capacity);
         self.worker.presentation_attached = .init(true);
         self.thread = .{ .worker = &self.worker, .thread = undefined, .reconnect_control = Control.init(key) };
-        self.feed = .{ .engine = Engine.from(Adapter, &self.adapter), .text_slot = &self.worker.text };
+        self.feed = .{ .engine = Engine.from(Adapter, &self.worker.vt), .text_slot = &self.worker.text };
         self.native_runtime.torn_down = false;
         self.native_runtime.worker = &self.worker;
         self.native_runtime.thread = &self.thread;
@@ -55,7 +55,7 @@ const Fixture = struct {
         self.view.worker = null;
         self.view.releaseBuffers(self.cx);
         self.worker.text.deinit(a);
-        self.adapter.destroy();
+        self.worker.vt.destroy();
         a.free(self.scratch);
         self.cx.deinit();
     }
@@ -90,7 +90,7 @@ test "SSH terminal status uses real published UTF8 frame and applied 138x35 grid
     try std.testing.expect(active.utf8);
     try std.testing.expectEqual(@as(u16, 138), active.grid.?.cols);
     // An unacknowledged resize request is not a new displayed grid.
-    try Engine.from(Adapter, &f.adapter).resize(160, 42);
+    try Engine.from(Adapter, &f.worker.vt).resize(160, 42);
     try std.testing.expectEqual(@as(u16, 138), f.view.statusSnapshot(key).?.cols);
     f.feed.publishTextFrame(20);
     try std.testing.expect(try f.consume());

@@ -97,11 +97,11 @@ test "settings page map covers eight documented pages" {
     var buffer: [1024]u8 = undefined;
     const text = try formatPages(&buffer);
     try std.testing.expect(std.mem.indexOf(u8, text, "AI 辅助 [ai]") != null);
-    try std.testing.expectEqual(@as(usize, 52), keys.len);
-    try std.testing.expectEqualStrings("line_height", keys[4].key);
-    try std.testing.expectEqualStrings("permission_mode", keys[19].key);
-    try std.testing.expectEqualStrings("error_hint", keys[21].key);
-    try std.testing.expectEqualStrings("checkpoint_sec", keys[23].key);
+    try std.testing.expectEqual(@as(usize, 53), keys.len);
+    try std.testing.expectEqualStrings("line_height", keys[5].key);
+    try std.testing.expectEqualStrings("permission_mode", keys[20].key);
+    try std.testing.expectEqualStrings("error_hint", keys[22].key);
+    try std.testing.expectEqualStrings("checkpoint_sec", keys[24].key);
     try std.testing.expect(keyExists("ai", "error_hint"));
     try std.testing.expect(!keyExists("ai", "not_a_setting"));
 }

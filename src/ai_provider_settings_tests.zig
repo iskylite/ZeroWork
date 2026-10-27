@@ -13,7 +13,7 @@ const Fixture = struct {
     saving: *ui.Signal(bool),
     changes: usize = 0,
     fn init(self: *Fixture, configured: bool) !void {
-        return self.initWithCount(configured, 3);
+        return self.initWithCount(configured, if (configured) 1 else 0);
     }
     fn initWithCount(self: *Fixture, configured: bool, count: usize) !void {
         self.cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
@@ -57,12 +57,13 @@ const Fixture = struct {
     fn clickId(self: *Fixture, id: []const u8) void {
         const node = byId(self.cx.root.?, id).?;
         if (node.behavior.events.on_click) |handler| handler.invoke() else if (node.behavior.events.on_event) |handler| {
-            _ = handler(.{ .key_down = .{ .key = .space, .modifiers = .{} } }, node.behavior.events.event_context);
+            _ = handler(.{ .click = .{ .x = 0, .y = 0 } }, node.behavior.events.event_context);
         }
         self.frame();
         self.frame();
     }
     fn input(self: *Fixture, id: []const u8) *ui.widgets.input.TextInputState {
+        if (std.mem.eql(u8, id, "settings.ai.model.id") and byId(self.cx.root.?, id) == null) self.clickId("settings.ai.model.catalog");
         const node = byId(self.cx.root.?, id).?;
         return @ptrCast(@alignCast(node.behavior.events.event_context.?));
     }
@@ -70,6 +71,16 @@ const Fixture = struct {
         const state = self.input(id);
         inputEvent(state, .{ .key_down = .{ .key = .a, .modifiers = .{ .super = true } } });
         inputEvent(state, .{ .text_input = .{ .text = value } });
+        if (std.mem.eql(u8, id, "settings.ai.model.id")) {
+            self.clickId("settings.ai.model.catalog.manual");
+            self.capabilities(false, false);
+        }
+    }
+    fn capabilities(self: *Fixture, reasoning: bool, vision: bool) void {
+        self.clickId("settings.ai.model.reasoning");
+        self.clickId(if (reasoning) "settings.ai.model.reasoning.yes" else "settings.ai.model.reasoning.no");
+        self.clickId("settings.ai.model.vision");
+        self.clickId(if (vision) "settings.ai.model.vision.yes" else "settings.ai.model.vision.no");
     }
 };
 fn byId(node: *ui.Node, id: []const u8) ?*ui.Node {
@@ -89,7 +100,7 @@ fn inputEvent(state: *ui.widgets.input.TextInputState, event: ui.events.Event) v
 // The configured fixture reproduces the prototype's single model and collapsed connection details.
 test "native provider cards use V3 header field grid and a single model row" {
     var f: Fixture = undefined;
-    try f.init(true);
+    try f.initWithCount(true, 2);
     defer f.deinit();
     const first = byId(f.mounted.root, "settings.ai.provider.0.card").?.globalRect();
     const second = byId(f.mounted.root, "settings.ai.provider.1.card").?.globalRect();
@@ -158,25 +169,25 @@ test "native provider create local Ollama form saves vision independently and re
     try f.init(false);
     defer f.deinit();
     f.clickId("settings.ai.add_provider");
-    try std.testing.expectEqual(@as(usize, 4), f.controller.model.value.ai.provider_count);
-    f.replace("settings.ai.provider.3.name", "Production Gateway");
+    try std.testing.expectEqual(@as(usize, 1), f.controller.model.value.ai.provider_count);
+    f.replace("settings.ai.provider.0.name", "Production Gateway");
     // Use the existing provider edit API to choose the local adapter; no transport is invoked.
     var owned = try @import("config/runtime_config.zig").Snapshot.init(std.testing.allocator, f.controller.model.value);
     defer owned.deinit();
-    owned.value.ai.providers[3].kind = .ollama;
+    owned.value.ai.providers[0].kind = .ollama;
     try f.controller.editProviders(owned.value.ai);
-    f.replace("settings.ai.provider.3.endpoint", "http://127.0.0.1:11434/api/chat");
-    f.clickId("settings.ai.provider.3.add_model");
+    f.replace("settings.ai.provider.0.endpoint", "http://127.0.0.1:11434/api/chat");
+    f.clickId("settings.ai.provider.0.add_model");
     f.replace("settings.ai.model.id", "local-model");
     f.replace("settings.ai.model.context", "8192");
-    f.mounted.model_editor.?.model.vision = true;
+    f.capabilities(false, true);
     f.clickId("settings.ai.model.save");
-    const model = f.controller.model.value.ai.providers[3].models[0];
+    const model = f.controller.model.value.ai.providers[0].models[0];
     try std.testing.expect(model.vision and !model.reasoning);
-    try std.testing.expectEqualStrings("", f.controller.model.value.ai.providers[3].api_key);
-    try std.testing.expect(!f.controller.model.value.ai.providers[3].enabled);
-    f.clickId("settings.ai.provider.3.enabled");
-    try std.testing.expect(f.controller.model.value.ai.providers[3].enabled);
+    try std.testing.expectEqualStrings("", f.controller.model.value.ai.providers[0].api_key);
+    try std.testing.expect(!f.controller.model.value.ai.providers[0].enabled);
+    f.clickId("settings.ai.provider.0.enabled");
+    try std.testing.expect(f.controller.model.value.ai.providers[0].enabled);
     // Explicit enable initializes a missing default; selection remains the same draft transaction.
     try f.controller.selectProvider("Production Gateway");
     var tmp = std.testing.tmpDir(.{});
@@ -186,8 +197,8 @@ test "native provider create local Ollama form saves vision independently and re
     try f.controller.save(std.testing.io, tmp.dir, &target);
     var loaded = try @import("config/runtime_config.zig").RuntimeConfig.loadOrDefault(std.testing.io, tmp.dir, std.testing.allocator, "settings.toml");
     defer loaded.deinit();
-    try std.testing.expect(loaded.value.ai.providers[3].models[0].vision);
-    try std.testing.expect(!loaded.value.ai.providers[3].models[0].reasoning);
+    try std.testing.expect(loaded.value.ai.providers[0].models[0].vision);
+    try std.testing.expect(!loaded.value.ai.providers[0].models[0].reasoning);
     try std.testing.expectEqualStrings("Production Gateway", loaded.value.ai.default_provider);
     try std.testing.expectEqual(@import("config/settings_controller.zig").State.clean, f.controller.state());
 }
@@ -276,7 +287,7 @@ test "native provider focused add model pointer opens isolated editor and cancel
     f.cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
     for (0..6) |_| f.frame();
     try std.testing.expectEqual(@as(usize, 1), f.controller.model.value.ai.providers[0].model_count);
-    const editor = byId(f.cx.root.?, "settings.ai.model.id").?;
+    const editor = byId(f.cx.root.?, "settings.ai.model.catalog").?;
     try std.testing.expect(editor.isDisplayedInTree());
     f.replace("settings.ai.model.id", "ops-model-2");
     f.replace("settings.ai.model.context", "128000");
@@ -301,6 +312,9 @@ test "native provider model dialog preserves an active composition before Escape
     try std.testing.expect(!f.mounted.consumeEscape());
     try std.testing.expect(!f.mounted.model_editor.?.done);
     inputEvent(state, .{ .ime_preedit = .{ .text = "", .cursor_utf8_offset = 0 } });
+    try std.testing.expect(f.mounted.consumeEscape()); // close model search first
+    f.frame();
+    try std.testing.expect(f.mounted.hasModelEditor());
     try std.testing.expect(f.mounted.consumeEscape());
     for (0..6) |_| f.frame();
     try std.testing.expect(!f.mounted.hasModelEditor());
@@ -326,7 +340,7 @@ fn configureInactive(f: *Fixture, index: usize, name: []const u8) !void {
 
 test "native provider explicit enable protects the last default and selects an enabled replacement" {
     var f: Fixture = undefined;
-    try f.init(false);
+    try f.initWithCount(false, 2);
     defer f.deinit();
     try configureInactive(&f, 0, "first");
     try configureInactive(&f, 1, "second");
@@ -350,7 +364,7 @@ test "native provider explicit enable protects the last default and selects an e
 
 test "native provider reveal key is transient and deletion requires explicit confirmation" {
     var f: Fixture = undefined;
-    try f.init(true);
+    try f.initWithCount(true, 2);
     defer f.deinit();
     const key_input = f.input("settings.ai.provider.0.api_key");
     f.clickId("settings.ai.provider.0.reveal_key");

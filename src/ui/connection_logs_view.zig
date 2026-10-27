@@ -204,7 +204,7 @@ pub const View = struct {
         self.form_scope = scope;
         self.dialog.setStyleInline(self.cx.allocator, S.panel(self.cx.viewport));
         const head = try ui.box(self.cx, S.header(), .{});
-        try head.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get("list").?, S.theme.current().accent, S.icon(18)));
+        try head.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get("file-text").?, S.theme.current().accent, S.icon(18)));
         _ = try label(self.cx, head, "连接日志", S.title(), S.titleBox());
         const close_context = try self.action(scope, .close);
         const close = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "关闭连接日志", .base_style = S.closeIcon(), .hover_style = S.hover(), .on_click = self.cx.on(Action, close_context, Action.click) }).mount(scope, self.cx);

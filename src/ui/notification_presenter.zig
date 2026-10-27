@@ -212,12 +212,13 @@ pub const Presenter = struct {
             }
         }
         for (self.slots[0..count], records[0..count]) |*slot, record| {
-            slot.obscured = covered and !record.persistent();
+            slot.obscured = covered;
             slot.root.setOpacityRaw(if (slot.obscured) 0 else 1);
             slot.root.setStyle(self.cx.allocator, .hit_behavior, if (slot.obscured) .pass_through else .@"opaque");
             self.host.coordinator.pauseNotification(record.fact_id, slot.hovered or slot.obscured or (if (self.cx.focus_manager.getFocused()) |focused| focused == slot.root or focused.isDescendantOf(slot.root) else false));
         }
 
+        self.root.setDisplay(if (covered or count == 0) .none else .flex);
         if (count != 0) self.cx.scheduleRedrawAfterNs(100 * std.time.ns_per_ms);
     }
 };

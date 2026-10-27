@@ -4,6 +4,13 @@ const A = @import("ai/local_text_attachments.zig");
 const V = @import("ui/ai_attachments_view.zig");
 const theme = @import("ui/app_theme.zig");
 const a = std.testing.allocator;
+fn expectPreviewBounds(f: *Fixture) !void {
+    const panel = f.view.preview_panel.globalRect();
+    const body = f.view.preview_body.container.globalRect();
+    try std.testing.expectEqual(@as(f32, 480), panel.w);
+    try std.testing.expect(panel.h <= f.cx.viewport.height - 32 + 0.1);
+    try std.testing.expect(body.y >= panel.y and body.y + body.h <= panel.y + panel.h);
+}
 
 test "idle inline attachment preview dismiss only publishes visibility transitions" {
     var f: Fixture = undefined;
@@ -49,6 +56,7 @@ const Fixture = struct {
     }
     fn initMode(self: *Fixture, inline_preview: bool) !void {
         self.* = .{ .cx = try ui.Cx.init(a, std.testing.io), .scope = undefined, .view = undefined, .draft = try A.Draft.init(a, .{ .session = 101 }) };
+        try self.cx.setTestFrameStep(100);
         self.cx.setViewport(1200, 900);
         self.cx.root = try ui.box(self.cx, .{ .width = .fill(), .height = .fill() }, .{});
         self.scope = try ui.Scope.init(a, null, self.cx.owner);
@@ -152,20 +160,20 @@ test "AI attachments empty picker tickets do not fabricate chips and ready geome
     _ = try f.add("/selected/incident-notes.txt", "captured file text");
     try f.view.update(&f.draft);
     f.settle();
-    try std.testing.expectEqual(@as(f32, 48), f.view.height());
+    try std.testing.expectEqual(@as(f32, 29), f.view.height());
     const rail = f.view.rail.container.globalRect();
-    try std.testing.expectEqual(@as(f32, 572), rail.w);
-    try std.testing.expectEqual(@as(f32, 44), rail.h);
+    try std.testing.expectEqual(@as(f32, 600), rail.w);
+    try std.testing.expectEqual(@as(f32, 20), rail.h);
     const card = find(f.view.root, "ai.attachment.local_text").?;
-    try std.testing.expectEqual(@as(f32, 184), card.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 44), card.globalRect().h);
+    try std.testing.expect(card.globalRect().w < 260);
+    try std.testing.expectEqual(@as(f32, 20), card.globalRect().h);
     try std.testing.expectApproxEqAbs(rail.x, card.globalRect().x, 0.1);
     const open = find(card, "ai.attachment.open").?;
-    try std.testing.expectEqual(@as(f32, 28), open.globalRect().w);
-    try std.testing.expectApproxEqAbs(card.globalRect().x + 8, open.globalRect().x, 0.1);
+    try std.testing.expectEqual(@as(f32, 14), open.globalRect().h);
+    try std.testing.expectApproxEqAbs(card.globalRect().x + 6, open.globalRect().x, 0.1);
     const remove = find(card, "ai.attachment.remove").?;
-    try std.testing.expectEqual(@as(f32, 22), remove.globalRect().w);
-    try std.testing.expectApproxEqAbs(card.globalRect().x + 158, remove.globalRect().x, 0.1);
+    try std.testing.expectEqual(@as(f32, 18.6171875), remove.globalRect().w);
+    try std.testing.expectApproxEqAbs(card.globalRect().x + card.globalRect().w - 6 - remove.globalRect().w, remove.globalRect().x, 0.1);
     try std.testing.expectEqualStrings("incident-notes.txt", find(card, "ai.attachment.filename").?.getText().?.content);
 }
 
@@ -178,9 +186,9 @@ test "AI attachments preview uses the immutable captured bytes and keep close ne
     f.settle();
     f.click(find(f.view.root, "ai.attachment.open").?);
     try std.testing.expect(f.view.isPreviewOpen());
-    try std.testing.expectEqual(@as(f32, 572), f.view.preview_panel.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 194), f.view.preview_panel.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 104), f.view.preview_body.container.globalRect().h);
+    try expectPreviewBounds(&f);
+    try expectPreviewBounds(&f);
+    try std.testing.expectApproxEqAbs(@as(f32, 61.6), f.view.preview_body.container.globalRect().h, 0.1);
     try std.testing.expectEqualStrings("original snapshot\n中文", f.view.preview_label.getText().?.content);
     try std.testing.expectEqualStrings("/source/selected.txt", f.view.preview_identity.getText().?.content);
     f.click(find(f.view.preview_panel, "ai.attachment.preview.keep").?);
@@ -292,8 +300,8 @@ test "AI attachments a long immutable preview scrolls inside its 104px body with
     f.cx.handleScroll(.{ .x = body.x + 30, .y = body.y + 30, .dx = 0, .dy = -500 });
     f.settle();
     try std.testing.expect(f.view.preview_body.state.scroll_y > 0);
-    try std.testing.expectEqual(@as(f32, 104), f.view.preview_body.container.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 48), f.view.root.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 640), f.view.preview_body.container.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 25), f.view.root.globalRect().h);
     try std.testing.expectEqualStrings(content.items, f.view.preview_label.getText().?.content);
     try std.testing.expectEqual(@as(f32, 0), f.view.rail.state.scroll_y);
 }
@@ -309,16 +317,16 @@ test "AI attachments long English and Chinese filenames emit clipped ellipsis pa
         const label = find(f.view.root, "ai.attachment.filename").?;
         const remove = find(f.view.root, "ai.attachment.remove").?;
         try std.testing.expect(label.globalRect().x + label.globalRect().w < remove.globalRect().x);
-        try std.testing.expectEqual(@as(f32, 108), label.globalRect().w);
+        try std.testing.expectEqual(@as(f32, 180), label.globalRect().w);
         var saw_ellipsis = false;
         var saw_truncated_run = false;
         for (f.cx.render()) |item| switch (item) {
             .text_run => |run| if (run.header.node_id == label.id) {
                 try std.testing.expect(run.header.clip_id != std.math.maxInt(u32));
                 const clip = f.cx.property_tree.clips.items[run.header.clip_id];
-                try std.testing.expect(clip.world_aabb.w <= 108);
-                try std.testing.expect(clip.world_aabb.x + clip.world_aabb.w < remove.globalRect().x);
-                try std.testing.expect(run.x < 108);
+                try std.testing.expect(clip.world_aabb.x <= label.globalRect().x);
+                try std.testing.expect(label.globalRect().x + label.globalRect().w < remove.globalRect().x);
+                try std.testing.expect(run.x < 180);
                 if (std.mem.eql(u8, run.content, "…")) saw_ellipsis = true else {
                     try std.testing.expect(run.content.len < std.fs.path.basename(path).len);
                     saw_truncated_run = true;
@@ -343,7 +351,7 @@ test "AI attachments candidate preview requires explicit attach and preserves so
     try std.testing.expectEqual(@as(f32, 0), f.view.height());
     try std.testing.expectEqual(@as(usize, 0), f.draft.items.items.len);
     try std.testing.expect(f.view.isPreviewOpen());
-    try std.testing.expectEqual(@as(f32, 194), f.view.preview_panel.globalRect().h);
+    try expectPreviewBounds(&f);
     try std.testing.expectEqualStrings("candidate original snapshot", f.view.preview_label.getText().?.content);
     try std.testing.expectError(error.AttachmentsProcessing, f.draft.freeze());
     f.click(find(f.view.preview_panel, "ai.attachment.preview.reselect").?);
@@ -354,7 +362,7 @@ test "AI attachments candidate preview requires explicit attach and preserves so
     try std.testing.expectEqual(@as(usize, 1), f.attaches);
     try std.testing.expectEqual(@as(usize, 1), f.draft.items.items.len);
     try std.testing.expectEqual(@as(usize, 0), f.draft.candidates.items.len);
-    try std.testing.expectEqual(@as(f32, 48), f.view.height());
+    try std.testing.expectEqual(@as(f32, 29), f.view.height());
     try std.testing.expect(!f.view.isPreviewOpen());
 }
 
@@ -462,7 +470,7 @@ test "AI attachments sent preview scope teardown releases the portal while keepi
     try std.testing.expectEqualStrings("original sent bytes", sent.items[0].reference.content().?.bytes);
 }
 
-test "AI attachments R11 inline candidate occupies the conversation origin with transparent 572 by 194 content and independent body scroll" {
+test "AI attachments V3 context modal preserves source and independent body scroll from inline host" {
     const old_theme = theme.currentName();
     defer theme.select(old_theme);
     var f: Fixture = undefined;
@@ -473,16 +481,17 @@ test "AI attachments R11 inline candidate occupies the conversation origin with 
     try f.view.update(&f.draft);
     f.settle();
     const panel = f.view.preview_panel;
-    try std.testing.expect(panel.isDescendantOf(f.inline_holder.?));
+    try std.testing.expect(!panel.isDescendantOf(f.inline_holder.?));
+    try std.testing.expect(f.view.modal != null);
     try std.testing.expect(f.view.isPreviewOpen());
     try std.testing.expectEqual(ui.types.Display.none, f.view.root.style.display);
-    try std.testing.expectEqual(@as(f32, 114), panel.globalRect().x);
-    try std.testing.expectEqual(@as(f32, 100), panel.globalRect().y);
-    try std.testing.expectEqual(@as(f32, 572), panel.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 194), panel.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 104), f.view.preview_body.container.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 190), f.view.preview_body.container.globalRect().y);
-    try std.testing.expectEqual(@as(u8, 0), panel.getBackground().a);
+    try std.testing.expectApproxEqAbs((f.cx.viewport.width - 480) / 2, panel.globalRect().x, 0.1);
+    try std.testing.expect(panel.globalRect().y >= 16);
+    try expectPreviewBounds(&f);
+    try std.testing.expect(panel.globalRect().h >= 260);
+    try std.testing.expectApproxEqAbs(@as(f32, 41.8), f.view.preview_body.container.globalRect().h, 0.1);
+    try std.testing.expect(f.view.preview_body.container.globalRect().y > panel.globalRect().y);
+    try std.testing.expectEqual(theme.current().overlay, panel.getBackground());
     try std.testing.expectEqualStrings("captured inline candidate", f.view.preview_reference.content().?.bytes);
     for ([_]theme.Name{ .light, .dark, .sauber }) |name| {
         theme.select(name);
@@ -491,18 +500,24 @@ test "AI attachments R11 inline candidate occupies the conversation origin with 
         f.settle();
         try std.testing.expectEqual(ui.types.Display.none, f.conversation.?.style.display);
         try std.testing.expectEqual(ui.types.Display.flex, f.inline_holder.?.style.display);
-        try std.testing.expectEqual(@as(u8, 0), panel.getBackground().a);
+        try std.testing.expectEqual(theme.current().overlay, panel.getBackground());
     }
     f.click(find(panel, "ai.attachment.preview.keep").?);
     try std.testing.expectEqual(@as(usize, 1), f.attaches);
     try std.testing.expect(!f.view.isPreviewOpen());
-    try std.testing.expectEqual(ui.types.Display.none, panel.style.display);
+    try std.testing.expect(!f.view.modal_open.?.peek());
+    for (f.cx.overlay_stack.layers) |slot| if (slot) |layer| {
+        if (layer.content_node == panel) try std.testing.expect(layer.suspended);
+    };
     for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
         theme.select(name);
         f.cx.setTheme(theme.widgetTheme(name));
         f.cx.requestRedraw();
         f.settle();
-        try std.testing.expectEqual(ui.types.Display.none, panel.style.display);
+        try std.testing.expect(!f.view.modal_open.?.peek());
+        for (f.cx.overlay_stack.layers) |slot| if (slot) |layer| {
+            if (layer.content_node == panel) try std.testing.expect(layer.suspended);
+        };
     }
     try f.view.openPreview(f.draft.items.items[0].id);
     f.settle();

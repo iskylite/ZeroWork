@@ -13,6 +13,7 @@ pub const Snapshot = struct {
     regenerate_enabled: bool,
     cooldown_seconds: u64,
     retained_answer: bool = true,
+    has_tool_calls: bool = false,
 };
 pub const Actions = struct { context: *anyopaque, enqueue: *const fn (*anyopaque, Envelope) void };
 const Click = struct {
@@ -40,6 +41,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
     const labels = [_][]const u8{ "重试", "编辑问题", "重新生成计划" };
     const ids = [_][]const u8{ "ai.recovery.answer", "ai.recovery.edit", "ai.recovery.regenerate" };
     for (std.enums.values(Action), labels, ids) |action, label, id| {
+        if (action == .regenerate and !state.has_tool_calls) continue;
         const enabled = switch (action) {
             .answer => state.retry_enabled,
             .regenerate => state.regenerate_enabled,
@@ -55,13 +57,13 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
         }
         const button = try ui.widgets.Button(.{ .label = if (action == .answer) action_label else if (action == .regenerate) "新计划" else "", .icon_only = action == .edit, .icon_asset = if (action == .edit) ui.icons.pencil else if (action == .regenerate) ui.icons.rotate_cw else null, .icon_size = @as(f32, 14), .a11y_label = label, .variant = @as(ui.widgets.button.ButtonVariant, if (action == .answer) .primary else .secondary), .disabled = !enabled, .base_style = button_style, .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
         button.meta.ownership.meta.test_id = id;
-        if (action == .regenerate) {
+        if (action == .regenerate and state.has_tool_calls) {
             const notice = try ui.boxStyled(cx, S.statusRow, .{});
             try notice.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("shield-check").?, S.text(undefined).color, S.icon()));
             try notice.appendChild(cx.allocator, try ui.textStyled(cx, S.text, "已完成调用不重放；未知写入先核查。"));
             try root.appendChild(cx.allocator, notice);
             try row.appendChild(cx.allocator, button);
-        } else try row.appendChild(cx.allocator, button);
+        } else if (action != .regenerate) try row.appendChild(cx.allocator, button);
     }
     return root;
 }

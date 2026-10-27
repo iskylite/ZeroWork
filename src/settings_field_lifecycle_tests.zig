@@ -18,6 +18,7 @@ fn nextValue(value: config.Config, entry: @TypeOf(schema.fields[0])) !values.Val
         .text => {},
     }
     const choices = [_]struct { section: []const u8, key: []const u8, text: []const u8 }{
+        .{ .section = "ui", .key = "icon_background", .text = "dark" },
         .{ .section = "ui", .key = "theme", .text = "light" },
         .{ .section = "ui", .key = "font_family", .text = "Menlo" },
         .{ .section = "ui", .key = "font_weight", .text = "bold" },
@@ -98,5 +99,5 @@ test "settings scalar lifecycle covers every schema field through cancel save re
         try std.testing.expect(schema.fieldEqual(defaults_restarted.value, config.resetDefaults(), index));
         checked += 1;
     }
-    try std.testing.expectEqual(@as(usize, 52), checked);
+    try std.testing.expectEqual(schema.fields.len, checked);
 }

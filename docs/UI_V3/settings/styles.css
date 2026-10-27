@@ -138,3 +138,5 @@ body[data-integrated-settings] .future-only{display:none}
 .icon-background-help{font-size:11px;line-height:18px;color:var(--muted);margin:0 0 8px}
 
 .cursor-radio-dot{display:flex;align-items:center;justify-content:center;width:18px;height:18px;border:1.5px solid var(--muted);border-radius:50%;flex-shrink:0}.selected .cursor-radio-dot{background:var(--accent);border-color:var(--accent)}.selected .cursor-radio-dot::after{content:"";width:9px;height:9px;border-radius:50%;background:#fff}.cursor-options button:hover .cursor-radio-dot{border-color:var(--accent)}
+
+.model-meta{display:inline-flex;align-items:center;gap:7px;white-space:nowrap}.model-capability{display:inline-flex;align-items:center}.model-capability svg{width:14px;height:14px}

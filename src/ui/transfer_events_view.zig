@@ -23,7 +23,7 @@ pub const View = struct {
         self.dialog.meta.ownership.meta.test_id = "transfer.events.dialog";
         modal.body.setStyleInline(cx.allocator, S.body(cx.tokens));
         const head = try ui.boxStyled(cx, S.row, .{});
-        try head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.list, theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 } }));
+        try head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("file-clock").?, theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 } }));
         self.title = try ui.textStyled(cx, S.title, "任务事件");
         try head.appendChild(cx.allocator, self.title);
         try head.appendChild(cx.allocator, try ui.spacer(cx));

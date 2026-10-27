@@ -155,6 +155,10 @@ test "keyboard menus never select or execute actions hidden by the shared snapsh
         try std.testing.expect(state.selected().? != .export_session);
         state.move(1);
     }
-    state.selected_index = 2;
-    try std.testing.expect(state.handle(.enter) == null);
+    for (menus.items(.tab, state.context), 0..) |item, index| {
+        if (menus.isVisible(item.action, state.context)) continue;
+        state.selected_index = index;
+        try std.testing.expect(state.handle(.enter) == null);
+        try std.testing.expect(state.open != null);
+    }
 }

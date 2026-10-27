@@ -3,15 +3,15 @@ pub const theme = @import("app_theme.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 
 // Bridge 274:912835 / 358:1425300, live 360x260 content-hug card.
-pub const width: f32 = 360;
-pub const row_height: f32 = 26;
-pub const row_gap: f32 = 6;
-pub const visible_rows: usize = 3;
-pub const fixed_height: f32 = 170; // chrome, header, scope, manage and feedback
+pub const width: f32 = 344;
+pub const row_height: f32 = 36;
+pub const row_gap: f32 = 0;
+pub const visible_rows: usize = 10;
+pub const fixed_height: f32 = 114; // chrome, header, scope, manage and feedback
 
 pub fn panel() ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .left = 14, .right = 14, .top = 17, .bottom = 18 }, .background = c.overlay, .border = .{ .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(14), .background = c.overlay, .border = .{ .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
 }
 pub fn content() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 9, .min_height = 0 };
@@ -26,14 +26,13 @@ pub fn body() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = row_gap, .min_height = 0 };
 }
 pub fn row() ButtonStyle {
-    const c = theme.current();
-    return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .row, .align_items = .center, .justify = .start, .gap = 0, .padding = .{}, .background = c.surface_2, .corner_radius = 7, .border_width = 0, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .row, .align_items = .center, .justify = .start, .gap = 0, .padding = .{}, .background = ui.Color.TRANSPARENT, .corner_radius = 7, .border_width = 0, .flex_shrink = 0 };
 }
 pub fn hover() ButtonStyle {
     return .{ .background = theme.current().hover };
 }
 pub fn rowContent() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .direction = .row, .align_items = .center, .gap = row_gap, .padding = .{ .left = 6, .right = 6 } };
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 6, .right = 6 } };
 }
 pub fn passiveRow() ui.BoxStyle {
     var result = rowContent();

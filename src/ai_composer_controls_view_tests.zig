@@ -94,14 +94,14 @@ fn modelOption(node: *ui.Node, name: []const u8) ?*ui.Node {
     return null;
 }
 
-test "AI composer controls match the actual Figma fixed row and retain the host send slot" {
+test "AI composer controls match the V3 compact row and retain the host send slot" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
     const row = f.view.root.globalRect();
     const chip_width = f.view.buttons[2].globalRect().w;
-    const positions = [_]f32{ 0, 32, 152, 0, 160 + chip_width };
-    const widths = [_]f32{ 24, 112, chip_width, 0, 68 };
+    const positions = [_]f32{ 0, 32, 138, 0, 146 + chip_width };
+    const widths = [_]f32{ 24, 98, chip_width, 0, 38 };
     for (f.view.buttons, 0..) |button, index| {
         if (index == 3) {
             try std.testing.expect(button.style.display == .none);
@@ -115,21 +115,21 @@ test "AI composer controls match the actual Figma fixed row and retain the host 
     }
     try std.testing.expectApproxEqAbs(row.x + 544, f.send.globalRect().x, 0.1);
     try std.testing.expectEqual(@as(f32, 28), f.send.globalRect().h);
-    try std.testing.expectApproxEqAbs(row.x + 42, f.view.icons[1].globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(row.x + 62, f.view.labels[1].?.globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(row.x + 178, f.view.labels[2].?.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(row.x + 40, f.view.icons[1].globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(row.x + 56, f.view.labels[1].?.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(row.x + 162, f.view.labels[2].?.globalRect().x, 0.1);
     const vision = find(f.view.buttons[2], "ai.composer.model.vision") orelse return error.MissingVisionIcon;
-    try std.testing.expectEqual(@as(f32, 14), vision.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 14), vision.globalRect().h);
-    try std.testing.expectApproxEqAbs(row.x + 160, vision.globalRect().x, 0.1);
+    try std.testing.expectEqual(@as(f32, 12), vision.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 12), vision.globalRect().h);
+    try std.testing.expectApproxEqAbs(row.x + 146, vision.globalRect().x, 0.1);
     try std.testing.expectEqualStrings("支持图片输入与识图", vision.behavior.interaction.a11y.?.label.?);
-    try std.testing.expectEqual(@as(f32, 14), f.view.icons[1].globalRect().w);
+    try std.testing.expectEqual(@as(f32, 12), f.view.icons[1].globalRect().w);
     try std.testing.expectEqual(@as(f32, 10), f.view.labels[2].?.getText().?.font_size);
-    try std.testing.expectEqual(@as(u16, 600), f.view.labels[2].?.getText().?.font_weight);
-    try std.testing.expectApproxEqAbs(row.x + 126, f.view.chevrons[0].globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(row.x + 152 + chip_width - 20, f.view.chevrons[1].globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(row.x + 170 + chip_width, f.view.ring.globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(f.view.labels[2].?.globalRect().x + f.view.labels[2].?.globalRect().w + 6, f.view.labels[3].?.globalRect().x, 0.1);
+    try std.testing.expectEqual(@as(u16, 400), f.view.labels[2].?.getText().?.font_weight);
+    try std.testing.expectApproxEqAbs(row.x + 110, f.view.chevrons[0].globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(row.x + 138 + chip_width - 20, f.view.chevrons[1].globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(row.x + 154 + chip_width, f.view.ring.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(f.view.labels[2].?.globalRect().x + f.view.labels[2].?.globalRect().w + 4, f.view.labels[3].?.globalRect().x, 0.1);
     try std.testing.expect(chip_width < 190);
     try std.testing.expectEqualStrings("alpha", f.view.labels[2].?.getText().?.content);
     try std.testing.expectEqualStrings("高", f.view.labels[3].?.getText().?.content);
@@ -181,7 +181,7 @@ test "AI composer vision icon follows selected model capability" {
     try std.testing.expectEqual(.none, f.view.model_vision_hint.wrapper.style.display);
     try std.testing.expectEqual(.flex, f.view.model_text_icon.style.display);
     try std.testing.expectEqual(ui.icons.get("brain").?.icon_id.?, f.view.model_text_icon.getIcon().?.icon_id);
-    try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + 26, f.view.labels[2].?.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + 24, f.view.labels[2].?.globalRect().x, 0.1);
     try std.testing.expect(!f.view.model_vision_hint.open.?.peek());
 }
 

@@ -116,6 +116,9 @@ pub const Surface = struct {
     rectangle: bool = false,
     mouse_reporting: bool = false,
     wheel_remainder: f32 = 0,
+    pending_scroll: i32 = 0,
+    scrollbar: ?*ui.Node = null,
+    scrollbar_until: f64 = 0,
     pending_paste: ?terminal.Paste = null,
     paste_requested: ?[]u8 = null,
     paste_confirmed: bool = false,
@@ -160,6 +163,7 @@ pub const Surface = struct {
         message.setDisplay(.none);
         self.* = .{ .cx = cx, .host = host, .root = root, .service = service, .owner = owner, .options = owned_options, .composite = @import("terminal_document.zig").Document.init(cx.allocator, service, owner), .caret = caret, .preedit_node = preedit, .message = message, .message_root = message_root };
         self.service = self.composite.service();
+        self.scrollbar = try @import("terminal_scrollbar.zig").mount(cx, root);
         try host.appendChild(cx.allocator, root);
         return self;
     }
@@ -242,6 +246,21 @@ pub const Surface = struct {
             if (self.snapshot == null or self.snapshot.?.applied_theme_revision != theme.revision)
                 self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
         };
+        if (self.pending_scroll != 0) {
+            var accepted = true;
+            self.service.scroll(.{ .delta = self.pending_scroll }) catch |err| {
+                accepted = false;
+                if (err != error.WorkerBusy) {
+                    self.pending_scroll = 0;
+                    self.showError(err);
+                }
+                self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
+            };
+            if (accepted) {
+                self.pending_scroll = 0;
+                self.force_snapshot = true;
+            }
+        }
         const activated = active and !self.active;
         self.active = active;
         if (activated) self.force_snapshot = true;
@@ -368,6 +387,11 @@ pub const Surface = struct {
             changed = true;
         }
         const value = &self.snapshot.?;
+        if (self.scrollbar) |bar| {
+            const range = value.projection.scrollback;
+            @import("terminal_scrollbar.zig").update(self.cx, bar, range.total_rows, range.viewport_offset, range.viewport_rows, !value.projection.modes.alternate_screen and (self.cx.frame_time_ms < self.scrollbar_until or range.viewport_offset + range.viewport_rows < range.total_rows));
+            if (self.cx.frame_time_ms < self.scrollbar_until) self.cx.scheduleRedrawAfterNs(900 * std.time.ns_per_ms);
+        }
         const current_input = self.focused and !value.read_only and value.projection.cursor.visible and value.projection.cursor.row < value.projection.rows;
         const text_blinking = for (value.projection.cells) |cell| {
             if (cell.attributes & (1 << 3) != 0) break true;

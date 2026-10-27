@@ -1001,13 +1001,13 @@ test "full startup queue defers ordinary handoff without failing the transport" 
     var worker: SshWorker = undefined;
     try inputTestWorker(&worker);
     defer deinitInputTestWorker(&worker);
-    var startup: [128]u8 = @splat('s');
+    var startup: [256]u8 = @splat('s');
     worker.startup_input = &startup;
     try worker.pushInputFrom("中", .ordinary);
     worker.markAttached();
     try worker.enqueueStartupIfReady(2 * std.time.ns_per_s, 0);
-    try std.testing.expectEqual(@as(usize, 128), worker.input.pending());
-    try worker.input.consume(128);
+    try std.testing.expectEqual(startup.len, worker.input.pending());
+    try worker.input.consume(startup.len);
     try std.testing.expect(try worker.replay.attached(&worker.input, worker.options.operation_key, replay_mod.InputMode.from(worker.vt.snapshot().modes)));
     var bytes: [8]u8 = undefined;
     try std.testing.expectEqualStrings("中", worker.input.drain(&bytes));

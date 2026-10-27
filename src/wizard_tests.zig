@@ -45,6 +45,8 @@ const SaveFixture = struct {
         self.cx.layout();
     }
     fn deinit(self: *SaveFixture) void {
+        self.wizard.hide();
+        feedbackFrames(self);
         self.scope.dispose();
         self.cx.deinit();
         self.assets[0].deinit(a);

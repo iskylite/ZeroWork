@@ -82,13 +82,14 @@ test "AI VT candidate preserves original full ticket and R11 metadata until expl
     defer s.deinit();
     const ticket = try s.stage();
     try std.testing.expect(ticket.eql(s.view.preview_ticket.?));
-    try std.testing.expectEqualStrings("终端选区预览", s.view.preview_title.getText().?.content);
+    try std.testing.expectEqualStrings("上下文附件", s.view.preview_title.getText().?.content);
     try std.testing.expectEqualStrings("终端选区.txt", s.view.preview_identity.getText().?.content);
     var buffer: [160]u8 = undefined;
     try std.testing.expectEqualStrings(try std.fmt.bufPrint(&buffer, "原会话 #101 · 2 行 · {d} B", .{captured_bytes.len}), s.view.preview_metadata.getText().?.content);
     try std.testing.expectEqualStrings(captured_bytes, s.view.preview_label.getText().?.content);
-    try std.testing.expectEqual(@as(f32, 194), s.view.preview_panel.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 104), s.view.preview_body.container.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 480), s.view.preview_panel.globalRect().w);
+    try std.testing.expect(s.view.preview_panel.globalRect().h < s.cx.viewport.height - 32);
+    try std.testing.expectApproxEqAbs(@as(f32, 61.6), s.view.preview_body.container.globalRect().h, 0.1);
     try std.testing.expectEqual(ui.types.Display.none, s.view.preview_reselect.style.display);
     try std.testing.expectEqual(@as(usize, 0), s.draft.items.items.len);
     try std.testing.expectError(error.AttachmentsProcessing, s.draft.freeze());

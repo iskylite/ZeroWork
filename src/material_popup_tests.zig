@@ -155,6 +155,9 @@ fn authSubmit(_: *anyopaque, _: @import("proto/ssh/auth_challenge.zig").RequestI
 fn authCancel(_: *anyopaque, _: @import("proto/ssh/auth_challenge.zig").RequestIdentity) void {}
 
 test "production auth content inherits modal and inline material across retheme without replacing secrets" {
+    const previous_parameters = theme.materialParameters();
+    defer _ = theme.setMaterialParameters(previous_parameters.transparency, previous_parameters.blur);
+    _ = theme.setMaterialParameters(75, 16);
     const auth_view = @import("ui/auth_challenge_view.zig");
     const auth = auth_view.auth;
     const old_name = theme.currentName();

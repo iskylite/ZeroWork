@@ -895,8 +895,19 @@ pub const View = struct {
         try self.labels[1].?.setTextContent(self.cx.allocator, permission);
         if (self.buttons[1].behavior.interaction.a11y) |*attrs| attrs.label = self.labels[1].?.getText().?.content;
         setAsset(self.icons[1], if (source != null and source.?.permission == .auto) "shield-check" else "hand", 12, if (editable) colors.fg_2 else colors.fg_3);
-        try self.labels[2].?.setTextContent(self.cx.allocator, if (current) |item| item.key.model_id else if (source) |value| if (value.current) |key| key.model_id else "未配置模型" else "未配置模型");
-        if (self.buttons[2].behavior.interaction.a11y) |*attrs| attrs.label = self.labels[2].?.getText().?.content;
+        const full_model_name = if (current) |item| item.key.model_id else if (source) |value| if (value.current) |key| key.model_id else "未配置模型" else "未配置模型";
+        var model_label_buffer: [512]u8 = undefined;
+        var displayed_model_name = full_model_name;
+        if (self.cx.text.measureTextWidth(full_model_name, 10, 400, false) > 100) {
+            var end = @min(full_model_name.len, model_label_buffer.len - 4);
+            const ellipsis_width = self.cx.text.measureTextWidth("…", 10, 400, false);
+            while (end > 0) : (end -= 1) {
+                if (std.unicode.utf8ValidateSlice(full_model_name[0..end]) and self.cx.text.measureTextWidth(full_model_name[0..end], 10, 400, false) + ellipsis_width <= 100) break;
+            }
+            displayed_model_name = try std.fmt.bufPrint(&model_label_buffer, "{s}…", .{full_model_name[0..end]});
+        }
+        try self.labels[2].?.setTextContent(self.cx.allocator, displayed_model_name);
+        if (self.buttons[2].behavior.interaction.a11y) |*attrs| attrs.label = full_model_name;
         for (0..2) |index| {
             const selected = source != null and @backingInt(source.?.permission) == index;
             self.permission_styles[index].set(S.option(32, selected));

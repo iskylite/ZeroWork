@@ -1,7 +1,7 @@
 //! V3 workspace identity popover: 344px, labeled facts and fixed actions.
 //! Status triggers: 358:1407192; retained fixed hit areas and icon positions.
 const ui = @import("ui");
-pub const identity_width: f32 = 162;
+pub const identity_width: f32 = 138;
 const shared = @import("connection_details_styles.zig");
 pub const theme = shared.theme;
 pub const ButtonStyle = shared.ButtonStyle;

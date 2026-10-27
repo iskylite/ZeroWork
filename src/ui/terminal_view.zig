@@ -201,6 +201,11 @@ pub const TerminalViewNode = struct {
     ghost_cache: OverlayCache = .{},
     palette: command_palette.Palette = .{},
     local_editor: command_palette.Editor = .{},
+    parameter_panel: ?*ui.Node = null,
+    parameter_cache: OverlayCache = .{},
+    parameter_color: ?ui.Color = null,
+    parameter_rows: [2]?*ui.Node = .{ null, null },
+    parameter_choice: usize = 0,
     active_command_record: ?u64 = null,
     command_record_retry: bool = false,
     command_message: ?*ui.Node = null,
@@ -242,6 +247,8 @@ pub const TerminalViewNode = struct {
     history: history_replay.Timeline,
     history_bar: ?*ui.Node = null,
     history_track: ?*ui.Node = null,
+    live_scrollbar: ?*ui.Node = null,
+    wheel_remainder: f32 = 0,
     history_fill: ?*ui.Node = null,
     history_dragging: bool = false,
     history_search_top: ?u32 = null,
@@ -1650,6 +1657,7 @@ pub const TerminalViewNode = struct {
             return true;
         }
         if (self.local_editor.active) {
+            if (key == .tab and self.completeParameter(modifiers.shift)) return true;
             if (key == .@"return") self.executeLocalCommand() else {
                 const mapped: ?command_palette.Editor.Key = switch (key) {
                     .left => .left,
@@ -1668,6 +1676,11 @@ pub const TerminalViewNode = struct {
             return true;
         }
         if (self.palette.isOpen()) {
+            if (key == .tab) {
+                _ = self.palette.handleKey(self.cx.allocator, .adopt);
+                self.commitPaletteCommand(false);
+                return true;
+            }
             if (key == .@"return" and self.palette.matchCount() == 0) {
                 self.adoptUnknownCommand();
                 return true;
@@ -2148,7 +2161,10 @@ pub const TerminalViewNode = struct {
                 return;
             },
             .not_command => {
-                self.showCommandMessage("未知内置指令；输入 @help 查看支持的命令，Esc 取消当前输入。");
+                self.showCommandMessage("未知内置指令；输入 @help 查看支持的命令。");
+                self.local_editor.cancel();
+                if (self.terminal_surface) |surface| if (self.trusted_lease != 0) self.requestTrusted(.end, "") catch |err| surface.showError(err);
+                self.renderLocalInput();
                 return;
             },
             else => {},
@@ -2294,7 +2310,69 @@ pub const TerminalViewNode = struct {
         self.renderLocalInput();
     }
 
+    fn parameterCommand(self: *TerminalViewNode) ?[]const u8 {
+        if (!self.local_editor.active) return null;
+        const text = self.local_editor.text.items;
+        const end = std.mem.indexOfAny(u8, text, " \t") orelse text.len;
+        const name = text[0..end];
+        for ([_][]const u8{ "@sync", "@ts", "@socks" }) |command| if (std.mem.eql(u8, name, command)) return name;
+        return null;
+    }
+    const ParameterClick = struct {
+        view: *TerminalViewNode,
+        index: usize,
+        fn click(self: *@This()) void {
+            self.view.acceptParameter(self.index);
+        }
+    };
+    fn acceptParameter(self: *TerminalViewNode, index: usize) void {
+        const name = self.parameterCommand() orelse return;
+        var buffer: [64]u8 = undefined;
+        const next = std.fmt.bufPrint(&buffer, "{s} {s}", .{ name, if (index % 2 == 0) "on" else "off" }) catch return;
+        self.local_editor.adopt(self.cx.allocator, next) catch return;
+        self.parameter_choice = (index + 1) % 2;
+        self.hideCommandMessage();
+        self.renderLocalInput();
+        self.focus();
+    }
+    fn completeParameter(self: *TerminalViewNode, reverse: bool) bool {
+        if (self.parameterCommand() == null) return false;
+        self.acceptParameter(if (reverse) (self.parameter_choice + 1) % 2 else self.parameter_choice);
+        return true;
+    }
+    fn renderParameterCandidates(self: *TerminalViewNode) void {
+        if (self.parameterCommand() == null) {
+            if (self.parameter_panel) |panel| hideOverlay(panel, &self.parameter_cache);
+            return;
+        }
+        if (self.parameter_panel == null) {
+            const panel = ui.box(self.cx, .{ .position = .absolute, .width = .{ .px = 208 }, .height = .{ .px = 88 }, .direction = .column, .gap = 3, .padding = ui.Padding.all(6), .background = app_theme.current().overlay, .border = .{ .radius = 8 }, .z_index = 35, .hit_behavior = .@"opaque" }, .{}) catch return;
+            panel.meta.ownership.meta.test_id = "terminal.parameters";
+            self.root.appendChild(self.cx.allocator, panel) catch return;
+            self.parameter_panel = panel;
+            for ([_][]const u8{ "on · 开启", "off · 关闭" }, 0..) |caption, index| {
+                const click = self.palette_scope.createState(ParameterClick, .{ .view = self, .index = index }) catch return;
+                const button = ui.widgets.Button(.{ .label = caption, .variant = .ghost, .base_style = @as(ui.BoxStyle, .{ .width = .fill(), .height = .{ .px = 25 }, .justify = .start, .font_size = 11, .padding = .{ .left = 8, .right = 8 } }), .on_click = self.cx.on(ParameterClick, click, ParameterClick.click) }).mount(self.palette_scope, self.cx) catch return;
+                self.parameter_rows[index] = button;
+                panel.appendChild(self.cx.allocator, button) catch return;
+            }
+            const hint = ui.text(self.cx, "Tab 切换参数 · Enter 执行", .{ .font_size = 10, .color = app_theme.current().fg_2 }) catch return;
+            panel.appendChild(self.cx.allocator, hint) catch return;
+        }
+        const panel = self.parameter_panel.?;
+        const bounds = self.root.globalRect();
+        const left = std.math.clamp(self.local_input_cache.x, 4, @max(4, bounds.w - 212));
+        const top = if (self.local_input_cache.y >= 92) self.local_input_cache.y - 92 else @min(bounds.h - 88, self.local_input_cache.y + self.cell_height + 4);
+        const next: OverlayCache = .{ .placed = true, .x = left, .y = @max(0, top), .w = 208, .h = 88 };
+        if (std.meta.eql(self.parameter_cache, next) and std.meta.eql(self.parameter_color, @as(?ui.Color, app_theme.current().overlay))) return;
+        self.parameter_cache = next;
+        self.parameter_color = app_theme.current().overlay;
+        panel.setStyleInline(self.cx.allocator, .{ .inset = .{ .left = .{ .px = left }, .top = .{ .px = next.y } }, .background = app_theme.current().overlay });
+        panel.setDisplay(.flex);
+    }
+
     fn renderLocalInput(self: *TerminalViewNode) void {
+        defer self.renderParameterCandidates();
         if (self.terminal_surface) |surface| surface.setCommandCaret(if (self.local_editor.active) @intCast(displayCellWidth(self.local_editor.text.items[0..self.local_editor.caret])) else 0);
         if (!self.local_editor.active) {
             const visible = self.local_input_node.style.display != .none;
@@ -2696,6 +2774,7 @@ pub const TerminalViewNode = struct {
         self.root.behavior.events.event_context = @ptrCast(self);
         self.root.behavior.events.on_key_down = onWorkerKeyDown;
         self.root.behavior.events.on_event = onWorkerEvent;
+        self.root.behavior.events.on_scroll = onWorkerScroll;
     }
 
     pub fn bindWorker(self: *TerminalViewNode, worker: *Presentation) void {
@@ -2735,6 +2814,7 @@ pub const TerminalViewNode = struct {
         self.root.behavior.events.event_context = @ptrCast(self);
         self.root.behavior.events.on_key_down = onWorkerKeyDown;
         self.root.behavior.events.on_event = onWorkerEvent;
+        self.root.behavior.events.on_scroll = onWorkerScroll;
         // Register as a text-input client so the platform IME gate opens and
         // character keystrokes arrive as .text_input events. The terminal is a
         // pass-through surface: empty buffer, empty selection.
@@ -2772,6 +2852,10 @@ pub const TerminalViewNode = struct {
     fn textInputSelection(raw: *anyopaque) ui.types.TextInputSelection {
         const len: u32 = @intCast(textInputLen(raw));
         return .{ .start = len, .end = len, .caret = len };
+    }
+
+    fn onWorkerScroll(wheel: ui.events.ScrollEvent, raw: ?*anyopaque) ui.events.EventResult {
+        return onWorkerEvent(.{ .scroll = wheel }, raw);
     }
 
     fn onWorkerEvent(event: ui.events.Event, context: ?*anyopaque) ui.events.EventResult {
@@ -2821,7 +2905,9 @@ pub const TerminalViewNode = struct {
                     return .handled;
                 };
                 if (view.legacy_document) |doc| if (doc.enabled and !doc.alternate) {
-                    const delta: i32 = @intFromFloat(-wheel.dy / @max(1, view.metrics.cell_height));
+                    view.wheel_remainder -= wheel.dy / @max(1, view.metrics.cell_height);
+                    const delta: i32 = @intFromFloat(@trunc(view.wheel_remainder));
+                    view.wheel_remainder -= @floatFromInt(delta);
                     if (delta != 0) {
                         doc.service().scroll(.{ .delta = delta }) catch {};
                         _ = view.refreshLegacyDocument() catch false;
@@ -3349,6 +3435,7 @@ pub const TerminalViewNode = struct {
         if (view.history.selected != null) return .handled;
         if (view.preedit != null) return .handled;
         if (view.local_editor.active) {
+            if (key == .tab and view.completeParameter(modifiers.shift)) return .handled;
             if (key == .@"return") {
                 view.executeLocalCommand();
             } else {
@@ -3386,6 +3473,11 @@ pub const TerminalViewNode = struct {
         // @ 命令面板优先接管导航键（↑↓/→/↵/Esc/Backspace，裸键）；
         // .forward（Tab/←/翻页/修饰组合…）继续走下面的终端正常路径。
         if (view.palette.isOpen()) {
+            if (key == .tab) {
+                _ = view.palette.handleKey(view.cx.allocator, .adopt);
+                view.commitPaletteCommand(false);
+                return .handled;
+            }
             if (key == .@"return" and view.palette.matchCount() == 0) {
                 view.adoptUnknownCommand();
                 return .handled;
@@ -3803,6 +3895,9 @@ pub const TerminalViewNode = struct {
         const doc = self.legacy_document orelse return false;
         var snapshot = try doc.service().snapshot(self.cx.allocator);
         defer snapshot.deinit(self.cx.allocator);
+        if (self.live_scrollbar == null) self.live_scrollbar = try @import("terminal_scrollbar.zig").mount(self.cx, self.root);
+        const range = snapshot.projection.scrollback;
+        @import("terminal_scrollbar.zig").update(self.cx, self.live_scrollbar.?, range.total_rows, range.viewport_offset, range.viewport_rows, !snapshot.projection.modes.alternate_screen);
         try self.history.appendProjection(wallClockMs(), &snapshot.projection);
         if (doc.service().searchSnapshot(self.cx.allocator)) |captured| {
             const last = &self.history.frames.items[self.history.frames.items.len - 1];
@@ -4840,6 +4935,13 @@ test "trusted completion local draft renderer sleeps until text or visibility ch
     cx.root = view.root;
     defer view.releaseBuffers(cx);
     try view.local_editor.adopt(cx.allocator, "@ts on");
+    view.renderLocalInput();
+    for (0..4) |_| {
+        if (!cx.wantsFrame()) break;
+        cx.advanceFrameClock();
+        _ = cx.render();
+    }
+    // Parameter candidates anchor after the first real root layout.
     view.renderLocalInput();
     for (0..4) |_| {
         if (!cx.wantsFrame()) break;

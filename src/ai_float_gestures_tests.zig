@@ -138,13 +138,14 @@ test "AI float double click resets only position maximize restores size and owne
     const manual: float.Rect = .{ .x = 600, .y = 180, .width = 720, .height = 480 };
     f.model.setRectangle(manual, pane, window);
     f.layout();
+    const constrained = f.model.rect(pane, window);
     const grip = f.grip.globalRect();
     f.cx.handleClick(grip.x + grip.w / 2, grip.y + grip.h / 2);
     f.cx.handleClick(grip.x + grip.w / 2, grip.y + grip.h / 2);
     f.layout();
     const reset = f.model.rect(pane, window);
-    try std.testing.expectEqual(manual.width, reset.width);
-    try std.testing.expectEqual(manual.height, reset.height);
+    try std.testing.expectEqual(constrained.width, reset.width);
+    try std.testing.expectEqual(constrained.height, reset.height);
     try std.testing.expectEqual(pane.x + (pane.width - reset.width) / 2, reset.x);
     try std.testing.expectEqual(pane.y + 14, reset.y);
     f.view.toggleMaximized();

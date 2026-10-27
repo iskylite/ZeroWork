@@ -153,7 +153,12 @@ pub const Host = struct {
                 .cancelled => .cancelled,
                 .unverified => .unverified,
             },
-            .summary = if (completion.result == .succeeded) "AI 回答已就绪" else "AI 回合已结束",
+            .summary = switch (completion.result) {
+                .succeeded => "AI 回答已就绪",
+                .failed => "AI 请求失败，详情见助手对话",
+                .cancelled => "AI 请求已停止",
+                .unverified => "AI 执行结果待核查",
+            },
             .terminal_confirmed = true,
             .resources_released = completion.resources_released,
             .final_answer = completion.final_answer,

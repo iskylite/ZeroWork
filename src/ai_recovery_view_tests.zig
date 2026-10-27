@@ -23,7 +23,7 @@ test "recovery buttons keep captured group and turn and disable IO actions durin
     defer scope.dispose();
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     var probe: Probe = .{};
-    const root = try V.mount(cx, scope, .{ .ticket = .{ .owner = .{ .group = 7 }, .turn = 83 }, .reason = "ToolOutcomeUnknown", .retries = 0, .max_retries = 3, .retry_enabled = false, .regenerate_enabled = false, .cooldown_seconds = 2 }, .{ .context = &probe, .enqueue = Probe.enqueue });
+    const root = try V.mount(cx, scope, .{ .ticket = .{ .owner = .{ .group = 7 }, .turn = 83 }, .reason = "ToolOutcomeUnknown", .has_tool_calls = true, .retries = 0, .max_retries = 3, .retry_enabled = false, .regenerate_enabled = false, .cooldown_seconds = 2 }, .{ .context = &probe, .enqueue = Probe.enqueue });
     try cx.root.?.appendChild(cx.allocator, root);
     cx.layout();
     const retry = find(root, "ai.recovery.answer").?;

@@ -2,7 +2,7 @@
 // Shared effective material settings. The image switch never gates surface derivation.
 (()=>{
  const sourceURL=document.currentScript?.src||location.href,query=new URLSearchParams(location.search),embedded=query.has('integrated')||query.has('embed');
- const coefficients={'surface-1':.95,'surface-2':.90,well:.80,overlay:.10,hover:.75,'tab-on':.65,'card-deep':.90,'card-deep-ft':.80};
+ const coefficients={'surface-1':.95,'surface-2':.90,well:.80,overlay:.65,hover:.75,'tab-on':.65,'card-deep':.90,'card-deep-ft':.80};
  const clamp=(v,min,max)=>Math.max(min,Math.min(max,Number.isFinite(+v)?+v:min));
  const stored=()=>{try{return JSON.parse(localStorage.getItem('zw-settings-v3-design')||'{}').values||{}}catch{return {}}};
  const saved=stored();let effective={transparency:clamp(saved.background_transparency??0,0,100),blur:clamp(saved.blur_px??0,0,96),imageEnabled:!!saved.background_enabled,imageURL:/^(data:image\/|blob:)/.test(saved.background_path||'')?saved.background_path:'',fit:saved.background_fit||'fill',alignment:saved.background_alignment||'center'};

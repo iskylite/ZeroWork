@@ -389,7 +389,7 @@ test "appearance removed thumbnail clears while failed replacement retains last 
     const preview = byId(empty.root, "settings.materials.preview.open").?;
     try std.testing.expect(byId(preview, "test.prepared.thumbnail") == null);
     try std.testing.expect(firstImage(preview) != null);
-    try std.testing.expect(preview.behavior.interaction.a11y.?.disabled);
+    try std.testing.expect(!preview.behavior.interaction.a11y.?.disabled);
     try std.testing.expectEqualStrings("尚未选择图片", byId(empty.root, "settings.background.filename").?.getText().?.content);
     try std.testing.expectEqualStrings("", f.controller.model.value.ui.materials.background.path);
     try std.testing.expectEqualStrings("/good.png", f.controller.background.last_good.?.path);
@@ -601,7 +601,7 @@ test "global material settings keep flat sections and shared chooser roles while
         f.cx.handleMouseUp(family_rect.x + 8, family_rect.y + 8);
         try std.testing.expectEqual(theme.current().overlay, byId(f.cx.root.?, "settings.chooser.font_family").?.getBackground());
         try std.testing.expect(mounted.consumeEscape());
-        try std.testing.expectEqual(theme.current().accent, mounted.save_button.getBackground());
+        try std.testing.expectEqual(theme.current().action_accent, mounted.save_button.getBackground());
         try std.testing.expectEqual(@as(u8, 255), mounted.save_button.getBackground().a);
         try std.testing.expect(!mounted.save_button.behavior.interaction.a11y.?.disabled);
         const size = inputFor(mounted, "settings.field.font_size");
@@ -620,6 +620,9 @@ test "global material settings keep flat sections and shared chooser roles while
 
 test "settings search repaints its retained opaque input after material readiness without losing composition" {
     const theme = @import("ui/app_theme.zig");
+    const previous_parameters = theme.materialParameters();
+    defer _ = theme.setMaterialParameters(previous_parameters.transparency, previous_parameters.blur);
+    _ = theme.setMaterialParameters(0, 0);
     const previous = theme.currentName();
     const was_visible = theme.materialVisible();
     defer {
@@ -628,6 +631,7 @@ test "settings search repaints its retained opaque input after material readines
     }
     for (std.enums.values(theme.Name)) |name| {
         _ = theme.setMaterialVisible(false);
+        _ = theme.setMaterialParameters(0, 0);
         theme.select(name);
         const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
         defer cx.deinit();
@@ -651,6 +655,7 @@ test "settings search repaints its retained opaque input after material readines
         const selection = input.state.selection_anchor;
         try std.testing.expect(input.state.imeIsComposing());
         _ = theme.setMaterialVisible(true);
+        _ = theme.setMaterialParameters(75, 0);
         publication.publish(cx, theme.widgetTheme(name));
         view.styles.paintSearch(cx, &input);
         cx.layout();
@@ -664,6 +669,7 @@ test "settings search repaints its retained opaque input after material readines
         try std.testing.expect(input.state.imeIsComposing());
         try std.testing.expect(cx.focused_node == input.input_container);
         _ = theme.setMaterialVisible(false);
+        _ = theme.setMaterialParameters(0, 0);
         publication.publish(cx, theme.widgetTheme(name));
         view.styles.paintSearch(cx, &input);
         try std.testing.expectEqual(theme.current().well, input.input_container.getBackground());
@@ -862,7 +868,7 @@ test "native settings shortcut chips show all 27 actions and request a single ed
     }
     try std.testing.expectEqual(@as(usize, 27), count);
     try std.testing.expectEqual(@as(usize, 25), probe.request_count);
-    try std.testing.expectApproxEqAbs(@as(f32, 32), byId(mounted.root, "settings.key.tab_9").?.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 110), byId(mounted.root, "settings.key.tab_9").?.globalRect().w, 0.1);
     try std.testing.expect(!f.controller.model.dirty);
 }
 

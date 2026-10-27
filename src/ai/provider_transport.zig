@@ -44,7 +44,7 @@ pub const Transport = struct {
 
 /// Production HTTPS transport backed by Zig's TLS-enabled std.http client.
 /// The caller owns the Io and keeps it alive for the duration of the request.
-pub const NativeContext = struct { io: std.Io };
+pub const NativeContext = struct { io: std.Io, diagnostic: http.Diagnostic = .{} };
 
 pub fn native(ctx: *NativeContext) Transport {
     return .{ .ctx = ctx, .send = nativeSend, .send_stream = nativeSendStream };
@@ -52,11 +52,13 @@ pub fn native(ctx: *NativeContext) Transport {
 
 fn nativeSend(raw: *anyopaque, plan: http.RequestPlan, body: []const u8, allocator: std.mem.Allocator) !Response {
     const context: *NativeContext = @ptrCast(@alignCast(raw));
+    context.diagnostic = .{};
     return sendBounded(context.io, raw, nativeSendUnbounded, plan, body, allocator);
 }
 
 fn nativeSendStream(raw: *anyopaque, plan: http.RequestPlan, body: []const u8, allocator: std.mem.Allocator, sink: ChunkSink, sink_ctx: *anyopaque) !ResponseMeta {
     const context: *NativeContext = @ptrCast(@alignCast(raw));
+    context.diagnostic = .{};
     return sendStreamBounded(context.io, raw, nativeSendStreamUnbounded, plan, body, allocator, sink, sink_ctx);
 }
 
@@ -198,6 +200,20 @@ fn nativeSendStreamUnbounded(raw: *anyopaque, plan: http.RequestPlan, body: []co
     // A rate-limit response is already fully classified from its head. Do
     // not wait for an error body on a persistent or stalled provider stream.
     if (http.response(status, retry_after_ms).kind != .success) {
+        context.diagnostic.capture(status, "", plan.api_key);
+        // Error bodies may be chunked. Retain bounded JSON details under the
+        // same request deadline; rate limiting remains immediate.
+        if (status != 429) {
+            var error_buffer: [8192]u8 = undefined;
+            const error_reader = response.reader(&.{});
+            var writer: std.Io.Writer = .fixed(&error_buffer);
+            while (writer.end < error_buffer.len) {
+                const before = writer.end;
+                _ = error_reader.stream(&writer, .limited(error_buffer.len - writer.end)) catch break;
+                if (writer.end == before) break;
+            }
+            context.diagnostic.capture(status, writer.buffered(), plan.api_key);
+        }
         if (http_request.connection) |connection| connection.closing = true;
         return .{ .status = status, .retry_after_ms = retry_after_ms };
     }
@@ -239,6 +255,9 @@ pub fn request(allocator: std.mem.Allocator, transport: Transport, config: provi
     if (chat.retry_after_ms) |hint| hint.* = null;
     if (chat.cancel) |token| if (token.isCancelled()) return error.Cancelled;
     var plan = try http.plan(config);
+    const endpoint = try http.chatEndpoint(allocator, config.kind, config.endpoint);
+    defer allocator.free(endpoint);
+    plan.endpoint = endpoint;
     plan.timeout_ms = chat.timeout_ms;
     plan.cancel = chat.cancel;
     const body = try http.requestBody(allocator, config.kind, config.chatRequest(chat), config.context_window);
@@ -275,6 +294,9 @@ pub fn requestStream(allocator: std.mem.Allocator, transport: Transport, config:
         return .{ .status = response.status, .retry_after_ms = response.retry_after_ms };
     };
     var plan = try http.plan(config);
+    const endpoint = try http.chatEndpoint(allocator, config.kind, config.endpoint);
+    defer allocator.free(endpoint);
+    plan.endpoint = endpoint;
     plan.timeout_ms = chat.timeout_ms;
     plan.cancel = chat.cancel;
     const body = try http.requestBody(allocator, config.kind, config.chatRequest(chat), config.context_window);

@@ -46,6 +46,7 @@ pub const ProviderView = struct {
     catalog_signature: u64 = 0,
     catalog_revision: u64 = 0,
     catalog_message: []const u8 = "",
+    catalog_detail: [1400]u8 = undefined,
 
     delete_dialog: ?*DeleteDialog.Dialog = null,
     delete_request: ?struct { provider: usize, model: ?usize } = null,
@@ -106,7 +107,8 @@ pub const ProviderView = struct {
         const self: *ProviderView = @ptrCast(@alignCast(raw));
         if (self.model_test.busy()) {
             if (self.model_test.finishRequest()) {
-                if (self.model_editor) |editor| if (self.model_test_owner == editor) editor.updateTest(if (self.model_test.request_error) |err| if (err == error.Cancelled) "测试已取消" else "请求失败，请检查模型与访问权限。" else "模型请求已完成。", false);
+                var detail: [1200]u8 = undefined;
+                if (self.model_editor) |editor| if (self.model_test_owner == editor) editor.updateTest(if (self.model_test.request_error) |err| if (err == error.Cancelled) "测试已取消" else self.model_test.diagnostic.format(&detail, err) else "模型请求已完成。", false);
                 self.model_test_owner = null;
             } else self.cx.scheduleRedrawAfterNs(33 * 1000000);
         }
@@ -116,7 +118,7 @@ pub const ProviderView = struct {
                 self.catalog_message = if (!valid) "连接配置已变化，请重新获取模型清单。" else if (self.discovery.request_error) |err| switch (err) {
                     error.Cancelled => "已取消获取；可重新获取或手动添加模型。",
                     error.InvalidCatalog => "接口未提供有效模型清单，可手动添加模型。",
-                    else => "获取模型清单失败，请检查 API 地址与访问权限后重试；也可手动添加。",
+                    else => self.discovery.diagnostic.format(&self.catalog_detail, err),
                 } else if (self.catalogModels().len == 0) "接口未返回模型，可重新获取或手动添加。" else "模型清单已获取，添加模型时可下拉选择。";
                 if (self.model_editor) |editor| editor.updateCatalog(self.catalogFor(editor.provider), self.catalog_message, false) catch {};
                 self.pending = true;
@@ -157,7 +159,11 @@ pub const ProviderView = struct {
             self.edit_request = null;
             const p = self.controller.model.value.ai.providers[request.provider];
             const model: config.AiModel = if (request.model) |j| p.models[j] else .{ .default = p.model_count == 0, .context_window = 0, .efforts = @splat(false) };
-            const editor = ModelEditor.mount(self.cx, self.scope, request.provider, request.model, draft.providerName(p), model, self.catalogFor(request.provider), .{ .context = self, .commit = commitModel, .metadata = candidateMetadata, .fetch_models = fetchEditorModels, .test_model = testEditorModel }) catch return .done;
+            const editor = ModelEditor.mount(self.cx, self.scope, request.provider, request.model, draft.providerName(p), model, self.catalogFor(request.provider), .{ .context = self, .commit = commitModel, .metadata = candidateMetadata, .fetch_models = fetchEditorModels, .test_model = testEditorModel }) catch |err| {
+                self.error_text = @errorName(err);
+                self.refresh();
+                return .done;
+            };
             self.model_editor = editor;
             if (!editor.modal.portaled) self.root.appendChild(self.cx.allocator, editor.modal.overlay) catch {};
             return .needs_layout;
@@ -555,19 +561,25 @@ pub const ProviderView = struct {
         try root.appendChild(self.cx.allocator, name_tip.wrapper);
         var buffer: [32]u8 = undefined;
         const context_tip = try self.tooltip(try numberText(model.context_window, &buffer));
-        var count_buffer: [32]u8 = undefined;
-        var meta_buffer: [128]u8 = undefined;
-        const meta = try std.fmt.bufPrint(&meta_buffer, "{s} tokens{s}{s}", .{ try numberText(model.context_window, &count_buffer), if (model.reasoning) " · 推理" else "", if (model.vision) " · 识图" else "" });
-        const window = try ui.text(self.cx, try controls.owned(self.render_scope.?, meta), .{ .font_size = 11, .line_height = 16.0 / 11.0, .color = S.theme.current().fg_2, .text_overflow = .ellipsis });
-        window.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0, .flex = 1 });
-        context_tip.wrapper.setStyleInline(self.cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
-        context_tip.trigger.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0 });
+        const window = try ui.text(self.cx, try controls.owned(self.render_scope.?, try contextText(model.context_window, &buffer)), .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = S.theme.current().fg_2, .text_overflow = .ellipsis });
+        window.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 16 }, .flex_shrink = 0 });
+        context_tip.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .fit = .{} }, .min_width = 0 });
+        context_tip.trigger.setStyleInline(self.cx.allocator, .{ .width = .{ .fit = .{} }, .min_width = 0 });
         try context_tip.trigger.appendChild(self.cx.allocator, window);
         try root.appendChild(self.cx.allocator, context_tip.wrapper);
+        if (model.reasoning) try root.appendChild(self.cx.allocator, try self.capabilityIcon("brain", "支持推理"));
+        if (model.vision) try root.appendChild(self.cx.allocator, try self.capabilityIcon("image", "支持图片输入"));
+        try root.appendChild(self.cx.allocator, try ui.spacer(self.cx));
         try root.appendChild(self.cx.allocator, try self.iconButton(.default_model, i, j, ui.icons.star, if (model.default) "默认模型" else "设为默认模型", 28, model.default, model.default or !self.savedEligible(i, j)));
         try root.appendChild(self.cx.allocator, try self.iconButton(.edit_model, i, j, ui.icons.pencil, "编辑模型", 24, false, false));
         try root.appendChild(self.cx.allocator, try self.iconButton(.delete_model, i, j, ui.icons.trash_2, "删除模型前须选择默认替代项", 24, false, self.modelProtected(i, j)));
         return root;
+    }
+    fn capabilityIcon(self: *ProviderView, asset: []const u8, caption: []const u8) !*ui.Node {
+        const tip = try self.tooltip(caption);
+        tip.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .flex_shrink = 0 });
+        try tip.trigger.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.get(asset).?, S.theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
+        return tip.wrapper;
     }
     fn commitModel(raw: *anyopaque, i: usize, index: ?usize, model: config.AiModel) !void {
         const self: *ProviderView = @ptrCast(@alignCast(raw));

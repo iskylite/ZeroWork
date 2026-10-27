@@ -265,7 +265,7 @@ pub const View = struct {
         self.footer = actions;
         actions.meta.ownership.meta.test_id = "status.connection.footer";
         self.copy_button = try self.textButton(scope, actions, .copy, "复制信息", "status.connection.copy", 90, true, null);
-        self.logs_button = try self.button(scope, actions, .logs, "连接日志", "status.connection.logs", ui.icons.get("list").?, 28, true, self.logs_disabled);
+        self.logs_button = try self.button(scope, actions, .logs, "连接日志", "status.connection.logs", ui.icons.get("file-text").?, 28, true, self.logs_disabled);
         self.feedback_label = try label(self.cx, actions, "", S.infoText(true), S.feedbackBox());
         self.reconnect_button = try self.textButton(scope, actions, .reconnect, "重新连接", "status.connection.reconnect", 74, false, self.reconnect_disabled);
         try self.content.appendChild(self.cx.allocator, actions);

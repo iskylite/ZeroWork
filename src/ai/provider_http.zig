@@ -3,6 +3,43 @@ const provider = @import("provider.zig");
 const provider_config = @import("provider_config.zig");
 const registry = @import("registry.zig");
 
+/// Bounded, credential-free provider failure shared by tests and chat UI.
+pub const Diagnostic = struct {
+    status: u16 = 0,
+    message: [1024]u8 = @splat(0),
+    len: usize = 0,
+    pub fn capture(self: *Diagnostic, status: u16, body: []const u8, key: ?[]const u8) void {
+        self.* = .{ .status = status };
+        const parsed = std.json.parseFromSlice(std.json.Value, std.heap.page_allocator, body, .{}) catch return;
+        defer parsed.deinit();
+        if (parsed.value != .object) return;
+        const problem = parsed.value.object.get("error") orelse parsed.value;
+        const value = if (problem == .object) problem.object.get("message") orelse return else problem;
+        if (value != .string) return;
+        // Do not show a response that reflects the request credential.
+        if (key) |secret| if (secret.len != 0 and std.mem.indexOf(u8, value.string, secret) != null) return;
+        const text = value.string[0..@min(value.string.len, self.message.len)];
+        for (text) |byte| if (byte >= 32 or byte == '\n' or byte == '\t') {
+            self.message[self.len] = byte;
+            self.len += 1;
+        };
+        while (self.len > 0 and !std.unicode.utf8ValidateSlice(self.message[0..self.len])) self.len -= 1;
+    }
+    pub fn format(self: *const Diagnostic, buffer: []u8, err: anyerror) []const u8 {
+        const summary: []const u8 = switch (self.status) {
+            400, 422 => "服务端拒绝请求参数",
+            401 => "鉴权失败，请检查 API Key",
+            403 => "当前凭据无访问权限",
+            404 => "接口或模型不存在",
+            408, 504 => "服务端请求超时",
+            429 => "请求被限流，请稍后重试",
+            500...503, 505...599 => "模型服务暂不可用",
+            else => "请求失败",
+        };
+        return if (self.status != 0) std.fmt.bufPrint(buffer, "HTTP {d} · {s}（{s}）{s}{s}", .{ self.status, summary, @errorName(err), if (self.len > 0) "\n" else "", self.message[0..self.len] }) catch @errorName(err) else std.fmt.bufPrint(buffer, "请求失败 · {s}", .{@errorName(err)}) catch @errorName(err);
+    }
+};
+
 pub const AuthStyle = enum { bearer, anthropic_key, none };
 pub const RequestPlan = struct {
     method: std.http.Method = .POST,
@@ -37,6 +74,42 @@ pub fn isLoopbackHttp(endpoint: []const u8) bool {
         .percent_encoded => |v| v,
     };
     return std.mem.eql(u8, value, "localhost") or std.mem.eql(u8, value, "127.0.0.1") or std.mem.eql(u8, value, "[::1]") or std.mem.eql(u8, value, "::1");
+}
+
+/// Accept a provider base URL as well as an explicit protocol endpoint.
+/// Custom paths and query strings remain explicit and are never rewritten.
+pub fn chatEndpoint(allocator: std.mem.Allocator, kind: registry.Kind, endpoint: []const u8) ![]u8 {
+    const uri = try std.Uri.parse(endpoint);
+    const path = switch (uri.path) {
+        .raw => |v| v,
+        .percent_encoded => |v| v,
+    };
+    const base = std.mem.trimEnd(u8, endpoint, "/");
+    if (uri.query != null or uri.fragment != null) return allocator.dupe(u8, endpoint);
+    const suffix: []const u8 = switch (kind) {
+        .openai_compat => if (path.len == 0 or std.mem.eql(u8, path, "/")) "/v1/chat/completions" else if (std.mem.eql(u8, std.mem.trimEnd(u8, path, "/"), "/v1")) "/chat/completions" else "",
+        .anthropic => if (path.len == 0 or std.mem.eql(u8, path, "/")) "/v1/messages" else if (std.mem.eql(u8, std.mem.trimEnd(u8, path, "/"), "/v1")) "/messages" else "",
+        .ollama => if (path.len == 0 or std.mem.eql(u8, path, "/")) "/api/chat" else if (std.mem.eql(u8, std.mem.trimEnd(u8, path, "/"), "/api")) "/chat" else "",
+    };
+    return if (suffix.len == 0) allocator.dupe(u8, endpoint) else std.mem.concat(allocator, u8, &.{ base, suffix });
+}
+
+test "chat endpoint supports base URLs and preserves explicit gateway paths" {
+    const a = std.testing.allocator;
+    for ([_][2][]const u8{ .{ "https://gateway.test", "https://gateway.test/v1/chat/completions" }, .{ "https://gateway.test/v1/", "https://gateway.test/v1/chat/completions" }, .{ "https://gateway.test/custom/chat?x=1", "https://gateway.test/custom/chat?x=1" } }) |pair| {
+        const actual = try chatEndpoint(a, .openai_compat, pair[0]);
+        defer a.free(actual);
+        try std.testing.expectEqualStrings(pair[1], actual);
+    }
+}
+test "provider diagnostic shows structured failures without credentials" {
+    var diagnostic: Diagnostic = .{};
+    diagnostic.capture(400, "{\"error\":{\"message\":\"unsupported model\"}}", "key");
+    var buffer: [1400]u8 = undefined;
+    try std.testing.expect(std.mem.indexOf(u8, diagnostic.format(&buffer, error.ProviderFailure), "HTTP 400") != null);
+    try std.testing.expectEqualStrings("unsupported model", diagnostic.message[0..diagnostic.len]);
+    diagnostic.capture(401, "{\"error\":{\"message\":\"invalid key secret-value\"}}", "secret-value");
+    try std.testing.expectEqual(@as(usize, 0), diagnostic.len);
 }
 
 pub const ResponseKind = enum { success, retryable, provider_error, malformed };

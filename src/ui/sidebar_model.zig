@@ -7,6 +7,7 @@ pub const Model = struct {
     assets: std.ArrayList(Asset) = .empty,
     filtered: std.ArrayList(usize) = .empty,
     collapsed: bool = false,
+    expanded_width: f32 = 300,
     user_collapsed: ?bool = null,
     committed_collapsed: ?bool = null,
     session_count: usize = 0,
@@ -36,7 +37,7 @@ pub const Model = struct {
         self.user_collapsed = self.collapsed;
     }
     pub fn width(self: Model) f32 {
-        return if (self.collapsed) 0 else 300;
+        return if (self.collapsed) 0 else self.expanded_width;
     }
 
     /// Session changes never override the user's sidebar choice.

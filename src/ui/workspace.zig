@@ -848,7 +848,9 @@ pub const Workspace = struct {
     }
 
     fn saveHostSlice(self: *Workspace, hosts: []hosts_mod.HostConfig) !void {
-        try store.saveHosts(self.io, std.Io.Dir.cwd(), self.hosts_path, .{ .arena = self.registry.arena, .hosts = hosts });
+        var candidate = self.registry;
+        candidate.hosts = hosts;
+        try store.saveHosts(self.io, std.Io.Dir.cwd(), self.hosts_path, candidate);
     }
 
     fn refreshAssetPositions(self: *Workspace, selected: ?HostId) void {
@@ -1881,8 +1883,13 @@ pub const Workspace = struct {
                     }
                 },
                 .end, .cancel => {
+                    if (event_value.phase == .end) for (view.panes.items) |pane| {
+                        const rect = pane.node.globalRect();
+                        const point = event_value.position_window;
+                        if (point.x >= rect.x and point.x < rect.x + rect.w and point.y >= rect.y and point.y < rect.y + rect.h) view.drag_target = pane.session;
+                    };
                     for (view.panes.items) |pane| {
-                        pane.node.setBorderWidth(0);
+                        pane.node.setBorderWidth(1);
                         pane.node.setOpacityRaw(1);
                     }
                     if (event_value.phase == .end) if (view.drag_target) |target| if (view.drag_source) |source| {
@@ -1995,7 +2002,17 @@ pub const Workspace = struct {
             header.meta.ownership.meta.test_id = "groups.pane.header";
             var grip_style = group_styles.control();
             grip_style.width = .{ .px = 13 };
-            const grip = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.grip_vertical, .icon_size = @as(f32, 13), .a11y_label = "拖动排序成员", .base_style = grip_style }).mount(scope, self.cx);
+            grip_style.cursor = .grab;
+            grip_style.align_items = .center;
+            grip_style.justify = .center;
+            grip_style.hit_behavior = .@"opaque";
+            const grip = try ui.box(self.cx, grip_style, .{});
+            const grip_id = try self.groupCell(scope, view.id, tab.id, .pin);
+            grip.meta.ownership.meta.test_id = try std.fmt.bufPrint(&grip_id.test_id, "groups.drag.{d}", .{tab.id});
+            grip.behavior.interaction.a11y = .{ .role = .button, .label = "拖动排序成员" };
+            const grip_icon = try ui.iconTint(self.cx, ui.icons.grip_vertical, app_theme.current().fg_2, .{ .width = .{ .px = 13 }, .height = .{ .px = 13 } });
+            grip_icon.setStyleInline(self.allocator, .{ .hit_behavior = .pass_through });
+            try grip.appendChild(self.allocator, grip_icon);
             _ = try ui.interaction.drag.Binding.attach(scope, self.cx, grip, .{ .axis = .both, .activation_distance = 5 }, GroupCell.drag, cell);
             try header.appendChild(self.allocator, grip);
             const identity_text = if (tab.local) try std.fmt.allocPrint(self.allocator, "Local Terminal · #{d}", .{tab.id}) else if (tab.host_snapshot) |snapshot| try std.fmt.allocPrint(self.allocator, "{s} · {s}@{s}:{d} · #{d}", .{ tab.titleSlice(), snapshot.value.user, snapshot.value.host, snapshot.value.port, tab.id }) else try std.fmt.allocPrint(self.allocator, "{s} · #{d}", .{ tab.titleSlice(), tab.id });
@@ -2004,9 +2021,11 @@ pub const Workspace = struct {
             member_label_style.font_size = 11;
             const label = try ui.text(self.cx, identity_text, member_label_style);
             label.meta.ownership.meta.test_id = "groups.pane.title";
+            label.setStyleInline(self.allocator, .{ .cursor = .grab });
+            _ = try ui.interaction.drag.Binding.attach(scope, self.cx, label, .{ .axis = .both, .activation_distance = 5 }, GroupCell.drag, cell);
             label.setStyleInline(self.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 1, .overflow_hidden = true });
             try header.appendChild(self.allocator, label);
-            const online = !tab.failed and !tab.closing and (if (tab.local) tab.local_state == .running else tab.runtime != null and tab.terminal.?.tombstone.state == .active);
+            const online = !tab.failed and !tab.closing and (if (tab.local) tab.local_state == .running else if (tab.runtime) |runtime| runtime.isConnected() and tab.terminal.?.tombstone.state == .active else false);
             const status_dot = try ui.box(self.cx, .{ .width = .{ .px = 6 }, .height = .{ .px = 6 }, .background = if (online) app_theme.current().ok else app_theme.current().danger, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
             status_dot.meta.ownership.meta.test_id = "groups.pane.status_dot";
             try header.appendChild(self.allocator, status_dot);
@@ -2021,7 +2040,7 @@ pub const Workspace = struct {
             var broadcast_style = group_styles.control();
             broadcast_style.width = .{ .px = 24 };
             broadcast_style.height = .{ .px = 24 };
-            broadcast_style.background = if (broadcasting) app_theme.current().selection else ui.Color.TRANSPARENT;
+            broadcast_style.background = ui.Color.TRANSPARENT;
             const broadcast_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.radio, .icon_size = @as(f32, 14), .icon_tint = if (broadcasting) app_theme.current().accent else app_theme.current().fg_2, .disabled = !online, .a11y_label = if (!online) "广播 · 连接未就绪" else if (broadcasting) "广播 · 已开启" else "广播 · 已关闭", .base_style = broadcast_style, .on_click = self.cx.on(GroupCell, broadcast_cell, GroupCell.act) }).mount(scope, self.cx);
             broadcast_button.meta.ownership.meta.test_id = try std.fmt.bufPrint(&broadcast_cell.test_id, "groups.broadcast.{d}", .{tab.id});
             if (broadcast_button.behavior.interaction.a11y) |*a11y| a11y.pressed = broadcasting;
@@ -2126,6 +2145,7 @@ pub const Workspace = struct {
                     std.hash.autoHash(&hash, tab.local_state);
                     std.hash.autoHash(&hash, tab.group_broadcast_enabled);
                     if (tab.terminal) |terminal| std.hash.autoHash(&hash, terminal.tombstone.state);
+                    std.hash.autoHash(&hash, if (tab.runtime) |runtime| runtime.isConnected() else false);
                 }
             }
             const next = hash.final();
@@ -5130,6 +5150,7 @@ test "saved revision opens with transient credentials without mutating registry"
         \\options={strict_host_key=false}
     );
     defer workspace.registry.deinit();
+    workspace.recent_connections = .{};
     workspace.identities = .{};
     defer workspace.identities.deinit(std.testing.allocator);
     workspace.session_bridge = .{ .context = &capture, .create = Capture.create };

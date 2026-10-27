@@ -249,13 +249,14 @@ test "auxiliary appearance rejects another Cx and republishes retained global to
     const initial = try appearance.refresh(&first_app, null, .{}, 0, tokens);
     try std.testing.expect(initial.theme_changed);
     const version = first.cx.theme_version;
+    const retained = tokens.*;
     theme.select(.dark);
-    try std.testing.expectEqual(tokens, theme.widgetTheme(theme.currentName()));
-    const changed = try appearance.refresh(&first_app, null, .{}, 0, tokens);
+    try std.testing.expectEqualDeep(retained, tokens.*);
+    const changed = try appearance.refresh(&first_app, null, .{}, 0, theme.widgetTheme(theme.currentName()));
     try std.testing.expect(changed.theme_changed);
     try std.testing.expect(first.cx.theme_version > version);
     try std.testing.expectEqual(theme.baseColors().app.withAlpha(255), appearance.root.getBackground());
-    try std.testing.expectEqual(.none, appearance.view.root.style.display);
+    try std.testing.expectEqual(.flex, appearance.view.root.style.display);
     try std.testing.expect(theme.materialVisible());
 }
 

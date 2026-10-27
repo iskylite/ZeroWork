@@ -100,6 +100,17 @@ pub const Config = struct {
                 } else try result.apply(allocator, section, key, value);
             }
         }
+        // Retire only untouched protocol placeholders left by older versions.
+        if (allocator != null and result.ai.provider_count > 0) {
+            var count: usize = 0;
+            for (result.ai.providers[0..@min(result.ai.provider_count, result.ai.providers.len)]) |provider| {
+                if (!provider.enabled and provider.name.len == 0 and provider.endpoint.len == 0 and provider.api_key.len == 0 and provider.api_key_ref == null and provider.model_count == 0 and provider.model.len == 0) continue;
+                result.ai.providers[count] = provider;
+                count += 1;
+            }
+            result.ai.provider_count = count;
+            result.ai.providers = result.ai.providers[0..count];
+        }
         result.keys = keybindings.Map.parse(text) catch return error.InvalidValue;
         try result.validate();
         return result;
@@ -613,14 +624,14 @@ test "new configuration starts with no provider and flat legacy providers retain
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const old = try Config.parseWithAllocator(arena.allocator(), "[ai]\nprovider_1_endpoint = \"https://gateway.example.test/v1\"\nprovider_1_enabled = false\n");
-    try std.testing.expectEqual(@as(usize, 2), old.ai.provider_count);
-    try std.testing.expectEqual(ProviderKind.openai_compat, old.ai.providers[1].kind);
-    try std.testing.expectEqualStrings("https://gateway.example.test/v1", old.ai.providers[1].endpoint);
+    try std.testing.expectEqual(@as(usize, 1), old.ai.provider_count);
+    try std.testing.expectEqual(ProviderKind.openai_compat, old.ai.providers[0].kind);
+    try std.testing.expectEqualStrings("https://gateway.example.test/v1", old.ai.providers[0].endpoint);
     var buffer: [8192]u8 = undefined;
     const written = try old.format(&buffer);
     const loaded = try Config.parseWithAllocator(arena.allocator(), written);
-    try std.testing.expectEqual(@as(usize, 2), loaded.ai.provider_count);
-    try std.testing.expectEqualStrings(old.ai.providers[1].endpoint, loaded.ai.providers[1].endpoint);
+    try std.testing.expectEqual(@as(usize, 1), loaded.ai.provider_count);
+    try std.testing.expectEqualStrings(old.ai.providers[0].endpoint, loaded.ai.providers[0].endpoint);
 }
 
 test "none and ultra effort configuration roundtrips without enabling undeclared steps" {

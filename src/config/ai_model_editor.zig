@@ -117,12 +117,18 @@ pub const Editor = struct {
         try capabilities.appendChild(cx.allocator, self.effort_body);
         try self.capability(capabilities, "识图能力", "settings.ai.model.vision", .vision, model.vision);
         try scroll.content.appendChild(cx.allocator, capabilities);
-        const test_row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 52 }, .margin = .{ .top = -3 }, .direction = .row, .align_items = .center, .gap = 12, .padding = .{ .left = 12, .right = 12, .top = 10, .bottom = 10 }, .background = S.theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
+        const test_row = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 52, .margin = .{ .top = -3 }, .direction = .row, .align_items = .center, .gap = 12, .padding = .{ .left = 12, .right = 12, .top = 10, .bottom = 10 }, .background = S.theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
         const test_status = try ui.textStyled(cx, S.label, "未测试");
         test_status.meta.ownership.meta.test_id = "settings.ai.model.test_status";
+        test_status.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+        if (test_status.getText()) |old| {
+            var properties = old;
+            properties.wrap = .word;
+            properties.text_overflow = .clip;
+            test_status.setText(properties);
+        }
         self.test_status = test_status;
         try test_row.appendChild(cx.allocator, test_status);
-        try test_row.appendChild(cx.allocator, try ui.spacer(cx));
         var test_style = S.modelDialogButton(false);
         test_style.width = .{ .px = 72 };
         const test_button = try ui.widgets.Button(.{ .label = "测试模型", .variant = .secondary, .base_style = test_style, .on_click = cx.on(Editor, self, testModel) }).mount(scope, cx);

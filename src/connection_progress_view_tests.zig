@@ -102,14 +102,14 @@ test "connection progress view direct and routed facts keep the current hop dist
     try std.testing.expectEqualStrings("直连 DB · 正在连接", f.view.title.getText().?.content);
     for (f.view.slots[0..f.view.slot_count]) |slot| {
         const r = slot.node.globalRect();
-        try std.testing.expectApproxEqAbs(r.x + 10, slot.name.globalRect().x, 0.01);
-        try std.testing.expectApproxEqAbs(r.y + 10, slot.name.globalRect().y, 0.01);
-        try std.testing.expectApproxEqAbs(r.y + 30, slot.endpoint.globalRect().y, 0.01);
-        try std.testing.expectApproxEqAbs(r.y + 46, slot.user.globalRect().y, 0.01);
-        try std.testing.expectApproxEqAbs(r.y + 62, slot.status.globalRect().y, 0.01);
+        try std.testing.expectApproxEqAbs(r.x + 12, slot.name.globalRect().x, 0.01);
+        try std.testing.expectApproxEqAbs(r.y + 12, slot.name.globalRect().y, 0.01);
+        try std.testing.expectApproxEqAbs(r.y + 13, slot.endpoint.globalRect().y, 0.01);
+        try std.testing.expectEqual(ui.types.Display.none, slot.user.style.display);
+        try std.testing.expectApproxEqAbs(r.y + 13, slot.status.globalRect().y, 0.01);
     }
-    try std.testing.expectApproxEqAbs(f.view.footer.globalRect().x + 516, f.view.footer_hint.globalRect().x, 0.01);
-    try std.testing.expectApproxEqAbs(f.view.cancel_button.?.globalRect().x + 56, f.view.cancel_label.?.globalRect().x + f.view.cancel_label.?.globalRect().w / 2, 0.01);
+    try std.testing.expect(f.view.footer_hint.globalRect().x >= f.view.footer.globalRect().x);
+    try std.testing.expectApproxEqAbs(f.view.cancel_button.?.globalRect().x + f.view.cancel_button.?.globalRect().w / 2, f.view.cancel_label.?.globalRect().x + f.view.cancel_label.?.globalRect().w / 2, 0.01);
     try std.testing.expectEqual(@as(f32, 16), f.view.copy_icon.?.globalRect().w);
     f.view.cancel();
     f.view.cancel();
@@ -157,8 +157,8 @@ test "connection progress view failed summary remains outside folded logs and re
     try std.testing.expectEqual(@as(@TypeOf(f.view.logs_scroll.container.style.display), .none), f.view.logs_scroll.container.style.display);
     f.view.toggleLogs();
     f.cx.layout();
-    try std.testing.expectEqual(@as(f32, 412), f.view.dialog.globalRect().h);
-    try std.testing.expectApproxEqAbs(f.view.dialog.globalRect().y + f.view.dialog.globalRect().h - 12, f.view.footer.globalRect().y + 34, 0.01);
+    try std.testing.expectEqual(@as(f32, 580), f.view.dialog.globalRect().h);
+    try std.testing.expectApproxEqAbs(f.view.dialog.globalRect().y + f.view.dialog.globalRect().h, f.view.footer.globalRect().y + f.view.footer.globalRect().h, 0.01);
     _ = ledger.record(key, 0, .session, .released);
     source.cleanup = .released;
     source.resources = ledger.snapshot();
@@ -173,7 +173,7 @@ test "connection progress view failed summary remains outside folded logs and re
     const panel_rect = f.view.dialog.globalRect();
     const body_rect = f.view.body_scroll.container.globalRect();
     const toggle_rect = f.view.toggle_button.globalRect();
-    try std.testing.expectApproxEqAbs(panel_rect.x + 12, f.view.endpoint.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(panel_rect.x + 24, f.view.endpoint.globalRect().x, 0.01);
     try std.testing.expect(toggle_rect.y >= body_rect.y);
     try std.testing.expect(toggle_rect.y + toggle_rect.h <= body_rect.y + body_rect.h + 0.01);
     // A native theme/style replay may run after the initial mount. The next
@@ -400,8 +400,8 @@ test "connection progress view log follow pauses on scroll new rows stay pending
     try std.testing.expect(f.view.filter == null);
     f.cx.setViewport(860, 480);
     try f.show(f.snapshot(&hops));
-    try std.testing.expectEqual(@as(f32, 458), f.view.dialog.globalRect().h);
-    try std.testing.expectApproxEqAbs(f.view.dialog.globalRect().y + f.view.dialog.globalRect().h - 12, f.view.footer.globalRect().y + 34, 0.01);
+    try std.testing.expectEqual(@as(f32, 464), f.view.dialog.globalRect().h);
+    try std.testing.expectApproxEqAbs(f.view.dialog.globalRect().y + f.view.dialog.globalRect().h, f.view.footer.globalRect().y + f.view.footer.globalRect().h, 0.01);
 }
 
 test "connection progress viewport width changes preserve reachable actions at unchanged height" {

@@ -150,6 +150,7 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
             return .stop;
         },
         .scroll => |wheel| {
+            self.scrollbar_until = self.cx.frame_time_ms + 900;
             if (self.snapshot == null) return .stop;
             // Zenit preserves AppKit's positive-up delta (as ScrollArea does);
             // Ghostty viewport deltas and terminal wheel encodings use up < 0.
@@ -166,10 +167,7 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
                     while (count > 0) : (count -= 1) enqueueKey(self, .{ .key = if (delta < 0) .arrow_up else .arrow_down }) catch |err| self.showError(err);
                 }
             } else {
-                self.service.scroll(.{ .delta = delta }) catch |err| {
-                    self.showError(err);
-                    return .stop;
-                };
+                self.pending_scroll +|= delta;
                 self.force_snapshot = true;
                 self.cx.requestRedraw();
             }

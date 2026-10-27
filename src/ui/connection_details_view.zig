@@ -130,7 +130,7 @@ pub const View = struct {
         try validate(snapshot);
         const opening = !self.visible;
         if (self.visible and self.source != null and !self.source.?.key.eql(snapshot.key)) self.hide();
-        const changed = self.source == null or !self.source.?.key.eql(snapshot.key);
+        const changed = opening or self.expired or self.source == null or !self.source.?.key.eql(snapshot.key);
         if (changed) {
             self.source = snapshot;
             self.expired = false;
@@ -349,7 +349,7 @@ pub const View = struct {
         footer.meta.ownership.meta.test_id = "connection.details.footer";
         try footer.appendChild(self.cx.allocator, try self.textAction(scope, .edit, "编辑连接路径", "connection.details.edit", self.callbacks.edit == null or target.endpoint.asset_owner == null, target.endpoint.asset_owner, 96, false));
         try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .copy, ui.icons.copy, "复制链路", "connection.details.copy", self.callbacks.copy == null, null, 24, true));
-        try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .logs, ui.icons.get("list").?, "连接日志", "connection.details.logs", self.callbacks.logs == null, null, 24, true));
+        try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .logs, ui.icons.get("file-text").?, "连接日志", "connection.details.logs", self.callbacks.logs == null, null, 24, true));
         try footer.appendChild(self.cx.allocator, try ui.spacer(self.cx));
         try footer.appendChild(self.cx.allocator, try self.textAction(scope, .sample, "测试全链路", "connection.details.sample", self.expired or self.callbacks.request_sample == null or !canSample(snapshot.*), null, 90, true));
         try self.chrome.appendChild(self.cx.allocator, footer);

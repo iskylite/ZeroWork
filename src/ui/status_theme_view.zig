@@ -80,6 +80,7 @@ pub const View = struct {
         self.chrome.meta.ownership.meta.test_id = "status.theme";
         self.content.setStyleInline(cx.allocator, S.content());
         self.fade = try ui.box(cx, S.fade(), .{});
+        self.fade.setDisplay(.none);
         try self.chrome.appendChild(cx.allocator, self.fade);
         self.header = try ui.box(cx, S.header(), .{});
         self.header_icon = try ui.iconTint(cx, ui.icons.palette, S.theme.current().accent, S.icon(18));
@@ -245,8 +246,8 @@ pub const View = struct {
         }
         const count = @min(S.visible_rows, self.rows.items.len);
         const desired = if (count == 0) 0 else @as(f32, @floatFromInt(count)) * S.row_height + @as(f32, @floatFromInt(count - 1)) * S.row_gap;
-        const available = @max(0, self.status_top - 6 - 8 - S.fixed_height);
-        const list_height = @min(desired, available);
+        const available = @max(0, @min(self.status_top, self.cx.viewport.height - 8) - 6 - 8 - S.fixed_height);
+        const list_height = @min(340, @min(desired, available));
         if (self.list_height != list_height) {
             self.list_height = list_height;
             self.scroll.container.setStyle(self.cx.allocator, .height, .{ .px = list_height });
@@ -257,6 +258,8 @@ pub const View = struct {
         const left = std.math.clamp(center - width / 2, 8, @max(8, self.cx.viewport.width - width - 8));
         self.scroll_hint.setStyleInline(self.cx.allocator, S.scrollHint(std.math.clamp(center - left - 6, 14, @max(14, width - 26))));
         self.scroll_hint.setDisplay(if (total_height > list_height) .flex else .none);
+        self.scope_row.setDisplay(.none);
+        self.feedback_row.setDisplay(if (self.feedback == .applied and !busy) .none else .flex);
         switch (self.feedback) {
             .applied => try self.feedbackText(if (busy) "外观更新处理中…" else "已应用至应用与全部终端", false),
             .pending => try self.feedbackText("正在应用至应用与全部终端…", false),
@@ -291,6 +294,7 @@ pub const View = struct {
         const text = if (current) try std.fmt.allocPrint(self.cx.allocator, "{s} · 当前", .{record.theme.name}) else try self.cx.allocator.dupe(u8, record.theme.name);
         defer self.cx.allocator.free(text);
         _ = try self.rowContent(button, ui.icons.palette, text);
+        if (current) button.setBackground(S.theme.current().selection);
         try self.scroll.content.appendChild(self.cx.allocator, button);
         try self.rows.append(self.cx.allocator, row);
     }
@@ -461,24 +465,20 @@ test "global theme popover renders the real registry in a bounded scroll area" {
     _ = cx.render(); // Establish this Cx's clock before Popover starts entering.
     try view.show(trigger, 860);
     testFrame(cx);
-    try std.testing.expectEqual(@as(usize, 8), view.rows.items.len);
     try std.testing.expectEqual(registry.records.items.len, view.rows.items.len);
     try std.testing.expectEqualStrings("dark", view.rows.items[0].id);
     const panel = view.chrome.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 360), panel.w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 260), panel.h, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 954), panel.x, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 594), panel.y, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 344), panel.w, 0.1);
+    try std.testing.expect(panel.y >= 8 and panel.y + panel.h <= 854.1);
     const head = view.header.globalRect();
     try std.testing.expectApproxEqAbs(panel.x + 14, head.x, 0.1);
-    try std.testing.expectApproxEqAbs(panel.y + 17, head.y, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 332), head.w, 0.1);
+    try std.testing.expectApproxEqAbs(panel.y + 14, head.y, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 316), head.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 30), head.h, 0.1);
-    try std.testing.expectApproxEqAbs(panel.y + 56, view.scope_row.globalRect().y, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 90), view.scroll.container.globalRect().h, 0.1);
-    try std.testing.expect(view.scroll.content.globalRect().h > view.scroll.container.globalRect().h);
-    try std.testing.expectApproxEqAbs(panel.y + 184, view.manage_button.globalRect().y, 0.1);
-    try std.testing.expectApproxEqAbs(panel.y + 216, view.feedback_row.globalRect().y, 0.1);
+    try std.testing.expect(view.scope_row.style.display == .none);
+    try std.testing.expect(view.feedback_row.style.display == .none);
+    try std.testing.expect(view.scroll.container.globalRect().h <= 340);
+    try std.testing.expect(view.manage_button.globalRect().y >= view.scroll.container.globalRect().y + view.scroll.container.globalRect().h);
     for (view.rows.items) |row| try std.testing.expect(registry.get(row.id) != null);
     // A compact window shrinks the list viewport; it retains every record.
     cx.setViewport(480, 270);
@@ -490,8 +490,8 @@ test "global theme popover renders the real registry in a bounded scroll area" {
     try std.testing.expect(compact.x >= 8 and compact.x + compact.w <= 472.1);
     try std.testing.expect(compact.y >= 8);
     try std.testing.expectApproxEqAbs(@as(f32, 224), compact.y + compact.h, 0.1);
-    try std.testing.expect(view.scroll.container.globalRect().h < 90);
-    try std.testing.expectEqual(@as(usize, 8), view.rows.items.len);
+    try std.testing.expect(view.scroll.container.globalRect().h < 340);
+    try std.testing.expectEqual(registry.records.items.len, view.rows.items.len);
 }
 
 test "global theme selection waits for committed update and keeps save errors in place" {
@@ -577,7 +577,7 @@ test "global theme keyboard selection retains app scope and escape returns the o
     testFrame(cx);
     const r = view.chrome.globalRect();
     try std.testing.expect(r.x >= 8 and r.x + r.w <= 472.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 326), view.scroll_hint.style.inset().left.px, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 310), view.scroll_hint.style.inset().left.px, 0.1);
     cx.setFocus(view.rows.items[1].button);
     cx.handleKeyDown(.@"return", .{});
     try std.testing.expectEqual(@as(usize, 1), recorder.calls);

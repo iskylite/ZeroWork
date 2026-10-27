@@ -188,6 +188,7 @@ const AiHost = struct {
     manager: AiManager,
     provider: ai_provider.Provider,
     native_context: ?*NativeContext,
+    painted_config_revision: u64 = 0,
     native_client: ?*AiClient,
     native_binding: ?*AiClient.Binding,
     endpoint: []const u8,
@@ -263,6 +264,7 @@ const AiHost = struct {
     /// internal buffer would be overwritten by the next keystroke).
     request_text: ?[]u8 = null,
     failure_label: []const u8 = "AI request failed",
+    failure_detail: [1400]u8 = undefined,
     request_failure: ?anyerror = null,
     recovery_failed: bool = false,
     recovery_pending: ?@import("ui/ai_recovery_view.zig").Envelope = null,
@@ -1183,6 +1185,13 @@ const AiHost = struct {
                 return err;
             };
         }
+        if (self.request_failure != null) {
+            var message = try (HistoryMessage{ .user = false, .text = @constCast(self.failure_label) }).clone(self.allocator);
+            additions.append(self.allocator, message) catch |err| {
+                message.deinit(self.allocator);
+                return err;
+            };
+        }
         try self.history.ensureUnusedCapacity(self.allocator, additions.items.len);
         self.history.appendSliceAssumeCapacity(additions.items);
         self.controller.stream.clearRetainingCapacity();
@@ -1226,7 +1235,7 @@ const AiHost = struct {
                 };
             },
         };
-        self.setFeedback(if (std.mem.eql(u8, label, "AI 助手") or
+        self.setFeedback(if (self.recoveryVisible() or std.mem.eql(u8, label, "AI 助手") or
             std.mem.eql(u8, label, "AI Float") or
             std.mem.eql(u8, label, "AI Float · 请求中") or
             std.mem.eql(u8, label, "AI · 当前助手") or
@@ -1387,6 +1396,7 @@ const AiHost = struct {
                 .regenerate_enabled = (run == null or !run.?.uncertain) and cooldown == 0,
                 .cooldown_seconds = (cooldown + 999) / 1000,
                 .retained_answer = retained_answer,
+                .has_tool_calls = if (run) |value| value.records.items.len > 0 else false,
             }, .{ .context = self, .enqueue = enqueueRecovery }) catch return;
             conv.appendChild(allocator, recovery) catch return;
         }
@@ -1439,7 +1449,15 @@ const AiHost = struct {
 
     fn updateStrip(self: *AiHost) void {
         const strip = self.strip orelse return;
-        const pane = if (self.currentScope() != null) self.ownerBounds() else null;
+        const pane = if (self.currentScope() != null) region: {
+            if (self.workspace) |workspace| if (workspace.active_group_view != null) {
+                var rect = workspace.terminal_area.globalRect();
+                rect.y -= 12;
+                rect.h += 12;
+                break :region rect;
+            };
+            break :region self.ownerBounds();
+        } else null;
         // File workspaces align with the sidebar. Their toolbar AI entry remains
         // available without reserving or overlaying a strip across the file cards.
         const file_workspace = if (self.workspace) |workspace| blk: {
@@ -1802,6 +1820,7 @@ const AiHost = struct {
     }
 
     fn recoveryReason(self: *AiHost) []const u8 {
+        if (self.request_failure != null) return self.failure_label;
         return if (self.request_failure) |err| switch (err) {
             error.ToolOutcomeUnknown => "远端写入结果待核实，请先核查原目标",
             error.Timeout => "请求超时，已保留收到的答复和调用结果",
@@ -2356,8 +2375,8 @@ const AiHost = struct {
                 return;
             }
             self.request_failure = err;
-            self.failure_label = "答复流中断";
-            applog.warn(.ai, "ai worker turn failed: {s}", .{@errorName(err)});
+            self.failure_label = if (self.native_context) |context| context.diagnostic.format(&self.failure_detail, err) else std.fmt.bufPrint(&self.failure_detail, "请求失败 · {s}", .{@errorName(err)}) catch @errorName(err);
+            applog.warn(.ai, "ai worker turn failed: {s}", .{self.failure_label});
             self.thread_state.store(3, .release);
         }
     }
@@ -2619,6 +2638,11 @@ const AiHost = struct {
                 if (picker.open_state) if (host.attachment_preview_holder) |holder| holder.setDisplay(.flex);
             }
             if (previous_owner != null and host.display_owner != null and !@import("ai/tool_scope.zig").Owner.eql(previous_owner.?, host.display_owner.?)) host.refresh("AI · 当前助手");
+            if (host.runtime_config) |runtime| if (host.painted_config_revision != runtime.value.config_revision) {
+                host.painted_config_revision = runtime.value.config_revision;
+                host.composer_hash = null;
+                host.refresh("AI 助手");
+            };
             host.refreshComposer() catch |err| {
                 host.refresh(@errorName(err));
             };
@@ -2988,6 +3012,7 @@ const MenuHost = struct {
         self.row_scope = scope;
         try scope.onCleanup(MenuHost, self, rowScopeEnded);
         const c = app_theme.current();
+        if (self.chrome) |chrome| chrome.setBackground(c.overlay);
         const context = self.state.context;
         const host_asset_menu = kind == .host_asset;
         const remote_terminal = kind == .terminal and !context.local_session;
@@ -5472,6 +5497,8 @@ const AppNavHost = struct {
     quick_panel: *ui.Node,
     quick_host: ?*QuickConnectHost = null,
     sidebar_panel: *ui.Node = undefined,
+    sidebar_grip: ?*ui.Node = null,
+    sidebar_drag_width: f32 = 300,
     sidebar_full: ?*ui.Node = null,
     sidebar_empty: ?*ui.Node = null,
     collapsed_sidebar: ?*CollapsedSidebar = null,
@@ -5653,8 +5680,21 @@ const AppNavHost = struct {
         self.cx.requestRedraw();
     }
 
+    fn resizeSidebar(event: ui.interaction.drag.Event, raw: *anyopaque) void {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        switch (event.phase) {
+            .start => self.sidebar_drag_width = self.quick.sidebar.expanded_width,
+            .move, .end => self.quick.sidebar.expanded_width = std.math.clamp(self.sidebar_drag_width + event.delta.x, 220, @min(480, @max(220, self.cx.viewport.width - 480))),
+            .cancel => self.quick.sidebar.expanded_width = self.sidebar_drag_width,
+        }
+        self.applySidebar();
+        self.cx.requestRedraw();
+    }
+
     fn applySidebar(self: *AppNavHost) void {
         self.sidebar_panel.setDisplay(if (self.quick.sidebar.collapsed) .none else .flex);
+        self.sidebar_panel.setStyle(self.allocator, .width, .{ .px = self.quick.sidebar.expanded_width });
+        if (self.sidebar_grip) |grip| grip.setDisplay(if (self.quick.sidebar.collapsed) .none else .flex);
         if (self.collapsed_sidebar) |collapsed| collapsed.setCollapsed(self.quick.sidebar.collapsed);
     }
 
@@ -7759,7 +7799,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     try ai_header.appendChild(cx.allocator, ai_new);
     const ai_sessions = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "AI 会话列表", .base_style = ai_window_base, .hover_style = ai_window_hovers[0], .on_click = cx.on(AiHost, ai_host, AiHost.showConversations) }).mount(scope, cx);
     ai_sessions.meta.ownership.meta.test_id = "ai.sessions";
-    const ai_sessions_icon = try ui.iconTint(cx, ui.icons.get("list").?, app_theme.current().fg_2, ai_styles.icon());
+    const ai_sessions_icon = try ui.iconTint(cx, ui.icons.get("messages-square").?, app_theme.current().fg_2, ai_styles.icon());
     try ai_sessions.appendChild(cx.allocator, ai_sessions_icon);
     try ai_header.appendChild(cx.allocator, ai_sessions);
     const ai_collapse = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "收起 AI 助手", .base_style = ai_window_base, .hover_style = ai_window_hovers[0], .on_click = cx.on(AiHost, ai_host, AiHost.collapse) }).mount(scope, cx);
@@ -8248,6 +8288,11 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     if (workspace.sidebar_chrome) |view| try background_view.isolate(view.new_menu.scope, view.new_menu.chrome);
     nav_host.sidebar_panel = sidebar;
     try main_row.appendChild(cx.allocator, sidebar);
+    const sidebar_grip = try ui.box(cx, .{ .width = .{ .px = 8 }, .height = .fill(), .margin = .{ .left = -8, .right = -8 }, .flex_shrink = 0, .cursor = .ew_resize, .hit_behavior = .@"opaque" }, .{});
+    sidebar_grip.meta.ownership.meta.test_id = "sidebar.resize";
+    _ = try ui.interaction.drag.Binding.attach(scope, cx, sidebar_grip, .{ .axis = .horizontal, .activation_distance = 1 }, AppNavHost.resizeSidebar, nav_host);
+    nav_host.sidebar_grip = sidebar_grip;
+    try main_row.appendChild(cx.allocator, sidebar_grip);
     const collapsed_sidebar = try CollapsedSidebar.mount(cx, scope, workspace, .{
         .context = @ptrCast(nav_host),
         .search = AppNavHost.collapsedSearch,
@@ -9560,7 +9605,10 @@ const TransferHost = struct {
             if (tab.content_owner != .session) continue;
             const owner = tab.content_owner.session;
             var has_tasks = false;
-            for (self.tasks.job_owners.items) |record| if (record.owner.eql(owner) and self.manager.progress(record.job) != null) { has_tasks = true; break; };
+            for (self.tasks.job_owners.items) |record| if (record.owner.eql(owner) and self.manager.progress(record.job) != null) {
+                has_tasks = true;
+                break;
+            };
             if (has_tasks) try choices.append(a, .{ .label = try a.dupe(u8, tab.titleSlice()), .scope = .{ .session = owner } });
         }
         return choices.items;

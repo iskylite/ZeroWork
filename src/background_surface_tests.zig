@@ -73,6 +73,9 @@ fn imageCount(items: []const ui.DisplayItem, texture: u32) usize {
 }
 
 test "global background remains the only image through floating card move resize hide and reopen" {
+    const previous_parameters = theme.materialParameters();
+    defer _ = theme.setMaterialParameters(previous_parameters.transparency, previous_parameters.blur);
+    _ = theme.setMaterialParameters(75, 16);
     const w = try Window.init();
     defer w.deinit();
     var materials: assets.Materials = .{ .background = .{ .enabled = true, .path = "/fixture", .fit = .fit }, .blur_px = 12 };
@@ -80,6 +83,7 @@ test "global background remains the only image through floating card move resize
     const children = w.card.children.items.len;
     const hooks = w.cx.after_layout_hooks.items.len;
     try w.source.isolate(w.scope, w.card);
+    _ = w.cx.render();
     try std.testing.expectEqual(children, w.card.children.items.len);
     try std.testing.expectEqual(hooks, w.cx.after_layout_hooks.items.len);
     try std.testing.expectEqual(@as(f32, 16), w.card.style.backdrop_blur());

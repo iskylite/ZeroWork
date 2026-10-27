@@ -112,7 +112,8 @@ pub const Presenter = struct {
         scroll.content.setStyleInline(cx.allocator, S.stack());
         try self.modal.body.appendChild(cx.allocator, scroll.container);
         for (&self.choices, 0..) |*choice, i| {
-            const value = try scope.createSignal([]const u8, " ");
+            // Challenge payloads may retire before the retained button/a11y projection.
+            const value = try scope.createText(" ", .{});
             const button = try ui.widgets.Button(.{ .label = value, .variant = .secondary, .on_click = cx.on(Choice, choice, Choice.choose) }).mount(scope, cx);
             choice.* = .{ .presenter = self, .index = i, .root = button, .label = textNode(button).?, .value = value };
             button.meta.ownership.meta.test_id = try std.fmt.bufPrint(&choice.id, "plugin.challenge.choice.{d}", .{i});
@@ -127,7 +128,7 @@ pub const Presenter = struct {
         cancel_button.meta.ownership.meta.test_id = "plugin.challenge.cancel";
         try footer.appendChild(cx.allocator, cancel_button);
         self.submit_disabled = try scope.createSignal(bool, true);
-        self.submit_label = try scope.createSignal([]const u8, "确认");
+        self.submit_label = try scope.createText("确认", .{});
         self.submit_button = try ui.widgets.Button(.{ .label = self.submit_label, .disabled = self.submit_disabled, .variant = .primary, .on_click = cx.on(Presenter, self, submit) }).mount(scope, cx);
         self.submit_button.meta.ownership.meta.test_id = "plugin.challenge.submit";
         try footer.appendChild(cx.allocator, self.submit_button);

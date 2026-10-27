@@ -42,12 +42,12 @@ var material_transparency: f32 = 0;
 var material_blur: f32 = 0;
 
 /// Ratios of the global transparency, not independent surface opacity values.
-/// Overlay transmits at most 10% so text remains readable even with blur off.
+/// Overlay retains at least 35% paint; stacked controls share the window material.
 pub const material_ratio = struct {
     pub const surface_1: f32 = 0.95;
     pub const surface_2: f32 = 0.90;
     pub const well: f32 = 0.80;
-    pub const overlay: f32 = 0.10;
+    pub const overlay: f32 = 0.65;
     pub const hover: f32 = 0.75;
     pub const tab_on: f32 = 0.65;
 };
@@ -76,14 +76,14 @@ test "global material parameters derive role ratios with readable overlay at end
     defer _ = setMaterialParameters(saved.transparency, saved.blur);
     for ([_]f32{ 0, 25, 75, 100 }) |percent| {
         _ = setMaterialParameters(percent, percent * 0.5);
-        try std.testing.expectEqual(@as(u8, @intFromFloat(@round(255 * (1 - percent / 100 * 0.10)))), current().overlay.a);
-        try std.testing.expect(current().overlay.a >= 230);
+        try std.testing.expectEqual(@as(u8, @intFromFloat(@round(255 * (1 - percent / 100 * 0.65)))), current().overlay.a);
+        try std.testing.expect(current().overlay.a >= 89);
         try std.testing.expectEqual(percent * 0.5, overlayGlass().backdrop_blur);
         try std.testing.expectEqual(current().overlay, widgetTheme(currentName()).tokens.color.tooltip_bg);
     }
     _ = setMaterialParameters(75, 0);
     try std.testing.expectEqual(@as(f32, 0), overlayGlass().backdrop_blur);
-    try std.testing.expectEqual(@as(u8, 236), current().overlay.a);
+    try std.testing.expectEqual(@as(u8, 131), current().overlay.a);
 }
 
 /// Tracks actual image visibility for host/preview bookkeeping only. It never

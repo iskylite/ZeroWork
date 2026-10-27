@@ -119,7 +119,7 @@ test "SSH status host mounts exact live bar geometry and publishes only authorit
     defer f.deinit();
     try f.update(try snapshot(key, "DB-A"), false);
     const Item = struct { node: *ui.Node, x: f32, w: f32 };
-    for ([_]Item{ .{ .node = f.bar.controls.identity_button, .x = 0, .w = 162 }, .{ .node = f.bar.controls.encoding_button, .x = 168, .w = 68 }, .{ .node = f.bar.controls.grid_button, .x = 242, .w = 82 }, .{ .node = f.bar.chain_trigger, .x = 928, .w = 86 }, .{ .node = f.bar.controls.theme_button, .x = 1112, .w = 28 } }) |item| {
+    for ([_]Item{ .{ .node = f.bar.controls.identity_button, .x = 0, .w = 138 }, .{ .node = f.bar.controls.encoding_button, .x = 144, .w = 68 }, .{ .node = f.bar.controls.grid_button, .x = 218, .w = 82 }, .{ .node = f.bar.chain_trigger, .x = 928, .w = 86 }, .{ .node = f.bar.controls.theme_button, .x = 1112, .w = 28 } }) |item| {
         const r = item.node.globalRect();
         try std.testing.expectApproxEqAbs(8 + item.x, r.x, 0.1);
         try std.testing.expectEqual(item.w, r.w);
@@ -187,7 +187,7 @@ test "SSH status host metrics remain static and collapsed state follows sidebar"
     try std.testing.expectEqual(.none, f.bar.controls.more_button.style.display);
     f.bar.controls.sidebar_width = 48;
     try f.update(try snapshot(key, "DB-A"), false);
-    try std.testing.expectEqual(@as(f32, 162), f.bar.controls.identity_button.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 138), f.bar.controls.identity_button.globalRect().w);
     try std.testing.expectEqual(.flex, f.bar.controls.identity_label.style.display);
 }
 
@@ -279,7 +279,7 @@ test "SSH status host projects only the original ready SFTP attachment without t
     try std.testing.expectEqual(.none, f.bar.controls.file_icon.style.display);
     const rect = f.bar.controls.identity_button.globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 8), rect.x, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 112), rect.w, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 96), rect.w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 26), rect.h, 0.1);
     f.click(f.bar.controls.identity_button);
     try std.testing.expectEqual(@as(usize, 1), f.captures);

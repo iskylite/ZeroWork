@@ -12,6 +12,7 @@ pub const Service = struct {
     next_refresh: i64 = 0,
     revision: u64 = 0,
     request_error: ?anyerror = null,
+    diagnostic: http.Diagnostic = .{},
     pub fn deinit(self: *Service) void {
         if (self.job) |job| {
             job.cancel.cancel();
@@ -72,6 +73,7 @@ pub const Service = struct {
         job.thread.?.join();
         self.job = null;
         self.request_error = job.failure;
+        self.diagnostic = job.diagnostic;
         if (job.success) {
             if (self.current) |old| old.destroy();
             self.current = job;
@@ -117,6 +119,7 @@ const Job = struct {
     require_list: bool = false,
     probe: bool = false,
     failure: ?anyerror = null,
+    diagnostic: http.Diagnostic = .{},
     metadata: std.ArrayList(ModelMetadata) = .empty,
     fn create(ai: config.Ai, revision: u64) !*Job {
         const self = try std.heap.c_allocator.create(Job);
@@ -152,7 +155,12 @@ const Job = struct {
     }
     fn fetch(self: *Job, t: transport.Transport, plan: http.RequestPlan, body: []const u8) ![]u8 {
         if (!std.mem.startsWith(u8, plan.endpoint, "https://") and !http.isLoopbackHttp(plan.endpoint)) return error.InsecureEndpoint;
-        var response = try t.send(t.ctx, plan, body, self.arena.allocator());
+        const native_context: *transport.NativeContext = @ptrCast(@alignCast(t.ctx));
+        var response = t.send(t.ctx, plan, body, self.arena.allocator()) catch |err| {
+            self.diagnostic = native_context.diagnostic;
+            return err;
+        };
+        self.diagnostic = native_context.diagnostic;
         defer response.deinit(self.arena.allocator());
         if (response.status < 200 or response.status >= 300) return error.ModelDiscoveryFailed;
         return self.arena.allocator().dupe(u8, response.body);
@@ -165,6 +173,7 @@ const Job = struct {
         const provider_config = @import("provider_config.zig");
         const resolved = try provider_config.fromSettings(self.ai);
         var plan = try http.plan(resolved);
+        plan.endpoint = try http.chatEndpoint(self.arena.allocator(), resolved.kind, resolved.endpoint);
         plan.cancel = &self.cancel;
         plan.timeout_ms = 30000;
         const messages = [_]@import("provider.zig").Message{.{ .content = "Reply with OK." }};

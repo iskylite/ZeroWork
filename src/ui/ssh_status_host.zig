@@ -150,7 +150,7 @@ pub fn mountStatusBar(cx: *ui.Cx, scope: *ui.Scope, status_node: *ui.Node) !Stat
     try left.appendChild(cx.allocator, id);
     const rtt = try metric(cx, scope, left, "往返延迟", "status.connection.rtt", 64, ui.icons.activity, hover, disabled);
     cx.detachChild(rtt.button, rtt.label);
-    rtt.label.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 80 }, .top = .{ .px = 5 } }, .width = .{ .px = 52 }, .height = .{ .px = 16 }, .overflow_hidden = true });
+    rtt.label.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 74 }, .top = .{ .px = 5 } }, .width = .{ .px = 36 }, .height = .{ .px = 16 }, .overflow_hidden = true });
     try id.appendChild(cx.allocator, rtt.label);
     rtt.button.setDisplay(.none);
     const encoding = try metric(cx, scope, left, "终端编码", "status.connection.encoding", 68, ui.icons.get("type").?, hover, disabled);
@@ -355,6 +355,7 @@ pub const Host = struct {
         const colors = S.theme.current();
         if (self.colors == null or !std.meta.eql(self.colors.?, colors)) {
             controls.identity_label.setTextColor(colors.fg_1);
+            for ([_]*ui.Node{ controls.chain_button, controls.socks_button }) |node| node.setBackground(ui.Color.TRANSPARENT);
             for ([_]*ui.Node{ controls.rtt_label, controls.encoding_label, controls.grid_label }) |node| node.setTextColor(colors.fg_2);
             for (controls.icons) |node| _ = node.setTint(colors.fg_2);
             _ = controls.file_icon.setTint(colors.fg_2);
@@ -362,7 +363,7 @@ pub const Host = struct {
             self.detail.dirty = true;
             self.colors = colors;
         }
-        const identity_width: f32 = if (self.active != null) S.identity_width else 112;
+        const identity_width: f32 = if (self.active != null) S.identity_width else 96;
         controls.icons[1].setStyleInline(self.cx.allocator, .{ .inset = .{ .left = .{ .px = identity_width - 24 }, .top = .{ .px = 6 } } });
         controls.identity_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = identity_width } });
         controls.identity_label.setDisplay(.flex);

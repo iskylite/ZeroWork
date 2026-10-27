@@ -114,7 +114,7 @@ pub const Model = struct {
     }
     pub fn resetPosition(self: *Model, pane: Rect, window: Rect) void {
         if (self.maximized) return;
-        var value = Rect{ .x = 0, .y = 0, .width = 600, .height = 456 };
+        var value = self.rect(pane, window);
         value.x = pane.x + (pane.width - value.width) / 2;
         value.y = pane.y + 14;
         self.setRectangle(value, pane, window);

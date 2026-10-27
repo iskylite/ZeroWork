@@ -208,8 +208,8 @@ pub fn naturalChip() ui.BoxStyle {
 pub fn compactModelWidth(model_width: f32, effort_width: f32, vision: bool) f32 {
     return 32 + (if (vision) @as(f32, 16) else 0) + model_width + (if (effort_width > 0) effort_width + 4 else 0);
 }
-pub fn compactModelLabel(_: f32, _: bool) ui.BoxStyle {
-    return .{ .position = .relative, .inset = .{}, .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .max_width = 100, .flex_shrink = 0 };
+pub fn compactModelLabel(width_value: f32, _: bool) ui.BoxStyle {
+    return .{ .position = .relative, .inset = .{}, .width = .{ .px = width_value }, .height = .{ .px = 14 }, .max_width = 100, .min_width = 0, .overflow = .hidden, .flex_shrink = 1 };
 }
 pub fn compactEffortLabel(_: f32, _: f32, _: bool) ui.BoxStyle {
     return .{ .position = .relative, .inset = .{}, .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .flex_shrink = 0 };

@@ -127,7 +127,7 @@ test "settings search every scalar schema key keeps its own category and mounts 
             if (std.mem.eql(u8, entry.key, "alignment_x") or std.mem.eql(u8, entry.key, "alignment_y")) break :blk "settings.field.alignment";
             const boolean = @import("config/settings_values.zig").read(f.controller.model.value, entry.section, entry.key).? == .boolean;
             break :blk try std.fmt.bufPrint(&buffer, "settings.{s}.{s}", .{ if (boolean) "toggle" else "field", entry.key });
-        } else try std.fmt.bufPrint(&buffer, "settings.field.{s}", .{entry.key});
+        } else if (std.mem.eql(u8, entry.section, "ai") and std.mem.eql(u8, entry.key, "default_provider")) "settings.ai.behavior" else try std.fmt.bufPrint(&buffer, "settings.field.{s}", .{entry.key});
         if (byId(mounted.root, id) == null) std.debug.print("missing scalar search control {s}.{s} ({s})\n", .{ entry.section, entry.key, id });
         try std.testing.expect(byId(mounted.root, id) != null);
     }

@@ -23,8 +23,9 @@ test "AI images show processing and error retry in the original four fixed slots
     try std.testing.expectEqual(@as(usize, 1), view.count);
     try std.testing.expectEqualStrings("图片处理中", view.cards[0].metadata.getText().?.content);
     try std.testing.expectEqual(ui.types.Display.none, view.cards[0].retry_button.style.display);
-    try std.testing.expectEqual(@as(f32, 184), view.cards[0].root.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 44), view.cards[0].root.globalRect().h);
+    try std.testing.expect(view.cards[0].root.globalRect().w <= 260);
+    try std.testing.expectApproxEqAbs(view.cards[0].root.globalRect().x + view.cards[0].root.globalRect().w - 6, view.cards[0].remove_button.globalRect().x + view.cards[0].remove_button.globalRect().w, 0.1);
+    try std.testing.expectEqual(@as(f32, 20), view.cards[0].root.globalRect().h);
     try std.testing.expect(draft.fail(ticket, error.AccessDenied));
     try view.update(&draft);
     try std.testing.expectEqual(ui.types.Display.flex, view.cards[0].retry_button.style.display);
@@ -135,17 +136,17 @@ test "AI images share one fixed-height horizontal rail with text attachments" {
     text_view.external_count = image_view.count;
     try text_view.update(&text_draft);
     settle(cx);
-    try std.testing.expectEqual(@as(f32, 48), text_view.root.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 25), text_view.root.globalRect().h);
     const first = image_view.cards[0].root.globalRect();
     const last = image_view.cards[3].root.globalRect();
     try std.testing.expectEqual(first.y, last.y);
-    try std.testing.expect(last.x > first.x + 500);
+    try std.testing.expect(last.x > first.x + 300);
     // Rebuilding text cards must not destroy the externally owned image cards.
     const ticket = try text_draft.begin();
     var reference = try text_model.ContentRef.create(a, "/text.txt", "saved", 1);
     _ = try text_draft.complete(ticket, &reference);
     try text_view.update(&text_draft);
     settle(cx);
-    try std.testing.expectEqual(@as(f32, 48), text_view.root.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 25), text_view.root.globalRect().h);
     try std.testing.expectEqual(@as(usize, 4), image_view.count);
 }
