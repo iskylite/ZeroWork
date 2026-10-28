@@ -9,7 +9,7 @@ pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 pub const chrome_height: f32 = 168;
 
 pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = width }, .height = .{ .px = max_height }, .max_height = max_height, .padding = .{}, .gap = 0, .direction = .column, .background = theme.current().overlay, .border = .{ .radius = 14 }, .overflow_hidden = true, .flex_shrink = 0 };
+    return .{ .width = .{ .px = width }, .height = .{ .px = max_height }, .max_height = max_height, .padding = .{}, .gap = 0, .direction = .column, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .overflow_hidden = true, .flex_shrink = 0 };
 }
 pub fn editorSlot(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_height = 0, .flex = 1, .flex_shrink = 1, .direction = .column, .gap = 0 };
@@ -37,7 +37,7 @@ pub fn identityFields(tokens: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
     var style = stack(undefined);
     style.padding = ui.Padding.all(12);
-    style.background = theme.current().surface_2;
+    style.background = theme.popupAction();
     style.border = .{ .radius = 9 };
     return style;
 }
@@ -56,7 +56,7 @@ pub fn row(h: f32) ui.BoxStyle {
 pub fn footer() ui.BoxStyle {
     var style = row(62);
     style.padding = .{ .left = 24, .right = 24, .top = 14, .bottom = 14 };
-    style.background = theme.current().surface_2;
+    style.background = theme.popupAction();
     return style;
 }
 pub fn scroll() ui.BoxStyle {
@@ -67,10 +67,10 @@ pub fn field(w: ?f32) ui.BoxStyle {
 }
 // zenit draws borders inside the box; include the CSS 1px border in content insets.
 pub fn input() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 34 }, .padding = .{ .left = 11, .right = 11, .top = 6, .bottom = 6 }, .background = theme.current().well, .border = .{ .radius = 8, .width = 1, .color = ui.Color.TRANSPARENT }, .font_size = 11 };
+    return .{ .width = .fill(), .height = .{ .px = 34 }, .padding = .{ .left = 11, .right = 11, .top = 6, .bottom = 6 }, .background = theme.popupInset(), .border = .{ .radius = 8, .width = 1, .color = ui.Color.TRANSPARENT }, .font_size = 11 };
 }
 pub fn button(w: f32, h: f32, primary: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .direction = .row, .align_items = .center, .justify = .center, .gap = 6, .background = if (primary) theme.current().action_accent else theme.current().well, .gradient = if (primary) .{ .from = theme.current().action_accent, .to = theme.current().action_accent_2, .direction = .diagonal } else null, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .direction = .row, .align_items = .center, .justify = .center, .gap = 6, .background = if (primary) theme.current().action_accent else theme.popupInset(), .gradient = if (primary) .{ .from = theme.current().action_accent, .to = theme.current().action_accent_2, .direction = .diagonal } else null, .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn disclosure() ui.BoxStyle {
     var style = row(18);
@@ -81,7 +81,7 @@ pub fn disclosure() ui.BoxStyle {
     return style;
 }
 pub fn step(selected: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 36 }, .padding = .{ .left = 8, .right = 8, .top = 5, .bottom = 5 }, .direction = .row, .align_items = .center, .justify = .center, .gap = 12, .background = if (selected) theme.current().selection else ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 36 }, .padding = .{ .left = 8, .right = 8, .top = 5, .bottom = 5 }, .direction = .row, .align_items = .center, .justify = .center, .gap = 12, .background = if (selected) theme.popupSelection() else ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .flex_shrink = 0 };
 }
 pub fn stepCopy() ui.BoxStyle {
     return .{ .width = .{ .fit = .{} }, .height = .{ .px = 18 }, .direction = .column, .gap = 0, .flex_shrink = 0 };
@@ -114,13 +114,13 @@ pub fn number(_: bool) ui.BoxStyle {
     return .{ .width = .{ .px = 8 }, .height = .{ .px = 18 }, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
 }
 pub fn accessChoice(selected: bool) ButtonStyle {
-    return .{ .width = .fill(), .height = .{ .px = 61 }, .flex = 1, .min_width = 0, .flex_shrink = 0, .background = if (selected) theme.current().selection else theme.current().well, .corner_radius = 8, .border_width = 0, .padding = .{} };
+    return .{ .width = .fill(), .height = .{ .px = 61 }, .flex = 1, .min_width = 0, .flex_shrink = 0, .background = if (selected) theme.popupSelection() else theme.popupInset(), .corner_radius = 8, .border_width = 0, .padding = .{} };
 }
 pub fn routeHop() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 51 }, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .gap = 8, .background = ui.Color.TRANSPARENT, .border_bottom_width = 1, .border_bottom_color = theme.current().border, .flex_shrink = 0 };
 }
 pub fn routeNode(_: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = 146 }, .height = .{ .px = 76 }, .padding = ui.Padding.all(10), .direction = .column, .gap = 2, .background = theme.current().well, .border = .{ .radius = 9 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 146 }, .height = .{ .px = 76 }, .padding = ui.Padding.all(10), .direction = .column, .gap = 2, .background = theme.popupInset(), .border = .{ .radius = 9 }, .flex_shrink = 0 };
 }
 // Review/test nodes: Bridge 358:1328872 / 1328884, 146×76, p10, g3.
 pub fn testNode() ui.BoxStyle {
@@ -140,7 +140,7 @@ pub fn testNodeText(kind: enum { name, address, status }) ui.TextStyle {
 }
 // 358:1328935 / 1328950 / 1328988: 28+4+80+4+26 = 142.
 pub fn testLogs() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 4, .background = theme.current().well, .border = .{ .radius = 9, .width = 0 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 4, .background = theme.popupInset(), .border = .{ .radius = 9, .width = 0 }, .flex_shrink = 0 };
 }
 pub fn testLogText(column: usize) ui.TextStyle {
     var style = text(if (column == 3) 10.5 else 9.5, 400, false);
@@ -161,7 +161,7 @@ pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
 }
 pub fn hint(_: *const ui.ThemeTokens) ui.TextStyle {
     var style = text(10.5, 400, false);
-    style.color = theme.current().fg_3;
+    style.color = theme.current().fg_2;
     return style;
 }
 pub fn paragraph(_: *const ui.ThemeTokens) ui.TextStyle {
@@ -204,7 +204,7 @@ pub fn topFade(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 72 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .gradient = .{ .from = c.well_border.withAlpha(48), .to = c.overlay.withAlpha(0) }, .border = .{ .radius = 14 }, .hit_behavior = .pass_through };
 }
 pub fn grip(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .top = .{ .px = 7 }, .left = .{ .percent = 50 } }, .width = .{ .px = 32 }, .height = .{ .px = 3 }, .margin = .{ .left = -16 }, .background = theme.current().fg_3, .border = .{ .radius = 1.5 }, .hit_behavior = .pass_through };
+    return .{ .position = .absolute, .inset = .{ .top = .{ .px = 7 }, .left = .{ .percent = 50 } }, .width = .{ .px = 32 }, .height = .{ .px = 3 }, .margin = .{ .left = -16 }, .background = theme.current().fg_2, .border = .{ .radius = 1.5 }, .hit_behavior = .pass_through };
 }
 
 pub fn summaryName() ui.TextStyle {
@@ -251,7 +251,7 @@ pub fn reviewIdentity() ui.BoxStyle {
     var value = row(66);
     value.gap = 12;
     value.padding = ui.Padding.all(14);
-    value.background = theme.current().well;
+    value.background = theme.popupInset();
     value.border = .{ .radius = 10 };
     return value;
 }
@@ -274,7 +274,7 @@ pub fn reviewRoute() ui.BoxStyle {
     var value = stack(undefined);
     value.gap = 10;
     value.padding = ui.Padding.all(14);
-    value.background = theme.current().well;
+    value.background = theme.popupInset();
     value.border = .{ .radius = 10 };
     return value;
 }
@@ -313,7 +313,7 @@ pub fn commandField(_: *const ui.ThemeTokens) ui.BoxStyle {
 // Frozen HTML connectionTest: compact header and per-hop stage list. Rich
 // diagnostics stay in the existing disclosure beneath this summary.
 pub fn testResult(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(14), .gap = 0, .background = theme.current().well, .border = .{ .radius = 10 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(14), .gap = 0, .background = theme.popupInset(), .border = .{ .radius = 10 }, .flex_shrink = 0 };
 }
 pub fn testStage() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 54.6 }, .direction = .row, .align_items = .start, .padding = .{ .top = 8, .bottom = 8 }, .gap = 10, .flex_shrink = 0 };

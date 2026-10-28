@@ -7,7 +7,8 @@ logging.getLogger('paramiko').setLevel(logging.CRITICAL)
 p=argparse.ArgumentParser();p.add_argument('--out',required=True);o=Path(p.parse_args().out);o.mkdir(parents=True,exist_ok=True)
 stop=threading.Event();signal.signal(signal.SIGTERM,lambda *_:stop.set())
 key=paramiko.RSAKey.generate(2048)
-entries={'/fixture/a.txt':b'first captured source\n','/fixture/b.log':b'second captured source\n'}
+entries={'/fixture/a.txt':b'first captured source\n','/fixture/b.log':b'second captured source\n','/fixture/logs/c.log':b'nested captured source\n'}
+directories=('/', '/fixture', '/fixture/logs')
 class Server(paramiko.ServerInterface):
  def check_auth_password(self,u,p):return paramiko.AUTH_SUCCESSFUL if (u,p)==('fixture','ai-readonly') else paramiko.AUTH_FAILED
  def get_allowed_auths(self,u):return 'password'
@@ -15,17 +16,18 @@ class Server(paramiko.ServerInterface):
  def check_channel_pty_request(self,*a):return True
  def check_channel_shell_request(self,ch):
   def prompt():
-   time.sleep(.1);ch.send(b'\x1b]7;file://localhost/fixture\x07fixture$ ')
+   time.sleep(.1);ch.send(b'fixture$ ')
   threading.Thread(target=prompt,daemon=True).start();return True
 class Files(paramiko.SFTPServerInterface):
  def canonicalize(self,path):return '/fixture' if path=='.' else path
  def stat(self,path):
-  a=paramiko.SFTPAttributes();a.st_mode=(stat.S_IFDIR|0o755) if path in ('/','/fixture','.') else (stat.S_IFREG|0o644);a.st_size=len(entries.get(path,b''));a.st_mtime=1700000000;a.st_atime=1700000000;return a if path in ('/','/fixture','.') or path in entries else paramiko.SFTP_NO_SUCH_FILE
+  a=paramiko.SFTPAttributes();a.st_mode=(stat.S_IFDIR|0o755) if path in (*directories,'.') else (stat.S_IFREG|0o644);a.st_size=len(entries.get(path,b''));a.st_mtime=1700000000;a.st_atime=1700000000;return a if path in (*directories,'.') or path in entries else paramiko.SFTP_NO_SUCH_FILE
  lstat=stat
  def list_folder(self,path):
-  if path not in ('/fixture','.'):return paramiko.SFTP_NO_SUCH_FILE
+  if path not in directories:return paramiko.SFTP_NO_SUCH_FILE
   result=[]
-  for name in entries:
+  for name in (*entries, *directories):
+   if name=='/' or name.rsplit('/',1)[0] != path.rstrip('/'):continue
    a=self.stat(name);a.filename=name.rsplit('/',1)[-1];result.append(a)
   return result
  def open(self,path,flags,attr):

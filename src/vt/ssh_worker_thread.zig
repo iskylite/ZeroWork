@@ -123,7 +123,7 @@ pub const Thread = struct {
 
     fn publishRelease(self: *Thread, shell_ended: bool, receipt: @import("../proto/ssh/session.zig").ReleaseReceipt, failure: anyerror) void {
         const before = self.reconnect_control.snapshot();
-        if (shell_ended) self.reconnect_control.ended(self.worker.options.operation_key, receipt, self.worker.shell_exit_code) else self.reconnect_control.lost(self.worker.options.operation_key, receipt, failure);
+        if (shell_ended) self.reconnect_control.ended(self.worker.options.operation_key, receipt, self.worker.shell_exit_code) else self.reconnect_control.lostWithIncident(self.worker.options.operation_key, receipt, failure, self.worker.notification_incident);
         // EOF/connection loss and cleanup receipts can change without a text
         // frame. Wake only for actual changes, never on every cleanup retry.
         if (!std.meta.eql(before, self.reconnect_control.snapshot())) @import("../platform/presentation_wakeup.zig").notify();

@@ -81,7 +81,7 @@ test "registry global theme publication preserves RGBA roles beyond three legacy
     try std.testing.expectEqual(@as(u8, @intCast(record.ui_tokens.selection & 255)), actual.selection.a);
     const widgets = theme.widgetTheme(theme.currentName());
     try std.testing.expectEqual(actual.fg_1, widgets.tokens.color.fg_primary);
-    try std.testing.expectEqual(actual.selection, widgets.tokens.color.selection_bg);
+    try std.testing.expectEqual(theme.popupSelection(), widgets.tokens.color.selection_bg);
 }
 
 test {
@@ -153,7 +153,7 @@ fn statusId(node: *ui.Node, id: []const u8) ?*ui.Node {
     return null;
 }
 
-test "status popover local identity matches the real cwd and original session at the exact 156 height" {
+test "status popover local identity matches the real cwd and original session with shared SSH connection styling" {
     var f: StatusFixture = undefined;
     try f.init();
     defer f.deinit();
@@ -165,15 +165,16 @@ test "status popover local identity matches the real cwd and original session at
     cwd[1] = 'x';
     try f.show(.identity, false);
     const r = f.view.chrome.globalRect();
-    try std.testing.expectEqual(@as(f32, 360), r.w);
-    try std.testing.expectEqual(@as(f32, 156), r.h);
-    try std.testing.expectEqual(@as(usize, 4), f.view.rows.children.items.len);
+    try std.testing.expectEqual(@as(f32, 380), r.w);
+    try std.testing.expectEqual(@as(f32, 272), r.h);
+    try std.testing.expectEqual(@as(usize, 5), f.view.rows.children.items.len);
     try std.testing.expect(statusText(f.view.rows, "/tmp/own"));
     try std.testing.expect(statusText(f.view.rows, "会话 #401"));
-    try std.testing.expect(statusText(f.view.rows, "交互式登录"));
-    for ([_]f32{ 46, 70, 94, 118 }, 0..) |offset, index| try std.testing.expectApproxEqAbs(r.y + offset, f.view.rows.children.items[index].globalRect().y, 0.1);
-    try std.testing.expectEqual(@as(u16, 500), f.view.title.getText().?.font_weight);
-    try std.testing.expectEqual(@as(f32, 24), f.view.close_button.globalRect().w);
+    try std.testing.expect(statusText(f.view.rows, "本地 · 交互式 Shell"));
+    try std.testing.expectApproxEqAbs(r.y + 56, f.view.rows.children.items[0].globalRect().y, 0.1);
+    try std.testing.expect(statusText(f.view.title, "会话连接"));
+    try std.testing.expectEqual(@as(u16, 600), f.view.title.getText().?.font_weight);
+    try std.testing.expectEqual(@as(f32, 28), f.view.close_button.globalRect().w);
     f.cx.setFocus(f.view.close_button);
     f.cx.handleKeyDown(.escape, .{});
     try std.testing.expect(f.view.controller.popover == null);

@@ -162,7 +162,7 @@ test "AI error hint real widgets preserve focus until click and only open origin
     try std.testing.expectEqual(@as(usize, 0), sink.calls);
     try std.testing.expectEqual(@as(@TypeOf(view.root.style.display), .flex), view.root.style.display);
     try std.testing.expectEqual(@as(f32, 340), view.root.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 109), view.root.globalRect().h);
+    try std.testing.expectEqual(@as(f32, 115), view.root.globalRect().h);
     try std.testing.expectEqualStrings("命令  false", view.command.getText().?.content);
     try std.testing.expectEqualStrings("输出  失败 output", view.output.getText().?.content);
     try std.testing.expect(view.detail.parent == view.exit_tag);

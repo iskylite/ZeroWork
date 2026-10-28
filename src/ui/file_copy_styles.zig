@@ -2,7 +2,7 @@
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
 pub fn root() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 398 }, .direction = .column, .gap = 0, .padding = .ZERO, .background = theme.current().overlay, .border = .{ .radius = 14 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 398 }, .direction = .column, .gap = 0, .padding = .ZERO, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .flex_shrink = 0 };
 }
 pub fn row(height: f32, gap: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = height }, .direction = .row, .align_items = .center, .gap = gap, .min_width = 0, .flex_shrink = 0 };
@@ -21,7 +21,7 @@ pub fn body() ui.BoxStyle {
 pub fn summary() ui.BoxStyle {
     var s = row(56, 10);
     s.padding = ui.Padding.all(12);
-    s.background = theme.current().well;
+    s.background = theme.popupInset();
     s.border = .{ .radius = 8 };
     return s;
 }
@@ -29,7 +29,7 @@ pub fn field() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 52 }, .direction = .column, .gap = 4, .min_width = 0, .flex_shrink = 0 };
 }
 pub fn path() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .background = theme.current().well, .border = .{ .radius = 8 }, .min_width = 0, .flex_shrink = 0, .overflow = .hidden, .overflow_hidden = true };
+    return .{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .background = theme.popupInset(), .border = .{ .radius = 8 }, .min_width = 0, .flex_shrink = 0, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn footer() ui.BoxStyle {
     var s = row(62, 8);
@@ -37,5 +37,5 @@ pub fn footer() ui.BoxStyle {
     return s;
 }
 pub fn button(primary: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = if (primary) 112 else 68 }, .height = .{ .px = 34 }, .padding = .ZERO, .background = if (primary) theme.current().action_accent else theme.current().surface_2, .border = .{ .radius = 8 }, .font_size = 12, .font_weight = 500, .flex_shrink = 0 };
+    return .{ .width = .{ .px = if (primary) 112 else 68 }, .height = .{ .px = 34 }, .padding = .ZERO, .background = if (primary) theme.current().action_accent else theme.popupAction(), .border = .{ .radius = 8 }, .font_size = 12, .font_weight = 500, .flex_shrink = 0 };
 }

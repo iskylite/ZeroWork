@@ -50,7 +50,7 @@ document.addEventListener('keydown',e=>{if(e.key==='Tab'&&!$('#note-modal').hidd
 $('#retry-save').onclick=()=>{failSave=false;$('#retry-save').hidden=true;$('#save-error').textContent='保存失败场景';$('#save-state').textContent='已保存';toast('保存成功')};
 
 function formError(message){const n=$('#note-form-error');n.hidden=false;n.textContent=message;}
-function positionNoteMenu(){const a=$('#notes-app').getBoundingClientRect(),b=$('#more').getBoundingClientRect(),m=$('#note-menu').getBoundingClientRect();$('#note-menu').style.left=Math.max(8,Math.min(b.right-a.x-m.width,a.width-m.width-8))+'px';$('#note-menu').style.right='auto';$('#note-menu').style.top=Math.max(8,Math.min(b.bottom-a.y+4,a.height-m.height-8))+'px';}
+function positionNoteMenu(){const a=$('#notes-app').getBoundingClientRect(),b=$('#more').getBoundingClientRect(),m=$('#note-menu').getBoundingClientRect();$('#note-menu').style.left=Math.max(8,Math.min(b.left-a.x,a.width-m.width-8))+'px';$('#note-menu').style.right='auto';$('#note-menu').style.top=Math.max(8,Math.min(b.bottom-a.y+4,a.height-m.height-8))+'px';}
 window.addEventListener('resize',()=>{if(!$('#note-menu').hidden)positionNoteMenu()});document.addEventListener('scroll',()=>{if(!$('#note-menu').hidden)positionNoteMenu()},{capture:true});document.addEventListener('pointerdown',e=>{if(!e.target.closest('#note-menu,#more'))$('#note-menu').hidden=true;});
 
 document.addEventListener("click",e=>{const a=e.target.closest("a[href]");if(!a)return;const u=new URL(a.href,location.href);if(u.origin===location.origin&&u.pathname.endsWith(".html")){u.searchParams.set("theme",document.body.dataset.theme);a.href=u.href}},{capture:true});

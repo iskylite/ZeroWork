@@ -56,7 +56,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !
             label_node.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .margin = .{ .right = 12 } });
             try button.appendChild(cx.allocator, label_node);
             try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("arrow-up-right").?, S.muted(), .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
-            const hint = try ui.widgets.Tooltip(.{ .text = if (i == 0) "填入问题，发送后分析所选文字或最近输出。" else "选择日志文件，预览后附加到问题。" }).mount(scope, cx);
+            const hint = try ui.widgets.Tooltip(.{ .text = if (i == 0) "填入问题，发送后分析所选文字或最近输出。" else "选择日志文件，附加到问题。" }).mount(scope, cx);
             hint.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
             hint.trigger.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 30 }, .min_width = 0 });
             try hint.trigger.appendChild(cx.allocator, button);

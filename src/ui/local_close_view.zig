@@ -19,6 +19,7 @@ pub const View = struct {
     extra_text: *ui.Node,
     dialog: *ui.Node,
     cancel_button: *ui.Node,
+    confirm_button: *ui.Node = undefined,
     risk: *ui.Node = undefined,
     title_icon: *ui.Node = undefined,
     title: *ui.Node = undefined,
@@ -73,6 +74,7 @@ pub const View = struct {
         self.cancel_button.meta.ownership.meta.test_id = "local.close.cancel";
         try actions.appendChild(cx.allocator, self.cancel_button);
         const confirm = try ui.widgets.Button(.{ .label = "结束并关闭", .variant = .danger, .on_click = cx.on(View, self, accept) }).mount(scope, cx);
+        self.confirm_button = confirm;
         confirm.setStyleInline(cx.allocator, styles.button(112, true));
         confirm.meta.ownership.meta.test_id = "local.close.accept";
         try actions.appendChild(cx.allocator, confirm);
@@ -130,8 +132,9 @@ pub const View = struct {
     fn retheme(self: *View) void {
         const c = theme.current();
         self.dialog.setStyleInline(self.cx.allocator, styles.dialogPaint());
-        self.risk.setBackground(c.surface_2);
-        self.cancel_button.setBackground(c.surface_2);
+        self.risk.setBackground(theme.popupAction());
+        self.cancel_button.setBackground(theme.popupAction());
+        self.confirm_button.setStyleInline(self.cx.allocator, styles.button(112, true));
         _ = self.title_icon.setTint(c.accent);
         for ([_]*ui.Node{ self.title, self.identity, self.risk_title }) |node| node.setTextColor(c.fg_1);
         for ([_]*ui.Node{ self.risk_detail, self.extra_text, self.notice, self.explanation }) |node| node.setTextColor(c.fg_2);

@@ -648,7 +648,7 @@ test "settings search repaints its retained translucent input after material rea
         cx.layout();
         const rect = input.node.globalRect();
         const id = input.input_container.id;
-        try std.testing.expectEqual(theme.current().well.a, input.input_container.getBackground().a);
+        try std.testing.expectEqual(theme.popupInset().a, input.input_container.getBackground().a);
         cx.setFocus(input.input_container);
         inputEvent(input.state, .{ .ime_preedit = .{ .text = "ni", .cursor_utf8_offset = 2 } });
         const cursor = input.state.cursor_pos;
@@ -659,8 +659,8 @@ test "settings search repaints its retained translucent input after material rea
         publication.publish(cx, theme.widgetTheme(name));
         view.styles.paintSearch(cx, &input);
         cx.layout();
-        try std.testing.expectEqual(theme.current().well, input.input_container.getBackground());
-        try std.testing.expect(input.input_container.getBackground().a < 255);
+        try std.testing.expectEqual(theme.popupInset(), input.input_container.getBackground());
+        try std.testing.expectEqual(@as(u8, 255), input.input_container.getBackground().a);
         try std.testing.expectEqual(id, input.input_container.id);
         try std.testing.expectEqual(rect, input.node.globalRect());
         try std.testing.expectEqualStrings("背景", query.peek());
@@ -672,8 +672,8 @@ test "settings search repaints its retained translucent input after material rea
         _ = theme.setMaterialParameters(0, 0);
         publication.publish(cx, theme.widgetTheme(name));
         view.styles.paintSearch(cx, &input);
-        try std.testing.expectEqual(theme.current().well, input.input_container.getBackground());
-        try std.testing.expectEqual(theme.current().well.a, input.input_container.getBackground().a);
+        try std.testing.expectEqual(theme.popupInset(), input.input_container.getBackground());
+        try std.testing.expectEqual(theme.popupInset().a, input.input_container.getBackground().a);
         try std.testing.expect(input.state.imeIsComposing());
     }
 }
@@ -1081,4 +1081,23 @@ test "settings section cards explicitly suppress inherited outline on every edge
     try root.appendChild(cx.allocator, content);
     const card = byId(content, "settings.ssh.connection").?;
     for (card.style.border.resolvedWidths()) |edge| try std.testing.expectEqual(@as(f32, 0), edge);
+}
+
+test "appearance transparency uses tenths for display submission and slider keyboard" {
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.controller.folded_sections = 0;
+    f.controller.model.value.ui.materials.background.transparency = 74.48309;
+    const mounted = try f.mount();
+    const input = inputFor(mounted, "settings.field.transparency");
+    try std.testing.expectEqualStrings("74.5", input.getText());
+    f.cx.setFocus(input.input_container_node);
+    f.cx.handleKeyDown(.@"return", .{});
+    try std.testing.expectApproxEqAbs(@as(f32, 74.5), f.controller.model.value.ui.materials.background.transparency, 0.0001);
+    const slider = byId(mounted.root, "settings.slider.transparency").?;
+    f.cx.setFocus(slider);
+    f.cx.handleKeyDown(.right, .{});
+    try std.testing.expectApproxEqAbs(@as(f32, 74.6), f.controller.model.value.ui.materials.background.transparency, 0.0001);
+    try std.testing.expectEqualStrings("74.6", input.getText());
 }

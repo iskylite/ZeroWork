@@ -20,7 +20,7 @@ pub fn height(mode: Mode) f32 {
     };
 }
 pub fn panel(mode: Mode, size: ui.Size, natural: f32) ui.BoxStyle {
-    return .{ .width = .{ .px = @min(width(mode), @max(0, size.width - 16)) }, .height = .{ .px = @min((if (natural > 0) natural + chrome_height + @as(f32, if (mode == .remote_confirmation) 8 else 0) else height(mode)), @max(0, size.height - 16)) }, .direction = .column, .padding = .{}, .gap = 0, .background = theme.current().overlay, .border = .{ .radius = 14 }, .overflow_hidden = true, .flex_shrink = 0 };
+    return .{ .width = .{ .px = @min(width(mode), @max(0, size.width - 16)) }, .height = .{ .px = @min((if (natural > 0) natural + chrome_height + @as(f32, if (mode == .remote_confirmation) 8 else 0) else height(mode)), @max(0, size.height - 16)) }, .direction = .column, .padding = .{}, .gap = 0, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .overflow_hidden = true, .flex_shrink = 0 };
 }
 pub fn form() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .column, .padding = .{}, .gap = 0 };
@@ -50,13 +50,13 @@ pub fn footer(mode: Mode) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 48 }, .direction = .row, .align_items = .center, .justify = .end, .padding = .{ .left = 12, .right = 12, .top = 7, .bottom = 7 }, .gap = if (mode == .remote_confirmation) 8 else 6, .flex_shrink = 0 };
 }
 pub fn choice(selected: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 34 }, .direction = .row, .align_items = .center, .justify = .start, .padding = ui.Padding.all(8), .gap = 8, .background = if (selected) theme.current().selection else theme.current().surface_2, .border = .{ .radius = 7, .width = 0 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 34 }, .direction = .row, .align_items = .center, .justify = .start, .padding = ui.Padding.all(8), .gap = 8, .background = if (selected) theme.popupSelection() else theme.popupAction(), .border = .{ .radius = 7, .width = 0 }, .flex_shrink = 0 };
 }
 pub fn radioGlyph() ui.BoxStyle {
     return .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .padding = .{}, .border = .{ .width = 0 }, .background = ui.Color.TRANSPARENT, .align_items = .center, .justify = .center, .flex_shrink = 0 };
 }
 pub fn input() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 31 }, .padding = .{ .left = 10, .right = 8 }, .background = theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 31 }, .padding = .{ .left = 10, .right = 8 }, .background = theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn checkbox() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
@@ -81,7 +81,7 @@ pub fn label(min: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = min, .min_width = 0, .flex_shrink = 0 };
 }
 pub fn button(w: f32, h: f32, primary: bool, danger: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .gap = 0, .corner_radius = 8, .border_width = 0, .background = if (danger) theme.current().action_danger else if (primary) theme.current().action_accent else theme.current().surface_2, .font_size = 12, .font_weight = 500, .text_color = if (primary) theme.widgetTheme(theme.currentName()).tokens.color.button_primary_fg else theme.current().fg_2, .flex_shrink = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .gap = 0, .corner_radius = 8, .border_width = 0, .background = if (danger) theme.current().action_danger else if (primary) theme.current().action_accent else theme.popupAction(), .font_size = 12, .font_weight = 500, .text_color = if (primary) theme.widgetTheme(theme.currentName()).tokens.color.button_primary_fg else theme.current().fg_2, .flex_shrink = 0 };
 }
 // The prototype mutes fill and label to 40%, keeping the primary hue. Button's
 // generic disabled recipe substitutes a neutral fill; this state is the local

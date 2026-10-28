@@ -1,6 +1,6 @@
 {
-  "scope": "Global notifications; native presenter remains the production implementation",
-  "reference": "index.html using ../shared/feedback.css and feedback.js",
+  "scope": "Global notification visual renderer plus structured important-event policy; native routing is not yet migrated",
+  "reference": "../app/index.html?notification-review=1; index.html and history.html resolve to this shared host",
   "browser": {
     "viewport": [
       1280,
@@ -62,5 +62,24 @@
   "overflow": "Single-line title, source, object and detail when a result action exists; full original strings retained. Messages without a result action preserve wrapped detail.",
   "verification": "Native local scenario fixture calls production host publish functions and presenter; no remote operation is executed. See verification/report.json.",
   "platformDifferences": "Native SVG icons and system text shaping; HTML uses CSS and text symbols. Card dimensions and control sizes are matched in logical pixels.",
-  "metadata": "Source and object share a single ellipsized line, joined by ·; identical labels are deduplicated."
+  "metadata": "Source and object share a single ellipsized line, joined by ·; identical labels are deduplicated.",
+  "policy": {
+    "source": "../shared/notification-policy.js",
+    "centerStyles": "../shared/notification-policy.css",
+    "integration": "../shared/notification-integration.js",
+    "default": "source-local",
+    "globalAdmission": "allowed kind + actual actionable impact + time sensitivity + source not viewed; application risk exception",
+    "bannerLimit": 1,
+    "history": "only admitted important events; pending vs recent; read != resolved",
+    "nativeStatus": "visual baseline retained; routing/center-state migration pending"
+  },
+  "center": {
+    "width": 360,
+    "itemMinHeight": 68,
+    "itemRadius": 9,
+    "itemGap": 6,
+    "itemBackground": "control-bg / popupInset",
+    "itemBorder": 0,
+    "itemShadow": "none"
+  }
 }

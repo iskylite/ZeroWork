@@ -80,7 +80,7 @@ test "socks global material paints retained foreground from every theme with loc
         try std.testing.expectEqual(theme.popupAction(), view.copy_button.getBackground());
         try std.testing.expectEqual(theme.popupAction(), view.config_button.getBackground());
         try std.testing.expectEqual(c.fg_1, view.address.getText().?.color);
-        try std.testing.expectEqual(c.fg_3, view.route.getText().?.color);
+        try std.testing.expectEqual(c.fg_2, view.route.getText().?.color);
         try std.testing.expectEqual(ForwardColors.text(.success), view.status.getText().?.color);
         try std.testing.expectEqual(c.danger_ink, view.control_text.getText().?.color);
         try std.testing.expectEqual(c.fg_2, view.message.getText().?.color);

@@ -7,11 +7,11 @@ const controls = @import("settings_controls.zig");
 pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const page = try controls.Page.create(cx, bound, "settings.notifications");
     const query = bound.controller.search_query;
-    if (binding.matches(query, "事件提醒 通知 传输完成 断线 重连 AI 回答 就绪 终端 Bell 声音 transfer_done reconnect ai_ready bell")) {
+    if (binding.matches(query, "事件提醒 通知 传输完成 断线 重连 AI 助手 回合 结束 终端 Bell 声音 transfer_done reconnect ai_ready bell")) {
         const section = try page.section("事件提醒", "后台事件与终端声音", ui.icons.bell, 48, "settings.notifications.events", null);
-        try section.toggle(.{ .section = "notify", .key = "transfer_done" }, "传输完成", "", null);
-        try section.toggle(.{ .section = "notify", .key = "reconnect" }, "断线与重连", "", null);
-        try section.toggle(.{ .section = "notify", .key = "ai_ready" }, "AI 回答就绪", "", null);
+        try section.toggle(.{ .section = "notify", .key = "transfer_done" }, "后台传输完成", "仅离开应用时提醒；已有保存值继续生效。", null);
+        try section.toggle(.{ .section = "notify", .key = "reconnect" }, "持续连接故障", "断线后自动重连停止并影响工作时提醒。", null);
+        try section.toggle(.{ .section = "notify", .key = "ai_ready" }, "后台 AI 任务完成", "默认关闭；仅最终答复完成且离开应用时提醒。", null);
         try section.toggle(.{ .section = "notify", .key = "bell" }, "终端 Bell 声音", "", null);
         const permission_panel = try ui.box(cx, .{ .width = .fill(), .direction = .column, .padding = .{ .left = 10, .right = 10, .bottom = 8 }, .margin = .{ .top = 8, .bottom = 8 }, .background = controls.S.theme.current().well, .border = .{ .radius = 8 } }, .{});
         const row = try ui.boxStyled(cx, controls.S.fieldRow, .{});

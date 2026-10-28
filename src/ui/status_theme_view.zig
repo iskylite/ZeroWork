@@ -71,7 +71,7 @@ pub const View = struct {
         self.* = .{ .cx = cx, .scope = scope, .registry = registry, .hooks = hooks, .open = open, .disabled = disabled };
         try scope.onCleanup(View, self, cleanup);
         adopted = true;
-        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = 6 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .flip = false, .shift_main_axis = false, .size_policy = .fit_content, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = 6 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .flip = false, .shift_main_axis = false, .size_policy = .fit_content, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;
@@ -307,7 +307,7 @@ pub const View = struct {
         const text = if (current) try std.fmt.allocPrint(self.cx.allocator, "{s} · 当前", .{record.theme.name}) else try self.cx.allocator.dupe(u8, record.theme.name);
         defer self.cx.allocator.free(text);
         _ = try self.rowContent(button, ui.icons.palette, text);
-        if (current) button.setBackground(S.theme.current().selection);
+        if (current) button.setBackground(S.theme.popupSelection());
         try self.scroll.content.appendChild(self.cx.allocator, button);
         try self.rows.append(self.cx.allocator, row);
     }

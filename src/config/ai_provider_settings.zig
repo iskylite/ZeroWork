@@ -657,6 +657,7 @@ pub const ProviderView = struct {
         field.* = .{ .view = self, .address = address, .text = try scope.createText(initial, .{}), .input = undefined, .error_node = undefined };
         try scope.onCleanup(Field, field, Field.cleanup);
         field.input = try ui.widgets.Input(.{ .value = field.text, .input_type = @as(ui.widgets.InputType, if (address.field == .api_key) .password else .text), .placeholder = placeholder, .disabled = self.disabled, .on_change = self.cx.on(Field, field, Field.edit), .on_submit = self.cx.on(Field, field, Field.submit) }).mountResult(scope, self.cx);
+        @import("../ui/app_theme.zig").styleInput(field.input);
         const input_style = S.providerInput(width, height);
         field.input.input_container.setStyleInline(self.cx.allocator, input_style);
         field.input.node.style.width = if (width > 0) .{ .px = width } else .fill();
@@ -748,7 +749,7 @@ pub const ProviderView = struct {
         const action_click = try self.click(action, i, j);
         const tip = try self.tooltip(help);
         var style = S.button(size, false);
-        style.background = if (active) S.theme.current().selection else if (blocked) S.theme.current().well else ui.Color.TRANSPARENT;
+        style.background = if (active) S.theme.popupSelection() else if (blocked) S.theme.current().well else ui.Color.TRANSPARENT;
         style.text_color = if (active) S.theme.current().accent else S.theme.current().fg_2;
         const state = try scope.allocator.create(ButtonState);
         state.* = .{ .view = self, .action = action, .provider = i, .model = j, .fallback_blocked = blocked, .disabled = try scope.createSignal(bool, blocked or self.disabled.peek()) };

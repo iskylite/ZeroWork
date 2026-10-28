@@ -16,7 +16,7 @@ pub fn height(hops: usize) f32 {
 }
 pub fn panel(h: f32, viewport_width: f32) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = @min(width, @max(0, viewport_width - margin * 2)) }, .height = .{ .px = h }, .direction = .column, .padding = ui.Padding.all(16), .gap = 0, .background = c.overlay, .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
+    return .{ .width = .{ .px = @min(width, @max(0, viewport_width - margin * 2)) }, .height = .{ .px = h }, .direction = .column, .padding = ui.Padding.all(16), .gap = 0, .background = c.overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
 }
 pub fn wrapper() ui.BoxStyle {
     return .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 } };
@@ -119,7 +119,7 @@ pub fn fade() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 72 }, .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .gradient = .{ .from = c.well_border.withAlpha(48), .to = ui.Color.lerp(c.surface_1, c.overlay, 0.6) }, .border = .{ .radius = 14 }, .hit_behavior = .pass_through, .z_index = -1 };
 }
 pub fn nodePanel(viewport: ui.Size) ui.BoxStyle {
-    return .{ .width = .{ .px = @min(node_width, @max(160, viewport.width - margin * 2)) }, .height = .{ .px = @min(node_height, @max(160, viewport.height - margin * 2)) }, .direction = .column, .gap = 0, .padding = .{}, .background = theme.current().overlay, .border = .{ .radius = 14 }, .overflow_hidden = true };
+    return .{ .width = .{ .px = @min(node_width, @max(160, viewport.width - margin * 2)) }, .height = .{ .px = @min(node_height, @max(160, viewport.height - margin * 2)) }, .direction = .column, .gap = 0, .padding = .{}, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .overflow_hidden = true };
 }
 // Figma 358:1349121 (route status action): 28×26, r7,
 // 14×14 network icon at (7,6). Default is transparent; hover is theme well.
@@ -148,12 +148,12 @@ pub fn chips() ui.BoxStyle {
     return result;
 }
 pub fn chip(online: bool) ui.BoxStyle {
-    return .{ .height = .{ .px = 24 }, .direction = .row, .padding = .{ .left = 9, .right = 9 }, .align_items = .center, .justify = .center, .background = if (online) theme.current().ok.withAlpha(33) else theme.current().surface_2, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+    return .{ .height = .{ .px = 24 }, .direction = .row, .padding = .{ .left = 9, .right = 9 }, .align_items = .center, .justify = .center, .background = if (online) theme.current().ok.withAlpha(33) else theme.popupAction(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn facts() ui.BoxStyle {
     var result = stack();
     result.padding = ui.Padding.all(12);
-    result.background = theme.current().surface_2;
+    result.background = theme.popupAction();
     result.border = .{ .radius = 9 };
     result.min_height = 86;
     return result;
@@ -162,7 +162,7 @@ pub fn fingerprint() ui.BoxStyle {
     var result = stack();
     result.padding = ui.Padding.all(10);
     result.gap = 4;
-    result.background = theme.current().well;
+    result.background = theme.popupInset();
     result.border = .{ .radius = 9 };
     result.min_height = 56;
     return result;

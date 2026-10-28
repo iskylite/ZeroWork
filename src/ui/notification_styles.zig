@@ -8,9 +8,7 @@ pub fn overlay(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .position = .absolute, .direction = .column, .width = .{ .px = width }, .height = .{ .fit = .{} }, .gap = ui.arb.px(gap), .hit_behavior = .children_only, .z_index = 120 };
 }
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
-    // Zenit borders paint inside the box; include the CSS one-pixel border
-    // in each content inset without shrinking the reference padding.
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .align_items = .stretch, .padding = .{ .left = 17, .right = 17, .top = 9, .bottom = 9 }, .gap = 4, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 1, .color = theme.current().border, .radius = ui.arb.px(12) }, .shadow = .{ .offset_y = 16, .blur = 40, .color = theme.current().shadow }, .hit_behavior = .@"opaque", .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .align_items = .stretch, .padding = .{ .left = 16, .right = 16, .top = 12, .bottom = 12 }, .gap = 4, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = ui.arb.px(12) }, .shadow = .{ .offset_y = 16, .blur = 40, .color = theme.current().shadow }, .hit_behavior = .@"opaque", .flex_shrink = 0 };
 }
 pub fn body(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .direction = .column, .padding = .{ .left = 22 }, .gap = 4, .flex_shrink = 0 };
@@ -44,7 +42,7 @@ pub fn action(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 
 pub fn actionLabel(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11, .font_weight = 500, .line_height = 1.5, .color = theme.actionForeground(theme.current().action_accent), .text_overflow = .ellipsis, .selectable = false };
+    return .{ .font_size = 11, .font_weight = 500, .line_height = 1.5, .color = theme.current().accent_ink, .text_overflow = .ellipsis, .selectable = false };
 }
 
 pub fn line(_: *const ui.ThemeTokens) ui.TextStyle {
@@ -73,7 +71,7 @@ pub fn statusTag(severity: u8) ui.BoxStyle {
         3 => c.danger,
         else => c.fg_2,
     };
-    return .{ .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .padding = .{ .left = 6, .right = 6 }, .background = color.withAlpha(23), .border = .{ .radius = 4, .width = 1, .color = color.withAlpha(64) }, .flex_shrink = 0 };
+    return .{ .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .padding = .{ .left = 6, .right = 6 }, .background = color.withAlpha(23), .border = .{ .radius = 4, .width = 0 }, .flex_shrink = 0 };
 }
 pub fn actionHover() ui.BoxStyle {
     return .{ .background = theme.current().action_accent_2 };
@@ -81,7 +79,7 @@ pub fn actionHover() ui.BoxStyle {
 
 pub fn secondaryAction(tokens: *const ui.ThemeTokens) ui.BoxStyle {
     var style = action(tokens);
-    style.background = theme.current().surface_2;
-    style.border = .{ .radius = 6, .width = 1, .color = theme.current().border };
+    style.background = theme.popupAction();
+    style.border = .{ .radius = 6, .width = 0 };
     return style;
 }

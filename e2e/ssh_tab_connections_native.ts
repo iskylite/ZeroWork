@@ -46,7 +46,9 @@ try{
  for(const [action,label] of [['new_tab','新标签连接'],['reuse_connection','复用连接'],['new_window','新窗口连接']]){assert(content(await vis('context.menu.'+action)).includes(label));}
  assert(!(await query('context.menu.clone_session')).some(shown));
  await capture('tab-menu');report.checks.push('Real tab right click opens all three distinct connection actions');
- await press('escape');
+ await click('context.menu.view_jump_chain');await vis('connection.details');
+ await capture('tab-menu-connection-chain');await click('connection.details.close');
+ report.checks.push('Tab communication chain action opens the native connection details panel');
  const terminal=await vis('terminal.input');await button(terminal,'middle');await vis('context.menu');
  for(const action of ['new_tab','reuse_connection','new_window'])assert(!(await query('context.menu.'+action)).some(shown));
  await capture('terminal-menu');report.checks.push('Real terminal middle click contains no connection creation actions');await press('escape');

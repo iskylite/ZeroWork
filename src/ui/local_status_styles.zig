@@ -6,12 +6,13 @@ pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 pub const height: f32 = 30;
 pub const chip_height: f32 = 26;
 pub const gap: f32 = 6;
-pub const identity_width: f32 = 112;
+// Local status has no latency: 29.5px icon/label inset + 44px state + trailing padding.
+pub const identity_width: f32 = 82;
 pub const collapsed_identity_width: f32 = 48;
-pub const encoding_width: f32 = 76;
-pub const grid_width: f32 = 94;
+pub const encoding_width: f32 = 68;
+pub const grid_width: f32 = 82;
 pub const cwd_width: f32 = 440;
-pub const right_padding: f32 = 12;
+pub const right_padding: f32 = 8;
 
 pub fn bar() ui.BoxStyle {
     const c = theme.current();

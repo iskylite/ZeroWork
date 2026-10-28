@@ -7,6 +7,10 @@ const c = @import("generated_ssh_session");
 const Lease = @import("../host/runtime_service.zig").SharedLease;
 var pending_mutex: std.atomic.Mutex = .unlocked;
 var pending_head: ?*Connection = null;
+var next_notification_id: std.atomic.Value(u64) = .init(1);
+pub fn reserveNotificationId() u64 {
+    return next_notification_id.fetchAdd(1, .monotonic);
+}
 
 pub const Connection = struct {
     const ShellCleanup = struct {
@@ -20,6 +24,7 @@ pub const Connection = struct {
         }
     };
     allocator: std.mem.Allocator,
+    notification_id: u64 = 0,
     mutex: std.atomic.Mutex = .unlocked,
     library: ssh.Library,
     route: ?*@import("../proto/ssh/jump_transport.zig").Route = null,
@@ -137,7 +142,7 @@ pub const Connection = struct {
     }
     /// Register the new tab's upstream facades only after all fallible Worker
     /// initialization succeeded. Registration itself allocates no native state.
-    pub fn bindUpstreamForwards(self: *Connection, forwards: []const ?*Forward) !void {
+    pub fn bindUpstreamForwards(self: *Connection, forwards: []const ?*Forward, details: ?*ssh.ConnectionDetails.Store) !void {
         self.lock();
         defer self.unlock();
         if (self.broken or self.native.handle == null) return error.SharedTransportLost;
@@ -150,8 +155,12 @@ pub const Connection = struct {
             const relay = hop.relay orelse return error.SharedTransportLost;
             if (relay.state.load(.acquire) != 0) return error.SharedTransportLost;
         }
-        for (route.hops[0 .. forwards.len - 1], forwards[0 .. forwards.len - 1]) |hop, service| {
-            if (service) |value| hop.relay.?.bindSharedForward(value);
+        for (route.hops[0 .. forwards.len - 1], forwards[0 .. forwards.len - 1], 0..) |hop, service, index| {
+            if (service) |value| {
+                value.relay_details = details;
+                value.relay_hop = index;
+                hop.relay.?.bindSharedForward(value);
+            }
         }
     }
     /// Once the target is broken no sibling may use its upstream graph. Join
@@ -224,6 +233,7 @@ pub const Connection = struct {
         }
     }
     pub fn openShell(self: *Connection, options: ssh.Options) !ssh.Session {
+        try options.prepareDetails();
         const pending = try self.allocator.create(ShellCleanup);
         var graph_owned = false;
         defer if (!graph_owned) self.allocator.destroy(pending);
@@ -273,8 +283,12 @@ pub const Connection = struct {
                     self.unlock();
                     return error.ShellOpenFailed;
                 }
-                var child: ssh.Session = .{ .state = .active, .handle = self.native.handle, .socket_fd = self.native.socket_fd, .channel = .{ .handle = @ptrCast(pending.raw.?) }, .borrowed_transport = true, .shared_gate = &self.native, .resource_ledger = options.resource_ledger, .resource_key = options.operation_key, .resource_hop = options.hop_index, .source_owner = options.source_owner, .connection_details = options.connection_details };
+                var child: ssh.Session = .{ .state = .active, .handle = self.native.handle, .socket_fd = self.native.socket_fd, .channel = .{ .handle = @ptrCast(pending.raw.?) }, .borrowed_transport = true, .shared_gate = &self.native, .resource_ledger = options.resource_ledger, .resource_key = options.operation_key, .resource_hop = options.hop_index, .source_owner = options.source_owner, .connection_details = options.connection_details, .negotiated_metadata = self.native.negotiated_metadata };
                 child.recordResource(.shell, .owned);
+                if (options.connection_details) |store| if (options.operation_key) |key| {
+                    if (self.route) |route| for (route.hops[0 .. route.hops.len - 1], 0..) |hop, index| store.negotiated(key, index, hop.session.negotiated_metadata);
+                    store.negotiated(key, options.hop_index, child.negotiated_metadata);
+                };
                 self.unlock();
                 self.allocator.free(pending.term);
                 return child;

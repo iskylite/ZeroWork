@@ -64,6 +64,7 @@ pub const View = struct {
         const field = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 53 }, .direction = .column, .gap = 8, .flex_shrink = 0 }, .{});
         try field.appendChild(cx.allocator, try ui.text(cx, "全部页签", .{ .font_size = 11, .font_weight = 600, .color = theme.current().fg_1, .line_height = 13.0 / 11.0 }));
         self.input = try ui.widgets.Input(.{ .value = query, .placeholder = "搜索名称、主机或类型…", .on_change = cx.on(View, self, queryChanged), .on_submit = cx.on(View, self, submit) }).mountResult(popover.scope, cx);
+        @import("app_theme.zig").styleInput(self.input);
         self.input.input_container.setStyleInline(cx.allocator, styles.field());
         styles.tuneInput(&self.input);
         self.input.node.meta.ownership.meta.test_id = "tabs.picker.query";
@@ -169,7 +170,7 @@ pub const View = struct {
     fn retheme(self: *View) void {
         const c = theme.current();
         self.chrome.setBackground(c.overlay);
-        self.input.input_container.setBackground(c.well);
+        self.input.input_container.setBackground(theme.popupInset());
         self.input.input_container.setBorderColor(ui.Color.TRANSPARENT);
         self.input.state.tokens = self.cx.tokens;
         self.input.state.dirty = true;

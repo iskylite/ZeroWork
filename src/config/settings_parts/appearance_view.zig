@@ -247,7 +247,7 @@ fn themeStrip(cx: *ui.Cx, bound: *binding.Binding, host: *Context) !*ui.Node {
         const selected = std.mem.eql(u8, bound.controller.model.value.ui.theme, record.id);
         if (selected) selected_index = record_index;
         const choose = try Click.create(bound.scope, bound, .select_theme, record.id);
-        const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = record.theme.name, .disabled = disabled(bound), .on_click = cx.on(Click, choose, Click.activate), .base_style = .{ .width = .{ .px = 150 }, .height = .{ .px = 75 }, .padding = ui.Padding.all(6), .background = if (selected) S.theme.current().selection else S.theme.current().well, .corner_radius = 9, .border_width = 0 }, .hover_style = S.base.buttonHover() }).mount(bound.scope, cx);
+        const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = record.theme.name, .disabled = disabled(bound), .on_click = cx.on(Click, choose, Click.activate), .base_style = .{ .width = .{ .px = 150 }, .height = .{ .px = 75 }, .padding = ui.Padding.all(6), .background = if (selected) S.theme.popupSelection() else S.theme.current().well, .corner_radius = 9, .border_width = 0 }, .hover_style = S.base.buttonHover() }).mount(bound.scope, cx);
         button.setStyleInline(cx.allocator, .{ .direction = .column, .align_items = .stretch, .justify = .start, .gap = 5, .flex_shrink = 0 });
         button.meta.ownership.meta.test_id = try id(bound.scope, "settings.theme.", record.id);
         if (button.behavior.interaction.a11y) |*access| {
@@ -456,6 +456,7 @@ const ThemeGrid = struct {
         }
         try root.appendChild(cx.allocator, categories);
         self.input = try ui.widgets.Input(.{ .value = bound.controller.theme_library.query, .placeholder = "搜索主题…", .append_icon_asset = ui.icons.search, .on_change = cx.on(ThemeGrid, self, queryChanged) }).mountResult(bound.scope, cx);
+        @import("../../ui/app_theme.zig").styleInput(self.input);
         self.input.input_container.setStyleInline(cx.allocator, S.field(580, 32));
         self.input.input_container.style.width = .fill();
         S.tuneInput(&self.input);
@@ -512,7 +513,7 @@ const ThemeGrid = struct {
             empty.meta.ownership.meta.test_id = "settings.theme.empty";
             try self.grid.appendChild(self.cx.allocator, empty);
         }
-        for (self.filters, [_]themes.Filter{ .all, .favorites, .imported }) |button, filter| button.setBackground(if (self.bound.controller.theme_library.filter == filter) S.theme.current().selection else ui.Color.TRANSPARENT);
+        for (self.filters, [_]themes.Filter{ .all, .favorites, .imported }) |button, filter| button.setBackground(if (self.bound.controller.theme_library.filter == filter) S.theme.popupSelection() else ui.Color.TRANSPARENT);
     }
     fn tile(self: *ThemeGrid, scope: *ui.Scope, record: *const themes.Record, width: f32) !*ui.Node {
         const cx = self.cx;
@@ -593,6 +594,7 @@ const Field = struct {
         try bound.scope.onCleanup(Field, self, cleanup);
         const unit: ?[]const u8 = if (std.mem.eql(u8, key.key, "transparency")) "%" else if (std.mem.eql(u8, key.key, "blur_px")) "px" else if (std.mem.eql(u8, key.key, "font_size")) "pt" else null;
         self.input = try ui.widgets.Input(.{ .value = text, .append_text = unit, .on_change = cx.on(Field, self, edit), .on_submit = cx.on(Field, self, submit), .disabled = disabled(bound) }).mountResult(bound.scope, cx);
+        @import("../../ui/app_theme.zig").styleInput(self.input);
         self.input.input_container.setStyleInline(cx.allocator, S.field(width, height));
         if (unit != null) self.input.input_container.style.padding = .{ .left = 8, .right = 10 };
         self.input.node.style.width = .{ .px = width };
@@ -627,6 +629,13 @@ const Field = struct {
         if (self.input.state.imeIsComposing()) return;
         // Display rounding must not change a saved value on Enter without an edit.
         if (self.edited or !std.mem.eql(u8, self.key.key, "line_height")) self.bound.controller.editRaw(self.key.section, self.key.key, self.text.peek()) catch {};
+        if (std.mem.eql(u8, self.key.key, "transparency") and self.bound.controller.raw_fields[schema.find(self.key.section, self.key.key).?].problem == null) {
+            const current = self.bound.controller.model.value.ui.materials.background.transparency;
+            const rounded = @round(current * 10) / 10;
+            self.bound.controller.editKey(self.key.section, self.key.key, .{ .decimal = rounded }) catch return;
+            var buffer: [64]u8 = undefined;
+            self.text.set(fieldDisplay(&buffer, .{ .decimal = rounded }, self.key) catch return);
+        }
         if (self.bound.hooks.appearance) |h| if (std.mem.eql(u8, self.key.section, "ui")) h.send(.validate_font);
         self.refresh();
         self.syncSlider();
@@ -672,6 +681,7 @@ const Field = struct {
     }
 };
 fn fieldDisplay(buffer: []u8, value: values.Value, key: binding.Key) ![]const u8 {
+    if (std.mem.eql(u8, key.key, "transparency") and value == .decimal) return std.fmt.bufPrint(buffer, "{d:.1}", .{value.decimal});
     if (std.mem.eql(u8, key.key, "line_height") and value == .decimal) return std.fmt.bufPrint(buffer, "{d:.2}", .{value.decimal});
     return valueText(buffer, value);
 }
@@ -1064,7 +1074,7 @@ fn materialSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     try root.appendChild(cx.allocator, try fieldRow(cx, bound, "图片适配", null, fit));
     try root.appendChild(cx.allocator, try fieldRow(cx, bound, "图片对齐", null, try alignmentChooser(cx, bound)));
     const sliders = try ui.boxStyled(cx, S.column, .{});
-    const transparency = try sliderRow(cx, bound, "全局透明度", .{ .section = "ui.materials.background", .key = "transparency" }, background.transparency, 100, 0);
+    const transparency = try sliderRow(cx, bound, "全局透明度", .{ .section = "ui.materials.background", .key = "transparency" }, background.transparency, 100, 0.1);
     const blur = try sliderRow(cx, bound, "背景与浮层模糊", .{ .section = "ui.materials", .key = "blur_px" }, @floatFromInt(c.model.value.ui.materials.blur_px), 96, 1);
     try sliders.appendChild(cx.allocator, transparency.row);
     try sliders.appendChild(cx.allocator, blur.row);
@@ -1099,7 +1109,7 @@ fn sliderRow(cx: *ui.Cx, bound: *binding.Binding, label: []const u8, key: bindin
     const row = try ui.boxStyled(cx, S.row, .{});
     const labels = try ui.boxStyled(cx, S.labelGroup, .{});
     try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.label, label));
-    if (step == 0) {
+    if (std.mem.eql(u8, key.key, "transparency")) {
         labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 4 });
         try labels.appendChild(cx.allocator, try controls.inlineHint(cx, bound, "settings.appearance.help.transparency", "数值越大，图片越透明。", ui.icons.circle_help, S.theme.current().fg_2));
     }
@@ -1111,7 +1121,7 @@ fn sliderRow(cx: *ui.Cx, bound: *binding.Binding, label: []const u8, key: bindin
     const number = try Field.create(cx, bound, key, 90, 32);
     number.slider = signal;
     const slider = try bound.scope.allocator.create(SliderEdit);
-    slider.* = .{ .field = number, .integer = step != 0 };
+    slider.* = .{ .field = number, .integer = step >= 1 };
     try bound.scope.onCleanup(SliderEdit, slider, SliderEdit.cleanup);
     const result = try ui.widgets.Slider(.{ .value = signal, .min = @as(f32, 0), .max = max, .step = step, .width = @as(f32, 328), .track_height = @as(f32, 4), .thumb_size = @as(f32, 16), .disabled = disabled(bound), .on_change = cx.on(SliderEdit, slider, SliderEdit.change), .test_id = try id(bound.scope, "settings.slider.", key.key) }).mount(bound.scope, cx);
     result.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .height = .{ .px = 32 }, .min_width = 0, .align_items = .center, .padding = .{ .left = 8, .right = 8 } });
@@ -1129,7 +1139,7 @@ const SliderEdit = struct {
         const field = self.field;
         field.bound.controller.editKey(field.key.section, field.key.key, if (self.integer) .{ .unsigned = @intFromFloat(value) } else .{ .decimal = value }) catch return;
         var buffer: [64]u8 = undefined;
-        const text = valueText(&buffer, values.read(field.bound.controller.model.value, field.key.section, field.key.key).?) catch return;
+        const text = fieldDisplay(&buffer, values.read(field.bound.controller.model.value, field.key.section, field.key.key).?, field.key) catch return;
         field.text.set(text);
         field.refresh();
         field.bound.valuesChanged();
@@ -1192,7 +1202,7 @@ pub fn mountMaterialPreviewActions(cx: *ui.Cx, scope: *ui.Scope, bound: *binding
     try root.appendChild(cx.allocator, label);
     var buffer: [64]u8 = undefined;
     const materials = bound.controller.model.value.ui.materials;
-    const status = try ui.textStyled(cx, S.value, try std.fmt.bufPrint(&buffer, "{d}% · {d}px", .{ materials.background.transparency, materials.blur_px }));
+    const status = try ui.textStyled(cx, S.value, try std.fmt.bufPrint(&buffer, "{d:.1}% · {d}px", .{ materials.background.transparency, materials.blur_px }));
     status.style.width = .{ .px = 120 };
     try root.appendChild(cx.allocator, status);
     try root.appendChild(cx.allocator, try ui.spacer(cx));

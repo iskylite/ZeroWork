@@ -61,6 +61,9 @@ pub const View = struct {
     preview_reference: images.ContentRef = .{},
     preview_ticket: ?images.Ticket = null,
     readonly: bool = false,
+    preview_content: ?*ui.Node = null,
+    modal: ui.widgets.ModalResult = undefined,
+    modal_open: *ui.Signal(bool) = undefined,
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks, preview_parent: *ui.Node) !*View {
         const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .callbacks = callbacks });
         try scope.onCleanup(View, self, release);
@@ -76,12 +79,17 @@ pub const View = struct {
             slot.* = card;
             card.root = try ui.boxStyled(cx, S.card, .{});
             card.root.meta.ownership.meta.test_id = "ai.image";
+            _ = ui.clickable(card.root, cx.on(Card, card, Card.open));
+            card.root.behavior.interaction.a11y = .{ .role = .button, .label = "查看图片" };
             card.root.setDisplay(.none);
             try self.rail.content.appendChild(cx.allocator, card.root);
             card.preview = try self.button(card.root, "ai.image.preview", "查看图片", ui.icons.image, cx.on(Card, card, Card.open));
             card.preview.setStyleInline(cx.allocator, S.previewSlot());
             card.filename = try ui.textStyled(cx, S.filename, "");
             card.filename.setStyleInline(cx.allocator, S.filenameSlot());
+            _ = ui.clickable(card.filename, cx.on(Card, card, Card.open));
+            card.filename.behavior.interaction.a11y = .{ .role = .button, .label = "查看图片" };
+            card.filename.meta.ownership.meta.test_id = "ai.image.filename";
             try card.root.appendChild(cx.allocator, card.filename);
             card.metadata = try ui.textStyled(cx, S.metadata, "");
             card.metadata.setStyleInline(cx.allocator, S.metadataSlot());
@@ -93,12 +101,17 @@ pub const View = struct {
             card.retry_button = try self.button(card.root, "ai.image.retry", "重试附件", ui.icons.get("rotate-cw").?, cx.on(Card, card, Card.retry));
             card.retry_button.setStyleInline(cx.allocator, I.retrySlot());
         }
-        self.panel = try ui.boxStyled(cx, S.inlinePreview, .{});
+        _ = preview_parent;
+        self.modal_open = try scope.createSignal(bool, false);
+        self.modal = try ui.widgets.Modal(.{ .open = self.modal_open, .width = 800, .max_height = cx.viewport.height, .overlay_color = ui.Color.TRANSPARENT, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        if (!self.modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, self.modal.overlay);
+        self.panel = self.modal.dialog;
+        self.modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .padding = ui.Padding.all(18), .gap = 12, .direction = .column, .min_height = 0 });
+        try cx.addAfterLayoutHook(self, afterLayout);
         self.panel.meta.ownership.meta.test_id = "ai.image.preview.panel";
-        self.panel.setDisplay(.none);
-        try preview_parent.appendChild(cx.allocator, self.panel);
+
         const heading = try ui.boxStyled(cx, S.heading, .{});
-        try self.panel.appendChild(cx.allocator, heading);
+        try self.modal.body.appendChild(cx.allocator, heading);
         const title_icon = try ui.iconTint(cx, ui.icons.image, S.theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
         title_icon.meta.ownership.meta.test_id = "ai.image.preview.title.icon";
         try heading.appendChild(cx.allocator, title_icon);
@@ -107,20 +120,20 @@ pub const View = struct {
         try heading.appendChild(cx.allocator, title);
         _ = try self.button(heading, "ai.image.preview.close", "关闭预览", ui.icons.x, cx.on(View, self, dismiss));
         const identity_row = try ui.boxStyled(cx, S.identity, .{});
-        try self.panel.appendChild(cx.allocator, identity_row);
+        try self.modal.body.appendChild(cx.allocator, identity_row);
         self.identity = try ui.textStyled(cx, S.identityText, "");
         self.identity.setStyleInline(cx.allocator, S.fillLabel());
         try identity_row.appendChild(cx.allocator, self.identity);
         self.keep_button = try self.button(identity_row, "ai.image.preview.keep", "保留图片", ui.icons.check, cx.on(View, self, dismiss));
         self.preview_remove = try self.button(identity_row, "ai.image.preview.remove", "移除图片", ui.icons.x, cx.on(View, self, removePreview));
         const source_row = try ui.boxStyled(cx, S.source, .{});
-        try self.panel.appendChild(cx.allocator, source_row);
+        try self.modal.body.appendChild(cx.allocator, source_row);
         self.metadata = try ui.textStyled(cx, S.sourceText, "");
         self.metadata.setStyleInline(cx.allocator, S.fillLabel());
         try source_row.appendChild(cx.allocator, self.metadata);
-        self.preview_image = try ui.box(cx, I.previewStyle(), .{});
+        self.preview_image = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .align_items = .center, .justify = .center, .overflow = .hidden }, .{});
         self.preview_image.meta.ownership.meta.test_id = "ai.image.preview.raster";
-        try self.panel.appendChild(cx.allocator, self.preview_image);
+        try self.modal.body.appendChild(cx.allocator, self.preview_image);
         self.raster = try ui.box(cx, .{}, .{});
         try self.preview_image.appendChild(cx.allocator, self.raster);
         return self;
@@ -217,9 +230,9 @@ pub const View = struct {
         if (self.app) |app| {
             self.preview_texture = try app.renderer.image_renderer.loadTexture(content.width, content.height, content.pixels);
             self.raster.setImage(.{ .texture_id = self.preview_texture.? });
-            self.raster.setStyleInline(self.cx.allocator, I.raster(content.width, content.height));
         }
-        self.panel.setDisplay(.flex);
+        self.modal_open.set(true);
+        self.layoutPreview();
         if (self.callbacks.visibility) |callback| callback(self.callbacks.context, true);
         self.cx.requestRedraw();
     }
@@ -235,10 +248,11 @@ pub const View = struct {
         return if (self.count > 0) S.rail_height + S.input_gap else 0;
     }
     pub fn isPreviewOpen(self: *const View) bool {
-        return self.panel.style.display != .none;
+        return self.modal_open.peek();
     }
     pub fn dismiss(self: *View) void {
-        self.panel.setDisplay(.none);
+        if (!self.isPreviewOpen() and self.preview_reference.content() == null) return;
+        self.modal_open.set(false);
         self.preview_ticket = null;
         self.preview_reference.release();
         self.raster.setImage(null);
@@ -247,9 +261,28 @@ pub const View = struct {
         if (self.callbacks.visibility) |callback| callback(self.callbacks.context, false);
     }
     pub fn escapePreview(self: *View) bool {
-        if (self.panel.style.display == .none) return false;
+        if (!self.isPreviewOpen()) return false;
         self.dismiss();
         return true;
+    }
+    fn openChanged(self: *View, visible: bool) void {
+        if (!visible) self.dismiss();
+    }
+    fn layoutPreview(self: *View) void {
+        const rect = @import("ai_preview_geometry.zig").bounds(self.cx, self.preview_content);
+        self.panel.setStyleInline(self.cx.allocator, @import("ai_preview_geometry.zig").panel(rect, true));
+        const content = self.preview_reference.content() orelse return;
+        const viewport = self.preview_image.globalRect();
+        const w = @max(1, if (viewport.w > 0) @min(viewport.w, rect.w - 36) else rect.w - 36);
+        const h = @max(1, if (viewport.h > 0) @min(viewport.h, rect.h - 150) else rect.h - 150);
+        const scale = @min(w / @as(f32, @floatFromInt(content.width)), h / @as(f32, @floatFromInt(content.height)));
+        self.raster.setStyleInline(self.cx.allocator, .{ .width = .{ .px = @as(f32, @floatFromInt(content.width)) * scale }, .height = .{ .px = @as(f32, @floatFromInt(content.height)) * scale }, .flex_shrink = 0 });
+    }
+    fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *View = @ptrCast(@alignCast(raw));
+        if (!self.isPreviewOpen()) return .done;
+        self.layoutPreview();
+        return .done;
     }
     fn fail(self: *View, err: anyerror) void {
         if (self.callbacks.on_error) |callback| callback(self.callbacks.context, err);
@@ -263,10 +296,7 @@ pub const View = struct {
     }
     fn release(self: *View) void {
         if (self.detached_wrapper) |node| self.cx.destroyDetached(node);
-        if (self.panel.parent) |parent| {
-            self.cx.detachChild(parent, self.panel);
-            self.cx.destroyDetached(self.panel);
-        }
+        self.cx.removeAfterLayoutHook(self);
         for (self.cards) |card| card.release();
         self.preview_reference.release();
         if (self.preview_texture) |texture| if (self.app) |app| app.renderer.image_renderer.unloadTexture(texture);

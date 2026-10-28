@@ -735,6 +735,8 @@ pub const Session = struct {
     host_key_verification: ?known_hosts.Verification = null,
     host_key_acceptance: HostKeyAcceptance = .unverified,
     accepted_auth_methods: auth_flow.Methods = .init(.{}),
+    /// Immutable transport facts, retained independently of any tab's details store.
+    negotiated_metadata: ConnectionDetails.Metadata = .{},
     resource_ledger: ?*ResourceLedger = null,
     resource_key: ?OperationKey = null,
     resource_hop: usize = 0,
@@ -804,13 +806,14 @@ pub const Session = struct {
         };
     }
     fn publishNegotiated(self: *Session) void {
-        const store = self.connection_details orelse return;
-        const key = self.resource_key orelse return;
         var metadata: ConnectionDetails.Metadata = .{ .accepted_auth_methods = self.accepted_auth_methods };
         metadata.fingerprint = ConnectionDetails.Text(128).init(self.host_key_fingerprint[0..self.host_key_fingerprint_len]) catch .{};
         if (c.zw_libssh2_session_hostkey_method(self.handle.?)) |value| metadata.host_key_algorithm = ConnectionDetails.Text(64).init(std.mem.span(value)) catch .{};
         if (c.zw_libssh2_session_cipher_cs(self.handle.?)) |value| metadata.cipher_c2s = ConnectionDetails.Text(64).init(std.mem.span(value)) catch .{};
         if (c.zw_libssh2_session_cipher_sc(self.handle.?)) |value| metadata.cipher_s2c = ConnectionDetails.Text(64).init(std.mem.span(value)) catch .{};
+        self.negotiated_metadata = metadata;
+        const store = self.connection_details orelse return;
+        const key = self.resource_key orelse return;
         store.negotiated(key, self.resource_hop, metadata);
     }
     fn publishRtt(self: *Session, finished: bool) void {

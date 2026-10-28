@@ -40,6 +40,7 @@ const Fixture = struct {
         self.logs = try Logs.View.mount(self.cx, self.scope, .{ .context = self, .copy_logs = copy });
         self.host = try SSH.Host.mount(self.cx, self.scope, .{ .context = self, .capture = capture, .copy = copy, .logs = openLogs, .reconnect = reconnect, .hide_chain = hideChain });
         self.host.bind(self.bar.controls, self, theme);
+        try self.bar.controls.setThemeName(self.cx, "Sauber");
         self.cx.layout();
         _ = self.cx.render();
     }
@@ -118,8 +119,9 @@ test "SSH status host mounts exact live bar geometry and publishes only authorit
     try f.init();
     defer f.deinit();
     try f.update(try snapshot(key, "DB-A"), false);
+    const theme_width = f.bar.controls.theme_button.globalRect().w;
     const Item = struct { node: *ui.Node, x: f32, w: f32 };
-    for ([_]Item{ .{ .node = f.bar.controls.identity_button, .x = 0, .w = 118 }, .{ .node = f.bar.controls.encoding_button, .x = 124, .w = 68 }, .{ .node = f.bar.controls.grid_button, .x = 198, .w = 82 }, .{ .node = f.bar.chain_trigger, .x = 894, .w = 80 }, .{ .node = f.bar.controls.theme_button, .x = 1066, .w = 80 } }) |item| {
+    for ([_]Item{ .{ .node = f.bar.controls.identity_button, .x = 0, .w = 118 }, .{ .node = f.bar.controls.encoding_button, .x = 124, .w = 68 }, .{ .node = f.bar.controls.grid_button, .x = 198, .w = 82 }, .{ .node = f.bar.chain_trigger, .x = 978 - theme_width, .w = 78 }, .{ .node = f.bar.controls.theme_button, .x = 1146 - theme_width, .w = theme_width } }) |item| {
         const r = item.node.globalRect();
         try std.testing.expectApproxEqAbs(8 + item.x, r.x, 0.1);
         try std.testing.expectEqual(item.w, r.w);
@@ -272,7 +274,7 @@ test "SSH status host projects only the original ready SFTP attachment without t
     try std.testing.expectEqual(f.bar.controls.theme_button, f.cx.focus_manager.current_focus.?);
     try std.testing.expectEqualStrings("已连接", f.bar.controls.identity_label.getText().?.content);
     try std.testing.expectEqualStrings("SFTP · 已连接", f.bar.controls.identity_button.behavior.interaction.a11y.?.description.?);
-    try std.testing.expectEqualDeep(@import("ui/app_theme.zig").current().ok, f.bar.controls.state_dot.getBackground());
+    try std.testing.expectEqualDeep(@import("ui/app_theme.zig").current().ok, f.bar.controls.state_dot.getIcon().?.tint);
     try std.testing.expectEqualStrings("—", f.bar.controls.rtt_label.getText().?.content);
     try std.testing.expect(f.bar.controls.disabled.peek());
     for ([_]*ui.Node{ f.bar.controls.rtt_button, f.bar.controls.encoding_button, f.bar.controls.grid_button, f.bar.controls.more_button, f.bar.chain_trigger, f.bar.socks_chip, f.bar.controls.icons[0], f.bar.controls.icons[1] }) |node| try std.testing.expectEqual(.none, node.style.display);
@@ -301,7 +303,7 @@ test "SSH status host projects only the original ready SFTP attachment without t
     f.settle();
     try std.testing.expectEqualStrings("已断开", f.bar.controls.identity_label.getText().?.content);
     try std.testing.expectEqualStrings("SFTP · 已断开", f.bar.controls.identity_button.behavior.interaction.a11y.?.description.?);
-    try std.testing.expectEqualDeep(@import("ui/app_theme.zig").current().fg_3, f.bar.controls.state_dot.getBackground());
+    try std.testing.expectEqualDeep(@import("ui/app_theme.zig").current().fg_3, f.bar.controls.state_dot.getIcon().?.tint);
 
     try f.update(try snapshot(key, "DB-A"), false);
     try std.testing.expect(f.host.file_active == null);
@@ -378,7 +380,8 @@ test "status transfer ticker displays only the filename and retains a plain file
     f.settle();
     const trigger = ticker.root.globalRect();
     const label = ticker.name.globalRect();
-    try std.testing.expect(trigger.w < 110);
+    try std.testing.expectEqual(@as(f32, 11), ticker.name.getText().?.font_size);
+    try std.testing.expect(trigger.w < 140);
     try std.testing.expectApproxEqAbs(@as(f32, 7), trigger.x + trigger.w - label.x - label.w, 0.1);
 }
 
@@ -392,7 +395,7 @@ test "SSH chain bottom bar reports online negotiating and disconnected without o
     f.settle();
     try std.testing.expect(!f.host.info.isVisible());
     try std.testing.expectEqualStrings("连接链路", f.bar.controls.chain_label.getText().?.content);
-    try std.testing.expectEqual(C.statusBarInk(C.text(.success)), f.bar.controls.chain_label.getText().?.color);
+    try std.testing.expectEqual(C.theme.current().fg_1, f.bar.controls.chain_label.getText().?.color);
     for (f.bar.controls.chain_button.children.items) |child| if (child.getIcon()) |icon| {
         try std.testing.expectEqual(C.statusBarInk(C.text(.success)), icon.tint);
     };
@@ -401,16 +404,37 @@ test "SSH chain bottom bar reports online negotiating and disconnected without o
     try f.update(source, false);
     f.settle();
     try std.testing.expectEqualStrings("连接链路", f.bar.controls.chain_label.getText().?.content);
-    try std.testing.expectEqual(C.statusBarInk(C.text(.warning)), f.bar.controls.chain_label.getText().?.color);
+    try std.testing.expectEqual(C.theme.current().fg_1, f.bar.controls.chain_label.getText().?.color);
     for (f.bar.controls.chain_button.children.items) |child| if (child.getIcon()) |icon| {
         try std.testing.expectEqual(C.statusBarInk(C.text(.warning)), icon.tint);
     };
     try f.host.updateActive(.{ .details = source, .ended = true });
     f.settle();
     try std.testing.expectEqualStrings("连接链路", f.bar.controls.chain_label.getText().?.content);
-    try std.testing.expectEqual(C.statusBarInk(C.text(.danger)), f.bar.controls.chain_label.getText().?.color);
+    try std.testing.expectEqual(C.theme.current().fg_1, f.bar.controls.chain_label.getText().?.color);
     for (f.bar.controls.chain_button.children.items) |child| if (child.getIcon()) |icon| {
         try std.testing.expectEqual(C.statusBarInk(C.text(.danger)), icon.tint);
     };
     try std.testing.expect(!f.host.info.isVisible());
+}
+
+test "SSH status theme name follows committed display name and fits long names" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.update(try snapshot(key, "DB-A"), false);
+    const controls = f.bar.controls;
+    const short_width = controls.theme_button.globalRect().w;
+    const long_name = "自定义配色 · Catppuccin Mocha Extended";
+    try controls.setThemeName(f.cx, long_name);
+    f.settle();
+    try std.testing.expectEqualStrings(long_name, controls.theme_label.getText().?.content);
+    const button = controls.theme_button.globalRect();
+    const label = controls.theme_label.globalRect();
+    try std.testing.expect(button.w > short_width);
+    try std.testing.expectApproxEqAbs(@as(f32, 27), label.x - button.x, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 7), button.x + button.w - label.x - label.w, 0.1);
+    try controls.setThemeName(f.cx, "Sauber");
+    f.settle();
+    try std.testing.expectApproxEqAbs(short_width, controls.theme_button.globalRect().w, 0.1);
 }

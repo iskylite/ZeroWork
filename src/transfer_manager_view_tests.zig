@@ -85,12 +85,12 @@ test "transfer projection global popover stays in current Cx hides without nativ
     try std.testing.expectApproxEqAbs(@as(f32, 272), bounds.h, 0.01);
     try std.testing.expectApproxEqAbs(trigger.y + trigger.h + 8, bounds.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 12), 1440 - bounds.x - bounds.w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 96) + @import("ui/workspace_tab_styles.zig").height, p.list.container.globalRect().y - bounds.y, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 122) - @import("ui/workspace_tab_styles.zig").height, p.list.container.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 90), p.list.container.globalRect().y - bounds.y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 128), p.list.container.globalRect().h, 0.01);
     try std.testing.expect(p.foot.style.display != .none);
     try std.testing.expect(text(p.head, "传输任务") != null);
     try std.testing.expect(text(p.head, "本会话传输") == null);
-    try std.testing.expect(p.scope_row.style.display != .none);
+    try std.testing.expect(p.scope_row.style.display == .none);
     try std.testing.expect(p.counts_row.style.display != .none);
     try std.testing.expectEqual(@as(usize, 1), p.counts.active);
     try std.testing.expectEqual(capture.owner, p.source.?.value.rows[0].target.owner.?);
@@ -146,10 +146,12 @@ test "transfer projection theme publication repaints mounted headings and scoped
     try p.update(.{ .revision = 1, .rows = &.{row(1, 101, .running)}, .choices = &.{ .{ .label = "全部会话", .scope = .all }, .{ .label = "原会话", .scope = .{ .session = handle(101, 1) } } } });
     p.show();
     h.frames();
-    click(h, scopeButton(p.scope_row, "原会话").?);
+    click(h, id(p.root, "transfer.scope.select").?);
+    h.frames();
+    click(h, id(h.root, "transfer.scope.option.1").?);
     h.frames();
     try std.testing.expectEqual(@as(usize, 1), p.visible.items.len);
-    try std.testing.expectEqual(theme.current().tab_on, scopeButton(p.scope_row, "原会话").?.getBackground());
+    try std.testing.expect(p.scope_row.style.display == .none);
     theme.select(.light);
     _ = theme.setMaterialVisible(true);
     h.cx.setTheme(theme.widgetTheme(.light));
@@ -254,8 +256,8 @@ test "transfer projection exact window and session geometry uses actual widgets"
     h.frames();
     try std.testing.expectApproxEqAbs(@as(f32, 840), p.root.globalRect().w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 578), p.root.globalRect().h, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 96) + @import("ui/workspace_tab_styles.zig").height, p.list.container.globalRect().y - p.root.globalRect().y, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 428) - @import("ui/workspace_tab_styles.zig").height, p.list.container.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 90), p.list.container.globalRect().y - p.root.globalRect().y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 434), p.list.container.globalRect().h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 530), p.foot.globalRect().y - p.root.globalRect().y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 76), id(p.root, "transfer.task").?.globalRect().h, 0.01);
     try std.testing.expectEqual(@as(@TypeOf(p.notice.parent.?.style.display), .none), p.notice.parent.?.style.display);
@@ -263,11 +265,11 @@ test "transfer projection exact window and session geometry uses actual widgets"
     h.frames();
     try std.testing.expectEqual(@as(@TypeOf(p.notice.parent.?.style.display), .flex), p.notice.parent.?.style.display);
     try std.testing.expectEqualStrings("原会话已关闭，等待重新绑定", p.notice.getText().?.content);
-    try std.testing.expectApproxEqAbs(@as(f32, 132) + @import("ui/workspace_tab_styles.zig").height, p.list.container.globalRect().y - p.root.globalRect().y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 126), p.list.container.globalRect().y - p.root.globalRect().y, 0.01);
     try p.update(.{ .revision = 3, .rows = &.{row(1, 101, .running)} });
     h.frames();
     try std.testing.expectEqual(@as(@TypeOf(p.notice.parent.?.style.display), .none), p.notice.parent.?.style.display);
-    try std.testing.expectApproxEqAbs(@as(f32, 96) + @import("ui/workspace_tab_styles.zig").height, p.list.container.globalRect().y - p.root.globalRect().y, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 90), p.list.container.globalRect().y - p.root.globalRect().y, 0.01);
     click(h, id(p.root, "transfer.window.minimize").?);
     try std.testing.expectEqual(V.WindowAction.minimize, c.window.?);
     click(h, id(p.root, "transfer.window.close").?);
@@ -1067,12 +1069,6 @@ test "transfer projection global portal Manager receipts reach the frozen event 
     try std.testing.expect(p.root.style.display == .none);
 }
 
-fn scopeButton(node: *ui.Node, label_text: []const u8) ?*ui.Node {
-    if (node.meta.ownership.meta.test_id) |test_id| if (std.mem.eql(u8, test_id, "transfer.scope") and text(node, label_text) != null) return node;
-    for (node.children.items) |child| if (scopeButton(child, label_text)) |found| return found;
-    return null;
-}
-
 test "transfer projection Manager scopes filter original owners and survive live refresh" {
     const h = try H.init(926, 594);
     defer h.deinit();
@@ -1087,7 +1083,9 @@ test "transfer projection Manager scopes filter original owners and survive live
     p.show();
     h.frames();
     try std.testing.expectEqual(@as(usize, 3), p.source.?.value.choices.len);
-    click(h, scopeButton(p.scope_row, "会话 #101").?);
+    click(h, id(p.root, "transfer.scope.select").?);
+    h.frames();
+    click(h, id(h.root, "transfer.scope.option.1").?);
     h.frames();
     try std.testing.expectEqual(@as(usize, 1), p.visible.items.len);
     try p.refresh(500, .{ .window_chunks = 16, .chunk_kb = 64 });
@@ -1095,7 +1093,9 @@ test "transfer projection Manager scopes filter original owners and survive live
     try std.testing.expect(p.selected_scope == .session);
     try std.testing.expectEqual(@as(u64, 101), @backingInt(p.selected_scope.session.session_id));
     try std.testing.expectEqual(@as(usize, 1), p.visible.items.len);
-    click(h, scopeButton(p.scope_row, "全部会话").?);
+    click(h, id(p.root, "transfer.scope.select").?);
+    h.frames();
+    click(h, id(h.root, "transfer.scope.option.0").?);
     h.frames();
     try std.testing.expectEqual(@as(usize, 2), p.visible.items.len);
     try std.testing.expectEqual(@as(usize, 0), capture.actions);
@@ -1470,7 +1470,7 @@ test "transfer projection owner column expands for complete names without coveri
     try std.testing.expect(narrow_name.x + narrow_name.w <= narrow_owner.x);
 }
 
-test "transfer projection tabs show only sessions with tasks and hover contains static fields" {
+test "transfer projection header dropdown includes sessions without tasks and hover contains static fields" {
     const h = try H.init(1440, 900);
     defer h.deinit();
     var capture: Capture = .{};
@@ -1482,8 +1482,14 @@ test "transfer projection tabs show only sessions with tasks and hover contains 
     } });
     panel.show();
     h.frames();
-    try std.testing.expect(scopeButton(panel.scope_row, "有任务") != null);
-    try std.testing.expect(scopeButton(panel.scope_row, "无任务") == null);
+    try std.testing.expect(panel.scope_row.style.display == .none);
+    click(h, id(panel.root, "transfer.scope.select").?);
+    h.frames();
+    try std.testing.expect(id(h.root, "transfer.scope.option.2") != null);
+    click(h, id(h.root, "transfer.scope.option.2").?);
+    h.frames();
+    try std.testing.expectEqual(@as(usize, 0), panel.visible.items.len);
+    try std.testing.expectEqual(@as(u64, 202), @backingInt(panel.selected_scope.session.session_id));
     try std.testing.expect(id(panel.root, "transfer.detail.status") == null);
     try std.testing.expectApproxEqAbs(@as(f32, 760), panel.root.globalRect().w, 0.01);
 }
@@ -1507,5 +1513,41 @@ test "transfer projection popovers size to content and independently cap scroll 
         try std.testing.expect(panel.root.globalRect().h > one_height);
         try std.testing.expectApproxEqAbs(cap, panel.root.globalRect().h, 0.01);
         try std.testing.expect(panel.list.content.globalRect().h > panel.list.container.globalRect().h);
+    }
+}
+
+test "transfer projection V3 scope menu keeps theme material density and anchor alignment" {
+    const saved = theme.currentName();
+    const material = theme.materialVisible();
+    defer {
+        theme.select(saved);
+        _ = theme.setMaterialVisible(material);
+    }
+    for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        _ = theme.setMaterialVisible(false);
+        const h = try H.init(1440, 900);
+        defer h.deinit();
+        h.cx.setTheme(theme.widgetTheme(name));
+        var capture: Capture = .{};
+        const panel = try h.panel(&capture, .global_popover);
+        try panel.update(.{ .revision = 1, .rows = &.{row(1, 101, .running)}, .choices = &.{
+            .{ .label = "全部会话", .scope = .all },
+            .{ .label = "K8s-Production-Node01 #101", .scope = .{ .session = handle(101, 1) } },
+        } });
+        panel.show();
+        h.frames();
+        const trigger = id(panel.root, "transfer.scope.select").?;
+        click(h, trigger);
+        for (0..6) |_| h.frames();
+        const menu = id(h.root, "transfer.scope.menu").?;
+        const bounds = menu.globalRect();
+        const anchor = trigger.globalRect();
+        try std.testing.expectEqual(theme.current().overlay, menu.getBackground());
+        try std.testing.expectEqual(@as(f32, 12), menu.style.backdrop_blur());
+        try std.testing.expectApproxEqAbs(anchor.x, bounds.x, 0.1);
+        try std.testing.expectApproxEqAbs(anchor.y + anchor.h + 4, bounds.y, 0.1);
+        try std.testing.expect(bounds.w >= 160 and bounds.w <= 320);
+        try std.testing.expectApproxEqAbs(@as(f32, 33), id(h.root, "transfer.scope.option.1").?.globalRect().h, 0.1);
     }
 }

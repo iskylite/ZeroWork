@@ -18,7 +18,7 @@ pub fn height(step: Step) f32 {
     };
 }
 pub fn panel(h: f32) ui.BoxStyle {
-    return .{ .width = .{ .px = width }, .height = .{ .px = h }, .direction = .column, .padding = .{}, .gap = 0, .background = theme.current().overlay, .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 12, .blur = 24, .color = theme.current().shadow } };
+    return .{ .width = .{ .px = width }, .height = .{ .px = h }, .direction = .column, .padding = .{}, .gap = 0, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 12, .blur = 24, .color = theme.current().shadow } };
 }
 pub fn header() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 12, .right = 12 }, .flex_shrink = 0 };
@@ -58,14 +58,14 @@ pub fn pair() ui.BoxStyle {
     var result = stack(8);
     result.height = .{ .px = 68 };
     result.padding = ui.Padding.all(12);
-    result.background = theme.current().surface_2;
+    result.background = theme.popupAction();
     result.border = .{ .radius = 9 };
     return result;
 }
 pub fn target() ui.BoxStyle {
     var result = row(48, 10);
     result.padding = ui.Padding.all(10);
-    result.background = theme.current().surface_2;
+    result.background = theme.popupAction();
     result.border = .{ .radius = 9 };
     return result;
 }
@@ -114,7 +114,7 @@ pub fn close() ui.BoxStyle {
 }
 pub fn button(w: f32, h: f32, primary: bool, danger: bool) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .background = if (danger) c.action_danger else if (primary) c.action_accent else c.surface_2, .border = .{ .radius = 8 }, .align_items = .center, .justify = .center, .flex_shrink = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .background = if (danger) c.action_danger else if (primary) c.action_accent else theme.popupAction(), .border = .{ .radius = 8 }, .align_items = .center, .justify = .center, .flex_shrink = 0 };
 }
 pub fn actionColor(primary: bool, disabled: bool) ui.Color {
     return if (disabled) theme.current().fg_3 else if (primary) theme.widgetTheme(theme.currentName()).tokens.color.button_primary_fg else theme.current().fg_2;
@@ -122,11 +122,11 @@ pub fn actionColor(primary: bool, disabled: bool) ui.Color {
 const GroupRecipe = ui.recipe.recipe(struct {
     pub const Variants = struct { selected: bool = false };
     pub fn base(_: *const ui.ThemeTokens) ui.ConditionalStyle {
-        return .{ .base = .{ .width = .fill(), .height = .{ .px = 44 }, .direction = .row, .align_items = .center, .padding = ui.Padding.all(10), .gap = 8, .background = theme.current().surface_2, .border = .{ .radius = 9 }, .flex_shrink = 0 } };
+        return .{ .base = .{ .width = .fill(), .height = .{ .px = 44 }, .direction = .row, .align_items = .center, .padding = ui.Padding.all(10), .gap = 8, .background = theme.popupAction(), .border = .{ .radius = 9 }, .flex_shrink = 0 } };
     }
     pub const variants = .{ .selected = struct {
         fn resolve(selected: bool, _: *const ui.ThemeTokens) ui.ConditionalStyle {
-            return .{ .base = .{ .background = if (selected) theme.current().selection else theme.current().surface_2 } };
+            return .{ .base = .{ .background = if (selected) theme.popupSelection() else theme.popupAction() } };
         }
     }.resolve };
 });

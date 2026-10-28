@@ -202,6 +202,7 @@ fn preferenceRow(cx: *ui.Cx, bound: *binding.Binding, plugin_id: []const u8, fie
         .string => {
             const value = try bound.scope.createText(current, .{});
             var input = try ui.widgets.Input(.{ .value = value, .disabled = bound.saving, .on_change = cx.on(PreferenceControl, state, PreferenceControl.edit) }).mountResult(bound.scope, cx);
+            @import("../../ui/app_theme.zig").styleInput(input);
             input.input_container.setStyleInline(cx.allocator, S.fieldControl(undefined));
             input.node.meta.ownership.meta.test_id = test_id;
             input.node.style.width = .{ .px = S.geometry.control_width };

@@ -99,6 +99,19 @@ pub fn materialAlpha(comptime role: []const u8) u8 {
     // Apply background alpha only; text, icons and subtree opacity stay intact.
     return @intFromFloat(@round(255 * (1 - transparency)));
 }
+
+/// Floating surface level, independent of widget kind and numeric z-index.
+/// L1 preserves the existing material; L2 transmits 1–4%; L3+ is opaque.
+pub fn layerAlpha(level: usize) u8 {
+    return switch (level) {
+        0, 1 => materialAlpha("overlay"),
+        2 => @intFromFloat(@round(255 * (1 - (0.01 + 0.03 * material_transparency / 100)))),
+        else => 255,
+    };
+}
+pub fn layerBackground(level: usize) ui.Color {
+    return baseColors().overlay.withAlpha(layerAlpha(level));
+}
 /// Keep retained surface paint in sync with the same publication as widget tokens.
 /// Only overlay surfaces filter the backdrop; foreground opacity is untouched.
 pub fn bindMaterial(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, comptime role: []const u8) !void {
@@ -106,7 +119,7 @@ pub fn bindMaterial(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, comptime role:
         fn paint(ctx: anytype) void {
             _ = ctx.publication.get();
             ctx.node.setBackground(@field(current(), role));
-            if (comptime std.mem.eql(u8, role, "overlay")) ctx.node.setStyleInline(ctx.cx.allocator, .{ .glass = overlayGlass() });
+            if (comptime std.mem.eql(u8, role, "overlay")) ctx.node.setStyleInline(ctx.cx.allocator, overlayPaint());
         }
     }.paint);
 }
@@ -115,13 +128,66 @@ pub fn bindMaterial(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, comptime role:
 /// Even when the configured background blur is zero, use 12 logical px to suppress
 /// lower-layer text ghosting. This samples app content, not the desktop.
 /// Quiet, opaque content surface inside an overlay; independent of wallpaper alpha.
+fn insetColor(c: Colors) ui.Color {
+    const overlay = c.overlay.withAlpha(255);
+    const well = c.well.withAlpha(255);
+    const blended = ui.Color.lerp(overlay, well, 0.3);
+    return if (contrast(overlay, blended) >= 1.1) blended else well;
+}
 pub fn popupInset() ui.Color {
-    const c = current();
-    return ui.Color.lerp(c.overlay.withAlpha(255), c.well.withAlpha(255), 0.3);
+    return insetColor(current());
+}
+fn actionColor(c: Colors) ui.Color {
+    return ui.Color.lerp(c.overlay.withAlpha(255), c.fg_2.withAlpha(255), 0.12);
 }
 pub fn popupAction() ui.Color {
+    return actionColor(current());
+}
+pub fn popupBorder() ui.Color {
+    return ui.Color.TRANSPARENT;
+}
+fn selectionColor(c: Colors) ui.Color {
+    const dark = @as(u32, c.app.r) * 299 + @as(u32, c.app.g) * 587 + @as(u32, c.app.b) * 114 < 128000;
+    return ui.Color.lerp(c.overlay.withAlpha(255), c.accent, if (dark) 0.16 else 0.10);
+}
+pub fn popupSelection() ui.Color {
+    return selectionColor(current());
+}
+/// Secondary metadata must remain readable on the UI selection surface.
+pub fn selectionSecondary() ui.Color {
     const c = current();
-    return ui.Color.lerp(c.overlay.withAlpha(255), c.fg_2.withAlpha(255), 0.12);
+    if (contrast(c.fg_2, popupSelection()) >= 4.5) return c.fg_2;
+    const ink = ui.Color.lerp(c.fg_2, c.fg_1, 0.25);
+    return if (contrast(ink, popupSelection()) >= 4.5) ink else c.fg_1;
+}
+/// Repaint retained UI-derived fills without treating terminal selection as UI chrome.
+pub fn remapUiSurface(color: ui.Color, previous: Colors) ?ui.Color {
+    if (ui.Color.eql(color, insetColor(previous))) return popupInset();
+    if (ui.Color.eql(color, actionColor(previous))) return popupAction();
+    if (ui.Color.eql(color, selectionColor(previous))) return popupSelection();
+    return null;
+}
+/// Separate floating surfaces with material and shadow, without perimeter lines.
+pub fn overlayPaint() ui.BoxStyle {
+    return .{ .glass = overlayGlass(), .outline = .{ .width = 0, .color = ui.Color.TRANSPARENT } };
+}
+/// App-owned field paint survives widget focus/disabled recipes and theme publication.
+/// The Input keeps its editing, focus, accessibility and composition handlers.
+pub fn styleInput(input: ui.widgets.input.InputResult) void {
+    input.input_container.addBeforeRender(paintInputChrome);
+}
+fn paintInputChrome(node: *ui.Node) void {
+    const state: *ui.widgets.input.TextInputState = @ptrCast(@alignCast(node.behavior.events.event_context orelse return));
+    if (state.cx_ref) |cx| if (state.tokens != cx.tokens) {
+        state.tokens = cx.tokens;
+        state.dirty = true;
+    };
+    const c = current();
+    const background = if (state.disabled) popupAction() else if (state.has_error) c.danger.withAlpha(24) else if (state.focused) popupSelection() else popupInset();
+    if (!ui.Color.eql(node.getBackground(), background)) node.setBackground(background);
+    node.setBorderColor(ui.Color.TRANSPARENT);
+    const outline = node.style.outline();
+    if (outline != null and outline.?.width != 0) node.setStyleInline(state.allocator, .{ .outline = .{ .width = 0, .color = ui.Color.TRANSPARENT } });
 }
 pub fn overlayGlass() ui.GlassParams {
     return .{ .backdrop_blur = @max(12, material_blur), .capture_current_target = false, .glass_intensity = 0, .specular_opacity = 0, .refraction_level = 0, .warp_gain = 0 };
@@ -251,89 +317,9 @@ fn refreshWidgets() void {
     applied_widgets.name = if (applied_colors != null) "global" else @tagName(selected);
 }
 pub fn colors(name: Name) Colors {
-    var c: Colors = switch (name) {
-        .dark => .{
-            .app = hex(0x060608),
-            .surface_1 = hex(0x131316),
-            .surface_2 = hex(0x1b1b1f),
-            .well = hex(0x0c0c0f),
-            .well_border = hex(0x26262c),
-            .terminal = hex(0x0a0a0d),
-            .overlay = hex(0x292a30),
-            .hover = hex(0x202026),
-            .tab_on = hex(0x1e1e23),
-            .fg_1 = hex(0xf4f4f5),
-            .fg_2 = hex(0xa1a1aa),
-            .fg_3 = hex(0x5b5b64),
-            .accent = hex(0x6366f1),
-            .accent_ink = hex(0x8c8ef5),
-            .ok = hex(0x22c55e),
-            .ok_ink = hex(0x22c55e),
-            .warn = hex(0xf59e0b),
-            .warn_ink = hex(0xf59e0b),
-            .danger = hex(0xef4444),
-            .danger_ink = hex(0xf36e6e),
-            .selection = ui.Color.rgba(0x63, 0x66, 0xf1, 36),
-            .border = hex(0x26262c),
-            .shadow = ui.Color.rgba(0, 0, 0, 92),
-        },
-        .light => .{
-            .app = hex(0xe6e6ea),
-            .surface_1 = hex(0xfbfbfc),
-            .surface_2 = hex(0xf4f4f7),
-            .well = hex(0xececf0),
-            .well_border = hex(0xd9d9e0),
-            .terminal = hex(0xfbfbfc),
-            .overlay = hex(0xffffff),
-            .hover = hex(0xececf1),
-            .tab_on = hex(0xffffff),
-            .fg_1 = hex(0x18181b),
-            .fg_2 = hex(0x52525b),
-            .fg_3 = hex(0xa1a1aa),
-            .accent = hex(0x4f46e5),
-            .accent_ink = hex(0x4f46e5),
-            .ok = hex(0x16a34a),
-            .ok_ink = hex(0x107435),
-            .warn = hex(0xd97706),
-            .warn_ink = hex(0x985304),
-            .danger = hex(0xdc2626),
-            .danger_ink = hex(0xc32222),
-            .selection = ui.Color.rgba(0x4f, 0x46, 0xe5, 23),
-            .border = hex(0xd9d9e0),
-            .shadow = ui.Color.rgba(15, 23, 42, 36),
-        },
-        .sauber => .{
-            .app = hex(0xd9eccf),
-            .surface_1 = hex(0xf2fdec),
-            .surface_2 = hex(0xecfbe5),
-            .well = hex(0xe2f5da),
-            .well_border = hex(0xc9e4bd),
-            .terminal = hex(0xecffe5),
-            .overlay = hex(0xf3ffef),
-            .hover = hex(0xdbf0d6),
-            .tab_on = hex(0xf8fff4),
-            .fg_1 = hex(0x0f172a),
-            .fg_2 = hex(0x46604f),
-            .fg_3 = hex(0x8aa396),
-            .accent = hex(0x1345f6),
-            .accent_ink = hex(0x1345f6),
-            .ok = hex(0x10b981),
-            .ok_ink = hex(0x0a714f),
-            .warn = hex(0xd49a0c),
-            .warn_ink = hex(0x7f5c07),
-            .danger = hex(0xdc4c3f),
-            .danger_ink = hex(0xad3c32),
-            .selection = ui.Color.rgba(0x13, 0x45, 0xf6, 23),
-            .border = hex(0xc9e4bd),
-            .shadow = ui.Color.rgba(20, 70, 35, 36),
-        },
-    };
-    const actions = @import("../config/theme_registry.zig").builtinTokens(@tagName(name));
-    c.action_accent = tokenColor(actions.action_accent);
-    c.action_accent_2 = tokenColor(actions.action_accent_2);
-    c.action_danger = tokenColor(actions.action_danger);
-    return completeColors(c);
+    return tokenColors(@import("../config/theme_registry.zig").builtinTokens(@tagName(name)));
 }
+
 fn tokenColor(rgba: u32) ui.Color {
     return ui.Color.rgba(@intCast(rgba >> 24), @intCast((rgba >> 16) & 255), @intCast((rgba >> 8) & 255), @intCast(rgba & 255));
 }
@@ -395,46 +381,47 @@ fn widgetTokensFrom(c: Colors, dark: bool) ui.ThemeTokens {
     t.bg_inset = c.well;
     t.fg_primary = c.fg_1;
     t.fg_secondary = c.fg_2;
-    t.fg_tertiary = c.fg_3;
+    t.fg_tertiary = c.fg_2;
     t.fg_disabled = c.fg_3;
     // Zenit uses accent for checked checkbox/radio/switch fills. V3 uses --primary.
     t.accent = c.action_accent;
     t.accent_hover = c.action_accent;
-    t.accent_muted = c.selection;
-    t.accent_subtle = c.selection;
+    t.accent_muted = selectionColor(c);
+    t.accent_subtle = selectionColor(c);
     t.border = ui.Color.TRANSPARENT;
     t.border_strong = ui.Color.TRANSPARENT;
     t.border_focus = ui.Color.TRANSPARENT;
-    // V3 controls use selected surfaces for focus; the HTML adds no outline.
+    // Focus uses selection fill and caret, without a border or focus ring.
     t.focus_ring = ui.Color.TRANSPARENT;
     t.fg_inverse = actionForeground(c.action_accent);
-    t.success = c.ok;
+    t.success = c.ok_ink;
     t.success_subtle = c.ok.withAlpha(24);
     t.warning_subtle = c.warn.withAlpha(24);
     t.danger_subtle = c.danger.withAlpha(24);
     t.danger_hover = c.action_danger;
     t.info = c.accent_ink;
-    t.info_subtle = c.selection;
-    t.warning = c.warn;
-    t.danger = c.action_danger;
-    t.selection_bg = c.selection;
+    t.info_subtle = selectionColor(c);
+    t.warning = c.warn_ink;
+    // Widget danger is text/icon ink. Filled app actions use action_danger explicitly.
+    t.danger = c.danger_ink;
+    t.selection_bg = selectionColor(c);
     t.button_primary_bg = c.action_accent;
     t.button_primary_fg = actionForeground(c.action_accent);
-    t.button_secondary_bg = c.surface_2;
-    t.button_secondary_fg = c.fg_1;
-    t.input_bg = c.well;
+    t.button_secondary_bg = actionColor(c);
+    t.button_secondary_fg = if (dark) c.fg_2 else c.fg_1;
+    t.input_bg = insetColor(c);
     t.input_border = ui.Color.TRANSPARENT;
-    t.checkbox_bg = c.well;
+    t.checkbox_bg = ui.Color.lerp(c.overlay.withAlpha(255), c.fg_2.withAlpha(255), 0.4);
     t.checkbox_border = ui.Color.TRANSPARENT;
     t.checkbox_disabled_bg = c.surface_2;
-    t.checkbox_disabled_border = c.well_border;
+    t.checkbox_disabled_border = ui.Color.TRANSPARENT;
     t.checkbox_disabled_checked_bg = c.well_border;
     t.switch_track_on = c.action_accent;
     t.switch_thumb = ui.Color.WHITE;
     t.switch_track_off = ui.Color.lerp(c.surface_2.withAlpha(255), c.fg_3, 0.35);
     t.list_hover_bg = c.hover;
-    t.list_selection_bg = c.selection;
-    t.list_selection_hover_bg = c.selection;
+    t.list_selection_bg = selectionColor(c);
+    t.list_selection_hover_bg = selectionColor(c);
     t.table_header_bg = c.surface_2;
     t.separator = ui.Color.TRANSPARENT;
     t.tooltip_bg = c.overlay;
@@ -469,7 +456,7 @@ test "global surface tints do not depend on whether an image is visible" {
         }
         const widget = widgetTheme(name).tokens.color;
         try std.testing.expectEqual(no_image.surface_1, widget.bg_primary);
-        try std.testing.expectEqual(no_image.well, widget.input_bg);
+        try std.testing.expectEqual(popupInset(), widget.input_bg);
         try std.testing.expectEqual(no_image.overlay, widget.tooltip_bg);
         try std.testing.expectEqual(base.action_accent, widget.button_primary_bg);
     }
@@ -498,13 +485,13 @@ test "all V3 themes publish independent filled action and readable state roles" 
         const widget = widgetTheme(currentName()).tokens.color;
         try std.testing.expectEqual(tokenColor(record.action_accent), widget.button_primary_bg);
         try std.testing.expectEqual(tokenColor(record.action_accent), widget.accent);
-        try std.testing.expectEqual(tokenColor(record.action_danger), widget.danger);
+        try std.testing.expectEqual(tokenColor(record.danger_ink), widget.danger);
         try std.testing.expect(contrast(widget.button_primary_bg, widget.button_primary_fg) >= 4.49);
         try std.testing.expectEqual(ui.Color.TRANSPARENT, widget.focus_ring);
         try std.testing.expectEqual(c.fg_3, widget.fg_disabled);
         try std.testing.expectEqual(c.surface_2, widget.checkbox_disabled_bg);
-        try std.testing.expectEqual(c.well, widget.input_bg);
-        try std.testing.expectEqual(c.selection, widget.list_selection_bg);
+        try std.testing.expectEqual(popupInset(), widget.input_bg);
+        try std.testing.expectEqual(popupSelection(), widget.list_selection_bg);
         try std.testing.expectEqual(c.hover, widget.bg_active);
         if (!std.mem.eql(u8, id, "dark") and !std.mem.eql(u8, id, "light") and !std.mem.eql(u8, id, "sauber"))
             try std.testing.expect(!ui.Color.eql(c.action_accent, c.accent));
@@ -523,4 +510,52 @@ test "legacy imported palettes derive readable filled action foreground" {
     const widget = widgetTheme(currentName()).tokens.color;
     try std.testing.expectEqual(tokenColor(record.accent), widget.button_primary_bg);
     try std.testing.expect(contrast(widget.button_primary_bg, widget.button_primary_fg) > 10);
+}
+
+test "layer hierarchy keeps fields and actions readable without perimeter outlines" {
+    const previous = currentName();
+    const parameters = materialParameters();
+    defer {
+        select(previous);
+        _ = setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    var registry = try @import("../config/theme_registry.zig").Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    for (registry.records.items) |record| {
+        selectTokens(record.ui_tokens);
+        for ([_]f32{ 0, 50, 100 }) |transparency| {
+            _ = setMaterialParameters(transparency, 0);
+            const c = current();
+            const tokens = widgetTheme(currentName()).tokens.color;
+            try std.testing.expectEqual(@as(u8, 255), tokens.input_bg.a);
+            try std.testing.expectEqual(@as(u8, 255), tokens.button_secondary_bg.a);
+            try std.testing.expectEqual(@as(u8, 255), tokens.checkbox_bg.a);
+            try std.testing.expectEqual(ui.Color.TRANSPARENT, tokens.border_focus);
+            try std.testing.expectEqual(ui.Color.TRANSPARENT, tokens.input_border);
+            inline for (@typeInfo(@TypeOf(record.ui_tokens)).@"struct".field_names) |role|
+                try std.testing.expect(@field(record.ui_tokens, role) != 0);
+            for ([_]ui.Color{ tokens.input_bg, tokens.button_secondary_bg, popupSelection() }) |surface| {
+                try std.testing.expect(contrast(surface, c.fg_1) >= 4.5);
+                try std.testing.expect(contrast(surface, c.fg_2) >= 4.5);
+            }
+            for ([_]ui.Color{ c.accent_ink, c.ok_ink, c.warn_ink, c.danger_ink }) |ink|
+                try std.testing.expect(contrast(c.overlay.withAlpha(255), ink) >= 4.5);
+            try std.testing.expect(contrast(c.action_accent, tokens.button_primary_fg) >= 4.5);
+            try std.testing.expect(contrast(c.action_accent_2, tokens.button_primary_fg) >= 4.5);
+            try std.testing.expect(contrast(c.action_danger, actionForeground(c.action_danger)) >= 4.5);
+            try std.testing.expectEqual(c.danger_ink, tokens.danger);
+            try std.testing.expectEqual(popupSelection(), tokens.list_selection_bg);
+            try std.testing.expectEqual(popupSelection(), tokens.selection_bg);
+            try std.testing.expect(!ui.Color.eql(tokens.input_bg, tokens.checkbox_bg));
+            try std.testing.expect(contrast(tokens.input_bg, c.fg_1) >= 4.5);
+            try std.testing.expect(contrast(tokens.input_bg, c.overlay.withAlpha(255)) >= 1.1);
+            try std.testing.expect(contrast(popupSelection(), c.fg_1) >= 4.5);
+            try std.testing.expect(contrast(popupSelection(), c.accent_ink) >= 4.5);
+            try std.testing.expectEqual(@as(f32, 0), @import("notification_history_styles.zig").panel().border.?.width);
+            try std.testing.expectEqual(@as(f32, 0), @import("notification_styles.zig").card(widgetTheme(currentName())).border.?.width);
+            try std.testing.expect(contrast(tokens.button_secondary_bg, tokens.button_secondary_fg) >= 4.5);
+            try std.testing.expectEqual(@as(f32, 0), overlayPaint().outline.?.width);
+            try std.testing.expectEqual(@as(f32, 12), overlayPaint().glass.?.backdrop_blur);
+        }
+    }
 }

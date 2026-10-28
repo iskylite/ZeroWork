@@ -3,7 +3,7 @@
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 pub fn dialog(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = 520 }, .max_width = 520, .height = .{ .px = 242 }, .padding = .ZERO, .background = theme.current().overlay, .border = .{ .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 64, .color = theme.current().shadow } };
+    return .{ .width = .{ .px = 520 }, .max_width = 520, .height = .{ .px = 242 }, .padding = .ZERO, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 64, .color = theme.current().shadow } };
 }
 pub fn body(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = ui.Padding.all(12), .gap = 0 };

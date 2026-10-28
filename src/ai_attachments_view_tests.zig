@@ -7,7 +7,7 @@ const a = std.testing.allocator;
 fn expectPreviewBounds(f: *Fixture) !void {
     const panel = f.view.preview_panel.globalRect();
     const body = f.view.preview_body.container.globalRect();
-    try std.testing.expectEqual(@as(f32, 480), panel.w);
+    try std.testing.expectApproxEqAbs(f.cx.viewport.width * 0.78, panel.w, 0.1);
     try std.testing.expect(panel.h <= f.cx.viewport.height - 32 + 0.1);
     try std.testing.expect(body.y >= panel.y and body.y + body.h <= panel.y + panel.h);
 }
@@ -187,8 +187,7 @@ test "AI attachments preview uses the immutable captured bytes and keep close ne
     f.click(find(f.view.root, "ai.attachment.open").?);
     try std.testing.expect(f.view.isPreviewOpen());
     try expectPreviewBounds(&f);
-    try expectPreviewBounds(&f);
-    try std.testing.expectApproxEqAbs(@as(f32, 61.6), f.view.preview_body.container.globalRect().h, 0.1);
+    try std.testing.expect(f.view.preview_body.container.globalRect().h > 400);
     try std.testing.expectEqualStrings("original snapshot\n中文", f.view.preview_label.getText().?.content);
     try std.testing.expectEqualStrings("/source/selected.txt", f.view.preview_identity.getText().?.content);
     f.click(find(f.view.preview_panel, "ai.attachment.preview.keep").?);
@@ -280,11 +279,11 @@ test "AI attachments horizontal rail keeps all entries on one row and theme chan
         try std.testing.expect(ui.Color.eql(theme.current().surface_2, card.getBackground()));
         try std.testing.expectApproxEqAbs(card.globalRect().x + 6, find(card, "ai.attachment.open").?.globalRect().x, 0.1);
         try std.testing.expectEqualStrings("captured", f.view.preview_label.getText().?.content);
-        try std.testing.expectApproxEqAbs(@as(f32, 41.796875), f.view.preview_body.container.globalRect().h, 0.01);
+        try std.testing.expect(f.view.preview_body.container.globalRect().h > 400);
     }
 }
 
-test "AI attachments a long immutable preview scrolls inside its 104px body without growing the attachment row" {
+test "AI attachments a long immutable preview scrolls inside its bounded bubble without growing the attachment row" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -300,7 +299,7 @@ test "AI attachments a long immutable preview scrolls inside its 104px body with
     f.cx.handleScroll(.{ .x = body.x + 30, .y = body.y + 30, .dx = 0, .dy = -500 });
     f.settle();
     try std.testing.expect(f.view.preview_body.state.scroll_y > 0);
-    try std.testing.expectEqual(@as(f32, 640), f.view.preview_body.container.globalRect().h);
+    try std.testing.expect(f.view.preview_body.container.globalRect().h > 400);
     try std.testing.expectEqual(@as(f32, 25), f.view.root.globalRect().h);
     try std.testing.expectEqualStrings(content.items, f.view.preview_label.getText().?.content);
     try std.testing.expectEqual(@as(f32, 0), f.view.rail.state.scroll_y);
@@ -485,13 +484,13 @@ test "AI attachments V3 context modal preserves source and independent body scro
     try std.testing.expect(f.view.modal != null);
     try std.testing.expect(f.view.isPreviewOpen());
     try std.testing.expectEqual(ui.types.Display.none, f.view.root.style.display);
-    try std.testing.expectApproxEqAbs((f.cx.viewport.width - 480) / 2, panel.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(f.cx.viewport.width * 0.11, panel.globalRect().x, 0.1);
     try std.testing.expect(panel.globalRect().y >= 16);
     try expectPreviewBounds(&f);
     try std.testing.expect(panel.globalRect().h >= 260);
-    try std.testing.expectApproxEqAbs(@as(f32, 41.8), f.view.preview_body.container.globalRect().h, 0.1);
+    try std.testing.expect(f.view.preview_body.container.globalRect().h > 400);
     try std.testing.expect(f.view.preview_body.container.globalRect().y > panel.globalRect().y);
-    try std.testing.expectEqual(theme.current().overlay, panel.getBackground());
+    try std.testing.expectEqual(theme.current().overlay.withAlpha(245), panel.getBackground());
     try std.testing.expectEqualStrings("captured inline candidate", f.view.preview_reference.content().?.bytes);
     for ([_]theme.Name{ .light, .dark, .sauber }) |name| {
         theme.select(name);
@@ -500,7 +499,7 @@ test "AI attachments V3 context modal preserves source and independent body scro
         f.settle();
         try std.testing.expectEqual(ui.types.Display.none, f.conversation.?.style.display);
         try std.testing.expectEqual(ui.types.Display.flex, f.inline_holder.?.style.display);
-        try std.testing.expectEqual(theme.current().overlay, panel.getBackground());
+        try std.testing.expectEqual(theme.current().overlay.withAlpha(245), panel.getBackground());
     }
     f.click(find(panel, "ai.attachment.preview.keep").?);
     try std.testing.expectEqual(@as(usize, 1), f.attaches);

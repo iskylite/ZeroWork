@@ -1,28 +1,17 @@
-.zw-feedback-stack{position:absolute;right:20px;top:62px;z-index:150;display:flex;flex-direction:column;gap:8px;width:340px;max-width:calc(100% - 40px);pointer-events:none}.zw-feedback{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--overlay);border:1px solid var(--line);border-radius:9px;box-shadow:var(--shadow);color:var(--fg);font:12px/18px Inter,-apple-system,sans-serif;pointer-events:auto;backdrop-filter:blur(var(--overlay-blur,12px))}.zw-feedback>span{flex:1;min-width:0}.zw-feedback strong{font-weight:500}.zw-feedback small{display:block;color:var(--muted);margin-top:2px;font-size:11px}.zw-feedback button{background:transparent;color:var(--muted);border:0;cursor:pointer;padding:3px;font:inherit}.zw-feedback-local{font-size:11px;padding:6px 9px}.zw-feedback-local small{max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-
-.zw-feedback-stack[data-obscured=true]>.zw-feedback:not(.zw-feedback-local){visibility:hidden}
-
-.zw-feedback[hidden]{display:none}
-
-.zw-feedback-stack[data-obscured=true]>.zw-feedback[data-severity=error]{visibility:visible}
-
-/* Compact structured notifications; local receipts keep their lightweight form. */
-.zw-feedback{flex-direction:column;align-items:stretch;gap:4px;padding:8px 16px;border-radius:12px;box-shadow:0 16px 40px #0005}
-.zw-feedback-heading{display:flex;align-items:center;gap:8px;min-width:0}
-.zw-feedback-heading strong{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.zw-feedback-heading [data-feedback-close]{flex:none;width:19px;height:19px;padding:0}
-.zw-feedback small{margin:0;line-height:18px}
-.zw-feedback:not(.zw-feedback-local)>small,.zw-feedback-footer{margin-left:22px}
-.zw-feedback small[title],.zw-feedback-summary{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.zw-feedback-footer{display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:24px}
-.zw-feedback [data-feedback-action]{height:24px;max-width:100%;padding:0 10px;border-radius:6px;background:var(--primary,#6366f1);color:var(--on-primary,#fff);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-left:auto}
-.zw-feedback-tag{flex:none;padding:1px 6px;border:1px solid #71717a40;border-radius:4px;background:#71717a17;color:var(--muted);font-size:11px;line-height:16px}
-.zw-feedback[data-severity=error] .zw-feedback-tag{color:#ff666d;background:#f34b5617;border-color:#f34b5640}
-.zw-feedback[data-severity=warning] .zw-feedback-tag{color:#ffb300;background:#ffb30017;border-color:#ffb30040}
-.zw-feedback[data-severity=success] .zw-feedback-tag{color:#32c86c;background:#32c86c17;border-color:#32c86c40}
-
-.zw-feedback-icon{display:flex;flex:none;align-items:center;justify-content:center;width:14px;height:14px;border:1.5px solid currentColor;border-radius:50%;font:500 11px/1 -apple-system,sans-serif;color:var(--muted)}
-.zw-feedback[data-severity=error] .zw-feedback-icon{color:#ff666d}.zw-feedback[data-severity=warning] .zw-feedback-icon{color:#ffb300}.zw-feedback[data-severity=success] .zw-feedback-icon{color:#32c86c}
-.zw-feedback [data-feedback-action]{font-weight:500}
-
-.zw-feedback-local{flex-direction:row;align-items:center;gap:10px;padding:6px 9px}
+/* Toasts and history share the V3 title / summary + action / optional detail layout. */
+.zw-feedback-stack{position:absolute;right:20px;top:62px;z-index:150;display:flex;flex-direction:column;gap:8px;width:340px;max-width:calc(100% - 40px);max-height:calc(100% - 74px);overflow:auto;pointer-events:none}
+.zw-feedback{box-sizing:border-box;display:flex;flex-direction:column;align-items:stretch;gap:4px;flex:none;padding:12px 16px;background:var(--overlay);border:0;border-radius:12px;box-shadow:var(--shadow-float,var(--shadow));color:var(--fg);font:12px/18px Inter,-apple-system,sans-serif;pointer-events:auto;backdrop-filter:blur(var(--overlay-blur,12px))}
+.zw-feedback[hidden]{display:none}.zw-feedback-stack[data-obscured=true]>.zw-feedback:not(.zw-feedback-local){visibility:hidden}.zw-feedback-stack[data-obscured=true]>.zw-feedback[data-severity=error]{visibility:visible}
+.zw-feedback-heading{display:flex;align-items:center;gap:8px;min-width:0;min-height:19px}
+.zw-feedback-heading strong{font-size:12px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.zw-feedback button{background:transparent;color:var(--muted);border:0;cursor:pointer;padding:0 6px;border-radius:5px;font:400 11px/18px Inter,-apple-system,sans-serif;white-space:nowrap;flex:none}
+.zw-feedback button:hover{background:var(--hover)}.zw-feedback button:focus-visible{outline:0;background:var(--popup-selected,var(--sel));color:var(--fg)}
+.zw-feedback-heading [data-feedback-close]{width:19px;height:19px;padding:0;font-size:14px}
+.zw-feedback-secondary{display:flex;align-items:center;gap:6px;min-width:0;min-height:22px;margin-left:22px}
+.zw-feedback-summary{display:block;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted);font-size:11px;line-height:18px}
+.zw-feedback [data-feedback-action]{height:22px;max-width:112px;color:var(--accent-ink,var(--accent));overflow:hidden;text-overflow:ellipsis}
+.zw-feedback [data-feedback-expand]{width:22px;height:22px;padding:0}
+.zw-feedback-detail{margin-left:22px;padding:4px 0 2px;white-space:pre-wrap;overflow-wrap:anywhere;font-size:11px;line-height:18px;color:var(--muted)}.zw-feedback-detail[hidden]{display:none}
+.zw-feedback-icon{display:grid;place-items:center;flex:none;width:14px;height:14px;color:var(--muted)}.zw-feedback-icon svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.7}
+.zw-feedback[data-severity=error] .zw-feedback-icon{color:var(--danger-ink,var(--danger))}.zw-feedback[data-severity=warning] .zw-feedback-icon{color:var(--warn-ink,var(--warn))}.zw-feedback[data-severity=success] .zw-feedback-icon{color:var(--ok-ink,var(--good))}
+.zw-feedback-local{flex-direction:row;align-items:center;gap:10px;padding:6px 9px;font-size:11px}.zw-feedback-local>span{flex:1;min-width:0}.zw-feedback-local strong{font-weight:500}.zw-feedback-local small{display:block;color:var(--muted);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}

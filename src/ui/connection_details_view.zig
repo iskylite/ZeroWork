@@ -105,7 +105,7 @@ pub const View = struct {
         // Scope children dispose in creation order. Release this view's focus
         // while all Button/Tooltip signals still exist.
         const focus_guard = try scope.childScope();
-        const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = false, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged), .enter_transition = .none, .exit_transition = .none }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = false, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged), .enter_transition = .none, .exit_transition = .none }).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;

@@ -33,7 +33,7 @@ pub const View = struct {
         const open = try scope.createSignal(bool, false);
         self.* = .{ .cx = cx, .scope = scope, .controller = .{ .allocator = cx.allocator }, .hooks = hooks, .open = open };
         try scope.onCleanup(View, self, cleanup);
-        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = 360, .max_width = 360, .offset = .{ .static = 6 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .flip = false, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .max_width = 380, .offset = .{ .static = 6 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .flip = false, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;
@@ -134,8 +134,9 @@ pub const View = struct {
         const current = self.controller.popover.?;
         const source = self.controller.source.?.value;
         const size = try self.controller.placement(.{ .width = self.cx.viewport.width, .height = self.cx.viewport.height });
-        const panel_style = styles.panel();
+        const panel_style = if (current.kind == .identity) @import("status_connection_styles.zig").panel(size.height, self.cx.viewport.width) else styles.panel();
         self.chrome.setStyleInline(self.cx.allocator, .{ .padding = panel_style.padding, .background = panel_style.background, .border = panel_style.border, .shadow = panel_style.shadow });
+        self.chrome.setStyle(self.cx.allocator, .width, .{ .px = size.width });
         self.chrome.setStyle(self.cx.allocator, .height, .{ .px = size.height });
         self.content.setStyle(self.cx.allocator, .gap, 6);
         self.rows.setStyleInline(self.cx.allocator, styles.body());
@@ -144,19 +145,19 @@ pub const View = struct {
         self.pointer.setDisplay(if (current.kind == .identity) .none else .flex);
         self.pointer.setStyleInline(self.cx.allocator, styles.pointer(@min(@max(14, current.anchor.x + current.anchor.width / 2 - size.x - 6), @max(14, size.width - 26))));
         _ = self.pointer.setTint(styles.theme.current().fg_3);
-        self.close_button.setStyleInline(self.cx.allocator, styles.close(current.kind == .identity));
-        self.close_icon.setStyleInline(self.cx.allocator, styles.iconBox(if (current.kind == .identity) 16 else 14));
+        self.close_button.setStyleInline(self.cx.allocator, if (current.kind == .identity) @import("status_connection_styles.zig").action(28, false) else styles.close(false));
+        self.close_icon.setStyleInline(self.cx.allocator, styles.iconBox(14));
         _ = self.close_icon.setTint(styles.theme.current().fg_2);
         var title_props = self.title.getText().?;
-        const title_style = if (current.kind == .identity) styles.localTitle() else styles.title();
+        const title_style = if (current.kind == .identity) @import("status_connection_styles.zig").title() else styles.title();
         title_props.font_size = title_style.font_size;
         title_props.font_weight = title_style.font_weight;
         title_props.line_height = title_style.line_height;
         title_props.color = title_style.color;
         self.title.setText(title_props);
-        self.title.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (current.kind == .identity) 264 else 72 }, .height = .{ .px = if (current.kind == .identity) 18 else 20 }, .flex = 0, .flex_shrink = 0 });
+        self.title.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 72 }, .height = .{ .px = 20 }, .flex = 0, .flex_shrink = 0 });
         try self.title.setTextContent(self.cx.allocator, switch (current.kind) {
-            .identity => "本地终端",
+            .identity => "会话连接",
             .grid => "终端网格",
             .encoding => "终端编码",
             .more => "更多状态",
@@ -179,28 +180,25 @@ pub const View = struct {
             .theme => ui.icons.palette,
         };
         try self.header_icon.appendChild(self.cx.allocator, try ui.iconTint(self.cx, icon, @import("app_theme.zig").current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 } }));
+        self.header_icon.setDisplay(if (current.kind == .identity) .none else .flex);
         switch (current.kind) {
             .identity => {
-                self.chrome.setStyleInline(self.cx.allocator, .{ .padding = ui.Padding.all(12) });
-                self.content.setStyle(self.cx.allocator, .gap, 6);
-                self.rows.setStyle(self.cx.allocator, .gap, 6);
-                try self.label("本机 · macOS", 18, styles.localText(.machine));
-                try self.label("/bin/zsh", 18, styles.localText(.shell));
-                try self.label(source.cwd orelse "目录未知", 18, styles.localText(.cwd));
+                const S = @import("status_connection_styles.zig");
+                self.content.setStyle(self.cx.allocator, .gap, 12);
+                self.rows.setStyle(self.cx.allocator, .gap, 9);
+                const summary = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = ui.Padding.all(12), .direction = .column, .gap = 4, .margin = .{ .bottom = 10 }, .background = S.theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
+                _ = try self.rowLabel(summary, "本地终端", @import("connection_details_styles.zig").text(15, 600, 24, false), styles.labelBox(24));
+                _ = try self.rowLabel(summary, "本机 · macOS", S.address(), styles.labelBox(20));
+                try self.rows.appendChild(self.cx.allocator, summary);
+                try self.fact("协议", "本地 · 交互式 Shell");
+                try self.fact("Shell", "/bin/zsh");
+                try self.fact("目录", source.cwd orelse "目录未知");
                 var buffer: [96]u8 = undefined;
                 const session = switch (source.owner) {
                     .session => |owner| @backingInt(owner.session_id),
                     else => 0,
                 };
-                var row_style = styles.row(26);
-                row_style.gap = 6;
-                const row = try ui.box(self.cx, row_style, .{});
-                try row.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.terminal, styles.theme.current().fg_2, styles.icon(14)));
-                _ = try self.rowLabel(row, try std.fmt.bufPrint(&buffer, "会话 #{d}", .{session}), styles.infoText(false), styles.labelBox(16));
-                var trailing_style = styles.infoText(true);
-                trailing_style.font_weight = 400;
-                _ = try self.rowLabel(row, "交互式登录", trailing_style, styles.trailingBox(100));
-                try self.rows.appendChild(self.cx.allocator, row);
+                try self.fact("会话", try std.fmt.bufPrint(&buffer, "会话 #{d}", .{session}));
             },
             .grid => {
                 var buffer: [80]u8 = undefined;
@@ -294,6 +292,14 @@ pub const View = struct {
         _ = try self.rowLabel(row, text, style, styles.labelBox(height));
         try self.rows.appendChild(self.cx.allocator, row);
     }
+    fn fact(self: *View, name: []const u8, value: []const u8) !void {
+        const S = @import("status_connection_styles.zig");
+        const row = try ui.box(self.cx, S.info(), .{});
+        _ = try self.rowLabel(row, name, S.infoText(false), S.factLabel());
+        _ = try self.rowLabel(row, value, S.infoText(true), S.factValue());
+        try self.rows.appendChild(self.cx.allocator, row);
+    }
+
     fn rowLabel(self: *View, row: *ui.Node, text: []const u8, style: ui.TextStyle, box: ui.BoxStyle) !*ui.Node {
         const node = try ui.text(self.cx, "", style);
         node.setStyleInline(self.cx.allocator, box);

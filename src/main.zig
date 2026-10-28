@@ -204,7 +204,8 @@ const AiHost = struct {
     model: []const u8,
     panel: *ui.Node,
     status: *ui.Node,
-    feedback: ?*ui.Node = null,
+    feedback: ?*@import("ui/ai_feedback_view.zig").View = null,
+    rollback_to_start: bool = false,
     card_node: *ui.Node,
     prompt: *ui.Signal([]const u8),
     textarea: ?*ui.widgets.input.TextareaState = null,
@@ -230,6 +231,7 @@ const AiHost = struct {
     request_image_refs: std.ArrayList(ai_images.ContentRef) = .empty,
     preflight_image_refs: std.ArrayList([]ai_images.ContentRef) = .empty,
     remote_picker: ?*@import("ui/ai_remote_picker.zig").View = null,
+    remote_reference_requested: ?ai_attachments.Owner = null,
     file_application: ?*file_application_mod.Host = null,
     request_attachments: ?ai_attachments.Bundle = null,
     attachment_preview_holder: ?*ui.Node = null,
@@ -258,6 +260,7 @@ const AiHost = struct {
     tool_bridge: @import("ui/ai_tools.zig").Bridge,
     tool_results: @import("ai/tool_results.zig").Store,
     approval_view: ?*@import("ui/ai_tool_approval_view.zig").View = null,
+    turn_footer: ?*ui.Node = null,
     request_tools: [ai_provider.max_tool_definitions]ai_provider.ToolDefinition = undefined,
     request_tools_len: usize = 0,
 
@@ -307,6 +310,7 @@ const AiHost = struct {
     request_max_output: u32 = 4096,
     notification_window: ?@import("host/notification_host.zig").WindowId = null,
     request_operation_id: ?u64 = null,
+    approval_notification: ?@import("host/notification_coordinator.zig").NotificationEvent = null,
     display_owner: ?@import("ai/tool_scope.zig").Owner = null,
     assistant_states: ?@import("ai/assistant_store.zig").Store = null,
     roster: ?*@import("ui/group_model.zig").Roster = null,
@@ -435,6 +439,7 @@ const AiHost = struct {
         const controls = saved.controls;
         saved.* = .{ .id = selected_id, .listed = loaded_listed, .phase = loaded_phase, .controls = controls, .owner = scope.owner, .stream = @import("ai/card_stream.zig").Stream.init(self.allocator) };
         self.setFeedback("");
+        self.rollback_to_start = false;
         self.image_gate = null;
         self.recall_index = null;
         self.editing_index = null;
@@ -789,6 +794,7 @@ const AiHost = struct {
             const ticket = try draft.beginTerminal(intent.source);
             errdefer _ = draft.cancel(ticket);
             try draft.stage(ticket, &reference);
+            _ = try draft.attach(ticket);
             if (self.attachments_view) |view| try view.update(draft);
             self.promptChanged(self.prompt.get());
         } else if (self.input_node) |input| self.cx.setFocus(input);
@@ -876,14 +882,20 @@ const AiHost = struct {
                 result.release();
                 continue;
             };
-            var reference = completion.result catch {
+            var reference = completion.result catch |err| {
                 _ = draft.cancel(completion.ticket);
+                self.attachmentFailure(completion.ticket, err);
                 continue;
             };
             const byte_count = reference.content().?.bytes.len;
             draft.stageReplacing(completion.ticket, &reference, replacement) catch |err| {
                 _ = draft.cancel(completion.ticket);
                 if (err != error.StaleAttachment) self.attachmentFailure(completion.ticket, err);
+                continue;
+            };
+            _ = draft.attach(completion.ticket) catch |err| {
+                _ = draft.cancel(completion.ticket);
+                self.attachmentFailure(completion.ticket, err);
                 continue;
             };
             @import("ai/tool_trace.zig").emit(.{ .event = "attachment_preview_ready", .owner = completion.ticket.owner, .draft_epoch = completion.ticket.draft_epoch, .attachment_id = completion.ticket.id, .bytes = byte_count });
@@ -964,17 +976,8 @@ const AiHost = struct {
 
     fn attachmentPreviewVisibility(raw: *anyopaque, visible: bool) void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
-        if (self.attachment_preview_holder) |holder| holder.setDisplay(if (visible) .flex else .none);
-        if (self.conversation) |conversation| conversation.setDisplay(if (visible) .none else .flex);
-        if (self.tail_follow) |*follow| {
-            if (visible) {
-                if (self.attachment_preview_scroll_y == null) self.attachment_preview_scroll_y = follow.scroll.state.scroll_y;
-                ui.widgets.scroll_area.setScrollY(follow.scroll.state, follow.scroll.content, 0);
-            } else if (self.attachment_preview_scroll_y) |offset| {
-                ui.widgets.scroll_area.setScrollY(follow.scroll.state, follow.scroll.content, offset);
-                self.attachment_preview_scroll_y = null;
-            }
-        }
+        // Portal previews never replace or resize the conversation viewport.
+        _ = visible;
         self.cx.requestRedraw();
     }
 
@@ -1250,11 +1253,9 @@ const AiHost = struct {
     }
 
     fn setFeedback(self: *AiHost, label: []const u8) void {
-        const node = self.feedback orelse return;
+        const view = self.feedback orelse return;
         const message = if (std.mem.eql(u8, label, "InvalidImage") or std.mem.eql(u8, label, "UnsupportedImage")) "无法识别此图片，请选择 PNG、JPEG 等有效图片" else if (std.mem.eql(u8, label, "ImageTooLarge")) "图片超过大小或尺寸限制，请缩小后重试" else if (std.mem.eql(u8, label, "TooManyImages")) "最多添加 4 张图片，请先移除已有图片" else if (std.mem.eql(u8, label, "AnimatedImageUnsupported")) "暂不支持动态图，请选择静态图片" else label;
-        node.setTextContent(self.allocator, message) catch return;
-        node.setDisplay(if (message.len == 0) .none else .flex);
-        node.markRenderDirty();
+        view.show(message, .warning);
     }
 
     fn imageGateLabel(problem: anyerror) []const u8 {
@@ -1396,9 +1397,10 @@ const AiHost = struct {
         const view = @import("ui/ai_step_view.zig");
         const now: u64 = @intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
         if (turn.thinking.items.len > 0) {
+            if (turn.thinking_scroll == null) turn.thinking_scroll = try @import("ai/conversation_turn.zig").ThinkingScroll.create(self.allocator);
             const text = std.mem.trim(u8, turn.thinking.items, " \t\r\n");
             const last_line = if (std.mem.lastIndexOfScalar(u8, text, '\n')) |offset| text[offset + 1 ..] else text;
-            try parent.appendChild(self.allocator, try view.mount(self.cx, self.conversation_scope.?, .{ .title = "思考", .projection = last_line, .detail = text, .copy_detail = false, .phase = if (turn.thinking_ended_ms != null or turn.ended_at_ms != null) .succeeded else .running, .elapsed_ms = (turn.thinking_ended_ms orelse now) -| (turn.thinking_started_ms orelse now), .expanded = &turn.thinking_expanded, .test_id = "ai.thinking", .on_toggle = self.cx.on(AiHost, self, pauseConversationFollow) }));
+            try parent.appendChild(self.allocator, try view.mount(self.cx, self.conversation_scope.?, .{ .title = "思考", .projection = last_line, .detail = text, .copy_detail = false, .phase = if (turn.thinking_ended_ms != null or turn.ended_at_ms != null) .succeeded else .running, .elapsed_ms = (turn.thinking_ended_ms orelse now) -| (turn.thinking_started_ms orelse now), .expanded = &turn.thinking_expanded, .scroll_position = turn.thinking_scroll, .test_id = "ai.thinking", .on_toggle = self.cx.on(AiHost, self, pauseConversationFollow) }));
         }
         for (turn.steps.items) |*step| {
             var found = false;
@@ -1487,6 +1489,7 @@ const AiHost = struct {
                 const restored_text = try self.allocator.dupe(u8, message.text);
                 defer self.allocator.free(restored_text);
                 try self.truncateTurns(action.index);
+                self.rollback_to_start = self.history.items.len == 0;
                 self.cancelConversationReaders(self.display_conversation orelse return);
                 std.mem.swap(ai_attachments.Draft, draft, &next_files);
                 std.mem.swap(ai_images.Draft, images, &next_images);
@@ -1503,7 +1506,8 @@ const AiHost = struct {
                 if (self.input_node) |input| self.cx.setFocus(input);
                 self.composer_hash = null;
                 self.promptChanged(self.prompt.peek());
-                self.setFeedback("已回退，原回合及后续记录和上下文已清除");
+                if (self.image_gate == null) if (self.feedback) |view| view.show(@import("ui/ai_feedback_view.zig").rollback_label, .rollback);
+                if (self.tail_follow) |*follow| follow.reset();
             },
             .edit => {
                 self.editing_index = action.index;
@@ -1684,10 +1688,18 @@ const AiHost = struct {
         self.live_scope = null;
         self.live_dirty = false;
         self.streaming_label = null;
-        if (self.cx.pressed_node) |node| if (node.isDescendantOf(conv)) self.cx.cancelPointerInteractions(.explicit);
-        if (self.cx.focus_manager.current_focus) |node| if (node.isDescendantOf(conv)) self.cx.clearFocus();
+        if (self.cx.pressed_node) |node| if (node.isDescendantOf(conv) or (if (self.turn_footer) |footer| node.isDescendantOf(footer) else false)) self.cx.cancelPointerInteractions(.explicit);
+        if (self.cx.focus_manager.current_focus) |node| if (node.isDescendantOf(conv) or (if (self.turn_footer) |footer| node.isDescendantOf(footer) else false)) self.cx.clearFocus();
         if (self.conversation_scope) |scope| scope.dispose();
         self.conversation_scope = null;
+        if (self.turn_footer) |footer| {
+            while (footer.children.items.len > 0) {
+                const child = footer.children.items[footer.children.items.len - 1];
+                self.cx.detachChild(footer, child);
+                self.cx.destroyDetached(child);
+            }
+            footer.setDisplay(.none);
+        }
         // 清空旧流（status 节点不在 conv 内，安全）。
         var count = conv.children.items.len;
         while (count > 0) : (count -= 1) {
@@ -1754,7 +1766,6 @@ const AiHost = struct {
             card.appendChild(allocator, body_text) catch return;
             conv.appendChild(allocator, card) catch return;
         }
-        if (self.last_user_text != null) self.appendTurnFooter(conv, self.history.items.len) catch return;
         if (self.recoveryVisible()) {
             if (self.conversation_scope == null) self.conversation_scope = (self.scope orelse return).childScope() catch return;
             const run = self.manager.tool_run;
@@ -1779,6 +1790,7 @@ const AiHost = struct {
             const recovery = @import("ui/ai_recovery_view.zig").mount(cx, self.conversation_scope.?, .{
                 .ticket = .{ .owner = self.request_owner.?, .turn = self.manager.turn_id },
                 .reason = self.recoveryReason(),
+                .title = if (self.request_failure != null and self.request_failure.? == error.Timeout) "请求超时" else "请求失败",
                 .retries = self.manager.retry_attempt,
                 .max_retries = self.manager.retry_policy.max_attempts,
                 .retry_enabled = safe and cooldown == 0,
@@ -1789,7 +1801,12 @@ const AiHost = struct {
             }, .{ .context = self, .enqueue = enqueueRecovery }) catch return;
             conv.appendChild(allocator, recovery) catch return;
         }
-        if (snap.card_count == 0 and self.last_user_text == null and self.history.items.len == 0) {
+        if (self.last_user_text != null) {
+            const footer = self.turn_footer orelse conv;
+            footer.setDisplay(.flex);
+            self.appendTurnFooter(footer, self.history.items.len) catch return;
+        }
+        if (snap.card_count == 0 and self.last_user_text == null and self.history.items.len == 0 and !self.rollback_to_start) {
             if (self.conversation_scope == null) self.conversation_scope = (self.scope orelse return).childScope() catch return;
             const Empty = @import("ui/ai_empty_view.zig");
             var recent: [2]Empty.Recent = undefined;
@@ -2273,10 +2290,10 @@ const AiHost = struct {
     }
 
     fn recoveryReason(self: *AiHost) []const u8 {
-        if (self.request_failure != null) return self.failure_label;
+        if (self.native_context) |context| if (context.diagnostic.status != 0) return self.failure_label;
         return if (self.request_failure) |err| switch (err) {
             error.ToolOutcomeUnknown => "远端写入结果待核实，请先核查原目标",
-            error.Timeout => "请求超时，已保留收到的答复和调用结果",
+            error.Timeout => "模型长时间未返回新内容，已保留收到的答复和附件",
             error.RequestRejected, error.RateLimited => "服务暂不可用或请求受限，请在冷却结束后重试",
             error.MissingApiKey, error.ProviderFailure => "服务请求失败，请检查 AI 设置",
             else => "连接或答复流中断，已保留收到的内容",
@@ -2331,8 +2348,6 @@ const AiHost = struct {
         if (self.manager.tool_run == null) return;
         // Snapshot/ledger and Provider binding remain frozen. Never call submit
         // or prepare a new bridge for an answer-only continuation.
-        const marker = "— 重新尝试答复 —";
-        _ = self.manager.cards.append(.{ .text = marker }) catch return;
         self.controller.stream.clearRetainingCapacity();
         for (self.manager.cards.cards.items) |card| _ = self.controller.stream.append(card) catch return;
         self.retry_prefix_count = self.controller.stream.count();
@@ -2350,7 +2365,7 @@ const AiHost = struct {
         };
         self.recovery_failed = false;
         self.current_turn.ended_at_ms = null;
-        self.refresh("正在重试答复…");
+        self.refresh("AI 助手");
     }
 
     fn sendPrompt(self: *AiHost) void {
@@ -2417,6 +2432,25 @@ const AiHost = struct {
         const self: *AiHost = @ptrCast(@alignCast(raw orelse return .ignored));
         const textarea = self.textarea orelse return .ignored;
         switch (event) {
+            .text_input => |input| {
+                if (@import("ui/ai_remote_reference.zig").triggers(textarea.getText(), textarea.cursor.offset, input.text, textarea.imeIsComposing(), textarea.cursor.hasSelection())) {
+                    const owner = self.display_owner orelse return .ignored;
+                    const current = remoteScope(self, owner) orelse return .ignored;
+                    const domain = self.application_host orelse return .ignored;
+                    var available = false;
+                    for (current.members.ids[0..current.members.len]) |id| {
+                        const tab = self.tabForSession(id) orelse continue;
+                        if (tab.content_owner != .session or tab.closing) continue;
+                        const manifest = domain.sessions.manifestFor(tab.content_owner.session) orelse continue;
+                        if (manifest.integration.auxiliary_readonly or domain.sessions.queryService(tab.content_owner.session, .file_read) != .unsupported) available = true;
+                    }
+                    if (!available) return .ignored;
+                    // Open on the next safe frame, outside Textarea event delivery.
+                    self.remote_reference_requested = owner;
+                    self.cx.requestRedraw();
+                    return .stop;
+                }
+            },
             .key_down => |key| if (key.key == .v and key.modifiers.super and !textarea.imeIsComposing()) {
                 const sdk = self.cx.system_sdk orelse return .ignored;
                 const kinds = sdk.clipboardProbe() catch return .ignored;
@@ -2708,6 +2742,7 @@ const AiHost = struct {
             return;
         };
         self.current_turn = next_meta;
+        self.rollback_to_start = false;
         next_meta = .{};
         self.recall_index = null;
         if (self.recall_draft) |value| self.allocator.free(value);
@@ -2862,6 +2897,11 @@ const AiHost = struct {
     fn streamReset(raw: *anyopaque) void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         self.stream_mailbox.reset();
+    }
+
+    fn streamToolRejected(raw: *anyopaque, call: ai_provider.ToolCall, detail: []const u8) !void {
+        const self: *AiHost = @ptrCast(@alignCast(raw));
+        try self.step_mailbox.push(.{ .call_id = call.id, .name = call.name, .detail = detail, .phase = if (self.request_cancel.isCancelled()) .cancelled else .failed, .at_ms = @intCast(@divTrunc(@import("platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)) });
     }
 
     fn streamDelta(raw: *anyopaque, delta: ai_provider.Delta) !void {
@@ -3043,6 +3083,36 @@ const AiHost = struct {
                 };
                 break :uncertain_result false;
             } else false;
+            if (uncertain) if (self.notification_window) |window| {
+                // Only a real remote-effect receipt grants this escalation;
+                // ordinary provider/read failures remain in the transcript.
+                const effect_unknown = if (self.manager.tool_run) |run| check: {
+                    for (run.records.items) |record| {
+                        if (record.outcome) |outcome| for (outcome.targets) |target| {
+                            if (target.remote_effect_unknown) break :check true;
+                        };
+                        if (record.generic_results) |results| for (results) |result| {
+                            if (result.receipt.remote_effect_unknown) break :check true;
+                        };
+                    }
+                    break :check false;
+                } else false;
+                if (effect_unknown) _ = notifications.publish(.{
+                    .definition_id = "host.ai_unknown",
+                    .owner = .{ .window_id = @backingInt(window), .content = owner },
+                    .operation_id = operation,
+                    .attempt_id = self.manager.turn_id,
+                    .event_revision = 1,
+                    .phase = .outcome_unknown,
+                    .severity = .warning,
+                    .title = "AI 执行结果需要核查",
+                    .detail = "已有远端操作派发，当前无法确认其实际效果。请回到原执行卡核查。",
+                    .attention = .{ .kind = .outcome_unknown, .requires_action = true, .time_sensitive = true },
+                    .actions = &.{.{ .kind = .locate_owner, .label = "查看对话" }},
+                }) catch |err| {
+                    applog.warn(.app, "unknown effect notification: {s}", .{@errorName(err)});
+                };
+            };
             const resources_released = if (self.manager.tool_run) |run| released: {
                 for (run.records.items) |record| {
                     if (record.outcome) |outcome| {
@@ -3131,6 +3201,40 @@ const AiHost = struct {
         if (!self.requestDisplayed()) self.refresh("AI 助手");
     }
 
+    fn observeApprovalNotification(self: *AiHost) void {
+        const notifications = process_notifications orelse return;
+        const approval = self.tool_bridge.pendingApproval();
+        if (self.approval_notification) |old| {
+            if (approval != null and self.request_operation_id == old.operation_id and approval.?.sequence == old.attempt_id) return;
+            var resolved = old;
+            resolved.event_revision += 1;
+            resolved.phase = .succeeded;
+            resolved.attention.resolved = true;
+            resolved.title = "AI 确认等待已结束";
+            _ = notifications.publish(resolved) catch return;
+            self.approval_notification = null;
+        }
+        const pending = approval orelse return;
+        const operation = self.request_operation_id orelse return;
+        const owner = self.request_content_owner orelse return;
+        const window = self.notification_window orelse return;
+        const event: @import("host/notification_coordinator.zig").NotificationEvent = .{
+            .definition_id = "host.ai_attention",
+            .owner = .{ .window_id = @backingInt(window), .content = owner },
+            .operation_id = operation,
+            .attempt_id = pending.sequence,
+            .event_revision = 1,
+            .phase = .accepted,
+            .severity = .warning,
+            .title = "AI 任务正在等待确认",
+            .detail = "任务需要你在原对话中确认后才能继续。",
+            .attention = .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true },
+            .actions = &.{.{ .kind = .locate_owner, .label = "查看对话" }},
+        };
+        _ = notifications.publish(event) catch return;
+        self.approval_notification = event;
+    }
+
     /// UI-thread poll: one after-layout hook, self-scheduling only while a
     /// request is in flight.
     const PollHook = struct {
@@ -3148,6 +3252,12 @@ const AiHost = struct {
             host.processMessageAction() catch |err| host.setFeedback(@errorName(err));
             host.updateDock();
             host.openRequestedSettings();
+            if (host.remote_reference_requested) |owner| {
+                host.remote_reference_requested = null;
+                if (host.display_owner) |display| if (display.eql(owner)) {
+                    host.chooseRemoteFile(owner) catch |err| host.refresh(@errorName(err));
+                };
+            }
             var composer_resized = false;
             if (host.composer_input) |input| if (host.composer_node) |composer| {
                 if (host.input_placeholder) |placeholder| {
@@ -3161,6 +3271,7 @@ const AiHost = struct {
                 composer_resized = @import("ui/ai_composer_sizing.zig").update(host.cx, input, composer, group and approval and compact, if (host.attachments_view) |view| view.height() else 0);
             };
             if (host.application_host) |application| host.tool_bridge.pump(application);
+            host.observeApprovalNotification();
             if (host.thread_state.load(.acquire) == 1) if (host.assistant_states) |*store| if (host.request_conversation) |id| {
                 if (store.find(id)) |state| state.phase = if (host.tool_bridge.pendingApproval() != null) .approval else .running;
             };
@@ -3187,7 +3298,6 @@ const AiHost = struct {
                     _ = node.setTint(colors.fg_2);
                 };
                 if (host.send_base) |base| base.set(styles.primary());
-                if (host.feedback) |node| node.setTextColor(colors.warn);
                 host.painted_colors = colors;
                 host.refresh("AI 助手");
             }
@@ -3335,6 +3445,7 @@ const MenuHost = struct {
     context_host: ?usize = null,
     /// Tab index when the menu targets the tab strip.
     context_tab: ?usize = null,
+    connection_details_host: ?*@import("ui/connection_details_host.zig").Host = null,
     anchor: ui.ComputedRect = .{ .x = 0, .y = 40, .w = 0, .h = 0 },
     rename_input: ?*ui.Node = null,
     rename_scope: ?*ui.Scope = null,
@@ -3682,7 +3793,7 @@ const MenuHost = struct {
 
     fn menuRowStyle(selected: bool) ui.BoxStyle {
         const c = app_theme.current();
-        return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{}, .background = if (selected) c.selection else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 6 }, .flex_shrink = 0 };
+        return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{}, .background = if (selected) app_theme.popupSelection() else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 6 }, .flex_shrink = 0 };
     }
     fn menuIconName(action: @import("ui/context_menus.zig").Action) []const u8 {
         return switch (action) {
@@ -4035,17 +4146,8 @@ const MenuHost = struct {
             },
             .view_jump_chain => {
                 const tab_index = self.context_tab orelse return;
-                if (tab_index >= workspace.tabs.items.len) return;
-                const host = workspace.tabHost(tab_index) orelse return;
-                if (host.jump_chain.len == 0) {
-                    workspace.status("直连（无跳板）");
-                } else {
-                    var buffer: [256]u8 = undefined;
-                    var writer = std.Io.Writer.fixed(&buffer);
-                    writer.print("跳板链路：{d} 跳", .{host.jump_chain.len}) catch return;
-                    for (host.jump_chain) |hop| writer.print(" · {s}", .{hop}) catch break;
-                    workspace.status(writer.buffered());
-                }
+                const details = self.connection_details_host orelse return;
+                details.showForTab(tab_index);
             },
             .open_theme => {
                 if (self.global_theme) |show_theme| {
@@ -5270,8 +5372,8 @@ const SettingsHost = struct {
             const click = try self.cx.allocator.create(SettingsNavClick);
             click.* = .{ .host = self, .page_index = index };
             try nav_scope.onCleanup(SettingsNavClick, click, SettingsNavClick.cleanup);
-            const btn = try ui.widgets.Button(.{ .a11y_label = page.name, .variant = .ghost, .disabled = self.controller.state() == .saving, .on_click = self.cx.on(SettingsNavClick, click, SettingsNavClick.activate), .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 36 }, .flex_shrink = 0, .direction = .row, .justify = .start, .gap = 8, .padding = .{ .left = 6, .right = 6 }, .background = if (selected) c.selection else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 7 } } }).mount(nav_scope, self.cx);
-            btn.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 36 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{ .left = 6, .right = 6 }, .background = if (selected) c.selection else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 7 } });
+            const btn = try ui.widgets.Button(.{ .a11y_label = page.name, .variant = .ghost, .disabled = self.controller.state() == .saving, .on_click = self.cx.on(SettingsNavClick, click, SettingsNavClick.activate), .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 36 }, .flex_shrink = 0, .direction = .row, .justify = .start, .gap = 8, .padding = .{ .left = 6, .right = 6 }, .background = if (selected) app_theme.popupSelection() else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 7 } } }).mount(nav_scope, self.cx);
+            btn.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 36 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{ .left = 6, .right = 6 }, .background = if (selected) app_theme.popupSelection() else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 7 } });
             try btn.appendChild(self.cx.allocator, try ui.iconTint(self.cx, icons[index], if (selected) c.accent else c.fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
             try btn.appendChild(self.cx.allocator, try ui.text(self.cx, page.name, .{ .font_size = 12, .font_weight = if (selected) @as(u16, 600) else 400, .color = if (selected) c.fg_1 else c.fg_2 }));
             const test_ids = [_][]const u8{ "settings.nav.appearance", "settings.nav.keys", "settings.nav.ssh", "settings.nav.transfer", "settings.nav.ai", "settings.nav.plugins", "settings.nav.notifications", "settings.nav.data" };
@@ -7035,6 +7137,10 @@ const AppNavHost = struct {
         if (!settings.appearance_initialized) return;
         const runtime = settings.runtime.value;
         const record = settings.registry.get(runtime.ui.theme) orelse return;
+        if (self.connection_details_host) |host| if (host.ssh_status.controls) |controls| {
+            try controls.setThemeName(self.cx, record.theme.name);
+        };
+        if (self.local_status_view) |view| try view.setThemeName(record.theme.name);
         const preview = settings.appearance_context.preview_active;
         const materials = if (preview) settings.controller.model.value.ui.materials else runtime.ui.materials;
         const texture = if (preview) settings.draft_texture orelse settings.committed_texture else settings.committed_texture;
@@ -8498,7 +8604,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const endpoint = provider_config.endpoint;
     const model = provider_config.model;
     ai_host.* = .{ .allocator = cx.allocator, .cx = cx, .scope = scope, .controller = AiController.init(cx.allocator), .manager = AiManager.init(cx.allocator), .stream_mailbox = @import("ai/stream_mailbox.zig").Mailbox.init(cx.allocator), .step_mailbox = @import("ai/step_events.zig").Mailbox.init(cx.allocator), .tool_bridge = @import("ui/ai_tools.zig").Bridge.init(std.heap.c_allocator), .tool_results = @import("ai/tool_results.zig").Store.init(cx.allocator), .provider = ai_provider_instance, .native_context = native_context, .native_client = native_client, .native_binding = native_binding, .endpoint = endpoint, .model = model, .panel = ai_panel, .status = ai_status, .card_node = ai_card, .prompt = ai_prompt, .conversation = ai_conversation };
-    ai_host.manager.observer = .{ .context = ai_host, .reset = AiHost.streamReset, .delta = AiHost.streamDelta };
+    ai_host.manager.observer = .{ .context = ai_host, .reset = AiHost.streamReset, .delta = AiHost.streamDelta, .tool_rejected = AiHost.streamToolRejected };
     ai_host.window_base = ai_window_base;
     for (ai_window_hovers, 0..) |hover, index| ai_host.window_hovers[index] = hover;
     ai_host.window_icons = .{ ai_collapse_icon, ai_maximize_icon, ai_close_icon };
@@ -8542,6 +8648,12 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     try scope.onCleanup(AiHost.PollHook, ai_poll, AiHost.PollHook.cleanup);
     ai_host.approval_view = try @import("ui/ai_tool_approval_view.zig").View.mount(cx, scope, .{ .context = ai_host, .decide = AiHost.decideTool });
     try ai_scroll.content.appendChild(cx.allocator, ai_host.approval_view.?.root);
+    // The current lifecycle row follows every current-turn surface, including approval.
+    const ai_turn_footer = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .left = 14, .right = 14, .top = 12 }, .flex_shrink = 0 }, .{});
+    ai_turn_footer.meta.ownership.meta.test_id = "ai.turn.footer";
+    ai_turn_footer.setDisplay(.none);
+    ai_host.turn_footer = ai_turn_footer;
+    try ai_scroll.content.appendChild(cx.allocator, ai_turn_footer);
     const ai_preview_holder = try ui.boxStyled(cx, @import("ui/ai_attachments_styles.zig").inlineHolder, .{});
     ai_preview_holder.setDisplay(.none);
     try ai_scroll.content.insertChildBefore(cx.allocator, ai_preview_holder, ai_conversation);
@@ -8553,12 +8665,8 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
 
     try ai_host.images_view.?.shareRail(ai_host.attachments_view.?.rail.content);
     ai_host.attachments_view.?.external_rail = ai_host.images_view.?.root;
-    const ai_feedback = try ui.text(cx, "", .{ .font_size = 11, .line_height = 1.4, .wrap = .word, .color = app_theme.current().warn });
-    ai_feedback.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 0, .padding = .{ .left = 14, .right = 14, .top = 4, .bottom = 4 } });
-    ai_feedback.meta.ownership.meta.test_id = "ai.feedback";
-    ai_feedback.setDisplay(.none);
-    ai_host.feedback = ai_feedback;
-    try ai_card_box.appendChild(cx.allocator, ai_feedback);
+    ai_host.feedback = try @import("ui/ai_feedback_view.zig").View.mount(cx, scope);
+    try ai_scroll.content.appendChild(cx.allocator, ai_host.feedback.?.root);
     const ai_input_row = try ui.boxStyled(cx, ai_styles.composer, .{});
     ai_styles.finishComposer(cx, ai_input_row);
     try ai_input_row.appendChild(cx.allocator, ai_host.attachments_view.?.root);
@@ -8877,6 +8985,8 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     nav_host.shell_root = root;
     nav_host.material_pane = terminal_area;
     settings_host.preview_viewport = terminal_area;
+    ai_host.images_view.?.preview_content = terminal_area;
+    ai_host.attachments_view.?.preview_content = terminal_area;
     const background_view = try @import("ui/background_layers.zig").View.mount(cx, scope);
     nav_host.background_view = background_view;
     settings_host.record_cleanup_material = background_view;
@@ -9133,13 +9243,27 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     details_host.bindEditor(wiz_host, WizardHost.openCapturedAsset);
     details_host.bindStatus(status_bar.controls, nav_host, AppNavHost.showGlobalTheme);
     nav_host.connection_details_host = details_host;
+    menu_host.connection_details_host = details_host;
     try details_host.view.setMaterial(background_view);
     try background_view.isolate(details_host.logs.scope, details_host.logs.dialog);
     try background_view.isolate(details_host.ssh_status.info.scope, details_host.ssh_status.info.chrome);
     try background_view.isolate(details_host.ssh_status.detail.scope, details_host.ssh_status.detail.chrome);
+    const StatusPreview = @import("ui/status_hover_preview.zig").Preview;
+    const status_previews = try scope.createState(@import("ui/status_hover_preview.zig").Group, .{});
+    try StatusPreview.mount(cx, scope, status_previews, status_bar.controls.identity_button, details_host.ssh_status.info.chrome, details_host.ssh_status.info.open, cx.on(@import("ui/status_connection_view.zig").View, details_host.ssh_status.info, @import("ui/status_connection_view.zig").View.dismiss));
+    try StatusPreview.mount(cx, scope, status_previews, status_bar.chain_trigger, details_host.view.chrome, details_host.view.open, cx.on(@import("ui/connection_details_view.zig").View, details_host.view, @import("ui/connection_details_view.zig").View.hide));
+    try StatusPreview.mount(cx, scope, status_previews, status_bar.socks_chip, socks_info.root, socks_info.open, cx.on(@import("ui/socks_info_view.zig").View, socks_info, @import("ui/socks_info_view.zig").View.hide));
+    for ([_]*ui.Node{ status_bar.controls.theme_button, local_status.theme_button }) |trigger| {
+        try StatusPreview.mount(cx, scope, status_previews, trigger, theme_picker.chrome, theme_picker.open, cx.on(@import("ui/status_theme_view.zig").View, theme_picker, @import("ui/status_theme_view.zig").View.hide));
+    }
+    try StatusPreview.mount(cx, scope, status_previews, local_status.identity_button, status_detail.chrome, status_detail.open, cx.on(@import("ui/status_detail_view.zig").View, status_detail, @import("ui/status_detail_view.zig").View.hide));
+    for ([_]*ui.Node{ background_socks.view.remote_entry, background_socks.view.local_entry }) |trigger| {
+        try StatusPreview.mount(cx, scope, status_previews, trigger, background_socks.view.popover.chrome, background_socks.view.popover.open.?, background_socks.view.popover.close);
+    }
     nav_host.asset_group_host = try @import("ui/asset_group_host.zig").Host.mount(cx, scope, workspace, .{ .context = wiz_host, .open = WizardHost.openInAssetGroup });
     try background_view.isolate(scope, nav_host.asset_group_host.?.view.dialog);
     try cx.addAfterLayoutHook(nav_host, AppNavHost.hookRun);
+    try @import("ui/layer_materials.zig").Policy.mount(cx, scope);
     return root;
 }
 
@@ -9509,6 +9633,7 @@ const NotificationWindowHook = struct {
     }
     fn publishFileFailure(raw: *anyopaque, owner: @import("host/identity.zig").SessionHandle, message: []const u8) void {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
+        self.workspace.status(message);
         self.host.publishFeedbackSeverity(self.id, .{ .session = owner }, message, .failure) catch |err| applog.warn(.ui, "file creation failure notification: {s}", .{@errorName(err)});
         self.cx.requestRedraw();
     }
@@ -9575,8 +9700,8 @@ const NotificationWindowHook = struct {
         if (key.owner != .session or !tab.content_owner.eql(.{ .session = key.owner.session }) or key.attempt_id == null) return;
         if (state.phase == .active and key.attempt_id.? > 1) {
             self.host.publishReconnectDetails(tab.content_owner, key.operation_id, key.attempt_id.?, .recovered, .{ .object = tab.titleSlice() }) catch |err| applog.warn(.app, "reconnect notification: {s}", .{@errorName(err)});
-        } else if ((state.phase == .waiting or state.phase == .releasing) and state.failure != null) {
-            self.host.publishReconnectDetails(tab.content_owner, key.operation_id, key.attempt_id.?, if (state.was_attached) .disconnected else .failed, .{ .object = tab.titleSlice(), .detail = @import("ui/connection_progress_view.zig").failureText(state.failure) }) catch |err| applog.warn(.app, "disconnect notification: {s}", .{@errorName(err)});
+        } else if (state.phase == .waiting and state.cleanup == .released and (state.was_attached or tab.remote_retrying) and tab.remote_retry_deadline == null and state.failure != null) {
+            self.host.publishReconnectDetails(tab.content_owner, key.operation_id, key.attempt_id.?, .failed, .{ .object = tab.titleSlice(), .detail = @import("ui/connection_progress_view.zig").failureText(state.failure), .incident_id = state.notification_incident }) catch |err| applog.warn(.app, "disconnect notification: {s}", .{@errorName(err)});
         }
     }
     fn run(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
@@ -9602,6 +9727,7 @@ const NotificationWindowHook = struct {
                 if (!status.owner.eql(owner)) continue;
                 break :blk status.notification();
             } else if (tab.runtime) |runtime| runtime.workerPtr().notificationSnapshot(owner) catch continue else continue;
+            self.host.publishRecordingStatus(self.id, owner, facts.recording_error) catch |err| applog.warn(.app, "recording risk notification: {s}", .{@errorName(err)});
             if (facts.output_sequence != 0) _ = self.host.coordinator.observeOutput(tab.content_owner, facts.output_sequence) catch false;
             if (facts.bell_count != 0) {
                 const bell = self.host.coordinator.observeBell(tab.content_owner, facts.bell_count, clock) catch continue;

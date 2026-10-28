@@ -100,6 +100,7 @@ pub const View = struct {
     icon_hover: *ui.Signal(?ui.BoxStyle),
     colors: S.theme.Colors,
     last_error: ?anyerror = null,
+    preview_content: ?*ui.Node = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
         return mountAt(cx, scope, callbacks, null);
@@ -217,7 +218,7 @@ pub const View = struct {
         const scope = try self.scope.childScope();
         self.preview_scope = scope;
         self.modal_open = try scope.createSignal(bool, false);
-        const modal = try ui.widgets.Modal(.{ .open = self.modal_open.?, .width = 480, .max_height = @max(200, cx.viewport.height - 32), .background = S.theme.current().overlay, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const modal = try ui.widgets.Modal(.{ .open = self.modal_open.?, .width = 480, .max_height = @max(200, cx.viewport.height - 32), .background = S.theme.current().overlay, .overlay_color = ui.Color.TRANSPARENT, .enter_transition = .none, .exit_transition = .none, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.modal = modal;
         if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         self.preview_panel = modal.dialog;
@@ -251,8 +252,9 @@ pub const View = struct {
         self.preview_identity_box = card;
         try body.appendChild(cx.allocator, card);
         const status = try ui.box(cx, .{ .height = .{ .px = 18 }, .width = .fill(), .direction = .row }, .{});
+        status.setDisplay(.none);
         try card.appendChild(cx.allocator, status);
-        const badge = try ui.text(cx, "ready", .{ .font_size = 10, .line_height = 1.2, .color = S.theme.current().fg_2 });
+        const badge = try ui.text(cx, "", .{ .font_size = 10, .line_height = 1.2, .color = S.theme.current().fg_2 });
         badge.setStyleInline(cx.allocator, .{ .height = .{ .px = 18 }, .padding = .{ .top = 3, .bottom = 3, .left = 6, .right = 6 }, .background = S.theme.current().well, .corner_radius = 5 });
         try status.appendChild(cx.allocator, badge);
         self.preview_metadata = try ui.text(cx, "", .{ .font_size = 12, .line_height = 1.65, .color = S.theme.current().fg_2, .wrap = .word });
@@ -382,7 +384,7 @@ pub const View = struct {
         };
         defer self.cx.allocator.free(metadata);
         try self.preview_metadata.setTextContent(self.cx.allocator, metadata);
-        try self.preview_title.setTextContent(self.cx.allocator, "上下文附件");
+        try self.preview_title.setTextContent(self.cx.allocator, "文件预览");
         var time_buffer: [8]u8 = undefined;
         const capture_time = try @import("terminal_surface_input.zig").localTimestamp(&time_buffer, content.captured_at_ms);
         var info_buffer: [40]u8 = undefined;
@@ -391,9 +393,7 @@ pub const View = struct {
         self.preview_icons[0].setDisplay(if (content.source == .terminal) .none else .flex);
         self.preview_terminal_icon.setDisplay(if (content.source == .terminal) .flex else .none);
         try self.preview_label.setTextContent(self.cx.allocator, content.bytes);
-        const line_count = @max(1, std.mem.count(u8, content.bytes, "\n") + 1);
-        const preview_h = @min(@max(41.796875, @as(f32, @floatFromInt(line_count)) * 19.8 + 22), @max(41.796875, self.cx.viewport.height - 260));
-        self.preview_body.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = preview_h } });
+        self.layoutPreview();
         self.preview_reference.release();
         self.preview_reference = reference.retain();
         self.preview_ticket = ticket;
@@ -550,10 +550,10 @@ pub const View = struct {
             self.icon_style.set(S.iconButton());
             self.icon_hover.set(S.hover());
             for (self.cards.items) |card| card.retheme();
-            self.preview_panel.setBackground(S.theme.current().overlay);
+            self.preview_panel.setBackground(S.theme.current().overlay.withAlpha(245));
             self.preview_title.setTextColor(self.colors.fg_1);
             _ = self.preview_icon.setTint(self.colors.accent);
-            self.preview_identity_box.setBackground(self.colors.well);
+            self.preview_identity_box.setBackground(S.theme.popupInset());
             self.preview_identity.setTextColor(self.colors.fg_1);
             self.preview_metadata.setTextColor(self.colors.fg_2);
             self.preview_label.setTextColor(self.colors.fg_1);
@@ -561,6 +561,7 @@ pub const View = struct {
             _ = self.preview_icons[0].setTint(S.theme.current().accent);
             _ = self.preview_terminal_icon.setTint(S.theme.current().accent);
         }
+        if (self.isPreviewOpen()) self.layoutPreview();
         const row_height = self.height();
         if (self.modal == null and self.inline_parent != null) self.preview_panel.setDisplay(if (self.inline_open) .flex else .none);
         self.root.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (row_height > 0) row_height - 4 else 0 } });
@@ -572,6 +573,15 @@ pub const View = struct {
             break;
         };
         return if (changed or themed) .needs_layout else .done;
+    }
+    fn layoutPreview(self: *View) void {
+        const rect = @import("ai_preview_geometry.zig").bounds(self.cx, self.preview_content);
+        self.preview_panel.setStyleInline(self.cx.allocator, @import("ai_preview_geometry.zig").panel(rect, false));
+        if (self.modal) |modal| modal.body.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .fill(), .padding = .{}, .gap = 0, .direction = .column, .min_height = 0 });
+        const body_h = @max(1, rect.h - 79.1484375 - 63.5);
+        if (self.modal_body) |body| body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = body_h }, .min_height = 0 });
+        if (self.modal_card) |card| card.setStyleInline(self.cx.allocator, .{ .height = .{ .px = @max(1, body_h - 20) }, .min_height = 0 });
+        self.preview_body.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = @max(1, body_h - 20 - 28 - 19.796875) }, .min_height = 0 });
     }
     fn releaseFocus(self: *View) void {
         if (self.cx.focus_manager.current_focus) |node| if (node.isDescendantOf(self.root) or node.isDescendantOf(self.preview_panel)) self.cx.clearFocus();

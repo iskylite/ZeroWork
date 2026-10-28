@@ -22,7 +22,7 @@ pub fn height(kind: auth.Kind) f32 {
     };
 }
 pub fn panel(w: f32, h: f32) ui.BoxStyle {
-    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .gap = 0, .direction = .column, .background = theme.current().overlay, .border = .{ .radius = 14 }, .overflow_hidden = true };
+    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .gap = 0, .direction = .column, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .overflow_hidden = true };
 }
 pub fn inlineRoot() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .display = .none };
@@ -65,7 +65,7 @@ pub fn text(size: f32, weight: u16, mono: bool) ui.TextStyle {
     return .{ .font_size = size, .font_weight = weight, .color = if (weight >= 500) theme.current().fg_1 else theme.current().fg_2, .line_height = (if (size >= 13) @as(f32, 20) else if (size >= 12) @as(f32, 18) else @as(f32, 16)) / size, .wrap = .word, .use_monospace_font = mono, .selectable = false };
 }
 pub fn well() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 56, .direction = .column, .gap = 4, .padding = ui.Padding.all(10), .background = theme.current().well, .border = .{ .radius = 9 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 56, .direction = .column, .gap = 4, .padding = ui.Padding.all(10), .background = theme.popupInset(), .border = .{ .radius = 9 }, .flex_shrink = 0 };
 }
 pub fn notice(kind: auth.Kind) ui.BoxStyle {
     var result = well();
@@ -85,7 +85,7 @@ pub fn field() ui.BoxStyle {
 }
 pub fn input(h: f32, has_eye: bool) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .fill(), .height = .{ .px = h }, .min_height = h, .padding = .{ .left = 12, .right = if (has_eye) 40 else 12 }, .background = c.well, .border = .{ .width = 0, .color = c.well_border, .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = h }, .min_height = h, .padding = .{ .left = 12, .right = if (has_eye) 40 else 12 }, .background = theme.popupInset(), .border = .{ .width = 0, .color = c.well_border, .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn inputWrapper(h: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = h }, .flex_shrink = 0 };
@@ -104,7 +104,7 @@ pub fn footer() ui.BoxStyle {
 }
 pub fn button(w: f32, primary: bool, danger: bool) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = w }, .height = .{ .px = footer_height }, .padding = .{}, .background = if (danger) c.action_danger else if (primary) c.action_accent else c.surface_2, .border = .{ .radius = 8 }, .justify = .center, .align_items = .center, .flex_shrink = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = footer_height }, .padding = .{}, .background = if (danger) c.action_danger else if (primary) c.action_accent else theme.popupAction(), .border = .{ .radius = 8 }, .justify = .center, .align_items = .center, .flex_shrink = 0 };
 }
 pub fn actionText(primary: bool) ui.TextStyle {
     var result = text(12, 500, false);

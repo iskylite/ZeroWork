@@ -111,9 +111,17 @@ const StreamJob = struct {
     sink: ChunkSink,
     sink_ctx: *anyopaque,
     done: std.atomic.Value(bool) = .init(false),
+    io: std.Io,
+    started: std.Io.Clock.Timestamp,
+    last_activity_ms: std.atomic.Value(u64) = .init(0),
+    fn receive(raw: *anyopaque, bytes: []const u8) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (bytes.len > 0) self.last_activity_ms.store(@intCast(self.started.durationTo(std.Io.Clock.Timestamp.now(self.io, .awake)).raw.toMilliseconds()), .release);
+        try self.sink(self.sink_ctx, bytes);
+    }
 
     fn run(self: *@This()) anyerror!ResponseMeta {
-        const result = self.send(self.raw, self.plan, self.body, self.allocator, self.sink, self.sink_ctx);
+        const result = self.send(self.raw, self.plan, self.body, self.allocator, receive, self);
         self.done.store(true, .release);
         return result;
     }
@@ -124,13 +132,14 @@ const StreamJob = struct {
 fn sendStreamBounded(io: std.Io, raw: *anyopaque, send: StreamSend, plan: http.RequestPlan, body: []const u8, allocator: std.mem.Allocator, sink: ChunkSink, sink_ctx: *anyopaque) !ResponseMeta {
     if (plan.cancel) |token| if (token.isCancelled()) return error.Cancelled;
     if (plan.timeout_ms == 0) return error.Timeout;
-    var job: StreamJob = .{ .raw = raw, .send = send, .plan = plan, .body = body, .allocator = allocator, .sink = sink, .sink_ctx = sink_ctx };
-    var future = try std.Io.concurrent(io, StreamJob.run, .{&job});
     const started = std.Io.Clock.Timestamp.now(io, .awake);
+    var job: StreamJob = .{ .io = io, .started = started, .raw = raw, .send = send, .plan = plan, .body = body, .allocator = allocator, .sink = sink, .sink_ctx = sink_ctx };
+    var future = try std.Io.concurrent(io, StreamJob.run, .{&job});
     while (!job.done.load(.acquire)) {
         const cancelled = if (plan.cancel) |token| token.isCancelled() else false;
         const elapsed = started.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.toMilliseconds();
-        if (cancelled or elapsed >= plan.timeout_ms) {
+        const idle_ms = @as(u64, @intCast(@max(0, elapsed))) -| job.last_activity_ms.load(.acquire);
+        if (cancelled or elapsed >= plan.timeout_ms or (plan.idle_timeout_ms != null and idle_ms >= plan.idle_timeout_ms.?)) {
             if (future.cancel(io)) |_| {} else |_| {}
             return if (cancelled) error.Cancelled else error.Timeout;
         }
@@ -298,6 +307,7 @@ pub fn requestStream(allocator: std.mem.Allocator, transport: Transport, config:
     defer allocator.free(endpoint);
     plan.endpoint = endpoint;
     plan.timeout_ms = chat.timeout_ms;
+    plan.idle_timeout_ms = chat.idle_timeout_ms;
     plan.cancel = chat.cancel;
     const body = try http.requestBody(allocator, config.kind, config.chatRequest(chat), config.context_window);
     defer allocator.free(body);
@@ -640,4 +650,35 @@ test "stream hook caps bytes stops on sink error and keeps retry hints" {
     injected = .{ .status = 400 };
     try std.testing.expectError(error.ProviderFailure, requestStream(std.testing.allocator, t, config, chat, Injected.receive, &injected));
     try std.testing.expectEqual(@as(?u32, null), hint);
+}
+
+test "stream inactivity resets on chunks while the overall request stays bounded" {
+    const Active = struct {
+        chunks: usize = 0,
+        stall: bool = false,
+        fn send(raw: *anyopaque, _: http.RequestPlan, _: []const u8, _: std.mem.Allocator, sink: ChunkSink, ctx: *anyopaque) !ResponseMeta {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            for (0..8) |_| {
+                try std.Io.sleep(std.testing.io, .fromMilliseconds(15), .awake);
+                try sink(ctx, "reasoning chunk");
+            }
+            if (self.stall) try std.Io.sleep(std.testing.io, .fromMilliseconds(200), .awake);
+            return .{ .status = 200 };
+        }
+        fn receive(raw: *anyopaque, _: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.chunks += 1;
+        }
+    };
+    var active: Active = .{};
+    const plan: http.RequestPlan = .{ .endpoint = "http://127.0.0.1/fixture", .auth_style = .none, .timeout_ms = 1000, .idle_timeout_ms = 70 };
+    _ = try sendStreamBounded(std.testing.io, &active, Active.send, plan, "{}", std.testing.allocator, Active.receive, &active);
+    try std.testing.expectEqual(@as(usize, 8), active.chunks);
+    active = .{ .stall = true };
+    try std.testing.expectError(error.Timeout, sendStreamBounded(std.testing.io, &active, Active.send, plan, "{}", std.testing.allocator, Active.receive, &active));
+    try std.testing.expectEqual(@as(usize, 8), active.chunks);
+    active = .{};
+    var capped = plan;
+    capped.timeout_ms = 70;
+    try std.testing.expectError(error.Timeout, sendStreamBounded(std.testing.io, &active, Active.send, capped, "{}", std.testing.allocator, Active.receive, &active));
 }

@@ -28,34 +28,54 @@ pub fn waveOffset(time_ms: f64, index: usize, reduced_motion: bool) f32 {
     if (reduced_motion) return 0;
     return @floatCast(@sin(time_ms * (2.0 * std.math.pi / 1400.0) - @as(f64, @floatFromInt(index)) * 0.65) * 1.5);
 }
+pub const Label = struct {
+    text: []const u8,
+    animated: bool = true,
+};
+pub fn turnLabel(turn: *const Turn) Label {
+    if (turn.ended_at_ms != null) return .{ .text = "～回合结束～", .animated = false };
+    // A decision that needs the user takes precedence over other active tools.
+    for (turn.steps.items) |step| if (step.phase == .approval) return .{ .text = "～等待你确认～", .animated = false };
+    var index = turn.steps.items.len;
+    while (index > 0) {
+        index -= 1;
+        const step = turn.steps.items[index];
+        if (step.phase != .running) continue;
+        const text = if (std.mem.eql(u8, step.name, "run_command")) "～执行命令中～" else if (std.mem.eql(u8, step.name, "read_terminal")) "～读取终端中～" else if (std.mem.eql(u8, step.name, "read_remote_file")) "～读取文件中～" else if (std.mem.eql(u8, step.name, "list_remote_files")) "～查看目录中～" else "～执行操作中～";
+        return .{ .text = text };
+    }
+    for (turn.steps.items) |step| if (step.phase == .assembling or step.phase == .approved) return .{ .text = "～准备操作中～" };
+    return .{ .text = "～大浪淘金中～" };
+}
 const Wave = struct {
     cx: *ui.Cx,
     root: *ui.Node,
-    glyphs: [7]*ui.Node,
     fn release(self: *Wave) void {
         self.cx.removeAfterLayoutHook(self);
     }
     fn tick(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *Wave = @ptrCast(@alignCast(raw));
         if (!self.root.isDisplayedInTree()) return .done;
-        for (self.glyphs, 0..) |glyph, index| glyph.setStyleInline(self.cx.allocator, .{ .translate_y = waveOffset(self.cx.frame_time_ms, index, self.cx.reduced_motion) });
+        for (self.root.children.items, 0..) |glyph, index| glyph.setStyleInline(self.cx.allocator, .{ .translate_y = waveOffset(self.cx.frame_time_ms, index, self.cx.reduced_motion) });
         if (!self.cx.reduced_motion) self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
         return .done;
     }
 };
-fn runningLabel(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
+fn runningLabel(cx: *ui.Cx, scope: *ui.Scope, label: Label) !*ui.Node {
     const root = try ui.box(cx, .{ .direction = .row, .height = .{ .px = 20 }, .gap = 0, .align_items = .center, .flex_shrink = 0 }, .{});
-    root.behavior.interaction.a11y = .{ .role = .group, .label = "～大海淘金中～" };
-    const wave = try scope.createState(Wave, .{ .cx = cx, .root = root, .glyphs = undefined });
-    for ([_][]const u8{ "～", "大", "海", "淘", "金", "中", "～" }, 0..) |character, index| {
+    root.behavior.interaction.a11y = .{ .role = .group, .label = label.text };
+    var characters = (try std.unicode.Utf8View.init(label.text)).iterator();
+    while (characters.nextCodepointSlice()) |character| {
         const glyph = try ui.text(cx, character, .{ .font_size = 11.5, .line_height = 16.0 / 11.5, .color = theme.current().fg_2 });
         glyph.meta.ownership.meta.test_id = "ai.turn.wave.glyph";
         glyph.behavior.interaction.a11y = .{ .hidden = true };
-        wave.glyphs[index] = glyph;
         try root.appendChild(cx.allocator, glyph);
     }
-    try cx.addAfterLayoutHook(wave, Wave.tick);
-    try scope.onCleanup(Wave, wave, Wave.release);
+    if (label.animated) {
+        const wave = try scope.createState(Wave, .{ .cx = cx, .root = root });
+        try cx.addAfterLayoutHook(wave, Wave.tick);
+        try scope.onCleanup(Wave, wave, Wave.release);
+    }
     return root;
 }
 const Clock = struct {
@@ -86,7 +106,8 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, turn: *const Turn, texture: ?u32) !*u
     const logo = try ui.image(cx, texture orelse 0, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
     logo.meta.ownership.meta.test_id = "ai.turn.logo";
     try row.appendChild(cx.allocator, logo);
-    const label = if (!completed) try runningLabel(cx, scope) else try ui.text(cx, "～回合结束～", .{ .font_size = 11.5, .line_height = 16.0 / 11.5, .color = theme.current().fg_2 });
+    const activity = turnLabel(turn);
+    const label = if (!completed) try runningLabel(cx, scope, activity) else try ui.text(cx, activity.text, .{ .font_size = 11.5, .line_height = 16.0 / 11.5, .color = theme.current().fg_2 });
     label.meta.ownership.meta.test_id = "ai.turn.label";
     try row.appendChild(cx.allocator, label);
     try row.appendChild(cx.allocator, try dot(cx));

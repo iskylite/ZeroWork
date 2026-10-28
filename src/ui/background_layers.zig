@@ -55,7 +55,7 @@ pub const View = struct {
         try scope.createEffect(.{ .cx = self.cx, .target = target, .publication = try self.cx.themeSignal(scope) }, struct {
             fn paint(ctx: anytype) void {
                 _ = ctx.publication.get();
-                ctx.target.setStyleInline(ctx.cx.allocator, .{ .glass = theme.overlayGlass() });
+                ctx.target.setStyleInline(ctx.cx.allocator, theme.overlayPaint());
             }
         }.paint);
     }

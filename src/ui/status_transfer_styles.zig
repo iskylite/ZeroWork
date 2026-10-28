@@ -21,7 +21,7 @@ pub fn text(primary: bool) ui.TextStyle {
     return .{ .font_size = if (primary) 10.5 else 10, .font_weight = 400, .line_height = if (primary) 16.0 / 10.5 else 1.6, .color = theme.current().fg_2, .text_overflow = .ellipsis, .selectable = false };
 }
 pub fn track() ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = 23 } }, .width = .{ .px = 248 }, .height = .{ .px = 2 }, .background = theme.current().well, .border = .{ .radius = 1 } };
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = 23 } }, .width = .{ .px = 248 }, .height = .{ .px = 2 }, .background = theme.popupInset(), .border = .{ .radius = 1 } };
 }
 pub fn fill(w: f32) ui.BoxStyle {
     return .{ .width = .{ .px = w }, .height = .{ .px = 2 }, .background = theme.current().accent, .border = .{ .radius = 1 } };

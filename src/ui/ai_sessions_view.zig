@@ -25,7 +25,7 @@ pub const View = struct {
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, anchor: *ui.Node, hooks: Hooks) !*View {
         const open = try scope.createSignal(bool, false);
         const confirmation = try scope.createSignal(bool, false);
-        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .node = anchor }, .position = .bottom_end, .offset = .{ .static = 6 }, .width = 440, .max_height = 160, .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .viewport_padding = 8 }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .node = anchor }, .position = .bottom_start, .offset = .{ .static = 6 }, .width = 440, .max_height = 160, .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .viewport_padding = 8 }).mount(scope, cx);
         popup.wrapper.setStyleInline(cx.allocator, .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 }, .flex_shrink = 0 });
         popup.chrome.setStyleInline(cx.allocator, S.popover());
         const scroll = try ui.widgets.ScrollArea(.{ .height = 168, .direction = .vertical, .rubber_band_y = false }).mount(popup.scope, cx);

@@ -3,9 +3,25 @@
 (()=>{
  const sourceURL=document.currentScript?.src||location.href,query=new URLSearchParams(location.search),embedded=query.has('integrated')||query.has('embed');
  // Final [base transparency P0, slider span D, maximum transparency M].
- const roles={'surface-1':[0.446777856,0.670166784,0.95],'surface-2':[0.305690112,0.752467968,0.9],'well':[0.211631616,0.728953344,0.8],'overlay':[0.117573120,0.646652160,0.65],'hover':[0.235146240,0.646652160,0.75],'tab-on':[0.164602368,0.599622912,0.65],'card-deep':[0.305690112,0.752467968,0.9],'card-deep-ft':[0.211631616,0.728953344,0.8]};
+ const roles={'surface-1':[0.446777856,0.670166784,0.95],'surface-2':[0.305690112,0.752467968,0.9],'well':[0.211631616,0.728953344,0.8],'overlay':[0.04,0.12,0.16],'hover':[0.235146240,0.646652160,0.75],'tab-on':[0.164602368,0.599622912,0.65],'card-deep':[0.305690112,0.752467968,0.9],'card-deep-ft':[0.211631616,0.728953344,0.8]};
  const materialAlpha=(role,t)=>{const [p0,d,m]=roles[role];return Math.round(255*(1-Math.min(m,p0+d*t)))/255;};
  const clamp=(v,min,max)=>Math.max(min,Math.min(max,Number.isFinite(+v)?+v:min));
+ // Surface boundaries only: component names never select an alpha percentage.
+ const floatingSelector='.popover,.context-menu,.modal,.assistant,.v3-ai-model-info,.v3-hover,.design-tooltip,.toast,#tooltip,.utility-layer,#global-notice,#settings-frame,.settings-window';
+ const owners=new WeakMap();
+ const layerAlpha=(level,t)=>level>=3?1:level===2?Math.round(255*(1-(.01+.03*t)))/255:materialAlpha('overlay',t);
+ function levelOf(surface,seen=new Set()){
+  if(!surface||seen.has(surface))return 0;seen.add(surface);
+  const anchor=owners.get(surface),parent=(anchor?.isConnected?anchor:surface.parentElement)?.closest(floatingSelector);
+  return Math.min(3,1+levelOf(parent,seen));
+ }
+ function syncLayers(){for(const surface of document.querySelectorAll(floatingSelector)){
+  const level=levelOf(surface),alpha=(100*layerAlpha(level,effective.transparency/100)).toFixed(4)+'%',background='color-mix(in srgb,rgb(from var(--overlay-base) r g b / 1) '+alpha+',transparent)';
+  if(surface.dataset.materialLevel!==String(level))surface.dataset.materialLevel=String(level);
+  if(surface.style.getPropertyValue('--layer-background')!==background)surface.style.setProperty('--layer-background',background);
+ }}
+ window.V3Materials=Object.freeze({setOwner(surface,anchor){if(anchor)owners.set(surface,anchor);else owners.delete(surface);syncLayers();},sync:syncLayers});
+
  const stored=()=>{try{return JSON.parse(localStorage.getItem('zw-settings-v3-design')||'{}').values||{}}catch{return {}}};
  const saved=stored();let effective={transparency:clamp(saved.background_transparency??0,0,100),blur:clamp(saved.blur_px??0,0,96),imageEnabled:!!saved.background_enabled,imageURL:/^(data:image\/|blob:)/.test(saved.background_path||'')?saved.background_path:'',fit:saved.background_fit||'fill',alignment:saved.background_alignment||'center'};
  if(query.has('material-t'))effective.transparency=clamp(query.get('material-t'),0,100);if(query.has('material-b'))effective.blur=clamp(query.get('material-b'),0,96);
@@ -24,7 +40,7 @@
  const root=document.querySelector('#desktop,#app,#notes-app,.settings-window');if(!root)return;root.classList.add('zw-background-root');
  let image=null;if(!embedded){const layer=document.createElement('div');layer.className='zw-global-background';layer.ariaHidden='true';image=document.createElement('div');image.className='zw-global-background-image';layer.append(image);root.prepend(layer);}
  const frames=()=>[...document.querySelectorAll('object[data-document-host],iframe')].map(n=>n.contentWindow||n.contentDocument?.defaultView).filter(Boolean);
- function apply(value){effective={...effective,...value,transparency:clamp(value.transparency??effective.transparency,0,100),blur:clamp(value.blur??effective.blur,0,96)};const t=effective.transparency/100,style=document.body.style;style.setProperty('--material-transparency',t);style.setProperty('--material-blur',effective.blur+'px');style.setProperty('--overlay-blur',Math.max(12,effective.blur)+'px');style.setProperty('--material-scrim-alpha',(1-t)*.25);for(const role of Object.keys(roles))style.setProperty('--'+role+'-alpha',(100*materialAlpha(role,t)).toFixed(4)+'%');document.body.dataset.materialTransparency=String(effective.transparency);document.body.dataset.materialBlur=String(effective.blur);syncBubbleInk();
+ function apply(value){effective={...effective,...value,transparency:clamp(value.transparency??effective.transparency,0,100),blur:clamp(value.blur??effective.blur,0,96)};const t=effective.transparency/100,style=document.body.style;style.setProperty('--material-transparency',t);style.setProperty('--material-blur',effective.blur+'px');style.setProperty('--overlay-blur',Math.max(12,effective.blur)+'px');style.setProperty('--material-scrim-alpha',(1-t)*.25);for(const role of Object.keys(roles))style.setProperty('--'+role+'-alpha',(100*materialAlpha(role,t)).toFixed(4)+'%');document.body.dataset.materialTransparency=String(effective.transparency);document.body.dataset.materialBlur=String(effective.blur);syncBubbleInk();syncLayers();
   if(image){const url=fixture?new URL('../assets/backgrounds/continuity.svg',sourceURL).href:effective.imageEnabled&&/^(data:image\/|blob:)/.test(effective.imageURL||'')?effective.imageURL:null;image.style.backgroundImage=url?'url("'+url+'")':'none';image.style.opacity=String(1-t);image.style.filter='blur('+effective.blur+'px)';image.style.backgroundSize=effective.fit==='fit'?'contain':effective.fit==='tile'||effective.fit==='center'?'auto':'cover';image.style.backgroundPosition=(effective.alignment||'center').replace('-',' ');image.style.backgroundRepeat=effective.fit==='tile'?'repeat':'no-repeat';}
   const tControl=document.querySelector('#material-review-transparency'),bControl=document.querySelector('#material-review-blur');if(tControl)tControl.value=effective.transparency;if(bControl)bControl.value=effective.blur;
  }
@@ -33,6 +49,7 @@
  document.addEventListener('zw-material-draft',e=>update(e.detail||{}));
  window.addEventListener('message',e=>{if(e.origin!==location.origin)return;const d=e.data;if(embedded&&e.source===parent&&d?.type==='zw-material-effective'){apply(d.value||{});return;}if(!embedded&&frames().includes(e.source)){if(d?.type==='zw-material-ready')e.source.postMessage({type:'zw-material-effective',value:effective},location.origin);if(d?.type==='zw-material-draft'){apply(d.value||{});broadcast();}}});
  window.addEventListener('storage',e=>{if(e.key!=='zw-settings-v3-design')return;const v=stored();update({transparency:v.background_transparency??0,blur:v.blur_px??0,imageEnabled:!!v.background_enabled});});
+ new MutationObserver(syncLayers).observe(root,{subtree:true,childList:true,attributes:true,attributeFilter:['class','hidden','style']});
  apply(effective);if(embedded&&parent!==window)parent.postMessage({type:'zw-material-ready'},location.origin);
  if(!embedded){const review=document.createElement('details');review.className='review-scenarios material-review';review.innerHTML='<summary>全局材质验证（窗口外）</summary><div class="material-review-controls"><label>透明度 <input id="material-review-transparency" type="number" min="0" max="100" aria-label="评审透明度" value="'+effective.transparency+'"> %</label><label>模糊 <input id="material-review-blur" type="number" min="0" max="96" aria-label="评审模糊" value="'+effective.blur+'"> px</label><label><input id="material-review-image" type="checkbox" '+(fixture?'checked':'')+'>连续性背景</label></div>';root.after(review);review.querySelector('#material-review-transparency').oninput=e=>update({transparency:e.target.value});review.querySelector('#material-review-blur').oninput=e=>update({blur:e.target.value});review.querySelector('#material-review-image').onchange=e=>{fixture=e.target.checked;apply(effective);};}
 })();

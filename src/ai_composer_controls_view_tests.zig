@@ -328,7 +328,7 @@ test "AI composer usage and ring reflect only provided measurements and source l
     try std.testing.expectEqualStrings("history", f.view.source.?.value.usage.?.parts[0].name);
     f.click(f.view.buttons[4]);
     const menu = find(f.cx.root.?, "ai.usage.menu").?;
-    try std.testing.expectEqual(@as(f32, 344), menu.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 288), menu.globalRect().w);
     try std.testing.expectEqual(@as(f32, 142), menu.globalRect().h);
     try std.testing.expect(find(menu, "ai.usage.compaction.status") == null);
     const track = find(menu, "ai.usage.track").?.globalRect();
@@ -381,9 +381,10 @@ test "AI composer theme changes repaint open popovers and callback errors do not
     try std.testing.expectEqual(error.FixtureRejected, f.view.last_error.?);
     try std.testing.expectEqualStrings("确认后执行", f.view.labels[1].?.getText().?.content);
     Styles.theme.select(.light);
-    f.cx.setTheme(Styles.theme.widgetTheme(.light));
+    const publication = try f.cx.bindState(@import("ui/shell_styles.zig").ThemePublication, .{});
+    publication.publish(f.cx, Styles.theme.widgetTheme(.light));
     f.settle();
-    try std.testing.expect(ui.Color.eql(Styles.theme.current().surface_2, f.view.buttons[1].getBackground()));
+    try std.testing.expect(ui.Color.eql(Styles.theme.popupAction(), f.view.buttons[1].getBackground()));
     try std.testing.expect(ui.Color.eql(Styles.theme.current().overlay, find(f.cx.root.?, "ai.permission.menu").?.getBackground()));
     f.view.dismiss();
     f.settle();
@@ -595,5 +596,20 @@ test "AI composer pointer reaches every one of seven declared native efforts" {
         f.cx.handleMouseUp(x, area.y + area.h / 2);
         f.settle();
         try std.testing.expectEqual(expected, f.last.?.action.effort.value);
+    }
+}
+
+test "AI composer model metadata columns align across supported and unsupported capabilities" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.click(f.view.buttons[2]);
+    const alpha = modelOption(f.cx.root.?, "alpha").?;
+    const quiet = modelOption(f.cx.root.?, "quiet").?;
+    for ([_][]const u8{ "ai.model.context", "ai.model.reasoning", "ai.model.vision" }) |id| {
+        const first = find(alpha, id).?.globalRect();
+        const second = find(quiet, id).?.globalRect();
+        try std.testing.expectApproxEqAbs(first.x, second.x, 0.1);
+        try std.testing.expectApproxEqAbs(first.w, second.w, 0.1);
     }
 }

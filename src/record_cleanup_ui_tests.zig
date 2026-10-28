@@ -136,7 +136,7 @@ test "record cleanup modal retained theme and background publication preserves c
     f.apply(.light, false);
     try std.testing.expectEqual(theme.current().overlay, view.dialog.getBackground());
     // Cancel retains keyboard focus, whose focus-visible paint overrides its base background.
-    try std.testing.expectEqual(theme.current().surface_2, view.cancel_style.peek().background.?);
+    try std.testing.expectEqual(theme.popupAction(), view.cancel_style.peek().background.?);
     try std.testing.expectEqual(theme.current().fg_1, view.detail.getText().?.color);
     f.apply(.sauber, true);
     try std.testing.expectEqual(theme.current().overlay, view.dialog.getBackground());

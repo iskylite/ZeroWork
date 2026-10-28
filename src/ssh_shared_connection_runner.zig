@@ -67,6 +67,34 @@ pub fn main(init: std.process.Init) !void {
     try attached(app, child, 1);
     try send(app, child, "test -z \"$SOURCE_ONLY\" && printf 'INDEPENDENT_%s\n' CONTEXT\n");
     try contains(app, child, "INDEPENDENT_CONTEXT");
+    if (std.mem.eql(u8, scenario, "details")) {
+        const original = try onlineDetails(app, source);
+        try sameTransportDetails(original, try onlineDetails(app, child));
+        try sampleDetails(app, child);
+        try restart(app, child);
+        try sameTransportDetails(original, try onlineDetails(app, child));
+        try sampleDetails(app, child);
+        try closeOne(app, source);
+        // Details and new samples belong to the surviving tab, even after
+        // the tab that authenticated the transport has been destroyed.
+        try sameTransportDetails(original, try onlineDetails(app, child));
+        try sampleDetails(app, child);
+        try workspace.reuseSessionFromTab(workspace.tabIndex(child).?);
+        const sibling = workspace.tabs.items[workspace.tabs.items.len - 1].id;
+        try attached(app, sibling, 1);
+        try sameTransportDetails(original, try onlineDetails(app, sibling));
+        try sampleDetails(app, sibling);
+        try probe(app, child);
+        try probe(app, sibling);
+        try closeOne(app, sibling);
+        try closeOne(app, child);
+        std.debug.print("SHARED_DETAILS_OK online=true metadata=true generations=true rtt_all_hops=true source_closed=true\n", .{});
+        return;
+    }
+    if (std.mem.eql(u8, scenario, "reconnect-fallback")) {
+        try reconnectFallback(app, source, child, init.io, fixture orelse return error.MissingFixture);
+        return;
+    }
     if (std.mem.eql(u8, scenario, "jump-forwards")) {
         if (jump_port == null) return error.MissingJump;
         try jumpForwardScenario(app, source, child, port);
@@ -147,6 +175,89 @@ fn tick(app: *ApplicationHost) !void {
     if (app.workspace.pendingAuthentication()) |challenge| try app.workspace.submitAuthentication(challenge.identity, .trust_once);
     var delay: std.c.timespec = .{ .sec = 0, .nsec = 2 * std.time.ns_per_ms };
     _ = std.c.nanosleep(&delay, null);
+}
+const Details = @import("proto/ssh/connection_details.zig");
+fn onlineDetails(app: *ApplicationHost, id: u64) !Details.ConnectionDetailsSnapshot {
+    const owner = app.ownerForLegacy(id) orelse return error.MissingOwner;
+    const deadline = realtime.monotonicNs() + 3 * std.time.ns_per_s;
+    while (true) {
+        const snapshot = app.sshConnectionDetails(owner) catch |err| {
+            if (err != error.WorkerBusy or realtime.monotonicNs() >= deadline) return err;
+            try tick(app);
+            continue;
+        };
+        if (!snapshot.key.owner.session.eql(owner)) return error.WrongDetailsOwner;
+        for (snapshot.hops[0..snapshot.hop_count]) |hop| {
+            if (!hop.configured or hop.status != .online) return error.DetailsNotOnline;
+            if (hop.metadata.cipher_c2s.len == 0 or hop.metadata.cipher_s2c.len == 0 or hop.metadata.fingerprint.len == 0 or hop.metadata.host_key_algorithm.len == 0) return error.MissingNegotiatedMetadata;
+        }
+        return snapshot;
+    }
+}
+fn sameTransportDetails(expected: Details.ConnectionDetailsSnapshot, actual: Details.ConnectionDetailsSnapshot) !void {
+    if (expected.hop_count != actual.hop_count) return error.WrongDetailsRoute;
+    for (expected.hops[0..expected.hop_count], actual.hops[0..actual.hop_count]) |before, after| {
+        if (!std.meta.eql(before.endpoint, after.endpoint) or !std.meta.eql(before.metadata, after.metadata)) return error.TransportDetailsChanged;
+    }
+}
+fn sampleDetails(app: *ApplicationHost, id: u64) !void {
+    const owner = app.ownerForLegacy(id) orelse return error.MissingOwner;
+    const deadline = realtime.monotonicNs() + 5 * std.time.ns_per_s;
+    const request = while (true) {
+        const request = app.requestSshRtt(owner, null) catch |err| {
+            if ((err != error.SampleBusy and err != error.WorkerBusy) or realtime.monotonicNs() >= deadline) return err;
+            try tick(app);
+            continue;
+        };
+        break request;
+    };
+    while (realtime.monotonicNs() < deadline) {
+        try tick(app);
+        const snapshot = app.sshConnectionDetails(owner) catch |err| {
+            if (err == error.WorkerBusy) continue;
+            return err;
+        };
+        var ready = true;
+        for (snapshot.hops[0..snapshot.hop_count]) |hop| {
+            const sample = hop.rtt_sample orelse return error.MissingRttSample;
+            if (sample.request_id != request) return error.WrongRttOwner;
+            if (sample.status == .unavailable) return error.RttUnavailable;
+            ready = ready and sample.status == .ready and sample.cleanup == .released;
+        }
+        if (ready) return;
+    }
+    return error.RttTimeout;
+}
+fn reconnectFallback(app: *ApplicationHost, source: u64, child: u64, io: std.Io, fixture: []const u8) !void {
+    try sampleDetails(app, source);
+    try sampleDetails(app, child);
+    try send(app, child, "exit\n");
+    try ended(app, child);
+    try send(app, source, "printf 'ZW_ARM_REUSE_HOLD_%s\n' READY\n");
+    try contains(app, source, "ZW_ARM_REUSE_HOLD_READY");
+    try app.requestSshReconnect(child);
+    const held = try std.fs.path.join(std.heap.c_allocator, &.{ fixture, "held-request.json" });
+    defer std.heap.c_allocator.free(held);
+    const deadline = realtime.monotonicNs() + 4 * std.time.ns_per_s;
+    while (true) {
+        std.Io.Dir.cwd().access(io, held, .{}) catch {
+            if (realtime.monotonicNs() >= deadline) return error.PeerDidNotHoldRequest;
+            try tick(app);
+            continue;
+        };
+        break;
+    }
+    const drop = try std.fs.path.join(std.heap.c_allocator, &.{ fixture, "drop-first" });
+    defer std.heap.c_allocator.free(drop);
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = drop, .data = "drop" });
+    try attached(app, child, 2);
+    if (native(app, child).worker.shared_connection != null) return error.SharedOwnerRetainedAfterFallback;
+    _ = try onlineDetails(app, child);
+    try sampleDetails(app, child);
+    try probe(app, child);
+    try closeOne(app, child);
+    try closeOne(app, source);
+    std.debug.print("RECONNECT_FALLBACK_OK independent=true online=true rtt=true terminal_io=true closed=true\n", .{});
 }
 fn attached(app: *ApplicationHost, id: u64, generation: u64) !void {
     const deadline = realtime.monotonicNs() + 8 * std.time.ns_per_s;

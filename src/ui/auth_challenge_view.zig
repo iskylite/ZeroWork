@@ -561,6 +561,7 @@ pub const View = struct {
         field.* = .{ .view = self, .secret = secret, .input = undefined };
         const input_type: ui.widgets.input.InputType = if (secret) .password else .text;
         field.input = try ui.widgets.Input(.{ .input_type = input_type, .disabled = self.disabled, .on_change = self.cx.on(Field, field, Field.changed), .on_submit = self.cx.on(Field, field, Field.submit) }).mountResult(self.content_scope.?, self.cx);
+        @import("app_theme.zig").styleInput(field.input);
         field.input.node.setStyleInline(self.cx.allocator, S.inputWrapper(h));
         field.input.input_container.setStyleInline(self.cx.allocator, S.input(h, secret));
         S.tuneInput(&field.input);

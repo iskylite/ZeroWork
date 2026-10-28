@@ -35,7 +35,7 @@ pub const View = struct {
         const count_style = try scope.createSignal(ui.BoxStyle, S.count());
         const count_text = try scope.createText("", .{});
         const self = try scope.createState(View, .{ .cx = cx, .hooks = hooks, .popover = undefined, .header = undefined, .list = undefined, .remote_entry = undefined, .local_entry = undefined, .count_text = count_text, .tint = tint, .hover = hover, .count_style = count_style, .colors = S.theme.current() });
-        self.popover = try ui.widgets.Popover(.{ .trigger = .manual, .position = .top_end, .offset = .{ .static = 6 }, .width = @as(f32, 360), .max_width = @as(f32, 360), .max_height = @as(f32, 420), .constrain_width_to_viewport = true, .close_on_escape = true, .close_on_outside_click = true, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } } }).mount(scope, cx);
+        self.popover = try ui.widgets.Popover(.{ .trigger = .manual, .position = .top_end, .offset = .{ .static = 6 }, .width = @as(f32, 360), .max_width = @as(f32, 360), .max_height = @as(f32, 420), .constrain_width_to_viewport = true, .close_on_escape = true, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } } }).mount(scope, cx);
         self.popover.content.meta.ownership.meta.test_id = "socks.background.panel";
         self.popover.content.setStyleInline(cx.allocator, S.panel(128, cx.viewport.width));
         self.popover.trigger.setDisplay(.none);

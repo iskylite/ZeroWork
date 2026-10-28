@@ -35,7 +35,7 @@ pub fn field(show_error: bool) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = if (show_error) 74 else 53 }, .direction = .column, .gap = 5, .flex_shrink = 0 };
 }
 pub fn input() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 12, .right = 12 }, .background = theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 12, .right = 12 }, .background = theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn tuneInput(value: *ui.widgets.input.InputResult) void {
     value.state.font_size = 12;

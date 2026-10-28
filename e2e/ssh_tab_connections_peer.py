@@ -85,6 +85,9 @@ def serve(connection,index):
     try:
         transport.start_server(server=server)
         while transport.is_active() and not stop.is_set():
+            if index == 1 and (out/'drop-first').exists():
+                transport.close()
+                break
             if server.pending_message is not None and (out/'release-held').exists():
                 message, server.pending_message = server.pending_message, None
                 original_send(message)

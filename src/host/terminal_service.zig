@@ -83,6 +83,7 @@ pub const NotificationSnapshot = struct {
     owner: identity.SessionHandle,
     output_sequence: u64,
     bell_count: u64,
+    recording_error: ?[]const u8 = null,
 };
 pub const Status = struct {
     owner: identity.SessionHandle,
@@ -102,7 +103,7 @@ pub const Status = struct {
     modes: Modes = .{},
 
     pub fn notification(self: Status) NotificationSnapshot {
-        return .{ .owner = self.owner, .output_sequence = self.output_sequence, .bell_count = self.bell_count };
+        return .{ .owner = self.owner, .output_sequence = self.output_sequence, .bell_count = self.bell_count, .recording_error = self.recording_error };
     }
 };
 

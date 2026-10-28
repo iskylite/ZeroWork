@@ -35,6 +35,10 @@ pub const Service = struct {
     relay_detach: std.atomic.Value(bool) = .init(false),
     relay_next: ?*Service = null,
     relay_session: ssh.Session = .{},
+    // Published before relay registration; only that Relay accesses these
+    // borrowed details until it acknowledges detach or parent release.
+    relay_details: ?*ssh.ConnectionDetails.Store = null,
+    relay_hop: usize = 0,
     // These fields belong exclusively to the current native IO owner.
     listener: ?*socks.Socks5Listener = null,
     transport_paused: bool = false,
@@ -65,13 +69,18 @@ pub const Service = struct {
             .borrowed_transport = true,
             .shared_gate = parent,
             .resource_key = self.snapshot().origin,
+            .connection_details = self.relay_details,
+            .resource_hop = self.relay_hop,
         };
+        try self.relay_session.stepRtt(@import("../../platform/realtime.zig").monotonicNs());
         try self.step(&self.relay_session);
     }
     pub fn detachSharedStep(self: *Service) !ssh.ReleaseReceipt {
         try self.transportLost();
         const receipt = try self.detachReceipt();
         if (receipt != .released) return receipt;
+        const sample_receipt = self.relay_session.closeReceipt();
+        if (sample_receipt != .released) return sample_receipt;
         try self.sessionReleased();
         self.relay_session = .{ .state = .closed };
         return .released;
@@ -80,6 +89,7 @@ pub const Service = struct {
     /// with its Relay joined. No borrowed native handle is inspected here.
     pub fn sharedParentReleased(self: *Service) !void {
         self.adoptIoAfterOwnerStopped();
+        if (self.relay_session.connection_details) |store| if (self.relay_session.resource_key) |key| store.status(key, self.relay_hop, .released);
         self.relay_session = .{ .state = .closed };
         try self.sessionReleased();
     }

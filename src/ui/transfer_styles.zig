@@ -9,7 +9,7 @@ pub const row_height: f32 = 76;
 pub const row_pitch: f32 = 84;
 pub const detail_height: f32 = 176;
 pub fn panel(window: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = if (window) 840 else 620 }, .height = .{ .px = if (window) 578 else 330 }, .direction = .column, .padding = .{ .top = 17, .left = 14, .right = 14, .bottom = if (window) 16 else 18 }, .background = theme.current().overlay, .border = .{ .radius = 14 }, .overflow = .hidden, .flex_shrink = 0 };
+    return .{ .width = .{ .px = if (window) 840 else 620 }, .height = .{ .px = if (window) 578 else 330 }, .direction = .column, .padding = .{ .top = 17, .left = 14, .right = 14, .bottom = if (window) 16 else 18 }, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .overflow = .hidden, .flex_shrink = 0 };
 }
 pub fn row(h: f32, spacing: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = h }, .direction = .row, .align_items = .center, .gap = spacing, .min_width = 0, .flex_shrink = 0 };
@@ -39,13 +39,13 @@ pub fn badge(width: f32, color: ui.Color) ui.BoxStyle {
     return .{ .width = .{ .px = width }, .height = .{ .px = 22 }, .padding = .{ .left = 8, .right = 8 }, .align_items = .center, .justify = .center, .background = color.withAlpha(25), .border = .{ .radius = 6 }, .flex_shrink = 0 };
 }
 pub fn task(selected: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .column, .gap = 7, .padding = .{ .top = 9, .left = 10, .right = 10, .bottom = 9 }, .background = if (selected) theme.current().selection else theme.current().surface_2, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .column, .gap = 7, .padding = .{ .top = 9, .left = 10, .right = 10, .bottom = 9 }, .background = if (selected) theme.popupSelection() else theme.popupAction(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn detail() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 120 }, .direction = .column, .gap = 4, .padding = .{ .top = 8, .left = 10, .right = 10, .bottom = 8 }, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 8 }, .flex_shrink = 0, .overflow = .hidden };
 }
 pub fn track() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 3 }, .background = theme.current().well, .border = .{ .radius = 1 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 3 }, .background = theme.popupInset(), .border = .{ .radius = 1 }, .flex_shrink = 0 };
 }
 pub fn fill(fraction: f32, color: ui.Color) ui.BoxStyle {
     return .{ .width = .{ .percent = fraction * 100 }, .height = .fill(), .background = color, .border = .{ .radius = 1 } };
@@ -76,7 +76,7 @@ fn remap(color: ui.Color, previous: theme.Colors) ui.Color {
 }
 
 pub fn confirmation(h: f32) ui.BoxStyle {
-    return .{ .width = .{ .px = 520 }, .height = .{ .px = h }, .padding = .{}, .direction = .column, .background = theme.current().overlay, .border = .{ .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = theme.current().shadow }, .overflow = .hidden };
+    return .{ .width = .{ .px = 520 }, .height = .{ .px = h }, .padding = .{}, .direction = .column, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = theme.current().shadow }, .overflow = .hidden };
 }
 pub fn confirmationHeader() ui.BoxStyle {
     var value = row(48, 6);
@@ -93,7 +93,7 @@ pub fn confirmationStack() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 10, .flex_shrink = 0 };
 }
 pub fn confirmationIdentity() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 4, .padding = ui.Padding.all(12), .background = theme.current().surface_2, .border = .{ .radius = 9 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 4, .padding = ui.Padding.all(12), .background = theme.popupAction(), .border = .{ .radius = 9 }, .flex_shrink = 0 };
 }
 pub fn confirmationSources() ui.BoxStyle {
     return confirmationStack();
@@ -104,18 +104,18 @@ pub fn confirmationHint() ui.BoxStyle {
 pub fn pathRow() ui.BoxStyle {
     var value = row(32, 6);
     value.padding = .{ .left = 8, .right = 8 };
-    value.background = theme.current().well;
+    value.background = theme.popupInset();
     value.border = .{ .radius = 8 };
     return value;
 }
 pub fn option() ui.BoxStyle {
-    return .{ .width = .{ .px = 98 }, .height = .{ .px = 24 }, .padding = .{}, .background = theme.current().surface_2, .border = .{ .radius = 7 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 98 }, .height = .{ .px = 24 }, .padding = .{}, .background = theme.popupAction(), .border = .{ .radius = 7 }, .flex_shrink = 0 };
 }
 pub fn confirmationPrimary() ui.BoxStyle {
     return .{ .width = .{ .px = 120 }, .height = .{ .px = 34 }, .padding = .{}, .background = theme.current().action_accent, .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn sourceHint() ui.BoxStyle {
-    return .{ .direction = .column, .gap = 4, .padding = ui.Padding.all(8), .background = theme.current().overlay, .border = .{ .radius = 7 } };
+    return .{ .direction = .column, .gap = 4, .padding = ui.Padding.all(8), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 7 } };
 }
 
 pub fn topFade(_: *const ui.ThemeTokens) ui.BoxStyle {
@@ -131,7 +131,7 @@ pub const v3_card_height: f32 = row_height;
 pub const v3_card_pitch: f32 = row_pitch;
 pub fn v3Panel(global: bool) ui.BoxStyle {
     // Transparent HTML border consumes 1px in addition to the 12px padding.
-    return .{ .width = .{ .px = if (global) 720 else 680 }, .height = .{ .px = 199 }, .direction = .column, .padding = ui.Padding.all(13), .background = theme.current().overlay, .border = .{ .radius = 11 }, .overflow = .hidden, .flex_shrink = 0, .hit_behavior = .@"opaque" };
+    return .{ .width = .{ .px = if (global) 720 else 680 }, .height = .{ .px = 199 }, .direction = .column, .padding = ui.Padding.all(13), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 11 }, .overflow = .hidden, .flex_shrink = 0, .hit_behavior = .@"opaque" };
 }
 pub fn v3EmptyState() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .row, .align_items = .center, .gap = 10, .padding = .{ .top = 8, .bottom = 8, .left = 4, .right = 4 }, .overflow = .hidden };
@@ -142,15 +142,15 @@ pub fn v3EmptyIcon() ui.BoxStyle {
 pub fn v3Segment() ui.BoxStyle {
     var s = row(30, 3);
     s.padding = ui.Padding.all(3);
-    s.background = theme.current().well;
+    s.background = theme.popupInset();
     s.border = .{ .radius = 8 };
     return s;
 }
 pub fn v3Filter(selected: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .flex = 1, .padding = .{ .top = 4, .bottom = 4, .left = 8, .right = 8 }, .font_size = 11, .font_weight = 400, .text_color = if (selected) theme.current().accent_ink else theme.current().fg_2, .background = if (selected) theme.current().selection else theme.current().surface_2, .border = .{ .radius = 6 }, .shadow = .{}, .align_items = .center, .justify = .center };
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .padding = .{ .top = 4, .bottom = 4, .left = 8, .right = 8 }, .font_size = 11, .font_weight = 400, .text_color = if (selected) theme.current().accent_ink else theme.current().fg_2, .background = if (selected) theme.popupSelection() else theme.popupAction(), .border = .{ .radius = 6 }, .shadow = .{}, .align_items = .center, .justify = .center };
 }
 pub fn v3Card() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = v3_card_height }, .direction = .column, .padding = .{ .left = 10, .right = 10, .top = 7, .bottom = 9 }, .background = theme.current().well, .border = .{ .radius = 7 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = v3_card_height }, .direction = .column, .padding = .{ .left = 10, .right = 10, .top = 7, .bottom = 9 }, .background = theme.popupInset(), .border = .{ .radius = 7 }, .flex_shrink = 0 };
 }
 pub fn v3TextAction() ui.BoxStyle {
     return .{ .height = .{ .px = 24 }, .padding = .{ .left = 6, .right = 6, .top = 2, .bottom = 2 }, .font_size = 11, .font_weight = 400, .text_color = theme.current().accent_ink, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 4 }, .shadow = .{}, .flex_shrink = 0 };
@@ -171,7 +171,7 @@ pub fn sessionTray() ui.BoxStyle {
 }
 
 pub fn hoverDetail() ui.BoxStyle {
-    return .{ .width = .{ .px = 420 }, .height = .{ .fit = .{} }, .min_width = 0, .direction = .column, .gap = 12, .padding = ui.Padding.all(14), .background = theme.current().overlay, .border = .{ .radius = 10 }, .shadow = .{ .offset_y = 8, .blur = 28, .color = theme.current().shadow }, .overflow = .hidden };
+    return .{ .width = .{ .px = 420 }, .height = .{ .fit = .{} }, .min_width = 0, .direction = .column, .gap = 12, .padding = ui.Padding.all(14), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 10 }, .shadow = .{ .offset_y = 8, .blur = 28, .color = theme.current().shadow }, .overflow = .hidden };
 }
 
 pub fn hoverDetailField() ui.BoxStyle {
@@ -179,9 +179,20 @@ pub fn hoverDetailField() ui.BoxStyle {
 }
 
 pub fn hoverDetailIdentity() ui.BoxStyle {
-    return .{ .width = .fill(), .min_width = 0, .padding = .{ .top = 7, .bottom = 7, .left = 8, .right = 8 }, .background = theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .min_width = 0, .padding = .{ .top = 7, .bottom = 7, .left = 8, .right = 8 }, .background = theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 
 pub fn optionTag(enabled: bool) ui.BoxStyle {
     return .{ .height = .{ .px = 24 }, .padding = .{ .left = 8, .right = 8, .top = 3, .bottom = 3 }, .background = (if (enabled) theme.current().ok else theme.current().fg_2).withAlpha(28), .border = .{ .radius = 5 }, .flex_shrink = 0 };
+}
+
+// V3 compact scope chip and menu share the session-menu density.
+pub fn scopeTrigger() ui.BoxStyle {
+    return .{ .height = .{ .px = 22 }, .padding = .{ .left = 8, .right = 6 }, .gap = 5, .background = theme.popupAction(), .border = .{ .width = 0, .radius = 6 }, .shadow = .{ .blur = 0, .color = ui.Color.TRANSPARENT }, .inset_shadow = .{ .blur = 0, .color = ui.Color.TRANSPARENT } };
+}
+pub fn scopeMenu() ui.BoxStyle {
+    return .{ .padding = ui.Padding.all(6), .gap = 0, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = 11 }, .shadow = .{ .blur = 24, .offset_y = 8, .color = theme.current().shadow } };
+}
+pub fn scopeOption() ui.BoxStyle {
+    return .{ .height = .{ .px = 33 }, .min_height = 33, .padding = .{ .left = 10, .right = 10 }, .border = .{ .width = 0, .radius = 7 }, .flex_shrink = 0 };
 }

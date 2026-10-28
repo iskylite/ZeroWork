@@ -272,6 +272,7 @@ test "file workspace real row click Cmd Shift checkbox selection uses original k
     try std.testing.expectEqual(@as(usize, 1), f.record.count);
     try std.testing.expectEqualStrings(entries[2].absolute_path, f.record.keys[0][0..f.record.lengths[0]]);
     try std.testing.expectEqual(@as(usize, 1), f.view.panes[0].projection().?.selected_keys.len);
+    try std.testing.expectEqual(@import("ui/app_theme.zig").popupSelection(), f.row(.local, entries[2].absolute_path).getBackground());
     f.click(f.row(.local, entries[3].absolute_path), .{ .super = true });
     try std.testing.expectEqual(@as(usize, 2), f.record.count);
     try std.testing.expect(f.view.panes[0].mixed.peek());
@@ -498,7 +499,14 @@ test "file workspace global theme material updates every card without replacing 
         try std.testing.expectEqual(theme.current().fg_1, pane.title.getText().?.color);
         try std.testing.expectEqual(@as(f32, 11.5), pane.path.state.text_display_node.?.getText().?.font_size);
     }
-    try std.testing.expectEqual(theme.current().selection, f.row(.local, entries[2].absolute_path).getBackground());
+    try std.testing.expectEqual(theme.popupSelection(), f.row(.local, entries[2].absolute_path).getBackground());
+    const selected_row = f.row(.local, entries[2].absolute_path);
+    const rect = selected_row.globalRect();
+    f.cx.handleMouseMove(rect.x + 100, rect.y + rect.h / 2);
+    f.settle();
+    try std.testing.expectEqual(theme.popupSelection(), selected_row.getBackground());
+    try std.testing.expectEqual(theme.popupSelection(), find(selected_row, "files.row.columns").?.getBackground());
+
     try std.testing.expectEqual(revision, f.current().revision);
     try std.testing.expectEqualStrings(entries[2].absolute_path, f.view.panes[0].projection().?.selected_keys[0]);
     try std.testing.expectEqual(@as(usize, 0), f.calls);

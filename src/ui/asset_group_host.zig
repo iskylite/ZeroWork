@@ -112,6 +112,7 @@ pub const View = struct {
         self.field = try ui.box(cx, S.field(false), .{});
         self.field_label = try self.label(self.field, "分组名称", 16, S.text(11, 500, false));
         self.input = try ui.widgets.Input(.{ .value = self.value, .disabled = self.disabled, .on_change = cx.on(View, self, changed), .on_submit = cx.on(View, self, inputSubmit) }).mountResult(scope, cx);
+        @import("app_theme.zig").styleInput(self.input);
         self.input.input_container.setStyleInline(cx.allocator, S.input());
         self.input.input_container.meta.ownership.meta.test_id = "asset.group.input";
         S.tuneInput(&self.input);

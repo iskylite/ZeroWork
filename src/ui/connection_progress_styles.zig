@@ -9,7 +9,7 @@ pub const authentication_height: f32 = 346;
 pub const max_hops = 9;
 
 pub fn panel(h: f32, viewport_width: f32) ui.BoxStyle {
-    return .{ .width = .{ .px = @min(width, @max(160, viewport_width - 16)) }, .height = .{ .px = h }, .padding = .{}, .gap = 0, .direction = .column, .background = theme.current().overlay, .border = .{ .radius = 14 }, .overflow_hidden = true };
+    return .{ .width = .{ .px = @min(width, @max(160, viewport_width - 16)) }, .height = .{ .px = h }, .padding = .{}, .gap = 0, .direction = .column, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .overflow_hidden = true };
 }
 pub fn header() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 40 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 12, .right = 12 }, .flex_shrink = 0 };
@@ -35,13 +35,13 @@ pub fn chainScroll() ui.BoxStyle {
 pub fn chain(count: usize, available: f32) ui.BoxStyle {
     _ = count;
     _ = available;
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 0, .padding = ui.Padding.all(4), .background = theme.current().well, .border = .{ .radius = 9 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 0, .padding = ui.Padding.all(4), .background = theme.popupInset(), .border = .{ .radius = 9 }, .flex_shrink = 0 };
 }
 pub fn card(selected: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 36 }, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 10 }, .gap = 10, .background = if (selected) theme.current().selection else ui.Color.TRANSPARENT, .corner_radius = 6, .border = .{ .radius = 6, .width = 0 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 36 }, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 10 }, .gap = 10, .background = if (selected) theme.popupSelection() else ui.Color.TRANSPARENT, .corner_radius = 6, .border = .{ .radius = 6, .width = 0 }, .flex_shrink = 0 };
 }
 pub fn footer(compact: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 54 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = if (compact) 18 else 20, .right = if (compact) 18 else 20, .top = 10, .bottom = 10 }, .background = theme.current().surface_2, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 54 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = if (compact) 18 else 20, .right = if (compact) 18 else 20, .top = 10, .bottom = 10 }, .background = ui.Color.TRANSPARENT, .outline = null, .flex_shrink = 0 };
 }
 pub fn connector() ui.BoxStyle {
     return .{ .width = .{ .px = 24 }, .height = .{ .px = 52 }, .direction = .column, .align_items = .center, .justify = .center, .gap = 4, .flex_shrink = 0 };
@@ -82,7 +82,7 @@ pub fn notice(failed: bool) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 66, .padding = .{ .left = 14, .right = 14, .top = 12, .bottom = 12 }, .gap = 4, .direction = .column, .background = (if (failed) theme.current().danger else theme.current().accent).withAlpha(if (failed) 13 else 16), .border = .{ .radius = 9 }, .flex_shrink = 0 };
 }
 pub fn logs() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 124 }, .background = theme.current().well, .border = .{ .radius = 9 }, .flex_shrink = 0, .overflow_hidden = true };
+    return .{ .width = .fill(), .height = .{ .px = 124 }, .background = theme.popupInset(), .border = .{ .radius = 9 }, .flex_shrink = 0, .overflow_hidden = true };
 }
 pub fn logContent() ui.BoxStyle {
     var result = stack();

@@ -11,7 +11,7 @@ pub const fixed_height: f32 = 114; // chrome, header, scope, manage and feedback
 
 pub fn panel() ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(14), .background = c.overlay, .border = .{ .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(14), .background = c.overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
 }
 pub fn content() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 9, .min_height = 0 };

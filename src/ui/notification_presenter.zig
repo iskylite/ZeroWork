@@ -24,10 +24,17 @@ const Slot = struct {
     close: *ui.Node,
     actions: [3]Action,
     action_row: *ui.Node,
+    expand: *ui.Node,
+    expanded: bool = false,
     hovered: bool = false,
     obscured: bool = false,
     fn dismiss(self: *Slot) void {
         if (self.fact_id) |id| self.presenter.host.coordinator.dismissNotification(id);
+        self.presenter.cx.requestRedraw();
+    }
+    fn toggle(self: *Slot) void {
+        self.expanded = !self.expanded;
+        self.revision = 0;
         self.presenter.cx.requestRedraw();
     }
     fn enter(self: *Slot) void {
@@ -114,7 +121,12 @@ pub const Presenter = struct {
             try card.appendChild(cx.allocator, body);
             const source = try ui.textStyled(cx, S.line, "");
             source.setStyleInline(cx.allocator, S.lineBox(cx.tokens));
-            try body.appendChild(cx.allocator, source);
+            const secondary = try ui.box(cx, .{ .width = .fill(), .direction = .row, .align_items = .center, .gap = 6, .min_width = 0, .height = .{ .px = 22 }, .flex_shrink = 0 }, .{});
+            try body.appendChild(cx.allocator, secondary);
+            source.setStyleInline(cx.allocator, .{ .flex = 1, .height = .{ .px = 18 } });
+            try secondary.appendChild(cx.allocator, source);
+            const expand = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.chevron_down, .icon_size = @as(f32, 12), .variant = .ghost, .a11y_label = "展开通知详情", .base_style = @import("notification_history_styles.zig").expand(), .on_click = cx.on(Slot, slot, Slot.toggle) }).mount(scope, cx);
+            expand.meta.ownership.meta.test_id = "notifications.expand";
             source.meta.ownership.meta.test_id = "notifications.metadata";
             const detail = try ui.textStyled(cx, S.detail, "");
             detail.meta.ownership.meta.test_id = "notifications.detail";
@@ -131,19 +143,20 @@ pub const Presenter = struct {
             countdown.setStyleInline(cx.allocator, .{ .width = .{ .px = 64 }, .min_width = 64, .height = .{ .px = 18 }, .flex_shrink = 0 });
             const action_row = try ui.boxStyled(cx, S.actions, .{});
             try footer.appendChild(cx.allocator, action_row);
-            try action_row.appendChild(cx.allocator, countdown);
-            slot.* = .{ .presenter = self, .root = card, .icons = icons, .title = title, .detail = detail, .source = source, .footer = footer, .status_tag = status_tag, .status_label = status_label, .countdown = countdown, .close = close, .action_row = action_row, .actions = undefined };
+            try header.insertChildBefore(cx.allocator, countdown, close);
+            try secondary.appendChild(cx.allocator, expand);
+            slot.* = .{ .presenter = self, .root = card, .icons = icons, .title = title, .detail = detail, .source = source, .footer = footer, .status_tag = status_tag, .status_label = status_label, .countdown = countdown, .close = close, .action_row = action_row, .actions = undefined, .expand = expand };
             card.behavior.events.on_hover = cx.on(Slot, slot, Slot.enter);
             card.behavior.events.on_leave = cx.on(Slot, slot, Slot.leave);
             inline for (&slot.actions, 0..) |*action, j| {
-                const button = try ui.widgets.Button(.{ .a11y_label = "通知操作", .variant = if (j == 0) .primary else .secondary, .size = .xs, .base_style = if (j == 0) S.action(cx.tokens) else S.secondaryAction(cx.tokens), .hover_style = if (j == 0) S.actionHover() else .{ .background = theme.current().hover }, .on_click = cx.on(Action, action, Action.invoke) }).mount(scope, cx);
+                const button = try ui.widgets.Button(.{ .a11y_label = "通知操作", .variant = if (j == 0) .primary else .secondary, .size = .xs, .base_style = @import("notification_history_styles.zig").action(), .hover_style = .{ .background = theme.current().hover }, .on_click = cx.on(Action, action, Action.invoke) }).mount(scope, cx);
                 const label = try ui.textStyled(cx, S.actionLabel, "");
-                if (j > 0) label.setTextColor(theme.current().fg_1);
+                label.setTextColor(theme.current().accent_ink);
                 label.setStyleInline(cx.allocator, .{ .height = .{ .px = 18 }, .min_width = 0, .flex_shrink = 1 });
                 try button.appendChild(cx.allocator, label);
                 action.* = .{ .slot = slot, .index = j, .root = button, .label = label };
                 button.meta.ownership.meta.test_id = "notifications.action";
-                try action_row.appendChild(cx.allocator, button);
+                if (j == 0) try secondary.insertChildBefore(cx.allocator, button, expand) else try action_row.appendChild(cx.allocator, button);
                 button.setDisplay(.none);
             }
             try scroll.content.appendChild(cx.allocator, card);
@@ -159,7 +172,7 @@ pub const Presenter = struct {
         };
         for (&self.slots) |*slot| if (slot.fact_id) |id| {
             const keyboard = if (self.cx.focus_manager.getFocused()) |focused| focused == slot.root or focused.isDescendantOf(slot.root) else false;
-            self.host.coordinator.pauseNotification(id, slot.hovered or keyboard or slot.obscured);
+            self.host.coordinator.pauseNotification(id, slot.hovered or keyboard or slot.obscured or slot.expanded);
         };
         const colors = theme.current();
         const theme_changed = self.colors == null or !std.meta.eql(self.colors.?, colors);
@@ -171,7 +184,7 @@ pub const Presenter = struct {
             slot.source.setTextColor(colors.fg_2);
             slot.detail.setTextColor(colors.fg_2);
             slot.countdown.setTextColor(colors.fg_2);
-            for (slot.actions, 0..) |action, index| action.label.setTextColor(if (index == 0) theme.actionForeground(colors.action_accent) else colors.fg_1);
+            for (slot.actions) |action| action.label.setTextColor(colors.accent_ink);
         };
         var records: [3]*const notifications.NotificationRecord = undefined;
         const count = self.host.coordinator.visibleNotifications(@backingInt(self.window_id), now_ms, window_focused, &records);
@@ -185,8 +198,8 @@ pub const Presenter = struct {
                 continue;
             }
             const record = records[i];
-            const structured = std.mem.startsWith(u8, record.event.definition_id, "host.") and !std.mem.eql(u8, record.event.definition_id, "host.feedback");
-            const tagged = structured or record.event.actions.len > 0;
+            const detail = @import("notification_card.zig").extraDetail(record.event);
+            const tagged = false;
             slot.action_row.setStyle(self.cx.allocator, .flex_wrap, if (record.event.actions.len > 1) .wrap else .no_wrap);
             const action_width = @max(1, width - 34 - 22 - (if (tagged) @as(f32, 76) else 0) - (if (!record.persistent()) @as(f32, 68) else 0));
             for (&slot.actions) |*action| {
@@ -194,6 +207,7 @@ pub const Presenter = struct {
                 action.label.setStyle(self.cx.allocator, .max_width, @max(1, action_width - 20));
             }
             if (theme_changed or slot.fact_id != record.fact_id or slot.revision != record.event.event_revision) {
+                if (slot.fact_id != record.fact_id) slot.expanded = false;
                 slot.fact_id = record.fact_id;
                 slot.revision = record.event.event_revision;
                 slot.root.behavior.interaction.a11y = .{ .role = if (record.persistent()) .alert else .status, .live = if (record.persistent()) "assertive" else "polite" };
@@ -201,13 +215,25 @@ pub const Presenter = struct {
                 // history expansion retains the complete title and details.
                 try setLine(self.cx, slot.title, record.event.title);
                 try setLine(self.cx, slot.detail, record.event.detail);
-                slot.detail.setStyleInline(self.cx.allocator, S.lineBox(self.cx.tokens));
+                slot.detail.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .flex_shrink = 0 });
+                if (slot.detail.getText()) |text| {
+                    var wrapped = text;
+                    wrapped.wrap = .word;
+                    wrapped.text_overflow = .clip;
+                    slot.detail.setText(wrapped);
+                }
                 try slot.status_label.setTextContent(self.cx.allocator, statusLabel(record.event));
                 slot.status_tag.setStyleInline(self.cx.allocator, S.statusTag(@backingInt(record.event.severity)));
                 slot.status_label.setTextColor(S.statusInk(@backingInt(record.event.severity)));
                 slot.status_tag.setDisplay(if (tagged) .flex else .none);
-                slot.footer.setDisplay(if (tagged or !record.persistent()) .flex else .none);
-                slot.detail.setDisplay(if (record.event.detail.len != 0) .flex else .none);
+                slot.footer.setDisplay(if (slot.expanded and record.event.actions.len > 1) .flex else .none);
+                slot.detail.setDisplay(if (slot.expanded and detail.len != 0) .flex else .none);
+                slot.expand.setDisplay(if (detail.len > 0 or record.event.actions.len > 1) .flex else .none);
+                slot.expand.setStyle(self.cx.allocator, .rotate, if (slot.expanded) @as(f32, std.math.pi) else @as(f32, 0));
+                if (slot.expand.behavior.interaction.a11y) |*attrs| {
+                    attrs.expanded = slot.expanded;
+                    attrs.label = if (slot.expanded) "收起通知详情" else "展开通知详情";
+                }
                 for (slot.icons, 0..) |icon, j| icon.setDisplay(if (j == @backingInt(record.event.severity)) .flex else .none);
                 for (&slot.actions, 0..) |*action, j| {
                     if (j >= record.event.actions.len) {
@@ -216,7 +242,7 @@ pub const Presenter = struct {
                     }
                     try action.label.setTextContent(self.cx.allocator, record.event.actions[j].label);
                     action.root.behavior.interaction.a11y = .{ .role = .button, .label = action.label.getText().?.content };
-                    action.root.setDisplay(.flex);
+                    action.root.setDisplay(if (j == 0 or slot.expanded) .flex else .none);
                 }
                 slot.action_row.setDisplay(if (record.event.actions.len == 0 and record.persistent()) .none else .flex);
             }
@@ -226,17 +252,8 @@ pub const Presenter = struct {
                 const text = try std.fmt.bufPrint(&remaining, "{d} 秒后关闭", .{(record.remaining_ms + 999) / 1000});
                 try slot.countdown.setTextContent(self.cx.allocator, text);
             }
-            const source = record.event.owner_name;
-            var metadata_buffer: [1536]u8 = undefined;
-            const object = if (std.mem.eql(u8, record.event.object_name, source)) "" else record.event.object_name;
-            const metadata = if (source.len > 0 and object.len > 0)
-                try std.fmt.bufPrint(&metadata_buffer, "{s} · {s}", .{ source, object })
-            else if (source.len > 0) source else object;
-            var ended_buffer: [1600]u8 = undefined;
-            const identified = if (record.owner_ended)
-                try std.fmt.bufPrint(&ended_buffer, "{s} · 所属会话已结束", .{if (metadata.len == 0) "会话" else metadata})
-            else
-                metadata;
+            const identified = try @import("notification_card.zig").summary(self.cx.allocator, record.event, record.owner_ended);
+            defer self.cx.allocator.free(identified);
             try setLine(self.cx, slot.source, identified);
             slot.source.setDisplay(if (identified.len == 0) .none else .flex);
             slot.root.setDisplay(.flex);
@@ -273,7 +290,7 @@ pub const Presenter = struct {
             slot.obscured = covered;
             slot.root.setOpacityRaw(if (slot.obscured) 0 else 1);
             slot.root.setStyle(self.cx.allocator, .hit_behavior, if (slot.obscured) .pass_through else .@"opaque");
-            self.host.coordinator.pauseNotification(record.fact_id, slot.hovered or slot.obscured or (if (self.cx.focus_manager.getFocused()) |focused| focused == slot.root or focused.isDescendantOf(slot.root) else false));
+            self.host.coordinator.pauseNotification(record.fact_id, slot.hovered or slot.obscured or slot.expanded or (if (self.cx.focus_manager.getFocused()) |focused| focused == slot.root or focused.isDescendantOf(slot.root) else false));
         }
 
         self.root.setDisplay(if (covered or count == 0) .none else .flex);

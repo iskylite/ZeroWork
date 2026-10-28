@@ -6,7 +6,7 @@ p = argparse.ArgumentParser()
 p.add_argument('--runner', required=True)
 p.add_argument('--output', required=True)
 p.add_argument('--jump', action='store_true')
-p.add_argument('--scenario', choices=['baseline', 'source-first', 'child-first', 'interleaved', 'simultaneous-live', 'simultaneous-broken', 'close-during-reconnect', 'cancel-open', 'cancel-pty', 'cancel-shell', 'timeout-open', 'timeout-pty', 'timeout-shell', 'eof-loss', 'jump-forwards'], default='baseline')
+p.add_argument('--scenario', choices=['baseline', 'details', 'reconnect-fallback', 'source-first', 'child-first', 'interleaved', 'simultaneous-live', 'simultaneous-broken', 'close-during-reconnect', 'cancel-open', 'cancel-pty', 'cancel-shell', 'timeout-open', 'timeout-pty', 'timeout-shell', 'eof-loss', 'jump-forwards'], default='baseline')
 a = p.parse_args()
 out = Path(a.output).resolve(); out.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='zw-shared-acceptance-') as directory:
@@ -14,6 +14,7 @@ with tempfile.TemporaryDirectory(prefix='zw-shared-acceptance-') as directory:
     peer_log = (out / 'peer.log').open('w')
     peer_command=[sys.executable, str(Path(__file__).with_name('ssh_tab_connections_peer.py')), '--out', str(root / 'peer')]
     if a.scenario.startswith(('cancel-','timeout-')): peer_command+=['--hold-request',a.scenario.split('-',1)[1]]
+    if a.scenario=='reconnect-fallback': peer_command+=['--hold-request','open']
     if a.scenario=='eof-loss': peer_command+=['--drop-after-eof']
     peer = subprocess.Popen(peer_command, stdout=peer_log, stderr=subprocess.STDOUT)
     jump = None
@@ -53,6 +54,10 @@ with tempfile.TemporaryDirectory(prefix='zw-shared-acceptance-') as directory:
         shells = [json.loads(path.read_text()) for path in (root / 'peer').glob('shell-*.json')]
         if a.scenario == 'baseline':
             expected_connections, expected_shells = (1, 3) if a.jump else (4, 8)
+        elif a.scenario == 'details':
+            expected_connections, expected_shells = 1, 4
+        elif a.scenario == 'reconnect-fallback':
+            expected_connections, expected_shells = 2, 3
         elif a.scenario.startswith(('cancel-', 'timeout-')):
             expected_connections, expected_shells = 1, (2 if a.scenario.endswith(('open','pty')) else 3)
         elif a.scenario=='eof-loss':

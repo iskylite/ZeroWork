@@ -17,6 +17,8 @@ pub const Manager = struct {
         context: *anyopaque,
         reset: *const fn (*anyopaque) void,
         delta: *const fn (*anyopaque, provider.Delta) anyerror!void,
+        /// Calls rejected by parsing or preflight may never reach the tool host.
+        tool_rejected: ?*const fn (*anyopaque, provider.ToolCall, []const u8) anyerror!void = null,
     };
     allocator: std.mem.Allocator,
     observer: ?Observer = null,
@@ -380,6 +382,17 @@ pub const Manager = struct {
         const loop = self.tool_run.?;
         const records_start = loop.records.items.len;
         try loop.complete(self.round_text.items, calls[0..count], .{ .context = self, .execute = execute, .execute_dynamic = executeDynamic }, policy, policy_revision, cancel);
+        if (self.observer) |observer| if (observer.tool_rejected) |notify| {
+            for (calls[0..count]) |call| {
+                const record = blk: {
+                    for (loop.records.items) |*record| if (std.mem.eql(u8, record.key.call_id, call.id)) break :blk record;
+                    break :blk null;
+                };
+                if (record) |result| {
+                    if (!result.dispatched) try notify(observer.context, call, result.result_body orelse "工具未执行");
+                } else try notify(observer.context, call, "工具调用次数已达上限");
+            }
+        };
         self.open_text_card = null;
         for (loop.records.items[records_start..]) |record| {
             try self.audit_log.append(.{ .timestamp_ms = self.timestamp_ms, .turn_id = self.turn_id, .command = record.arguments, .verdict = if (record.dispatched) "tool_result" else "tool_rejected", .target = record.name, .call_id = record.key.call_id });

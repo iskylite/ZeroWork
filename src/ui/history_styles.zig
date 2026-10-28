@@ -5,7 +5,7 @@ const theme = @import("app_theme.zig");
 pub const row_height: f32 = 80;
 pub const row_gap: f32 = 10;
 pub fn card() ui.BoxStyle {
-    return .{ .width = .{ .px = 560 }, .direction = .column, .background = theme.current().overlay, .border = .{ .radius = 14 }, .overflow = .hidden, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 560 }, .direction = .column, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .overflow = .hidden, .flex_shrink = 0 };
 }
 pub fn header() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 48 }, .direction = .row, .align_items = .center, .padding = .{ .left = 16, .right = 11 }, .gap = 6, .flex_shrink = 0 };
@@ -14,7 +14,7 @@ pub fn list() ui.BoxStyle {
     return .{ .width = .fill(), .direction = .column, .gap = row_gap, .padding = .{ .left = 16, .right = 16, .top = 8, .bottom = 16 } };
 }
 pub fn row() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .column, .padding = ui.Padding.all(10), .gap = 6, .background = theme.current().surface_2, .border = .{ .radius = 9 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .column, .padding = ui.Padding.all(10), .gap = 6, .background = theme.popupAction(), .border = .{ .radius = 9 }, .flex_shrink = 0 };
 }
 pub fn metadata() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
@@ -35,7 +35,7 @@ pub fn text(size: f32, weight: u16, secondary: bool) ui.TextStyle {
     return .{ .font_size = size, .font_weight = weight, .line_height = (if (size == 12) @as(f32, 18) else 16) / size, .color = if (secondary) theme.current().fg_2 else theme.current().fg_1, .text_overflow = .ellipsis, .selectable = false };
 }
 pub fn chip() ui.BoxStyle {
-    return .{ .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .padding = .{ .left = 9, .right = 9 }, .background = theme.current().surface_2, .border = .{ .radius = 8 }, .flex_shrink = 0 };
+    return .{ .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .padding = .{ .left = 9, .right = 9 }, .background = theme.popupAction(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 const Time = extern struct { sec: c_int, min: c_int, hour: c_int, day: c_int, month: c_int, year: c_int, week_day: c_int, year_day: c_int, daylight: c_int, offset: c_long, zone: ?[*:0]const u8 };
 extern "c" fn localtime_r(*const c_long, *Time) ?*Time;

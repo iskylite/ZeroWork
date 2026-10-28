@@ -457,13 +457,13 @@ pub const View = struct {
         self.caption.setTextColor(S.theme.current().fg_2);
         self.groups.setDisplay(if (self.step == .move_select) .flex else .none);
         self.pair.setDisplay(if (self.step == .move_confirm) .flex else .none);
-        self.pair.setBackground(S.theme.current().surface_2);
+        self.pair.setBackground(S.theme.popupAction());
         try self.setFmt(self.from, "来源分组  {s}", .{snapshot.source_group_name});
         try self.setFmt(self.to, "目标分组  {s}", .{if (option) |value| value.name else "未选择"});
         self.from.setTextColor(S.theme.current().fg_2);
         self.to.setTextColor(S.theme.current().fg_1);
         self.target.setDisplay(if (self.step == .move_success) .flex else .none);
-        self.target.setBackground(S.theme.current().surface_2);
+        self.target.setBackground(S.theme.popupAction());
         _ = self.target_icon.setTint(S.theme.current().accent);
         try self.target_name.setTextContent(a, if (option) |value| value.name else "未选择");
         try self.setFmt(self.target_count, "{d} 台主机", .{if (option) |value| value.host_count +| 1 else 0});

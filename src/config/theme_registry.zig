@@ -176,7 +176,7 @@ pub const Registry = struct {
     pub fn init(allocator: std.mem.Allocator) !Registry {
         var self: Registry = .{ .allocator = allocator };
         errdefer self.deinit();
-        for (presets.ids ++ [_][]const u8{ "catppuccin-mocha", "dracula", "dark-pro", "solarized-dark", "nord" }) |id| {
+        for (presets.ids) |id| {
             const preset = builtinTheme(id);
             var colors = builtinTokens(id);
             if (presets.tokens(UiTokens, id) == null) {
@@ -463,7 +463,7 @@ fn builtinTheme(id: []const u8) importer.Theme {
     }
     if (presets.tokens(UiTokens, id) != null and !std.mem.eql(u8, id, "dark") and !std.mem.eql(u8, id, "light") and !std.mem.eql(u8, id, "sauber")) {
         result.name = presets.name(id);
-        result.cursor = colors.accent_ink;
+        result.cursor = builtinAnsi(id)[12];
     }
     // Preserve the terminal palettes that the existing implementation exposes;
     // the registry is now their global identity/lookup owner.
@@ -605,4 +605,37 @@ test "V3 presets have complete semantic tokens opaque ANSI and protected identit
         try std.testing.expect(importer.builtinId(id) != null);
     }
     try std.testing.expect(registry.get("forest").?.ui_tokens.app != registry.get("ocean").?.ui_tokens.app);
+}
+
+test "complete UI themes preserve existing terminal color contracts" {
+    var registry = try Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    const expected = .{
+        .{ "dark", @as(u64, 0xf64c6d099c9b109f) },
+        .{ "light", @as(u64, 0x2885caa256b7fc06) },
+        .{ "sauber", @as(u64, 0x67e5e042127ad302) },
+        .{ "midnight", @as(u64, 0x5c1a76d6a7ab77bf) },
+        .{ "forest", @as(u64, 0x6e542636372ddfbd) },
+        .{ "ocean", @as(u64, 0x0ad02c4d292e2e14) },
+        .{ "plum", @as(u64, 0x0284c4cc7172f3a0) },
+        .{ "ember", @as(u64, 0x32503a5c2cae8d74) },
+        .{ "graphite", @as(u64, 0x654bd2a9010ad0d4) },
+        .{ "paper", @as(u64, 0xcd96baa71fed4c36) },
+        .{ "sand", @as(u64, 0x0151adcdb73d3a57) },
+        .{ "ice", @as(u64, 0x32b223068b008344) },
+        .{ "catppuccin-mocha", @as(u64, 0x8f0fe7a4c3d58f10) },
+        .{ "dracula", @as(u64, 0x4f98371722370a83) },
+        .{ "dark-pro", @as(u64, 0xbbdb1bd51a1274ae) },
+        .{ "solarized-dark", @as(u64, 0x2edf848aa5a4e2bb) },
+        .{ "nord", @as(u64, 0x3a75432252c0c280) },
+    };
+    inline for (expected) |entry| {
+        const terminal = registry.get(entry[0]).?.theme;
+        var fingerprint: u64 = 14695981039346656037;
+        for ([_]u32{ terminal.bg, terminal.fg, terminal.cursor, terminal.selection.? } ++ terminal.ansi) |rgba| {
+            inline for (.{ 24, 16, 8, 0 }) |shift|
+                fingerprint = (fingerprint ^ @as(u8, @truncate(rgba >> shift))) *% 1099511628211;
+        }
+        try std.testing.expectEqual(entry[1], fingerprint);
+    }
 }

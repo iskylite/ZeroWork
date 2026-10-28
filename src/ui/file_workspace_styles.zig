@@ -19,13 +19,13 @@ pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .min_height = 0, .direction = .column, .gap = 0, .padding = ui.Padding.all(1), .background = theme.current().surface_1, .shadow = @import("shell_styles.zig").cardShadow(), .inset_shadow = @import("shell_styles.zig").cardHighlight(), .border = .{ .radius = 11, .width = 0, .color = theme.current().border }, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn toolbar(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0, .direction = .column, .gap = 10, .padding = .{ .top = 14, .right = 13, .bottom = 11, .left = 13 }, .border = .{ .width = 0, .side_widths = .{ 0, 0, 1, 0 }, .color = theme.current().border } };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0, .direction = .column, .gap = 10, .padding = .{ .top = 14, .right = 13, .bottom = 11, .left = 13 }, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT } };
 }
 pub fn footer(_: *const ui.ThemeTokens) ui.BoxStyle {
     var value = line(36);
     value.padding = .{ .left = 13, .right = 13 };
     value.gap = 8;
-    value.border = .{ .width = 0, .side_widths = .{ 1, 0, 0, 0 }, .color = theme.current().border };
+    value.border = .{ .width = 0, .color = ui.Color.TRANSPARENT };
     return value;
 }
 pub fn line(height: f32) ui.BoxStyle {
@@ -64,7 +64,7 @@ pub fn iconButton(size: f32) ButtonStyle {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .gap = 0, .flex_shrink = 0, .corner_radius = 7, .background = ui.Color.TRANSPARENT };
 }
 pub fn pathField(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .flex = 1, .min_width = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 8 }, .gap = 6, .background = theme.current().well, .border = .{ .radius = 8 }, .overflow = .hidden, .overflow_hidden = true };
+    return .{ .width = .fill(), .height = .{ .px = 30 }, .flex = 1, .min_width = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 8 }, .gap = 6, .background = theme.popupInset(), .border = .{ .width = 0, .radius = 8 }, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn pathInput() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 30 }, .flex = 1, .min_width = 0, .padding = .{}, .border = .{ .width = 0 }, .background = ui.Color.TRANSPARENT };
@@ -85,7 +85,7 @@ pub fn sortButton(width: f32) ButtonStyle {
     return .{ .width = .{ .px = width }, .height = .{ .px = header_height }, .padding = .{ .left = 7, .right = 7 }, .gap = 0, .flex_shrink = 0, .background = ui.Color.TRANSPARENT };
 }
 pub fn fileRow(width: f32, selected: bool, focused: bool) ButtonStyle {
-    return .{ .width = .{ .px = width }, .height = .{ .px = row_height }, .padding = .{}, .gap = 0, .flex_shrink = 0, .corner_radius = 0, .background = if (selected or focused) theme.current().selection else ui.Color.TRANSPARENT, .border = .{ .width = 0, .side_widths = .{ 0, 0, 1, 0 }, .color = theme.current().border } };
+    return .{ .width = .{ .px = width }, .height = .{ .px = row_height }, .padding = .{}, .gap = 0, .flex_shrink = 0, .corner_radius = 0, .background = if (selected or focused) theme.popupSelection() else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT } };
 }
 pub fn viewport() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .min_width = 0 };
@@ -110,6 +110,7 @@ pub fn repaint(node: *ui.Node, previous: theme.Colors) void {
     for (node.children.items) |child| repaint(child, previous);
 }
 fn remap(color: ui.Color, previous: theme.Colors) ui.Color {
+    if (theme.remapUiSurface(color, previous)) |next| return next;
     inline for (@typeInfo(theme.Colors).@"struct".field_names) |field| {
         if (ui.Color.eql(color, @field(previous, field))) return @field(theme.current(), field);
     }
@@ -122,5 +123,5 @@ pub fn dragPreview(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 
 pub fn dragGhost() ui.BoxStyle {
-    return .{ .position = .absolute, .width = .{ .px = 220 }, .height = .{ .px = 36 }, .padding = ui.Padding.all(8), .background = theme.current().overlay, .border = .{ .radius = 8 }, .shadow = .{ .blur = 16, .offset_y = 4, .color = theme.current().shadow }, .z_index = 80, .hit_behavior = .pass_through };
+    return .{ .position = .absolute, .width = .{ .px = 220 }, .height = .{ .px = 36 }, .padding = ui.Padding.all(8), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 8 }, .shadow = .{ .blur = 16, .offset_y = 4, .color = theme.current().shadow }, .z_index = 80, .hit_behavior = .pass_through };
 }

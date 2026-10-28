@@ -1,0 +1,55 @@
+@font-face{font-family:Inter;src:url(../../assets/fonts/InterVariable.woff2)}
+@font-face{font-family:JetBrainsMono;src:url(../../assets/fonts/JetBrainsMono-Regular.ttf)}
+*{box-sizing:border-box}
+body{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;font-size:13px;background:#17191d;color:#ecedf1}
+.review{height:64px;display:flex;align-items:center;gap:24px;padding:0 28px;border-bottom:1px solid #3d414a}
+.review strong{margin-right:auto}
+.review select{font:inherit;padding:6px 10px;background:#292c33;color:#ecedf1;border:1px solid #555b68;border-radius:6px}
+.review label{display:flex;gap:8px;align-items:center}
+#stage{position:relative;height:calc(100vh - 64px);min-height:400px;background:var(--app);color:var(--fg_1);overflow:hidden}
+.terminal{position:absolute;left:48px;top:48px;font:18px/2 Menlo,monospace;color:var(--fg_2);opacity:.65}
+.terminal span{color:var(--accent)}
+#palette{position:absolute;top:90px;left:50%;transform:translateX(-50%);width:520px;max-width:calc(100% - 16px);border-radius:14px;background:var(--overlay);outline:none;backdrop-filter:blur(12px);box-shadow:0 24px 48px var(--shadow);overflow:hidden}
+.heading{display:flex;align-items:center;height:48px;gap:6px;padding:0 14px 0 16px}
+svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;flex-shrink:0}
+.heading>svg{color:var(--accent)}
+h1{font-size:13px;line-height:20px;font-weight:700;flex:1;margin:0}
+button{cursor:pointer;font:inherit;flex-shrink:0}
+.close{color:var(--fg_2);background:none;border:0;width:22px;height:22px;font-size:21px;padding:0}
+.body{display:flex;flex-direction:column;gap:6px;padding:8px 16px 16px}
+.search{display:flex;align-items:center;gap:8px;height:40px;padding:0 12px;border:0;box-shadow:none;border-radius:8px;background:var(--inset);color:var(--fg_2);flex-shrink:0}
+.search:focus-within{background:var(--selected);box-shadow:none}
+.search input{border:0;outline:0;background:transparent;color:var(--fg_1);font-family:inherit;font-size:14px;line-height:20px;min-width:0;flex:1;padding:0}
+.search input::placeholder{color:var(--fg_2)}
+.results{display:flex;flex-direction:column;gap:6px}
+.caption{height:16px;font-size:11px;line-height:16px;color:var(--fg_2);margin:0}
+.rows{display:flex;flex-direction:column;gap:6px}
+.row{height:44px;border:0;outline:none;background:transparent;padding:0 10px;display:flex;align-items:center;gap:10px;border-radius:8px;text-align:left;color:var(--fg_1);width:100%;min-width:0}
+.row.selected{background:var(--selected)}
+.row>svg{width:20px;height:20px;color:var(--fg_2)}
+.labels{display:flex;flex-direction:column;flex:1;min-width:0;gap:0}
+.name{font-size:13px;font-weight:600;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.endpoint{font:11px/16px JetBrainsMono,monospace;color:var(--fg_2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hint{height:16px;font-size:10.5px;line-height:16px;color:var(--fg_2);margin:0}
+.gap{height:2px}
+footer{height:46px;display:flex;align-items:flex-end;justify-content:space-between;border-top:0;gap:8px}
+footer button{height:34px;width:144px;border:0;border-radius:8px;font-size:12px;font-weight:500}
+.primary{background:var(--action_accent);color:var(--action-fg)}
+.secondary{background:var(--subtle);color:var(--secondary-ink)}
+.row:hover{background:var(--subtle)}
+.row.selected:hover{background:var(--selected)}
+.selected .endpoint{color:var(--row-meta)}
+body.before #palette{outline:0;box-shadow:0 24px 32px var(--shadow)}
+body.before .search{background:var(--well);border:0}
+body.before .row{height:28px;padding:0 8px;gap:6px;border:0}
+body.before .row.selected{background:var(--old-selected)}
+body.before .row>svg{width:14px;height:14px}
+body.before .labels{flex-direction:row;align-items:center;gap:6px}
+body.before .name{width:108px;flex-shrink:0;font-size:11px;font-weight:500;line-height:16px}
+body.before .endpoint{font-size:9.5px;line-height:14px}
+body.before footer{height:34px;border:0}
+body.before .primary{background:var(--accent);color:white}
+body.before .secondary{background:var(--surface_2);color:var(--fg_2)}
+@media(max-width:600px){.review{gap:8px;padding:0 12px}
+.review strong{display:none}
+}

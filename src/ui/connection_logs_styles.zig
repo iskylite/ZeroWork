@@ -43,7 +43,7 @@ pub fn feedbackBox() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 16 }, .flex = 1, .min_width = 0 };
 }
 pub fn well() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .background = theme.current().well, .border = .{ .radius = 9 }, .overflow_hidden = true };
+    return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .background = theme.popupInset(), .border = .{ .radius = 9 }, .overflow_hidden = true };
 }
 pub fn logContent() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(12), .gap = 0, .flex_shrink = 0 };
@@ -73,7 +73,7 @@ pub fn footer() ui.BoxStyle {
     return result;
 }
 pub fn button(w: f32, h: f32, primary: bool) ButtonStyle {
-    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .gap = 0, .corner_radius = 8, .border_width = 0, .background = if (primary) theme.current().accent else theme.current().surface_2, .flex_shrink = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .gap = 0, .corner_radius = 8, .border_width = 0, .background = if (primary) theme.current().accent else theme.popupAction(), .flex_shrink = 0 };
 }
 pub fn closeIcon() ButtonStyle {
     var result = button(22, 22, false);

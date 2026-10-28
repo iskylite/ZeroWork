@@ -36,7 +36,7 @@ pub const Diagnostic = struct {
             500...503, 505...599 => "模型服务暂不可用",
             else => "请求失败",
         };
-        return if (self.status != 0) std.fmt.bufPrint(buffer, "HTTP {d} · {s}（{s}）{s}{s}", .{ self.status, summary, @errorName(err), if (self.len > 0) "\n" else "", self.message[0..self.len] }) catch @errorName(err) else std.fmt.bufPrint(buffer, "请求失败 · {s}", .{@errorName(err)}) catch @errorName(err);
+        return if (self.status != 0) std.fmt.bufPrint(buffer, "HTTP {d} · {s}{s}{s}", .{ self.status, summary, if (self.len > 0) "\n" else "", self.message[0..self.len] }) catch @errorName(err) else if (err == error.Timeout) "请求超时 · 模型长时间未返回新内容" else std.fmt.bufPrint(buffer, "请求失败 · {s}", .{@errorName(err)}) catch @errorName(err);
     }
 };
 
@@ -49,6 +49,7 @@ pub const RequestPlan = struct {
     auth_style: AuthStyle,
     api_key: ?[]const u8 = null,
     timeout_ms: u32 = 60_000,
+    idle_timeout_ms: ?u32 = null,
     cancel: ?*provider.CancelToken = null,
 };
 

@@ -8,3 +8,17 @@
 .v3-control-toggle:not(.on):not([aria-checked=true]){background-color:color-mix(in srgb,var(--surface-2-base) 65%,var(--fg-3) 35%)}
 .v3-control-toggle.on,.v3-control-toggle[aria-checked=true]{background-color:var(--action-accent)}
 .toolbar .v3-icon-action{width:var(--v3-icon-action-size);min-width:var(--v3-icon-action-size);height:var(--v3-icon-action-size);min-height:var(--v3-icon-action-size)}.toolbar .v3-icon-action svg{width:var(--v3-icon-size);height:var(--v3-icon-size)}
+
+/* UI selection owns its readable ink; terminal selection is independent. */
+#component-stage .segments button[aria-checked=true],#component-stage .sample-tabs [aria-selected=true],#component-stage .tree-node.selected{background:var(--popup-selected);color:var(--fg-1);border:0;box-shadow:none}
+#component-stage input:where(:not([type=checkbox]):not([type=radio]):not([type=range])),#component-stage textarea{background:var(--control-bg);border:0;outline:none;box-shadow:none;color:var(--fg-1)}
+#component-stage input:focus:not([type=checkbox]):not([type=radio]):not([type=range]),#component-stage textarea:focus{background:var(--popup-selected);outline:none;box-shadow:none}
+#component-stage input[aria-invalid=true]{background:color-mix(in srgb,var(--danger-base) 9%,var(--overlay-base));border:0;box-shadow:none}
+#component-stage .error{color:var(--danger-ink)}
+/* Match native neutral unchecked fills and explicit action/foreground on checked controls. */
+#component-stage input:is([type=checkbox],[type=radio]){appearance:none;display:inline-grid;place-content:center;width:18px;height:18px;vertical-align:middle;margin:0 6px 0 0;background:color-mix(in srgb,var(--overlay-base) 60%,var(--fg-2));border:0;outline:0;border-radius:4px;cursor:pointer}
+#component-stage input[type=radio]{border-radius:50%}
+#component-stage input:is([type=checkbox],[type=radio]):checked{background:var(--action-accent)}
+#component-stage input[type=checkbox]:checked::after{content:"";width:8px;height:4px;border-left:2px solid var(--accent-fg);border-bottom:2px solid var(--accent-fg);transform:translateY(-1px) rotate(-45deg)}
+#component-stage input[type=radio]:checked::after{content:"";width:9px;height:9px;background:var(--accent-fg);border-radius:50%}
+#component-stage input:is([type=checkbox],[type=radio]):focus-visible{filter:brightness(1.2)}

@@ -46,6 +46,7 @@ pub const Host = struct {
     probe_key: ?operations.OperationKey = null,
     probe_message: [160]u8 = undefined,
     probe_message_len: usize = 0,
+    probe_success_expires_ns: ?i128 = null,
     last_key: ?operations.OperationKey = null,
     last_phase: ?routes.Phase = null,
 
@@ -182,6 +183,7 @@ pub const Host = struct {
             self.probe_owner = null;
             self.probe_key = null;
             self.probe_message_len = 0;
+            self.probe_success_expires_ns = null;
             return;
         };
     }
@@ -204,6 +206,7 @@ pub const Host = struct {
         self.probe_owner = value.owner;
         self.probe_key = value.key;
         self.probe_message_len = 0;
+        self.probe_success_expires_ns = null;
         self.cx.scheduleRedrawAfterNs(25 * std.time.ns_per_ms);
     }
     fn desiredForward(self: *Host, legacy: ws.SessionId) ?Desired {
@@ -505,13 +508,19 @@ pub const Host = struct {
             .closed => if (value.failure != null) ForwardColors.text(.danger) else colors.fg_2,
         } else colors.fg_2);
         const state_ink = ForwardColors.statusBarInk(state_color);
-        label.setTextColor(state_ink);
+        label.setTextColor(colors.fg_1);
         if (self.chip) |chip| for (chip.children.items) |child| {
             if (child.getIcon() != null) _ = child.setTint(state_ink);
         };
         label.markRenderDirty();
     }
     fn poll(self: *Host) void {
+        if (self.probe_success_expires_ns) |deadline| {
+            if (@import("../platform/realtime.zig").monotonicNs() >= deadline) {
+                self.probe_message_len = 0;
+                self.probe_success_expires_ns = null;
+            }
+        }
         const active = self.backend.safeTick() catch |err| blk: {
             applog.warn(.ui, "SOCKS5 owner tick: {s}", .{@errorName(err)});
             break :blk true;
@@ -536,8 +545,12 @@ pub const Host = struct {
                 const current = value != null and self.probe_key != null and value.?.key.eql(self.probe_key.?) and value.?.phase == .ready;
                 if (current) {
                     const succeeded = result.status == .succeeded;
-                    const text = std.fmt.bufPrint(&self.probe_message, "{s} · {d} ms", .{ if (succeeded) "SOCKS CONNECT 成功" else if (result.failure) |err| @errorName(err) else "SOCKS CONNECT 失败", result.elapsed_ms }) catch "";
+                    var timestamp_buffer: [32]u8 = undefined;
+                    const timestamp = @import("../proto/ssh/forward_diagnostics.zig").formatTimestamp(&timestamp_buffer, @import("../platform/realtime.zig").milliseconds(undefined));
+                    const text = std.fmt.bufPrint(&self.probe_message, "{s} - {s} - {d} ms", .{ timestamp, if (succeeded) "SOCKS CONNECT 成功" else if (result.failure) |err| @errorName(err) else "SOCKS CONNECT 失败", result.elapsed_ms }) catch "";
                     self.probe_message_len = text.len;
+                    self.probe_success_expires_ns = if (succeeded) @import("../platform/realtime.zig").monotonicNs() + 5 * std.time.ns_per_s else null;
+                    if (succeeded) self.cx.scheduleRedrawAfterNs(5 * std.time.ns_per_s);
                     if (self.config) |view| if (view.visible) if (succeeded) view.setSuccess(text) else view.setError(text);
                 }
                 probe.deinit();
@@ -566,7 +579,7 @@ pub const Host = struct {
             }
         }
         self.refreshChip();
-        if (self.info) |view| if (view.root.style.display != .none) self.updateInfo();
+        if (self.info) |view| if (view.root.style.display != .none or view.logs_visible) self.updateInfo();
         if (active or self.pending_restart != null) self.cx.scheduleRedrawAfterNs(40 * std.time.ns_per_ms);
     }
     pub fn hookRun(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {

@@ -296,7 +296,7 @@ pub const Wizard = struct {
         self.protocol_picker = picker;
         for (self.protocol_options, 0..) |option, index| {
             const click = try scope.createState(ProtocolClick, .{ .wizard = self, .index = index });
-            const button = try ui.widgets.Button(.{ .label = option.label, .variant = .ghost, .disabled = self.locked.?, .on_click = cx.on(ProtocolClick, click, ProtocolClick.activate), .base_style = @as(@FieldType(ui.widgets.ControlShellConfig, "style"), .{ .width = .fill(), .flex = 1, .height = .{ .px = 31 }, .padding = .{}, .corner_radius = 7, .font_size = 11, .font_weight = 400, .text_color = if (std.mem.eql(u8, option.value, self.protocol_id)) S.theme.current().accent_ink else S.theme.current().fg_1, .background = if (std.mem.eql(u8, option.value, self.protocol_id)) S.theme.current().selection else ui.Color.TRANSPARENT, .border_width = 0 }) }).mount(scope, cx);
+            const button = try ui.widgets.Button(.{ .label = option.label, .variant = .ghost, .disabled = self.locked.?, .on_click = cx.on(ProtocolClick, click, ProtocolClick.activate), .base_style = @as(@FieldType(ui.widgets.ControlShellConfig, "style"), .{ .width = .fill(), .flex = 1, .height = .{ .px = 31 }, .padding = .{}, .corner_radius = 7, .font_size = 11, .font_weight = 400, .text_color = S.theme.current().fg_1, .background = if (std.mem.eql(u8, option.value, self.protocol_id)) S.theme.popupSelection() else ui.Color.TRANSPARENT, .border_width = 0 }) }).mount(scope, cx);
             button.meta.ownership.meta.test_id = option.test_id;
             if (button.behavior.interaction.a11y) |*access| {
                 access.selected = std.mem.eql(u8, option.value, self.protocol_id);
@@ -322,12 +322,12 @@ pub const Wizard = struct {
         if (self.modal) |node| node.setStyleInline(self.alloc, .{ .background = colors.overlay });
         if (self.title) |node| node.setTextColor(colors.fg_1);
         if (self.protocol_picker) |picker| {
-            picker.setBackground(colors.well);
+            picker.setBackground(S.theme.popupInset());
             for (picker.children.items, 0..) |button, index| {
                 if (index >= self.protocol_options.len) break;
                 const chosen = std.mem.eql(u8, self.protocol_options[index].value, self.protocol_id);
-                button.setStyleInline(self.alloc, .{ .background = if (chosen) colors.selection else ui.Color.TRANSPARENT });
-                paintPickerText(button, if (chosen) colors.accent_ink else colors.fg_1);
+                button.setStyleInline(self.alloc, .{ .background = if (chosen) S.theme.popupSelection() else ui.Color.TRANSPARENT });
+                paintPickerText(button, colors.fg_1);
             }
         }
         if (self.protocol_icon) |node| {

@@ -395,7 +395,7 @@ pub const Ai = struct {
 };
 pub const Log = struct { ring_mb: u16 = 64, checkpoint_sec: u16 = 30, retention_days: u16 = 14, export_format: []const u8 = "txt_cast" };
 
-pub const Notify = struct { transfer_done: bool = true, reconnect: bool = true, ai_ready: bool = true, bell: bool = false, tab_dot: bool = true, quiet_hours: []const u8 = "22:00-08:00" };
+pub const Notify = struct { transfer_done: bool = false, reconnect: bool = true, ai_ready: bool = false, bell: bool = false, tab_dot: bool = true, quiet_hours: []const u8 = "22:00-08:00" };
 
 const Section = enum { plugin_preferences, none, meta, ui, @"ui.materials", @"ui.materials.background", completion, transfer, ssh, ai, log, notify, keys };
 pub const ParseError = error{ InvalidSection, InvalidAssignment, InvalidValue, UnknownKey, MissingSection, OutOfRange, Overflow, RequiresAllocator, OutOfMemory };

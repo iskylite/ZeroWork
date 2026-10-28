@@ -10,7 +10,7 @@ pub fn overlay() ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .display = .none, .z_index = 80, .align_items = .center, .justify = .center, .background = ui.Color.BLACK.withAlpha(96), .hit_behavior = .@"opaque" };
 }
 pub fn panel() ui.BoxStyle {
-    return .{ .width = .{ .px = width }, .direction = .column, .gap = 0, .background = theme.current().overlay, .border = .{ .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 24, .color = theme.current().shadow }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = width }, .direction = .column, .gap = 0, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 24, .color = theme.current().shadow }, .flex_shrink = 0 };
 }
 pub fn row(height: f32) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = height }, .direction = .row, .gap = 6, .align_items = .center, .flex_shrink = 0 };
@@ -22,10 +22,10 @@ pub fn field() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 52 }, .direction = .column, .gap = 4, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn input() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 10, .right = 10 }, .background = theme.current().well, .border = .{ .radius = 8, .width = 0, .color = theme.current().well_border }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 10, .right = 10 }, .background = theme.popupInset(), .border = .{ .radius = 8, .width = 0, .color = theme.current().well_border }, .flex_shrink = 0 };
 }
 pub fn action(primary: bool, w: f32) ui.BoxStyle {
-    return .{ .width = .{ .px = w }, .height = .{ .px = 30 }, .padding = .{}, .background = if (primary) theme.current().action_accent else theme.current().surface_2, .border = .{ .radius = 8 }, .text_color = if (primary) theme.actionForeground(theme.current().action_accent) else theme.current().fg_2, .font_size = 12, .font_weight = 500, .flex_shrink = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = 30 }, .padding = .{}, .background = if (primary) theme.current().action_accent else theme.popupAction(), .border = .{ .radius = 8 }, .text_color = if (primary) theme.actionForeground(theme.current().action_accent) else theme.current().fg_2, .font_size = 12, .font_weight = 500, .flex_shrink = 0 };
 }
 pub fn text(size: f32, weight: u16, secondary: bool) ui.TextStyle {
     return .{ .font_size = size, .font_weight = weight, .line_height = (if (size == 13) @as(f32, 20) else @as(f32, 16)) / size, .color = if (secondary) theme.current().fg_2 else theme.current().fg_1, .selectable = false, .text_overflow = .ellipsis };
@@ -33,5 +33,5 @@ pub fn text(size: f32, weight: u16, secondary: bool) ui.TextStyle {
 pub const repaint = @import("quick_connect_styles.zig").repaint;
 
 pub fn modeCard(selected: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 54 }, .padding = ui.Padding.all(10), .background = if (selected) theme.current().selection else theme.current().well, .border = .{ .radius = 9 }, .flex_shrink = 0, .gap = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 54 }, .padding = ui.Padding.all(10), .background = if (selected) theme.popupSelection() else theme.popupInset(), .border = .{ .radius = 9 }, .flex_shrink = 0, .gap = 0 };
 }

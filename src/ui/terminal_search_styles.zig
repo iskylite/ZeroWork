@@ -12,7 +12,7 @@ pub const action_size: f32 = 24;
 pub const action_icon_size: f32 = 16;
 
 pub fn panelPaint() ui.BoxStyle {
-    return .{ .background = theme.current().overlay, .border_color = ui.Color.TRANSPARENT, .shadow = .{ .blur = 32, .offset_y = 12, .color = theme.current().shadow } };
+    return .{ .background = theme.current().overlay, .glass = theme.overlayGlass(), .border_color = ui.Color.TRANSPARENT, .shadow = .{ .blur = 32, .offset_y = 12, .color = theme.current().shadow } };
 }
 pub fn panel() ui.BoxStyle {
     var value = panelPaint();
@@ -74,8 +74,8 @@ pub fn paintInput(cx: *ui.Cx, input: ui.widgets.input.InputResult, focus_ring: *
     input.state.tokens = cx.tokens;
     input.state.placeholder_color = c.fg_2;
     input.state.dirty = true;
-    input.input_container.setBackground(if (input.state.focused) c.selection else c.surface_2);
+    input.input_container.setBackground(if (input.state.focused) theme.popupSelection() else theme.popupInset());
     input.input_container.setBorderColor(ui.Color.TRANSPARENT);
-    focus_ring.setBorderColor(ui.Color.TRANSPARENT);
+    focus_ring.setStyleInline(cx.allocator, .{ .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 8 } });
     input.input_container.markRenderDirty();
 }

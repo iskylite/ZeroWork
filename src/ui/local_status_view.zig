@@ -45,6 +45,7 @@ pub const View = struct {
     cwd_icon: *ui.Node = undefined,
     more_icon: *ui.Node = undefined,
     theme_icon: *ui.Node = undefined,
+    theme_label: *ui.Node = undefined,
     owner: ?identity.SessionHandle = null,
     source_revision: u64 = 0,
     sidebar_collapsed: bool = false,
@@ -69,7 +70,8 @@ pub const View = struct {
         self.identity_icon.setStyleInline(cx.allocator, S.identityIcon());
         self.identity_icon.setDisplay(.none);
         try self.identity_button.appendChild(cx.allocator, self.identity_icon);
-        self.state_dot = try ui.box(cx, S.stateDot(), .{});
+        self.state_dot = try ui.iconTintStyled(cx, ui.icons.activity, S.theme.current().fg_3, @import("status_connection_styles.zig").triggerDot());
+        self.state_dot.meta.ownership.meta.test_id = "local.status.heartbeat";
         try self.identity_button.appendChild(cx.allocator, self.state_dot);
         self.identity_label = try ui.text(cx, "状态未知", S.label(true));
         self.identity_label.setStyleInline(cx.allocator, S.identityTextBox());
@@ -102,6 +104,13 @@ pub const View = struct {
         const theme = try self.action(scope, "全局主题 · 应用与全部终端", "local.status.theme", ui.icons.palette, hooks.theme == null, showTheme);
         self.theme_button = theme.button;
         self.theme_icon = theme.icon;
+        self.theme_button.setStyleInline(cx.allocator, S.buttonLayout(@import("status_connection_styles.zig").themeTrigger()));
+        self.theme_icon.setStyleInline(cx.allocator, @import("status_connection_styles.zig").themeIcon());
+        self.theme_icon.setStyle(cx.allocator, .position, .relative);
+        self.theme_label = try ui.text(cx, "", @import("status_connection_styles.zig").actionText());
+        self.theme_label.setStyleInline(cx.allocator, @import("status_connection_styles.zig").themeLabel());
+        self.theme_label.meta.ownership.meta.test_id = "local.status.theme.label";
+        try self.theme_button.appendChild(cx.allocator, self.theme_label);
         self.layoutForWidth(@max(0, cx.viewport.width - 2 * @import("shell_styles.zig").outer));
         return self;
     }
@@ -138,6 +147,13 @@ pub const View = struct {
         return .{ .button = button, .icon = icon };
     }
 
+    pub fn setThemeName(self: *View, name: []const u8) !void {
+        if (std.mem.eql(u8, self.theme_label.getText().?.content, name)) return;
+        try self.theme_label.setTextContent(self.cx.allocator, name);
+        self.layout_dirty = true;
+        self.layoutForWidth(self.width);
+    }
+
     pub fn currentOwner(self: *const View) ?identity.SessionHandle {
         return self.owner;
     }
@@ -148,7 +164,7 @@ pub const View = struct {
         const c = S.theme.current();
         self.root.setStyleInline(self.cx.allocator, S.barPaint());
         self.identity_label.setTextColor(c.fg_1);
-        for ([_]*ui.Node{ self.encoding_label, self.grid_label, self.cwd_label }) |node| node.setTextColor(c.fg_2);
+        for ([_]*ui.Node{ self.encoding_label, self.grid_label, self.cwd_label, self.theme_label }) |node| node.setTextColor(c.fg_2);
         for ([_]*ui.Node{ self.identity_icon, self.identity_chevron, self.encoding_icon, self.grid_icon, self.cwd_icon, self.more_icon, self.theme_icon }) |node| _ = node.setTint(c.fg_2);
         self.hover_style.set(S.hover());
         self.cx.requestRedraw();
@@ -176,7 +192,7 @@ pub const View = struct {
             .closing => "关闭中",
             .cleanup_unknown => "状态未知",
         } else "状态未知");
-        self.state_dot.setBackground(if (state) |actual| switch (actual) {
+        _ = self.state_dot.setTint(if (state) |actual| switch (actual) {
             .running => S.theme.current().ok,
             .starting, .closing => S.theme.current().warn,
             .failed, .cleanup_unknown => S.theme.current().danger,
@@ -207,12 +223,12 @@ pub const View = struct {
         self.layout_dirty = false;
         const identity_width = S.identity_width;
         var show_theme = self.hooks.theme != null;
-        const show_metrics = width >= minimumWidth(identity_width, true, show_theme);
-        if (width < minimumWidth(identity_width, show_metrics, show_theme)) show_theme = false;
-        const remaining = @min(S.cwd_width, @max(0, width - minimumWidth(identity_width, show_metrics, show_theme) - S.gap));
+        const show_metrics = width >= self.minimumWidth(identity_width, true, show_theme);
+        if (width < self.minimumWidth(identity_width, show_metrics, show_theme)) show_theme = false;
+        const remaining = @min(S.cwd_width, @max(0, width - self.minimumWidth(identity_width, show_metrics, show_theme) - S.gap));
         self.identity_button.setStyleInline(self.cx.allocator, S.buttonLayout(S.chip(identity_width)));
         self.identity_label.setDisplay(.flex);
-        self.identity_chevron.setDisplay(.flex);
+        self.identity_chevron.setDisplay(.none);
         visible(self.encoding_button, show_metrics);
         visible(self.grid_button, show_metrics);
         visible(self.theme_button, show_theme);
@@ -220,9 +236,9 @@ pub const View = struct {
         self.cwd_row.setStyleInline(self.cx.allocator, S.cwd(remaining));
     }
 
-    fn minimumWidth(identity_width: f32, metrics: bool, theme: bool) f32 {
+    fn minimumWidth(self: *View, identity_width: f32, metrics: bool, theme: bool) f32 {
         const children: f32 = 3 + @as(f32, if (metrics) 2 else 0) + @as(f32, if (theme) 1 else 0); // identity, spacer, More
-        return identity_width + S.chip_height + S.right_padding + (if (metrics) S.encoding_width + S.grid_width else 0) + (if (theme) S.chip_height else 0) + (children - 1) * S.gap;
+        return identity_width + S.chip_height + S.right_padding + (if (metrics) S.encoding_width + S.grid_width else 0) + (if (theme) @max(S.chip_height, self.theme_button.globalRect().w) else 0) + (children - 1) * S.gap;
     }
     fn visible(node: *ui.Node, enabled: bool) void {
         node.setDisplay(if (enabled) .flex else .none);
@@ -291,11 +307,10 @@ test "Local status uses exact public widget geometry and real detail triggers" {
     try std.testing.expectApproxEqAbs(@as(f32, 30), view.root.globalRect().h, 0.01);
     const Expected = struct { node: *ui.Node, x: f32, width: f32 };
     const expected = [_]Expected{
-        .{ .node = view.identity_button, .x = 0, .width = 112 },
-        .{ .node = view.encoding_button, .x = 118, .width = 76 },
-        .{ .node = view.grid_button, .x = 200, .width = 94 },
-        .{ .node = view.cwd_row, .x = 300, .width = 440 },
-        .{ .node = view.theme_button, .x = 1386, .width = 26 },
+        .{ .node = view.identity_button, .x = 0, .width = 82 },
+        .{ .node = view.encoding_button, .x = 88, .width = 68 },
+        .{ .node = view.grid_button, .x = 162, .width = 82 },
+        .{ .node = view.cwd_row, .x = 250, .width = 440 },
     };
     for (expected) |item| {
         const rect = item.node.globalRect();
@@ -304,8 +319,9 @@ test "Local status uses exact public widget geometry and real detail triggers" {
         try std.testing.expectApproxEqAbs(item.width, rect.w, 0.01);
         try std.testing.expectApproxEqAbs(@as(f32, 26), rect.h, 0.01);
     }
-    try std.testing.expectApproxEqAbs(@as(f32, 145), view.encoding_label.globalRect().x, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 227), view.grid_label.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 1416), view.theme_button.globalRect().x + view.theme_button.globalRect().w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 115), view.encoding_label.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 189), view.grid_label.globalRect().x, 0.01);
     const Click = struct { node: *ui.Node, kind: status.Kind };
     for ([_]Click{.{ .node = view.identity_button, .kind = .identity }}) |click| {
         const rect = click.node.globalRect();
@@ -349,7 +365,7 @@ test "Local status owns displayed cwd and keeps narrow actions reachable without
     cx.layout();
     try std.testing.expectApproxEqAbs(S.identity_width, view.identity_button.globalRect().w, 0.01);
     try std.testing.expect(view.identity_label.style.display != .none);
-    try std.testing.expect(view.identity_chevron.style.display != .none);
+    try std.testing.expect(view.identity_chevron.style.display == .none);
     try std.testing.expect(view.encoding_button.style.display != .none);
     try std.testing.expect(view.grid_button.style.display != .none);
     update.source_revision = 2;
@@ -400,7 +416,7 @@ test "Local status rethemes dark to light in place without changing triggers or 
     }
     const dark = S.theme.current();
     try std.testing.expectEqual(dark.fg_1, view.identity_label.getText().?.color);
-    try std.testing.expectEqual(dark.ok, view.state_dot.getBackground());
+    try std.testing.expectEqual(dark.ok, (if (view.state_dot.getIcon()) |icon| icon.tint else view.state_dot.getImage().?.tint));
     S.theme.select(.light);
     cx.setTheme(S.theme.widgetTheme(.light));
     view.retheme();
@@ -426,10 +442,10 @@ test "Local status rethemes dark to light in place without changing triggers or 
         try std.testing.expectApproxEqAbs(rects[index].h, rect.h, 0.01);
     }
     // The host's next real projection refreshes process-derived colors.
-    try std.testing.expectEqual(dark.ok, view.state_dot.getBackground());
+    try std.testing.expectEqual(dark.ok, (if (view.state_dot.getIcon()) |icon| icon.tint else view.state_dot.getImage().?.tint));
     value.source_revision += 1;
     try view.update(value);
-    try std.testing.expectEqual(light.ok, view.state_dot.getBackground());
+    try std.testing.expectEqual(light.ok, (if (view.state_dot.getIcon()) |icon| icon.tint else view.state_dot.getImage().?.tint));
     const more = view.theme_button.globalRect();
     cx.handleMouseMove(more.x + 13, more.y + 13);
     try cx.setTestFrameStep(16);

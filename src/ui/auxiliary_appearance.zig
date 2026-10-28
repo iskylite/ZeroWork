@@ -65,6 +65,7 @@ pub const Appearance = struct {
         const self = try scope.createState(Appearance, .{ .cx = cx, .root = root, .view = view, .publication = try cx.bindState(ThemePublication, .{}) });
         try scope.onCleanup(Appearance, self, cleanup);
         try cx.addAfterLayoutHook(self, afterLayout);
+        try @import("layer_materials.zig").Policy.mount(cx, scope);
         try parent.insertChildBefore(cx.allocator, root, if (parent.children.items.len > 0) parent.children.items[0] else null);
         return self;
     }

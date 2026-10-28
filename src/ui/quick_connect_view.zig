@@ -52,6 +52,7 @@ pub const View = struct {
     root: *ui.Node,
     chrome: *ui.Node,
     body: *ui.Node,
+    footer: *ui.Node,
     input: ui.widgets.input.InputResult,
     clear: *ui.Node,
     query: *ui.Signal([]const u8),
@@ -102,7 +103,7 @@ pub const View = struct {
         const query = try scope.createText("", .{});
         const open = try scope.createSignal(bool, false);
         const self = try cx.allocator.create(View);
-        self.* = .{ .cx = cx, .scope = scope, .callbacks = callbacks, .root = undefined, .chrome = undefined, .body = undefined, .input = undefined, .clear = undefined, .query = query, .open = open, .title = undefined, .saved_area = undefined, .result_label = undefined, .scroll = undefined, .empty_area = undefined, .leading_spacer = undefined, .middle_spacer = undefined, .temporary_area = undefined, .notice = undefined, .notice_title = undefined, .notice_message = undefined, .host_input = undefined, .user_input = undefined, .port_input = undefined, .host_value = try scope.createText("", .{}), .user_value = try scope.createText("", .{}), .port_value = try scope.createText("22", .{}), .hint = undefined, .primary = undefined, .secondary = undefined, .primary_label = try scope.createText("连接所选主机", .{}), .secondary_label = try scope.createText("新建主机配置", .{}), .disabled = try scope.createSignal(bool, true), .failure = undefined, .colors = S.theme.current() };
+        self.* = .{ .cx = cx, .scope = scope, .callbacks = callbacks, .root = undefined, .chrome = undefined, .body = undefined, .footer = undefined, .input = undefined, .clear = undefined, .query = query, .open = open, .title = undefined, .saved_area = undefined, .result_label = undefined, .scroll = undefined, .empty_area = undefined, .leading_spacer = undefined, .middle_spacer = undefined, .temporary_area = undefined, .notice = undefined, .notice_title = undefined, .notice_message = undefined, .host_input = undefined, .user_input = undefined, .port_input = undefined, .host_value = try scope.createText("", .{}), .user_value = try scope.createText("", .{}), .port_value = try scope.createText("22", .{}), .hint = undefined, .primary = undefined, .secondary = undefined, .primary_label = try scope.createText("连接所选主机", .{}), .secondary_label = try scope.createText("新建主机配置", .{}), .disabled = try scope.createSignal(bool, true), .failure = undefined, .colors = S.theme.current() };
         try scope.onCleanup(View, self, cleanup);
         const popup = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .bottom_start, .offset = .{ .static = 0 }, .width = S.width, .max_width = S.width, .viewport_padding = 8, .constrain_width_to_viewport = true, .shift_main_axis = true, .size_policy = .fit_content, .close_on_escape = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.scope = popup.scope;
@@ -122,7 +123,7 @@ pub const View = struct {
         try header.appendChild(cx.allocator, close);
         self.body = try ui.box(cx, S.body(), .{});
         try self.chrome.appendChild(cx.allocator, self.body);
-        self.input = try ui.widgets.Input(.{ .value = query, .placeholder = "搜索主机或输入 SSH 目标", .leading_icon_asset = ui.icons.search, .on_change = cx.on(View, self, queryChanged), .on_submit = cx.on(View, self, inputSubmit) }).mountResult(popup.scope, cx);
+        self.input = try ui.widgets.Input(.{ .value = query, .placeholder = "搜索主机或输入 SSH 目标", .embedded = true, .leading_icon_asset = ui.icons.search, .on_change = cx.on(View, self, queryChanged), .on_submit = cx.on(View, self, inputSubmit) }).mountResult(popup.scope, cx);
         tune(cx, &self.input, 40, 14);
         self.input.node.meta.ownership.meta.test_id = "quick.query";
         const query_row = try ui.box(cx, S.queryRow(), .{});
@@ -133,7 +134,8 @@ pub const View = struct {
         self.result_label = try label(cx, self.saved_area, "已保存的主机 · 0 个结果", 11, 400, true);
         self.result_label.setStyleInline(cx.allocator, S.line(16));
         self.scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(popup.scope, cx);
-        self.scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 28 }, .flex_shrink = 0 });
+        self.scroll.container.meta.ownership.meta.test_id = "quick.results";
+        self.scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = S.row_height }, .flex_shrink = 0 });
         self.scroll.content.setStyleInline(cx.allocator, S.column());
         try self.saved_area.appendChild(cx.allocator, self.scroll.container);
         self.empty_area = try ui.box(cx, S.column(), .{});
@@ -179,6 +181,8 @@ pub const View = struct {
         const gap = try ui.box(cx, S.line(2), .{});
         try self.body.appendChild(cx.allocator, gap);
         const footer = try ui.box(cx, S.footer(), .{});
+        self.footer = footer;
+        footer.meta.ownership.meta.test_id = "quick.footer";
         try self.body.appendChild(cx.allocator, footer);
         self.leading_spacer = try ui.spacer(cx);
         self.leading_spacer.setDisplay(.none);
@@ -204,7 +208,7 @@ pub const View = struct {
         try parent.appendChild(self.cx.allocator, slot);
         const name = try label(self.cx, slot, title, 11, 500, true);
         name.setStyleInline(self.cx.allocator, S.line(16));
-        var input = try ui.widgets.Input(.{ .value = value, .on_change = self.cx.on(View, self, fieldChanged), .on_submit = self.cx.on(View, self, inputSubmit) }).mountResult(self.scope, self.cx);
+        var input = try ui.widgets.Input(.{ .value = value, .embedded = true, .on_change = self.cx.on(View, self, fieldChanged), .on_submit = self.cx.on(View, self, inputSubmit) }).mountResult(self.scope, self.cx);
         tune(self.cx, &input, 32, if (std.mem.eql(u8, id, "quick.user")) 12 else 11.5);
         input.node.meta.ownership.meta.test_id = id;
         try slot.appendChild(self.cx.allocator, input.node);
@@ -399,7 +403,7 @@ pub const View = struct {
         try self.empty_title.setTextContent(self.cx.allocator, if (searching) "未找到匹配的主机" else "输入 SSH 地址，直接连接");
         try self.empty_help.setTextContent(self.cx.allocator, if (searching) "可修改关键词，或输入 user@host:port 临时连接。" else "在上方输入目标后按 Enter，也可新建配置以便下次使用。");
         self.clear.setDisplay(if (searching) .flex else .none);
-        self.input.input_container.setStyleInline(self.cx.allocator, S.queryInput(searching));
+        self.input.input_container.setStyleInline(self.cx.allocator, S.inputContent(40, searching));
         self.saved_area.setDisplay(if (self.mode == .saved and !no_match) .flex else .none);
         self.empty_area.setDisplay(if (no_match) .flex else .none);
         self.hint.setDisplay(if (no_match) .none else .flex);
@@ -439,24 +443,34 @@ pub const View = struct {
             const asset = self.source.?.assets[index];
             const selected = self.selected != null and std.meta.eql(self.selected.?, asset.owner);
             const cell = try scope.createState(Row, .{ .view = self, .owner = asset.owner, .generation = self.generation });
-            const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = try scope.createText(asset.name, .{}), .base_style = S.row(selected), .hover_style = ui.BoxStyle{ .background = S.theme.current().hover }, .on_click = self.cx.on(Row, cell, Row.select) }).mount(scope, self.cx);
+            const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = try scope.createText(asset.name, .{}), .base_style = S.row(selected), .hover_style = ui.BoxStyle{ .background = if (selected) S.selectedFill() else S.theme.popupAction() }, .on_click = self.cx.on(Row, cell, Row.select) }).mount(scope, self.cx);
             node.meta.ownership.meta.test_id = "quick.saved.row";
             try self.scroll.content.appendChild(self.cx.allocator, node);
             const content = try ui.box(self.cx, S.rowContent(), .{});
             try node.appendChild(self.cx.allocator, content);
-            const icon = try ui.iconTint(self.cx, @import("session_icon.zig").forOs(asset.os) orelse (if (asset.protocol == .sftp) ui.icons.folder_open else ui.icons.server), S.theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
+            const icon = try ui.iconTint(self.cx, @import("session_icon.zig").forOs(asset.os) orelse (if (asset.protocol == .sftp) ui.icons.folder_open else ui.icons.server), S.theme.current().fg_2, .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .flex_shrink = 0 });
             icon.meta.ownership.meta.test_id = "quick.saved.icon";
             try content.appendChild(self.cx.allocator, icon);
-            const name = try label(self.cx, content, asset.name, 11, 500, false);
-            name.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 108 }, .flex_shrink = 0 });
+            const labels = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 34 }, .flex = 1, .direction = .column, .min_width = 0 }, .{});
+            try content.appendChild(self.cx.allocator, labels);
+            const name = try label(self.cx, labels, asset.name, 13, 600, false);
+            name.meta.ownership.meta.test_id = "quick.saved.name";
+            name.setStyleInline(self.cx.allocator, S.line(18));
+            if (name.getText()) |old| {
+                var next = old;
+                next.line_height = 18.0 / 13.0;
+                name.setText(next);
+            }
             const endpoint = try std.fmt.allocPrint(self.cx.allocator, "{s}@{s}:{d}", .{ asset.user, asset.host, asset.port });
             defer self.cx.allocator.free(endpoint);
-            const detail = try label(self.cx, content, endpoint, 9.5, 400, true);
-            detail.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 230 }, .height = .{ .px = 14 }, .min_width = 0, .flex_shrink = 0 });
+            const detail = try label(self.cx, labels, endpoint, 11, 400, true);
+            detail.setTextColor(if (selected) ui.Color.lerp(S.theme.current().fg_2, S.theme.current().fg_1, 0.12) else S.theme.current().fg_2);
+            detail.meta.ownership.meta.test_id = "quick.saved.endpoint";
+            detail.setStyleInline(self.cx.allocator, S.line(16));
             if (detail.getText()) |old| {
                 var next = old;
                 next.use_monospace_font = true;
-                next.line_height = 14.0 / 9.5;
+                next.line_height = 16.0 / 11.0;
                 detail.setText(next);
             }
             if (asset.hops > 0) {
@@ -469,12 +483,14 @@ pub const View = struct {
             }
         }
         const count = @max(@as(usize, 1), @min(@as(usize, 3), self.matches.items.len));
-        const height = @as(f32, @floatFromInt(count)) * 28 + @as(f32, @floatFromInt(count - 1)) * 6;
+        const height = @as(f32, @floatFromInt(count)) * S.row_height + @as(f32, @floatFromInt(count - 1)) * S.row_gap;
         self.scroll.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = height } });
         if (self.selected) |owner| for (self.matches.items, 0..) |index, rank| if (std.meta.eql(owner, self.source.?.assets[index].owner)) {
-            const top = @as(f32, @floatFromInt(rank)) * 34;
-            if (top < self.scroll.state.scroll_y) self.scroll.state.scroll_y = top;
-            if (top + 28 > self.scroll.state.scroll_y + height) self.scroll.state.scroll_y = top + 28 - height;
+            const top = @as(f32, @floatFromInt(rank)) * (S.row_height + S.row_gap);
+            var scroll_y = self.scroll.state.scroll_y;
+            if (top < scroll_y) scroll_y = top;
+            if (top + S.row_height > scroll_y + height) scroll_y = top + S.row_height - height;
+            ui.widgets.setScrollY(self.scroll.state, self.scroll.content, scroll_y);
             break;
         };
         if (restore_input) self.cx.setFocus(self.input.input_container);
@@ -486,10 +502,11 @@ pub const View = struct {
     fn retheme(self: *View) void {
         S.repaint(self.chrome, self.colors);
         self.colors = S.theme.current();
-        self.chrome.setBackground(self.colors.overlay);
+        self.chrome.setStyleInline(self.cx.allocator, S.panel());
+        self.footer.setStyleInline(self.cx.allocator, S.footer());
         inline for (.{ "input", "host_input", "port_input", "user_input" }) |field_name| {
             const input = &@field(self, field_name);
-            input.input_container.setBackground(self.colors.well);
+            input.node.setStyleInline(self.cx.allocator, S.input(if (std.mem.eql(u8, field_name, "input")) 40 else 32));
             input.state.tokens = self.cx.tokens;
             input.state.dirty = true;
         }
@@ -497,10 +514,18 @@ pub const View = struct {
         self.paint_version = self.cx.theme_version;
         self.invalidate();
     }
+    fn paintInputFocus(self: *View) void {
+        inline for (.{ "input", "host_input", "port_input", "user_input" }) |field_name| {
+            const input = &@field(self, field_name);
+            const background = if (input.state.focused) S.theme.popupSelection() else S.theme.popupInset();
+            if (!ui.Color.eql(input.node.getBackground(), background)) input.node.setBackground(background);
+        }
+    }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
         if (!self.isOpen()) return .done;
         if (self.paint_version != self.cx.theme_version) self.retheme();
+        self.paintInputFocus();
         if (!self.dirty) return .done;
         self.flush() catch |err| {
             self.fail(err);
@@ -554,8 +579,8 @@ fn label(cx: *ui.Cx, parent: *ui.Node, content: []const u8, size: f32, weight: u
     return node;
 }
 fn tune(cx: *ui.Cx, input: *ui.widgets.input.InputResult, height: f32, size: f32) void {
-    input.input_container.setStyleInline(cx.allocator, S.input(height));
-    input.node.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = height }, .flex_shrink = 0 });
+    input.input_container.setStyleInline(cx.allocator, S.inputContent(height, false));
+    input.node.setStyleInline(cx.allocator, S.input(height));
     input.state.font_size = size;
     input.state.line_height = if (height == 40) 20 else if (size == 12) 18 else 17;
     input.state.char_width = size * 0.6;

@@ -411,7 +411,7 @@ pub const View = struct {
     }
     fn modelItemHeight(index: usize, raw: ?*anyopaque) f32 {
         const self: *View = @ptrCast(@alignCast(raw orelse return 30));
-        return if (index < self.model_rows.items.len and self.model_rows.items[index].header) 24 else 30;
+        return if (index < self.model_rows.items.len and self.model_rows.items[index].header) 28 else 30;
     }
     fn renderModel(self: *View, filtered_index: usize, scope: *ui.Scope, cx: *ui.Cx) !*ui.Node {
         const source = if (self.source) |*source| &source.value else return error.NoModelSource;
@@ -426,7 +426,7 @@ pub const View = struct {
             try row.appendChild(cx.allocator, try ui.iconTint(cx, if (collapsed) ui.icons.chevron_right else ui.icons.chevron_down, S.theme.current().fg_2, S.icon(12)));
             const brand = @import("ai_brand.zig");
             try row.appendChild(cx.allocator, try brand.mount(cx, brand.provider(model.key.provider_id, ""), model.key.provider_id, 16));
-            _ = try self.label(row, model.key.provider_id, S.text(10, 400, 12, true), S.flexibleLabel(12));
+            _ = try self.label(row, model.key.provider_id, S.text(13, 600, 18, false), S.flexibleLabel(18));
             return row;
         }
         const id = try scope.createText(model.key.model_id, .{});
@@ -448,7 +448,7 @@ pub const View = struct {
         const hint = try ui.widgets.Popover(.{ .trigger = .hover, .position = .right, .offset = .{ .static = 8 }, .width = 284, .max_height = 180, .constrain_width_to_viewport = true, .shift_main_axis = true, .tier = .tooltip, .close_on_outside_click = false, .close_on_escape = false }).mount(scope, cx);
         hint.chrome.meta.ownership.meta.test_id = "ai.model.details";
         hint.chrome.setHitTestVisible(false);
-        hint.chrome.setStyleInline(cx.allocator, .{ .width = .{ .px = 284 }, .min_width = 284, .max_width = 284, .padding = .{ .left = 12, .right = 12, .top = 10, .bottom = 10 }, .background = S.theme.current().well, .border = .{ .radius = 9 } });
+        hint.chrome.setStyleInline(cx.allocator, .{ .width = .{ .px = 284 }, .min_width = 284, .max_width = 284, .padding = .{ .left = 12, .right = 12, .top = 10, .bottom = 10 }, .background = S.theme.current().overlay, .border = .{ .radius = 9 } });
         var detail_style = S.text(11, 400, 18, true);
         detail_style.wrap = .word;
         const detail_label = try ui.text(cx, description.peek(), detail_style);
@@ -462,8 +462,7 @@ pub const View = struct {
             attrs.description = description.peek();
         }
         const ink = if (model.enabled) S.theme.current().fg_2 else S.theme.current().fg_3;
-        var marker_style = S.modelMarker();
-        marker_style.width = .{ .px = if (selected) 4.234375 else 3.171875 };
+        const marker_style = S.modelMarker();
         const marker = try ui.box(cx, marker_style, .{});
         marker.meta.ownership.meta.test_id = if (selected) "ai.model.selected" else "ai.model.unselected";
         if (selected) {
@@ -473,37 +472,39 @@ pub const View = struct {
         }
         try button.appendChild(cx.allocator, marker);
         const brand = @import("ai_brand.zig");
-        const logo = try brand.mount(cx, brand.model(id.peek()), brand.basename(id.peek()), 20);
+        const logo = try brand.mount(cx, brand.model(id.peek()), brand.basename(id.peek()), 16);
         logo.meta.ownership.meta.test_id = "ai.model.logo";
         try button.appendChild(cx.allocator, logo);
-        const name = try self.label(button, id.peek(), S.text(11, 400, 13, false), S.flexibleLabel(13));
+        const name = try self.label(button, id.peek(), S.text(11, 400, 16, false), S.flexibleLabel(16));
         name.setTextColor(if (model.enabled) S.theme.current().fg_1 else S.theme.current().fg_3);
         var context_buffer: [32]u8 = undefined;
         const context_text = if (model.context_window >= 1000000) try std.fmt.bufPrint(&context_buffer, "{s}{d}M", .{ if (model.context_discovered) "" else "配置", model.context_window / 1000000 }) else try std.fmt.bufPrint(&context_buffer, "{s}{d}k", .{ if (model.context_discovered) "" else "配置", model.context_window / 1000 });
-        const context_width = @max(@ceil(cx.text.measureTextWidth(context_text, 10, 400, true)) + 2, @as(f32, @floatFromInt(context_text.len)) * 6.5);
+        const context_width: f32 = 64;
         const context_label = try self.label(button, context_text, S.text(10, 400, 13, false), S.label(context_width, 13));
         if (context_label.getText()) |text| {
             var value = text;
             value.use_monospace_font = true;
             value.text_overflow = .clip;
+            value.text_align = .end;
             context_label.setText(value);
         }
         context_label.setTextColor(ink);
         context_label.meta.ownership.meta.test_id = "ai.model.context";
-        if (model.reasoning) {
-            const reasoning_hint = try ui.widgets.Tooltip(.{ .text = "支持推理" }).mount(scope, cx);
+        {
+            const reasoning_hint = try ui.widgets.Tooltip(.{ .text = if (model.reasoning) "支持推理" else "不支持推理" }).mount(scope, cx);
             reasoning_hint.wrapper.setStyleInline(cx.allocator, S.visionTarget());
             reasoning_hint.trigger.setStyleInline(cx.allocator, S.visionTarget());
             reasoning_hint.trigger.meta.ownership.meta.test_id = "ai.model.reasoning";
             reasoning_hint.content.meta.ownership.meta.test_id = "ai.model.reasoning.tooltip";
-            try reasoning_hint.trigger.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("brain").?, ink, S.icon(14)));
+            try reasoning_hint.trigger.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("brain").?, if (model.reasoning) ink else S.theme.current().fg_3, S.icon(14)));
             try button.appendChild(cx.allocator, reasoning_hint.wrapper);
         }
-        if (model.vision) {
-            const vision_hint = try ui.widgets.Tooltip(.{ .text = "支持图片输入与识图" }).mount(scope, cx);
+        {
+            const vision_hint = try ui.widgets.Tooltip(.{ .text = if (model.vision) "支持图片输入与识图" else "不支持识图，仅支持文本输入" }).mount(scope, cx);
             vision_hint.wrapper.setStyleInline(cx.allocator, S.visionTarget());
             vision_hint.trigger.setStyleInline(cx.allocator, S.visionTarget());
-            try vision_hint.trigger.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("image").?, ink, S.icon(14)));
+            vision_hint.trigger.meta.ownership.meta.test_id = "ai.model.vision";
+            try vision_hint.trigger.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get(if (model.vision) "image" else "image-off").?, if (model.vision) ink else S.theme.current().fg_3, S.icon(14)));
             try button.appendChild(cx.allocator, vision_hint.wrapper);
         }
         hint.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 30 }, .min_width = 0 });
@@ -535,7 +536,7 @@ pub const View = struct {
         const track_area = self.slider.wrapper.children.items[0];
         self.slider_track = track_area.children.items[0];
         self.slider_thumb = track_area.children.items[1];
-        self.slider_track.setBackground(S.theme.current().well);
+        self.slider_track.setBackground(S.theme.popupInset());
         self.slider_thumb.setStyleInline(self.cx.allocator, S.sliderThumb());
         for (0..8) |index| {
             const tick = try ui.box(self.cx, S.sliderTick(index, 8), .{});
@@ -962,7 +963,7 @@ pub const View = struct {
             }
             self.effort_ticks[index].setTextColor(colors.fg_2);
         }
-        self.slider_track.setBackground(colors.well);
+        self.slider_track.setBackground(S.theme.popupInset());
         self.slider_thumb.setStyleInline(self.cx.allocator, S.sliderThumb());
         self.effort_name.setTextColor(colors.fg_2);
         if (self.buttons[3].behavior.interaction.a11y) |*attrs| attrs.label = self.effort_name.getText().?.content;
@@ -1048,7 +1049,7 @@ pub const View = struct {
             const id = button.meta.ownership.meta.test_id orelse continue;
             if ((!std.mem.eql(u8, id, "ai.send") and !std.mem.eql(u8, id, "ai.stop")) or button.getOpacity() == 0) continue;
             const hovered = if (self.cx.hovered_node) |node| node == button or node.isDescendantOf(button) else false;
-            button.setBackground(if (hovered) S.theme.current().hover else S.theme.current().surface_2);
+            button.setBackground(if (hovered) S.theme.current().hover else S.theme.popupAction());
             if (!std.mem.eql(u8, id, "ai.send")) continue;
             const disabled = if (button.behavior.interaction.a11y) |attrs| attrs.disabled else false;
             button.setOpacityRaw(if (disabled) 0.45 else 1);
@@ -1154,6 +1155,10 @@ fn repaint(node: *ui.Node, old: S.theme.Colors) void {
 }
 fn remap(value: ui.Color, old: S.theme.Colors) ui.Color {
     const next = S.theme.current();
+    if (ui.Color.eql(value, ui.Color.lerp(old.overlay.withAlpha(255), old.well.withAlpha(255), 0.3))) return S.theme.popupInset();
+    if (ui.Color.eql(value, ui.Color.lerp(old.overlay.withAlpha(255), old.fg_2.withAlpha(255), 0.12))) return S.theme.popupAction();
+    const old_dark = @as(u32, old.app.r) * 299 + @as(u32, old.app.g) * 587 + @as(u32, old.app.b) * 114 < 128000;
+    if (ui.Color.eql(value, ui.Color.lerp(old.overlay.withAlpha(255), old.accent, if (old_dark) 0.16 else 0.10))) return S.theme.popupSelection();
     inline for (@typeInfo(S.theme.Colors).@"struct".field_names) |field| if (ui.Color.eql(value, @field(old, field))) return @field(next, field);
     return value;
 }

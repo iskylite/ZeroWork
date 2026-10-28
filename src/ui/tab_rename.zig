@@ -68,6 +68,7 @@ pub const Editor = struct {
         try self.body.appendChild(cx.allocator, header);
         const body = try ui.box(cx, styles.renameContent(), .{});
         self.input = try ui.widgets.Input(.{ .value = value, .on_change = cx.on(Editor, self, change), .on_submit = cx.on(Editor, self, submit) }).mountResult(scope, cx);
+        @import("app_theme.zig").styleInput(self.input);
         self.input.input_container.setStyleInline(cx.allocator, styles.renameField());
         styles.tuneInput(&self.input);
         self.node = self.input.input_container;

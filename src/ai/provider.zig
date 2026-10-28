@@ -62,7 +62,10 @@ pub const ChatRequest = struct {
     image_token_reservation: ?u32 = null,
     vision: bool = false,
     max_output: u32 = 4096,
-    timeout_ms: u32 = 60_000,
+    /// Total budget across retries; active reasoning may exceed one minute.
+    timeout_ms: u32 = 10 * 60_000,
+    /// Stream inactivity limit, reset by received bytes.
+    idle_timeout_ms: u32 = 60_000,
     cancel: ?*CancelToken = null,
     /// Transport writes a retry hint for this attempt; owned by the caller's
     /// worker thread, and never exposed as a pointer into a response header.

@@ -220,7 +220,10 @@ test "production auth content inherits modal and inline material across retheme 
                 try std.testing.expectEqualStrings("654321", input.getText());
                 try std.testing.expectEqual(ui.widgets.input.InputType.password, input.input_type);
                 try std.testing.expect(!view.submit_disabled.peek());
-                try std.testing.expectEqual(theme.current().well, view.fields[0].input.input_container.getBackground());
+                try std.testing.expect(input.focused);
+                try std.testing.expectEqual(theme.popupSelection(), view.fields[0].input.input_container.getBackground());
+                try std.testing.expectEqual(ui.Color.TRANSPARENT, view.fields[0].input.input_container.style.border.color);
+                if (view.fields[0].input.input_container.style.outline()) |outline| try std.testing.expectEqual(@as(f32, 0), outline.width);
                 var projected: usize = 0;
                 var opaque_chrome = false;
                 for (items) |item| switch (item) {
@@ -228,8 +231,8 @@ test "production auth content inherits modal and inline material across retheme 
                         if (q.texture_id == 777) projected += 1;
                     },
                     .fill_rect => |fill| {
-                        // A content-sized fill would cover the inherited image.
-                        try std.testing.expect(fill.header.node_id != form.id);
+                        // Transparent paint bookkeeping does not cover the inherited image.
+                        if (fill.header.node_id == form.id) try std.testing.expectEqual(@as(u8, 0), fill.color.a);
                         if (fill.header.node_id == chrome.id and fill.color.a == 255) opaque_chrome = true;
                     },
                     else => {},
@@ -340,6 +343,6 @@ test "material retained tab and recorder overlays update alpha and blur independ
         try std.testing.expectEqual(theme.current().well, well.getBackground());
         try std.testing.expectEqual(ink, label.getText().?.color);
         try std.testing.expectEqual(ids, .{ color.chrome.id, rename.dialog.id, dialog.id });
-        try std.testing.expectEqual(theme.current().surface_2, @import("ui/notification_history_styles.zig").policy().background);
+        try std.testing.expectEqual(theme.popupAction(), @import("ui/notification_history_styles.zig").policy().background);
     }
 }

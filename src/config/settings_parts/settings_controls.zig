@@ -222,6 +222,7 @@ pub const Section = struct {
         const raw = self.page.bound.controller.raw_fields[schema.find(key.section, key.key).?].input;
         field.text = try self.page.bound.scope.createText(raw orelse try valueText(self.page.bound.controller.model.value, key, &buffer), .{});
         field.input_result = try ui.widgets.Input(.{ .value = field.text.?, .append_text = presentation.unit, .disabled = field.disabled, .on_change = self.page.cx.on(Field, field, Field.edit), .on_submit = self.page.cx.on(Field, field, Field.submit) }).mountResult(self.page.bound.scope, self.page.cx);
+        @import("../../ui/app_theme.zig").styleInput(field.input_result.?);
         const result = &field.input_result.?;
         result.input_container.setStyleInline(self.page.cx.allocator, S.fieldControl(undefined));
         result.node.style.width = .{ .px = S.geometry.control_width };

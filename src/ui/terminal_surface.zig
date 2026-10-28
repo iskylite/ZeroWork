@@ -30,7 +30,7 @@ pub const Options = struct {
     highlight: bool,
     cursor_style: enum { block, bar, underline },
 };
-const Glyph = struct { node: *ui.Node, overline: ?*ui.Node = null, double_underline: ?*ui.Node = null };
+const Glyph = struct { node: *ui.Node, background: ?*ui.Node = null, overline: ?*ui.Node = null, double_underline: ?*ui.Node = null };
 const Row = struct {
     root: *ui.Node,
     test_id: []u8,
@@ -739,11 +739,24 @@ pub const Surface = struct {
             props.spans_owned = spans.len > 0;
             glyph.node.setText(props);
             published = true;
-            glyph.node.setBackground(if (cell.background == .default and cell.attributes & (1 << 4) == 0 and !projection.modes.reverse_colors) ui.Color.TRANSPARENT else bg);
+            const has_background = cell.background != .default or cell.attributes & (1 << 4) != 0 or projection.modes.reverse_colors;
+            // Cell backgrounds belong below the selection; text stays above it.
+            if (has_background and glyph.background == null) {
+                const background = try leaf(self.cx, bg);
+                errdefer self.cx.destroyDetached(background);
+                try row.root.insertChildBefore(self.cx.allocator, background, row.selected);
+                glyph.background = background;
+            }
+            glyph.node.setBackground(ui.Color.TRANSPARENT);
             glyph.node.setDisplay(.flex);
             const x = self.bodyX() + row.layout.shift_x + @as(f32, @floatFromInt(start)) * self.options.cell_width;
             const width = self.options.cell_width * @as(f32, @floatFromInt(if (cell.width == .wide_lead) @as(usize, 2) else col - start));
             try absolute(self.cx, glyph.node, x, 0, width, self.options.row_height);
+            if (glyph.background) |background| {
+                background.setDisplay(if (has_background) .flex else .none);
+                background.setBackground(bg);
+                try absolute(self.cx, background, x, 0, width, self.options.row_height);
+            }
             if (cell.attributes & (1 << 8) != 0 and glyph.overline == null) {
                 const line = try leaf(self.cx, fg);
                 errdefer self.cx.destroyDetached(line);
@@ -771,6 +784,7 @@ pub const Surface = struct {
         }
         for (row.glyphs.items[used..]) |glyph| {
             glyph.node.setDisplay(.none);
+            if (glyph.background) |background| background.setDisplay(.none);
             if (glyph.overline) |line| line.setDisplay(.none);
             if (glyph.double_underline) |line| line.setDisplay(.none);
         }

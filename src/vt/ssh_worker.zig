@@ -141,6 +141,7 @@ pub const SshWorker = struct {
     native_mutex: std.atomic.Mutex = .unlocked,
     rebuilding: std.atomic.Value(bool) = .init(false),
     shared_connection: ?*@import("shared_ssh_connection.zig").Connection = null,
+    notification_incident: ?u64 = null,
     connection_lifetime: ?@import("shared_ssh_connection.zig").Lifetime = null,
     /// Creation policy; lending an independent transport does not change it.
     prefer_shared_reconnect: bool = false,
@@ -174,7 +175,8 @@ pub const SshWorker = struct {
         errdefer self.allocator.destroy(group);
         var library = try Library.init();
         errdefer library.deinit();
-        group.* = .{ .allocator = self.allocator, .library = library, .native = self.session, .route = self.jump_route, .on_release = self.connection_lifetime };
+        group.* = .{ .allocator = self.allocator, .library = library, .native = self.session, .route = self.jump_route, .on_release = self.connection_lifetime, .notification_id = @import("shared_ssh_connection.zig").reserveNotificationId() };
+        self.notification_incident = group.notification_id;
         if (self.session.resource_ledger) |ledger| {
             group.ledger = try @import("../proto/ssh/session.zig").ResourceLedger.init(null, ledger.hop_count);
             try ledger.transferConnectionOwnership(&group.ledger.?);
@@ -254,6 +256,7 @@ pub const SshWorker = struct {
         worker.native_mutex = .unlocked;
         worker.rebuilding = .init(false);
         worker.shared_connection = shared_group;
+        worker.notification_incident = if (shared_group) |group| if (group.notification_id != 0) group.notification_id else null else null;
         worker.prefer_shared_reconnect = shared_group != null;
         worker.connection_lifetime = null;
         const retained_lease = if (runtime.shared_connection) |lease| lease.retain() else null;
@@ -337,8 +340,16 @@ pub const SshWorker = struct {
         // A separate bounded exec request shares the existing IO owner.
         worker.os_probe = worker.exec_bridge.diagnostic(@import("../proto/ssh/remote_os.zig").command, .{ .timeout_ms = 3000, .capture_cap = 8192 }) catch null;
         if (worker.os_probe == null) worker.os_probe_finished.store(true, .release);
-        if (shared_group) |group| try group.bindUpstreamForwards(worker.forward_services[0..worker.forward_count]);
+        if (shared_group) |group| try group.bindUpstreamForwards(worker.forward_services[0..worker.forward_count], worker.session.connection_details);
+        worker.requestInitialRtt();
         return worker;
+    }
+
+    // Queue only; the existing IO owner performs and publishes the sample.
+    fn requestInitialRtt(self: *SshWorker) void {
+        const store = self.session.connection_details orelse return;
+        const key = self.session.resource_key orelse return;
+        _ = store.request(key, self.session.resource_hop, 1500) catch return;
     }
 
     pub fn deinit(self: *SshWorker) void {
@@ -683,7 +694,10 @@ pub const SshWorker = struct {
         while (!self.native_mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.native_mutex.unlock();
         const reuse = if (self.shared_connection) |group| self.prefer_shared_reconnect and group.isReusable() else false;
-        if (!reuse) self.detachSharedConnection();
+        if (!reuse) {
+            self.detachSharedConnection();
+            self.notification_incident = null;
+        }
         for (self.forward_services[0..self.forward_count], 0..) |*service, index| {
             if (service.*) |value| {
                 if (reuse and index + 1 < self.forward_count) try value.prepareSharedReplacement(self.options.operation_key) else try value.prepareReplacement();
@@ -695,6 +709,9 @@ pub const SshWorker = struct {
             route_options[index] = options;
             route_options[index].operation_key = self.options.operation_key;
             route_options[index].attempt_id = self.options.attempt_id;
+            // Shared shell creation skips Route.connect, but every hop still
+            // needs an endpoint owned by this successor's operation key.
+            try route_options[index].prepareDetails();
             if (index + 1 == self.jump_options.len) {
                 route_options[index].cols = self.options.cols;
                 route_options[index].rows = self.options.rows;
@@ -739,6 +756,7 @@ pub const SshWorker = struct {
         if (self.os_probe) |old| _ = self.exec_bridge.closeCall(old) catch .unknown;
         self.os_probe = self.exec_bridge.diagnostic(@import("../proto/ssh/remote_os.zig").command, .{ .timeout_ms = 3000, .capture_cap = 8192 }) catch null;
         self.os_probe_finished.store(self.os_probe == null, .release);
+        self.requestInitialRtt();
         if (self.shared_transfer) |shared| shared.transportReplaced();
         self.keepalive_watch = .{};
         self.jump_route = replacement_route;
@@ -766,7 +784,9 @@ pub const SshWorker = struct {
         try self.resumeInputAfterReconnect();
         self.reconnect.connected();
         try self.loop.setInterest(.{ .read = true });
-        if (reuse) try self.shared_connection.?.bindUpstreamForwards(self.forward_services[0..self.forward_count]);
+        // A failed shared open may have detached the old group and established
+        // an independent transport. Bind only the owner actually retained.
+        if (self.shared_connection) |group| try group.bindUpstreamForwards(self.forward_services[0..self.forward_count], self.session.connection_details);
     }
 
     /// Sole IO owner: unregister readiness, close target, then release each
@@ -785,7 +805,7 @@ pub const SshWorker = struct {
             self.session.rtt = null;
             self.session.recordResource(.shell, .released);
             self.session.recordResource(.rtt_channel, .released);
-            if (self.session.connection_details) |store| if (self.session.resource_key) |key| store.status(key, self.session.resource_hop, .released);
+            if (self.session.connection_details) |store| if (self.session.resource_key) |key| for (0..self.session.resource_hop + 1) |hop| store.status(key, hop, .released);
             self.exec_bridge.sessionReleased() catch return .awaiting;
             if (self.shared_transfer) |shared| shared.sessionReleased() catch return .awaiting;
         };

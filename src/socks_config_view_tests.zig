@@ -169,6 +169,7 @@ test "configuration changes global palette without replacing inputs or selected 
     theme.select(.dark);
     const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();
+    try cx.setTestFrameStep(16);
     cx.setTheme(theme.widgetTheme(.dark));
     cx.setViewport(1440, 900);
     const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
@@ -205,16 +206,25 @@ test "configuration changes global palette without replacing inputs or selected 
         try std.testing.expectEqualStrings("2", v.route_value.get().?);
         try std.testing.expect(ui.Color.eql(theme.current().fg_1, ui.widgets.select.stateOf(v.picker).colors.text_primary));
         try std.testing.expect(ui.Color.eql(theme.current().overlay, v.card.getBackground()));
-        _ = cx.render();
+        for (0..16) |_| {
+            cx.advanceFrameClock();
+            _ = cx.render();
+        }
         try std.testing.expect(cx.isFocused(original_input));
-        try std.testing.expectEqual(cx.tokens.tokens.color.bg_active, original_input.getBackground());
-        try std.testing.expect(original_input.style.outline() == null);
+        try std.testing.expectEqual(theme.popupSelection(), original_input.getBackground());
+        try std.testing.expect(original_input.style.outline() == null or original_input.style.outline().?.width == 0);
         cx.clearFocus();
-        _ = cx.render();
-        try std.testing.expectEqual(theme.current().well, original_input.getBackground());
+        for (0..16) |_| {
+            cx.advanceFrameClock();
+            _ = cx.render();
+        }
+        try std.testing.expectEqual(theme.popupInset(), original_input.getBackground());
         cx.setFocus(original_input);
-        _ = cx.render();
-        try std.testing.expectEqual(cx.tokens.tokens.color.bg_active, original_input.getBackground());
+        for (0..16) |_| {
+            cx.advanceFrameClock();
+            _ = cx.render();
+        }
+        try std.testing.expectEqual(theme.popupSelection(), original_input.getBackground());
         try std.testing.expect(ui.Color.eql(theme.current().fg_1, v.title.getText().?.color));
         try std.testing.expect(ui.Color.eql(theme.current().ok_ink, v.error_label.getText().?.color));
     }

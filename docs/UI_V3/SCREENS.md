@@ -64,7 +64,8 @@
 | AI 执行与审批 | [专项原型](ai-session-execution/index.html) | 页面场景选择与完整执行卡 |
 | 历史会话 | [列表](workspace/session-history/index.html?state=list)、[回看](workspace/session-history/index.html?state=tab)、[页签菜单](workspace/session-history/index.html?state=menu)、[@log](workspace/session-history/index.html?state=log) | 复用工作区历史 renderer |
 | 连接进度 | [直连](connection/progress.html)、[多跳](connection/progress.html?route=3)、[失败](connection/progress.html?route=3&state=failed) | 日志、取消、重试与关闭 |
-| 全局通知 | [消息](notifications/index.html)、[历史](notifications/history.html) | 查看操作进入对应会话 / 传输 / AI 原型 |
+| 全局通知 | [消息](notifications/index.html)、[提醒列表](notifications/history.html)、[完整规则](notifications/README.md) | 同一整机服务；重要事件升级、同源聚合、待处理／最近提醒与定位 |
 | AI 区域参考 | [初始区域](ai/welcome.html)、[回合与步骤](ai/conversation.html) | [工作区 AI](workspace/index.html?mode=ai) |
+| AI 提示与提醒边界 | [九种状态交互稿](ai/notifications.html)、[契约与原生映射](ai/notifications.md) | 回退、校验、失败、待确认、未知结果、接管、停止、完成及长路径；三尺寸、三主题 |
 | 设置排版参考 | [模型行](settings/model-row.html)、[模型编辑器](settings/model-editor.html)、[信息层级](settings/settings-hierarchy.html) | [模型组件](settings/index.html?component=model-row)、[完整设置](settings/index.html) |
 | 状态弹层参考 | [连接状态](workspace/status-popovers/index.html)、[会话状态提示](workspace/session-notice/index.html)、[端口转发](workspace/forwarding/index.html) | [工作区](workspace/index.html?mode=ssh)、[转发组件](workspace/index.html?mode=ssh&component=port-forward) |

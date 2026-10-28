@@ -29,6 +29,8 @@ pub const State = struct {
     on_toggle: ?ui.Handler(void) = null,
     root: *ui.Node,
     body: *ui.Node,
+    body_disclosure: *@import("layout_motion.zig").Disclosure = undefined,
+    footer_disclosure: *@import("layout_motion.zig").Disclosure = undefined,
     image_content: ?*ui.Node = null,
     footer: *ui.Node,
     identity: *ui.Node,
@@ -65,7 +67,7 @@ pub const State = struct {
             cancelled = cancelled or target.result.status == .cancelled or target.result.status == .timed_out;
         }
         const palette = @import("app_theme.zig").current();
-        header.setStyleInline(cx.allocator, .{ .background = palette.surface_1 });
+        header.setStyleInline(cx.allocator, .{ .background = palette.well });
         self.status_icon = try ui.iconTint(cx, if (all_succeeded) ui.icons.check else if (unknown) ui.icons.get("circle-help").? else if (cancelled) ui.icons.get("square").? else ui.icons.get("circle-alert").?, if (all_succeeded) palette.ok else if (unknown) palette.warn else palette.fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
         self.disclosure_icon = try ui.iconTint(cx, ui.icons.chevron_down, palette.fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
         self.disclosure_icon.?.setOpacityRaw(0);
@@ -106,7 +108,8 @@ pub const State = struct {
         self.body.meta.ownership.meta.test_id = "ai.tool.result.details";
         body.content.setStyleInline(cx.allocator, S.content(cx.tokens));
         self.image_content = body.content;
-        try self.root.appendChild(cx.allocator, self.body);
+        self.body_disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, self.body, record.expanded);
+        try self.root.appendChild(cx.allocator, self.body_disclosure.root);
         const command_row = try ui.boxStyled(cx, S.commandRow, .{});
         try body.content.appendChild(cx.allocator, command_row);
         const command_scroll = try ui.widgets.ScrollArea(.{ .direction = .both, .height = 27, .rubber_band_x = false }).mount(scope, cx);
@@ -181,7 +184,8 @@ pub const State = struct {
         self.stderr.meta.ownership.meta.test_id = "ai.tool.result.stderr";
         try stderr.content.appendChild(cx.allocator, self.stderr);
         self.footer = try ui.boxStyled(cx, S.footer, .{});
-        try self.root.appendChild(cx.allocator, self.footer);
+        self.footer_disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, self.footer, record.expanded);
+        try self.root.appendChild(cx.allocator, self.footer_disclosure.root);
         self.feedback = try ui.textStyled(cx, S.text, "执行结果");
         self.feedback.meta.ownership.meta.test_id = "ai.tool.result.feedback";
         try self.footer.appendChild(cx.allocator, self.feedback);
@@ -274,8 +278,8 @@ pub const State = struct {
             const asset = if (self.record.expanded) ui.icons.chevron_down else ui.icons.chevron_right;
             if (asset.icon_id) |id| if (asset.pickRep(14)) |rep| node.setIcon(.{ .icon_id = id, .rep = rep, .tint = @import("app_theme.zig").current().fg_2 });
         }
-        self.body.setDisplay(if (self.record.expanded) .flex else .none);
-        self.footer.setDisplay(if (self.record.expanded) .flex else .none);
+        self.body_disclosure.setExpanded(self.record.expanded);
+        self.footer_disclosure.setExpanded(self.record.expanded);
         self.root.setStyleInline(self.cx.allocator, .{ .height = .{ .fit = .{} } });
     }
     fn hoverDisclosure(self: *State) void {

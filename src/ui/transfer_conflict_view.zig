@@ -185,6 +185,7 @@ pub const View = struct {
         }
         try self.choices.appendChild(cx.allocator, self.radios);
         self.input = try ui.widgets.Input(.{ .value = self.rename, .placeholder = "新的文件名", .disabled = self.disabled, .on_change = cx.on(View, self, renamed), .on_submit = cx.on(View, self, submitted) }).mountResult(scope, cx);
+        @import("app_theme.zig").styleInput(self.input);
         self.input.node.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 31 }, .flex_shrink = 0 });
         self.input.input_container.setStyleInline(cx.allocator, S.input());
         self.input.input_container.meta.ownership.meta.test_id = "transfer.conflict.name";

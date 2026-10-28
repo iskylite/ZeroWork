@@ -21,7 +21,7 @@ pub fn rail() ui.BoxStyle {
     return .{ .width = .{ .fit = .{} }, .height = .{ .px = rail_height }, .flex_shrink = 0, .direction = .row, .gap = 6, .align_items = .center };
 }
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .fit = .{} }, .height = .{ .px = rail_height }, .direction = .row, .align_items = .center, .gap = 5, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .flex_shrink = 0, .background = theme.current().well, .border = .{ .radius = 5 } };
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = rail_height }, .direction = .row, .align_items = .center, .gap = 5, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .flex_shrink = 0, .background = theme.popupInset(), .border = .{ .radius = 5 } };
 }
 pub fn previewButton() ButtonStyle {
     return .{ .width = .{ .fit = .{} }, .min_width = 12, .height = .{ .px = 14 }, .padding = .{}, .gap = 0, .corner_radius = 6, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
@@ -57,7 +57,7 @@ pub fn invisibleWrapper() ui.BoxStyle {
     return .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 } };
 }
 pub fn previewPanel() ui.BoxStyle {
-    return .{ .width = .{ .px = preview_width }, .height = .{ .px = preview_height }, .direction = .column, .gap = 4, .padding = .{}, .background = theme.current().overlay, .border = .{ .radius = 11, .width = 0 }, .hit_behavior = .@"opaque" };
+    return .{ .width = .{ .px = preview_width }, .height = .{ .px = preview_height }, .direction = .column, .gap = 4, .padding = .{}, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 11, .width = 0 }, .hit_behavior = .@"opaque" };
 }
 pub fn inlinePreview(_: *const ui.ThemeTokens) ui.BoxStyle {
     return inlinePanel();
@@ -75,7 +75,7 @@ pub fn headingText(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 13, .font_weight = 700, .line_height = 18.0 / 13.0, .color = theme.current().fg_1 };
 }
 pub fn identity(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 32 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 4, .padding = .{ .left = 8, .right = 6 }, .background = theme.current().well, .border = .{ .radius = 8 } };
+    return .{ .width = .fill(), .height = .{ .px = 32 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 4, .padding = .{ .left = 8, .right = 6 }, .background = theme.popupInset(), .border = .{ .radius = 8 } };
 }
 pub fn identityText(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 10.5, .font_weight = 400, .line_height = 16.0 / 10.5, .color = theme.current().fg_1, .text_overflow = .ellipsis };

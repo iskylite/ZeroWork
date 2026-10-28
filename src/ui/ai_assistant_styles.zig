@@ -3,17 +3,13 @@ const ui = @import("ui");
 const theme = @import("app_theme.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .hit_behavior = .@"opaque", .width = .{ .px = 600 }, .height = .{ .px = 456 }, .direction = .column, .padding = ui.Padding.all(1), .background = theme.current().overlay, .border = .{ .width = 0, .radius = 14 }, .shadows = ui.ShadowList.of(&.{.{ .color = ui.Color.rgba(0, 0, 0, 119), .blur = 48, .offset_y = 18 }}), .overflow = .hidden };
+    return .{ .hit_behavior = .@"opaque", .width = .{ .px = 600 }, .height = .{ .px = 456 }, .direction = .column, .padding = ui.Padding.all(1), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = 14 }, .shadows = ui.ShadowList.of(&.{.{ .color = ui.Color.rgba(0, 0, 0, 119), .blur = 48, .offset_y = 18 }}), .overflow = .hidden };
 }
 pub fn gripRow(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 14 }, .flex_shrink = 0, .align_items = .center, .justify = .center };
 }
 pub fn grip(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = 36 }, .height = .{ .px = 4 }, .background = switch (theme.currentName()) {
-        .dark => ui.Color.hex(0x3a3a42),
-        .light => ui.Color.hex(0xd4d4d8),
-        .sauber => ui.Color.hex(0xb9d6ae),
-    }, .border = .{ .radius = 2 } };
+    return .{ .width = .{ .px = 36 }, .height = .{ .px = 4 }, .background = theme.current().fg_3, .border = .{ .radius = 2 } };
 }
 pub fn header(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 34 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 14, .right = 14, .bottom = 8, .top = 0 } };
@@ -44,7 +40,7 @@ pub fn regionIcon() ui.Style {
     return .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 };
 }
 pub fn ownerPill(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .fit = .{} }, .max_width = 160, .height = .{ .px = 20 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 8, .right = 8 }, .background = theme.current().well, .border = .{ .radius = 8 }, .overflow = .hidden };
+    return .{ .width = .{ .fit = .{} }, .max_width = 160, .height = .{ .px = 20 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 8, .right = 8 }, .background = theme.popupInset(), .border = .{ .radius = 8 }, .overflow = .hidden };
 }
 pub fn userBubbleMaxWidth(content_width: f32) f32 {
     return @max(0, content_width) * 0.75;
@@ -70,8 +66,18 @@ pub fn messageRow(user: bool) ui.BoxStyle {
 pub fn conversation(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .direction = .column, .gap = 12, .padding = .{ .left = 14, .right = 14 }, .height = .{ .fit = .{} }, .flex_shrink = 0 };
 }
+// Feedback belongs to the scrollable transcript, never the composer flex stack.
+pub fn noticeHolder(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .left = 14, .right = 14, .top = 8, .bottom = 12 }, .flex_shrink = 0 };
+}
+pub fn notice(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .height = .{ .fit = .{} }, .direction = .row, .align_items = .start, .gap = 8, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .background = theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
+}
+pub fn noticeText(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 11, .line_height = 18.0 / 11.0, .wrap = .word, .color = theme.current().fg_2 };
+}
 pub fn composer(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 90 }, .flex_shrink = 0, .direction = .column, .gap = 4, .padding = .{ .left = 14, .right = 14, .top = 6, .bottom = 6 }, .background = theme.current().well, .border = .{ .radius = 10 } };
+    return .{ .width = .fill(), .height = .{ .px = 90 }, .flex_shrink = 0, .direction = .column, .gap = 4, .padding = .{ .left = 14, .right = 14, .top = 6, .bottom = 6 }, .background = theme.popupInset(), .border = .{ .radius = 10 } };
 }
 pub fn controls(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 28 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6 };
@@ -93,7 +99,7 @@ pub fn assistantMessage() ui.BoxStyle {
     return .{ .width = .fill(), .min_width = 0, .direction = .column, .gap = 4, .flex_shrink = 0 };
 }
 pub fn markdownOptions() ui.widgets.MarkdownOptions {
-    return .{ .base_font_size = 12.5, .code_font_size = 11, .text_color = theme.current().fg_1, .code_color = theme.current().fg_1, .code_bg = theme.current().well, .link_color = theme.current().accent, .rule_color = theme.current().border, .heading_color = theme.current().fg_1, .paragraph_gap = 4, .line_height = 1.65, .code_line_height = 16.0 / 11.0 };
+    return .{ .base_font_size = 12.5, .code_font_size = 11, .text_color = theme.current().fg_1, .code_color = theme.current().fg_1, .code_bg = theme.popupInset(), .link_color = theme.current().accent, .rule_color = theme.current().border, .heading_color = theme.current().fg_1, .paragraph_gap = 4, .line_height = 1.65, .code_line_height = 16.0 / 11.0 };
 }
 
 pub const body_font_size: f32 = 12.5;

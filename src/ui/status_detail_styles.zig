@@ -5,7 +5,7 @@ pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 
 pub fn panel() ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .fill(), .direction = .column, .padding = ui.Padding.all(12), .gap = 6, .background = c.overlay, .border = .{ .width = 0, .color = c.border, .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
+    return .{ .width = .fill(), .direction = .column, .padding = ui.Padding.all(12), .gap = 6, .background = c.overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .color = c.border, .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
 }
 pub fn header() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 28 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6 };
@@ -42,7 +42,7 @@ pub fn fade() ui.BoxStyle {
     return shared.fade();
 }
 pub fn action() ButtonStyle {
-    return .{ .width = .fill(), .height = .{ .px = 26 }, .padding = .{}, .gap = 0, .direction = .row, .justify = .start, .align_items = .center, .corner_radius = 7, .border_width = 0, .background = theme.current().surface_2, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 26 }, .padding = .{}, .gap = 0, .direction = .row, .justify = .start, .align_items = .center, .corner_radius = 7, .border_width = 0, .background = theme.popupAction(), .flex_shrink = 0 };
 }
 pub fn actionContent() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_width = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 6, .right = 6 }, .gap = 6 };

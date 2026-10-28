@@ -38,15 +38,14 @@ pub fn control(width: f32) ui.BoxStyle {
 }
 pub fn panel() ui.BoxStyle {
     const c = theme.current();
-    return .{ .direction = .column, .padding = .{ .left = picker_padding, .right = picker_padding, .top = picker_padding, .bottom = picker_padding }, .gap = 8, .background = c.overlay, .border = .{ .width = 0, .color = c.border, .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 12, .color = c.shadow } };
+    return .{ .direction = .column, .padding = .{ .left = picker_padding, .right = picker_padding, .top = picker_padding, .bottom = picker_padding }, .gap = 8, .background = c.overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .color = c.border, .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 12, .color = c.shadow } };
 }
 pub fn pickerRow(selected: bool) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .fill(), .height = .{ .px = picker_row_height }, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .gap = 10, .background = if (selected) c.selection else c.well, .border = .{ .width = 0, .color = if (selected) c.accent else c.border, .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = picker_row_height }, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .gap = 10, .background = if (selected) theme.popupSelection() else theme.popupInset(), .border = .{ .width = 0, .color = if (selected) c.accent else c.border, .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn field() ui.BoxStyle {
-    const c = theme.current();
-    return .{ .width = .fill(), .height = .{ .px = field_height }, .background = c.well, .border = .{ .width = 0, .color = c.well_border, .radius = 7 } };
+    return .{ .width = .fill(), .height = .{ .px = field_height }, .background = theme.popupInset(), .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 7 } };
 }
 pub fn smallText() ui.TextStyle {
     return .{ .font_size = 10, .color = theme.current().fg_2, .line_height = 1.4, .selectable = false };
@@ -93,7 +92,7 @@ pub fn renameClose() ui.BoxStyle {
 }
 pub fn renameField() ui.BoxStyle {
     var value = field();
-    value.border = .{ .width = 0, .color = theme.current().well_border, .radius = 8 };
+    value.border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 8 };
     return value;
 }
 pub fn renameLabel() ui.TextStyle {
@@ -133,5 +132,5 @@ pub fn groupMarker(color: ui.Color) ui.BoxStyle {
 
 // V3 #tooltip: independent floating content, max-width300, inset7/10, radius7.
 pub fn tooltip() ui.BoxStyle {
-    return .{ .width = .{ .fit = .{ .max = 300 } }, .max_width = 300, .padding = .{ .left = 10, .right = 10, .top = 7, .bottom = 7 }, .border = .{ .radius = 7 }, .background = theme.current().overlay, .shadow = .{ .offset_y = 8, .blur = 24, .color = theme.current().shadow } };
+    return .{ .width = .{ .fit = .{ .max = 300 } }, .max_width = 300, .padding = .{ .left = 10, .right = 10, .top = 7, .bottom = 7 }, .border = .{ .radius = 7 }, .background = theme.current().overlay, .glass = theme.overlayGlass(), .shadow = .{ .offset_y = 8, .blur = 24, .color = theme.current().shadow } };
 }

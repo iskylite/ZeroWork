@@ -79,6 +79,7 @@ pub fn input(cx: *ui.Cx, scope: *ui.Scope, props: anytype, style: FieldStyle) !*
     builder.props.embedded = style.embedded;
     builder.props.placeholder_color = color.muted;
     const result = try builder.mountResult(scope, cx);
+    if (!style.embedded) @import("app_theme.zig").styleInput(result);
     result.state.font_size = style.font_size;
     result.state.line_height = style.font_size * 1.5;
     result.state.char_width = style.font_size * 0.6;

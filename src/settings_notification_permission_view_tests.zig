@@ -61,12 +61,12 @@ test "notification actual settings switches call explicit user edit hook while m
     cx.handleMouseDownEx(rect.x + rect.w / 2, rect.y + rect.h / 2, .left, .{});
     cx.handleMouseUpEx(rect.x + rect.w / 2, rect.y + rect.h / 2, .left, .{});
     try std.testing.expectEqual(@as(usize, 1), probe.user_edits);
-    try std.testing.expect(!controller.model.value.notify.transfer_done);
-    try std.testing.expect(controller.original.value.notify.transfer_done);
+    try std.testing.expect(controller.model.value.notify.transfer_done);
+    try std.testing.expect(!controller.original.value.notify.transfer_done);
     cx.handleMouseDownEx(rect.x + rect.w / 2, rect.y + rect.h / 2, .left, .{});
     cx.handleMouseUpEx(rect.x + rect.w / 2, rect.y + rect.h / 2, .left, .{});
     try std.testing.expectEqual(@as(usize, 2), probe.user_edits);
-    try std.testing.expect(controller.model.value.notify.transfer_done);
+    try std.testing.expect(!controller.model.value.notify.transfer_done);
     mounted.refreshFooter();
     try std.testing.expectEqual(@as(usize, 2), probe.user_edits);
     try std.testing.expectEqual(help_reads_after_mount, probe.help_reads);

@@ -104,7 +104,7 @@ pub const View = struct {
         try scope.onCleanup(View, self, cleanup);
         registered = true;
         const focus_guard = try scope.childScope();
-        const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = false, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
+        const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .close_on_outside_click = false, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchor } }, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = S.anchor_gap }, .viewport_padding = S.margin, .constrain_width_to_viewport = true, .flip = false, .shift_main_axis = false, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
         self.scope = popup.scope;
         self.root = popup.wrapper;
         self.chrome = popup.chrome;
@@ -272,7 +272,7 @@ pub const View = struct {
         self.copy_button = try self.textButton(scope, actions, .copy, "复制信息", "status.connection.copy", 90, true, null);
         self.logs_button = try self.button(scope, actions, .logs, "连接日志", "status.connection.logs", ui.icons.get("file-text").?, 28, true, self.logs_disabled);
         self.feedback_label = try label(self.cx, actions, "", S.infoText(true), S.feedbackBox());
-        self.reconnect_button = try self.textButton(scope, actions, .reconnect, "重新连接", "status.connection.reconnect", 88, false, self.reconnect_disabled);
+        self.reconnect_button = try self.textButton(scope, actions, .reconnect, "重新连接", "status.connection.reconnect", 88, true, self.reconnect_disabled);
         try self.content.appendChild(self.cx.allocator, actions);
         self.pointer = try ui.iconTint(self.cx, ui.icons.chevron_down, S.theme.current().fg_3, S.icon(12));
         self.pointer.setDisplay(.none);

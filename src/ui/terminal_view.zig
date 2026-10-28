@@ -4885,7 +4885,7 @@ test "terminal overlay global command paint follows hidden and visible publicati
     try std.testing.expectEqual(theme.current().fg_2, view.palette_count_text.getText().?.color);
     try std.testing.expectEqual(theme.current().overlay, view.palette_panel.getBackground());
     try std.testing.expectEqual(ui.Color.TRANSPARENT, first.getBackground());
-    try std.testing.expectEqual(theme.current().selection, row.getBackground());
+    try std.testing.expectEqual(theme.popupSelection(), row.getBackground());
     try std.testing.expect(view.palette_panel.style.display == .none);
     view.renderCommandPalette();
     const geometry = view.palette_cache;
@@ -4895,7 +4895,7 @@ test "terminal overlay global command paint follows hidden and visible publicati
     try std.testing.expectEqual(theme.current().accent, if (header_icon.getIcon()) |value| value.tint else header_icon.getImage().?.tint);
     try std.testing.expectEqual(theme.current().overlay, view.palette_panel.getBackground());
     try std.testing.expectEqual(theme.current().accent_ink, row.children.items[1].getText().?.color);
-    try std.testing.expectEqual(theme.current().selection, row.getBackground());
+    try std.testing.expectEqual(theme.popupSelection(), row.getBackground());
     try std.testing.expectEqual(row_id, view.palette_rows.items[selected].id);
     try std.testing.expectEqual(selected, view.palette.selected);
     try std.testing.expectEqual(scroll_y, view.palette_scroll.state.scroll_y);
@@ -4905,7 +4905,7 @@ test "terminal overlay global command paint follows hidden and visible publicati
     view.palette.selected = 0;
     view.refreshCommandPaletteSelection();
     try std.testing.expectEqual(ui.Color.TRANSPARENT, row.getBackground());
-    try std.testing.expectEqual(theme.current().selection, first.getBackground());
+    try std.testing.expectEqual(theme.popupSelection(), first.getBackground());
 }
 
 /// Shared headless VT fixture extended only with a trusted-editor provider.
@@ -5014,7 +5014,7 @@ test "terminal overlay global completion and replay repaint preserve retained in
         try std.testing.expectEqual(theme.current().overlay, view.completion_panel.getBackground());
         try std.testing.expectEqual(theme.current().fg_1, label.getText().?.color);
         try std.testing.expectEqual(theme.current().accent_ink, label.getText().?.spans[0].color.?);
-        try std.testing.expectEqual(theme.current().selection, row.getBackground());
+        try std.testing.expectEqual(theme.popupSelection(), row.getBackground());
         try std.testing.expectEqual(theme.current().overlay, view.history_bar.?.getBackground());
         try std.testing.expectEqual(theme.current().well, view.history_track.?.getBackground());
         try std.testing.expectEqual(theme.current().accent, view.history_fill.?.getBackground());

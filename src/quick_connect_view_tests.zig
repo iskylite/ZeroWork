@@ -145,21 +145,22 @@ test "quick connect native saved prototype geometry and keyboard submit use capt
     defer h.deinit();
     const view = h.view;
     try near(520, view.chrome.globalRect().w);
-    try near(306, view.chrome.globalRect().h);
+    try near(366, view.chrome.globalRect().h);
     try part(view.input.node, view.chrome, 16, 56, 488, 40);
     try part(view.input.input_container, view.chrome, 16, 56, 488, 40);
     try std.testing.expect(view.clear.style.display == .none);
-    try part(view.scroll.container, view.chrome, 16, 124, 488, 96);
-    try part(view.secondary, view.chrome, 16, 256, 144, 34);
-    try part(view.primary, view.chrome, 360, 256, 144, 34);
+    try part(view.scroll.container, view.chrome, 16, 124, 488, 144);
+    try part(view.secondary, view.chrome, 16, 316, 144, 34);
+    try part(view.primary, view.chrome, 360, 316, 144, 34);
     const row = view.scroll.content.children.items[0];
-    try near(28, row.globalRect().h);
+    try near(44, row.globalRect().h);
     const pieces = row.children.items[row.children.items.len - 1].children.items;
-    try part(pieces[0], row, 8, 7, 14, 14);
-    try near(108, pieces[1].globalRect().w);
-    try part(pieces[2], row, 142, 7, 230, 14);
-    try part(pieces[3], row, 378, 2, 46, 24);
-    try std.testing.expect(pieces[2].getText().?.use_monospace_font);
+    try part(pieces[0], row, 10, 12, 20, 20);
+    try part(pieces[1], row, 40, 5, 382, 34);
+    try part(pieces[1].children.items[0], row, 40, 5, 382, 18);
+    try part(pieces[1].children.items[1], row, 40, 23, 382, 16);
+    try part(pieces[2], row, 432, 10, 46, 24);
+    try std.testing.expect(pieces[1].children.items[1].getText().?.use_monospace_font);
     h.key(.down);
     try std.testing.expectEqual(owner_b, view.selected.?);
     h.key(.@"return");
@@ -178,7 +179,7 @@ test "quick connect native invalid raw port remains editable and corrected field
     try std.testing.expectEqual(V.Mode.invalid, view.mode);
     try std.testing.expectEqualStrings("70000", view.port_value.peek());
     try std.testing.expect(view.disabled.peek());
-    try near(366, view.chrome.globalRect().h);
+    try near(378, view.chrome.globalRect().h);
     try part(view.notice, view.chrome, 16, 102, 488, 62);
     try part(view.host_input.node, view.chrome, 16, 190, 330, 32);
     try part(view.port_input.node, view.chrome, 358, 190, 146, 32);
@@ -206,11 +207,11 @@ test "quick connect native no match preserves query explicit profile and clear s
     const view = h.view;
     h.query("no-such-host");
     // Revised centered connection guide, inline clear and one action.
-    try near(315, view.chrome.globalRect().h);
+    try near(327, view.chrome.globalRect().h);
     try part(view.input.input_container, view.chrome, 16, 56, 488, 40);
     try part(view.clear, view.chrome, 464, 64, 24, 24);
     try std.testing.expect(view.secondary.style.display == .none);
-    try part(view.primary, view.chrome, 360, 263, 144, 34);
+    try part(view.primary, view.chrome, 360, 275, 144, 34);
     h.key(.@"return");
     try std.testing.expectEqual(@as(usize, 0), probe.profile_count);
     try std.testing.expectEqualStrings("no-such-host", view.query.peek());
@@ -304,17 +305,22 @@ test "quick connect native theme material changes preserve active draft and sele
     const publication = try h.cx.bindState(@import("ui/shell_styles.zig").ThemePublication, .{});
     h.query("DB");
     const chrome_id = view.chrome.id;
-    inline for (.{ T.Name.dark, T.Name.light, T.Name.sauber }) |name| {
-        T.select(name);
+    var registry = try @import("config/theme_registry.zig").Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    for (registry.records.items) |record| {
+        T.selectTokens(record.ui_tokens);
         _ = T.setMaterialVisible(true);
         _ = T.setMaterialParameters(50, 32);
-        publication.publish(h.cx, T.widgetTheme(name));
+        publication.publish(h.cx, T.widgetTheme(T.currentName()));
         h.frames();
         try std.testing.expectEqual(chrome_id, view.chrome.id);
         try std.testing.expectEqualStrings("DB", view.query.peek());
         try std.testing.expectEqual(owner_a, view.selected.?);
         try std.testing.expectEqual(T.current().overlay, view.chrome.getBackground());
-        try std.testing.expectEqual(T.current().well, view.input.input_container.getBackground());
+        try std.testing.expectEqual(T.popupSelection(), view.input.node.getBackground());
+        try std.testing.expectEqual(T.popupSelection().a, view.input.node.getBackground().a);
+        try std.testing.expectEqual(V.styles.selectedFill(), view.scroll.content.children.items[0].getBackground());
+        try std.testing.expectEqual(V.styles.actionFill(), view.primary.getBackground());
         try std.testing.expect(view.chrome.getBackground().a < 255);
     }
     try std.testing.expectEqual(@as(usize, 0), probe.saved_count);

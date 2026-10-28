@@ -1019,8 +1019,9 @@ pub const Pane = struct {
             if (part.len == 0) continue;
             if (count > 0) try self.breadcrumb.appendChild(cx.allocator, try ui.text(cx, "/", .{ .font_size = 10, .color = S.theme.current().fg_2 }));
             const target = try scope.createText(path_[0..@min(path_.len, end - 1)], .{});
+            const part_text = try scope.createText(part, .{});
             const choice = try scope.createState(PathPart, .{ .pane = self, .path = target.peek() });
-            const button_ = try ui.widgets.Button(.{ .label = part, .variant = .ghost, .disabled = self.nav_disabled, .base_style = .{ .height = .{ .px = 24 }, .padding = .{ .left = 6, .right = 6 }, .font_size = 10, .font_weight = 400, .border = .{ .radius = 4 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 }, .on_click = cx.on(PathPart, choice, PathPart.choose) }).mount(scope, cx);
+            const button_ = try ui.widgets.Button(.{ .label = part_text, .variant = .ghost, .disabled = self.nav_disabled, .base_style = .{ .height = .{ .px = 24 }, .padding = .{ .left = 6, .right = 6 }, .font_size = 10, .font_weight = 400, .border = .{ .radius = 4 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 }, .on_click = cx.on(PathPart, choice, PathPart.choose) }).mount(scope, cx);
             breadcrumbFont(button_);
             button_.meta.ownership.meta.test_id = "files.path.part";
             try self.breadcrumb.appendChild(cx.allocator, button_);
@@ -1065,6 +1066,7 @@ pub const Pane = struct {
         node.meta.ownership.meta.test_id = "files.row";
         row.node = node;
         row.columns = try ui.box(cx, S.columns(self.column_width), .{});
+        row.columns.meta.ownership.meta.test_id = "files.row.columns";
         try node.appendChild(cx.allocator, row.columns);
         const check_cell = try ui.box(cx, S.column(20), .{});
         const checkbox = try ui.widgets.Checkbox(.{ .checked = ui.split(checked, cx.on(Row, row, Row.check)), .disabled = parentEntry(entry), .box_size = @as(f32, 13), .label = "" }).mount(scope, cx);
@@ -1190,6 +1192,8 @@ const Row = struct {
         self.checked.set(selected);
         const hovering = self.pane.view.drop_side == self.pane.side and std.mem.eql(u8, self.pane.view.drop_path[0..self.pane.view.drop_path_len], self.key);
         self.style.set(S.fileRow(self.pane.column_width, selected or hovering, sameOptional(p.focused_key, self.key)));
+        // Paint the selected content above the Button hover/press surface.
+        self.columns.setBackground(if (selected or hovering or sameOptional(p.focused_key, self.key)) S.theme.popupSelection() else ui.Color.TRANSPARENT);
         self.columns.setStyleInline(self.pane.view.cx.allocator, .{ .width = .{ .px = self.pane.column_width } });
         self.name_cell.setStyleInline(self.pane.view.cx.allocator, .{ .width = .{ .px = self.pane.name_width } });
         if (self.columns.children.items.len >= 4) {

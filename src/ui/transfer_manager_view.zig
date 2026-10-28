@@ -408,6 +408,7 @@ pub const Panel = struct {
     foot: *ui.Node,
     scope_row: *ui.Node,
     scope_scope: ?*ui.Scope = null,
+    scope_picker: ?*ui.Node = null,
     v3_filters: ?*ui.Node = null,
     v3_filter_labels: [3]?*ui.Node = @splat(null),
     counts_row: *ui.Node,
@@ -464,6 +465,11 @@ pub const Panel = struct {
         p.title_badge = try p.label(p.head, "", 10.5, 400, true);
         p.title_badge.setDisplay(if (tray) .none else .flex);
         p.title_badge.setStyleInline(cx.allocator, .{ .height = .{ .px = 22 }, .padding = .{ .left = 8, .right = 8 }, .background = S.theme.current().surface_2, .border = .{ .radius = 6 } });
+        if (!tray and options.presentation != .session_popover) {
+            p.scope_picker = try ui.box(cx, .{ .direction = .row, .align_items = .center, .min_width = 0 }, .{});
+            try p.head.appendChild(cx.allocator, p.scope_picker.?);
+            p.title_badge.setDisplay(.none);
+        }
         if (!tray) try p.head.appendChild(cx.allocator, try ui.spacer(cx));
         if (native_window) {
             _ = try p.button(p.head, scope, "最小化传输窗口", "transfer.window.minimize", "minus", .{ .panel = p, .kind = .window, .window = .minimize }, p.window_disabled, 22);
@@ -762,40 +768,44 @@ pub const Panel = struct {
                 self.cx.destroyDetached(child);
             }
         }
-        self.scope_row.setDisplay(if (self.options.presentation == .session_popover or self.options.presentation == .session_tray) .none else .flex);
+        self.scope_row.setDisplay(.none);
         const scope = try self.scope.childScope();
         self.scope_scope = scope;
         const source = self.source orelse return;
-        const strip = try ui.widgets.ScrollArea(.{ .direction = .horizontal }).mount(scope, self.cx);
-        strip.container.setStyleInline(self.cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = @import("workspace_tab_styles.zig").height } });
-        strip.content.setStyleInline(self.cx.allocator, .{ .direction = .row, .gap = 4, .height = .{ .px = @import("workspace_tab_styles.zig").height }, .align_items = .center });
-        try self.scope_row.appendChild(self.cx.allocator, strip.container);
-        for (source.value.choices, 0..) |choice, i| {
-            if (self.options.presentation == .session_popover) continue;
-            if (choice.scope == .sessions) continue;
-            if (choice.scope != .all) {
-                var has_tasks = false;
-                for (source.value.rows) |task_| if (belongs(choice.scope, task_.target.owner)) {
-                    has_tasks = true;
-                    break;
-                };
-                if (!has_tasks) continue;
+        if (self.scope_picker) |picker| {
+            while (picker.children.items.len > 0) {
+                const child = picker.children.items[picker.children.items.len - 1];
+                self.cx.detachChild(picker, child);
+                self.cx.destroyDetached(child);
             }
-            const state = try scope.createState(Control, .{ .panel = self, .kind = .choice, .choice = i });
-            const tabs = @import("workspace_tab_styles.zig");
-            const selected = scopeEql(choice.scope, self.selected_scope);
-            const width = std.math.clamp(self.cx.text.measureTextWidth(choice.label, 12, 500, false) + 28, 100, 220);
-            const button_ = try ui.box(self.cx, tabs.tab(width, selected), .{});
-            button_.behavior.interaction.a11y = .{ .role = .tab, .label = choice.label, .selected = selected };
-            button_.behavior.interaction.focusable = true;
-            _ = ui.clickable(button_, self.cx.on(Control, state, Control.run));
-            const title = try ui.text(self.cx, "", tabs.title());
-            try title.setTextContent(self.cx.allocator, choice.label);
-            title.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .margin = .{ .left = 10, .right = 10 } });
-            try button_.appendChild(self.cx.allocator, title);
-            if (selected) try button_.appendChild(self.cx.allocator, try ui.box(self.cx, tabs.underline(width), .{}));
-            button_.meta.ownership.meta.test_id = "transfer.scope";
-            try strip.content.appendChild(self.cx.allocator, button_);
+            var choices: std.ArrayList(ui.widgets.SelectOption) = .empty;
+            defer choices.deinit(self.cx.allocator);
+            var selected: ?[]const u8 = null;
+            var width: f32 = 64;
+            var menu_width: f32 = 160;
+            for (source.value.choices, 0..) |choice, i| {
+                if (choice.scope == .sessions) continue;
+                const storage = try scope.createState(struct { value: [20]u8 = undefined, id: [64]u8 = undefined }, .{});
+                const value = try std.fmt.bufPrint(&storage.value, "{d}", .{i});
+                const choice_label = if (choice.scope == .all) "全局" else choice.label;
+                menu_width = @max(menu_width, self.cx.text.measureTextWidth(choice_label, 11, 400, false) + 56);
+                try choices.append(self.cx.allocator, .{ .value = value, .label = choice_label, .test_id = try std.fmt.bufPrint(&storage.id, "transfer.scope.option.{d}", .{i}) });
+                if (scopeEql(choice.scope, self.selected_scope)) {
+                    selected = value;
+                    width = std.math.clamp(self.cx.text.measureTextWidth(choice_label, 10, 400, false) + 38, 64, 260);
+                }
+            }
+            const select = try ui.widgets.Select(.{ .options = choices.items, .value = selected, .placeholder = "全局", .size = .xs, .width = width, .dropdown_width = @min(menu_width, 320), .dropdown_position = .bottom_start, .on_change = self.cx.on(Panel, self, scopeChanged) }).mount(scope, self.cx);
+            select.chrome.meta.ownership.meta.test_id = "transfer.scope.menu";
+            select.chrome.setStyleInline(self.cx.allocator, S.scopeMenu());
+            try S.theme.bindMaterial(self.cx, select.scope, select.chrome, "overlay");
+            select.panel.setStyleInline(self.cx.allocator, .{ .gap = 0 });
+            select.trigger.meta.ownership.meta.test_id = "transfer.scope.select";
+            if (select.trigger.behavior.interaction.a11y) |*a11y| a11y.label = "选择传输会话";
+            const state = ui.widgets.select.stateOf(select);
+            state.trigger.setStyleInline(self.cx.allocator, S.scopeTrigger());
+            for (state.option_nodes) |option| option.setStyleInline(self.cx.allocator, S.scopeOption());
+            try picker.appendChild(self.cx.allocator, select.wrapper);
         }
         try self.v3TaskAction(self.tools_row, scope, if (self.batch_visible) "完成" else "管理", "transfer.batch", .{ .panel = self, .kind = .batch }, false);
         _ = try self.button(self.tools_row, scope, "搜索任务", "transfer.search.toggle", "search", .{ .panel = self, .kind = .search }, false, 28);
@@ -1041,7 +1051,7 @@ pub const Panel = struct {
         try parent.appendChild(self.cx.allocator, button_);
     }
     fn taskMenu(self: *Panel, parent: *ui.Node, scope: *ui.Scope, task_: Task) !void {
-        const menu = try ui.widgets.Popover(.{ .position = .bottom_end, .width = @as(f32, 180), .size_policy = .fit_content, .a11y_role = .menu }).mount(scope, self.cx);
+        const menu = try ui.widgets.Popover(.{ .position = .bottom_start, .width = @as(f32, 180), .size_policy = .fit_content, .a11y_role = .menu }).mount(scope, self.cx);
         menu.wrapper.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .flex_shrink = 0 });
         menu.trigger.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .fill() });
         menu.content.meta.ownership.meta.test_id = "transfer.task.menu";
@@ -1212,6 +1222,11 @@ pub const Panel = struct {
     }
     fn searchChanged(self: *Panel, _: []const u8) void {
         self.invalidate();
+    }
+    fn scopeChanged(self: *Panel, value: ?[]const u8) void {
+        const index = std.fmt.parseInt(usize, value orelse return, 10) catch return;
+        var control: Control = .{ .panel = self, .kind = .choice, .choice = index };
+        control.run();
     }
     fn filterChanged(self: *Panel, value: ?[]const u8) void {
         self.filter = std.meta.stringToEnum(Filter, value orelse "all") orelse .all;

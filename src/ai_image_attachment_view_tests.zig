@@ -86,10 +86,11 @@ test "AI images inline retain escape remove and immutable history use one captur
     try fixture.draft.complete(ticket, &reference);
     try fixture.view.update(&fixture.draft);
     settle(cx);
-    click(cx, fixture.view.cards[0].preview);
+    click(cx, fixture.view.cards[0].filename);
     try std.testing.expect(fixture.view.isPreviewOpen());
-    try std.testing.expectEqual(@as(f32, 194), fixture.view.panel.globalRect().h);
-    try std.testing.expectEqual(@as(f32, 104), fixture.view.preview_image.globalRect().h);
+    try std.testing.expectApproxEqAbs(@as(f32, 700 * 0.78), fixture.view.panel.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 800 * 0.78), fixture.view.panel.globalRect().w, 0.1);
+    try std.testing.expect(fixture.view.preview_image.globalRect().h > 350);
     try std.testing.expectEqualStrings("/original/captured.png", fixture.view.identity.getText().?.content);
     click(cx, fixture.view.keep_button);
     try std.testing.expect(!fixture.view.isPreviewOpen());

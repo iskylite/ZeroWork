@@ -1,0 +1,39 @@
+.zw-notification-root{position:absolute;inset:0;z-index:160;pointer-events:none}
+.zw-notification-center{position:absolute;right:12px;top:50px;width:360px;max-width:calc(100% - 24px);max-height:calc(100% - 64px);display:flex;flex-direction:column;pointer-events:auto;background:var(--overlay);color:var(--fg);border-radius:10px;box-shadow:var(--shadow-float,var(--shadow));font:12px/18px var(--font,Inter,-apple-system,sans-serif);overflow:hidden;backdrop-filter:blur(max(12px,var(--overlay-blur,12px)));-webkit-backdrop-filter:blur(max(12px,var(--overlay-blur,12px)))}
+.zw-notification-center[hidden]{display:none}
+.zw-notification-center>header{display:flex;align-items:center;justify-content:space-between;padding:10px 12px;flex:none}
+.zw-notification-center button{border:0;border-radius:5px;background:transparent;color:var(--muted);padding:3px 6px;font:inherit;cursor:pointer;min-height:24px}
+.zw-notification-center button:hover{background:var(--popup-action,var(--hover))}
+.zw-notification-center button:focus-visible{outline:0;background:var(--popup-selected,var(--sel));color:var(--fg)}
+.zw-notification-center button:disabled{opacity:.4;cursor:default}
+.zw-notification-center>nav{display:flex;gap:6px;padding:0 12px 8px;flex:none}
+.zw-notification-center [aria-pressed=true]{background:var(--popup-selected,var(--sel));color:var(--accent-ink,var(--accent))}
+.zw-notification-list{overflow:auto;min-height:0;max-height:320px;padding:0 8px 8px;display:flex;flex-direction:column;gap:6px}
+.zw-notification-record{position:relative;display:flex;flex-direction:column;gap:2px;flex:none;padding:8px 12px;min-height:68px;border-radius:9px;background:var(--control-bg,var(--well))}
+.zw-notification-record>div{display:flex;align-items:baseline;gap:8px;min-width:0}
+.zw-notification-record strong{font-weight:500;min-width:0;overflow-wrap:anywhere}
+.zw-notification-state{font-size:10px;flex:none;color:var(--muted)}
+.zw-notification-state.pending{color:var(--warn-ink,var(--warn))}
+.zw-notification-record p{margin:0;color:var(--muted);font-size:11px;line-height:18px;overflow-wrap:anywhere}
+.zw-notification-record summary{cursor:pointer;color:var(--muted);font-size:11px}
+.zw-notification-record>button{align-self:flex-end;color:var(--accent-ink,var(--accent));font-size:11px}
+.zw-notification-center>footer{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:8px 12px;color:var(--muted);font-size:10px;flex:none;background:var(--well)}
+.zw-notification-center>footer span{flex:1;min-width:0}
+.zw-notification-empty{padding:28px 12px;text-align:center;color:var(--muted);font-size:11px}
+.zw-global-notifications{position:relative;display:inline-flex!important;align-items:center;justify-content:center;width:28px!important;min-width:28px!important;height:28px!important;padding:0!important;border:0!important;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer}
+.zw-global-notifications svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7}
+.zw-global-notifications i{position:absolute;right:0;top:-2px;min-width:12px;height:12px;padding:0 2px;border-radius:6px;background:var(--warn-ink,var(--warn));color:var(--overlay);font:500 9px/12px var(--font,Inter,sans-serif);font-style:normal}
+.zw-global-notifications i[hidden]{display:none}
+.notification-review{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 20px;color:var(--muted);font:11px/18px var(--font,Inter,sans-serif)}
+.notification-review select,.notification-review button{background:var(--surface-2);color:var(--fg);border:0;border-radius:6px;padding:5px 8px;font:inherit;cursor:pointer}
+.notification-review label{display:flex;gap:5px;align-items:center}
+.notification-review output{flex:1 1 300px;color:var(--fg)}
+
+.zw-notification-center>footer button{background:var(--popup-action,var(--hover))}
+
+.zw-notification-record>.zw-notification-summary{align-items:center;min-height:22px;gap:6px}
+.zw-notification-summary>p{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.zw-notification-summary>button{flex:none;min-height:22px;height:22px;color:var(--accent-ink,var(--accent));padding:0 6px;font-size:11px}
+.zw-notification-summary>[data-center-expand]{width:22px;padding:0;color:var(--muted)}
+.zw-notification-detail{max-height:120px;overflow:auto;padding-top:4px}
+.zw-notification-detail[hidden]{display:none!important}

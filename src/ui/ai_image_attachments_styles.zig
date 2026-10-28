@@ -5,7 +5,7 @@ pub fn retrySlot() ui.BoxStyle {
     return .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .padding = .{}, .flex_shrink = 0 };
 }
 pub fn previewStyle() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = shared.preview_body_height }, .flex_shrink = 0, .background = shared.theme.current().well, .overflow = .hidden };
+    return .{ .width = .fill(), .height = .{ .px = shared.preview_body_height }, .flex_shrink = 0, .background = shared.theme.popupInset(), .overflow = .hidden };
 }
 /// Raster remains in proportion inside the fixed preview viewport.
 pub fn raster(width: u32, height: u32) ui.BoxStyle {

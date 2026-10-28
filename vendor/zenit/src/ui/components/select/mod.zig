@@ -59,6 +59,9 @@ pub const SelectProps = struct {
     /// For searchable single it's also search box placeholder
     placeholder: Source([]const u8) = .{ .value = "Select an option..." },
     width: f32 = 352,
+    /// Independent floating menu width; null follows the trigger.
+    dropdown_width: ?f32 = null,
+    dropdown_position: popover_mod.PopoverPosition = .bottom_start,
     size: SelectSize = .md,
     mode: SelectMode = .single,
     searchable: bool = false,
@@ -1061,12 +1064,12 @@ fn mountSelect(props: SelectProps, scope: *Scope, cx: *Cx) !SelectResult {
     }
 
     const pop = try popover_mod.Popover(.{
-        .position = .bottom_start,
+        .position = props.dropdown_position,
         .trigger = .manual,
         .offset = .{ .static = 4 },
         .flip = true,
-        .width = props.width,
-        .match_trigger_width = true,
+        .width = props.dropdown_width orelse props.width,
+        .match_trigger_width = props.dropdown_width == null,
         .constrain_width_to_viewport = true,
         .max_height = props.max_dropdown_height,
         // Anchor dropdown: 160ms fade + 0.98 scale + 6px slide-in to anchor (follows direction on

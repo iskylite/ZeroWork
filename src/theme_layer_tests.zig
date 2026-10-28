@@ -6,6 +6,52 @@ const publication = @import("ui/shell_styles.zig").ThemePublication;
 const Close = @import("ui/local_close_view.zig");
 const Transfer = @import("ui/transfer_panel.zig");
 
+test "floating material follows portaled owners rather than widget kinds" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    const w = try Window.init();
+    defer w.deinit();
+    try @import("ui/layer_materials.zig").Policy.mount(w.cx, w.scope);
+    const shell = try ui.box(w.cx, .{ .width = .{ .px = 600 }, .height = .{ .px = 456 }, .background = theme.current().overlay, .glass = theme.overlayGlass() }, .{});
+    try w.cx.root.?.appendChild(w.cx.allocator, shell);
+    const open = try w.scope.createSignal(bool, true);
+    const menu = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .enter_transition = .none, .exit_transition = .none, .width = 336 }).mount(w.scope, w.cx);
+    menu.chrome.setStyleInline(w.cx.allocator, .{ .outline = .{ .width = 1, .color = ui.Color.WHITE } });
+    menu.chrome.setBorderColor(ui.Color.WHITE);
+    try shell.appendChild(w.cx.allocator, menu.wrapper);
+    const hint = try ui.widgets.Tooltip(.{ .text = "Model metadata", .open = open }).mount(w.scope, w.cx);
+    try menu.content.appendChild(w.cx.allocator, hint.wrapper);
+    const root_hint = try ui.widgets.Tooltip(.{ .text = "Workspace metadata", .open = open }).mount(w.scope, w.cx);
+    try w.cx.root.?.appendChild(w.cx.allocator, root_hint.wrapper);
+    for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+        for ([_]f32{ 0, 25, 75, 100 }) |t| {
+            theme.select(name);
+            _ = theme.setMaterialParameters(t, 0);
+            shell.setBackground(theme.layerBackground(1));
+            w.publish.publish(w.cx, theme.widgetTheme(name));
+            w.frame();
+            try std.testing.expectEqual(theme.layerBackground(2), menu.chrome.getBackground());
+            try std.testing.expectEqual(theme.layerBackground(3), hint.content.getBackground());
+            try std.testing.expectEqual(theme.layerBackground(1), root_hint.content.getBackground());
+            try std.testing.expectEqual(ui.Color.TRANSPARENT, menu.chrome.style.border.color);
+            try std.testing.expectEqual(@as(f32, 0), menu.chrome.style.outline().?.width);
+            try std.testing.expect(menu.chrome.getBackground().a > shell.getBackground().a);
+            try std.testing.expect(hint.content.getBackground().a > menu.chrome.getBackground().a);
+            try std.testing.expectEqual(@as(f32, 12), hint.content.style.glass_params().?.backdrop_blur);
+        }
+    }
+    // Reparenting the same widgets changes material, without remount or type change.
+    w.cx.detachChild(shell, menu.wrapper);
+    try w.cx.root.?.appendChild(w.cx.allocator, menu.wrapper);
+    w.frame();
+    try std.testing.expectEqual(theme.layerBackground(1), menu.chrome.getBackground());
+    try std.testing.expectEqual(theme.layerBackground(2), hint.content.getBackground());
+}
+
 const Window = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
@@ -77,7 +123,7 @@ test "global appearance retained local close follows hidden and visible theme pu
     const focus = w.cx.focus_manager.getFocused();
     w.apply(.sauber, true);
     try std.testing.expectEqual(theme.current().overlay, view.dialog.getBackground());
-    try std.testing.expectEqual(theme.current().surface_2, view.risk.getBackground());
+    try std.testing.expectEqual(theme.popupAction(), view.risk.getBackground());
     try std.testing.expectEqual(theme.current().fg_1, view.identity.getText().?.color);
     try std.testing.expectEqual(identity_id, view.identity.id);
     try std.testing.expectEqual(focus, w.cx.focus_manager.getFocused());

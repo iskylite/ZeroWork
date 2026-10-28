@@ -6,7 +6,7 @@ pub const width: f32 = 520;
 pub const height: f32 = 300;
 pub const max_height: f32 = 360;
 pub fn dialog(viewport_width: f32) ui.BoxStyle {
-    return .{ .width = .{ .px = @min(width, @max(1, viewport_width - 32)) }, .height = .{ .px = height }, .padding = .ZERO, .background = theme.current().overlay, .border = .{ .width = 0, .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = theme.current().shadow } };
+    return .{ .width = .{ .px = @min(width, @max(1, viewport_width - 32)) }, .height = .{ .px = height }, .padding = .ZERO, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = 14 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = theme.current().shadow } };
 }
 pub fn body() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{ .left = 12, .right = 12, .top = 12, .bottom = 12 }, .gap = 8 };

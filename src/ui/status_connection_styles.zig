@@ -2,6 +2,7 @@
 //! Status triggers: 358:1407192; retained fixed hit areas and icon positions.
 const ui = @import("ui");
 pub const identity_width: f32 = 118;
+pub const action_width: f32 = 78;
 const shared = @import("connection_details_styles.zig");
 pub const theme = shared.theme;
 pub const ButtonStyle = shared.ButtonStyle;
@@ -98,7 +99,7 @@ pub fn triggerIcon() ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = 6 } }, .width = .{ .px = 14 }, .height = .{ .px = 14 } };
 }
 pub fn triggerDot() ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 18.5 }, .top = .{ .px = 10.5 } }, .width = .{ .px = 5 }, .height = .{ .px = 5 }, .border = .{ .radius = 2.5 } };
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 11.5 }, .top = .{ .px = 6 } }, .width = .{ .px = 14 }, .height = .{ .px = 14 } };
 }
 pub fn triggerName() ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 29.5 }, .top = .{ .px = 5 } }, .width = .{ .px = 44 }, .height = .{ .px = 16 }, .overflow_hidden = true };
@@ -118,6 +119,22 @@ pub fn metricIcon() ui.BoxStyle {
 }
 pub fn metricLabel(w: f32) ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 27 }, .top = .{ .px = 5 } }, .width = .{ .px = w - 34 }, .height = .{ .px = 16 }, .overflow_hidden = true };
+}
+pub fn themeTrigger() ButtonStyle {
+    var result = metricTrigger(action_width);
+    result.width = .{ .fit = .{} };
+    result.gap = 6;
+    result.padding = .{ .left = 7, .right = 7 };
+    return result;
+}
+pub fn themeIcon() ui.BoxStyle {
+    return .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 };
+}
+pub fn themeLabel() ui.BoxStyle {
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 16 }, .flex_shrink = 0 };
+}
+pub fn actionText() ui.TextStyle {
+    return triggerText(true);
 }
 pub fn triggerText(primary: bool) ui.TextStyle {
     return shared.text(if (primary) 11 else 10.5, if (primary) 500 else 400, 16, false);

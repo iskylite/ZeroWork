@@ -84,6 +84,14 @@ pub const View = struct {
         self.track.setDisplay(if (idle) .none else .flex);
         self.percent.setDisplay(if (idle) .none else .flex);
         self.counts.setDisplay(if (idle) .none else .flex);
+        var name_text = self.name.getText().?;
+        const name_size: f32 = if (idle) 11 else 10.5;
+        if (name_text.font_size != name_size) {
+            name_text.font_size = name_size;
+            name_text.font_weight = if (idle) 500 else 400;
+            name_text.line_height = 16.0 / name_size;
+            self.name.setText(name_text);
+        }
         self.name.setTextColor(if (idle) colors.fg_2 else colors.fg_1);
         _ = self.download.setTint(if (idle) colors.fg_2 else colors.accent);
 

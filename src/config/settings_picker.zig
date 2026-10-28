@@ -70,6 +70,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, overlay_parent: *ui.Node, anchor: *ui
             try self.body.content.appendChild(cx.allocator, note);
         }
         const field = try ui.widgets.Input(.{ .value = initial, .placeholder = if (std.mem.eql(u8, key.key, "term")) "输入 TERM 名称后按 Enter" else "输入数值后按 Enter", .on_submit = cx.on(Picker, self, Picker.onSubmit), .placeholder_color = theme.current().fg_3 }).mountResult(scope, cx);
+        @import("../ui/app_theme.zig").styleInput(field);
         field.state.font_size = 12;
         field.state.line_height = 18;
         field.state.char_width = 7.2;

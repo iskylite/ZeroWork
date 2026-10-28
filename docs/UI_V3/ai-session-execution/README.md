@@ -2,7 +2,7 @@
 
 本目录是 V0.2.6 AI 会话执行的设计基准。所有主机、命令、终端输出、审批与关闭结果都是确定性模拟，不连接 SSH，不启动 PTY/exec，不调用真实工具，不修改实际文件。它不代表这些能力已由产品实现。
 
-设计约束：直接载入现有 `workspace` 的结构、样式和 renderer，保留原会话组、会话卡片、成员操作、终端及原输入位置。受控卡片仅在右下角增加“AI 控制 • 只读”tag 和“接管”按钮；tag 直接使用现有 `badge accent`，接管直接使用现有 `button secondary`；该组统一28px高、11px字号、20px行高并居中；颜色、圆角、描边、阴影与交互态沿用现有组件。颜色复用主题的 `sel/accent/hover/fg`，不新增独立色值；控制期间该卡片只读。不增加底部输入栏、发送按钮、顶部 AI 控制栏或 AI 专用终端。助手中的模式、审批和工具卡保持本 PATCH 已确认设计。
+设计约束：直接载入现有 `workspace` 的结构、样式和 renderer，保留原会话组、会话卡片、成员操作、终端及原输入位置。受控卡片仅在右下角增加“AI 控制 • 只读”tag 和“接管”按钮；tag 直接使用现有 `badge accent`，接管直接使用现有 `button secondary`；该组统一28px高、11px字号、20px行高并居中；颜色、圆角、描边、阴影与交互态沿用现有组件。颜色复用主题的 `sel/accent/hover/fg`，不新增独立色值；控制期间该卡片只读。不增加底部输入栏、发送按钮、顶部 AI 控制栏或 AI 专用终端。助手只用原工作区的单一renderer；模式是新增控件，审批和工具内容复用原ap-card样式。
 
 ## 运行与场景
 
@@ -37,11 +37,11 @@
 | --- | --- |
 | `review-state`, `review-theme`, `review-viewport` | 更新 query 和当前画板，复用同一组件实现 |
 | `open-settings` → `global-mode-*`, `global-end-policy`, `save-settings` | 保存新的全局默认；对话中的独立覆盖不受影响 |
-| `permission-trigger` → `permission-confirm` / `permission-auto` | 独立保留原“确认后执行 / 自动执行”权限控件与存储，不与运行方式互相改写 |
-| `context-budget` | 保留上下文预算入口，紧凑显示1.3k，提示和点击可查看1.3k / 128k |
+| 原`ai-permission` → 共享`V3AIPermission`选项 | 独立保留原“确认后执行 / 自动执行”权限控件与存储，不与运行方式互相改写 |
+| `context-budget` | 复用原`ai-context-usage`与上下文计算器，显示真实当前比例，点击打开原上下文面板 |
 | `run-mode-trigger` → `mode-inherit` / `mode-auto` / `mode-ask` / `mode-exec` / `mode-attach` / `mode-new` | 选择当前对话覆盖，或即时恢复继承；回到输入框时显示当前有效方式 |
 | `override-end-policy` | 次级菜单中设置当前对话任务结束策略；继承全局为默认 |
-| `composer-draft` | 本原型专属草稿保存，刷新读回；Cmd/Ctrl+Enter 发送 |
+| `ai-input`（testid composer-draft） | 原有composer输入组件与Enter/Shift+Enter行为，补丁草稿单独保存 |
 | `approval-path-*` → `approve-execution` | 在同一审批卡选择批处理 / 已有 PTY / 新 PTY，命令和影响同步变化；确认进入对应状态 |
 | `reject-execution` | 拒绝本次调用，返回输入框；不执行命令 |
 | `create-group-step`, `open-session-step`, `pty-command-card` | 原生 details，可用鼠标、Enter、Space 展开；步骤明细中的工具名与实体 ID 一致 |
@@ -59,7 +59,7 @@
 
 运行方式、结束策略、对话覆盖、独立执行权限、输入框草稿和设置草稿共用上述专属 localStorage key。结束策略枚举与生产文档一致：`auto_idle`（默认，空闲后关闭）、`ask`（每次询问）、`keep`（保留）。它只作用于 created_task，借用的原 session-07 不随任务自动关闭。设置失败场景保留未提交的设置草稿；它不改变已保存的默认值。模拟的执行 / 审批 / 接管 / 清理状态由 query fixture 驱动，不持久化成真实产品记录。
 
-键盘支持：助手按钮与 summary 可聚焦；Esc关闭菜单、过程或设置，Alt+R打开运行方式，Cmd/Ctrl+Enter发送。终端沿用原组件的键盘、选择与滚动；控制期间阻止目标卡片输入，接管按钮仍可用键盘操作。
+键盘支持：助手按钮与 summary 可聚焦；Esc关闭菜单、过程或设置，Alt+R打开运行方式，Enter发送、Shift+Enter换行（沿用工作区）。终端沿用原组件的键盘、选择与滚动；控制期间阻止目标卡片输入，接管按钮仍可用键盘操作。
 
 ## 复用现有组件
 
@@ -85,7 +85,7 @@
 | --- | --- |
 | 主题 | 直接读取 `../theme-tokens.css`；dark / light / sauber 使用相同语义颜色、轻材质与控件结构 |
 | 外壳与会话卡片 | 完全复用现有 workspace 参数，不由本 PATCH 覆盖标题栏、侧栏、组布局、pane 标题/工具或终端字号 |
-| 助手 | 保留本 PATCH 的600×456正常/600×358紧凑助手；会话卡片与终端尺寸由原 workspace 决定 |
+| 助手 | 复用工作区positionAssistant的600×456期望尺寸及小窗夹取、拖动与缩放规则，不单独定义补丁浮窗尺寸；会话卡片与终端尺寸由原 workspace 决定 |
 | 输入框 | 固定90 px，textarea46 + 控件行28；左侧附件→权限模式→运行模式，右侧上下文→模型/推理→输入/状态/发送或停止，左右对齐；不增删或改小控件。运行方式放折叠菜单，不把五个选项常驻输入框 |
 | 工具卡 | header32，r9；正文与对话分开滚动；footer 保留查看终端 / 记录、查看过程、接管 / 输入动作 |
 | 文字 | 助手标题13，产品正文12.5，设置选项12，步骤标题11.5，输出11；小字只用于 ID、时间与辅助元信息 |
@@ -112,3 +112,14 @@
 AI关闭后的记录与全局列表共用 `ZeroWorkHistory.register/open`、ArchiveKey与同一原会话renderer；cmd-42仅提供区间定位参数，不再创建type=history的旧页面。短记录滑轮禁用并显示唯一真实时间；没有返回实时入口。全局入口再点同一记录聚焦同一Tab。
 
 历史阅读保存 entry/row/text offset 逻辑锚，缩窗重新换行后按锚定位，再计算百分比。停止/结果未知/封存中使用独立fixture状态；这些是可点击原型，不模拟后端已取得真实收据。专项验证结果和截图见[合并评审验证](verification/review-20261028/README.md)，较早截图仅代表当时版本。
+
+
+## 助手复用修订
+
+补丁不再定义assistant()、标题栏和composer renderer，也不再挂载patch-assistant。直接调用工作区renderAssistant，以原有#assistant为唯一窗口，V3AI.header/composer、模型/推理、权限、附件、会话列表、拖动/缩放和三点浮条继续由原实现处理。
+
+composer只插入运行方式控件，并移动原上下文与模型控件：左侧附件→权限模式→运行模式；中间弹性留白；右侧上下文→模型/推理→原输入状态及发送/暂停。控件尺寸和样式不复制，模型/推理由当前共享状态显示，预算由原计算器提供。
+
+外部消息增加输入方向图标及“外部消息 · 宿主更新”来源；工具卡只显示中文动作和具体参数投影。标题栏无执行历史按钮，查看过程仍位于工具卡。较早截图中的自建助手、GPT-5.4硬编码与1.3k自建预算已废止，不作为原生实施基线。
+
+当前效果图以[助手复用修订验证](verification/reuse-20261028/README.md)为准；此前独立助手外壳和composer截图已废止，不用于实现。

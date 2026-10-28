@@ -170,7 +170,7 @@ pub const Bridge = struct {
             self.mutex.unlock();
         }
         for (self.children.items) |child| child.invocation_context.cancel = cancel;
-        self.emitStep(invocation, .running, "");
+        self.emitStep(invocation, .assembling, "");
         const runtime: tools.Runtime = .{ .context = self, .live_scope = liveScope, .live_members = liveMembers, .current_policy = currentPolicy, .now_ms = timeNow, .approval = askApproval, .operations = self.operationHistory(), .invoke = invoke };
         const results = runtime.execute(invocation, allocator, cancel) catch |err| {
             self.emitStep(invocation, if (err == error.CancelledBeforeDispatch or (if (cancel) |token| token.isCancelled() else false)) .cancelled else .failed, @errorName(err));
@@ -299,6 +299,7 @@ pub const Bridge = struct {
             if (self.stopped.load(.acquire) or (if (cancel) |token| token.isCancelled() else false)) return error.CancelledBeforeDispatch;
             try tools.markSent(self.operationHistory(), request.owner, request.operation_id, request.call_id, request.tool_id, request.arguments_hash);
             if (self.stopped.load(.acquire) or (if (cancel) |token| token.isCancelled() else false)) return error.CancelledBeforeDispatch;
+            if (self.running) |running| self.emitStep(running, .running, "");
             return target.binding.handler(target.context, request, allocator);
         }
         var exchange: ControllerExchange = .{ .target = target, .invocation = request, .allocator = allocator, .cancel = cancel };
@@ -371,6 +372,7 @@ pub const Bridge = struct {
                     self.mutex.unlock();
                     return;
                 };
+                self.emitStep(running, .running, "");
                 current.result = current.target.binding.handler(current.target.context, current.invocation, current.allocator) catch |err| blk: {
                     current.failure = err;
                     break :blk null;

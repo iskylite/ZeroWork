@@ -6,10 +6,10 @@ pub fn list(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .padding = .{}, .flex_shrink = 0 };
 }
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .flex_shrink = 0, .background = theme.current().surface_1, .border = .{ .width = 0, .radius = 9 }, .overflow = .hidden };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .flex_shrink = 0, .background = theme.popupInset(), .border = .{ .width = 0, .radius = 9 }, .overflow = .hidden };
 }
 pub fn header(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .justify = .start, .padding = .{ .left = 10, .right = 12 }, .gap = 6, .flex_shrink = 0, .background = theme.current().surface_1, .border = .{ .radius = 11 } };
+    return .{ .width = .fill(), .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .justify = .start, .padding = .{ .left = 10, .right = 12 }, .gap = 6, .flex_shrink = 0, .background = theme.popupInset(), .border = .{ .radius = 11 } };
 }
 pub fn headerButton() ButtonStyle {
     return .{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 10, .right = 12 }, .gap = 6, .background = ui.Color.TRANSPARENT, .corner_radius = 9, .flex_shrink = 0 };
@@ -21,10 +21,10 @@ pub fn content(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .left = 12, .right = 12, .top = 4, .bottom = 6 }, .gap = 4, .flex_shrink = 0 };
 }
 pub fn footer(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 34 }, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 10, .top = 4, .bottom = 4 }, .gap = 6, .flex_shrink = 0, .background = theme.current().well };
+    return .{ .width = .fill(), .height = .{ .px = 34 }, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 10, .top = 4, .bottom = 4 }, .gap = 6, .flex_shrink = 0, .background = theme.popupInset() };
 }
 pub fn outputViewport(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 104 }, .flex_shrink = 0, .background = theme.current().well };
+    return .{ .width = .fill(), .height = .{ .px = 104 }, .flex_shrink = 0, .background = theme.popupInset() };
 }
 pub fn outputContent(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .fit = .{} }, .height = .{ .fit = .{} }, .padding = .{ .left = 6, .right = 6, .top = 4, .bottom = 4 }, .direction = .column, .flex_shrink = 0 };

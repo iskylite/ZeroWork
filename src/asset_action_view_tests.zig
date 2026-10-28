@@ -258,7 +258,7 @@ test "asset action view three themes and global material preserve selection and 
         try f.view.retheme();
         f.frame();
         try std.testing.expectEqual(theme.current().overlay, f.view.dialog.getBackground());
-        try std.testing.expectEqual(theme.current().surface_2, f.view.pair.getBackground());
+        try std.testing.expectEqual(theme.popupAction(), f.view.pair.getBackground());
         try std.testing.expectEqual(@as(?usize, 1), f.view.selected.peek());
         try std.testing.expectEqualStrings("目标分组  STAGING", f.view.to.getText().?.content);
         var found = false;

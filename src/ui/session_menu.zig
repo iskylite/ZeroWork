@@ -203,9 +203,9 @@ pub const View = struct {
         }
     }
     fn paintSelection(self: *View) void {
-        for (self.saved_rows.items, 0..) |row, index| row.button.setBackground(if (self.selected_saved == index) S.theme.current().selection else ui.Color.TRANSPARENT);
+        for (self.saved_rows.items, 0..) |row, index| row.button.setBackground(if (self.selected_saved == index) S.theme.popupSelection() else ui.Color.TRANSPARENT);
         for (self.highlights, 0..) |highlight, index| {
-            highlight.setBackground(S.theme.current().selection);
+            highlight.setBackground(S.theme.popupSelection());
             highlight.setDisplay(if (!self.selected_more_trigger and self.selected_saved == null and index == @backingInt(self.selected)) .flex else .none);
         }
     }

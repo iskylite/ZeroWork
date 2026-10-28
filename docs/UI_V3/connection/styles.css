@@ -69,3 +69,16 @@ body.compact .modal-body{padding-right:34px}
 
 /* Ordered route cards keep arrows centred between neighbours at every panel width. */
 .review-route ol{flex-wrap:nowrap;align-items:stretch;gap:24px;overflow-x:auto;padding-bottom:6px}.review-route li{flex:0 0 auto;max-width:220px;overflow-wrap:anywhere}.review-route li+li{margin-left:0}.review-route li+li:before{left:-24px;width:24px}
+
+/* A closed disclosure releases the unused identity-step space. */
+.modal:has([data-step-panel="0"]:not([hidden]) details:not([open])){height:auto}
+
+/* Match the native disclosure resize, including content-sized height. */
+.modal:has(>.step-nav){interpolate-size:allow-keywords;transition:height 200ms ease-out}
+@media(prefers-reduced-motion:reduce){.modal:has(>.step-nav){transition:none}}
+
+/* Clip disclosure content in both directions, alongside modal resize. */
+.modal details{interpolate-size:allow-keywords}
+.modal details::details-content{height:0;overflow:clip;transition:height 200ms ease-out,content-visibility 200ms;transition-behavior:allow-discrete}
+.modal details[open]::details-content{height:auto}
+@media(prefers-reduced-motion:reduce){.modal details::details-content{transition:none}}

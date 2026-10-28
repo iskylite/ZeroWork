@@ -214,6 +214,16 @@ pub fn build(b: *std.Build) void {
     settings_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
     b.step("settings-preview", "Build the read-only planning component acceptance runner").dependOn(&b.addInstallArtifact(settings_preview, .{}).step);
 
+    if (test_mode) {
+        const files_preview = b.addExecutable(.{ .name = "file-workspace-preview", .root_module = b.createModule(.{ .root_source_file = b.path("src/file_workspace_native_fixture.zig"), .target = target, .optimize = optimize }) });
+        zenit.attach(zenit_dep, files_preview);
+        files_preview.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+        files_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
+        files_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+        files_preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
+        b.step("file-workspace-preview", "Build the production file component for isolated theme acceptance").dependOn(&b.addInstallArtifact(files_preview, .{}).step);
+    }
+
     // Retained legacy authentication component acceptance; never installed by default.
     const auth_preview = b.addExecutable(.{ .name = "auth-challenge-preview", .root_module = b.createModule(.{ .root_source_file = b.path("src/auth_challenge_native_fixture.zig"), .target = target, .optimize = optimize }) });
     zenit.attach(zenit_dep, auth_preview);

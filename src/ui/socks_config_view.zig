@@ -246,7 +246,7 @@ pub const View = struct {
         for (self.button_paints[0..self.button_count]) |paint| if (paint.mode != null) paint.style.set(S.modeCard(false));
         for (self.mode_buttons, 0..) |node, i| {
             const selected = i == @backingInt(self.draft.mode);
-            self.mode_highlights[i].setBackground(S.theme.current().selection);
+            self.mode_highlights[i].setBackground(S.theme.popupSelection());
             self.mode_highlights[i].setDisplay(if (selected) .flex else .none);
             if (node.behavior.interaction.a11y) |*access| access.pressed = selected;
             tintMode(node, if (selected) S.theme.current().accent else S.theme.current().fg_1);
@@ -486,6 +486,7 @@ fn field(self: *View, parent: *ui.Node, label: []const u8, value: *ui.Signal([]c
     if (index == 0) self.listen_label = label_node;
     try column.appendChild(self.cx.allocator, label_node);
     const input = try ui.widgets.Input(.{ .value = value, .on_submit = self.cx.on(View, self, View.submit) }).mountResult(self.scope, self.cx);
+    @import("app_theme.zig").styleInput(input);
     input.node.style.width = .fill();
     input.state.font_size = 11.5;
     input.state.line_height = 17;
@@ -564,7 +565,7 @@ fn routeTestId(index: usize) []const u8 {
 
 fn modeCard(self: *View, parent: *ui.Node, title: []const u8, detail: []const u8, action: View.Action, id: []const u8) !*ui.Node {
     const node = try button(self, parent, title, action, id, 140);
-    const highlight = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .right = .{ .px = 0 }, .top = .{ .px = 0 }, .bottom = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .background = S.theme.current().selection, .border = .{ .radius = 9 }, .hit_behavior = .pass_through }, .{});
+    const highlight = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .right = .{ .px = 0 }, .top = .{ .px = 0 }, .bottom = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .background = S.theme.popupSelection(), .border = .{ .radius = 9 }, .hit_behavior = .pass_through }, .{});
     try node.appendChild(self.cx.allocator, highlight);
     self.mode_highlights[
         switch (action) {

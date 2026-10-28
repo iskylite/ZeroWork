@@ -8,7 +8,7 @@ pub const page_terms = [_][]const u8{
     "文件传输 连接隔离 独立传输连接 共享通道限速 dedicated_connection shared_pacing_kbps SFTP 引擎 滑动窗口 块大小 断点续传 MD5 完成校验 最大并发任务 window_chunks chunk_kb resume verify_md5 max_tasks 默认行为 默认下载目录 同名 重命名 冲突 每次询问 download_dir conflict_policy",
     "AI 辅助 Provider 模型 API Key 地址 endpoint anthropic OpenAI 兼容 Ollama 权限 确认 执行 自动执行 完全控制 permission_mode 上下文 隐藏连接身份 来源 脱敏 隐私 IP 主机 用户 redact_ip 附件 图片 本地 文本 文件 引用 attachment 其他行为 默认错误提示 error_hint default_provider",
     "协议 插件 Local zsh SSH SFTP 已内置 权限 版本",
-    "通知 事件提醒 传输完成 断线 重连 AI 回答 就绪 终端 Bell 声音 transfer_done reconnect ai_ready bell 注意标记 勿扰 非活跃 标签 圆点 时段 tab_dot quiet_hours",
+    "通知 事件提醒 传输完成 断线 重连 AI 助手 回合 结束 终端 Bell 声音 transfer_done reconnect ai_ready bell 注意标记 勿扰 非活跃 标签 圆点 时段 tab_dot quiet_hours",
     "数据 日志 位置 凭据 本地 配置目录 明文 600 config_dir 会话记录 缓冲 上限 快照 间隔 保留 天数 导出格式 ring_mb checkpoint_sec retention_days export_format 导出 清理 清空 删除 会话 诊断 export clear",
 };
 

@@ -47,7 +47,7 @@ pub fn field(width: f32, height: f32) ui.BoxStyle {
 }
 pub fn plainButton(width: f32, height: f32, selected: bool) ButtonStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = width }, .height = .{ .px = height }, .padding = .ZERO, .background = if (selected) c.selection else ui.Color.TRANSPARENT, .text_color = if (selected) c.accent_ink else c.fg_2, .corner_radius = 7, .border_width = 0, .font_size = 10.5, .font_weight = 400 };
+    return .{ .width = .{ .px = width }, .height = .{ .px = height }, .padding = .ZERO, .background = if (selected) theme.popupSelection() else ui.Color.TRANSPARENT, .text_color = if (selected) c.accent_ink else c.fg_2, .corner_radius = 7, .border_width = 0, .font_size = 10.5, .font_weight = 400 };
 }
 pub fn menu(width: f32, padding: f32, gap: f32) ui.BoxStyle {
     const c = theme.current();
@@ -76,11 +76,11 @@ pub fn dismissedTheme(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 44 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 8, .right = 8 }, .background = theme.current().surface_2, .border = .{ .radius = 7 }, .flex_shrink = 0 };
 }
 pub fn previewBadge(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .{ .px = 88 }, .height = .{ .px = 22 }, .direction = .row, .align_items = .center, .justify = .center, .background = theme.current().selection, .border = .{ .radius = 6 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 88 }, .height = .{ .px = 22 }, .direction = .row, .align_items = .center, .justify = .center, .background = theme.popupSelection(), .border = .{ .radius = 6 }, .flex_shrink = 0 };
 }
 pub fn tile(width: f32, selected: bool) ButtonStyle {
     var s = plainButton(width, g.tile_height, selected);
-    s.background = if (selected) theme.current().selection else theme.current().well;
+    s.background = if (selected) theme.popupSelection() else theme.current().well;
     s.corner_radius = 8;
     s.direction = .row;
     s.align_items = .center;

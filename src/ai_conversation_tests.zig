@@ -19,11 +19,17 @@ test "AI conversation context snapshots and steps clone independently with real 
     }, "formal answer");
     turn.answer = try a.dupe(u8, "formal answer");
     try turn.thinking.appendSlice(a, "provider thinking");
+    turn.thinking_scroll = try turns.ThinkingScroll.create(a);
+    turn.thinking_scroll.?.offset = 80;
+    turn.thinking_scroll.?.following = false;
     try steps.apply(a, &turn.steps, .{ .call_id = "call", .name = "run_command", .command = "date", .phase = .running, .at_ms = 10 });
     try steps.apply(a, &turn.steps, .{ .call_id = "call", .phase = .succeeded, .detail = "actual result", .at_ms = 50 });
     var fork = try turn.clone(a);
     defer fork.deinit(a);
+    try std.testing.expect(turn.thinking_scroll.? != fork.thinking_scroll.?);
     turn.deinit(a);
+    try std.testing.expectEqual(@as(f32, 80), fork.thinking_scroll.?.offset);
+    try std.testing.expect(!fork.thinking_scroll.?.following);
     try std.testing.expectEqual(@as(usize, 2), fork.before.messages.len);
     try std.testing.expectEqual(@as(usize, 6), fork.after.messages.len);
     try std.testing.expectEqualStrings("call", fork.after.messages[4].tool_call_id.?);
@@ -36,6 +42,7 @@ test "AI conversation renders Markdown tables and live thought disclosure at nat
     defer cx.deinit();
     const scope = try ui.Scope.init(a, null, cx.owner);
     defer scope.dispose();
+    cx.reduced_motion = true;
     cx.setViewport(600, 500);
     const root = try ui.box(cx, .{ .width = .{ .px = 572 }, .height = .fill(), .direction = .column }, .{});
     cx.root = root;
@@ -65,31 +72,150 @@ test "AI conversation renders Markdown tables and live thought disclosure at nat
     const detail = find(card, "ai.step.detail").?;
     try detail.setTextContent(a, "first line\nsecond line\nthird line");
     cx.layout();
+    _ = cx.render();
     try std.testing.expectApproxEqAbs(@as(f32, 90), card.globalRect().h, 0.1);
     const wrapped = try std.mem.join(a, " ", &@as([16][]const u8, @splat("wrapped thinking")));
     defer a.free(wrapped);
     try detail.setTextContent(a, wrapped);
     root.setStyleInline(a, .{ .width = .{ .px = 180 } });
     cx.layout();
+    _ = cx.render();
     const narrow_height = card.globalRect().h;
     try std.testing.expect(narrow_height > 90 and narrow_height <= 182);
     root.setStyleInline(a, .{ .width = .{ .px = 572 } });
     cx.layout();
+    _ = cx.render();
     try std.testing.expect(card.globalRect().h < narrow_height);
     const long_thinking = try std.mem.join(a, "\n", &@as([30][]const u8, @splat("long thinking line")));
     defer a.free(long_thinking);
     try detail.setTextContent(a, long_thinking);
     cx.layout();
+    _ = cx.render();
     const viewport = find(card, "ai.step.details").?;
     try std.testing.expectApproxEqAbs(@as(f32, 150), viewport.globalRect().h, 0.1);
     try std.testing.expect(detail.globalRect().h > viewport.globalRect().h);
     header.behavior.events.on_click.?.invoke();
     cx.layout();
+    _ = cx.render();
     try std.testing.expectApproxEqAbs(@as(f32, 32), card.globalRect().h, 0.1);
     header.behavior.events.on_click.?.invoke();
     try detail.setTextContent(a, "");
     cx.layout();
+    _ = cx.render();
     try std.testing.expect(card.globalRect().h < 70);
+}
+const ThinkingFixture = struct {
+    cx: *ui.Cx,
+    scope: *ui.Scope,
+    content: *ui.Node = undefined,
+    card_scope: ?*ui.Scope = null,
+    card: ?*ui.Node = null,
+    turn: turns.Turn = .{},
+    fn init(self: *ThinkingFixture) !void {
+        const cx = try ui.Cx.init(a, std.testing.io);
+        self.* = .{ .cx = cx, .scope = try ui.Scope.init(a, null, cx.owner) };
+        cx.reduced_motion = true;
+        cx.setViewport(600, 400);
+        cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+        const outer = try ui.widgets.ScrollArea(.{ .height = 300 }).mount(self.scope, cx);
+        try cx.root.?.appendChild(a, outer.container);
+        self.content = outer.content;
+        self.turn.thinking_scroll = try turns.ThinkingScroll.create(a);
+    }
+    fn rebuild(self: *ThinkingFixture, lines: usize, phase: steps.Phase) !void {
+        try self.mount(lines, phase);
+        self.settle();
+    }
+    fn mount(self: *ThinkingFixture, lines: usize, phase: steps.Phase) !void {
+        if (self.card_scope) |scope| scope.dispose();
+        if (self.card) |card| {
+            self.cx.detachChild(self.content, card);
+            self.cx.destroyDetached(card);
+        }
+        const text = try std.mem.join(a, "\n", @as([60][]const u8, @splat("thinking line"))[0..lines]);
+        defer a.free(text);
+        self.card_scope = try self.scope.childScope();
+        self.card = try @import("ui/ai_step_view.zig").mount(self.cx, self.card_scope.?, .{ .title = "思考", .projection = "latest thought", .detail = text, .copy_detail = false, .phase = phase, .elapsed_ms = 100, .expanded = &self.turn.thinking_expanded, .scroll_position = self.turn.thinking_scroll, .test_id = "ai.thinking" });
+        try self.content.appendChild(a, self.card.?);
+    }
+    fn settle(self: *ThinkingFixture) void {
+        for (0..3) |_| {
+            self.cx.advanceFrameClock();
+            self.cx.layout();
+            _ = self.cx.render();
+        }
+    }
+    fn wheel(self: *ThinkingFixture, delta: f32) void {
+        const r = find(self.card.?, "ai.step.details").?.globalRect();
+        self.cx.handleScroll(.{ .x = r.x + 30, .y = r.y + r.h / 2, .dy = delta, .dx = 0 });
+    }
+    fn expectTail(self: *ThinkingFixture) !void {
+        const viewport = find(self.card.?, "ai.step.details").?.globalRect();
+        const text = find(self.card.?, "ai.step.detail").?.globalRect();
+        try std.testing.expect(self.turn.thinking_scroll.?.following);
+        try std.testing.expect(self.turn.thinking_scroll.?.offset > 0);
+        try std.testing.expect(text.y + text.h <= viewport.y + viewport.h + 0.5);
+        try std.testing.expect(text.y + text.h >= viewport.y + viewport.h - 12);
+    }
+    fn deinit(self: *ThinkingFixture) void {
+        self.scope.dispose();
+        self.turn.deinit(a);
+        self.cx.deinit();
+    }
+};
+test "AI conversation expanded thinking follows streamed remounts and preserves reader scroll" {
+    var f: ThinkingFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.rebuild(30, .running);
+    try std.testing.expectEqual(@as(f32, 0), f.turn.thinking_scroll.?.offset);
+    f.card.?.children.items[0].behavior.events.on_click.?.invoke();
+    f.settle();
+    try f.expectTail();
+    try f.rebuild(40, .running);
+    try f.expectTail();
+    // Rebuild immediately after input, before another layout hook can run.
+    f.wheel(80);
+    try f.rebuild(45, .running);
+    const held = f.turn.thinking_scroll.?.offset;
+    try std.testing.expect(!f.turn.thinking_scroll.?.following);
+    try std.testing.expect(held > 0);
+    const Remount = struct {
+        fixture: *ThinkingFixture,
+        failed: bool = false,
+        fn run(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.fixture.cx.removeAfterLayoutHook(self);
+            self.fixture.mount(50, .running) catch {
+                self.failed = true;
+            };
+            return .needs_layout;
+        }
+    };
+    var remount: Remount = .{ .fixture = &f };
+    try f.cx.addAfterLayoutHook(&remount, Remount.run);
+    f.settle();
+    try std.testing.expect(!remount.failed);
+    try std.testing.expectApproxEqAbs(held, f.turn.thinking_scroll.?.offset, 0.1);
+    f.wheel(-10000);
+    try f.rebuild(55, .running);
+    try f.expectTail();
+    f.wheel(10000);
+    f.settle();
+    try std.testing.expect(!f.turn.thinking_scroll.?.following);
+    try std.testing.expectEqual(@as(f32, 0), f.turn.thinking_scroll.?.offset);
+    f.wheel(-10000);
+    f.settle();
+    try f.expectTail();
+    try f.rebuild(60, .succeeded);
+    try f.expectTail();
+    f.card.?.children.items[0].behavior.events.on_click.?.invoke();
+    f.settle();
+    try f.rebuild(60, .succeeded);
+    try std.testing.expect(!f.turn.thinking_expanded);
+    f.card.?.children.items[0].behavior.events.on_click.?.invoke();
+    f.settle();
+    try f.expectTail();
 }
 test "AI conversation attachment restore retains captured content after old turn is released" {
     const files = @import("ai/local_text_attachments.zig");
@@ -213,4 +339,134 @@ test "AI conversation wave is subtle phased and disabled by reduced motion" {
         try std.testing.expectEqual(@as(f32, 0), Status.waveOffset(350, index, true));
         try std.testing.expect(@abs(Status.waveOffset(1000, index, false)) <= 1.5);
     }
+}
+
+test "AI conversation activity label follows tool phases and prioritizes pending decisions" {
+    const Status = @import("ui/ai_turn_status_view.zig");
+    var turn: turns.Turn = .{};
+    defer turn.deinit(a);
+    try std.testing.expectEqualStrings("～大浪淘金中～", Status.turnLabel(&turn).text);
+    try steps.apply(a, &turn.steps, .{ .call_id = "command", .name = "run_command", .phase = .assembling, .at_ms = 1 });
+    try std.testing.expectEqualStrings("～准备操作中～", Status.turnLabel(&turn).text);
+    try steps.apply(a, &turn.steps, .{ .call_id = "command", .phase = .approval, .at_ms = 2 });
+    try std.testing.expectEqualStrings("～等待你确认～", Status.turnLabel(&turn).text);
+    try std.testing.expect(!Status.turnLabel(&turn).animated);
+    try steps.apply(a, &turn.steps, .{ .call_id = "command", .phase = .approved, .at_ms = 3 });
+    try std.testing.expectEqualStrings("～准备操作中～", Status.turnLabel(&turn).text);
+    try steps.apply(a, &turn.steps, .{ .call_id = "command", .phase = .running, .at_ms = 4 });
+    try std.testing.expectEqualStrings("～执行命令中～", Status.turnLabel(&turn).text);
+    // A planned next call must not hide a currently executing command.
+    try steps.apply(a, &turn.steps, .{ .call_id = "next", .name = "read_terminal", .phase = .assembling, .at_ms = 5 });
+    try std.testing.expectEqualStrings("～执行命令中～", Status.turnLabel(&turn).text);
+    try steps.apply(a, &turn.steps, .{ .call_id = "next", .phase = .approval, .at_ms = 6 });
+    try std.testing.expectEqualStrings("～等待你确认～", Status.turnLabel(&turn).text);
+    try steps.apply(a, &turn.steps, .{ .call_id = "next", .phase = .rejected, .at_ms = 7 });
+    try steps.apply(a, &turn.steps, .{ .call_id = "command", .phase = .failed, .at_ms = 8 });
+    try std.testing.expectEqualStrings("～大浪淘金中～", Status.turnLabel(&turn).text);
+    try std.testing.expect(Status.turnLabel(&turn).animated);
+    turn.ended_at_ms = 9;
+    try std.testing.expectEqualStrings("～回合结束～", Status.turnLabel(&turn).text);
+    try std.testing.expect(!Status.turnLabel(&turn).animated);
+
+    for ([_]struct { name: []const u8, label: []const u8 }{
+        .{ .name = "run_command", .label = "～执行命令中～" },
+        .{ .name = "read_terminal", .label = "～读取终端中～" },
+        .{ .name = "read_remote_file", .label = "～读取文件中～" },
+        .{ .name = "list_remote_files", .label = "～查看目录中～" },
+        .{ .name = "plugin.custom_tool", .label = "～执行操作中～" },
+    }) |case| {
+        var tool_turn: turns.Turn = .{};
+        defer tool_turn.deinit(a);
+        try steps.apply(a, &tool_turn.steps, .{ .call_id = "tool", .name = case.name, .phase = .running, .at_ms = 1 });
+        try std.testing.expectEqualStrings(case.label, Status.turnLabel(&tool_turn).text);
+        for ([_]steps.Phase{ .succeeded, .failed, .cancelled, .rejected }) |phase| {
+            tool_turn.steps.items[0].phase = phase;
+            try std.testing.expectEqualStrings("～大浪淘金中～", Status.turnLabel(&tool_turn).text);
+        }
+    }
+}
+
+test "AI conversation activity label renders matching accessible text and pauses approval motion" {
+    const Status = @import("ui/ai_turn_status_view.zig");
+    for ([_]steps.Phase{ .assembling, .approval, .approved, .running, .succeeded }) |phase| {
+        var turn: turns.Turn = .{};
+        defer turn.deinit(a);
+        try steps.apply(a, &turn.steps, .{ .call_id = "command", .name = "run_command", .phase = phase, .at_ms = 1 });
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        const scope = try ui.Scope.init(a, null, cx.owner);
+        defer scope.dispose();
+        cx.setViewport(320, 80);
+        cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+        const row = try Status.mount(cx, scope, &turn, null);
+        try cx.root.?.appendChild(a, row);
+        cx.layout();
+        const label = find(row, "ai.turn.label").?;
+        const expected = Status.turnLabel(&turn);
+        try std.testing.expectEqualStrings(expected.text, label.behavior.interaction.a11y.?.label.?);
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(a);
+        for (label.children.items) |glyph| try text.appendSlice(a, glyph.getText().?.content);
+        try std.testing.expectEqualStrings(expected.text, text.items);
+        try std.testing.expectEqual(try std.unicode.utf8CountCodepoints(expected.text), label.children.items.len);
+        try std.testing.expectEqual(@as(usize, if (expected.animated) 2 else 1), cx.after_layout_hooks.items.len);
+        const bounds = label.globalRect();
+        const elapsed = find(row, "ai.turn.elapsed").?.globalRect();
+        try std.testing.expect(bounds.x + bounds.w + 7.5 <= elapsed.x);
+        try std.testing.expect(elapsed.x + elapsed.w <= 320);
+    }
+}
+
+test "AI conversation activity label recovers when tool arguments fail before host execution" {
+    const provider = @import("ai/provider.zig");
+    const Manager = @import("ai/turn_manager.zig").Manager;
+    const Loop = @import("ai/tool_loop.zig");
+    const Status = @import("ui/ai_turn_status_view.zig");
+    const Fixture = struct {
+        turn: turns.Turn = .{},
+        rounds: usize = 0,
+        rejected: usize = 0,
+        fn chat(raw: *anyopaque, request: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, context: *anyopaque) !provider.ChatStats {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.rounds += 1;
+            if (self.rounds == 1) {
+                sink(context, .{ .tool_plan = .{ .call_id = "invalid-arguments", .name = "run_command", .arguments = "{}" } });
+                try std.testing.expectEqualStrings("～准备操作中～", Status.turnLabel(&self.turn).text);
+            } else {
+                try std.testing.expectEqual(@as(usize, 1), self.rejected);
+                try std.testing.expectEqual(provider.Role.tool, request.messages[2].role);
+                try std.testing.expectEqualStrings("～大浪淘金中～", Status.turnLabel(&self.turn).text);
+                sink(context, .{ .text = "继续处理参数错误" });
+            }
+            sink(context, .done);
+            return .{};
+        }
+        fn models(_: *anyopaque, allocator: std.mem.Allocator) ![]provider.ModelInfo {
+            return allocator.alloc(provider.ModelInfo, 0);
+        }
+        fn execute(_: *anyopaque, _: Loop.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !Loop.Outcome {
+            return error.InvalidToolMustNotExecute;
+        }
+        fn reset(_: *anyopaque) void {}
+        fn delta(raw: *anyopaque, value: provider.Delta) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (value == .tool_plan) try steps.apply(a, &self.turn.steps, .{ .call_id = value.tool_plan.call_id.?, .name = value.tool_plan.name.?, .phase = .assembling, .at_ms = 1 });
+        }
+        fn reject(raw: *anyopaque, call: provider.ToolCall, detail: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.rejected += 1;
+            try std.testing.expect(detail.len > 0);
+            try steps.apply(a, &self.turn.steps, .{ .call_id = call.id, .name = call.name, .detail = detail, .phase = .failed, .at_ms = 2 });
+        }
+    };
+    var fixture: Fixture = .{};
+    defer fixture.turn.deinit(a);
+    var manager = Manager.init(a);
+    defer manager.deinit();
+    manager.scope = .{ .owner = .{ .session = 101 }, .members = .{ .ids = .{101} ++ @as([15]u64, @splat(0)), .len = 1 } };
+    manager.tool_host = .{ .context = &fixture, .execute = Fixture.execute };
+    manager.observer = .{ .context = &fixture, .reset = Fixture.reset, .delta = Fixture.delta, .tool_rejected = Fixture.reject };
+    _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{ .model = "invalid-tool-fixture", .system = "", .messages = &.{.{ .content = "检查参数错误后的状态" }}, .tools = &.{.{ .tool = .run_command, .session_ids = &.{101} }} });
+    try std.testing.expectEqual(@as(usize, 2), fixture.rounds);
+    try std.testing.expectEqual(steps.Phase.failed, fixture.turn.steps.items[0].phase);
 }

@@ -6,14 +6,14 @@ pub fn editor(_: *const ui.ThemeTokens) ui.BoxStyle {
     var value = files.columns(files.min_columns);
     value.position = .absolute;
     value.inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } };
-    value.background = theme.current().surface_2;
+    value.background = theme.popupAction();
     return value;
 }
 pub fn name(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .flex = 1, .height = .{ .px = 28 }, .min_width = 0, .direction = .row, .align_items = .center, .gap = 6 };
 }
 pub fn field(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .flex = 1, .height = .{ .px = 24 }, .min_width = 0, .padding = .{ .left = 10, .right = 8 }, .background = theme.current().well, .border = .{ .width = 0, .color = theme.current().accent, .radius = 8 }, .align_items = .center, .overflow = .hidden, .overflow_hidden = true };
+    return .{ .width = .fill(), .flex = 1, .height = .{ .px = 24 }, .min_width = 0, .padding = .{ .left = 10, .right = 8 }, .background = theme.popupInset(), .border = .{ .width = 0, .color = theme.current().accent, .radius = 8 }, .align_items = .center, .overflow = .hidden, .overflow_hidden = true };
 }
 pub fn input() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 20 }, .flex = 1, .min_width = 0, .padding = .{}, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0 } };

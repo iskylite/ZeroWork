@@ -31,12 +31,15 @@ for(const [role,p0] of Object.entries(bases)){
 let checks=0;
 for(const palette of Object.values(presets.themes)){
  const values=new Map(),events={};
+ const surface=parent=>{const paint=new Map();return {isConnected:true,parentElement:parent,dataset:{},style:{getPropertyValue:k=>paint.get(k)||'',setProperty:(k,v)=>paint.set(k,v)},closest(){return this;}};};
+ const shell=surface(null),menu=surface(null),hint=surface(menu),surfaces=[shell,menu,hint];
  const root={classList:{add(){}}};
  const body={style:{setProperty:(k,v)=>values.set(k,String(v))},dataset:{}};
- const document={body,documentElement:{dataset:{},style:{}},currentScript:null,querySelector:s=>s.startsWith('#desktop,')?root:null,querySelectorAll:()=>[],addEventListener:(k,v)=>events[k]=v};
+ const document={body,documentElement:{dataset:{},style:{}},currentScript:null,querySelector:s=>s.startsWith('#desktop,')?root:null,querySelectorAll:s=>s.startsWith('.popover,')?surfaces:[],addEventListener:(k,v)=>events[k]=v};
  const window={addEventListener(){}};
  const context={document,window,parent:window,location:{href:'http://fixture.test/?embed',search:'?embed',origin:'http://fixture.test'},URL,URLSearchParams,localStorage:{getItem:()=>null},MutationObserver:class{observe(){}},getComputedStyle:()=>({colorScheme:'dark',getPropertyValue:k=>palette[k]||''})};
  vm.runInNewContext(source,context);
+ window.V3Materials.setOwner(menu,shell);
  for(const t of [0,25,75,100])for(const b of [0,8,24])for(const imageEnabled of [false,true]){
   events['zw-material-draft']({detail:{transparency:t,blur:b,imageEnabled}});
   const alpha=[];
@@ -51,6 +54,15 @@ for(const palette of Object.values(presets.themes)){
   assert.equal(values.get('--material-blur'),b+'px');
   assert.equal(values.get('--overlay-blur'),Math.max(12,b)+'px');
   assert(['#fff','#101014'].includes(values.get('--bubble-fg')));
+  for(const [index,node] of surfaces.entries()){
+   const level=index+1,definition=presets.materialProjection.floatingLevels[level===3?'3+':String(level)];
+   const alpha=Math.round(255*(1-(definition.baseTransparency+definition.sliderTransparencySpan*t/100)));
+   assert.equal(node.dataset.materialLevel,String(level));
+   assert(node.style.getPropertyValue('--layer-background').includes((100*alpha/255).toFixed(4)+'%'),`L${level} background`);
+  }
  }
+ // The same portaled surfaces change level when their owner changes.
+ window.V3Materials.setOwner(menu,null);
+ assert.equal(menu.dataset.materialLevel,'1');assert.equal(hint.dataset.materialLevel,'2');
 }
 console.log(`Material contract passed: ${Object.keys(presets.themes).length} themes, T=0/25/75/100, B=0/8/24, image on/off; ${checks} role alpha checks.`);

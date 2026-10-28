@@ -34,7 +34,7 @@ test "tool result view shows actual mixed target facts after source ledger destr
     try View.appendForOwner(cx, scope, root, &store, .{ .group = 7 });
     const card = find(root, store.records.items[0].testId()).?;
     for (0..4) |_| {
-        cx.advanceFrameClock();
+        cx.frame_time_ms += 100;
         cx.layout();
         _ = cx.render();
     }
@@ -42,7 +42,7 @@ test "tool result view shows actual mixed target facts after source ledger destr
     try std.testing.expect(!store.records.items[0].expanded);
     find(card, "ai.tool.result.disclosure").?.parent.?.behavior.events.on_click.?.invoke();
     for (0..4) |_| {
-        cx.advanceFrameClock();
+        cx.frame_time_ms += 100;
         cx.layout();
         _ = cx.render();
     }
@@ -210,6 +210,10 @@ test "tool result view fits short and empty results and scrolls long output in o
     try std.testing.expect(state.root.globalRect().h > empty_height);
     try std.testing.expect(state.root.globalRect().h < 216);
     find(state.root, "ai.tool.result.disclosure").?.parent.?.behavior.events.on_click.?.invoke();
-    cx.layout();
+    for (0..4) |_| {
+        cx.frame_time_ms += 100;
+        cx.layout();
+        _ = cx.render();
+    }
     try std.testing.expectApproxEqAbs(@as(f32, 32), state.root.globalRect().h, 0.1);
 }

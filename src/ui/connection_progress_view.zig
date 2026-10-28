@@ -193,6 +193,7 @@ pub const View = struct {
     /// once; show() never destroys or reparents it during state/log updates.
     authentication_area: *ui.Node,
     logs_scroll: ui.widgets.ScrollAreaResult,
+    logs_disclosure: *@import("layout_motion.zig").Disclosure = undefined,
     logs_text: *ui.Node,
     toggle_label: *ui.Node,
     log_help: *ui.Node,
@@ -361,7 +362,7 @@ pub const View = struct {
         try content.appendChild(cx.allocator, log_controls);
         self.logs_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
         self.logs_scroll.container.setStyleInline(cx.allocator, S.logs());
-        self.logs_scroll.container.setDisplay(.none);
+
         self.logs_scroll.container.meta.ownership.meta.test_id = "connection.progress.logs";
         self.logs_scroll.content.setStyleInline(cx.allocator, S.logContent());
         var log_style = S.text(10.5, 400, false);
@@ -370,7 +371,8 @@ pub const View = struct {
         log_style.wrap = .word;
         log_style.text_overflow = .clip;
         self.logs_text = try self.appendLabel(self.logs_scroll.content, "", log_style);
-        try content.appendChild(cx.allocator, self.logs_scroll.container);
+        self.logs_disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, self.logs_scroll.container, false);
+        try content.appendChild(cx.allocator, self.logs_disclosure.root);
         self.footer = try ui.box(cx, S.footer(self.compact), .{});
         self.footer.meta.ownership.meta.test_id = "connection.progress.actions";
         try modal.body.appendChild(cx.allocator, self.footer);
@@ -496,7 +498,7 @@ pub const View = struct {
     pub fn toggleLogs(self: *View) void {
         if (!self.visible) return;
         self.logs_expanded = !self.logs_expanded;
-        self.logs_scroll.container.setDisplay(if (self.logs_expanded) .flex else .none);
+        self.logs_disclosure.setExpanded(self.logs_expanded);
         self.toggle_label.setTextContent(self.cx.allocator, if (self.logs_expanded) "收起连接日志" else "查看连接日志") catch {};
         self.toggle_button.behavior.interaction.a11y.?.expanded = self.logs_expanded;
         const asset = if (self.logs_expanded) ui.icons.chevron_down else ui.icons.chevron_right;

@@ -174,7 +174,10 @@ pub const Host = struct {
             self.view.hide();
             return;
         }
-        const index = self.workspace.active_tab orelse return;
+        self.showForTab(self.workspace.active_tab orelse return);
+    }
+
+    pub fn showForTab(self: *Host, index: usize) void {
         if (index >= self.workspace.tabs.items.len) return;
         const tab = self.workspace.tabs.items[index];
         if (tab.content_owner != .session or tab.local or tab.file_scope != null) return;

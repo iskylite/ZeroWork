@@ -49,7 +49,7 @@ test "notification policy quiet hours uses local inclusive exclusive bounds incl
 
 test "notification coordinator actual terminal facts deliver once per event and operation and own summary" {
     var platform: Platform = .{};
-    var value = try notifications.Coordinator.init(a, .{}, platform.sink());
+    var value = try notifications.Coordinator.init(a, .{ .transfer_done = true, .ai_ready = true }, platform.sink());
     defer value.deinit();
     var summary = [_]u8{ 'D', 'o', 'n', 'e' };
     var completed = event(.transfer_done);
@@ -74,7 +74,7 @@ test "notification coordinator actual terminal facts deliver once per event and 
 
 test "notification coordinator rejects progress checksum or nonfinal AI as a ready event and keeps failure facts" {
     var platform: Platform = .{};
-    var value = try notifications.Coordinator.init(a, .{}, platform.sink());
+    var value = try notifications.Coordinator.init(a, .{ .transfer_done = true, .ai_ready = true }, platform.sink());
     defer value.deinit();
     var candidate = event(.transfer_done);
     candidate.terminal_confirmed = false;
@@ -144,13 +144,13 @@ test "notification coordinator saved toggles and quiet authorization changes do 
 }
 
 test "notification coordinator reports unsupported platform or failed delivery without losing business facts" {
-    var unavailable = try notifications.Coordinator.init(a, .{}, .{});
+    var unavailable = try notifications.Coordinator.init(a, .{ .transfer_done = true, .ai_ready = true }, .{});
     defer unavailable.deinit();
     const missing = try unavailable.publish(event(.transfer_done), day);
     try std.testing.expectEqual(.unsupported, unavailable.records.items[missing.record_index].system.disposition);
     try std.testing.expectEqual(.succeeded, unavailable.records.items[missing.record_index].event.result);
     var platform: Platform = .{ .fail = true };
-    var value = try notifications.Coordinator.init(a, .{}, platform.sink());
+    var value = try notifications.Coordinator.init(a, .{ .transfer_done = true, .ai_ready = true }, platform.sink());
     defer value.deinit();
     const sent = try value.publish(event(.ai_ready), day);
     try std.testing.expectEqual(.failed, value.records.items[sent.record_index].system.disposition);
@@ -162,7 +162,7 @@ test "notification coordinator reports unsupported platform or failed delivery w
 
 test "notification attention follows exact original owner and actual read generation independent of quiet" {
     var platform: Platform = .{};
-    var value = try notifications.Coordinator.init(a, .{}, platform.sink());
+    var value = try notifications.Coordinator.init(a, .{ .transfer_done = true, .ai_ready = true }, platform.sink());
     defer value.deinit();
     try std.testing.expect(try value.observeOutput(owner, 8));
     try std.testing.expect(!try value.observeOutput(owner, 8));
@@ -193,7 +193,7 @@ test "notification attention follows exact original owner and actual read genera
 
 test "notification bell consumes real counters once throttles sound and preserves attention" {
     var platform: Platform = .{};
-    var value = try notifications.Coordinator.init(a, .{}, platform.sink());
+    var value = try notifications.Coordinator.init(a, .{ .transfer_done = true, .ai_ready = true }, platform.sink());
     defer value.deinit();
     _ = try value.observeOutput(owner, 1);
     try std.testing.expectEqual(.disabled, (try value.observeBell(owner, 1, day)).sound.disposition);
@@ -214,7 +214,7 @@ test "notification bell consumes real counters once throttles sound and preserve
 
 test "notification reconnect differentiates lost and recovered operation transitions and old owner clicks" {
     var platform: Platform = .{};
-    var value = try notifications.Coordinator.init(a, .{}, platform.sink());
+    var value = try notifications.Coordinator.init(a, .{ .transfer_done = true, .ai_ready = true }, platform.sink());
     defer value.deinit();
     var lost = event(.reconnect);
     lost.result = .disconnected;
@@ -241,7 +241,7 @@ test "notification reconnect differentiates lost and recovered operation transit
 
 fn allocationCase(allocator: std.mem.Allocator) !void {
     var platform: Platform = .{};
-    var value = try notifications.Coordinator.init(allocator, .{}, platform.sink());
+    var value = try notifications.Coordinator.init(allocator, .{ .transfer_done = true }, platform.sink());
     defer value.deinit();
     _ = value.publish(event(.transfer_done), day) catch |err| {
         try std.testing.expectEqual(@as(usize, 0), platform.notifications_sent);

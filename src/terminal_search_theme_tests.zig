@@ -120,7 +120,7 @@ test "terminal search global publication repaints hidden and visible view withou
         try std.testing.expectEqual(theme.current().overlay, view.root.getBackground());
         try std.testing.expectEqual(theme.current().fg_2, view.count.getText().?.color);
         try std.testing.expectEqual(theme.current().fg_2, input_state.placeholder_color.?);
-        try std.testing.expectEqual(theme.current().selection, view.input_result.input_container.getBackground());
+        try std.testing.expectEqual(theme.popupSelection(), view.input_result.input_container.getBackground());
         try std.testing.expectEqual(theme.current().fg_1, input_state.text_display_node.?.getText().?.color);
         for (view.actions) |action| {
             try std.testing.expectEqual(ui.Color.TRANSPARENT, action.getBackground());

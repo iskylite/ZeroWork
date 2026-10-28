@@ -85,7 +85,7 @@ const Fixture = struct {
         for ([_][]const u8{ "ai.approval.accept", "ai.approval.reject" }) |id| {
             const button = self.node(id);
             const r = button.globalRect();
-            try std.testing.expectEqual(@as(f32, if (std.mem.eql(u8, id, "ai.approval.accept")) 66 else 36), r.w);
+            try std.testing.expectEqual(@as(f32, 66), r.w);
             try std.testing.expectEqual(@as(f32, 26.5), r.h);
             try std.testing.expect(r.x >= card.x and r.y >= card.y);
             try std.testing.expect(r.x + r.w <= card.x + card.w + 0.1 and r.y + r.h <= card.y + card.h + 0.1);
@@ -152,6 +152,15 @@ test "AI approval default short command shows entire risk feedback without scrol
     try std.testing.expectEqual(@as(f32, 167.625), f.view.height());
     try std.testing.expectEqual(@as(f32, 0), content.style.translate_y);
     try std.testing.expectEqualStrings("影响 · 尚未核实", f.view.feedback.getText().?.content);
+    const title = f.view.title.globalRect();
+    const target = f.view.header_identity.globalRect();
+    try std.testing.expectEqualStrings(f.view.identity.getText().?.content, f.view.header_identity.getText().?.content);
+    try std.testing.expect(target.x > title.x + title.w);
+    try std.testing.expect(@abs((target.y + target.h / 2) - (title.y + title.h / 2)) < 1);
+    try std.testing.expect(f.view.identity.style.display == .none);
+    const notice = f.node("ai.approval.impact_notice").globalRect();
+    try std.testing.expectEqual(@as(f32, 28), notice.h);
+    try std.testing.expect(feedback.y >= notice.y and feedback.y + feedback.h <= notice.y + notice.h + 0.01);
     try std.testing.expect(feedback.w > 0 and feedback.h > 0);
     try std.testing.expect(feedback.x >= body.x and feedback.x + feedback.w <= body.x + body.w + 0.01);
     try std.testing.expect(feedback.y >= body.y and feedback.y + feedback.h <= body.y + body.h + 0.01);
@@ -330,7 +339,7 @@ test "group AI approval preserves complete frozen targets and fixed actions at c
     const button = f.node("ai.approval.accept");
     const reject = f.node("ai.approval.reject");
     try std.testing.expectEqual(@as(f32, 66), button.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 36), reject.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 66), reject.globalRect().w);
     try std.testing.expectEqual(@as(f32, 26.5), button.globalRect().h);
     try std.testing.expect(button.globalRect().y >= f.view.body.globalRect().y + f.view.body.globalRect().h);
     const original_hash = f.view.arguments_hash;

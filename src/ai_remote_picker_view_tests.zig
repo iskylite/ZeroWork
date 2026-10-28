@@ -34,3 +34,7 @@ test "AI remote filename button stays inside its bounded table cell" {
     cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
     try std.testing.expectEqual(@as(usize, 1), probe.clicks);
 }
+
+test {
+    _ = @import("ui/ai_remote_reference.zig");
+}

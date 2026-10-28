@@ -755,7 +755,7 @@ test "SFTP wizard stepper keeps plain numerals and only the current selection af
     }
     try std.testing.expectEqual(ui.Color.TRANSPARENT, f.wizard.step_buttons[0].?.getBackground());
     try std.testing.expectEqual(ui.Color.TRANSPARENT, f.wizard.step_buttons[1].?.getBackground());
-    try std.testing.expectEqual(theme.current().selection, f.wizard.step_buttons[2].?.getBackground());
+    try std.testing.expectEqual(theme.popupSelection(), f.wizard.step_buttons[2].?.getBackground());
     for ([_][]const u8{ "wizard.step.identity.check", "wizard.step.route.check" }) |id| {
         const check = findId(f.wizard.root.?, id) orelse return error.CompletedStepCheckMissing;
         try std.testing.expectEqual(@as(@TypeOf(check.style.display), .none), check.style.display);
@@ -771,7 +771,7 @@ test "SFTP wizard stepper keeps plain numerals and only the current selection af
         _ = f.cx.render();
     }
     try std.testing.expectEqual(ui.Color.TRANSPARENT, f.wizard.step_buttons[0].?.getBackground());
-    try std.testing.expectEqual(theme.current().selection, f.wizard.step_buttons[1].?.getBackground());
+    try std.testing.expectEqual(theme.popupSelection(), f.wizard.step_buttons[1].?.getBackground());
     try std.testing.expectEqual(ui.Color.TRANSPARENT, f.wizard.step_buttons[2].?.getBackground());
     try std.testing.expectEqual(@as(@TypeOf(findId(f.wizard.root.?, "wizard.step.route.check").?.style.display), .none), findId(f.wizard.root.?, "wizard.step.route.check").?.style.display);
     try std.testing.expectEqual(@as(usize, 1), f.wizard.currentDraft().route.len);

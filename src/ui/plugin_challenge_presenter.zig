@@ -90,6 +90,7 @@ pub const Presenter = struct {
         self.material = try label(cx, material_scroll.content, "", S.text(11, 400, true));
         self.material.meta.ownership.meta.test_id = "plugin.challenge.material";
         self.input = try ui.widgets.Input(.{ .input_type = .password, .on_change = cx.on(Presenter, self, primaryChanged), .on_submit = cx.on(Presenter, self, submitted) }).mountResult(scope, cx);
+        @import("app_theme.zig").styleInput(self.input);
         self.input.node.setStyleInline(cx.allocator, S.inputWrapper(S.field_height));
         self.input.input_container.setStyleInline(cx.allocator, S.input(S.field_height, false));
         self.input.input_container.meta.ownership.meta.test_id = "plugin.challenge.secret";
@@ -105,6 +106,7 @@ pub const Presenter = struct {
             const root = try ui.box(cx, S.field(), .{});
             const text = try label(cx, root, "", S.text(11, 500, false));
             const input = try ui.widgets.Input(.{ .input_type = .password, .on_change = cx.on(FieldControl, field, FieldControl.changed), .on_submit = cx.on(FieldControl, field, FieldControl.submitted) }).mountResult(scope, cx);
+            @import("app_theme.zig").styleInput(input);
             input.node.setStyleInline(cx.allocator, S.inputWrapper(S.field_height));
             input.input_container.setStyleInline(cx.allocator, S.input(S.field_height, false));
             var mutable_input = input;

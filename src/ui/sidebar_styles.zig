@@ -66,7 +66,7 @@ pub fn action(size: f32) ui.BoxStyle {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .flex_shrink = 0 };
 }
 pub fn host(selected: bool, hot: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = host_height }, .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 9 }, .background = if (selected) theme.current().selection else if (hot) theme.current().selection else ui.Color.TRANSPARENT, .border = .{ .radius = 9 }, .flex_shrink = 0, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .px = host_height }, .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 9 }, .background = if (selected) theme.popupSelection() else if (hot) theme.popupSelection() else ui.Color.TRANSPARENT, .border = .{ .radius = 9 }, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn content() ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 9 }, .min_width = 0 };
@@ -85,9 +85,6 @@ pub fn icon(size: f32) ui.Style {
 }
 pub fn text(size: f32, weight: u16, secondary: bool) ui.TextStyle {
     return .{ .font_size = size, .font_weight = weight, .line_height = if (size == 13) 20.0 / 13.0 else if (size == 12) 1.5 else 16.0 / size, .color = if (secondary) theme.current().fg_2 else theme.current().fg_1, .selectable = false, .text_overflow = .ellipsis };
-}
-pub fn marker() ui.BoxStyle {
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 7 } }, .width = .{ .px = 3 }, .height = .{ .px = 22 }, .background = theme.current().accent, .border = .{ .radius = 1.25 } };
 }
 pub fn status(online: bool) ui.BoxStyle {
     return .{ .width = .{ .px = 6 }, .height = .{ .px = 6 }, .background = if (online) theme.current().ok else theme.current().fg_3, .border = .{ .radius = 3 }, .flex_shrink = 0 };
@@ -144,6 +141,7 @@ pub fn repaint(node: *ui.Node, old: theme.Colors) void {
     for (node.children.items) |child| repaint(child, old);
 }
 fn remap(value: ui.Color, old: theme.Colors) ui.Color {
+    if (theme.remapUiSurface(value, old)) |next| return next;
     const current = theme.current();
     inline for (@typeInfo(theme.Colors).@"struct".field_names) |field| if (ui.Color.eql(value, @field(old, field))) return @field(current, field);
     return value;

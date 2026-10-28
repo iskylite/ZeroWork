@@ -7,16 +7,10 @@ pub const ButtonRole = enum { test_proxy, control, ordinary, icon };
 
 pub fn text(role: TextRole) ui.Color {
     const c = theme.current();
-    if (theme.currentName() == .dark) switch (role) {
-        .success => return ui.Color.rgba(0x4b, 0xd1, 0x8a, 255),
-        .warning => return ui.Color.rgba(0xe8, 0xbd, 0x71, 255),
-        .danger => return ui.Color.rgba(0xff, 0x9d, 0x9d, 255),
-        else => {},
-    };
     return switch (role) {
         .primary => c.fg_1,
         .secondary => c.fg_2,
-        .muted => c.fg_3,
+        .muted => c.fg_2,
         .warning => c.warn_ink,
         .success => c.ok_ink,
         .danger => c.danger_ink,
@@ -32,6 +26,7 @@ pub fn panel() ui.BoxStyle {
     const c = theme.current();
     return .{
         .background = c.overlay,
+
         // Filter the existing window backdrop locally so workspace text does
         // not compete with foreground content; the global image is drawn once.
         .glass = theme.overlayGlass(),
@@ -45,11 +40,13 @@ pub fn pointer() ui.BoxStyle {
 }
 
 pub fn button(role: ButtonRole) ui.BoxStyle {
-    return .{ .background = if (role == .icon) ui.Color.TRANSPARENT else theme.current().surface_2, .border = .{ .width = 0, .radius = if (role == .icon) 7 else 8 } };
+    return .{ .background = if (role == .icon) ui.Color.TRANSPARENT else theme.popupAction(), .border = .{ .width = 0, .radius = if (role == .icon) 7 else 8 } };
 }
 pub const width: f32 = 380;
-pub const normal_height: f32 = 290;
-pub const body_height: f32 = 159;
+pub const logs_width: f32 = 560;
+pub const logs_height: f32 = 420;
+pub const normal_height: f32 = 451;
+pub const body_height: f32 = 320;
 pub const chrome_height: f32 = 131;
 pub fn header() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 8, .margin = .{ .bottom = 12 }, .flex_shrink = 0 };

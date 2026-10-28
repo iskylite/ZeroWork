@@ -14,22 +14,58 @@ pub const Props = struct {
     expanded: *bool,
     test_id: []const u8 = "ai.step",
     on_toggle: ?ui.Handler(void) = null,
+    scroll_position: ?*@import("../ai/conversation_turn.zig").ThinkingScroll = null,
 };
 const State = struct {
     cx: *ui.Cx,
     props: Props,
     root: *ui.Node,
     body: *ui.Node,
+    disclosure: *@import("layout_motion.zig").Disclosure,
     status: *ui.Node,
     chevron: *ui.Node,
     clock: *ui.Node,
     mounted_ms: u64,
     last_tick_ms: u64 = 0,
+    follow: ?@import("ai_tail_follow.zig").Follow = null,
+    restore_scroll: bool = true,
     fn release(self: *State) void {
+        self.rememberScroll();
         self.cx.removeAfterLayoutHook(self);
+        if (self.props.scroll_position) |position| position.release();
+    }
+    fn rememberScroll(self: *State) void {
+        if (self.restore_scroll) return;
+        if (self.follow) |*follow| {
+            // Nested scroll hand-off can move to an edge without incrementing
+            // input_serial. Content growth itself never changes the offset.
+            if (follow.scroll.state.input_serial != follow.input_serial or @abs(follow.scroll.state.scroll_y - self.props.scroll_position.?.offset) > 0.1) {
+                follow.following = follow.scroll.state.scroll_y >= follow.scroll.state.maxScrollY() - 1;
+                follow.input_serial = follow.scroll.state.input_serial;
+            }
+            self.props.scroll_position.?.following = follow.following;
+            self.props.scroll_position.?.offset = follow.scroll.state.scroll_y;
+        }
     }
     fn tick(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *State = @ptrCast(@alignCast(raw));
+        if (self.props.expanded.*) if (self.follow) |*follow| {
+            if (self.restore_scroll) {
+                const content_height = follow.scroll.content.globalRect().h;
+                const viewport_height = follow.scroll.container.globalRect().h;
+                // The host can mount us inside its after-layout hook. Wait for
+                // the new nodes' first layout before clamping a saved offset.
+                if (content_height <= 0 or viewport_height <= 0) return .done;
+                follow.scroll.state.content_height = content_height;
+                follow.scroll.state.viewport_height = viewport_height;
+                ui.widgets.setScrollY(follow.scroll.state, follow.scroll.content, self.props.scroll_position.?.offset);
+                self.restore_scroll = false;
+            }
+            self.rememberScroll();
+            follow.update();
+            self.rememberScroll();
+        };
+        if (self.props.phase != .assembling and self.props.phase != .running and self.props.phase != .approval and self.props.phase != .approved) return .done;
         const now: u64 = @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
         self.cx.scheduleRedrawAfterNs(100 * std.time.ns_per_ms);
         if (now -| self.last_tick_ms < 100) return .done;
@@ -50,7 +86,7 @@ const State = struct {
     }
     fn toggle(self: *State) void {
         self.props.expanded.* = !self.props.expanded.*;
-        self.body.setDisplay(if (self.props.expanded.*) .flex else .none);
+        self.disclosure.setExpanded(self.props.expanded.*);
         self.chevron.setTextContent(self.cx.allocator, if (self.props.expanded.*) "⌄" else "›") catch {};
         if (self.props.on_toggle) |callback| callback.invoke();
         self.cx.requestRedraw();
@@ -58,14 +94,15 @@ const State = struct {
 };
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
     const root = try ui.boxStyled(cx, S.card, .{});
-    root.setStyleInline(cx.allocator, .{ .height = .{ .fit = .{} }, .background = theme.current().surface_1 });
+    root.setStyleInline(cx.allocator, .{ .height = .{ .fit = .{} } });
     root.meta.ownership.meta.test_id = props.test_id;
     const header = try ui.widgets.Button(.{ .variant = .ghost, .label = "", .a11y_label = props.title, .base_style = S.ButtonStyle{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 10, .right = 12 }, .gap = 6, .background = ui.Color.TRANSPARENT, .corner_radius = 9, .flex_shrink = 0 } }).mount(scope, cx);
     header.setStyleInline(cx.allocator, .{ .justify = .start });
     for (header.children.items) |child| child.setDisplay(.none);
     const slot = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0 }, .{});
     const palette = theme.current();
-    const status = try ui.iconTint(cx, switch (props.phase) {
+    const spinning = props.phase == .assembling or props.phase == .running or props.phase == .approved;
+    const status = if (spinning) try ui.widgets.Spinner(.{ .size = 14, .stroke_width = 1.6, .color = palette.fg_2 }).mount(scope, cx) else try ui.iconTint(cx, switch (props.phase) {
         .succeeded => ui.icons.check,
         .approval => ui.icons.get("hand").?,
         .failed, .rejected => ui.icons.get("circle-alert").?,
@@ -76,6 +113,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
         .failed, .rejected => palette.warn,
         else => palette.fg_2,
     }, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
+    status.meta.ownership.meta.test_id = if (spinning) "ai.step.spinner" else "ai.step.status";
     status.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 4 }, .top = .{ .px = 4 } } });
     const chevron = try ui.text(cx, if (props.expanded.*) "⌄" else "›", .{ .font_size = 16, .color = palette.fg_2 });
     chevron.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 4 }, .top = .{ .px = 0 } }, .width = .{ .px = 14 }, .height = .{ .px = 22 } });
@@ -84,7 +122,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
     try slot.appendChild(cx.allocator, chevron);
     try header.appendChild(cx.allocator, slot);
     const title_node = try ui.textStyled(cx, S.title, props.title);
-    title_node.setStyleInline(cx.allocator, S.headerTitle(cx.tokens));
+    title_node.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 16 }, .flex_shrink = 0 });
     try header.appendChild(cx.allocator, title_node);
     const projection = try ui.text(cx, props.projection, .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = palette.fg_2, .text_overflow = .ellipsis });
     projection.setStyleInline(cx.allocator, S.headerSummary(cx.tokens));
@@ -97,6 +135,9 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
     clock.meta.ownership.meta.test_id = "ai.step.elapsed";
     try header.appendChild(cx.allocator, clock);
     try root.appendChild(cx.allocator, header);
+    // Sibling scopes are disposed in creation order: save the position before
+    // ScrollArea releases its state during a conversation rebuild.
+    const state_scope = try scope.childScope();
     const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
     scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{ .max = 150 } }, .flex_shrink = 0 });
     scroll.content.setStyleInline(cx.allocator, S.content(cx.tokens));
@@ -110,12 +151,13 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
         copy_button.meta.ownership.meta.test_id = "ai.step.copy";
         try scroll.content.appendChild(cx.allocator, copy_button);
     }
-    scroll.container.setDisplay(if (props.expanded.*) .flex else .none);
-    try root.appendChild(cx.allocator, scroll.container);
-    const state = try scope.createState(State, .{ .cx = cx, .props = props, .root = root, .body = scroll.container, .status = status, .chevron = chevron, .clock = clock, .mounted_ms = @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)) });
-    if (props.phase == .assembling or props.phase == .running or props.phase == .approval or props.phase == .approved) {
+    const disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, scroll.container, props.expanded.*);
+    try root.appendChild(cx.allocator, disclosure.root);
+    const state = try state_scope.createState(State, .{ .cx = cx, .props = props, .root = root, .body = scroll.container, .disclosure = disclosure, .status = status, .chevron = chevron, .clock = clock, .mounted_ms = @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)), .follow = if (props.scroll_position) |position| .{ .scroll = scroll, .following = position.following } else null });
+    if (props.scroll_position != null or props.phase == .assembling or props.phase == .running or props.phase == .approval or props.phase == .approved) {
         try cx.addAfterLayoutHook(state, State.tick);
-        try scope.onCleanup(State, state, State.release);
+        try state_scope.onCleanup(State, state, State.release);
+        if (props.scroll_position) |position| position.retain();
     }
     _ = ui.clickable(header, cx.on(State, state, State.toggle));
     const hovered = try ui.hooks.useHover(scope, header);

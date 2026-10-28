@@ -149,11 +149,11 @@ pub const Controller = struct {
             .encoding => 148,
             .readonly => 184,
             .more => 52 + 32 * @as(f32, @floatFromInt(self.moreItems(&items, open.narrow_more).len)),
-            .identity => 156, // Bridge 444:186232, Local identity.
+            .identity => 272, // Shared connection header, summary and labeled facts.
             .theme => 260,
         };
         const height = @min(desired, @max(0, open.anchor.y - 6 - 8));
-        const width = @min(@as(f32, 360), @max(0, window.width - 16));
+        const width = @min(@as(f32, if (open.kind == .identity) 380 else 360), @max(0, window.width - 16));
         return .{
             .x = @min(@max(8, open.anchor.x + (open.anchor.width - width) / 2), @max(8, window.width - width - 8)),
             .y = @max(8, open.anchor.y - 6 - height),

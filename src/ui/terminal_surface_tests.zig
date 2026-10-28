@@ -1686,7 +1686,17 @@ test "global backdrop survives OSC default backgrounds while explicit ANSI cells
             try std.testing.expectEqual(ui.Color.TRANSPARENT, glyph.node.getBackground());
             found_plain = true;
         } else if (std.mem.eql(u8, text, "X")) {
-            try std.testing.expectEqual(ui.Color.hex(0xaa3300), glyph.node.getBackground());
+            try std.testing.expectEqual(ui.Color.TRANSPARENT, glyph.node.getBackground());
+            try std.testing.expectEqual(ui.Color.hex(0xaa3300), glyph.background.?.getBackground());
+            var background_index: usize = 0;
+            var selection_index: usize = 0;
+            var text_index: usize = 0;
+            for (row.root.children.items, 0..) |child, index| {
+                if (child == glyph.background.?) background_index = index;
+                if (child == row.selected) selection_index = index;
+                if (child == glyph.node) text_index = index;
+            }
+            try std.testing.expect(background_index < selection_index and selection_index < text_index);
             found_ansi = true;
         }
     };
@@ -2167,7 +2177,7 @@ test "terminal surface preserves full SGR native styles reverse blank cells and 
     try transport.controller.feedOutput(owner, 3, "\x1b[2J\x1b[H\x1b[?5h", 3);
     _ = try view.refreshTerminalService(owner, true);
     try std.testing.expect(surface.rows.items[1].glyphs.items.len > 0);
-    try std.testing.expectEqual(ui.Color.hex(0xeeeeee), surface.rows.items[1].glyphs.items[0].node.getBackground());
+    try std.testing.expectEqual(ui.Color.hex(0xeeeeee), surface.rows.items[1].glyphs.items[0].background.?.getBackground());
 }
 
 test "terminal surface first wheel waits for complete async history instead of consuming delta" {

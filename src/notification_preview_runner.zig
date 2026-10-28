@@ -40,23 +40,51 @@ const Fixture = struct {
     }
     fn scenes(self: *Fixture) void {
         self.operation += 10;
-        self.notice_host.publishTransfer(owner, self.operation, 1, .{ .result = .failed, .resources_released = true, .notify_complete = false, .details = .{ .object = "backup-2026-10-27.tar.gz", .detail = "没有文件访问权限" } }) catch return;
-        self.notice_host.publishReconnectDetails(.{ .session = .{ .session_id = @fromBackingInt(2), .generation = 1 } }, self.operation + 1, 1, .disconnected, .{ .object = "prod-api-02", .detail = "连接超时，远端未响应。" }) catch return;
-        self.notice_host.publishAi(owner, self.operation + 2, 1, .{ .result = .unverified, .resources_released = true }) catch return;
+        for (1..4) |id| {
+            _ = self.notice_host.publish(.{
+                .definition_id = "host.reconnect",
+                .owner = .{ .window_id = 1, .content = .{ .session = .{ .session_id = @fromBackingInt(id), .generation = 1 } } },
+                .operation_id = self.operation + id,
+                .attempt_id = 1,
+                .event_revision = 1,
+                .phase = .failed,
+                .title = "SSH 自动恢复已停止",
+                .detail = "同一共享链路中断，后台工作需要你处理连接。",
+                .severity = .failure,
+                .attention = .{ .kind = .connection_stopped, .requires_action = true, .time_sensitive = true, .incident_id = self.operation },
+                .actions = &.{.{ .kind = .locate_owner, .label = "查看来源" }},
+            }) catch return;
+        }
+        _ = self.notice_host.publish(.{
+            .definition_id = "host.transfer_done",
+            .owner = .{ .window_id = 1, .content = owner },
+            .operation_id = self.operation + 4,
+            .event_revision = 1,
+            .phase = .failed,
+            .severity = .warning,
+            .title = "后台传输批次已停止",
+            .detail = "批次需要你处理权限后才能继续。",
+            .attention = .{ .kind = .transfer_batch_stopped, .requires_action = true, .time_sensitive = true },
+            .actions = &.{.{ .kind = .locate_owner, .label = "查看来源" }},
+        }) catch return;
         self.cx.requestRedraw();
     }
     fn outcomes(self: *Fixture) void {
-        for (self.view.slots) |slot| if (slot.fact_id) |id| self.notice_host.coordinator.dismissNotification(id);
-        self.operation += 10;
-        self.notice_host.publishTransfer(owner, self.operation, 1, .{ .result = .cancelled, .resources_released = true, .notify_complete = false, .details = .{ .object = "archive.tar.gz" } }) catch return;
-        self.notice_host.publishReconnectDetails(.{ .session = .{ .session_id = @fromBackingInt(2), .generation = 1 } }, self.operation + 1, 2, .recovered, .{ .object = "prod-api-02" }) catch return;
-        self.notice_host.publishAi(owner, self.operation + 2, 1, .{ .result = .succeeded, .resources_released = true, .final_answer = true }) catch return;
+        for (self.notice_host.coordinator.notification_records.items) |record| {
+            if (!record.pending()) continue;
+            var value = record.event;
+            value.event_revision += 1;
+            value.phase = .succeeded;
+            value.title = "来源已恢复";
+            value.attention.resolved = true;
+            _ = self.notice_host.update(value) catch return;
+        }
         self.cx.requestRedraw();
     }
     fn publish(self: *Fixture, is_error: bool, has_action: bool) void {
         self.operation += 1;
         const action_id = self.notice_host.registerAction(owner, .view_result, .{ .context = self, .invoke = action }) catch return;
-        _ = self.notice_host.coordinator.publishNotification(.{ .definition_id = "fixture.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = self.operation, .event_revision = 1, .phase = if (is_error) .failed else .succeeded, .severity = if (is_error) .failure else .info, .owner_name = "prod-web-01", .title = if (is_error) "验证错误" else if (has_action) "有结果可查看" else "普通消息", .detail = "仅验证原生展示，未执行远程操作", .actions = if (has_action) &.{.{ .kind = .view_result, .action_id = action_id, .label = "查看" }} else &.{} }, host.localClock() catch return) catch return;
+        _ = self.notice_host.coordinator.publishNotification(.{ .definition_id = "fixture.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = self.operation, .event_revision = 1, .phase = if (is_error) .failed else .succeeded, .severity = if (is_error) .failure else .info, .owner_name = "prod-web-01", .attention = if (has_action) .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true } else .{}, .title = if (is_error) "验证错误" else if (has_action) "有结果可查看" else "普通消息", .detail = "仅验证原生展示，未执行远程操作", .actions = if (has_action) &.{.{ .kind = .view_result, .action_id = action_id, .label = "查看" }} else &.{} }, host.localClock() catch return) catch return;
         self.cx.requestRedraw();
     }
     fn long(self: *Fixture) void {
@@ -66,11 +94,26 @@ const Fixture = struct {
         for (&detail, 0..) |*byte, index| byte.* = word[index % word.len];
         const action_id = self.notice_host.registerAction(owner, .view_result, .{ .context = self, .invoke = action }) catch return;
         const label = "View the complete retained operation result with its original owner and verification details";
-        _ = self.notice_host.coordinator.publishNotification(.{ .definition_id = "fixture.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = self.operation, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Long persistent notification", .detail = &detail, .actions = &.{ .{ .kind = .view_result, .action_id = action_id, .label = label }, .{ .kind = .view_result, .action_id = action_id, .label = label }, .{ .kind = .view_result, .action_id = action_id, .label = label } } }, host.localClock() catch return) catch return;
+        _ = self.notice_host.coordinator.publishNotification(.{ .definition_id = "fixture.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = self.operation, .event_revision = 1, .phase = .failed, .severity = .failure, .attention = .{ .kind = .application_risk, .requires_action = true, .time_sensitive = true }, .title = "Long persistent notification", .detail = &detail, .actions = &.{ .{ .kind = .view_result, .action_id = action_id, .label = label }, .{ .kind = .view_result, .action_id = action_id, .label = label }, .{ .kind = .view_result, .action_id = action_id, .label = label } } }, host.localClock() catch return) catch return;
         self.cx.requestRedraw();
     }
     fn normal(self: *Fixture) void {
         self.publish(false, false);
+    }
+    fn selectTheme(self: *Fixture, value: theme.Name) void {
+        theme.select(value);
+        self.cx.setTheme(theme.widgetTheme(value));
+        self.root.setBackground(theme.baseColors().app);
+        self.cx.requestRedraw();
+    }
+    fn dark(self: *Fixture) void {
+        self.selectTheme(.dark);
+    }
+    fn light(self: *Fixture) void {
+        self.selectTheme(.light);
+    }
+    fn sauber(self: *Fixture) void {
+        self.selectTheme(.sauber);
     }
     fn actionable(self: *Fixture) void {
         self.publish(false, true);
@@ -137,6 +180,9 @@ const Fixture = struct {
             count += 1;
         };
         self.view.update((host.localClock() catch return .done).monotonic_ms, true, owner, .{ .content = self.root.globalRect(), .avoid = avoid[0..count] }) catch {};
+        // This isolated fixture has no production service ticker. Keep real
+        // animation/timer frames running instead of advancing them by queries.
+        if (self.notice_host.coordinator.presentation_count > 0 or (if (self.history) |history| history.open.peek() else false)) self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
         return .done;
     }
     fn cleanup(self: *Fixture) void {
@@ -157,7 +203,7 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     try root.appendChild(cx.allocator, obstacle);
     const result = try ui.text(cx, "尚未查看结果", .{ .font_size = 12, .color = theme.current().fg_1 });
     result.meta.ownership.meta.test_id = "fixture.result";
-    const self = try scope.createState(Fixture, .{ .cx = cx, .root = root, .notice_host = .{ .allocator = cx.allocator, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(cx.allocator, .{}, .{}) }, .obstacle = obstacle, .result = result });
+    const self = try scope.createState(Fixture, .{ .cx = cx, .root = root, .notice_host = .{ .allocator = cx.allocator, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(cx.allocator, .{ .quiet_hours = "00:00-00:00" }, .{}) }, .obstacle = obstacle, .result = result });
     try scope.onCleanup(Fixture, self, Fixture.cleanup);
     try self.notice_host.coordinator.registerDefinition(.{ .id = "fixture.feedback", .category = .operation_result, .default_channels = .{ .system = false, .attention = false } });
     _ = try self.notice_host.registerWindow(.{ .context = self, .owns = Fixture.owns, .activate = Fixture.activate, .feedback = Fixture.feedback, .owner_name = Fixture.ownerName });
@@ -167,12 +213,17 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     bell.meta.ownership.meta.test_id = "toolbar.notifications";
     try root.appendChild(cx.allocator, bell);
     self.history = try @import("ui/notification_history.zig").View.mount(cx, scope, &self.notice_host, bell);
-    const row = try ui.box(cx, .{ .direction = .row, .gap = 12 }, .{});
+    const row = try ui.box(cx, .{ .width = .fill(), .direction = .row, .flex_wrap = .wrap, .gap = 12 }, .{});
     const Spec = struct { label: []const u8, id: []const u8, callback: *const fn (*Fixture) void };
     inline for ([_]Spec{ .{ .label = "命令失败", .id = "fixture.command-error", .callback = Fixture.commandHint }, .{ .label = "典型通知", .id = "fixture.scenes", .callback = Fixture.scenes }, .{ .label = "完成与取消", .id = "fixture.outcomes", .callback = Fixture.outcomes }, .{ .label = "长消息", .id = "fixture.long", .callback = Fixture.long }, .{ .label = "普通消息", .id = "fixture.normal", .callback = Fixture.normal }, .{ .label = "带查看动作", .id = "fixture.action", .callback = Fixture.actionable }, .{ .label = "错误消息", .id = "fixture.error", .callback = Fixture.failure }, .{ .label = "连接失败", .id = "fixture.connection-failure", .callback = Fixture.connectionFailure }, .{ .label = "切换遮挡", .id = "fixture.cover", .callback = Fixture.toggle }, .{ .label = "就地确认", .id = "fixture.local", .callback = Fixture.local } }) |spec| {
         const button = try ui.widgets.Button(.{ .label = spec.label, .on_click = cx.on(Fixture, self, spec.callback) }).mount(scope, cx);
         button.meta.ownership.meta.test_id = spec.id;
         if (comptime std.mem.eql(u8, spec.id, "fixture.local")) self.local_anchor = button;
+        try row.appendChild(cx.allocator, button);
+    }
+    inline for ([_]Spec{ .{ .label = "Dark", .id = "fixture.theme.dark", .callback = Fixture.dark }, .{ .label = "Light", .id = "fixture.theme.light", .callback = Fixture.light }, .{ .label = "Sauber", .id = "fixture.theme.sauber", .callback = Fixture.sauber } }) |spec| {
+        const button = try ui.widgets.Button(.{ .label = spec.label, .on_click = cx.on(Fixture, self, spec.callback) }).mount(scope, cx);
+        button.meta.ownership.meta.test_id = spec.id;
         try row.appendChild(cx.allocator, button);
     }
     try root.appendChild(cx.allocator, row);

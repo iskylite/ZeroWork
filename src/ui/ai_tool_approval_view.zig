@@ -21,6 +21,7 @@ pub const View = struct {
     group_mode: bool = false,
     card_height: f32 = 167.625,
     identity: *ui.Node,
+    header_identity: *ui.Node,
     title: *ui.Node,
     command_copy: *ui.Node,
     command: *ui.Node,
@@ -35,7 +36,7 @@ pub const View = struct {
     reject_style: *ui.Signal(S.ButtonStyle),
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
-        const self = try scope.createState(View, .{ .cx = cx, .root = undefined, .card = undefined, .body = undefined, .footer = undefined, .group_footer = undefined, .target_copy = undefined, .tail = undefined, .identity = undefined, .title = undefined, .command_copy = undefined, .command = undefined, .feedback = undefined, .callbacks = callbacks, .decision_pending = try scope.createSignal(bool, false), .accept_style = try scope.createSignal(S.ButtonStyle, S.iconButton(true)), .reject_style = try scope.createSignal(S.ButtonStyle, S.iconButton(false)) });
+        const self = try scope.createState(View, .{ .cx = cx, .root = undefined, .card = undefined, .body = undefined, .footer = undefined, .group_footer = undefined, .target_copy = undefined, .tail = undefined, .identity = undefined, .header_identity = undefined, .title = undefined, .command_copy = undefined, .command = undefined, .feedback = undefined, .callbacks = callbacks, .decision_pending = try scope.createSignal(bool, false), .accept_style = try scope.createSignal(S.ButtonStyle, S.iconButton(true)), .reject_style = try scope.createSignal(S.ButtonStyle, S.iconButton(false)) });
         try scope.onCleanup(View, self, cleanup);
         self.root = try ui.boxStyled(cx, S.wrapper, .{});
         self.root.meta.ownership.meta.test_id = "ai.approval";
@@ -50,7 +51,10 @@ pub const View = struct {
         self.title = try ui.textStyled(cx, S.title, "工具调用");
         self.title.meta.ownership.meta.test_id = "ai.approval.title";
         try header.appendChild(cx.allocator, self.title);
-        try header.appendChild(cx.allocator, try ui.spacer(cx));
+        self.header_identity = try ui.textStyled(cx, S.headerIdentity, "");
+        self.header_identity.meta.ownership.meta.test_id = "ai.approval.target";
+        self.header_identity.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+        try header.appendChild(cx.allocator, self.header_identity);
         const state = try ui.text(cx, "待确认", .{ .font_size = 10, .line_height = 1.65, .color = theme.current().fg_2 });
         state.setStyleInline(cx.allocator, .{ .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = theme.current().well, .corner_radius = 5 });
         try header.appendChild(cx.allocator, state);
@@ -65,7 +69,7 @@ pub const View = struct {
         scroll.content.setStyleInline(cx.allocator, S.content(cx.tokens));
         try self.card.appendChild(cx.allocator, self.body);
         self.identity = try ui.textStyled(cx, S.secondary, "");
-        self.identity.meta.ownership.meta.test_id = "ai.approval.target";
+        self.identity.meta.ownership.meta.test_id = "ai.approval.group_targets";
         self.identity.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 20.625 }, .flex_shrink = 0 });
         try scroll.content.appendChild(cx.allocator, self.identity);
         const command_row = try ui.boxStyled(cx, S.commandRow, .{});
@@ -83,15 +87,19 @@ pub const View = struct {
         self.command_copy = copy;
         copy.meta.ownership.meta.test_id = "ai.approval.copy";
         try command_row.appendChild(cx.allocator, copy);
+        const impact = try ui.boxStyled(cx, S.impactNotice, .{});
+        impact.meta.ownership.meta.test_id = "ai.approval.impact_notice";
+        try impact.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("triangle-alert").?, theme.current().warn_ink, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
         self.feedback = try ui.textStyled(cx, S.impact, "影响 · 尚未核实");
         self.feedback.meta.ownership.meta.test_id = "ai.approval.impact";
-        self.feedback.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 13 }, .flex_shrink = 0 });
-        try scroll.content.appendChild(cx.allocator, self.feedback);
+        self.feedback.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1, .flex_shrink = 0 });
+        try impact.appendChild(cx.allocator, self.feedback);
+        try scroll.content.appendChild(cx.allocator, impact);
         const footer = try ui.boxStyled(cx, S.footer, .{});
         self.footer = footer;
         try self.card.appendChild(cx.allocator, footer);
         try footer.appendChild(cx.allocator, try ui.spacer(cx));
-        const reject = try ui.widgets.Button(.{ .variant = .secondary, .label = "拒绝", .a11y_label = "拒绝此调用", .base_style = self.reject_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, rejectCall) }).mount(scope, cx);
+        const reject = try ui.widgets.Button(.{ .variant = .secondary, .label = "拒绝此调用", .a11y_label = "拒绝此调用", .base_style = self.reject_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, rejectCall) }).mount(scope, cx);
         reject.meta.ownership.meta.test_id = "ai.approval.reject";
         try footer.appendChild(cx.allocator, reject);
         const accept = try ui.widgets.Button(.{ .variant = .primary, .label = "批准此调用", .a11y_label = "批准此调用", .base_style = self.accept_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, acceptCall) }).mount(scope, cx);
@@ -130,6 +138,7 @@ pub const View = struct {
             const target = if (source.group) try self.cx.allocator.dupe(u8, source.target) else if (source.cwd != null or terminal) try std.fmt.allocPrint(self.cx.allocator, "{s} · #{d} · 目录 {s}", .{ source.target, @backingInt(source.owner.session_id), source.cwd orelse "未知" }) else try std.fmt.allocPrint(self.cx.allocator, "{s} · #{d}", .{ source.target, @backingInt(source.owner.session_id) });
             defer self.cx.allocator.free(target);
             try self.identity.setTextContent(self.cx.allocator, target);
+            try self.header_identity.setTextContent(self.cx.allocator, if (source.group) "全部目标" else target);
             try self.command.setTextContent(self.cx.allocator, command);
             try self.feedback.setTextContent(self.cx.allocator, if (source.group) (if (terminal) "影响 · 上述全部目标各执行一次此命令；写入及业务影响尚未核实。" else "影响 · 上述全部目标各执行一次此调用；写入及业务影响尚未核实。") else "影响 · 尚未核实");
             const target_copy = try self.cx.allocator.dupe(u8, target);
@@ -152,6 +161,7 @@ pub const View = struct {
         self.group_footer.setDisplay(.none);
         self.tail.setDisplay(.none);
         self.root.setStyleInline(self.cx.allocator, .{ .padding = .{ .left = 14, .right = 14, .top = 9 } });
+        self.identity.setDisplay(if (source.group) .flex else .none);
         self.identity.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (source.group) 60.625 else 20.625 } });
         self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (source.group) 130.625 else 90.625 } });
         if (self.card.style.height != .px or self.card.style.height.px != desired) self.card.setStyleInline(self.cx.allocator, .{ .height = .{ .px = desired } });

@@ -203,7 +203,8 @@ test "connection progress view failed summary remains outside folded logs and re
     f.view.close();
     try std.testing.expect(f.view.isVisible());
     try std.testing.expectEqual(@as(usize, 0), f.closes);
-    try std.testing.expectEqual(@as(@TypeOf(f.view.logs_scroll.container.style.display), .none), f.view.logs_scroll.container.style.display);
+    try std.testing.expectEqual(@as(f32, 0), f.view.logs_disclosure.root.globalRect().h);
+    try std.testing.expect(!f.view.logs_disclosure.expanded);
     f.view.toggleLogs();
     f.cx.layout();
     try std.testing.expect(f.view.dialog.globalRect().h <= 884);

@@ -117,9 +117,9 @@ test "notification native adapter queries without prompt and only explicit actio
     try std.testing.expectError(error.AuthorizationQueryPending, driver.refreshAuthorization());
     try fake.reportAuthorization(&driver, .{ .authorization = 1, .alert_setting = 1, .center_setting = 1, .sound_setting = 1 });
     try std.testing.expectEqual(.not_determined, driver.settings.?.authorization);
-    var coordinator = try notifications.Coordinator.init(a, .{}, driver.sink());
+    var coordinator = try notifications.Coordinator.init(a, .{ .transfer_done = true, .ai_ready = true }, driver.sink());
     defer coordinator.deinit();
-    _ = try coordinator.updatePolicy(.{ .quiet_hours = "00:00-00:00", .bell = true });
+    _ = try coordinator.updatePolicy(.{ .transfer_done = true, .ai_ready = true, .quiet_hours = "00:00-00:00", .bell = true });
     try std.testing.expectEqual(@as(usize, 0), fake.requests);
     const permission = try driver.requestAuthorization(.enable_system_notifications);
     try std.testing.expectEqual(@as(usize, 1), fake.requests);
@@ -137,7 +137,7 @@ test "notification native adapter and coordinator retain pending until matching 
     var driver = try platform.Driver.initWithApi(a, fake.api());
     defer driver.deinit();
     try fake.reportAuthorization(&driver, authorized);
-    var coordinator = try notifications.Coordinator.init(a, .{}, driver.sink());
+    var coordinator = try notifications.Coordinator.init(a, .{ .transfer_done = true, .ai_ready = true }, driver.sink());
     defer coordinator.deinit();
     const published = try coordinator.publish(event(41), day);
     try std.testing.expectEqual(.pending, coordinator.records.items[published.record_index].system.disposition);
@@ -161,7 +161,7 @@ test "notification native failure preserves terminal fact original owner error a
     var driver = try platform.Driver.initWithApi(a, fake.api());
     defer driver.deinit();
     try fake.reportAuthorization(&driver, authorized);
-    var coordinator = try notifications.Coordinator.init(a, .{}, driver.sink());
+    var coordinator = try notifications.Coordinator.init(a, .{ .transfer_done = true, .ai_ready = true }, driver.sink());
     defer coordinator.deinit();
     const published = try coordinator.publish(event(42), day);
     var failed: platform.RawEvent = .{ .kind = 3, .result = 3, .request_id = fake.last_send, .event_id = fake.last_event, .target = fake.last_target, .settings = .{ .authorization = 2 }, .error_code = 17 };
@@ -179,7 +179,7 @@ test "notification native failure preserves terminal fact original owner error a
     try std.testing.expectEqual(.failed, coordinator.records.items[published.record_index].system.disposition);
     try std.testing.expectEqual(.succeeded, coordinator.records.items[published.record_index].event.result);
     coordinator.reportAuthorization(.authorized);
-    _ = try coordinator.updatePolicy(.{ .quiet_hours = "00:00-00:00" });
+    _ = try coordinator.updatePolicy(.{ .transfer_done = true, .ai_ready = true, .quiet_hours = "00:00-00:00" });
     try std.testing.expect((try coordinator.publish(event(42), day)).duplicate);
     try std.testing.expectEqual(@as(usize, 1), fake.sends);
     try std.testing.expectEqual(@as(usize, 0), fake.requests);
@@ -264,7 +264,7 @@ test "notification native bare-executable capability is honest and Bell is indep
     try std.testing.expectEqual(.no_app_bundle, driver.capabilities.unavailable_reason);
     try std.testing.expectEqual(@as(usize, 0), fake.queries);
     try std.testing.expectError(error.NotificationUnavailable, driver.requestAuthorization(.enable_system_notifications));
-    var coordinator = try notifications.Coordinator.init(a, .{ .bell = true }, driver.sink());
+    var coordinator = try notifications.Coordinator.init(a, .{ .ai_ready = true, .bell = true }, driver.sink());
     defer coordinator.deinit();
     const published = try coordinator.publish(event(81), day);
     try std.testing.expectEqual(.unsupported, coordinator.records.items[published.record_index].system.disposition);
@@ -359,7 +359,7 @@ const WindowProbe = struct {
 
 test "notification process host sends only released final AI and each transfer intent choice survives global policy" {
     var fake: Fake = .{};
-    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
+    const host = try notification_host.Host.createWithApi(a, .{ .transfer_done = true, .ai_ready = true, .quiet_hours = "00:00-00:00" }, fake.api());
     defer host.destroy();
     fake.push(.{ .kind = 1, .result = 1, .request_id = fake.last_query, .settings = authorized });
     _ = try host.poll();
@@ -383,22 +383,24 @@ test "notification process host sends only released final AI and each transfer i
     } else return error.TestExpectedTransferNotification;
     try std.testing.expect(!transfer_record.event.system_enabled);
     try std.testing.expectEqual(.disabled, transfer_record.system.disposition);
-    try host.updatePolicy(.{ .transfer_done = false, .quiet_hours = "00:00-00:00" });
+    try host.updatePolicy(.{ .transfer_done = false, .ai_ready = true, .quiet_hours = "00:00-00:00" });
     try host.publishTransfer(target.owner, 2, 1, .{ .result = .succeeded, .resources_released = true, .notify_complete = true });
     try std.testing.expectEqual(@as(usize, 1), fake.sends);
-    try host.updatePolicy(.{ .quiet_hours = "00:00-00:00" });
+    try host.updatePolicy(.{ .transfer_done = true, .ai_ready = true, .quiet_hours = "00:00-00:00" });
     try host.publishTransfer(target.owner, 3, 1, .{ .result = .succeeded, .resources_released = true, .notify_complete = true });
     try std.testing.expectEqual(@as(usize, 2), fake.sends);
 }
 
 test "notification process host permissions and notification clicks retain registered original window owner" {
     var fake: Fake = .{};
-    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
+    const host = try notification_host.Host.createWithApi(a, .{ .transfer_done = true, .ai_ready = true, .quiet_hours = "00:00-00:00" }, fake.api());
     defer host.destroy();
     var original: WindowProbe = .{};
     var other: WindowProbe = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(5), .generation = 1 } } };
     const original_id = try host.registerWindow(original.callbacks());
-    _ = try host.registerWindow(other.callbacks());
+    const other_id = try host.registerWindow(other.callbacks());
+    host.setWindowFocus(original_id, false);
+    host.setWindowFocus(other_id, false);
     try host.requestAuthorization(original_id);
     fake.push(.{ .kind = 2, .result = 1, .request_id = fake.last_permission, .granted = 1, .settings = authorized });
     _ = try host.poll();
@@ -421,13 +423,15 @@ test "notification process host permissions and notification clicks retain regis
 
 test "notification process AI operations never route equal group numbers or closed origins into another window" {
     var fake: Fake = .{};
-    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
+    const host = try notification_host.Host.createWithApi(a, .{ .transfer_done = true, .ai_ready = true, .quiet_hours = "00:00-00:00" }, fake.api());
     defer host.destroy();
     const group: notifications.Owner = .{ .group = .{ .id = @fromBackingInt(1), .revision = 1 } };
     var first: WindowProbe = .{ .owner = group };
     var second: WindowProbe = .{ .owner = group };
     const first_id = try host.registerWindow(first.callbacks());
     const second_id = try host.registerWindow(second.callbacks());
+    host.setWindowFocus(first_id, false);
+    host.setWindowFocus(second_id, false);
     fake.push(.{ .kind = 1, .result = 1, .request_id = fake.last_query, .settings = authorized });
     _ = try host.poll();
     const first_op = try host.reserveAiOperation(first_id);
@@ -470,9 +474,9 @@ test "notification permission feedback retains waiting and native failure indepe
     try std.testing.expectEqual(@as(i64, 1), host.last_failure.?.code);
 }
 
-test "ordinary feedback stays quiet and explicitly typed failure retains severity independent of title" {
+test "ordinary feedback and typed failures stay outside global history" {
     var fake: Fake = .{};
-    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
+    const host = try notification_host.Host.createWithApi(a, .{ .transfer_done = true, .ai_ready = true, .quiet_hours = "00:00-00:00" }, fake.api());
     defer host.destroy();
     var window: WindowProbe = .{};
     const id = try host.registerWindow(window.callbacks());
@@ -481,13 +485,7 @@ test "ordinary feedback stays quiet and explicitly typed failure retains severit
     try std.testing.expectEqual(@as(usize, 0), host.coordinator.notification_records.items.len);
     try host.publishFeedbackSeverity(id, target.owner, "连接失败: ChallengeTimeout", .failure);
     try host.publishFeedbackSeverity(id, target.owner, "连接失败: ChallengeTimeout", .failure);
-    try std.testing.expectEqual(@as(usize, 1), host.coordinator.notification_records.items.len);
-    const fact = host.coordinator.notification_records.items[0];
-    try std.testing.expectEqualStrings("host.feedback", fact.event.definition_id);
-    try std.testing.expectEqualStrings("连接失败: ChallengeTimeout", fact.event.title);
-    try std.testing.expectEqual(.failure, fact.event.severity);
-    try std.testing.expectEqual(.failed, fact.event.phase);
-    try std.testing.expect(!fact.event.system_enabled);
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.notification_records.items.len);
     try std.testing.expect(!host.coordinator.hasDot(target.owner));
     try std.testing.expectEqual(@as(usize, 0), fake.sends);
 }
@@ -526,7 +524,7 @@ test "visible results stay quiet while background results and failures remain av
         }
     };
     var fake: Fake = .{};
-    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
+    const host = try notification_host.Host.createWithApi(a, .{ .transfer_done = true, .ai_ready = true, .quiet_hours = "00:00-00:00" }, fake.api());
     defer host.destroy();
     fake.push(.{ .kind = 1, .result = 1, .request_id = fake.last_query, .settings = authorized });
     _ = try host.poll();
@@ -538,19 +536,20 @@ test "visible results stay quiet while background results and failures remain av
     try std.testing.expectEqual(@as(usize, 0), host.coordinator.presentation_count);
     try std.testing.expectEqual(@as(usize, 0), fake.sends);
     host.windows.items[0].value.result_presented = null;
+    host.setWindowFocus(@fromBackingInt(1), false);
     try host.publishAi(target.owner, 11, 1, .{ .result = .succeeded, .resources_released = true, .final_answer = true });
-    try std.testing.expectEqual(@as(usize, 1), host.coordinator.presentation_count);
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.presentation_count);
     try std.testing.expectEqual(@as(usize, 1), fake.sends);
     host.windows.items[0].value.result_presented = Presented.result;
     try host.publishAi(target.owner, 12, 1, .{ .result = .failed, .resources_released = true });
-    try std.testing.expectEqual(@as(usize, 2), host.coordinator.presentation_count);
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.presentation_count);
     try host.publishAi(target.owner, 13, 1, .{ .result = .cancelled, .resources_released = true });
-    try std.testing.expectEqual(@as(usize, 2), host.coordinator.presentation_count);
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.presentation_count);
 }
 
 test "reconnect attempts replace previous notices for the same session" {
     var fake: Fake = .{};
-    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
+    const host = try notification_host.Host.createWithApi(a, .{ .transfer_done = true, .ai_ready = true, .quiet_hours = "00:00-00:00" }, fake.api());
     defer host.destroy();
     var window: WindowProbe = .{};
     _ = try host.registerWindow(window.callbacks());
@@ -558,5 +557,49 @@ test "reconnect attempts replace previous notices for the same session" {
     try host.publishReconnect(target.owner, 50, 2, .failed);
     try host.publishReconnect(target.owner, 50, 3, .failed);
     try std.testing.expectEqual(@as(usize, 1), host.coordinator.presentation_count);
-    try std.testing.expectEqual(@as(u64, 3), host.coordinator.notification_records.items[2].event.attempt_id);
+    try std.testing.expectEqual(@as(u64, 3), host.coordinator.notification_records.items[0].event.event_revision);
+}
+
+test "notification recording risk persists in foreground and clears only on source recovery" {
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
+    defer host.destroy();
+    var window: WindowProbe = .{};
+    const id = try host.registerWindow(window.callbacks());
+    try host.publishRecordingStatus(id, target.owner.session, "DiskFull");
+    try host.publishRecordingStatus(id, target.owner.session, "DiskFull");
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(true));
+    const fact = host.coordinator.notification_records.items[0];
+    try std.testing.expect(fact.persistent());
+    host.coordinator.dismissNotification(fact.fact_id);
+    host.coordinator.readHistory();
+    host.coordinator.clearHistory();
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(true));
+    try host.publishRecordingStatus(id, target.owner.session, null);
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.historyCount(true));
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(false));
+    host.coordinator.clearHistory();
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.notification_records.items.len);
+    try std.testing.expectEqual(@as(usize, 0), fake.sends);
+}
+
+test "notification shared transport submits one OS alert across all background windows" {
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
+    defer host.destroy();
+    fake.push(.{ .kind = 1, .result = 1, .request_id = fake.last_query, .settings = authorized });
+    _ = try host.poll();
+    var windows: [3]WindowProbe = @splat(.{});
+    for (&windows, 1..) |*window, index| {
+        window.owner = .{ .session = .{ .session_id = @fromBackingInt(index), .generation = 1 } };
+        const id = try host.registerWindow(window.callbacks());
+        host.setWindowFocus(id, false);
+    }
+    for (windows, 1..) |window, index| {
+        try host.publishReconnectDetails(window.owner, index, 1, .failed, .{ .incident_id = 91 });
+    }
+    try std.testing.expectEqual(@as(usize, 1), fake.sends);
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(true));
+    try std.testing.expectEqual(@as(usize, 3), host.coordinator.incidentSourceCount(host.coordinator.notification_records.items[0]));
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.presentation_count);
 }

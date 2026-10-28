@@ -105,6 +105,7 @@ pub const Control = struct {
         exit_code: ?i32 = null,
         /// Retained for this exact operation after a later transport fault.
         was_attached: bool = false,
+        notification_incident: ?u64 = null,
     };
     pub const Grant = struct { previous: OperationKey, next: OperationKey };
     mutex: std.atomic.Value(bool) = .init(false),
@@ -126,12 +127,16 @@ pub const Control = struct {
         return self.value;
     }
     pub fn lost(self: *Control, key: ?OperationKey, receipt: ReleaseReceipt, failure: anyerror) void {
+        self.lostWithIncident(key, receipt, failure, null);
+    }
+    pub fn lostWithIncident(self: *Control, key: ?OperationKey, receipt: ReleaseReceipt, failure: anyerror, incident: ?u64) void {
         self.lock();
         defer self.unlock();
         if (self.value.phase == .closed or self.value.phase == .ended or !std.meta.eql(key, self.value.key)) return;
         self.value.phase = if (receipt == .awaiting) .releasing else .waiting;
         self.value.cleanup = receipt;
         self.value.failure = failure;
+        self.value.notification_incident = incident;
     }
     pub fn ended(self: *Control, key: ?OperationKey, receipt: ReleaseReceipt, exit_code: ?i32) void {
         self.lock();

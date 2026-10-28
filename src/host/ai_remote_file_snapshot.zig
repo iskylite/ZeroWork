@@ -121,7 +121,9 @@ pub const Reader = struct {
 
     pub fn start(allocator: std.mem.Allocator, host: *files.FileBindingHost, original: Context, path: []const u8, action: Action) !*Reader {
         try validateContext(host, original);
-        try validatePath(path);
+        // SFTP resolves the explicit default-directory token to an absolute
+        // remote path before listing; file reads still require an absolute path.
+        if (!(action == .list and std.mem.eql(u8, path, "."))) try validatePath(path);
         try validateAction(action);
         const self = try allocator.create(Reader);
         errdefer allocator.destroy(self);

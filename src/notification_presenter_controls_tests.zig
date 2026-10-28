@@ -10,9 +10,11 @@ test "notification presenter bounds longest admitted content and all actions at 
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    defer scope.dispose();
-    var notice_host: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{}, .{}) };
-    defer notice_host.coordinator.deinit();
+    var notice_host: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        scope.dispose();
+        notice_host.coordinator.deinit();
+    }
     try notice_host.coordinator.registerDefinition(.{ .id = "audit.feedback", .category = .operation_result, .default_channels = .{ .system = false, .attention = false } });
     const view = try Presenter.mount(cx, scope, &notice_host, @fromBackingInt(1));
     const owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(1) } };
@@ -20,18 +22,27 @@ test "notification presenter bounds longest admitted content and all actions at 
     @memset(detail[0..512], 'x'); // A long unbroken path/token must also wrap.
     const action_label = cycled("long action label with spaces ", 128);
     for (0..3) |index| {
-        _ = try notice_host.coordinator.publishNotification(.{ .definition_id = "audit.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = index + 1, .event_revision = 1, .phase = .failed, .severity = .failure, .title = &cycled("Longest admitted title ", 256), .detail = &detail, .actions = &.{ .{ .kind = .view_result, .label = &action_label }, .{ .kind = .view_result, .label = &action_label }, .{ .kind = .view_result, .label = &action_label } } }, .{ .monotonic_ms = 1, .local_minute = 0 });
+        _ = try notice_host.coordinator.publishNotification(.{ .attention = .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true }, .definition_id = "audit.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = index + 1, .event_revision = 1, .phase = .failed, .severity = .failure, .title = &cycled("Longest admitted title ", 256), .detail = &detail, .actions = &.{ .{ .kind = .view_result, .label = &action_label }, .{ .kind = .view_result, .label = &action_label }, .{ .kind = .view_result, .label = &action_label } } }, .{ .monotonic_ms = 1, .local_minute = 0 });
     }
     for (0..8) |_| {
         try view.update(1, true, owner, .{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } });
         cx.layout();
+    }
+    // Every source starts with the same compact card; additional content is explicit.
+    for (view.slots[0..1]) |slot| {
+        try std.testing.expectEqual(ui.types.Display.none, slot.detail.style.display);
+        slot.expand.behavior.events.on_click.?.invoke();
+        for (0..8) |_| {
+            try view.update(1, true, owner, .{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } });
+            cx.layout();
+        }
     }
     const rect = view.root.globalRect();
 
     try std.testing.expectEqual(@as(f32, 62), rect.y);
     try std.testing.expect(rect.y + rect.h <= 480);
     try std.testing.expect(view.content.globalRect().h > view.viewport.globalRect().h);
-    for (view.slots) |slot| {
+    for (view.slots[0..1]) |slot| {
         const card = slot.root.globalRect();
         for (slot.actions) |action| {
             const button = action.root.globalRect();
@@ -42,11 +53,11 @@ test "notification presenter bounds longest admitted content and all actions at 
             try std.testing.expectEqualStrings(&action_label, action.label.getText().?.content);
         }
         try std.testing.expectEqualStrings(&detail, slot.detail.getText().?.content);
-        try std.testing.expectEqual(ui.TextWrap.none, slot.detail.getText().?.wrap);
-        try std.testing.expectEqual(@as(f32, 18), slot.detail.globalRect().h);
-        for (slot.actions) |action| try std.testing.expectEqual(@as(f32, 24), action.root.globalRect().h);
+        try std.testing.expectEqual(ui.TextWrap.word, slot.detail.getText().?.wrap);
+        try std.testing.expect(slot.detail.globalRect().h > 18);
+        for (slot.actions) |action| try std.testing.expectEqual(@as(f32, 22), action.root.globalRect().h);
     }
-    const last = view.slots[2].actions[2].root;
+    const last = view.slots[0].actions[2].root;
     const before = last.globalRect().y;
     cx.handleScroll(.{ .x = rect.x + 20, .y = rect.y + 100, .dx = 0, .dy = -100000 });
     for (0..8) |_| {
@@ -82,9 +93,11 @@ test "notification sources appear once below event titles for every built-in kin
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    defer scope.dispose();
-    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{}, .{}) };
-    defer notice.coordinator.deinit();
+    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        scope.dispose();
+        notice.coordinator.deinit();
+    }
     defer notice.windows.deinit(a);
     var probe: u8 = 0;
     const window = try notice.registerWindow(.{ .context = &probe, .owns = Probe.owns, .activate = Probe.activate, .feedback = Probe.feedback, .owner_name = Probe.name });
@@ -96,6 +109,7 @@ test "notification sources appear once below event titles for every built-in kin
     const history = try @import("ui/notification_history.zig").View.mount(cx, scope, &notice, trigger);
     const Case = enum { transfer_done, transfer_failed, transfer_cancelled, disconnected, recovered, reconnect_failed, ai_ready, ai_failed, ai_unverified, ai_cancelled, feedback_failure, feedback_warning, command_error, plugin_accepted, plugin_verifying, plugin_succeeded, plugin_failed, plugin_cancelled, plugin_unknown };
     for (std.enums.values(Case), 0..) |case, index| {
+        for (notice.coordinator.notification_records.items) |*prior| prior.event.attention.resolved = true;
         notice.coordinator.clearHistory();
         const operation: u64 = @intCast(index + 1);
         switch (case) {
@@ -113,8 +127,9 @@ test "notification sources appear once below event titles for every built-in kin
                 else => .outcome_unknown,
             }, .title = "插件连接状态", .object_name = "prod-web-01" }),
         }
-        if (case == .transfer_cancelled or case == .ai_cancelled) {
-            try std.testing.expectEqual(@as(usize, 0), notice.coordinator.notification_records.items.len);
+        if (case != .reconnect_failed) {
+            try std.testing.expectEqual(@as(usize, 0), notice.coordinator.historyCount(false));
+            try std.testing.expectEqual(@as(usize, 0), notice.coordinator.presentation_count);
             continue;
         }
         const record = notice.coordinator.notification_records.items[0];
@@ -161,8 +176,10 @@ test "notification host retains structured details and dispatches built-in actio
         }
     };
     var probe: Probe = .{};
-    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{}, .{}) };
-    defer notice.coordinator.deinit();
+    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        notice.coordinator.deinit();
+    }
     defer notice.windows.deinit(a);
     _ = try notice.registerWindow(.{ .context = &probe, .owns = Probe.owns, .activate = Probe.activate, .feedback = Probe.feedback, .owner_name = Probe.name });
     const owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(1) } };
@@ -183,7 +200,7 @@ test "notification host retains structured details and dispatches built-in actio
     // record, or queued toast is added by publishTransfer.
     try std.testing.expectEqual(@as(usize, 3), facts.len);
     try std.testing.expectEqual(@as(usize, 3), notice.coordinator.records.items.len);
-    try std.testing.expectEqual(@as(usize, 3), notice.coordinator.presentation_count);
+    try std.testing.expectEqual(@as(usize, 0), notice.coordinator.presentation_count);
     for (facts) |fact| try std.testing.expect(fact.event.operation_id != 4);
     for ([_]host.notifications.Kind{ .transfer_done, .reconnect, .ai_ready }, 0..) |kind, index| {
         try notice.dispatchAction(facts[index].fact_id, 0);
@@ -192,14 +209,15 @@ test "notification host retains structured details and dispatches built-in actio
 }
 
 test "notification history evicts oldest facts without rejecting new ones and retains dismissed content" {
-    var coordinator = try host.notifications.Coordinator.init(a, .{}, .{});
+    var coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{});
     defer coordinator.deinit();
     const owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(1) } };
     var first: u64 = 0;
     for (0..105) |index| {
-        const published = try coordinator.publishNotification(.{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = index + 1, .event_revision = 1, .phase = .succeeded, .title = "Retained" }, .{ .monotonic_ms = index, .local_minute = 0 });
+        const published = try coordinator.publishNotification(.{ .attention = .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true }, .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = index + 1, .event_revision = 1, .phase = .succeeded, .title = "Retained" }, .{ .monotonic_ms = index, .local_minute = 0 });
         if (index == 0) first = published.fact_id;
         coordinator.dismissNotification(published.fact_id);
+        coordinator.notification_records.items[coordinator.notification_records.items.len - 1].event.attention.resolved = true;
     }
     try std.testing.expectEqual(@as(usize, 100), coordinator.notification_records.items.len);
     try std.testing.expect(coordinator.recordFor(first) == null);
@@ -218,12 +236,14 @@ test "notification countdown follows actual timer pauses and excludes persistent
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    defer scope.dispose();
-    var notice_host: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{}, .{}) };
-    defer notice_host.coordinator.deinit();
+    var notice_host: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        scope.dispose();
+        notice_host.coordinator.deinit();
+    }
     const view = try Presenter.mount(cx, scope, &notice_host, @fromBackingInt(1));
     const owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(1) } };
-    _ = try notice_host.coordinator.publishNotification(.{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 1, .event_revision = 1, .phase = .succeeded, .title = "Done", .actions = &.{.{ .kind = .view_result, .label = "View" }} }, .{ .monotonic_ms = 0, .local_minute = 0 });
+    _ = try notice_host.coordinator.publishNotification(.{ .attention = .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true }, .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 1, .event_revision = 1, .phase = .succeeded, .title = "Done", .actions = &.{.{ .kind = .view_result, .label = "View" }} }, .{ .monotonic_ms = 0, .local_minute = 0 });
     const placement = @import("ui/notification_presenter.zig").Placement{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } };
     try view.update(0, true, owner, placement);
     try view.update(2300, true, owner, placement);
@@ -231,7 +251,7 @@ test "notification countdown follows actual timer pauses and excludes persistent
     view.slots[0].hovered = true;
     try view.update(7300, true, owner, placement);
     try std.testing.expectEqualStrings("6 秒后关闭", view.slots[0].countdown.getText().?.content);
-    _ = try notice_host.coordinator.publishNotification(.{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 2, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Failed" }, .{ .monotonic_ms = 7300, .local_minute = 0 });
+    _ = try notice_host.coordinator.publishNotification(.{ .attention = .{ .kind = .application_risk, .requires_action = true, .time_sensitive = true }, .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 2, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Failed" }, .{ .monotonic_ms = 7300, .local_minute = 0 });
     try view.update(7300, true, owner, placement);
     try std.testing.expect(view.slots[0].countdown.style.display == .none);
 }
@@ -242,14 +262,16 @@ test "notification history compact rows retain full long detail behind an explic
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    defer scope.dispose();
-    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{}, .{}) };
-    defer notice.coordinator.deinit();
+    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        scope.dispose();
+        notice.coordinator.deinit();
+    }
     const trigger = try ui.widgets.Button(.{ .label = "通知" }).mount(scope, cx);
     try cx.root.?.appendChild(a, trigger);
     const view = try @import("ui/notification_history.zig").View.mount(cx, scope, &notice, trigger);
     const detail = cycled("complete retained long notification detail ", 4096);
-    _ = try notice.coordinator.publishNotification(.{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = .{ .session = .{ .session_id = @fromBackingInt(1) } } }, .operation_id = 1, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Failure", .detail = &detail }, .{ .local_minute = 0, .monotonic_ms = 0 });
+    _ = try notice.coordinator.publishNotification(.{ .attention = .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true }, .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = .{ .session = .{ .session_id = @fromBackingInt(1) } } }, .operation_id = 1, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Failure", .detail = &detail }, .{ .local_minute = 0, .monotonic_ms = 0 });
     view.open.set(true);
     for (0..8) |_| {
         cx.layout();
@@ -260,6 +282,7 @@ test "notification history compact rows retain full long detail behind an explic
     try std.testing.expect(historyNode(view.root, "notifications.history.details") == null);
     var expand = historyNode(view.root, "notifications.history.expand").?;
     var rect = expand.globalRect();
+    const anchor_y = rect.y - view.scroll.container.globalRect().y;
     cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
     for (0..8) |_| {
         cx.layout();
@@ -272,6 +295,7 @@ test "notification history compact rows retain full long detail behind an explic
     try std.testing.expect(view.scroll.container.globalRect().h <= 320);
     expand = historyNode(view.root, "notifications.history.expand").?;
     try std.testing.expectEqual(expand, cx.focused_node.?);
+    try std.testing.expectApproxEqAbs(anchor_y, expand.globalRect().y - view.scroll.container.globalRect().y, 0.1);
     rect = expand.globalRect();
     cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
     for (0..8) |_| {
@@ -298,9 +322,11 @@ test "notification history background blur follows material changes without repl
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    defer scope.dispose();
-    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{}, .{}) };
-    defer notice.coordinator.deinit();
+    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        scope.dispose();
+        notice.coordinator.deinit();
+    }
     const trigger = try ui.widgets.Button(.{ .label = "通知" }).mount(scope, cx);
     try cx.root.?.appendChild(a, trigger);
     const view = try @import("ui/notification_history.zig").View.mount(cx, scope, &notice, trigger);
@@ -327,15 +353,18 @@ test "notification history expands only independent details without repeating ti
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    defer scope.dispose();
-    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{}, .{}) };
-    defer notice.coordinator.deinit();
+    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        scope.dispose();
+        notice.coordinator.deinit();
+    }
     const trigger = try ui.widgets.Button(.{ .label = "通知" }).mount(scope, cx);
     try cx.root.?.appendChild(a, trigger);
     const view = try @import("ui/notification_history.zig").View.mount(cx, scope, &notice, trigger);
     for ([_][]const u8{ "", " \n\t", "Failure", "Local Terminal", "backup.zip", "Permission denied\nexit 1" }, 1..) |detail, operation| {
+        for (notice.coordinator.notification_records.items) |*prior| prior.event.attention.resolved = true;
         notice.coordinator.clearHistory();
-        const record = try notice.coordinator.publishNotification(.{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = .{ .session = .{ .session_id = @fromBackingInt(1) } } }, .operation_id = operation, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Failure", .owner_name = "Local Terminal", .object_name = "backup.zip", .detail = detail }, .{ .local_minute = 0, .monotonic_ms = 0 });
+        const record = try notice.coordinator.publishNotification(.{ .attention = .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true }, .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = .{ .session = .{ .session_id = @fromBackingInt(1) } } }, .operation_id = operation, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Failure", .owner_name = "Local Terminal", .object_name = "backup.zip", .detail = detail }, .{ .local_minute = 0, .monotonic_ms = 0 });
         _ = record;
         view.open.set(true);
         for (0..8) |_| {

@@ -7,6 +7,7 @@ const files = @import("ui/file_workspace_view.zig");
 const theme = @import("ui/app_theme.zig");
 const FixtureState = enum { normal, empty, failed };
 var selected_state: FixtureState = .normal;
+var selected_theme: []const u8 = "dark";
 const owner = @import("host/identity.zig").SessionHandle{ .session_id = @fromBackingInt(301), .generation = 7 };
 const Fixture = struct {
     view: *files.View,
@@ -24,8 +25,10 @@ const Fixture = struct {
     }
 };
 fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
-    theme.select(.dark);
-    cx.setTheme(theme.widgetTheme(.dark));
+    var registry = try @import("config/theme_registry.zig").Registry.init(cx.allocator);
+    defer registry.deinit();
+    theme.selectTokens((registry.get(selected_theme) orelse return error.UnknownTheme).ui_tokens);
+    cx.setTheme(theme.widgetTheme(theme.currentName()));
     const fixture = try scope.createState(Fixture, .{ .view = undefined });
     fixture.view = try files.View.mount(cx, scope, .{ .context = fixture, .action = Fixture.action });
     const rows = try scope.createState([48]files.Entry, undefined);
@@ -60,7 +63,7 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
         projection.panes[1].failure = if (selected_state == .failed) "Connection lost" else "";
         try fixture.view.update(projection);
     }
-    const backdrop = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .background = theme.current().app }, .{});
+    const backdrop = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .background = theme.baseColors().app }, .{});
     try backdrop.appendChild(cx.allocator, fixture.view.root);
     return backdrop;
 }
@@ -68,6 +71,10 @@ pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
+        if (std.mem.startsWith(u8, arg, "--theme=")) {
+            selected_theme = arg[8..];
+            continue;
+        }
         if (!std.mem.startsWith(u8, arg, "--state=")) return error.InvalidFixtureArgument;
         selected_state = std.meta.stringToEnum(FixtureState, arg[8..]) orelse return error.InvalidFixtureState;
     }

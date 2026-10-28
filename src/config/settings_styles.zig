@@ -10,7 +10,7 @@ pub fn paintSearch(cx: *ui.Cx, input: *const ui.widgets.input.InputResult) void 
     input.state.tokens = cx.tokens;
     input.state.placeholder_color = c.fg_2;
     input.state.dirty = true;
-    input.input_container.setBackground(c.well);
+    input.input_container.setBackground(theme.popupInset());
     input.input_container.setBorderColor(if (input.state.focused) c.accent else input.state.restingBorderColor());
     input.input_container.markRenderDirty();
 }

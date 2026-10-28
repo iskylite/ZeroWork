@@ -35,7 +35,6 @@ pub fn dialogDetail() ui.TextStyle {
     result.font_weight = 400;
     result.line_height = 16.0 / 11.0;
     result.wrap = .word;
-    if (T.currentName() == .sauber and ui.Color.eql(T.baseColors().fg_2, T.colors(.sauber).fg_2)) result.color = ui.arb.hex(0x657560);
     return result;
 }
 pub fn dialog() ui.BoxStyle {

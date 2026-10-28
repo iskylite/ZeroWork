@@ -41,5 +41,5 @@ pub fn place(cx: *ui.Cx, node: *ui.Node, x: f32, y: f32, width: f32, height: f32
 }
 
 pub fn recordTime(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11, .line_height = 2, .color = theme.current().fg_3, .text_align = .end, .use_monospace_font = true, .selectable = false };
+    return .{ .font_size = 11, .line_height = 2, .color = theme.current().fg_2, .text_align = .end, .use_monospace_font = true, .selectable = false };
 }

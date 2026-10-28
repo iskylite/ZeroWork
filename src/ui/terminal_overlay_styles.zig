@@ -18,7 +18,7 @@ pub const catalogue_chrome_height: f32 = 2 * catalogue_padding + 2 * catalogue_g
 
 pub fn cataloguePanel() ui.BoxStyle {
     const c = theme.current();
-    return .{ .position = .absolute, .width = .{ .px = catalogue_width }, .direction = .column, .gap = catalogue_gap, .padding = ui.Padding.all(catalogue_padding), .background = c.overlay, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 14 }, .shadow = .{ .color = c.shadow, .blur = 28, .offset_y = 10 }, .overflow_hidden = true, .min_width = 0, .min_height = 0, .z_index = 30, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } } };
+    return .{ .position = .absolute, .width = .{ .px = catalogue_width }, .direction = .column, .gap = catalogue_gap, .padding = ui.Padding.all(catalogue_padding), .background = c.overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 14 }, .shadow = .{ .color = c.shadow, .blur = 28, .offset_y = 10 }, .overflow_hidden = true, .min_width = 0, .min_height = 0, .z_index = 30, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } } };
 }
 pub fn catalogueHeader() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = catalogue_header_height }, .direction = .row, .align_items = .center, .gap = catalogue_gap, .flex_shrink = 0, .min_width = 0 };
@@ -67,7 +67,7 @@ pub fn panelPaint() ui.BoxStyle {
 }
 
 pub fn rowBackground(selected: bool) ui.Color {
-    return if (selected) theme.current().selection else ui.Color.TRANSPARENT;
+    return if (selected) theme.popupSelection() else ui.Color.TRANSPARENT;
 }
 
 pub fn badgeForeground(source: completion.Source) ui.Color {
@@ -89,5 +89,5 @@ pub fn badgeBackground(source: completion.Source) ui.Color {
 }
 
 pub fn timestampText(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11, .line_height = 2, .color = theme.current().fg_3, .use_monospace_font = true, .wrap = .none };
+    return .{ .font_size = 11, .line_height = 2, .color = theme.current().fg_2, .use_monospace_font = true, .wrap = .none };
 }

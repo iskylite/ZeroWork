@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>AI 提示 · 原位反馈与提醒边界</title>
+  <link rel="stylesheet" href="../theme-tokens.css">
+  <link rel="stylesheet" href="../shared/ai-assistant.css?v=ai-card-audit-20261029">
+  <link rel="stylesheet" href="../shared/ai-prototype.css">
+  <link rel="stylesheet" href="../shared/feedback.css">
+  <link rel="stylesheet" href="notifications.css">
+</head>
+<body data-theme="dark">
+  <header class="review-head">
+    <div><a href="conversation.html?notice=rollback">← 回合参考</a><strong>AI 提示设计</strong><span>原位反馈，按需提醒</span></div>
+    <div class="review-controls">
+      <label>状态 <select id="review-state" aria-label="提示状态">
+        <option value="rollback">回退完成</option><option value="validation">发送前阻塞</option>
+        <option value="failure">请求失败</option><option value="approval">等待确认</option>
+        <option value="unknown">执行结果待核查</option><option value="host">用户接管</option>
+        <option value="stopped">主动停止</option><option value="complete">正常完成</option>
+        <option value="long">长附件路径</option>
+      </select></label>
+      <label>尺寸 <select id="review-size" aria-label="预览尺寸"><option value="default">600 × 456</option><option value="compact">600 × 358</option><option value="narrow">360 × 456</option></select></label>
+      <label>主题 <select id="review-theme" aria-label="预览主题"><option value="dark">Vanta Dark</option><option value="light">Vanta Light</option><option value="sauber">Sauber</option></select></label>
+    </div>
+  </header>
+  <main class="review-layout">
+    <section id="app" class="product-stage" aria-label="AI 界面预览">
+      <div class="stage-label">AI 助手 <span id="stage-size">600 × 456</span></div>
+      <aside id="assistant" class="assistant" aria-label="AI 助手"></aside>
+    </section>
+    <aside class="review-notes" aria-label="设计说明与提醒验证">
+      <span class="eyebrow">当前规则</span><h1 id="rule-title"></h1><p id="rule-copy"></p>
+      <dl><div><dt>承载位置</dt><dd id="rule-place"></dd></div><div><dt>保留方式</dt><dd id="rule-life"></dd></div><div><dt>全局提醒</dt><dd id="rule-global"></dd></div></dl>
+      <div class="attention-controls">
+        <label>用户所在位置 <select id="review-attention" aria-label="用户所在位置"><option value="viewing">正在看此对话</option><option value="elsewhere">应用内其他位置</option><option value="away">已离开应用</option></select></label>
+        <label class="checkbox"><input id="review-completion" type="checkbox">开启后台完成提醒</label>
+        <button id="emit-event" type="button">触发此事件</button>
+        <p id="delivery-receipt" role="status">切换位置不会补发旧事件。</p>
+      </div>
+      <a href="notifications.md">设计契约与原生映射 ↗</a>
+    </aside>
+  </main>
+  <footer class="review-foot">本页是可交互设计基准；模型请求、审批、核查及系统通知均为本地演示，不执行命令、不连接模型。</footer>
+  <script src="../shared/ai-assistant.js?v=ai-card-audit-20261029"></script>
+  <script src="../shared/feedback.js"></script>
+  <script src="../shared/notification-policy.js?v=global-policy-20261029"></script>
+  <script src="notifications.js"></script>
+</body>
+</html>

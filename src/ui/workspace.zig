@@ -939,6 +939,14 @@ pub const Workspace = struct {
     }
 
     pub fn rebuildSidebar(self: *Workspace) !void {
+        // Preserve an interrupted group's visible height across the registry's
+        // safe-boundary row rebuild; persistence still owns the final state.
+        const FoldFrame = struct { reference: sidebar_view.GroupRef, collapsed: bool, height: f32, animating: bool };
+        var folds: std.ArrayList(FoldFrame) = .empty;
+        defer folds.deinit(self.allocator);
+        for (self.group_rows.items) |row| if (row.reference) |reference| {
+            try folds.append(self.allocator, .{ .reference = reference, .collapsed = row.collapsed, .height = row.disclosure.root.globalRect().h, .animating = row.disclosure.animating });
+        };
         try self.identities.appendHosts(self.allocator, self.registry.hosts.len);
         if (self.default_group_row) |row| if (!self.default_group_forced_open) {
             self.default_group_collapsed = row.collapsed;
@@ -994,6 +1002,14 @@ pub const Workspace = struct {
             try self.sidebar_list.appendChild(self.allocator, section.root);
             try self.group_headers.append(self.allocator, section.root);
             try self.group_rows.append(self.allocator, section);
+            if (section.reference) |reference| for (folds.items) |fold| {
+                if (fold.reference.id == reference.id and (fold.collapsed != section.collapsed or fold.animating)) {
+                    section.disclosure.motion = .{ .value = fold.height, .target = fold.height, .from = fold.height };
+                    section.disclosure.animating = true;
+                    section.disclosure.root.setStyle(self.allocator, .height, .{ .px = fold.height });
+                    break;
+                }
+            };
             for (matches.items) |index| {
                 const host = self.registry.hosts[index];
                 const context = try self.newClickCtx(index);
@@ -2120,7 +2136,7 @@ pub const Workspace = struct {
                 layout_cell.layout = layout;
                 menu_items[layout_index] = .{ .label = if (layout == .stacked) "切换上下布局" else "切换左右布局", .on_click = self.cx.on(GroupCell, layout_cell, GroupCell.act) };
             }
-            const menu = try ui.widgets.Menu(.{ .items = @as([]const ui.widgets.MenuItem, &menu_items), .width = @as(f32, 220), .position = .bottom_end }).mount(scope, self.cx);
+            const menu = try ui.widgets.Menu(.{ .items = @as([]const ui.widgets.MenuItem, &menu_items), .width = @as(f32, 220), .position = .bottom_start }).mount(scope, self.cx);
             const menu_state: *ui.widgets.MenuState = @ptrCast(@alignCast(menu.wrapper.meta.ownership.debug_slots.state_ptrs[0].?));
             if (menu_state.menu_node) |menu_node| menu_node.meta.ownership.meta.test_id = "groups.member_menu";
             const menu_trigger = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.ellipsis, .icon_size = @as(f32, 14), .a11y_label = "成员菜单", .base_style = group_styles.control() }).mount(scope, self.cx);

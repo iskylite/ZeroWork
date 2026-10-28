@@ -42,7 +42,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     try scope.onCleanup(View, self, View.cleanup);
     const focus_guard = try scope.childScope();
     self.open = try scope.createSignal(bool, false);
-    const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = false, .shift_main_axis = false, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.openChanged) }).mount(scope, cx);
+    const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .close_on_outside_click = false, .position = .top, .width = S.width, .max_width = S.width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = false, .shift_main_axis = false, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.openChanged) }).mount(scope, cx);
     self.scope = popup.scope;
     self.wrapper = popup.wrapper;
     self.portaled = popup.portaled;
@@ -142,21 +142,52 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     }
     self.message.setDisplay(.none);
     try self.body.content.appendChild(cx.allocator, self.message);
-    self.logs_text = try text(self, "尚无转发日志", 12, 400, .secondary, false);
-    self.logs_text.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0, .margin = .{ .top = 12 } });
+    self.logs_open = try scope.createSignal(bool, false);
+    const logs_popup = try ui.widgets.Popover(.{ .open = self.logs_open, .trigger = .manual, .position = .top, .width = S.logs_width, .max_width = S.logs_width, .offset = .{ .static = @as(f32, 6) }, .viewport_padding = 8, .flip = false, .shift_main_axis = false, .constrain_width_to_viewport = true, .enter_transition = .none, .exit_transition = .none, .anchor = .{ .virtual = .{ .ctx = self, .getRect = View.anchorRect } }, .on_open_change = cx.on(View, self, View.logsOpenChanged) }).mount(scope, cx);
+    self.logs_wrapper = logs_popup.wrapper;
+    self.logs_portaled = logs_popup.portaled;
+    self.logs_root = logs_popup.chrome;
+    var logs_style = S.panel();
+    logs_style.position = .absolute;
+    logs_style.width = .{ .px = S.logs_width };
+    logs_style.height = .{ .px = S.logs_height };
+    logs_style.direction = .column;
+    logs_style.padding = ui.Padding.all(16);
+    logs_style.gap = 0;
+    logs_style.display = .none;
+    self.logs_root.setStyleInline(cx.allocator, logs_style);
+    self.logs_root.meta.ownership.meta.test_id = "socks.logs";
+    const logs_header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
+    try logs_header.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("file-text").?, S.theme.current().accent, S.icon(16)));
+    try logs_header.appendChild(cx.allocator, try text(self, "端口转发日志", 14, 600, .primary, false));
+    self.logs_owner = try text(self, "", 12, 400, .secondary, false);
+    try logs_header.appendChild(cx.allocator, try ui.spacer(cx));
+    self.logs_close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "关闭端口转发日志", .base_style = S.iconButton(28), .on_click = cx.on(View, self, View.closeLogs) }).mount(scope, cx);
+    self.logs_close.meta.ownership.meta.test_id = "socks.logs.close";
+    try self.logs_close.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.x, S.theme.current().fg_2, S.icon(14)));
+    try logs_header.appendChild(cx.allocator, self.logs_close);
+    try logs_popup.content.appendChild(cx.allocator, logs_header);
+    self.logs_owner.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 18 }, .margin = .{ .top = 2, .bottom = 14 }, .flex_shrink = 0 });
+    try logs_popup.content.appendChild(cx.allocator, self.logs_owner);
+    self.logs_body = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
+    self.logs_body.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0 });
+    self.logs_body.container.setStyleInline(cx.allocator, .{ .background = S.theme.popupInset(), .border = .{ .radius = 8, .width = 1, .color = S.theme.current().border } });
+    self.logs_body.content.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(12), .flex_shrink = 0 });
+    self.logs_text = try text(self, "尚无转发日志", 12, 400, .secondary, true);
+    self.logs_text.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0 });
     if (self.logs_text.getText()) |old| {
         var style = old;
         style.wrap = .word;
+        style.line_height = 21.0 / 12.0;
+        style.text_overflow = .clip;
         self.logs_text.setText(style);
     }
     self.logs_text.meta.ownership.meta.test_id = "socks.info.logs.content";
-    self.logs_text.setDisplay(.none);
-    try self.body.content.appendChild(cx.allocator, self.logs_text);
+    try self.logs_body.content.appendChild(cx.allocator, self.logs_text);
+    try logs_popup.content.appendChild(cx.allocator, self.logs_body.container);
+    if (!self.logs_portaled) try self.wrapper.appendChild(cx.allocator, self.logs_wrapper);
     const foot = try ui.box(cx, S.footer(), .{});
     self.footer = foot;
-    self.logs_back = try button(self, foot, "返回概览", .logs_back);
-    self.logs_back.meta.ownership.meta.test_id = "socks.info.logs.back";
-    self.logs_back.setDisplay(.none);
     self.test_button = try button(self, foot, "测试", .test_proxy);
     self.config_button = try button(self, foot, "添加转发", .config);
     try foot.appendChild(cx.allocator, try ui.spacer(cx));
@@ -217,7 +248,13 @@ pub const View = struct {
     button_count: usize = 0,
     logs_text: *ui.Node = undefined,
     logs_visible: bool = false,
-    logs_back: *ui.Node = undefined,
+    logs_root: *ui.Node = undefined,
+    logs_wrapper: *ui.Node = undefined,
+    logs_portaled: bool = false,
+    logs_open: *ui.Signal(bool) = undefined,
+    logs_owner: *ui.Node = undefined,
+    logs_close: *ui.Node = undefined,
+    logs_body: ui.widgets.ScrollAreaResult = undefined,
     state: State = .off,
     message_is_error: bool = false,
     paint_colors: ?S.theme.Colors = null,
@@ -232,11 +269,13 @@ pub const View = struct {
     /// so callbacks may synchronously update/hide this view without disposing their context.
     pub fn update(self: *View, data: Data) !void {
         self.state = data.state;
-        try self.logs_text.setTextContent(self.cx.allocator, if (data.logs.len > 0) data.logs else "尚无转发日志，启动后记录关键步骤耗时。");
+        const logs = if (data.logs.len > 0) data.logs else "尚无转发日志，启动后记录关键步骤耗时。";
+        if (!std.mem.eql(u8, self.logs_text.getText().?.content, logs))
+            try self.logs_text.setTextContent(self.cx.allocator, logs);
         self.message_is_error = data.error_text.len > 0;
         self.has_rule = data.configured or data.state != .off;
-        self.empty.setDisplay(if (self.has_rule or self.logs_visible) .none else .flex);
-        self.rule.setDisplay(if (self.has_rule and !self.logs_visible) .flex else .none);
+        self.empty.setDisplay(if (self.has_rule) .none else .flex);
+        self.rule.setDisplay(if (self.has_rule) .flex else .none);
         self.control_button.setDisplay(if (self.has_rule) .flex else .none);
         try self.config_text.setTextContent(self.cx.allocator, if (self.has_rule) "配置" else "添加转发");
         try self.mode_label.setTextContent(self.cx.allocator, switch (data.mode) {
@@ -256,6 +295,7 @@ pub const View = struct {
         try self.statistics.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "下载 {s}  ·  上传 {s}", .{ try formatBytes(&down_buf, data.downloaded), try formatBytes(&up_buf, data.uploaded) }));
         try self.protocol.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "{d} 个活跃连接 · {s}", .{ data.connections, if (data.mode == .socks5) "TCP · 不支持 UDP" else "固定TCP目标" }));
         try self.owner.setTextContent(self.cx.allocator, if (data.host.len > 0) try std.fmt.bufPrint(&count_buffer, "#{s}", .{data.host}) else "");
+        try self.logs_owner.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&count_buffer, "{s}  ·  最近 24 条", .{self.owner.getText().?.content}));
         try self.status.setTextContent(self.cx.allocator, switch (data.state) {
             .off => "未开启",
             .connecting => "启动中",
@@ -263,7 +303,7 @@ pub const View = struct {
             .paused => "连接已断开",
             .failed => "启动失败",
         });
-        try self.intro.setTextContent(self.cx.allocator, if (self.logs_visible) "关键网络步骤耗时 · 最近 24 条" else switch (data.state) {
+        try self.intro.setTextContent(self.cx.allocator, switch (data.state) {
             .running => "监听已就绪，可连接下方地址",
             .connecting => "正在建立转发，请稍候",
             .failed => "转发未运行，请检查错误后重试",
@@ -280,19 +320,22 @@ pub const View = struct {
         if (self.config_button.behavior.interaction.a11y) |*attrs| attrs.label = if (self.has_rule) "编辑转发配置" else "添加转发";
         const message = if (data.error_text.len > 0) data.error_text else data.test_result;
         try self.message.setTextContent(self.cx.allocator, message);
-        self.message.setDisplay(if (message.len > 0) .flex else .none);
+        self.message.setDisplay(.flex);
         self.retheme();
         self.paintState();
-        self.root.markLayoutDirty();
-        self.cx.requestRedraw();
     }
 
     /// Paint only: retain original nodes, action state, trigger and geometry.
     pub fn retheme(self: *View) void {
         const colors = S.theme.current();
         if (self.paint_colors) |old| if (std.meta.eql(old, colors)) return;
-        if (self.paint_colors) |previous| repaintIcons(self.root, previous);
+        if (self.paint_colors) |previous| {
+            repaintIcons(self.root, previous);
+            repaintIcons(self.logs_root, previous);
+        }
         self.root.setStyleInline(self.cx.allocator, S.panel());
+        self.logs_root.setStyleInline(self.cx.allocator, S.panel());
+        self.logs_body.container.setStyleInline(self.cx.allocator, .{ .background = S.theme.popupInset(), .border = .{ .radius = 8, .width = 1, .color = colors.border } });
         self.rule.setBackground(S.theme.popupInset());
         self.pointer.setStyleInline(self.cx.allocator, S.pointer());
         _ = self.title_icon.setTint(colors.accent);
@@ -349,12 +392,23 @@ pub const View = struct {
         self.cx.requestRedraw();
     }
     pub fn hide(self: *View) void {
+        self.logs_visible = false;
+        self.logs_open.set(false);
+        self.logs_root.setDisplay(.none);
         self.open.set(false);
         self.root.setDisplay(.none);
         self.cx.requestRedraw();
     }
     /// Public for layout tests and host resize integration.
     pub fn updateGeometry(self: *View) bool {
+        if (self.logs_visible) {
+            const upper = anchorRect(self).y;
+            const height = @max(@as(f32, 1), @min(S.logs_height, @min(self.cx.viewport.height - 16, upper - 14)));
+            const width = @max(@as(f32, 1), @min(S.logs_width, self.cx.viewport.width - 16));
+            const changed = self.logs_root.style.width != .px or self.logs_root.style.height != .px or @abs(self.logs_root.style.width.px - width) > 0.5 or @abs(self.logs_root.style.height.px - height) > 0.5;
+            if (changed) self.logs_root.setStyleInline(self.cx.allocator, .{ .width = .{ .px = width }, .height = .{ .px = height } });
+            return changed;
+        }
         if (self.root.style.display == .none) return false;
         if (self.anchor_node) |node| if (!node.isDisplayedInTree()) {
             self.hide();
@@ -363,7 +417,8 @@ pub const View = struct {
         const upper = anchorRect(self).y;
         const available = @max(@as(f32, 1), @min(self.cx.viewport.height - 16, upper - 14));
         const width = @max(@as(f32, 1), @min(S.width, self.cx.viewport.width - 16));
-        const natural = @max(S.body_height, self.body.content.globalRect().h);
+        // Content changes must never move the bottom-anchored popup.
+        const natural = S.body_height;
         const body_h = @min(natural, @max(@as(f32, 1), available - S.chrome_height));
         const card_h = body_h + S.chrome_height;
         var changed = false;
@@ -390,22 +445,36 @@ pub const View = struct {
         const rect = if (self.anchor_node) |node| node.globalRect() else self.anchor orelse ui.ComputedRect{ .x = 8, .y = self.cx.viewport.height - 32, .w = 0, .h = 0 };
         return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
     }
+    fn closeLogs(self: *View) void {
+        if (!self.logs_visible) return;
+        self.logs_visible = false;
+        self.logs_open.set(false);
+        self.logs_root.setDisplay(.none);
+        self.open.set(true);
+        self.root.setDisplay(.flex);
+        self.cx.requestRedraw();
+    }
+    fn logsOpenChanged(self: *View, value: bool) void {
+        if (!value) self.closeLogs();
+    }
     fn openChanged(self: *View, value: bool) void {
-        if (!value) self.hide();
+        if (!value and !self.logs_visible) self.hide();
     }
     fn releaseFocus(self: *View) void {
-        if (self.cx.focus_manager.current_focus) |focused| if (focused.isDescendantOf(self.root)) self.cx.clearFocus();
+        if (self.cx.focus_manager.current_focus) |focused| if (focused.isDescendantOf(self.root) or focused.isDescendantOf(self.logs_root)) self.cx.clearFocus();
     }
     pub fn dispatch(self: *View, requested: Action) void {
-        if (requested == .logs or requested == .logs_back) {
-            self.logs_visible = !self.logs_visible;
-            self.rule.setDisplay(if (self.has_rule and !self.logs_visible) .flex else .none);
-            self.empty.setDisplay(if (self.has_rule or self.logs_visible) .none else .flex);
-            self.title.setTextContent(self.cx.allocator, if (self.logs_visible) "端口转发日志" else "端口转发") catch {};
-            self.logs_back.setDisplay(if (self.logs_visible) .flex else .none);
-            self.logs_text.setDisplay(if (self.logs_visible) .flex else .none);
-            self.root.markLayoutDirty();
+        if (requested == .logs) {
+            self.logs_visible = true;
+            self.open.set(false);
+            self.root.setDisplay(.none);
+            self.logs_open.set(true);
+            self.logs_root.setDisplay(.flex);
             self.cx.requestRedraw();
+            return;
+        }
+        if (requested == .logs_back) {
+            self.closeLogs();
             return;
         }
         const action = if (requested == .start or requested == .stop) (if (self.state == .running or self.state == .paused) Action.stop else Action.start) else requested;

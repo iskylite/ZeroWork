@@ -89,17 +89,14 @@ pub const Editor = struct {
         const catalog_bar = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 25 }, .margin = .{ .bottom = -5 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
         const catalog_note = try ui.textStyled(cx, S.note, "从清单选择，或手动输入模型 ID");
         catalog_note.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
+        catalog_note.meta.ownership.meta.test_id = "settings.ai.model.catalog_status";
+        self.catalog_status = catalog_note;
         try catalog_bar.appendChild(cx.allocator, catalog_note);
         const fetch = try ui.widgets.Button(.{ .variant = .ghost, .label = "获取模型清单", .base_style = S.ButtonStyle{ .width = .{ .px = 78 }, .height = .{ .px = 25 }, .padding = .{ .left = 6, .right = 6 }, .background = ui.Color.TRANSPARENT, .text_color = S.theme.current().accent_ink, .font_size = 11, .font_weight = 400 }, .on_click = cx.on(Editor, self, fetchModels) }).mount(scope, cx);
         fetch.meta.ownership.meta.test_id = "settings.ai.model.fetch_models";
         self.catalog_fetch = fetch;
         try catalog_bar.appendChild(cx.allocator, fetch);
         try scroll.content.appendChild(cx.allocator, catalog_bar);
-        const catalog_status = try ui.textStyled(cx, S.note, "");
-        catalog_status.meta.ownership.meta.test_id = "settings.ai.model.catalog_status";
-        catalog_status.setDisplay(.none);
-        self.catalog_status = catalog_status;
-        try scroll.content.appendChild(cx.allocator, catalog_status);
         try self.modelChoice(scroll.content);
         self.inputs[1] = try self.field(scroll.content, "上下文窗口 *", self.context, "settings.ai.model.context");
         const capabilities = try ui.box(cx, S.modelCapabilities(), .{});
@@ -297,6 +294,7 @@ pub const Editor = struct {
         popup.content.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 4 });
         self.catalog_query = try popup.scope.createText("", .{});
         var search = try ui.widgets.Input(.{ .value = self.catalog_query.?, .placeholder = "搜索模型或输入模型 ID", .on_change = cx.on(Editor, self, filterCandidates), .on_submit = cx.on(Editor, self, commitQuery) }).mountResult(popup.scope, cx);
+        @import("../ui/app_theme.zig").styleInput(search);
         search.input_container.setStyleInline(cx.allocator, S.providerInput(0, 32));
         search.input_container.meta.ownership.meta.test_id = "settings.ai.model.id";
         search.node.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 32 }, .flex_shrink = 0 });
@@ -357,7 +355,7 @@ pub const Editor = struct {
     fn paintCatalogRows(self: *Editor) void {
         const colors = S.theme.current();
         for (self.catalog_rows.items, self.candidates, 0..) |row, candidate, i| {
-            row.setStyleInline(self.cx.allocator, .{ .justify = .start, .font_size = 12, .font_weight = 400, .background = if (self.catalog_active == i) colors.selection else ui.Color.TRANSPARENT });
+            row.setStyleInline(self.cx.allocator, .{ .justify = .start, .font_size = 12, .font_weight = 400, .background = if (self.catalog_active == i) S.theme.popupSelection() else ui.Color.TRANSPARENT });
             paintTextColor(row, if (std.mem.eql(u8, candidate.id, self.id.peek())) colors.accent_ink else colors.fg_1);
         }
     }
@@ -393,8 +391,7 @@ pub const Editor = struct {
     }
     pub fn updateCatalog(self: *Editor, candidates: []const config.AiModel, message: []const u8, busy: bool) !void {
         if (self.catalog_status) |node| {
-            try node.setTextContent(self.cx.allocator, message);
-            node.setDisplay(if (message.len != 0) .flex else .none);
+            try node.setTextContent(self.cx.allocator, if (message.len != 0) message else "从清单选择，或手动输入模型 ID");
         }
         if (self.catalog_fetch) |button| setButtonText(self.cx, button, if (busy) "取消获取" else "获取模型清单");
         if (busy) return;
@@ -539,6 +536,7 @@ pub const Editor = struct {
         self.context_source = source;
         try group.appendChild(self.cx.allocator, heading);
         var input = try ui.widgets.Input(.{ .value = value, .placeholder = "例如 128000", .append_text = "tokens", .on_change = self.cx.on(Editor, self, contextEdited) }).mountResult(self.scope, self.cx);
+        @import("../ui/app_theme.zig").styleInput(input);
         input.input_container.setStyleInline(self.cx.allocator, S.providerInput(0, 32));
         input.input_container.meta.ownership.meta.test_id = id;
         input.node.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 32 }, .flex_shrink = 0 });
