@@ -13,6 +13,36 @@ pub const HistoryId = enum(u64) { _ };
 pub const WindowId = enum(u64) { _ };
 pub const WorkspaceId = enum(u64) { _ };
 
+/// Persistence/cross-window correlation is independent of a Store's small UI
+/// counter. Entropy comes from the OS; no timestamp, address or session name is
+/// used as an identity. The zero value is reserved for uninitialized fixtures.
+pub const ConversationId = StableId(.conversation);
+pub const TaskId = StableId(.task);
+pub const ExecutionId = StableId(.execution);
+
+fn StableId(comptime kind: enum { conversation, task, execution }) type {
+    _ = kind;
+    return struct {
+        bytes: [16]u8 = @splat(0),
+
+        pub fn generate() @This() {
+            var result: @This() = .{};
+            while (!result.valid()) std.c.arc4random_buf(&result.bytes, result.bytes.len);
+            return result;
+        }
+        pub fn valid(self: @This()) bool {
+            return !std.mem.allEqual(u8, &self.bytes, 0);
+        }
+        pub fn eql(self: @This(), other: @This()) bool {
+            return std.mem.eql(u8, &self.bytes, &other.bytes);
+        }
+        pub fn jsonStringify(self: @This(), writer: anytype) !void {
+            const text = std.fmt.bytesToHex(self.bytes, .lower);
+            try writer.write(@as([]const u8, &text));
+        }
+    };
+}
+
 pub const SessionHandle = struct {
     session_id: SessionId,
     generation: u64 = 1,

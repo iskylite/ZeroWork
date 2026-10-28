@@ -76,6 +76,79 @@ const ObservedTransport = struct {
 };
 const Evidence = struct { model: []const u8, protocol: []const u8 = "openai_compat", tool_dispatches: usize, requests: usize, image_requests: usize, wire_image_count: usize, image_sha256: [64]u8, http_statuses: [8]u16, success: bool, error_code: ?[]const u8, answer: []const u8 };
 
+test "API2 LIVE gateway verifies unpredictable text tool result through production native client" {
+    const env = testEnvironment();
+    if (!std.mem.eql(u8, env.get(env.ctx, "ZEROWORK_AI_GATEWAY_TEXT_LIVE") orelse return error.SkipZigTest, "1")) return error.SkipZigTest;
+    const a = std.testing.allocator;
+    const host_authority = std.mem.eql(u8, env.get(env.ctx, "ZEROWORK_AI_GATEWAY_HOST_LIVE") orelse "0", "1");
+    const TokenHost = struct {
+        nonce: [32]u8,
+        dispatches: usize = 0,
+        fn invokeHost(raw: *anyopaque, call: tools.host.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !tools.host.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.dispatches += 1;
+            if (self.dispatches != 1) return error.RepeatedToolCall;
+            const blocks = try allocator.alloc(tools.host.Block, 1);
+            errdefer allocator.free(blocks);
+            blocks[0] = .{ .structured = try std.json.Stringify.valueAlloc(allocator, .{ .verification_nonce = self.nonce, .measured_value = @as(u32, 314159) }, .{ .emit_strings_as_arrays = false }) };
+            return .{ .status = .succeeded, .blocks = blocks, .receipt = .{ .conversation_id = call.context.conversation_id, .task_id = call.context.task_id, .operation_id = call.operation_id, .binding_revision = call.context.binding_revision } };
+        }
+        fn invoke(raw: *anyopaque, call: tools.DynamicInvocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) ![]tools.ToolResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.dispatches += 1;
+            if (self.dispatches != 1) return error.RepeatedToolCall;
+            const result = try allocator.alloc(tools.ToolResult, 1);
+            errdefer allocator.free(result);
+            const blocks = try allocator.alloc(tools.ContentBlock, 1);
+            errdefer allocator.free(blocks);
+            blocks[0] = .{ .structured = try std.json.Stringify.valueAlloc(allocator, .{ .verification_nonce = self.nonce, .measured_value = @as(u32, 314159) }, .{ .emit_strings_as_arrays = false }) };
+            result[0] = .{ .status = .succeeded, .blocks = blocks, .receipt = .{ .operation_id = call.operation_id, .owner = call.parsed.entry.targets[0].owner } };
+            return result;
+        }
+    };
+    var random: [16]u8 = undefined;
+    try std.testing.io.randomSecure(&random);
+    var host: TokenHost = .{ .nonce = std.fmt.bytesToHex(random, .lower) };
+    const captured: scope.Scope = if (host_authority) .{ .owner = .{ .group = 7 }, .members = .{} } else .{ .owner = .{ .session = 101 }, .members = .{ .ids = .{101} ++ @as([15]u64, @splat(0)), .len = 1 } };
+    const definition: tools.ToolDefinition = .{ .id = "synthetic.measure", .schema = schema, .description = "Read the current synthetic measurement and its unpredictable verification nonce." };
+    const member: tools.Member = .{ .owner = .{ .session_id = @fromBackingInt(101) }, .plugin_id = "synthetic", .context = &host, .bindings = &.{.{ .plugin_id = "synthetic", .definition_id = definition.id, .handler = Host.binding }} };
+    const host_definition: tools.ToolDefinition = .{ .id = "host.measure", .schema = "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}", .description = definition.description };
+    var table = if (host_authority) try tools.RequestTable.initWithHost(a, captured, &.{}, &.{}, .{ .conversation_id = @import("../host/identity.zig").ConversationId.generate(), .task_id = @import("../host/identity.zig").TaskId.generate(), .binding = captured.owner, .binding_revision = 1, .grant_revision = 1 }, &.{.{ .definition = host_definition, .authority = .conversation_context }}) else try tools.RequestTable.init(a, captured, &.{definition}, &.{member});
+    defer table.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    var native_context: transport.NativeContext = .{ .io = std.testing.io };
+    var observed: ObservedTransport = .{ .actual = transport.native(&native_context) };
+    var client = @import("provider_client.zig").Client.init(a, observed.interface(), .openai_compat);
+    var config = @import("provider_config.zig").defaults(.openai_compat);
+    config.endpoint = env.get(env.ctx, "ZEROWORK_AI_GATEWAY_CHAT_ENDPOINT") orelse return error.MissingEndpoint;
+    config.model = env.get(env.ctx, "ZEROWORK_AI_GATEWAY_MODEL") orelse return error.MissingModel;
+    config.auth = .{ .bearer_memory = env.get(env.ctx, "ZEROWORK_AI_GATEWAY_KEY") orelse return error.MissingApiKey };
+    config.context_window = 100_000;
+    var binding: @import("provider_client.zig").Client.Binding = .{ .client = &client, .config = config };
+    var manager = @import("turn_manager.zig").Manager.init(a);
+    defer manager.deinit();
+    manager.scope = captured;
+    manager.turn_id = 1;
+    manager.tool_limits.context_window = config.context_window;
+    manager.tool_limits.max_rounds = 3;
+    manager.retry_policy.max_attempts = 0;
+    manager.tool_host = .{ .context = &host, .execute = Host.old, .execute_dynamic = TokenHost.invoke, .execute_host = TokenHost.invokeHost };
+    var failure: ?[]const u8 = null;
+    const instructions = if (host_authority) "Call host__measure exactly once with {}. Read the actual result, then reply with its exact verification_nonce and measured_value. Never invent either value and do not repeat the call." else "Call synthetic__measure exactly once with session_ids [101]. Read the actual result, then reply with its exact verification_nonce and measured_value. Never invent either value and do not repeat the call.";
+    _ = manager.run(binding.asProvider(), config.chatRequest(.{ .model = config.model, .system = instructions, .messages = &.{.{ .content = "Read the synthetic measurement and report both fields from its result." }}, .tools = wire, .tool_table = &table, .max_output = 256, .timeout_ms = 60_000 })) catch |err| blk: {
+        failure = @errorName(err);
+        break :blk .{};
+    };
+    var answer: std.ArrayList(u8) = .empty;
+    defer answer.deinit(a);
+    for (manager.cards.cards.items) |card| if (card == .text) try answer.appendSlice(a, card.text);
+    const success = failure == null and host.dispatches == 1 and observed.requests == 2 and observed.statuses[0] == 200 and observed.statuses[1] == 200 and std.mem.indexOf(u8, answer.items, &host.nonce) != null and std.mem.indexOf(u8, answer.items, "314159") != null;
+    const evidence = try std.json.Stringify.valueAlloc(a, .{ .model = config.model, .host_authority = host_authority, .tool_dispatches = host.dispatches, .requests = observed.requests, .http_statuses = observed.statuses, .result_nonce = host.nonce, .answer = answer.items, .success = success, .error_code = failure }, .{ .whitespace = .indent_2, .emit_strings_as_arrays = false });
+    defer a.free(evidence);
+    try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = env.get(env.ctx, "ZEROWORK_AI_GATEWAY_TEXT_EVIDENCE") orelse "/tmp/zerowork-ai-text-gateway-evidence.json", .data = evidence });
+    try std.testing.expect(success);
+}
+
 test "API2 LIVE gateway model discovery tool image roundtrip through production native client" {
     const env = testEnvironment();
     const enabled = env.get(env.ctx, "ZEROWORK_AI_GATEWAY_LIVE") orelse return error.SkipZigTest;
@@ -135,7 +208,7 @@ test "API2 LIVE gateway model discovery tool image roundtrip through production 
         var answer: std.ArrayList(u8) = .empty;
         defer answer.deinit(a);
         for (manager.cards.cards.items) |card| if (card == .text) try answer.appendSlice(a, card.text);
-        const recognized = containsIgnoreCase(answer.items, "red") and containsIgnoreCase(answer.items, "green") and containsIgnoreCase(answer.items, "blue") and containsIgnoreCase(answer.items, "left") and containsIgnoreCase(answer.items, "right") and containsIgnoreCase(answer.items, "center");
+        const recognized = recognizesArrangement(answer.items);
         const success = failure == null and host.dispatches == 1 and observed.image_requests >= 1 and recognized;
         success_count += @intFromBool(success);
         try evidence.append(ea, .{ .model = try ea.dupe(u8, model_id), .tool_dispatches = host.dispatches, .requests = observed.requests, .image_requests = observed.image_requests, .wire_image_count = observed.image_count, .image_sha256 = observed.image_sha256, .http_statuses = observed.statuses, .success = success, .error_code = failure, .answer = try ea.dupe(u8, answer.items) });
@@ -152,6 +225,18 @@ fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
     if (needle.len > haystack.len) return false;
     for (0..haystack.len - needle.len + 1) |index| if (std.ascii.eqlIgnoreCase(haystack[index .. index + needle.len], needle)) return true;
     return false;
+}
+
+fn recognizesArrangement(answer: []const u8) bool {
+    return containsIgnoreCase(answer, "red") and containsIgnoreCase(answer, "green") and containsIgnoreCase(answer, "blue") and containsIgnoreCase(answer, "left") and containsIgnoreCase(answer, "right") and
+        (containsIgnoreCase(answer, "center") or containsIgnoreCase(answer, "centre") or containsIgnoreCase(answer, "middle"));
+}
+
+test "gateway visual acceptance recognizes equivalent spatial terms and still requires all colors" {
+    try std.testing.expect(recognizesArrangement("Red on the left, green on the right, blue in the middle."));
+    try std.testing.expect(recognizesArrangement("red left, green right, blue centre"));
+    try std.testing.expect(!recognizesArrangement("red left, green right, yellow center"));
+    try std.testing.expect(!recognizesArrangement("red, green and blue"));
 }
 
 fn testEnvironment() struct { ctx: *anyopaque, get: *const fn (*anyopaque, []const u8) ?[]const u8 } {

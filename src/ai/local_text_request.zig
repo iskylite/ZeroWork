@@ -65,6 +65,7 @@ pub fn inputTokens(request: provider.ChatRequest) !usize {
             bytes = std.math.add(usize, bytes, call.id.len + call.name.len + call.arguments.len + 64) catch return error.RequestTooLarge;
         }
     }
+    bytes = std.math.add(usize, bytes, try provider.catalogTextBytes(request.tools)) catch return error.RequestTooLarge;
     const image_tokens = try @import("image_budget.zig").validate(request);
     return std.math.add(usize, (bytes +| 3) / 4 + request.tools.len * 256, image_tokens) catch error.RequestTooLarge;
 }

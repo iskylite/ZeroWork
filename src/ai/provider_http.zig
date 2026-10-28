@@ -501,11 +501,23 @@ fn validCallId(value: []const u8) bool {
 }
 
 pub fn validateToolMessages(request: provider.ChatRequest) !void {
-    if (request.tools.len > provider.max_tool_definitions) return error.InvalidToolDefinition;
+    if (request.tools.len > provider.max_tool_definitions) return error.ToolCatalogLimit;
+    _ = try provider.catalogTextBytes(request.tools);
+    var plugin_count: usize = 0;
+    var host_count: usize = 0;
     for (request.tools, 0..) |definition, definition_index| {
-        if (definition.session_ids.len == 0 or definition.session_ids.len > @import("tool_scope.zig").max_targets) return error.InvalidToolDefinition;
+        if (definition.authority == .session_targets) {
+            plugin_count += 1;
+            if (plugin_count > provider.max_plugin_tool_definitions) return error.ToolCatalogLimit;
+            if (definition.session_ids.len == 0 or (definition.dynamic == null and definition.session_ids.len > @import("tool_scope.zig").max_targets)) return error.InvalidToolDefinition;
+        } else {
+            host_count += 1;
+            if (host_count > provider.max_host_tool_definitions) return error.ToolCatalogLimit;
+            if (definition.dynamic == null or definition.session_ids.len != 0) return error.InvalidToolDefinition;
+        }
         for (request.tools[0..definition_index]) |previous| if (std.mem.eql(u8, previous.name(), definition.name())) return error.InvalidToolDefinition;
         if (definition.dynamic) |dynamic| {
+            if (std.mem.startsWith(u8, dynamic.id, "host.") != (definition.authority != .session_targets)) return error.InvalidToolDefinition;
             var encoded: [64]u8 = undefined;
             if (!std.mem.eql(u8, try @import("plugin_tools.zig").encodeName(&encoded, dynamic.id), dynamic.name)) return error.InvalidToolDefinition;
             try @import("plugin_tools.zig").validateDefinition(.{ .id = dynamic.id, .description = dynamic.description, .schema = dynamic.schema });
@@ -819,6 +831,76 @@ test "tool declaration validation rejects duplicate empty zero and excessive tar
     try std.testing.expectError(error.InvalidToolDefinition, requestBody(std.testing.allocator, .openai_compat, .{ .model = "m", .system = "", .messages = &.{}, .tools = &duplicate }, 8192));
     const excessive: [5]provider.ToolDefinition = @splat(.{ .tool = .run_command, .session_ids = &.{101} });
     try std.testing.expectError(error.InvalidToolDefinition, requestBody(std.testing.allocator, .openai_compat, .{ .model = "m", .system = "", .messages = &.{}, .tools = &excessive }, 8192));
+}
+
+test "host catalog uses a separate pool and no fabricated session targets across wire protocols" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var catalog: [49]provider.ToolDefinition = undefined;
+    for (catalog[0..32], 0..) |*definition, index| {
+        const id = try std.fmt.allocPrint(a, "host.query{d}", .{index});
+        var encoded: [64]u8 = undefined;
+        definition.* = .{ .session_ids = &.{}, .authority = .conversation_context, .dynamic = .{ .id = id, .name = try a.dupe(u8, try @import("plugin_tools.zig").encodeName(&encoded, id)), .description = "Read authorized context", .schema = "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}" } };
+    }
+    for (catalog[32..48], 0..) |*definition, index| {
+        const id = try std.fmt.allocPrint(a, "plugin.read{d}", .{index});
+        var encoded: [64]u8 = undefined;
+        definition.* = .{ .session_ids = &.{101}, .dynamic = .{ .id = id, .name = try a.dupe(u8, try @import("plugin_tools.zig").encodeName(&encoded, id)), .description = "Read a session", .schema = "{\"type\":\"object\"}" } };
+    }
+    const request: provider.ChatRequest = .{ .model = "model", .system = "", .messages = &.{}, .tools = catalog[0..48] };
+    for ([_]registry.Kind{ .openai_compat, .anthropic, .ollama }) |kind| {
+        const body = try requestBody(a, kind, request, 32768);
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, body, .{});
+        const declarations = parsed.value.object.get("tools").?.array.items;
+        try std.testing.expectEqual(@as(usize, 48), declarations.len);
+        const first = if (kind == .anthropic) declarations[0].object else declarations[0].object.get("function").?.object;
+        const parameters = first.get(if (kind == .anthropic) "input_schema" else "parameters").?.object;
+        try std.testing.expect(parameters.get("properties").?.object.get("session_ids") == null);
+        try std.testing.expect(first.get("authority") == null);
+    }
+    // Neither pool may borrow unused capacity from the other.
+    catalog[32] = catalog[0];
+    catalog[32].dynamic.?.id = "host.extra";
+    catalog[32].dynamic.?.name = "host__extra";
+    var excessive = request;
+    excessive.tools = catalog[0..33];
+    try std.testing.expectError(error.ToolCatalogLimit, validateToolMessages(excessive));
+    catalog[48] = catalog[47];
+    catalog[48].dynamic.?.id = "plugin.extra";
+    catalog[48].dynamic.?.name = "plugin__extra";
+    excessive.tools = catalog[33..49];
+    // Restore the sixteenth contribution overwritten above, then add a seventeenth.
+    catalog[32] = catalog[48];
+    catalog[32].dynamic.?.id = "plugin.sixteenth";
+    catalog[32].dynamic.?.name = "plugin__sixteenth";
+    excessive.tools = catalog[32..49];
+    try std.testing.expectError(error.ToolCatalogLimit, validateToolMessages(excessive));
+    var forged = catalog[0];
+    forged.authority = .session_targets;
+    forged.session_ids = &.{101};
+    excessive.tools = &.{forged};
+    try std.testing.expectError(error.InvalidToolDefinition, validateToolMessages(excessive));
+    forged = catalog[0];
+    forged.session_ids = &.{101};
+    excessive.tools = &.{forged};
+    try std.testing.expectError(error.InvalidToolDefinition, validateToolMessages(excessive));
+}
+
+test "catalog text budget is shared by serialization and initial context admission" {
+    const a = std.testing.allocator;
+    const description = try a.alloc(u8, 4096);
+    defer a.free(description);
+    @memset(description, 'x');
+    const definition: provider.ToolDefinition = .{ .session_ids = &.{}, .authority = .conversation_context, .dynamic = .{ .id = "host.context", .name = "host__context", .description = description, .schema = "{\"type\":\"object\"}" } };
+    var request: provider.ChatRequest = .{ .model = "m", .system = "", .messages = &.{}, .tools = &.{definition}, .max_output = 1 };
+    const input = try @import("local_text_request.zig").inputTokens(request);
+    try std.testing.expect(input >= description.len / 4 + 256);
+    try std.testing.expectError(error.ContextBudgetExceeded, @import("local_text_request.zig").checkContext(request, 1024));
+    const catalog: [24]provider.ToolDefinition = @splat(definition);
+    request.tools = &catalog;
+    try std.testing.expectError(error.ToolCatalogLimit, validateToolMessages(request));
+    try std.testing.expectError(error.ToolCatalogLimit, @import("local_text_request.zig").inputTokens(request));
 }
 
 test "tool message correlation rejects orphan duplicate missing and interrupted result slots" {

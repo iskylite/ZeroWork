@@ -2,11 +2,18 @@ const std = @import("std");
 pub const Effort = enum { low, medium, high, xhigh, max, none, ultra };
 pub const Role = enum { user, assistant, tool };
 pub const Tool = @import("tool_scope.zig").Tool;
-pub const max_tool_definitions = 16;
+pub const max_plugin_tool_definitions = 16;
+pub const max_host_tool_definitions = 32;
+pub const max_tool_definitions = max_plugin_tool_definitions + max_host_tool_definitions;
+pub const max_tool_catalog_text_bytes = 96 * 1024;
 pub const max_tool_calls = 16;
 pub const max_tool_call_id_bytes = 256;
 pub const max_tool_name_bytes = 64;
 pub const max_tool_arguments_bytes = 64 * 1024;
+
+/// Internal admission metadata. This never becomes a model-supplied parameter
+/// and does not by itself authorize dispatch; the captured host table does that.
+pub const ToolAuthority = enum { session_targets, conversation_context, lifecycle, execution_control, local_network_read };
 
 /// The host supplies a separate allowed target set for each real capability.
 /// Parameter schemas are fixed by Tool; callers cannot inject arbitrary JSON.
@@ -14,11 +21,25 @@ pub const ToolDefinition = struct {
     tool: Tool = .read_terminal,
     session_ids: []const u64,
     dynamic: ?DynamicDefinition = null,
+    authority: ToolAuthority = .session_targets,
     pub fn name(self: ToolDefinition) []const u8 {
         return if (self.dynamic) |definition| definition.name else @tagName(self.tool);
     }
     pub const DynamicDefinition = struct { id: []const u8, name: []const u8, schema: []const u8, description: []const u8 };
 };
+
+/// Shared by initial submission and subsequent tool rounds. The framing
+/// allowance is accounted for separately, as with the existing byte/4 estimate.
+pub fn catalogTextBytes(definitions: []const ToolDefinition) !usize {
+    var bytes: usize = 0;
+    for (definitions) |definition| if (definition.dynamic) |dynamic| {
+        for ([_][]const u8{ dynamic.name, dynamic.description, dynamic.schema }) |text| {
+            bytes = std.math.add(usize, bytes, text.len) catch return error.ToolCatalogLimit;
+            if (bytes > max_tool_catalog_text_bytes) return error.ToolCatalogLimit;
+        }
+    };
+    return bytes;
+}
 
 /// A transcript of the provider's original call, not execution authority.
 /// Unknown tool names and invalid argument JSON can be retained here so the

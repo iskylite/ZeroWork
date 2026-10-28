@@ -181,13 +181,15 @@ test "notification host retains structured details and dispatches built-in actio
         notice.coordinator.deinit();
     }
     defer notice.windows.deinit(a);
-    _ = try notice.registerWindow(.{ .context = &probe, .owns = Probe.owns, .activate = Probe.activate, .feedback = Probe.feedback, .owner_name = Probe.name });
+    defer notice.ai_origins.deinit(a);
+    const window = try notice.registerWindow(.{ .context = &probe, .owns = Probe.owns, .activate = Probe.activate, .feedback = Probe.feedback, .owner_name = Probe.name });
     const owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(1) } };
     var object = [_]u8{ 'a', '.', 'z', 'i', 'p' };
     try notice.publishTransfer(owner, 1, 1, .{ .result = .failed, .resources_released = true, .notify_complete = false, .details = .{ .object = &object, .detail = "没有文件访问权限" } });
     object[0] = 'b';
     try notice.publishReconnectDetails(owner, 2, 1, .disconnected, .{ .object = "prod-web-01", .detail = "连接超时" });
-    try notice.publishAi(owner, 3, 1, .{ .result = .unverified, .resources_released = true });
+    const ai_operation = try notice.reserveAiOperation(window);
+    try notice.publishAi(owner, ai_operation, 1, .{ .result = .unverified, .resources_released = true });
     try notice.publishTransfer(owner, 4, 1, .{ .result = .cancelled, .resources_released = true, .notify_complete = false });
     const facts = notice.coordinator.notification_records.items;
     try std.testing.expectEqualStrings("a.zip", facts[0].event.object_name);

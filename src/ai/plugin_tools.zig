@@ -4,9 +4,12 @@ const scope = @import("tool_scope.zig");
 const services = @import("../host/plugin_services.zig");
 const identity = @import("../host/identity.zig");
 const images = @import("image_attachments.zig");
+pub const host = @import("host_tools.zig");
 
 pub const max_plugin_tools = 8;
-pub const max_request_tools = 16;
+pub const max_plugin_request_tools = @import("provider.zig").max_plugin_tool_definitions;
+pub const max_host_request_tools = @import("provider.zig").max_host_tool_definitions;
+pub const max_request_tools = max_plugin_request_tools + max_host_request_tools;
 pub const Effect = enum { read_state, observe_image, remote_input, resource_write };
 pub const ApprovalPolicy = enum { read_only, confirm, always_confirm };
 pub const ToolDefinition = struct {
@@ -162,6 +165,7 @@ pub fn sameDefinition(a: ToolDefinition, b: ToolDefinition) bool {
 pub fn validateBindings(plugin_id: []const u8, definitions: []const ToolDefinition, bindings: []const ToolBinding, declared: []const services.Definition) !void {
     if (bindings.len > max_plugin_tools) return error.TooManyPluginTools;
     for (bindings, 0..) |binding, index| {
+        if (std.mem.startsWith(u8, binding.definition_id, "host.")) return error.ReservedToolNamespace;
         if (!std.mem.eql(u8, plugin_id, binding.plugin_id)) return error.ToolPluginMismatch;
         for (bindings[0..index]) |previous| if (std.mem.eql(u8, previous.definition_id, binding.definition_id)) return error.DuplicateToolBinding;
         const definition = findDefinition(definitions, binding.definition_id) orelse return error.UnknownToolDefinition;
@@ -192,11 +196,12 @@ pub const Member = struct {
     authorized: bool = true,
 };
 pub const TargetBinding = struct { owner: identity.SessionHandle, binding: ToolBinding, context: *anyopaque, capability_revision: u64, policy_revision: u64, services: []const services.Binding };
-pub const Entry = struct { definition: ToolDefinition, provider_name: []const u8, targets: []const TargetBinding };
+pub const Entry = struct { definition: ToolDefinition, provider_name: []const u8, targets: []const TargetBinding, authority: @import("provider.zig").ToolAuthority = .session_targets };
 pub const RequestTable = struct {
     arena: std.heap.ArenaAllocator,
     captured_scope: scope.Scope,
     entries: []const Entry,
+    host_context: ?host.Context = null,
     pub fn init(allocator: std.mem.Allocator, captured_scope: scope.Scope, definitions: []const ToolDefinition, members: []const Member) !RequestTable {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
@@ -212,6 +217,7 @@ pub const RequestTable = struct {
             if (!member.authorized) continue;
             if (member.bindings.len > max_plugin_tools) return error.TooManyPluginTools;
             for (member.bindings, 0..) |binding, binding_index| {
+                if (std.mem.startsWith(u8, binding.definition_id, "host.")) return error.ReservedToolNamespace;
                 if (!std.mem.eql(u8, member.plugin_id, binding.plugin_id)) return error.ToolPluginMismatch;
                 for (member.bindings[0..binding_index]) |previous| if (std.mem.eql(u8, previous.definition_id, binding.definition_id)) return error.DuplicateToolBinding;
                 const definition = findDefinition(definitions, binding.definition_id) orelse return error.UnknownToolDefinition;
@@ -226,7 +232,7 @@ pub const RequestTable = struct {
                     break;
                 };
                 const index = found orelse blk: {
-                    if (entries.items.len == max_request_tools) return error.TooManyRequestTools;
+                    if (entries.items.len == max_plugin_request_tools) return error.TooManyRequestTools;
                     var encoded: [64]u8 = undefined;
                     const name = try encodeName(&encoded, definition.id);
                     const owned_definition = try copyDefinition(a, definition);
@@ -252,6 +258,29 @@ pub const RequestTable = struct {
         self.arena.deinit();
         self.* = undefined;
     }
+    pub fn initWithHost(allocator: std.mem.Allocator, captured_scope: scope.Scope, definitions: []const ToolDefinition, members: []const Member, context: host.Context, contributions: []const host.Contribution) !RequestTable {
+        try context.validate();
+        if (!context.binding.eql(captured_scope.owner)) return error.InvalidHostAuthority;
+        if (contributions.len > max_host_request_tools) return error.ToolCatalogLimit;
+        var table = try init(allocator, captured_scope, definitions, members);
+        errdefer table.deinit();
+        const a = table.arena.allocator();
+        const entries = try a.alloc(Entry, table.entries.len + contributions.len);
+        @memcpy(entries[0..table.entries.len], table.entries);
+        for (contributions, table.entries.len..) |contribution, index| {
+            const definition = contribution.definition;
+            if (contribution.authority == .session_targets or !std.mem.startsWith(u8, definition.id, "host.") or definition.required_services.len != 0) return error.InvalidHostAuthority;
+            try validateDefinition(definition);
+            var encoded: [64]u8 = undefined;
+            const name = try encodeName(&encoded, definition.id);
+            for (entries[0..index]) |entry| if (std.mem.eql(u8, entry.provider_name, name)) return error.ToolDefinitionConflict;
+            entries[index] = .{ .definition = try copyDefinition(a, definition), .provider_name = try a.dupe(u8, name), .targets = &.{}, .authority = contribution.authority };
+        }
+        table.entries = entries;
+        table.host_context = context;
+        _ = try @import("provider.zig").catalogTextBytes(try providerDefinitions(&table, a));
+        return table;
+    }
     pub fn lookup(self: *const RequestTable, provider_name: []const u8) ?*const Entry {
         for (self.entries) |*entry| if (std.mem.eql(u8, entry.provider_name, provider_name)) return entry;
         return null;
@@ -266,6 +295,12 @@ pub const RequestTable = struct {
         defer schema.deinit();
         try validateValue(schema.value, parsed.value, 0);
         if (entry.definition.validate) |validator| try validator(parsed.value);
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(arguments, &hash, .{});
+        if (entry.authority != .session_targets) {
+            try (self.host_context orelse return error.InvalidHostAuthority).validate();
+            return .{ .json = parsed, .entry = entry, .targets = .{}, .arguments_hash = hash };
+        }
         const ids = parsed.value.object.get("session_ids") orelse return error.InvalidToolArguments;
         if (ids != .array or ids.array.items.len == 0 or ids.array.items.len > scope.max_targets) return error.InvalidTargetCount;
         var targets: scope.Targets = .{};
@@ -276,8 +311,6 @@ pub const RequestTable = struct {
         }
         targets.len = ids.array.items.len;
         _ = try self.captured_scope.validate(targets.slice());
-        var hash: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(arguments, &hash, .{});
         return .{ .json = parsed, .entry = entry, .targets = targets, .arguments_hash = hash };
     }
 };
@@ -526,7 +559,7 @@ pub fn providerDefinitions(table: *const RequestTable, allocator: std.mem.Alloca
     for (table.entries, output) |entry, *definition| {
         const ids = try allocator.alloc(u64, entry.targets.len);
         for (entry.targets, ids) |target, *id| id.* = @backingInt(target.owner.session_id);
-        definition.* = .{ .session_ids = ids, .dynamic = .{ .id = entry.definition.id, .name = entry.provider_name, .schema = entry.definition.schema, .description = entry.definition.description } };
+        definition.* = .{ .session_ids = ids, .authority = entry.authority, .dynamic = .{ .id = entry.definition.id, .name = entry.provider_name, .schema = entry.definition.schema, .description = entry.definition.description } };
     }
     return output;
 }
@@ -550,7 +583,7 @@ pub fn cloneTable(input: *const RequestTable, allocator: std.mem.Allocator) !Req
         }
         entry.targets = targets;
     }
-    return .{ .arena = arena, .captured_scope = input.captured_scope, .entries = entries };
+    return .{ .arena = arena, .captured_scope = input.captured_scope, .entries = entries, .host_context = input.host_context };
 }
 
 pub const DynamicInvocation = struct {
@@ -577,6 +610,7 @@ pub const Runtime = struct {
 
     pub fn execute(self: Runtime, invocation: DynamicInvocation, allocator: std.mem.Allocator, cancel: ?*@import("provider.zig").CancelToken) ![]ToolResult {
         const parsed = invocation.parsed;
+        if (parsed.entry.authority != .session_targets) return error.InvalidHostAuthority;
         if (self.operations.count() + parsed.targets.len > @import("../host/operation_store.zig").Store.capacity) return error.OperationHistoryFull;
         var ticket: ?ApprovalTicket = null;
         // No effects or approval prompts before complete group preflight.

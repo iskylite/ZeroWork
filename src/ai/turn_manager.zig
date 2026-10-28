@@ -365,6 +365,13 @@ pub const Manager = struct {
         const execute_dynamic = host.execute_dynamic orelse return error.DynamicToolHostUnavailable;
         return execute_dynamic(host.context, invocation, allocator, cancel);
     }
+    fn executeHost(raw: *anyopaque, invocation: @import("host_tools.zig").Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !@import("host_tools.zig").Result {
+        const self: *Manager = @ptrCast(@alignCast(raw));
+        self.turn.state = .executing;
+        const host = self.tool_host.?;
+        const execute_host = host.execute_host orelse return error.ToolNotAvailable;
+        return execute_host(host.context, invocation, allocator, cancel);
+    }
 
     fn completeTools(self: *Manager, cancel: ?*provider.CancelToken, policy: permission.Engine, policy_revision: u64) !void {
         defer self.clearPending();
@@ -381,7 +388,7 @@ pub const Manager = struct {
         }
         const loop = self.tool_run.?;
         const records_start = loop.records.items.len;
-        try loop.complete(self.round_text.items, calls[0..count], .{ .context = self, .execute = execute, .execute_dynamic = executeDynamic }, policy, policy_revision, cancel);
+        try loop.complete(self.round_text.items, calls[0..count], .{ .context = self, .execute = execute, .execute_dynamic = executeDynamic, .execute_host = executeHost }, policy, policy_revision, cancel);
         if (self.observer) |observer| if (observer.tool_rejected) |notify| {
             for (calls[0..count]) |call| {
                 const record = blk: {

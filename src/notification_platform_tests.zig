@@ -338,8 +338,11 @@ const WindowProbe = struct {
     activates: usize = 0,
     messages: usize = 0,
     owner: notifications.Owner = target.owner,
+    conversation: ?@import("host/identity.zig").ConversationId = null,
+    selected: ?@import("host/identity.zig").ConversationId = null,
+    conversation_activates: usize = 0,
     fn callbacks(self: *WindowProbe) notification_host.Window {
-        return .{ .context = self, .owns = owns, .activate = activate, .feedback = feedback };
+        return .{ .context = self, .owns = owns, .activate = activate, .activate_ai = activateAi, .feedback = feedback };
     }
     fn owns(raw: *anyopaque, value: notifications.Target) bool {
         const self: *WindowProbe = @ptrCast(@alignCast(raw));
@@ -355,7 +358,59 @@ const WindowProbe = struct {
         const self: *WindowProbe = @ptrCast(@alignCast(raw));
         self.messages += 1;
     }
+    fn activateAi(raw: *anyopaque, conversation: @import("host/identity.zig").ConversationId) bool {
+        const self: *WindowProbe = @ptrCast(@alignCast(raw));
+        const available = self.conversation orelse return false;
+        if (!available.eql(conversation)) return false;
+        self.selected = conversation;
+        self.conversation_activates += 1;
+        return true;
+    }
 };
+
+test "AI reminder selects its exact stable conversation and never falls back to another dialog" {
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{ .ai_ready = true, .quiet_hours = "00:00-00:00" }, fake.api());
+    defer host.destroy();
+    const ConversationId = @import("host/identity.zig").ConversationId;
+    const original = ConversationId.generate();
+    const other = ConversationId.generate();
+    var window: WindowProbe = .{ .conversation = original, .selected = other };
+    var foreign: WindowProbe = .{ .conversation = original, .selected = other };
+    const id = try host.registerWindow(window.callbacks());
+    const foreign_id = try host.registerWindow(foreign.callbacks());
+    host.setWindowFocus(id, false);
+    host.setWindowFocus(foreign_id, false);
+    fake.push(.{ .kind = 1, .result = 1, .request_id = fake.last_query, .settings = authorized });
+    _ = try host.poll();
+    const operation = try host.reserveAiConversation(id, original);
+    try host.publishAi(target.owner, operation, 1, .{ .result = .succeeded, .resources_released = true, .final_answer = true });
+    const event_id = fake.last_event;
+    const os_target = fake.last_target;
+    fake.push(.{ .kind = 4, .result = 1, .event_id = event_id, .target = os_target, .current_instance = 1 });
+    _ = try host.poll();
+    try std.testing.expect(window.selected.?.eql(original));
+    try std.testing.expectEqual(@as(usize, 1), window.conversation_activates);
+    try std.testing.expectEqual(@as(usize, 0), window.activates);
+    try std.testing.expectEqual(@as(usize, 0), foreign.conversation_activates);
+    window.selected = other;
+    const record = host.coordinator.notification_records.items[0];
+    try host.dispatchAction(record.fact_id, 0);
+    try std.testing.expect(window.selected.?.eql(original));
+    // Current binding can change without changing the immutable event owner.
+    window.owner = .{ .group = .{ .id = @fromBackingInt(42) } };
+    try host.dispatchAction(record.fact_id, 0);
+    try std.testing.expectEqual(@as(usize, 3), window.conversation_activates);
+    window.conversation = null;
+    window.selected = other;
+    try std.testing.expectError(error.NotificationOwnerEnded, host.dispatchAction(record.fact_id, 0));
+    fake.push(.{ .kind = 4, .result = 1, .event_id = event_id, .target = os_target, .current_instance = 1 });
+    _ = try host.poll();
+    try std.testing.expect(window.selected.?.eql(other));
+    try std.testing.expectEqual(@as(usize, 3), window.conversation_activates);
+    try std.testing.expectEqual(@as(usize, 0), foreign.conversation_activates);
+    try std.testing.expectEqual(@as(usize, 0), window.activates);
+}
 
 test "notification process host sends only released final AI and each transfer intent choice survives global policy" {
     var fake: Fake = .{};

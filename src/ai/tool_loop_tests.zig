@@ -10,6 +10,80 @@ const scope: scope_mod.Scope = .{ .owner = .{ .session = 101 }, .members = .{ .i
 const definitions = [_]provider.ToolDefinition{ .{ .tool = .run_command, .session_ids = &.{101} }, .{ .tool = .read_terminal, .session_ids = &.{101} } };
 const df: provider.ToolCall = .{ .id = "call-local-df", .name = "run_command", .arguments = "{\"session_ids\":[101],\"command\":\"df -h\"}" };
 
+test "host tools retain real call pairs and conversation receipts without session targets" {
+    const tools = @import("plugin_tools.zig");
+    const identity = @import("../host/identity.zig");
+    const authority: tools.host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .group = 7 }, .binding_revision = 2, .grant_revision = 3 };
+    const definition: tools.ToolDefinition = .{ .id = "host.get_current_context", .schema = "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}" };
+    const empty: scope_mod.Scope = .{ .owner = authority.binding, .members = .{} };
+    var table = try tools.RequestTable.initWithHost(a, empty, &.{}, &.{}, authority, &.{.{ .definition = definition, .authority = .conversation_context }});
+    defer table.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    const Gateway = struct {
+        context: tools.host.Context,
+        calls: usize = 0,
+        wrong_receipt: bool = false,
+        fn legacy(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedLegacyDispatch;
+        }
+        fn invoke(raw: *anyopaque, invocation: tools.host.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !tools.host.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!self.context.eql(invocation.context)) return error.StaleToolAuthority;
+            self.calls += 1;
+            const blocks = try allocator.alloc(tools.host.Block, 1);
+            errdefer allocator.free(blocks);
+            blocks[0] = .{ .structured = try allocator.dupe(u8, "{\"current_binding\":\"group\",\"member_count\":0}") };
+            return .{ .status = .succeeded, .blocks = blocks, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = if (self.wrong_receipt) identity.TaskId.generate() else invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision } };
+        }
+    };
+    var gateway: Gateway = .{ .context = authority };
+    const callbacks: loop_mod.Host = .{ .context = &gateway, .execute = Gateway.legacy, .execute_host = Gateway.invoke };
+    var loop = loop_mod.Loop.init(a, empty, 1, .{ .context_window = 100_000 });
+    defer loop.deinit();
+    try loop.start(.{ .model = "model", .system = "", .messages = &.{}, .tools = wire, .tool_table = &table });
+    const call: provider.ToolCall = .{ .id = "host-query", .name = wire[0].name(), .arguments = "{}" };
+    try loop.complete("", &.{call}, callbacks, .{}, 1, null);
+    try loop.complete("", &.{call}, callbacks, .{}, 1, null);
+    try std.testing.expectEqual(@as(usize, 1), gateway.calls);
+    try std.testing.expect(loop.records.items[0].host_result != null);
+    try std.testing.expect(loop.records.items[0].generic_results == null);
+    const request = try loop.nextRequest();
+    try http.validateToolMessages(request);
+    const body = try std.json.parseFromSlice(std.json.Value, a, request.messages[1].content, .{});
+    defer body.deinit();
+    try std.testing.expect(body.value.object.get("targets") == null);
+    try std.testing.expect(body.value.object.get("session_id") == null);
+    try std.testing.expectEqualStrings("succeeded", body.value.object.get("status").?.string);
+    // A stale grant is rejected before host dispatch. A wrong task receipt is
+    // never accepted as success, even with matching tool/call/operation IDs.
+    gateway.context.grant_revision += 1;
+    var stale = call;
+    stale.id = "stale-host-query";
+    try loop.complete("", &.{stale}, callbacks, .{}, 1, null);
+    try std.testing.expectEqual(@as(usize, 1), gateway.calls);
+    try std.testing.expect(!loop.uncertain);
+    gateway.context = authority;
+    gateway.wrong_receipt = true;
+    stale.id = "wrong-task-receipt";
+    try loop.complete("", &.{stale}, callbacks, .{}, 1, null);
+    try std.testing.expect(loop.uncertain);
+    try std.testing.expect(std.mem.indexOf(u8, loop.records.items[2].result_body.?, "InvalidHostToolResult") != null);
+    gateway.wrong_receipt = false;
+    gateway.calls = 0;
+    var script: Script = .{ .rounds = &.{ .{ .calls = &.{call} }, .{ .text = "Host context received" } } };
+    defer script.deinit();
+    var manager = manager_mod.Manager.init(a);
+    defer manager.deinit();
+    manager.scope = empty;
+    manager.turn_id = 1;
+    manager.tool_host = callbacks;
+    manager.tool_limits.context_window = 100_000;
+    _ = try manager.run(script.interface(), .{ .model = "model", .system = "", .messages = &.{}, .tools = wire, .tool_table = &table });
+    try std.testing.expectEqual(@as(usize, 1), gateway.calls);
+    try std.testing.expectEqual(@as(usize, 2), script.requests.items.len);
+    try std.testing.expect(manager.tool_run.?.records.items[0].host_result != null);
+}
+
 const Round = struct { text: []const u8 = "", calls: []const provider.ToolCall = &.{} };
 const Script = struct {
     rounds: []const Round,

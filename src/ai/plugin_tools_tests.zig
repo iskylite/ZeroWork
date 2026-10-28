@@ -60,6 +60,37 @@ test "API2 names are reversible collision-free and preserve all four legacy name
     try std.testing.expectError(error.ToolNameTooLong, tools.encodeName(&name, "_________________________________"));
 }
 
+test "API2 plugin contributions cannot impersonate the host namespace" {
+    var fake: Fake = .{};
+    const host_definition: tools.ToolDefinition = .{ .id = "host.get_current_context", .schema = "{\"type\":\"object\"}" };
+    const host_binding: tools.ToolBinding = .{ .plugin_id = "example", .definition_id = host_definition.id, .handler = Fake.handler };
+    try std.testing.expectError(error.ReservedToolNamespace, tools.validateBindings("example", &.{host_definition}, &.{host_binding}, &.{}));
+    try std.testing.expectError(error.ReservedToolNamespace, tools.RequestTable.init(std.testing.allocator, captured, &.{host_definition}, &.{member(&fake, 101, &.{host_binding})}));
+}
+
+test "host table captures conversation authority without a fake member and cannot enter plugin runtime" {
+    const a = std.testing.allocator;
+    const context: tools.host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .group = 7 }, .binding_revision = 2, .grant_revision = 3 };
+    const host_definition: tools.ToolDefinition = .{ .id = "host.get_current_context", .schema = "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}" };
+    const empty_scope: scope.Scope = .{ .owner = context.binding, .members = .{} };
+    var table = try tools.RequestTable.initWithHost(a, empty_scope, &.{}, &.{}, context, &.{.{ .definition = host_definition, .authority = .conversation_context }});
+    defer table.deinit();
+    var cloned = try tools.cloneTable(&table, a);
+    defer cloned.deinit();
+    try std.testing.expect(context.eql(cloned.host_context.?));
+    var call = try cloned.parse(a, cloned.entries[0].provider_name, "{}");
+    defer call.deinit();
+    try std.testing.expectEqual(@as(usize, 0), call.targets.len);
+    try std.testing.expectEqual(@as(usize, 0), call.entry.targets.len);
+    try std.testing.expectError(error.InvalidToolArguments, cloned.parse(a, call.entry.provider_name, "{\"session_ids\":[101]}"));
+    var history = operations.Store.init(a);
+    defer history.deinit();
+    var fake: Fake = .{};
+    try std.testing.expectError(error.InvalidHostAuthority, fake.runtime(&history).execute(.{ .table = &cloned, .parsed = call, .turn_id = 1, .call_id = "host-call", .arguments = "{}", .operation_id = 1 }, a, null));
+    try std.testing.expectEqual(@as(usize, 0), fake.count);
+    try std.testing.expectError(error.ToolDefinitionConflict, tools.RequestTable.initWithHost(a, empty_scope, &.{}, &.{}, context, &.{ .{ .definition = host_definition, .authority = .conversation_context }, .{ .definition = host_definition, .authority = .conversation_context } }));
+}
+
 test "API2 immutable request schemas validate generic values and each selected member" {
     const a = std.testing.allocator;
     var fake: Fake = .{};

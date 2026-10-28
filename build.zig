@@ -633,7 +633,11 @@ pub fn build(b: *std.Build) void {
     gateway_tests.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
     gateway_tests.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     gateway_tests.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
-    b.step("test-ai-gateway", "Run opt-in production gateway tool/image acceptance").dependOn(&b.addRunArtifact(gateway_tests).step);
+    const run_gateway_tests = b.addRunArtifact(gateway_tests);
+    // Endpoint/model/opt-in are supplied at execution time; a cached success
+    // from another environment is never evidence of a live gateway run.
+    run_gateway_tests.has_side_effects = true;
+    b.step("test-ai-gateway", "Run opt-in production gateway tool/image acceptance").dependOn(&run_gateway_tests.step);
 
     const environment_probe = b.addExecutable(.{ .name = "application-environment-contract", .root_module = b.createModule(.{
         .root_source_file = b.path("src/application_environment_contract.zig"),

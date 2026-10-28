@@ -2,6 +2,7 @@
 const std = @import("std");
 const scope = @import("tool_scope.zig");
 const cards = @import("card_stream.zig");
+pub const ConversationId = @import("../host/identity.zig").ConversationId;
 pub const ModelSelection = @import("provider_config.zig").ModelSelection;
 pub const PermissionMode = @import("../config/config.zig").PermissionMode;
 pub const Effort = @import("provider.zig").Effort;
@@ -70,6 +71,7 @@ pub const Phase = enum { idle, running, approval, done, failed, stopped };
 pub const State = struct {
     phase: Phase = .idle,
     id: u64 = 0,
+    conversation_id: ConversationId = .{},
     selected: bool = true,
     listed: bool = true,
     closed: bool = false,
@@ -134,6 +136,11 @@ pub const Store = struct {
         for (self.states.items) |*state| if (state.id == id) return state;
         return null;
     }
+    pub fn findConversation(self: *Store, id: ConversationId) ?*State {
+        if (!id.valid()) return null;
+        for (self.states.items) |*state| if (state.conversation_id.eql(id)) return state;
+        return null;
+    }
     /// The selected conversation's data is moved into the visible host.
     /// Background completion must resolve the request's original identity.
     pub fn wireHistoryFor(self: *Store, id: u64, displayed_id: ?u64, displayed: *@import("wire_history.zig").History) ?*@import("wire_history.zig").History {
@@ -152,8 +159,9 @@ pub const Store = struct {
     }
     pub fn create(self: *Store, owner: scope.Owner) !*State {
         const id = self.next_id;
-        try self.states.append(self.allocator, .{ .id = id, .owner = owner, .stream = cards.Stream.init(self.allocator) });
-        self.next_id += 1;
+        if (id == 0) return error.ConversationIdentityExhausted;
+        try self.states.append(self.allocator, .{ .id = id, .conversation_id = ConversationId.generate(), .owner = owner, .stream = cards.Stream.init(self.allocator) });
+        self.next_id = if (id == std.math.maxInt(u64)) 0 else id + 1;
         _ = self.select(id);
         return self.find(id).?;
     }
@@ -248,6 +256,35 @@ test "same numeric session and group IDs retain separate conversations" {
     try std.testing.expectEqual(@as(usize, 0), group.stream.count());
     _ = try group.stream.append(.{ .text = "group answer" });
     try std.testing.expectEqualStrings("session answer", (try store.get(.{ .session = 7 })).stream.cards.items[0].text);
+}
+
+test "stable conversation identity isolates equal UI counters across windows and restart" {
+    var first = Store.init(std.testing.allocator);
+    defer first.deinit();
+    var second = Store.init(std.testing.allocator);
+    defer second.deinit();
+    const first_state = try first.create(.{ .session = 7 });
+    const id = first_state.conversation_id;
+    const other = try second.create(.{ .session = 7 });
+    try std.testing.expectEqual(first_state.id, other.id);
+    try std.testing.expect(id.valid() and other.conversation_id.valid());
+    try std.testing.expect(!id.eql(other.conversation_id));
+    try std.testing.expect(first.findConversation(other.conversation_id) == null);
+    try std.testing.expect(second.findConversation(id) == null);
+    const ui_id = first_state.id;
+    _ = try first.create(.{ .session = 7 });
+    try std.testing.expect(first.select(ui_id));
+    try std.testing.expect(first.findConversation(id).?.conversation_id.eql(id));
+    first.remove(ui_id);
+    try std.testing.expect(first.findConversation(id) == null);
+    var restarted = Store.init(std.testing.allocator);
+    defer restarted.deinit();
+    const fresh = try restarted.create(.{ .session = 7 });
+    try std.testing.expectEqual(ui_id, fresh.id);
+    try std.testing.expect(!fresh.conversation_id.eql(id));
+    restarted.next_id = std.math.maxInt(u64);
+    _ = try restarted.create(.{ .session = 7 });
+    try std.testing.expectError(error.ConversationIdentityExhausted, restarted.create(.{ .session = 7 }));
 }
 
 test "owner controls own callback model strings and keep session and group overrides separate" {

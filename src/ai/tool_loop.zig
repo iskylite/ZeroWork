@@ -97,6 +97,9 @@ pub const Host = struct {
     /// (including unknown) and wait for release or transfer cleanup ownership.
     execute: *const fn (*anyopaque, Invocation, std.mem.Allocator, ?*provider.CancelToken) anyerror!Outcome,
     execute_dynamic: ?*const fn (*anyopaque, dynamic.DynamicInvocation, std.mem.Allocator, ?*provider.CancelToken) anyerror![]dynamic.ToolResult = null,
+    /// A separate host gateway must revalidate conversation/task, binding and
+    /// grants before dispatch. It never receives a fabricated SessionHandle.
+    execute_host: ?*const fn (*anyopaque, dynamic.host.Invocation, std.mem.Allocator, ?*provider.CancelToken) anyerror!dynamic.host.Result = null,
 };
 
 pub const Record = struct {
@@ -107,6 +110,7 @@ pub const Record = struct {
     dispatched: bool = false,
     outcome: ?Outcome = null,
     generic_results: ?[]dynamic.ToolResult = null,
+    host_result: ?dynamic.host.Result = null,
     result_body: ?[]const u8 = null,
 };
 pub const Loop = struct {
@@ -133,6 +137,7 @@ pub const Loop = struct {
                 for (results) |*result| result.deinit(self.allocator);
                 self.allocator.free(results);
             }
+            if (record.host_result) |*result| result.deinit(self.allocator);
         }
         if (self.tool_table) |*table| table.deinit();
         for (self.messages.items) |message| for (message.images) |reference| {
@@ -154,12 +159,22 @@ pub const Loop = struct {
         self.request = input;
         self.request.model = try a.dupe(u8, input.model);
         self.request.system = try a.dupe(u8, input.system);
-        if (input.tools.len > provider.max_tool_definitions) return error.InvalidToolDefinition;
+        if (input.tools.len > provider.max_tool_definitions) return error.ToolCatalogLimit;
         const definitions = try a.alloc(provider.ToolDefinition, input.tools.len);
         for (input.tools, definitions, 0..) |definition, *owned, definition_index| {
             for (input.tools[0..definition_index]) |previous| if (std.mem.eql(u8, previous.name(), definition.name())) return error.InvalidToolDefinition;
-            _ = try self.scope.validate(definition.session_ids);
-            owned.* = .{ .tool = definition.tool, .session_ids = try a.dupe(u64, definition.session_ids) };
+            if (definition.authority == .session_targets) {
+                _ = try self.scope.validate(definition.session_ids);
+            } else {
+                const table = input.tool_table orelse return error.InvalidHostAuthority;
+                const context = table.host_context orelse return error.InvalidHostAuthority;
+                try context.validate();
+                const entry = table.lookup(definition.name()) orelse return error.InvalidHostAuthority;
+                const wire = definition.dynamic orelse return error.InvalidHostAuthority;
+                if (!context.binding.eql(self.scope.owner) or entry.authority != definition.authority or definition.session_ids.len != 0 or !std.mem.eql(u8, entry.definition.schema, wire.schema) or !std.mem.eql(u8, entry.definition.id, wire.id)) return error.InvalidHostAuthority;
+            }
+            owned.* = definition;
+            owned.session_ids = try a.dupe(u64, definition.session_ids);
             if (definition.dynamic) |wire| owned.dynamic = .{ .id = try a.dupe(u8, wire.id), .name = try a.dupe(u8, wire.name), .schema = try a.dupe(u8, wire.schema), .description = try a.dupe(u8, wire.description) };
         }
         self.request.tools = definitions;
@@ -299,6 +314,51 @@ pub const Loop = struct {
         record.result_body = try self.outcomeBody(outcome);
         return record.result_body.?;
     }
+
+    fn resolveHost(self: *Loop, record: *Record, table: *const dynamic.RequestTable, parsed: dynamic.ParsedCall, call: provider.ToolCall, host: Host, cancel: ?*provider.CancelToken) ![]const u8 {
+        const context = table.host_context orelse return error.InvalidHostAuthority;
+        const execute = host.execute_host orelse {
+            record.result_body = try self.errorBody("HostToolGatewayUnavailable", null);
+            return record.result_body.?;
+        };
+        const affecting = parsed.entry.definition.effect == .remote_input or parsed.entry.definition.effect == .resource_write;
+        if (self.uncertain and affecting) {
+            record.result_body = try self.errorBody("EarlierToolOutcomeUnknown", null);
+            return record.result_body.?;
+        }
+        if (64 * 1024 > self.limits.max_retained_output_bytes -| self.retained_output_bytes) {
+            record.result_body = try self.errorBody("ToolResultCapacity", null);
+            return record.result_body.?;
+        }
+        const operation_id = next_dynamic_operation.fetchAdd(1, .monotonic);
+        if (operation_id == 0 or operation_id == std.math.maxInt(u64)) return error.IdentityExhausted;
+        record.dispatched = true;
+        const result = execute(host.context, .{ .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash }, self.allocator, cancel) catch |err| {
+            const preflight = err == error.InvalidHostAuthority or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ScopeChanged or err == error.PermissionDenied or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ToolNotAvailable or err == error.TargetOutsideScope;
+            record.dispatched = !preflight;
+            if (!preflight) self.uncertain = true;
+            record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = if (preflight) dynamic.Status.rejected else dynamic.Status.outcome_unknown, .error_code = @errorName(err), .conversation_id = context.conversation_id, .task_id = context.task_id, .operation_id = operation_id, .local_released = preflight, .remote_effect_unknown = !preflight }, .{});
+            return record.result_body.?;
+        };
+        record.host_result = result;
+        result.validate(context, operation_id) catch {
+            self.uncertain = true;
+            record.result_body = try self.errorBody("InvalidHostToolResult", null);
+            return record.result_body.?;
+        };
+        for (result.blocks) |block| self.retained_output_bytes += switch (block) {
+            .text, .structured => |text| text.len,
+        };
+        if (result.status == .outcome_unknown or result.receipt.remote_effect_unknown or !result.receipt.local_released) self.uncertain = true;
+        const EncodedBlock = struct { type: []const u8, text: []const u8 };
+        const blocks = try self.arena.allocator().alloc(EncodedBlock, result.blocks.len);
+        for (result.blocks, blocks) |block, *encoded| encoded.* = switch (block) {
+            .text => |text| .{ .type = "text", .text = text },
+            .structured => |text| .{ .type = "structured", .text = text },
+        };
+        record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = result.status, .content = blocks, .receipt = result.receipt }, .{ .emit_null_optional_fields = false });
+        return record.result_body.?;
+    }
     fn resolveDynamic(self: *Loop, record: *Record, table: *const dynamic.RequestTable, call: provider.ToolCall, host: Host, cancel: ?*provider.CancelToken) ![]const u8 {
         @import("tool_trace.zig").emit(.{ .event = "dynamic_invocation", .call_id = call.id, .tool_id = call.name, .owner = self.scope.owner, .arguments_hash = std.fmt.bytesToHex(record.arguments_hash, .lower) });
         var parsed = table.parse(self.allocator, call.name, call.arguments) catch |err| {
@@ -310,6 +370,7 @@ pub const Loop = struct {
             record.result_body = try self.errorBody("CancelledBeforeDispatch", &parsed.targets);
             return record.result_body.?;
         };
+        if (parsed.entry.authority != .session_targets) return self.resolveHost(record, table, parsed, call, host, cancel);
         if (self.uncertain) {
             record.result_body = try self.errorBody("EarlierToolOutcomeUnknown", &parsed.targets);
             return record.result_body.?;
@@ -382,9 +443,7 @@ pub const Loop = struct {
         }
         // Tool schemas and message framing also occupy context. This is the
         // existing byte/4 estimate, not fabricated provider usage accounting.
-        for (self.request.tools) |definition| if (definition.dynamic) |wire| {
-            bytes = std.math.add(usize, bytes, wire.schema.len + wire.description.len + wire.name.len) catch return error.ToolTranscriptLimit;
-        };
+        bytes = std.math.add(usize, bytes, try provider.catalogTextBytes(self.request.tools)) catch return error.ToolTranscriptLimit;
         const image_tokens = try @import("image_budget.zig").validate(self.request);
         const estimated = (bytes + 3) / 4 + self.request.tools.len * 256 + image_tokens;
         if (bytes > self.limits.max_transcript_bytes) return error.ToolTranscriptLimit;

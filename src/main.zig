@@ -396,6 +396,7 @@ const AiHost = struct {
             errdefer self.allocator.free(draft);
             const saved = store.find(self.display_conversation orelse return) orelse return;
             const saved_id = saved.id;
+            const saved_conversation_id = saved.conversation_id;
             const selected = saved.selected;
             const listed = saved.listed;
             const phase = saved.phase;
@@ -403,7 +404,7 @@ const AiHost = struct {
             const controls = saved.controls;
             saved.controls = .{};
             saved.deinit(self.allocator);
-            saved.* = .{ .id = saved_id, .selected = selected, .listed = listed, .phase = phase, .closed = closed, .tool_results = self.tool_results, .controls = controls, .owner = owner, .current_turn = self.current_turn, .history = self.history, .wire_history = self.wire_history, .stream = self.controller.stream, .last_user_text = self.last_user_text, .last_user_wire = self.last_user_wire, .last_user_attachments = self.last_user_attachments, .last_user_images = self.last_user_images, .draft = draft, .model = self.controller.model };
+            saved.* = .{ .id = saved_id, .conversation_id = saved_conversation_id, .selected = selected, .listed = listed, .phase = phase, .closed = closed, .tool_results = self.tool_results, .controls = controls, .owner = owner, .current_turn = self.current_turn, .history = self.history, .wire_history = self.wire_history, .stream = self.controller.stream, .last_user_text = self.last_user_text, .last_user_wire = self.last_user_wire, .last_user_attachments = self.last_user_attachments, .last_user_images = self.last_user_images, .draft = draft, .model = self.controller.model };
             self.tool_results = @import("ai/tool_results.zig").Store.init(self.allocator);
             self.current_turn = .{};
             self.history = .empty;
@@ -437,7 +438,8 @@ const AiHost = struct {
         self.prompt.set(saved.draft orelse "");
         if (saved.draft) |draft| self.allocator.free(draft);
         const controls = saved.controls;
-        saved.* = .{ .id = selected_id, .listed = loaded_listed, .phase = loaded_phase, .controls = controls, .owner = scope.owner, .stream = @import("ai/card_stream.zig").Stream.init(self.allocator) };
+        const conversation_id = saved.conversation_id;
+        saved.* = .{ .id = selected_id, .conversation_id = conversation_id, .listed = loaded_listed, .phase = loaded_phase, .controls = controls, .owner = scope.owner, .stream = @import("ai/card_stream.zig").Stream.init(self.allocator) };
         self.setFeedback("");
         self.rollback_to_start = false;
         self.image_gate = null;
@@ -2766,7 +2768,13 @@ const AiHost = struct {
         wire = null;
         self.manager.turn_id = next_turn;
         self.request_content_owner = if (owner_scope.owner == .group) .{ .group = .{ .id = @fromBackingInt(@intCast(owner_scope.owner.group)) } } else tab.content_owner;
-        self.request_operation_id = if (process_notifications) |notifications| if (self.notification_window) |window| notifications.reserveAiOperation(window) catch null else null else null;
+        self.request_operation_id = blk: {
+            const notifications = process_notifications orelse break :blk null;
+            const window = self.notification_window orelse break :blk null;
+            const store = if (self.assistant_states) |*value| value else break :blk null;
+            const conversation = store.find(self.request_conversation orelse break :blk null) orelse break :blk null;
+            break :blk notifications.reserveAiConversation(window, conversation.conversation_id) catch null;
+        };
         self.request_cancel = .{};
         self.request_stats = .{ .usage_reported = false };
         self.answer_only = false;
@@ -9578,7 +9586,7 @@ const NotificationWindowHook = struct {
     fn mount(cx: *ui.Cx, scope: *ui.Scope, host: *NotificationHost, workspace: *ws.Workspace, settings: *SettingsHost, nav: *AppNavHost, transfer: *TransferHost) !*NotificationWindowHook {
         const self = try cx.allocator.create(NotificationWindowHook);
         self.* = .{ .host = host, .cx = cx, .workspace = workspace, .settings = settings, .nav = nav, .transfer = transfer, .id = undefined };
-        self.id = host.registerWindow(.{ .context = self, .owns = owns, .activate = activate, .feedback = feedback, .owner_name = ownerName, .result_presented = resultPresented, .transfer_presented = transferPresented }) catch |err| {
+        self.id = host.registerWindow(.{ .context = self, .owns = owns, .activate = activate, .activate_ai = activateAi, .feedback = feedback, .owner_name = ownerName, .result_presented = resultPresented, .transfer_presented = transferPresented }) catch |err| {
             cx.allocator.destroy(self);
             return err;
         };
@@ -9686,6 +9694,28 @@ const NotificationWindowHook = struct {
             return true;
         }
         return false;
+    }
+    fn activateAi(raw: *anyopaque, conversation: @import("host/identity.zig").ConversationId) bool {
+        const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
+        if (self.workspace.shutting_down) return false;
+        const ai = self.nav.ai orelse return false;
+        const store = if (ai.assistant_states) |*value| value else return false;
+        const state = store.findConversation(conversation) orelse return false;
+        if (state.closed) return false;
+        switch (state.owner) {
+            .session => |id| {
+                const tab = ai.tabForSession(id) orelse return false;
+                if (tab.closing) return false;
+            },
+            .group => |id| {
+                const roster = ai.roster orelse return false;
+                _ = roster.findById(std.math.cast(u32, id) orelse return false) orelse return false;
+            },
+        }
+        AiHost.selectConversation(ai, state.id);
+        if (self.nav.app_runtime) |app| app.win.activate();
+        self.cx.requestRedraw();
+        return true;
     }
     fn feedback(raw: *anyopaque, message: []const u8) void {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));

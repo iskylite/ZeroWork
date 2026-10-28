@@ -5,11 +5,13 @@ const config = @import("../config/config.zig");
 const platform = @import("../platform/notifications.zig");
 pub const notifications = @import("notification_coordinator.zig");
 pub const ContentOwner = notifications.Owner;
+const ConversationId = @import("identity.zig").ConversationId;
 pub const WindowId = enum(u64) { _ };
 pub const Window = struct {
     context: *anyopaque,
     owns: *const fn (*anyopaque, notifications.Target) bool,
     activate: *const fn (*anyopaque, notifications.Target) bool,
+    activate_ai: ?*const fn (*anyopaque, ConversationId) bool = null,
     feedback: *const fn (*anyopaque, []const u8) void,
     owner_name: ?*const fn (*anyopaque, ContentOwner) []const u8 = null,
     result_presented: ?*const fn (*anyopaque, notifications.Kind, ContentOwner) bool = null,
@@ -33,7 +35,7 @@ const Registration = struct { id: WindowId, value: Window, focused: bool = true 
 pub const ActionHandler = struct { context: *anyopaque, invoke: *const fn (*anyopaque, notifications.NotificationEvent) anyerror!void };
 const RegisteredAction = struct { id: u64, owner: ContentOwner, kind: notifications.ActionKind, handler: ActionHandler };
 const PermissionOrigin = struct { request_id: u64, window: WindowId };
-const AiOrigin = struct { operation_id: u64, window: WindowId };
+const AiOrigin = struct { operation_id: u64, window: WindowId, conversation: ?ConversationId = null };
 pub const Poll = struct { consumed: usize = 0, settings_changed: bool = false };
 
 pub const Host = struct {
@@ -118,12 +120,31 @@ pub const Host = struct {
         if (@import("../platform/runtime_mode.zig").automation) std.debug.print("NOTIFICATION_PERMISSION_REQUESTED {{\"request_id\":{d},\"window\":{d}}}\n", .{ id, @backingInt(origin) });
     }
     pub fn reserveAiOperation(self: *Host, origin: WindowId) !u64 {
+        return self.reserveAi(origin, null);
+    }
+    pub fn reserveAiConversation(self: *Host, origin: WindowId, conversation: ConversationId) !u64 {
+        if (!conversation.valid()) return error.InvalidConversationIdentity;
+        return self.reserveAi(origin, conversation);
+    }
+    fn reserveAi(self: *Host, origin: WindowId, conversation: ?ConversationId) !u64 {
         _ = self.windowFor(origin) orelse return error.NotificationWindowClosed;
         if (self.next_ai_operation == 0) return error.NotificationOperationIdentityExhausted;
         const id = self.next_ai_operation;
-        try self.ai_origins.append(self.allocator, .{ .operation_id = id, .window = origin });
+        try self.ai_origins.append(self.allocator, .{ .operation_id = id, .window = origin, .conversation = conversation });
         self.next_ai_operation = if (id == std.math.maxInt(u64)) 0 else id + 1;
         return id;
+    }
+    fn activateAi(self: *Host, target: notifications.Target) bool {
+        for (self.ai_origins.items) |origin| if (origin.operation_id == target.operation_id) {
+            const window = self.windowFor(origin.window) orelse return false;
+            if (origin.conversation) |conversation| {
+                const activate = window.activate_ai orelse return false;
+                return activate(window.context, conversation);
+            }
+            // Compatibility for existing non-conversation API consumers.
+            return window.activate(window.context, target);
+        };
+        return false;
     }
     pub fn refreshAuthorization(self: *Host) !void {
         _ = self.driver.refreshAuthorization() catch |err| switch (err) {
@@ -433,6 +454,11 @@ pub const Host = struct {
         if (action_index >= record.event.actions.len) return error.UnknownNotificationAction;
         const action = record.event.actions[action_index];
         if (action.kind == .locate_owner) {
+            if (std.mem.startsWith(u8, record.event.definition_id, "host.ai_")) {
+                if (!record.owner_ended and self.activateAi(.{ .owner = record.event.owner.content, .kind = .ai_ready, .operation_id = record.event.operation_id, .attempt_or_turn_id = record.event.attempt_id })) return;
+                self.feedbackFor(null, "该提醒所属对话已不可用");
+                return error.NotificationOwnerEnded;
+            }
             if (!record.owner_ended) for (self.windows.items) |window| {
                 if (window.value.activate(window.value.context, .{ .owner = record.event.owner.content, .kind = if (std.mem.eql(u8, record.event.definition_id, "host.transfer_done")) .transfer_done else if (std.mem.startsWith(u8, record.event.definition_id, "host.ai_")) .ai_ready else .reconnect, .operation_id = record.event.operation_id, .attempt_or_turn_id = record.event.attempt_id })) return;
             };
@@ -533,10 +559,7 @@ pub const Host = struct {
                         const original = self.coordinator.targetFor(value.event_id);
                         if (original != null and std.meta.eql(original.?, value.target)) {
                             if (value.target.kind == .ai_ready) {
-                                for (self.ai_origins.items) |origin| if (origin.operation_id == value.target.operation_id) {
-                                    if (self.windowFor(origin.window)) |window| activated = window.activate(window.context, value.target);
-                                    break;
-                                };
+                                activated = self.activateAi(value.target);
                             } else {
                                 for (self.windows.items) |window| {
                                     if (window.value.activate(window.value.context, value.target)) {
