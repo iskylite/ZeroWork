@@ -254,3 +254,9 @@ body:not([data-functional-component]) .app-window[data-size=compact]{width:860px
 
 /* Measure the welcome viewport without changing transcript alignment or scrolling. */
 .assistant-body{container-name:ai-welcome;container-type:size}
+
+/* Terminal content cards use the surface and spacing, without an outer stroke. */
+#app .terminal-pane{border:0}
+
+/* Join the route at marker centres; labels never supply the connecting stroke. */
+.chain-nodes{--chain-axis:18.5px;--chain-half-marker:8.5px}.chain-nodes>.member{position:relative}.chain-nodes>.member:not(:last-child):after,.chain-nodes>.member~.member:before,.chain-connector:before{content:"";position:absolute;left:var(--chain-axis);width:1px;background:var(--muted);opacity:.45;transform:translateX(-50%);pointer-events:none}.chain-nodes>.member:not(:last-child):after{top:calc(50% + var(--chain-half-marker));bottom:0}.chain-nodes>.member~.member:before{top:0;height:calc(50% - var(--chain-half-marker))}.chain-connector{position:relative;padding-left:30px}.chain-connector:before{top:0;bottom:0}

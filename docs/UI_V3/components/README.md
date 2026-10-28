@@ -59,10 +59,10 @@
 
 ### 本轮实际验证
 
-IAB 1280×720 CSS px，DPR 2：API 协议下拉切到 Anthropic；文件页签 → 两项复选 → 计数2；任务模拟失败到40% → 关闭失败模拟 → 继续 → 暂停（进度保留）；连接失败 → 通知计数1 → 通知中心出现对应错误；Popover 测得 x775/y384/240×96.5，位于1280×720可见画布内；确认 Modal 实际打开并取消。已保存并查看 [新增组件状态图](verification/collections-async-notifications.png) 和 [模态窗图](verification/modal-contained.png)。`node --check components.js` 通过。
+IAB 1280×720 CSS px，DPR 2：API 协议下拉切到 Anthropic；文件页签 → 两项复选 → 计数2；任务模拟失败到40% → 关闭失败模拟 → 继续 → 暂停（进度保留）；连接失败 → 通知计数1 → 通知中心出现对应错误；Popover 测得 x775/y384/240×96.5，位于1280×720可见画布内；确认 Modal 实际打开并取消。相关状态见 [新增组件原型](index.html) 和 [模态窗原型](index.html)。`node --check components.js` 通过。
 
 展板仅是可编辑的组件规范，系统授权/实际网络/文件/剪贴板行为由业务页说明和后续原生实现负责。通用树表格示例不冒充虚拟化的性能验证。本轮已核对当前 Zenit 的 `ui.widgets` 导出，未更换项目工具链或修改原生实现。
 
-补充实测：自定义字体输入 `Custom Mono` → Enter 后触发器更新；Tooltip 聚焦显示，位于视口内（x671/y384/240×46）；Sheet 输入0显示范围错误，改为5保存，重新打开读得5，Escape关闭并回返触发按钮。Sheet 遮罩为可见画布交集（x40/y8/1200×704）。新增 [Tooltip](verification/tooltip-contained.png) 与 [Sheet](verification/sheet-contained.png) 视口截图，避免整页截图移动固定图层造成误判。
+补充实测：自定义字体输入 `Custom Mono` → Enter 后触发器更新；Tooltip 聚焦显示，位于视口内（x671/y384/240×46）；Sheet 输入0显示范围错误，改为5保存，重新打开读得5，Escape关闭并回返触发按钮。Sheet 遮罩为可见画布交集（x40/y8/1200×704）。查看 [Tooltip](index.html) 与 [Sheet](index.html) 交互原型；历史视口截图已清理。
 
 本轮实际复测了 Select 单步键盘移动、分段/Tab 方向键、Modal 连续打开后 Esc 的取消语义、Sheet 草稿取消/保存、滑块、任务失败重试与通知列表。860px 评审画布与滚动中浮层均有界；尺寸选择器位于产品外。详细路径、测量和原生 API 差异见 [专项报告](../verification/settings-components-audit.md)。

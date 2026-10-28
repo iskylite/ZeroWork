@@ -31,7 +31,7 @@ try {
   await h.sleep(6300);await absent('notifications.toast.0');
   await visible('notifications.unread');await click('toolbar.notifications');
   const retained=await visible('notifications.history.record');assert.equal(retained.rect.h,68);await absent('notifications.unread');await absent('notifications.history.details');await capture('retained-after-expiry');
-  await click('notifications.history.expand');assert(text(await visible('notifications.history.details')).includes('仅验证原生展示'));await capture('expanded-details');
+  await click('notifications.history.expand');const detailsText=text(await visible('notifications.history.details'));assert(detailsText.includes('仅验证原生展示'));assert(!detailsText.includes('有结果可查看')&&!detailsText.includes('prod-web-01'));await capture('expanded-details');
   assert.equal((await h.focused()).test_id,'notifications.history.expand');
   await click('notifications.history.expand');await absent('notifications.history.details');assert.equal((await visible('notifications.history.record')).rect.h,68);
   await click('notifications.history.action');await absent('notifications.history');assert(text(await visible('fixture.result')).includes('已打开结果'));
@@ -50,6 +50,8 @@ try {
   await click('notifications.history.expand');const longDetails=await visible('notifications.history.details');assert(text(longDetails).includes('Long notification content for native scroll verification.'));const longViewport=await visible('notifications.history.viewport');assert(longDetails.rect.h>longViewport.rect.h);
   const expandedPanel=(await visible('notifications.history')).rect;assert(expandedPanel.y+expandedPanel.h<=481);await capture('long-details-bounded');await h.scrollAt(longViewport.rect.x+20,longViewport.rect.y+80,0,-100000);await h.sleep(150);const lastAction=(await h.query('notifications.history.action')).filter(shown).at(-1);assert(lastAction.rect.y>=longViewport.rect.y&&lastAction.rect.y+lastAction.rect.h<=longViewport.rect.y+longViewport.rect.h+0.5);await capture('long-details-bottom');await h.scrollAt(longViewport.rect.x+20,longViewport.rect.y+80,0,100000);await h.sleep(150);
   await click('notifications.history.expand');assert.equal((await visible('notifications.history.record')).rect.h,68);
+  await click('notifications.history.clear');await click('notifications.history.close');await click('fixture.connection-failure');await click('toolbar.notifications');await visible('notifications.history.record');await absent('notifications.history.expand');await absent('notifications.history.details');await capture('no-extra-details');
+  report.checks.push('no expansion control without independent details; expanded details omit title and owner');
   report.checks.push('8-second actionable countdown decreases and expires','expired and dismissed records remain in history','bell unread dot clears on opening','history action dispatches original fact','persistent error has no countdown','history fits minimum window and clear works','68-point collapsed rows, inline actions, full details expand and collapse with keyboard focus','three compact rows and 4000-character details remain bounded');
  }else{
   await click('toolbar.quick_connect');assert(text(await visible('quick.empty.title')).includes('输入 SSH 地址，直接连接'));await absent('quick.clear');await capture('quick-initial');

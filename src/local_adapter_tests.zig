@@ -1,6 +1,10 @@
 //! Real PTY + Ghostty + SessionHost integration, with no windows or user data.
 const std = @import("std");
 const local = @import("local/adapter.zig");
+// Keep worker queue regressions discoverable under a narrow test filter.
+comptime {
+    _ = @import("local/adapter.zig");
+}
 const host = @import("host/session_host.zig");
 const plugins = @import("host/plugin_registry.zig");
 const terminal = @import("host/terminal_service.zig");

@@ -115,37 +115,25 @@ AI 状态浮条:   100×14 透明梯形（只容三点），Pane 顶边居中内
 
 **主工作区（侧栏展开 · 合并式标题栏）**
 
-![主工作区](mockups/mockup-main.png)
-
 标题栏与 Tab 合并单行 40px；右侧图标区 ⚡⌘K / ⇅传输 / ✨AI⌘J / ⚙⌘,；状态栏 `ProxyJump` 胶囊**可点击查看通信链路**（见 §2.6）。
 
 **侧栏折叠态（⌘B · 48px 图标栏）**
-
-![侧栏折叠](mockups/mockup-sidebar-collapsed.png)
 
 ⌘B 在 224px 展开 ⇄ 48px 图标栏间切换；折叠态 hover 图标显示主机详情气泡，最大化终端面积。
 
 **窗口缩放自适应（<1100px 自动折叠侧栏）**
 
-![窗口缩放](mockups/mockup-resize.png)
-
 窄窗口下：侧栏自动折叠、状态栏低优先级项隐藏、AI 浮窗锚定 Pane 顶部中央不偏移（§2.0c）。
 
 **Tab 中键菜单（右键 = 粘贴）**
-
-![Tab中键菜单](mockups/mockup-tab-context.png)
 
 右键打开页签菜单：重命名/新建同主机会话 @new/镜像复制 @dup/编辑连接配置/查看跳板链路/会话主题/开启 SOCKS5 转发/页签颜色/加入终端组/显示时间戳/导出会话日志/关闭其他/断开并关闭；中键 = 直接关闭页签；双击 = 内联重命名。
 
 **⌘K 快速连接**
 
-![快速连接](mockups/mockup-quickconnect.png)
-
 Spotlight 风格：模糊搜索 + 分组徽标 + 最近连接；底部支持 `user@host:port` 即兴直连，⌘↵ 在新分栏打开。
 
 **断线自动重连**
-
-![断线重连](mockups/mockup-reconnect.png)
 
 顶部横幅（不占终端文本平面）：点名中断跳板、倒计时、⌘R 立即重连；VT 网格与滚动历史完整保留；5 次失败后保留现场可 @log 复原。
 
@@ -153,13 +141,9 @@ Spotlight 风格：模糊搜索 + 分组徽标 + 最近连接；底部支持 `us
 
 **左侧时间戳 + 矩形块选 + 历史回溯**
 
-![终端增强](mockups/mockup-terminal-enhance.png)
-
 时间戳为最左列 gutter，与命令行垂直对齐、不参与复制；⌥+拖拽矩形块选跨行不强制整行；顶部时间轴滑杆进入只读历史回溯（RawStreamTap 重放）。当前提示符输入行整行相对高亮（accent 6% 底 + 左缘 3px 竖条，见 mockup-main/terminal-enhance），设置 `ui.input_line_highlight` 可关。
 
 **命令自动补全（App 级）**
-
-![命令补全](mockups/mockup-completion.png)
 
 ghost-text 内联建议（frecency = 频率 × 时间衰减），→ 接受；⌘; 全量菜单带来源徽标（历史/路径缓存/内置表）；纯本地预测零延迟，与远端 tab 补全正交，可开关。
 
@@ -167,45 +151,31 @@ ghost-text 内联建议（frecency = 频率 × 时间衰减），→ 接受；�
 
 **@ 指令菜单**
 
-![@菜单](mockups/mockup-commands.png)
-
 键入 `@xx` 实时过滤（只列匹配项 + 底部计数「共 N 条匹配」）；单独键入 `@` 回全量 14 条；菜单锚光标行下方，超高时内部滚动。
 
 **触发规则：仅提示符行缓冲区为空时键入 `@` 生效**；`@` 前有空格或文本（如 `echo @up`）、全屏程序（vim/htop）中均不触发；`@@` 转义字面 @。
 
 **@up 上传**
 
-![@up](mockups/mockup-at-up.png)
-
 `@up [本地路径]` → **统一传输面板（上传模式，与拖拽/⌘U 同组件）**；省略路径弹出文件选择（最近使用下拉 + macOS 原生选择器，支持多选/目录）；远程目录默认跟随终端当前目录。
 
 **@dl 下载**
-
-![@dl](mockups/mockup-at-dl.png)
 
 `@dl <远程路径> [本地目录]` → **统一传输面板（下载模式）**：保存目录可选（默认 ~/Downloads）、**文件名可重命名**、来源链路标注，↵ 即走 SFTP 独立连接。
 
 **@grp 终端组**
 
-![@grp](mockups/mockup-at-grp.png)
-
 `@grp k8s-nodes` → 创建/加入终端组；Tab 角标与 Pane 边框同步染组色，提示其他会话加入方式。
 
 **@new 基于当前主机新建会话**
-
-![@new](mockups/mockup-at-new.png)
 
 `@new` → 按当前会话的主机配置新建会话（走其启动命令）；**当前会话在终端组内时新会话自动入组**；链路凭据内存复用，无需二次认证。
 
 **@dup 复制（镜像）当前会话**
 
-![@dup](mockups/mockup-at-dup.png)
-
 `@dup` → 镜像当前会话状态：同主机 + 自动 `cd` 到当前目录（OSC 7 同步）；与 `@new` 的区别是 @new 为全新初始化、@dup 携带现场；组内同样自动入组。
 
 **@help 指令速查**
-
-![@help](mockups/mockup-at-help.png)
 
 全部指令一览浮层 + 触发规则说明。
 
@@ -215,13 +185,9 @@ ghost-text 内联建议（frecency = 频率 × 时间衰减），→ 接受；�
 
 **收起态：44×10 迷你状态胶囊（三点状态机）**
 
-![AI收起态](mockups/mockup-ai-collapsed.png)
-
 Pane 顶边居中内嵌 100×14 透明梯形，只容三个状态点。待机=微光；执行中=蓝青紫轮转；成功=绿 3s；失败=红常亮；待确认=琥珀呼吸。hover / 点击 / `@ai` / ⌘J 展开。
 
 **展开态：悬浮窗（权限模式 + 模型配置 + 远程文件附加）**
-
-![AI浮窗](mockups/mockup-ai-float.png)
 
 - 助手归属只读显示：活动会话或活动会话组；模型调用决定组内目标；📎 附加远程文件（SFTP 路径选择器，头部 4KB 注入上下文）；
 - 权限仅两档：**确认后执行（默认）/ 自动执行(白名单)**。只读命令两种模式都自动执行；黑名单任何模式仅可复制；
@@ -231,39 +197,27 @@ Pane 顶边居中内嵌 100×14 透明梯形，只容三个状态点。待机=�
 
 ### 2.5 终端组与广播
 
-![广播输入](mockups/mockup-broadcast.png)
-
 四宫格组色描边 + 底部广播条（成员 chips、⌘⇧I/@sync 开关）；AI `exec_group` 整组扇出并聚合 diff。
 
 ### 2.6 文件传输与链路查看
 
 **拖拽上传 HUD（纯 SFTP · 信息分层）**
 
-![拖拽上传](mockups/mockup-dragdrop.png)
-
 链路面包屑（本机→Bastion-01→VPC-Transit→DB-Master）+ 引擎能力 chips（独立传输连接 · 不占用终端 / 16×64KB 窗口 / 断点续传）。
 
 **状态栏 ProxyJump 胶囊点击 → 通信链路弹层**
-
-![链路查看](mockups/mockup-linkchain.png)
 
 逐跳展开：地址/端口、登录用户、密钥算法、单向 RTT 与端到端累计、在线状态；节点详情统一复用，重新连接会重建完整链路。底部保留测试全链路、复制链路报告、编辑配置入口。2026-10-14 原型模块契约见 [全量原型检查与变更](../DEVELOPMENT/V0.2_STATUS.md)。
 
 **传输管理器**
 
-![传输管理器](mockups/mockup-sftp.png)
-
 队列 + 速度曲线 + 暂停/恢复/重试 + MD5 校验状态 + 多跳链路标注。
 
 **SSH 双因素动态验证码（2FA/OTP）**
 
-![OTP验证](mockups/mockup-otp.png)
-
 密码/密钥通过后出现 keyboard-interactive 挑战 → 6 位动态码模态（TOTP 30s 倒计时环）；可配置 `totp_secret` 本地 RFC 6238 自动填码仅需确认；跳板链任意一跳可独立要求 OTP（§5.6）。
 
 **交互式密码 / 密钥口令 / 主机密钥确认（统一认证模态框架）**
-
-![交互式密码](mockups/mockup-auth-pwd.png)
 
 除 OTP 外，password auth、加密私钥口令、known_hosts 首连 TOFU 指纹确认均复用同一模态框架（§5.6 五类交互表）。“保存到 hosts.toml” 为首版明文方案的显式勾选。
 
@@ -271,11 +225,7 @@ Pane 顶边居中内嵌 100×14 透明梯形，只容三个状态点。待机=�
 
 **ProxyJump 多级跳板拓扑向导**
 
-![ProxyJump](mockups/mockup-proxyjump.png)
-
 **新建连接（多协议插件 + 启动命令）**
-
-![多协议](mockups/mockup-protocols.png)
 
 协议选择（SSH/SFTP 首发、FTP/VNC Beta、RDP/KVM 规划）+ 启动命令序列（`cd /opt/deploy` 等按序注入，支持 expect-send 对）。
 
@@ -287,35 +237,19 @@ Pane 顶边居中内嵌 100×14 透明梯形，只容三个状态点。待机=�
 
 **外观与主题**（主题卡片 + 字重 Light/Regular/Medium/Bold 真实变体）
 
-![设置-外观](mockups/mockup-settings.png)
-
 **快捷键**（可重录制；含鼠标交互约定）
-
-![设置-快捷键](mockups/mockup-settings-keys.png)
 
 **SSH 与网络**（保活/超时/重连退避/输入缓存回放）
 
-![设置-SSH](mockups/mockup-settings-ssh.png)
-
 **文件传输**（独立传输连接/共享通道限速/窗口/续传/MD5）
-
-![设置-传输](mockups/mockup-settings-transfer.png)
 
 **AI 辅助**（provider/endpoint/key/model/effort/context/权限模式/脱敏/Ollama）
 
-![设置-AI](mockups/mockup-settings-ai.png)
-
 **协议插件**（SSH/SFTP 已启用；FTP/VNC Beta；RDP/KVM 规划）
-
-![设置-插件](mockups/mockup-settings-plugins.png)
 
 **通知**（传输完成/断线重连/AI 就绪/Bell/勿扰时段）
 
-![设置-通知](mockups/mockup-settings-notify.png)
-
 **数据与日志**（明文配置警示/环形缓冲/快照间隔/导出/清空）
-
-![设置-数据](mockups/mockup-settings-data.png)
 
 ---
 
@@ -382,7 +316,6 @@ RECONNECTING ──5次失败──> DEAD (横幅: "重连失败 [重试] [保�
 
 **场景 B · 会话已结束**（远端 exit / 对端关闭 / 认证失败放弃）：页签进入**只读墓碑态**：
 
-![会话墓碑态](mockups/mockup-session-ended.png)
 - 终端内容完整保留只读可滚动/复制/搜索；光标消失，输入不再发送；
 - 顶部横幅：`⏹ 会话已结束 · exit 0 · 14:32:07` + `[↻ 重新连接]` `[📜 回溯历史]` `[✕ 关闭]`；
 - `@log` / ⌘⇧F 照常可用；墓碑态不产生新日志写入；
@@ -482,7 +415,6 @@ password/publickey 认证 → 服务端返回 "partial success"
 
 **可配置项**（连接配置「🔀 端口转发」区 + 信息卡「改端口/出口」转发配置模态）：
 
-![转发配置模态](mockups/mockup-socks5-config.png)
 | 配置项 | 默认 | 说明 |
 | :--- | :--- | :--- |
 | 本地端口 | 1080（冲突自动 +1 探测） | 1-65535 |
@@ -512,8 +444,6 @@ password/publickey 认证 → 服务端返回 "partial success"
 | 状态栏右侧 | `🧦 后台转发 ×N` | 全局计数（N>0 才显示），点击列出全部转发并可停止 |
 | 信息卡 | 监听/出口/活跃连接/累计流量/协议范围 + 测试/复制/改配置/停止 | 详见 mockup-socks5.png |
 - 转发随其宿主会话（前台 Tab 或后台转发会话）关闭而释放；
-![转发入口矩阵](mockups/mockup-socks5-entry.png)
-
 ---
 
 ## 6. 文件传输体系（纯 SFTP · 统一传输面板）
@@ -616,19 +546,19 @@ pub const Session = struct {   // 统一会话契约
 ### 9.2 指令表（客户端本地执行，不进远端 shell）
 | 指令 | 语义 | 效果图 |
 | :--- | :--- | :--- |
-| `@up [本地路径]` | 统一传输面板·上传（**省略路径弹文件选择**：最近列表+原生选择器多选） | mockups/mockup-at-up.png |
-| `@dl <远程路径> [本地目录]` | 统一传输面板·下载（**保存目录可选 + 重命名**，默认 ~/Downloads） | mockups/mockup-at-dl.png |
-| `@ai [问题]` | 展开 AI 浮窗（可带问题） | mockups/mockup-ai-float.png |
-| `@grp <组名>` | 当前会话加入/创建终端组 | mockups/mockup-at-grp.png |
-| `@new` | 基于当前主机新建会话；**在组内则自动入组**；凭据复用免二次认证 | mockups/mockup-at-new.png |
-| `@pin` | 在终端组内置顶/取消置顶当前会话（组摘要优先成员；不决定 AI 执行或远程文件目标） | mockups/mockup-broadcast.png |
-| `@socks on\|off [端口]` | 当前会话 SOCKS5 动态转发开关（默认 1080；出口=链路末端） | mockups/mockup-socks5.png |
-| `@theme [名称]` | 会话级主题切换（无参弹选择浮条；default 恢复全局） | mockups/mockup-theme-picker.png |
-| `@dup` | 复制（镜像）当前会话：同主机 + 自动 cd 当前目录（OSC 7）；组内自动入组 | mockups/mockup-at-dup.png |
-| `@sync on\|off` | 广播输入开关 | mockups/mockup-broadcast.png |
-| `@ts on\|off` | 时间戳 gutter 开关 | mockups/mockup-terminal-enhance.png |
-| `@log` | 历史回溯模式 | mockups/mockup-terminal-enhance.png |
-| `@help` | 指令速查浮层 | mockups/mockup-at-help.png |
+| `@up [本地路径]` | 统一传输面板·上传（**省略路径弹文件选择**：最近列表+原生选择器多选） | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| `@dl <远程路径> [本地目录]` | 统一传输面板·下载（**保存目录可选 + 重命名**，默认 ~/Downloads） | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| `@ai [问题]` | 展开 AI 浮窗（可带问题） | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| `@grp <组名>` | 当前会话加入/创建终端组 | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| `@new` | 基于当前主机新建会话；**在组内则自动入组**；凭据复用免二次认证 | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| `@pin` | 在终端组内置顶/取消置顶当前会话（组摘要优先成员；不决定 AI 执行或远程文件目标） | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| `@socks on\|off [端口]` | 当前会话 SOCKS5 动态转发开关（默认 1080；出口=链路末端） | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| `@theme [名称]` | 会话级主题切换（无参弹选择浮条；default 恢复全局） | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| `@dup` | 复制（镜像）当前会话：同主机 + 自动 cd 当前目录（OSC 7）；组内自动入组 | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| `@sync on\|off` | 广播输入开关 | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| `@ts on\|off` | 时间戳 gutter 开关 | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| `@log` | 历史回溯模式 | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| `@help` | 指令速查浮层 | [HTML 状态索引](../UI_V3/SCREENS.md) |
 
 ### 9.3 App 级命令补全（可开关，不依赖远端 tab）
 - **数据源三级融合**：本会话历史（frecency = 频率 × 时间衰减排序）+ SFTP 路径缓存 + 内置静态表（~500 常见命令/子命令/flag）；
@@ -683,11 +613,10 @@ pub const Session = struct {   // 统一会话契约
 
 | 菜单 | 触发 | 职责域 | 内容（仅列） | 效果图 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Tab 页签菜单** | Tab 右键 | 会话生命周期与配置 | 重命名 · 新建同主机会话(@new) · 镜像复制(@dup) · 编辑连接配置 · 查看跳板链路 · 页签颜色 · 加入终端组 · 时间戳开关 · 导出会话日志 · 关闭其他 · 断开并关闭 | mockup-tab-context.png |
-| **Terminal 文本菜单** | 终端区中键 | 文本/视图操作 | 问 AI(附选中) · 复制 · 粘贴 · 矩形块选模式 · 时间戳开关 · 历史回溯 · 终端搜索 · 导出选中 | mockup-term-context.png |
+| **Tab 页签菜单** | Tab 右键 | 会话生命周期与配置 | 重命名 · 新建同主机会话(@new) · 镜像复制(@dup) · 编辑连接配置 · 查看跳板链路 · 页签颜色 · 加入终端组 · 时间戳开关 · 导出会话日志 · 关闭其他 · 断开并关闭 | [HTML 状态索引](../UI_V3/SCREENS.md) |
+| **Terminal 文本菜单** | 终端区中键 | 文本/视图操作 | 问 AI(附选中) · 复制 · 粘贴 · 矩形块选模式 · 时间戳开关 · 历史回溯 · 终端搜索 · 导出选中 | [HTML 状态索引](../UI_V3/SCREENS.md) |
 
-![终端菜单](mockups/mockup-term-context.png) ![侧栏主机菜单](mockups/mockup-sidebar-context.png) |
-| **侧栏主机菜单** | 主机行右键 | 主机资产管理 | 新标签连接 · 新窗口连接 · 复制配置(克隆) · 修改配置 · 查看历史会话日志 · 置顶分组 · 移动分组 · 删除主机 | mockup-sidebar-context.png |
+| **侧栏主机菜单** | 主机行右键 | 主机资产管理 | 新标签连接 · 新窗口连接 · 复制配置(克隆) · 修改配置 · 查看历史会话日志 · 置顶分组 · 移动分组 · 删除主机 | [HTML 状态索引](../UI_V3/SCREENS.md) |
 
 > 区分原则：Tab=会话实例、Terminal=文本内容、侧栏=主机资产；**复制/粘贴/问 AI 只出现在 Terminal 菜单**，连接/配置只出现在 Tab 与侧栏菜单，零职责重叠。Tab 中键=直接关闭（不弹菜单）。
 
@@ -695,12 +624,12 @@ pub const Session = struct {   // 统一会话契约
 
 **Tab 页签**：
 - **左键**：切换；左键拖拽：排序；**双击**：重命名内联编辑；
-- **右键**：页签菜单（重命名/新建同主机会话 @new/镜像复制 @dup/编辑连接配置/查看跳板链路/页签颜色/加入终端组/显示时间戳/导出日志/关闭其他）（效果图 mockup-tab-context.png）；
+- **右键**：页签菜单（重命名/新建同主机会话 @new/镜像复制 @dup/编辑连接配置/查看跳板链路/页签颜色/加入终端组/显示时间戳/导出日志/关闭其他）（效果图 [HTML 状态索引](../UI_V3/SCREENS.md)）；
 - **中键**：**直接关闭页签**（浏览器惯例）。
 
 **Terminal 区域**：
 - **右键**：有选区 → **复制**；无选区 → 粘贴（⌘V 同效）；
-- **中键**：终端上下文菜单（问 AI/复制/粘贴/矩形块选模式/时间戳开关/历史回溯/导出选中）（效果图 mockup-term-context.png）；
+- **中键**：终端上下文菜单（问 AI/复制/粘贴/矩形块选模式/时间戳开关/历史回溯/导出选中）（效果图 [HTML 状态索引](../UI_V3/SCREENS.md)）；
 - ⌥+拖拽：矩形块选；双击选词；三击选逻辑行。
 
 ---
@@ -847,103 +776,9 @@ hdiutil create -volname ZeroWork -srcfolder ZeroWork.app -ov -format UDZO ZeroWo
 
 ⌘F 打开当前会话搜索条，只搜滚动区文本，不搜时间戳 gutter。Enter 下一条，⇧Enter 上一条，Esc 关闭。
 
-![终端搜索](mockups/mockup-search.png)
+## 18. 可编辑效果稿入口
 
-## 18. 效果图总索引（全 47 张，与 html/ 源文件同名一一对应）
-
-![ai-collapsed](mockups/mockup-ai-collapsed.png)
-
-![ai-exec](mockups/mockup-ai-exec.png)
-
-![ai-float](mockups/mockup-ai-float.png)
-
-![at-dl](mockups/mockup-at-dl.png)
-
-![at-dup](mockups/mockup-at-dup.png)
-
-![at-grp](mockups/mockup-at-grp.png)
-
-![at-help](mockups/mockup-at-help.png)
-
-![at-new](mockups/mockup-at-new.png)
-
-![at-up](mockups/mockup-at-up.png)
-
-![auth-pwd](mockups/mockup-auth-pwd.png)
-
-![broadcast](mockups/mockup-broadcast.png)
-
-![close-confirm](mockups/mockup-close-confirm.png)
-
-![commands](mockups/mockup-commands.png)
-
-![completion](mockups/mockup-completion.png)
-
-![conflict](mockups/mockup-conflict.png)
-
-![connect-confirm](mockups/mockup-connect-confirm.png)
-
-![dragdrop](mockups/mockup-dragdrop.png)
-
-![empty](mockups/mockup-empty.png)
-
-![history-list](mockups/mockup-history-list.png)
-
-![linkchain](mockups/mockup-linkchain.png)
-
-![main](mockups/mockup-main.png)
-
-![otp](mockups/mockup-otp.png)
-
-![protocols](mockups/mockup-protocols.png)
-
-![proxyjump](mockups/mockup-proxyjump.png)
-
-![quickconnect](mockups/mockup-quickconnect.png)
-
-![reconnect](mockups/mockup-reconnect.png)
-
-![resize](mockups/mockup-resize.png)
-
-![search](mockups/mockup-search.png)
-
-![session-ended](mockups/mockup-session-ended.png)
-
-![settings-ai](mockups/mockup-settings-ai.png)
-
-![settings-data](mockups/mockup-settings-data.png)
-
-![settings-keys](mockups/mockup-settings-keys.png)
-
-![settings-notify](mockups/mockup-settings-notify.png)
-
-![settings-plugins](mockups/mockup-settings-plugins.png)
-
-![settings-ssh](mockups/mockup-settings-ssh.png)
-
-![settings-transfer](mockups/mockup-settings-transfer.png)
-
-![settings](mockups/mockup-settings.png)
-
-![sftp](mockups/mockup-sftp.png)
-
-![sidebar-collapsed](mockups/mockup-sidebar-collapsed.png)
-
-![sidebar-context](mockups/mockup-sidebar-context.png)
-
-![socks5-config](mockups/mockup-socks5-config.png)
-
-![socks5-entry](mockups/mockup-socks5-entry.png)
-
-![socks5](mockups/mockup-socks5.png)
-
-![tab-context](mockups/mockup-tab-context.png)
-
-![term-context](mockups/mockup-term-context.png)
-
-![terminal-enhance](mockups/mockup-terminal-enhance.png)
-
-![theme-picker](mockups/mockup-theme-picker.png)
+历史效果图和截图已清理。当前设计通过[设计中心](../UI_V3/index.html)、[状态索引](../UI_V3/SCREENS.md)及各模块 HTML/CSS/JS 查看；旧版本外观可查阅 [V2 HTML 原型](prototypes/v2/index-dark.html)。
 
 ---
 

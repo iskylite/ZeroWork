@@ -223,6 +223,15 @@ pub fn build(b: *std.Build) void {
     auth_preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
     b.step("auth-challenge-preview", "Build isolated retained authentication component acceptance window").dependOn(&b.addInstallArtifact(auth_preview, .{}).step);
 
+    const connection_progress_preview = b.addExecutable(.{ .name = "connection-progress-preview", .root_module = b.createModule(.{ .root_source_file = b.path("src/connection_progress_preview_runner.zig"), .target = target, .optimize = optimize }) });
+    zenit.attach(zenit_dep, connection_progress_preview);
+    connection_progress_preview.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
+    connection_progress_preview.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
+    connection_progress_preview.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+    connection_progress_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
+    connection_progress_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+    b.step("connection-progress-preview", "Build isolated production connection progress view").dependOn(&b.addInstallArtifact(connection_progress_preview, .{}).step);
+
     const events_preview = b.addExecutable(.{ .name = "transfer-events-preview", .root_module = b.createModule(.{ .root_source_file = b.path("src/transfer_events_native_fixture.zig"), .target = target, .optimize = optimize }) });
     zenit.attach(zenit_dep, events_preview);
     events_preview.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
@@ -539,11 +548,15 @@ pub fn build(b: *std.Build) void {
     }
 
     const forward_acceptance = b.step("forward-acceptance", "Build real forwarding and production Worker/Relay lifecycle acceptance runners");
+    const shared_acceptance = b.step("shared-connection-acceptance", "Build independent SSH channel and reconnect acceptance runner");
+    const reconnect_acceptance = b.step("reconnect-acceptance", "Build original-terminal reconnect acceptance runner");
     for ([_]struct { name: []const u8, source: []const u8 }{
         .{ .name = "fixed-forward-runner", .source = "src/fixed_forward_runner.zig" },
         .{ .name = "socks-worker-host-runner", .source = "src/socks_worker_host_runner.zig" },
         .{ .name = "forward-load-runner", .source = "src/forward_load_runner.zig" },
         .{ .name = "ssh-connection-details-runner", .source = "src/ssh_connection_details_runner.zig" },
+        .{ .name = "ssh-reconnect-loopback-runner", .source = "src/ssh_reconnect_loopback_runner.zig" },
+        .{ .name = "ssh-shared-connection-runner", .source = "src/ssh_shared_connection_runner.zig" },
     }) |runner| {
         const fixed_forward_runner = b.addExecutable(.{ .name = runner.name, .root_module = b.createModule(.{
             .root_source_file = b.path(runner.source),
@@ -569,7 +582,15 @@ pub fn build(b: *std.Build) void {
         fixed_forward_runner.root_module.linkSystemLibrary("mbedcrypto", .{});
         fixed_forward_runner.root_module.linkSystemLibrary("z", .{});
         addCoreTextBridgeForTest(zenit_dep, fixed_forward_runner);
-        forward_acceptance.dependOn(&b.addInstallArtifact(fixed_forward_runner, .{}).step);
+        if (std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner") or std.mem.eql(u8, runner.name, "ssh-shared-connection-runner")) {
+            fixed_forward_runner.root_module.addCSourceFiles(.{ .files = &.{ "src/local/darwin_process.c", "src/local/trusted_edit_native.c" }, .flags = &.{"-std=c11"} });
+            fixed_forward_runner.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_credentials.m"), .flags = &.{} });
+            fixed_forward_runner.root_module.linkFramework("Security", .{});
+        }
+        const runner_install = b.addInstallArtifact(fixed_forward_runner, .{});
+        forward_acceptance.dependOn(&runner_install.step);
+        if (std.mem.eql(u8, runner.name, "ssh-shared-connection-runner")) shared_acceptance.dependOn(&runner_install.step);
+        if (std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner")) reconnect_acceptance.dependOn(&runner_install.step);
     }
 
     const forward_preview = b.addExecutable(.{ .name = "forward-config-preview", .root_module = b.createModule(.{

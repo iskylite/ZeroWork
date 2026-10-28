@@ -93,13 +93,14 @@ pub fn main(init: std.process.Init) !void {
         if (!first_ready and state.lifecycle == .attached and handle.generation == accepted.handle.generation) {
             if (first_failed) return error.FirstAttemptShouldFail;
             first_ready = true;
-            const runtime = tab.runtime orelse return error.MissingRuntime;
+            const facade = tab.runtime orelse return error.MissingRuntime;
+            const runtime = nativeRuntime(facade);
             original_worker = runtime.worker;
             original_vt = runtime.worker.vt.terminal;
             original_binding = app.sessions.queryService(handle, .terminal).available;
         }
         if (first_ready and !drop_sent and state.lifecycle == .attached and handle.generation == accepted.handle.generation) {
-            const worker = tab.runtime.?.worker;
+            const worker = nativeRuntime(tab.runtime.?).worker;
             worker.pushInput("DROP\n") catch |err| {
                 if (err == error.DisconnectedApplicationInput) {
                     pause();
@@ -110,7 +111,7 @@ pub fn main(init: std.process.Init) !void {
             drop_sent = true;
         }
         if (!first_failed and !buffered and state.lifecycle == .failed and state.create_cleanup == .released) {
-            const worker = tab.runtime.?.worker;
+            const worker = nativeRuntime(tab.runtime.?).worker;
             try worker.pushInputFrom("CACHED_中\n", .ordinary);
             worker.pushInput("APP_MUST_NOT_REPLAY\n") catch |err| {
                 if (err != error.DisconnectedApplicationInput) return err;
@@ -132,7 +133,8 @@ pub fn main(init: std.process.Init) !void {
             final_key = state.create_operation;
             if (handle.session_id != accepted.handle.session_id or final_key.operation_id == accepted.operation.operation_id or final_key.attempt_id.? != accepted.operation.attempt_id.? + 1) return error.AttemptIdentityReused;
             if (original_binding) |binding| if (app.sessions.bindingIsLive(binding)) return error.OldBindingStillLive;
-            const runtime = tab.runtime orelse return error.MissingRuntime;
+            const facade = tab.runtime orelse return error.MissingRuntime;
+            const runtime = nativeRuntime(facade);
             if (!first_failed) {
                 if (runtime.worker != original_worker.? or runtime.worker.vt.terminal != original_vt) return error.VtReplaced;
             }
@@ -154,7 +156,19 @@ pub fn main(init: std.process.Init) !void {
                 pause();
                 continue;
             }
-            if (!first_failed and std.mem.indexOf(u8, text, "first-ready") == null) return error.OriginalOutputLost;
+            if (!first_failed) {
+                const old_output = std.mem.indexOf(u8, text, "first-ready");
+                if (std.mem.eql(u8, mode, "manual-clear")) {
+                    if (old_output != null) return error.RemoteClearIgnored;
+                } else {
+                    if (old_output == null) return error.OriginalOutputLost;
+                    try runtime.worker.vt.scroll(.top);
+                    const top = try runtime.worker.vt.searchText(allocator);
+                    defer allocator.free(top);
+                    if (std.mem.indexOf(u8, top, "first-ready") == null) return error.HistoryUnavailable;
+                    try runtime.worker.vt.scroll(.bottom);
+                }
+            }
             if (!first_failed and runtime.worker.inputSnapshot().handed_off != "CACHED_中\n".len) {
                 pause();
                 continue;
@@ -197,4 +211,9 @@ fn closeAndDrain(app: *ApplicationHost, id: workspace_mod.SessionId) !void {
         pause();
     }
     return error.CloseDidNotRelease;
+}
+
+// Acceptance runner inspects native identity to prove reconnect retains the VT.
+fn nativeRuntime(facade: *@import("host/runtime_service.zig").Runtime) *@import("ui/session_runtime.zig").SessionRuntime {
+    return @ptrCast(@alignCast(facade.context));
 }

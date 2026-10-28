@@ -98,6 +98,7 @@ pub const Presenter = struct {
                 icon.*.setDisplay(.none);
             }
             const title = try ui.textStyled(cx, S.title, "");
+            title.meta.ownership.meta.test_id = "notifications.title";
             title.setStyleInline(cx.allocator, S.textBox(cx.tokens));
             try header.appendChild(cx.allocator, title);
             const close = try ui.widgets.Button(.{ .icon_only = true, .a11y_label = "关闭提示", .variant = .ghost, .base_style = S.close(cx.tokens), .on_click = cx.on(Slot, slot, Slot.dismiss) }).mount(scope, cx);
@@ -109,15 +110,18 @@ pub const Presenter = struct {
                 else => "notifications.dismiss.2",
             };
             try header.appendChild(cx.allocator, close);
+            const body = try ui.boxStyled(cx, S.body, .{});
+            try card.appendChild(cx.allocator, body);
             const source = try ui.textStyled(cx, S.line, "");
             source.setStyleInline(cx.allocator, S.lineBox(cx.tokens));
-            try card.appendChild(cx.allocator, source);
+            try body.appendChild(cx.allocator, source);
             source.meta.ownership.meta.test_id = "notifications.metadata";
             const detail = try ui.textStyled(cx, S.detail, "");
+            detail.meta.ownership.meta.test_id = "notifications.detail";
             detail.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .height = .{ .fit = .{} }, .flex_shrink = 0 });
-            try card.appendChild(cx.allocator, detail);
+            try body.appendChild(cx.allocator, detail);
             const footer = try ui.boxStyled(cx, S.footer, .{});
-            try card.appendChild(cx.allocator, footer);
+            try body.appendChild(cx.allocator, footer);
             const status_tag = try ui.box(cx, S.statusTag(0), .{});
             const status_label = try ui.textStyled(cx, S.line, "");
             try status_tag.appendChild(cx.allocator, status_label);
@@ -183,9 +187,8 @@ pub const Presenter = struct {
             const record = records[i];
             const structured = std.mem.startsWith(u8, record.event.definition_id, "host.") and !std.mem.eql(u8, record.event.definition_id, "host.feedback");
             const tagged = structured or record.event.actions.len > 0;
-            const compact = record.event.actions.len > 0;
             slot.action_row.setStyle(self.cx.allocator, .flex_wrap, if (record.event.actions.len > 1) .wrap else .no_wrap);
-            const action_width = @max(1, width - 26 - (if (tagged) @as(f32, 76) else 0) - (if (!record.persistent()) @as(f32, 68) else 0));
+            const action_width = @max(1, width - 34 - 22 - (if (tagged) @as(f32, 76) else 0) - (if (!record.persistent()) @as(f32, 68) else 0));
             for (&slot.actions) |*action| {
                 action.root.setStyle(self.cx.allocator, .max_width, action_width);
                 action.label.setStyle(self.cx.allocator, .max_width, @max(1, action_width - 20));
@@ -194,32 +197,11 @@ pub const Presenter = struct {
                 slot.fact_id = record.fact_id;
                 slot.revision = record.event.event_revision;
                 slot.root.behavior.interaction.a11y = .{ .role = if (record.persistent()) .alert else .status, .live = if (record.persistent()) "assertive" else "polite" };
-                if (compact) {
-                    try setLine(self.cx, slot.title, record.event.title);
-                    slot.title.setStyleInline(self.cx.allocator, S.textBox(self.cx.tokens));
-                } else {
-                    try slot.title.setTextContent(self.cx.allocator, record.event.title);
-                    slot.title.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .flex = 1 });
-                }
-                var title_props = slot.title.getText().?;
-                title_props.wrap = if (compact) .none else .word;
-                title_props.text_overflow = if (compact) .ellipsis else .clip;
-                slot.title.setText(title_props);
-                if (compact) {
-                    try setLine(self.cx, slot.detail, record.event.detail);
-                    slot.detail.setStyleInline(self.cx.allocator, S.lineBox(self.cx.tokens));
-                    var props = slot.detail.getText().?;
-                    props.wrap = .none;
-                    props.text_overflow = .ellipsis;
-                    slot.detail.setText(props);
-                } else {
-                    try slot.detail.setTextContent(self.cx.allocator, record.event.detail);
-                    slot.detail.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .flex_shrink = 0 });
-                    var props = slot.detail.getText().?;
-                    props.wrap = .word;
-                    props.text_overflow = .clip;
-                    slot.detail.setText(props);
-                }
+                // Toasts remain a compact preview even without actions. The
+                // history expansion retains the complete title and details.
+                try setLine(self.cx, slot.title, record.event.title);
+                try setLine(self.cx, slot.detail, record.event.detail);
+                slot.detail.setStyleInline(self.cx.allocator, S.lineBox(self.cx.tokens));
                 try slot.status_label.setTextContent(self.cx.allocator, statusLabel(record.event));
                 slot.status_tag.setStyleInline(self.cx.allocator, S.statusTag(@backingInt(record.event.severity)));
                 slot.status_label.setTextColor(S.statusInk(@backingInt(record.event.severity)));
@@ -244,10 +226,9 @@ pub const Presenter = struct {
                 const text = try std.fmt.bufPrint(&remaining, "{d} 秒后关闭", .{(record.remaining_ms + 999) / 1000});
                 try slot.countdown.setTextContent(self.cx.allocator, text);
             }
-            const background = if (active_owner) |owner| !owner.eql(record.event.owner.content) else true;
-            const source = if (record.owner_ended or background or structured) record.event.owner_name else "";
+            const source = record.event.owner_name;
             var metadata_buffer: [1536]u8 = undefined;
-            const object = record.event.object_name;
+            const object = if (std.mem.eql(u8, record.event.object_name, source)) "" else record.event.object_name;
             const metadata = if (source.len > 0 and object.len > 0)
                 try std.fmt.bufPrint(&metadata_buffer, "{s} · {s}", .{ source, object })
             else if (source.len > 0) source else object;

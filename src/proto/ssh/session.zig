@@ -64,7 +64,7 @@ pub const HostKeyObserver = struct {
 };
 
 pub const ResourceKind = enum { transport, session, shell, tunnel, relay_socket, relay_worker, rtt_channel };
-pub const ResourceState = enum { absent, owned, releasing, released, unknown };
+pub const ResourceState = enum { absent, owned, releasing, released, transferred, unknown };
 pub const ResourceEntry = struct {
     state: ResourceState = .absent,
     acquired_sequence: u64 = 0,
@@ -92,7 +92,7 @@ pub const ResourceLedger = struct {
         pub fn released(self: *const Snapshot) bool {
             if (self.overflowed or self.retained_count != 0) return false;
             for (self.resources[0..self.hop_count]) |hop| for (hop) |resource| {
-                if (resource.state != .absent and resource.state != .released) return false;
+                if (resource.state != .absent and resource.state != .released and resource.state != .transferred) return false;
             };
             return true;
         }
@@ -117,6 +117,39 @@ pub const ResourceLedger = struct {
     retained_library: ?Library = null,
     draining: std.atomic.Value(bool) = .init(false),
     previous_released: ?Snapshot = null,
+    redirects: [9]?struct { key: ?OperationKey, ledger: *ResourceLedger, target_hop: usize } = @splat(null),
+
+    pub fn transferConnectionOwnership(self: *ResourceLedger, target: *ResourceLedger) !void {
+        self.lock();
+        defer self.unlock();
+        var slot: ?usize = null;
+        for (self.redirects, 0..) |entry, i| if (entry == null) {
+            slot = i;
+            break;
+        };
+        const index = slot orelse return error.SharedConnectionLimit;
+        target.* = try ResourceLedger.init(self.key, self.hop_count);
+        target.resources = self.resources;
+        target.sequence = self.sequence;
+        const target_hop = self.hop_count - 1;
+        for (0..self.hop_count) |hop| for (0..kind_count) |kind| {
+            const owned_by_shell = hop == target_hop and (kind == @backingInt(ResourceKind.shell) or kind == @backingInt(ResourceKind.rtt_channel));
+            if (owned_by_shell) {
+                target.resources[hop][kind] = .{};
+                continue;
+            }
+            if (self.resources[hop][kind].state == .owned or self.resources[hop][kind].state == .releasing) self.resources[hop][kind].state = .transferred;
+        };
+        self.redirects[index] = .{ .key = self.key, .ledger = target, .target_hop = target_hop };
+        self.revision += 1;
+    }
+    pub fn forgetTransferred(self: *ResourceLedger, target: *ResourceLedger) void {
+        self.lock();
+        defer self.unlock();
+        for (&self.redirects) |*entry| if (entry.*) |value| if (value.ledger == target) {
+            entry.* = null;
+        };
+    }
 
     pub fn init(key: ?OperationKey, hop_count: usize) !ResourceLedger {
         if (hop_count == 0 or hop_count > max_hops) return error.InvalidJumpRoute;
@@ -139,6 +172,10 @@ pub const ResourceLedger = struct {
     pub fn record(self: *ResourceLedger, key: ?OperationKey, hop: usize, kind: ResourceKind, state: ResourceState) bool {
         self.lock();
         defer self.unlock();
+        for (self.redirects) |entry| if (entry) |value| {
+            const shell_owned = hop == value.target_hop and (kind == .shell or kind == .rtt_channel);
+            if (std.meta.eql(value.key, key) and !shell_owned) return value.ledger.record(key, hop, kind, state);
+        };
         if (!std.meta.eql(self.key, key) or hop >= self.hop_count or state == .absent) return false;
         const resource = &self.resources[hop][@backingInt(kind)];
         // Explicit, serial diagnostic requests reuse this one transient slot.
@@ -672,7 +709,8 @@ pub const SftpReadonlyHandle = struct {
 /// Owns one TCP socket, one libssh2 session, and one interactive PTY channel.
 pub const Session = struct {
     pub const OpenTicket = struct {
-        kind: enum { exec, rtt, sftp, forward, legacy_exec },
+        kind: enum { exec, rtt, sftp, forward, legacy_exec, shell },
+        owner: usize = 0,
         id: u64,
     };
     const RttOperation = struct {
@@ -703,6 +741,8 @@ pub const Session = struct {
     source_owner: ?identity.AssetOwner = null,
     connection_details: ?*ConnectionDetails.Store = null,
     channel_open: ?OpenTicket = null,
+    shared_gate: ?*Session = null,
+    borrowed_transport: bool = false,
     direct_opens: ?*c.ZW_SSH_DIRECT_OPEN = null,
     rtt: ?RttOperation = null,
     rtt_io_owner: ?std.Thread.Id = null,
@@ -737,6 +777,11 @@ pub const Session = struct {
     /// These gates are used only on the transport's one native IO owner.
     /// An EAGAIN open retains its ticket, including a cancelled RTT request.
     pub fn claimChannelOpen(self: *Session, ticket: OpenTicket) bool {
+        if (self.shared_gate) |gate| {
+            var scoped = ticket;
+            scoped.owner = @intFromPtr(self);
+            return gate.claimChannelOpen(scoped);
+        }
         if (self.channel_open) |current| return std.meta.eql(current, ticket);
         // A forward batch can finish one open and start the next before the
         // worker calls stepRtt again. Reserve the next free turn for an already
@@ -748,6 +793,12 @@ pub const Session = struct {
         return true;
     }
     pub fn finishChannelOpen(self: *Session, ticket: OpenTicket) void {
+        if (self.shared_gate) |gate| {
+            var scoped = ticket;
+            scoped.owner = @intFromPtr(self);
+            gate.finishChannelOpen(scoped);
+            return;
+        }
         if (self.channel_open) |current| if (std.meta.eql(current, ticket)) {
             self.channel_open = null;
         };
@@ -778,7 +829,7 @@ pub const Session = struct {
     /// Opens no PTY, shell, subsystem or exec request. A refused/slow sample is
     /// diagnostic only: it never tears down this Session or its other channels.
     pub fn stepRtt(self: *Session, now_ns: i128) !void {
-        if (self.state != .active or self.handle == null) return;
+        if ((self.state != .active and !(self.borrowed_transport and self.state == .closing and self.rtt != null)) or self.handle == null) return;
         const store = self.connection_details orelse return;
         const key = self.resource_key orelse return;
         const current_thread = std.Thread.getCurrentId();
@@ -1278,7 +1329,7 @@ pub const Session = struct {
     pub fn stepDirectTcpip(self: *Session, host: [:0]const u8, port: u16, pending: *?*c.ZW_SSH_DIRECT_OPEN) !?Channel {
         if (self.state != .active) return error.SessionNotActive;
         var raw: ?*c.LIBSSH2_CHANNEL = null;
-        const rc = c.zw_libssh2_direct_open_step(self.handle.?, &self.direct_opens, pending, host.ptr, port, &raw);
+        const rc = c.zw_libssh2_direct_open_step(self.handle.?, if (self.shared_gate) |gate| &gate.direct_opens else &self.direct_opens, pending, host.ptr, port, &raw);
         if (rc == 1) return null;
         if (rc < 0) return error.OpenDirectTcpipFailed;
         self.recordResource(.tunnel, .owned);
@@ -1337,6 +1388,23 @@ pub const Session = struct {
         self.state = .failed;
     }
     fn release(self: *Session) ReleaseReceipt {
+        if (self.borrowed_transport) {
+            if (self.rtt != null) {
+                self.rtt_io_owner = std.Thread.getCurrentId();
+                self.stepRtt(@import("../../platform/realtime.zig").monotonicNs()) catch return .unknown;
+                if (self.rtt != null) return .awaiting;
+            }
+            const sftp_receipt = self.closeSftpReceipt();
+            if (sftp_receipt != .released) return sftp_receipt;
+            if (self.channel) |*channel| {
+                const receipt = self.closeChannelReceipt(channel);
+                if (receipt != .released) return receipt;
+            }
+            self.handle = null;
+            self.socket_fd = -1;
+            if (self.connection_details) |store| if (self.resource_key) |key| for (0..self.resource_hop + 1) |hop| store.status(key, hop, .released);
+            return .released;
+        }
         if (self.socket_release_unknown) return .unknown;
         if (self.handle) |handle| {
             self.recordResource(.session, .releasing);
@@ -1642,4 +1710,37 @@ test "SSH IO handoff failure and cancelled connectOverFd consume owned resources
     session.failAndRelease();
     try std.testing.expectEqual(State.failed, session.state);
     try std.testing.expect(session.handle == null and session.socket_fd == -1);
+}
+
+test "shared transport ledger transfers native ownership while shell remains local" {
+    var source = try ResourceLedger.init(null, 2);
+    var shared = try ResourceLedger.init(null, 2);
+    try std.testing.expect(source.record(null, 0, .transport, .owned));
+    try std.testing.expect(source.record(null, 1, .session, .owned));
+    try std.testing.expect(source.record(null, 1, .shell, .owned));
+    try source.transferConnectionOwnership(&shared);
+    try std.testing.expectEqual(ResourceState.transferred, source.snapshot().entry(0, .transport).state);
+    try std.testing.expectEqual(ResourceState.owned, shared.snapshot().entry(0, .transport).state);
+    try std.testing.expect(!source.snapshot().released());
+    try std.testing.expect(source.record(null, 1, .shell, .released));
+    try std.testing.expect(source.snapshot().released());
+    try std.testing.expect(!shared.snapshot().released());
+    // Relay owners may finish recording through the original stable ledger.
+    try std.testing.expect(source.record(null, 0, .transport, .released));
+    try std.testing.expectEqual(ResourceState.released, shared.snapshot().entry(0, .transport).state);
+    source.forgetTransferred(&shared);
+}
+
+test "shared channel open gates namespace identical caller IDs by session" {
+    var native: Session = .{};
+    var one: Session = .{ .shared_gate = &native };
+    var two: Session = .{ .shared_gate = &native };
+    const ticket: Session.OpenTicket = .{ .kind = .exec, .id = 1 };
+    try std.testing.expect(one.claimChannelOpen(ticket));
+    try std.testing.expect(!two.claimChannelOpen(ticket));
+    two.finishChannelOpen(ticket);
+    try std.testing.expect(!two.claimChannelOpen(ticket));
+    one.finishChannelOpen(ticket);
+    try std.testing.expect(two.claimChannelOpen(ticket));
+    two.finishChannelOpen(ticket);
 }

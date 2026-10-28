@@ -16,6 +16,16 @@ pub fn load(allocator: std.mem.Allocator, cast: []const u8) !Timeline {
     const cols = try dimension(header.value.object.get("width") orelse return error.InvalidCast);
     const rows = try dimension(header.value.object.get("height") orelse return error.InvalidCast);
     if (version != .integer or version.integer != 2) return error.InvalidCast;
+    // A ring tail may begin inside an ANSI sequence, alternate screen or
+    // unknown geometry. Never interpret it from a fabricated empty VT.
+    if (header.value.object.get("zerowork")) |metadata| {
+        if (metadata != .object) return error.InvalidCast;
+        if (metadata.object.get("replay_baseline")) |baseline| {
+            if (baseline != .string) return error.InvalidCast;
+            if (std.mem.eql(u8, baseline.string, "unavailable")) return error.RecordingBaselineUnavailable;
+            return error.UnsupportedRecordingBaseline;
+        }
+    }
     var adapter = try Adapter.init(allocator, rows, cols);
     defer adapter.destroy();
     var timeline = Timeline.init(allocator, 128 * 1024 * 1024);
@@ -178,4 +188,20 @@ test "builtin_records replay keys command identity by source generation" {
     try std.testing.expect(std.mem.indexOf(u8, text, "second generation") != null);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "@ts"));
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text, "@theme"));
+}
+
+test "history refuses retained ANSI tails without a replay baseline after snapshot" {
+    const a = std.testing.allocator;
+    var recording = try @import("../vt/timeline.zig").Timeline.init(a, 2, 4096);
+    defer recording.deinit();
+    try recording.append(0, 0, "\x1b[31m\x1b[?1049h");
+    try recording.appendResize(1, 13, 120, 30);
+    try recording.append(2, 13, "tail");
+    var frozen = try recording.snapshotWithAllocator(a);
+    defer frozen.deinit();
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try frozen.exportCast(&writer, 80, 24);
+    try std.testing.expectError(error.RecordingBaselineUnavailable, load(a, writer.buffered()));
+    try std.testing.expectError(error.UnsupportedRecordingBaseline, load(a, "{\"version\":2,\"width\":80,\"height\":24,\"zerowork\":{\"replay_baseline\":\"future\"}}\n"));
 }

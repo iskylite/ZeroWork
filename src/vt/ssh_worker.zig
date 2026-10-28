@@ -39,6 +39,7 @@ pub const RuntimeOptions = struct {
     wait_for_attachment: bool = false,
     /// Owned by SessionRuntime and valid through every worker reconnect.
     jump_options: []const Options = &.{},
+    shared_connection: ?@import("../host/runtime_service.zig").SharedLease = null,
 };
 
 pub const current_directory_command = " printf '\\033]7;\\007\\033]7;file://localhost%s\\007' \"$(printf '%s' \"$PWD\" | sed 's/%/%25/g;s/ /%20/g')\"\n";
@@ -111,6 +112,9 @@ pub const SshWorker = struct {
     reconnect: Reconnect,
     replay: Replay,
     timeline: Timeline,
+    /// Immutable cast header geometry; options may change on reconnect.
+    recording_initial_cols: u16 = 80,
+    recording_initial_rows: u16 = 24,
     reconnect_backoff: [5]u8,
     auto_reconnect: bool,
     buffer_input: bool,
@@ -134,7 +138,77 @@ pub const SshWorker = struct {
     shell_eof_ns: ?i128 = null,
     shell_exit_code: ?i32 = null,
 
+    native_mutex: std.atomic.Mutex = .unlocked,
+    rebuilding: std.atomic.Value(bool) = .init(false),
+    shared_connection: ?*@import("shared_ssh_connection.zig").Connection = null,
+    connection_lifetime: ?@import("shared_ssh_connection.zig").Lifetime = null,
+    /// Creation policy; lending an independent transport does not change it.
+    prefer_shared_reconnect: bool = false,
+
+    pub fn transportFailed(self: *SshWorker) void {
+        self.lockNative();
+        defer self.unlockNative();
+        if (self.shared_connection) |group| {
+            group.broken = true;
+            if (group.native.handle) |handle| @import("generated_ssh_session").zw_libssh2_session_abort_io(handle, group.native.socket_fd);
+        }
+    }
+
+    pub fn reuseConnection(self: *SshWorker) !@import("../host/runtime_service.zig").SharedLease {
+        // Reconnect can hold the worker guard across authentication. A menu
+        // request must not block the UI waiting for that network operation.
+        while (!self.native_mutex.tryLock()) {
+            if (self.rebuilding.load(.acquire)) return error.WorkerBusy;
+            std.atomic.spinLoopHint();
+        }
+        if (self.rebuilding.load(.acquire)) {
+            self.native_mutex.unlock();
+            return error.WorkerBusy;
+        }
+        if (self.shared_connection) |group| group.lock();
+        defer self.unlockNative();
+        if (!self.loop_active or self.session.state != .active or self.io.closed) return error.SessionNotActive;
+        if (self.shared_connection) |group| return group.lease();
+        if (self.session.channel_open != null or self.session.rtt != null) return error.WorkerBusy;
+        const group = try self.allocator.create(@import("shared_ssh_connection.zig").Connection);
+        errdefer self.allocator.destroy(group);
+        var library = try Library.init();
+        errdefer library.deinit();
+        group.* = .{ .allocator = self.allocator, .library = library, .native = self.session, .route = self.jump_route, .on_release = self.connection_lifetime };
+        if (self.session.resource_ledger) |ledger| {
+            group.ledger = try @import("../proto/ssh/session.zig").ResourceLedger.init(null, ledger.hop_count);
+            try ledger.transferConnectionOwnership(&group.ledger.?);
+            group.native.resource_ledger = &group.ledger.?;
+            group.source_ledger = ledger;
+            if (group.route) |route| route.resource_ledger = &group.ledger.?;
+        }
+        if (self.connection_lifetime) |value| value.retain(value.context);
+        self.jump_route = null;
+        for (self.forward_services[0 .. self.forward_count - 1], 0..) |service, i| group.upstream[i] = service;
+        group.native.channel = null;
+        group.native.sftp = null;
+        group.native.rtt = null;
+        group.native.channel_open = self.session.channel_open;
+        self.session.channel_open = null;
+        self.session.direct_opens = null;
+        self.session.borrowed_transport = true;
+        self.session.shared_gate = &group.native;
+        // Transfer the held native guard together with the transport.
+        while (!group.mutex.tryLock()) std.atomic.spinLoopHint();
+        self.shared_connection = group;
+        return group.lease();
+    }
+    fn lockNative(self: *SshWorker) void {
+        while (!self.native_mutex.tryLock()) std.atomic.spinLoopHint();
+        if (self.shared_connection) |group| group.lock();
+    }
+    fn unlockNative(self: *SshWorker) void {
+        if (self.shared_connection) |group| group.unlock();
+        self.native_mutex.unlock();
+    }
+
     pub fn init(allocator: std.mem.Allocator, library: *const Library, options: Options, runtime: RuntimeOptions) !*SshWorker {
+        @import("shared_ssh_connection.zig").Connection.retryPending();
         const worker = try allocator.create(SshWorker);
         errdefer allocator.destroy(worker);
         var session_options = options;
@@ -142,12 +216,17 @@ pub const SshWorker = struct {
         session_options.keepalive_sec = runtime.keepalive_sec;
         session_options.compression = runtime.compression;
         var route: ?*JumpRoute = null;
-        var session = if (runtime.jump_options.len == 0) try Session.connect(library, session_options) else blk: {
+        const shared_group: ?*@import("shared_ssh_connection.zig").Connection = if (runtime.shared_connection) |lease| @ptrCast(@alignCast(lease.context)) else null;
+        var session = if (shared_group) |group| try group.openShell(session_options) else if (runtime.jump_options.len == 0) try Session.connect(library, session_options) else blk: {
             route = try JumpRoute.connect(allocator, library, runtime.jump_options);
             break :blk route.?.takeTarget();
         };
         errdefer if (route) |value| value.deinit();
-        errdefer closeSessionForRollback(&session);
+        errdefer {
+            if (shared_group) |group| group.lock();
+            defer if (shared_group) |group| group.unlock();
+            if (shared_group) |group| group.rollbackShell(&session) else closeSessionForRollback(&session);
+        }
         var vt = try VtAdapter.init(allocator, options.rows, options.cols);
         errdefer vt.destroy();
         vt.configureTerminalType(options.term);
@@ -172,6 +251,13 @@ pub const SshWorker = struct {
         errdefer allocator.free(startup_input);
         worker.* = undefined;
         worker.allocator = allocator;
+        worker.native_mutex = .unlocked;
+        worker.rebuilding = .init(false);
+        worker.shared_connection = shared_group;
+        worker.prefer_shared_reconnect = shared_group != null;
+        worker.connection_lifetime = null;
+        const retained_lease = if (runtime.shared_connection) |lease| lease.retain() else null;
+        errdefer if (retained_lease) |lease| lease.release();
         worker.library = library;
         worker.options = session_options;
         worker.keepalive_watch = .{};
@@ -204,6 +290,8 @@ pub const SshWorker = struct {
         worker.read_buffer = read_buffer;
         worker.write_buffer = write_buffer;
         worker.timeline = timeline;
+        worker.recording_initial_cols = options.cols;
+        worker.recording_initial_rows = options.rows;
         worker.startup_input = startup_input;
         worker.startup_pending = .init(runtime.wait_for_attachment or startup_input.len != 0);
         worker.presentation_attached = .init(!runtime.wait_for_attachment);
@@ -249,10 +337,12 @@ pub const SshWorker = struct {
         // A separate bounded exec request shares the existing IO owner.
         worker.os_probe = worker.exec_bridge.diagnostic(@import("../proto/ssh/remote_os.zig").command, .{ .timeout_ms = 3000, .capture_cap = 8192 }) catch null;
         if (worker.os_probe == null) worker.os_probe_finished.store(true, .release);
+        if (shared_group) |group| try group.bindUpstreamForwards(worker.forward_services[0..worker.forward_count]);
         return worker;
     }
 
     pub fn deinit(self: *SshWorker) void {
+        const group = self.shared_connection;
         for (self.forward_services[0..self.forward_count]) |service| if (service) |value| value.requestClose();
         if (self.releaseConnection() != .released) {
             // An owner-driven Listener may still borrow this exact Session
@@ -277,6 +367,14 @@ pub const SshWorker = struct {
             self.shared_transfer = null;
         }
         for (self.forward_services[0..self.forward_count]) |service| if (service) |value| {
+            if (group) |owner| {
+                var shared_upstream = false;
+                for (owner.upstream) |shared| if (shared == value) {
+                    shared_upstream = true;
+                    break;
+                };
+                if (shared_upstream) continue;
+            }
             value.adoptIoAfterOwnerStopped();
             value.stepPaused() catch return;
             value.deinitLocal() catch return;
@@ -295,6 +393,7 @@ pub const SshWorker = struct {
         const allocator = self.allocator;
         self.* = undefined;
         allocator.destroy(self);
+        if (group) |value| @import("shared_ssh_connection.zig").Connection.release(value);
     }
 
     fn pollOsProbe(self: *SshWorker) void {
@@ -325,14 +424,29 @@ pub const SshWorker = struct {
         try self.applyPendingScrollbackLimit();
         for (self.forward_services[0..self.forward_count]) |service| if (service) |value| if (value.parentCloseRequested()) return error.ForwardParentClosing;
         if (!self.loop_active) return error.WorkerStopped;
-        if (self.io.closed) return self.finishShellStep();
+        if (self.io.closed) {
+            self.lockNative();
+            defer self.unlockNative();
+            if (self.shared_connection) |group| {
+                if (group.broken) return error.SharedTransportLost;
+                group.stepShellCleanup();
+            }
+            return self.finishShellStep();
+        }
         const shared_pending = if (self.shared_transfer) |shared| shared.hasPending() else false;
         const forward_pending = if (self.targetForward()) |service| service.hasListener() else false;
         const wait_ms = if (shared_pending) @min(timeout_ms, 1) else if (forward_pending or self.input.pending() != 0 or self.io.repliesPending()) @min(timeout_ms, 5) else if (self.exec_bridge.hasPending()) @min(timeout_ms, 10) else timeout_ms;
         // A bounded read can leave packets in libssh2 even when the socket is
         // empty. Yield through the rest of this step, but don't sleep before
         // the next batch; only would-block returns us to readiness waiting.
-        self.loop.step(self.io.readTimeout(self.io.feed.publicationTimeout(wait_ms, realtime.milliseconds(undefined)))) catch |err| {
+        try self.loop.wait(self.io.readTimeout(self.io.feed.publicationTimeout(wait_ms, realtime.milliseconds(undefined))));
+        self.lockNative();
+        defer self.unlockNative();
+        if (self.shared_connection) |group| {
+            if (group.broken) return error.SharedTransportLost;
+            group.stepShellCleanup();
+        }
+        self.loop.dispatchReady() catch |err| {
             // A readable event can consume protocol EOF before a writable
             // event from the same batch reports that the shell is closed.
             if (self.io.closed) return self.finishShellStep();
@@ -487,7 +601,10 @@ pub const SshWorker = struct {
     /// Only after releaseConnection acknowledged every target/upstream native
     /// owner. The waiting worker then responds locally from retained ports.
     pub fn stepPausedForwards(self: *SshWorker) !void {
-        for (self.forward_services[0..self.forward_count]) |service| if (service) |value| try value.stepPaused();
+        for (self.forward_services[0..self.forward_count], 0..) |service, index| if (service) |value| {
+            if (self.shared_connection) |group| if (index + 1 < self.forward_count and service == group.upstream[index]) continue;
+            try value.stepPaused();
+        };
     }
 
     /// Worker-thread: applies the pending resize (remote PTY first, then the
@@ -500,9 +617,18 @@ pub const SshWorker = struct {
         const rows: u16 = @truncate(dims >> 16);
         try self.session.resize(cols, rows);
         try @import("engine.zig").VtEngine.from(VtAdapter, &self.vt).resize(cols, rows);
+        self.recordAppliedResize(cols, rows);
         self.io.feed.publishTextFrame(realtime.milliseconds(undefined));
         self.applied_resize_seq = seq;
         std.log.info("[worker] pty resize applied {d}x{d}", .{ cols, rows });
+    }
+
+    fn recordAppliedResize(self: *SshWorker, cols: u16, rows: u16) void {
+        if (self.io.timeline) |timeline| timeline.appendResize(realtime.milliseconds(undefined), self.io.stream_offset, cols, rows) catch |err| {
+            std.log.warn("[worker] recording resize dropped: {s}", .{@errorName(err)});
+            // Later output would have the wrong geometry: retire this prefix.
+            self.io.timeline = null;
+        };
     }
 
     /// A controller-issued successor replaces only protocol resources. VT,
@@ -538,8 +664,31 @@ pub const SshWorker = struct {
         }
     }
 
+    fn detachSharedConnection(self: *SshWorker) void {
+        if (self.shared_connection) |group| {
+            for (self.forward_services[0 .. self.forward_count - 1], 0..) |*service, i| if (service.* == group.upstream[i]) {
+                service.* = null;
+            };
+            self.shared_connection = null;
+            @import("shared_ssh_connection.zig").Connection.release(group);
+        }
+    }
+
     fn rebuildReleasedTransport(self: *SshWorker) !void {
-        for (self.forward_services[0..self.forward_count]) |service| if (service) |value| try value.prepareReplacement();
+        // UI-side reuseConnection reads the owner under this guard. Keep it
+        // stable while reconnect either retains or detaches that owner; the
+        // group itself is locked only for bounded native work by openShell.
+        self.rebuilding.store(true, .release);
+        defer self.rebuilding.store(false, .release);
+        while (!self.native_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.native_mutex.unlock();
+        const reuse = if (self.shared_connection) |group| self.prefer_shared_reconnect and group.isReusable() else false;
+        if (!reuse) self.detachSharedConnection();
+        for (self.forward_services[0..self.forward_count], 0..) |*service, index| {
+            if (service.*) |value| {
+                if (reuse and index + 1 < self.forward_count) try value.prepareSharedReplacement(self.options.operation_key) else try value.prepareReplacement();
+            } else service.* = try ForwardService.init(self.allocator, self.options.operation_key);
+        }
         var route_options: [9]Options = undefined;
         if (self.jump_options.len > route_options.len) return error.InvalidJumpRoute;
         for (self.jump_options, 0..) |options, index| {
@@ -552,12 +701,31 @@ pub const SshWorker = struct {
             }
         }
         var replacement_route: ?*JumpRoute = null;
-        var replacement = if (self.jump_options.len == 0) try Session.connect(self.library, self.options) else blk: {
-            replacement_route = try JumpRoute.connect(self.allocator, self.library, route_options[0..self.jump_options.len]);
-            break :blk replacement_route.?.takeTarget();
+        var replacement = replacement: {
+            if (reuse) {
+                const group = self.shared_connection.?;
+                if (group.openShell(self.options)) |shell| break :replacement shell else |err| {
+                    // A transport can disappear after the availability check.
+                    // Keep channel failures visible while a healthy parent exists.
+                    if (group.isReusable()) return err;
+                    self.detachSharedConnection();
+                }
+            }
+            break :replacement if (self.jump_options.len == 0) try Session.connect(self.library, self.options) else blk: {
+                replacement_route = try JumpRoute.connect(self.allocator, self.library, route_options[0..self.jump_options.len]);
+                break :blk replacement_route.?.takeTarget();
+            };
         };
+        var replacement_installed = false;
         errdefer if (replacement_route) |route| route.deinit();
-        errdefer closeSessionForRollback(&replacement);
+        errdefer {
+            // The worker guard is already held by this rebuild.
+            const group = self.shared_connection;
+            if (group) |value| value.lock();
+            defer if (group) |value| value.unlock();
+            const failed = if (replacement_installed) &self.session else &replacement;
+            if (group) |value| value.rollbackShell(failed) else closeSessionForRollback(failed);
+        }
         var replacement_loop = try WorkerLoop.init(try replacement.socketFd(), self.io.handler());
         errdefer replacement_loop.deinit();
         try replacement_loop.setWakeup(&self.wakeup);
@@ -567,6 +735,7 @@ pub const SshWorker = struct {
         // transport. A fresh real host binding is required for new submissions.
         if (self.shared_transfer) |shared| try shared.prepareReplacement();
         try self.exec_bridge.transportReplaced(replacement);
+        replacement_installed = true;
         if (self.os_probe) |old| _ = self.exec_bridge.closeCall(old) catch .unknown;
         self.os_probe = self.exec_bridge.diagnostic(@import("../proto/ssh/remote_os.zig").command, .{ .timeout_ms = 3000, .capture_cap = 8192 }) catch null;
         self.os_probe_finished.store(self.os_probe == null, .release);
@@ -582,21 +751,62 @@ pub const SshWorker = struct {
         self.io.last_output_ns = 0;
         self.applied_resize_seq = 0;
         if (self.jump_route) |value| value.bindForwards(self.forward_services[0..self.forward_count]);
-        if (self.targetForward()) |service| try service.step(&self.session);
+        if (self.targetForward()) |service| {
+            // Rebuild already holds the worker guard; only acquire the
+            // connection guard here, without recursively locking the worker.
+            const group = self.shared_connection;
+            if (group) |value| value.lock();
+            defer if (group) |value| value.unlock();
+            if (group) |value| if (value.broken) return error.SharedTransportLost;
+            try service.step(&self.session);
+        }
         // Startup and the original initial input belong only to first attach.
         // Rebuilding a transport must never re-arm potentially side-effecting
         // commands, including startup that had not yet drained at disconnect.
         try self.resumeInputAfterReconnect();
         self.reconnect.connected();
         try self.loop.setInterest(.{ .read = true });
+        if (reuse) try self.shared_connection.?.bindUpstreamForwards(self.forward_services[0..self.forward_count]);
     }
 
     /// Sole IO owner: unregister readiness, close target, then release each
     /// relay/tunnel/upstream hop. A nonterminal receipt preserves every owner.
     pub fn releaseConnection(self: *SshWorker) @import("../proto/ssh/session.zig").ReleaseReceipt {
+        self.lockNative();
+        defer self.unlockNative();
+        if (self.shared_connection) |group| if (group.broken) {
+            const native_receipt = group.releaseBroken();
+            if (native_receipt != .released) return native_receipt;
+            self.session.handle = null;
+            self.session.channel = null;
+            self.session.sftp = null;
+            self.session.socket_fd = -1;
+            self.session.state = .closed;
+            self.session.rtt = null;
+            self.session.recordResource(.shell, .released);
+            self.session.recordResource(.rtt_channel, .released);
+            if (self.session.connection_details) |store| if (self.session.resource_key) |key| store.status(key, self.session.resource_hop, .released);
+            self.exec_bridge.sessionReleased() catch return .awaiting;
+            if (self.shared_transfer) |shared| shared.sessionReleased() catch return .awaiting;
+        };
+        if (self.shared_connection) |group| {
+            var waiting = false;
+            for (self.forward_services[0 .. self.forward_count - 1], 0..) |service, index| if (service) |value| {
+                if (service == group.upstream[index]) continue;
+                if (value.relay_registered.load(.acquire)) {
+                    value.relay_detach.store(true, .release);
+                    waiting = true;
+                } else value.adoptIoAfterOwnerStopped();
+            };
+            if (waiting) return .awaiting;
+        }
         if (self.targetForward()) |service| {
             service.adoptIoAfterOwnerStopped();
             service.transportLost() catch return .unknown;
+            if (self.session.borrowed_transport and self.session.handle != null) {
+                const children = service.detachReceipt() catch return .unknown;
+                if (children != .released) return children;
+            }
         }
         self.exec_bridge.close();
         if (self.shared_transfer) |shared| {
@@ -612,6 +822,10 @@ pub const SshWorker = struct {
             self.loop.deinit();
             self.loop_active = false;
         }
+        if (self.shared_connection != null) {
+            const exec_receipt = self.exec_bridge.closeReceipt();
+            if (exec_receipt != .released) return exec_receipt;
+        }
         const target = self.session.closeReceipt();
         if (target != .released) return target;
         if (self.targetForward()) |service| service.sessionReleased() catch return .unknown;
@@ -622,6 +836,7 @@ pub const SshWorker = struct {
             // explicitly exports them or cancels their original jobs.
             if (!shared.canReleaseParent()) return .awaiting;
         }
+        if (self.shared_connection != null) return .released;
         if (self.options.resource_ledger) |ledger| {
             const pending = ledger.drainRetained();
             if (pending != .released and ledger.snapshot().retained_count != 0) return pending;
@@ -664,14 +879,10 @@ pub const SshWorker = struct {
         self.io.checkpoint = checkpoint;
     }
 
-    /// Safe UI-thread export: timeline locking and atomic requested dimensions
-    /// avoid reading the worker-owned VT grid while it is being resized.
+    /// Export uses the immutable starting grid followed by recorded resizes.
     pub fn exportTimeline(self: *SshWorker, io: std.Io, dir: std.Io.Dir, path: []const u8) !void {
-        const dimensions = self.resize_dims.load(.acquire);
-        const cols: u16 = if (dimensions == 0) self.options.cols else @truncate(dimensions);
-        const rows: u16 = if (dimensions == 0) self.options.rows else @truncate(dimensions >> 16);
         if (std.mem.endsWith(u8, path, ".cast"))
-            try self.timeline.saveCast(io, dir, path, cols, rows)
+            try self.timeline.saveCast(io, dir, path, self.recording_initial_cols, self.recording_initial_rows)
         else
             try self.timeline.save(io, dir, path);
     }
@@ -1164,4 +1375,80 @@ test "queued RTT expires without disturbing the current channel owner" {
     try std.testing.expect(sample.started_ns == null and sample.duration_ms == null);
     try std.testing.expect(session.rtt == null);
     try std.testing.expectEqual(owner, session.channel_open.?);
+}
+
+test "SSH reuse request does not block behind a reconnect owner" {
+    var worker: SshWorker = undefined;
+    worker.native_mutex = .unlocked;
+    worker.rebuilding = .init(true);
+    try std.testing.expect(worker.native_mutex.tryLock());
+    defer worker.native_mutex.unlock();
+    try std.testing.expectError(error.WorkerBusy, worker.reuseConnection());
+}
+
+test "shared shell EOF waits for the native owner before observing released transport" {
+    const Group = @import("shared_ssh_connection.zig").Connection;
+    const Probe = struct {
+        worker: *SshWorker,
+        entered: std.atomic.Value(bool) = .init(false),
+        done: std.atomic.Value(bool) = .init(false),
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.entered.store(true, .release);
+            self.worker.step(0) catch |err| {
+                self.failure = err;
+            };
+            self.done.store(true, .release);
+        }
+    };
+    var group: Group = .{ .allocator = std.testing.allocator, .library = .{ .active = false }, .native = .{ .state = .closed } };
+    var worker: SshWorker = undefined;
+    worker.native_mutex = .unlocked;
+    worker.shared_connection = &group;
+    worker.text.projection_requested = .init(false);
+    worker.pending_scrollback_limit = .init(0);
+    worker.forward_count = 0;
+    worker.loop_active = true;
+    worker.io.closed = true;
+    // No native handle may be inspected: another borrower already released it.
+    var probe: Probe = .{ .worker = &worker };
+    group.lock();
+    const thread = try std.Thread.spawn(.{}, Probe.run, .{&probe});
+    while (!probe.entered.load(.acquire)) std.atomic.spinLoopHint();
+    var delay: std.c.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&delay, null);
+    const waited = !probe.done.load(.acquire);
+    group.broken = true;
+    group.unlock();
+    thread.join();
+    try std.testing.expect(waited);
+    try std.testing.expectEqual(error.SharedTransportLost, probe.failure.?);
+}
+
+test "history SSH applied resize is ordered with output and keeps original geometry" {
+    const a = std.testing.allocator;
+    var worker: SshWorker = undefined;
+    worker.timeline = try Timeline.init(a, 16, 4096);
+    defer worker.timeline.deinit();
+    worker.recording_initial_cols = 80;
+    worker.recording_initial_rows = 24;
+    worker.io.timeline = &worker.timeline;
+    worker.io.stream_offset = 6;
+    try worker.timeline.append(0, 0, "before");
+    worker.recordAppliedResize(120, 30);
+    try worker.timeline.append(worker.timeline.events.items[1].timestamp_ms + 1, 6, "after");
+    try std.testing.expectEqual(@as(usize, 3), worker.timeline.eventCount());
+    try std.testing.expectEqualStrings("120x30", worker.timeline.events.items[1].payload);
+    try std.testing.expectEqual(@as(u64, 6), worker.timeline.events.items[1].stream_offset);
+    var buffer: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try worker.timeline.exportCast(&writer, worker.recording_initial_cols, worker.recording_initial_rows);
+    try std.testing.expect(std.mem.startsWith(u8, writer.buffered(), "{\"version\":2,\"width\":80,\"height\":24}"));
+    try std.testing.expect(std.mem.indexOf(u8, writer.buffered(), "\"r\",\"120x30\"") != null);
+    var decoded = try @import("../ui/history_cast.zig").load(a, writer.buffered());
+    defer decoded.deinit();
+    const frame = @import("text_frame.zig");
+    try std.testing.expectEqual(@as(u16, 80), frame.decode(decoded.frames.items[0].wire).?.cols);
+    try std.testing.expectEqual(@as(u16, 120), frame.decode(decoded.frames.items[1].wire).?.cols);
+    try std.testing.expect(std.mem.indexOf(u8, frame.decode(decoded.latest().?.wire).?.text, "beforeafter") != null);
 }

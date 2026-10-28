@@ -38,11 +38,17 @@ pub const ConnectJob = struct {
     progress_dismissed: bool = false,
     retained_cleanup: @import("../../ui/session_runtime.zig").DeferredRelease = .{},
     err: ?anyerror = null,
+    connection_attempts: u8 = 1,
+    automatic_retry_deadline_ns: ?i128 = null,
     host_key_bridge: host_key_confirmation.Bridge = .{},
     auth_bridge: auth_challenge.InteractiveBridge = .{},
     request_counter: auth_challenge.RequestCounter = .{},
     host_key_store: host_key_policy.HostKeyStore,
     initial_input: ?[]u8 = null,
+    shared_connection: ?@import("../../host/runtime_service.zig").SharedLease = null,
+    deferred_shared_destroy: bool = false,
+    shared_graph_refs: usize = 0,
+    destroy_mutex: std.atomic.Mutex = .unlocked,
     jump_snapshot: lifecycle.Snapshot([]const hosts_mod.HostConfig),
 
     pub fn create(ticket: lifecycle.Ticket, host: hosts_mod.HostConfig, registry: []const hosts_mod.HostConfig, app_config: config_mod.Config, io: std.Io) !*ConnectJob {
@@ -93,12 +99,26 @@ pub const ConnectJob = struct {
 
     /// Called only after the worker has been joined (or never started).
     pub fn destroy(job: *ConnectJob) void {
+        while (!job.destroy_mutex.tryLock()) std.atomic.spinLoopHint();
         if (job.runtime) |runtime| {
-            if (!runtime.cleanupReleased()) return;
+            if (!runtime.cleanupReleased()) {
+                job.destroy_mutex.unlock();
+                return;
+            }
             job.runtime = null;
         }
+        if (job.shared_graph_refs != 0) {
+            job.deferred_shared_destroy = true;
+            job.destroy_mutex.unlock();
+            return;
+        }
         job.retained_cleanup.finish(&job.resource_ledger, @import("../../ui/session_runtime.zig").drainRetainedResources);
-        if (!job.resource_ledger.snapshot().released()) return;
+        if (!job.resource_ledger.snapshot().released()) {
+            job.deferred_shared_destroy = true;
+            job.destroy_mutex.unlock();
+            return;
+        }
+        if (job.shared_connection) |lease| lease.release();
         if (job.initial_input) |input| std.heap.c_allocator.free(input);
         job.host_key_store.deinit();
         job.io_instance.deinit();
@@ -113,10 +133,33 @@ pub const ConnectJob = struct {
         if (job.resource_ledger.snapshot().released()) return .released;
         return job.retained_cleanup.request(&job.resource_ledger, @import("../../ui/session_runtime.zig").drainRetainedResources);
     }
+
+    /// Retry only network setup before authentication/shell creation. Each
+    /// successor still receives a fresh host-issued operation and resource ledger.
+    pub fn canAutomaticallyRetry(job: *ConnectJob) bool {
+        if (job.connection_attempts >= 3 or job.runtime != null or job.cancelled.load(.acquire)) return false;
+        const failure = job.progress.snapshot().failure orelse return false;
+        switch (failure.phase) {
+            .transport, .tunnel, .handshake => {},
+            else => return false,
+        }
+        return switch (job.err orelse return false) {
+            error.ConnectFailed, error.ConnectionRefused, error.HostResolutionFailed, error.ConnectionTimedOut, error.HandshakeFailed, error.SshHandshakeReceiveFailed, error.SshHandshakeSendFailed, error.SshHandshakeDisconnected, error.SshHandshakeBannerFailed, error.SshHandshakeTimedOut => true,
+            else => false,
+        };
+    }
 };
 
 pub fn connectThread(job: *ConnectJob) void {
     defer job.ready.store(true, .release);
+    defer if (job.shared_connection) |lease| {
+        // Creation pins the transport only until an installed worker owns its
+        // own lease. Failed native cleanup keeps the creation lease pinned.
+        if (job.runtime != null or job.resource_ledger.snapshot().released()) {
+            job.shared_connection = null;
+            lease.release();
+        }
+    };
     if (job.cancelled.load(.acquire)) return;
     const host = job.host_snapshot.value;
     applog.info(.workspace, "connect thread started session={d} for {s}", .{ job.ticket.session_id, host.name });
@@ -138,8 +181,24 @@ pub fn connectThread(job: *ConnectJob) void {
     applog.info(.workspace, "connect OK session={d}", .{job.ticket.session_id});
 }
 
+fn sharedGraphRetained(raw: *anyopaque) void {
+    const job: *ConnectJob = @ptrCast(@alignCast(raw));
+    while (!job.destroy_mutex.tryLock()) std.atomic.spinLoopHint();
+    job.shared_graph_refs += 1;
+    job.destroy_mutex.unlock();
+}
+fn sharedGraphReleased(raw: *anyopaque) void {
+    const job: *ConnectJob = @ptrCast(@alignCast(raw));
+    while (!job.destroy_mutex.tryLock()) std.atomic.spinLoopHint();
+    job.shared_graph_refs -= 1;
+    const destroy = job.shared_graph_refs == 0 and job.deferred_shared_destroy;
+    job.destroy_mutex.unlock();
+    if (destroy) job.destroy();
+}
 pub fn runtimeTarget(job: *ConnectJob) @import("../../ui/session_runtime.zig").HostTarget {
     var target = @import("../../ui/session_runtime.zig").targetFromHost(job.host_snapshot.value, job.jump_snapshot.value);
+    target.shared_connection = job.shared_connection;
+    target.connection_lifetime = .{ .context = job, .retain = sharedGraphRetained, .call = sharedGraphReleased };
     target.operation_key = job.operation_key;
     target.resource_ledger = &job.resource_ledger;
     target.connection_details = &job.connection_details;

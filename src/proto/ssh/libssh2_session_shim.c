@@ -38,7 +38,7 @@ int zw_ssh_socketpair(int *target_fd, int *relay_fd) {
 }
 
 struct zw_ssh_relay {
-    int fd, socket_eof, channel_eof, sent_eof;
+    int fd, socket_eof, channel_eof, sent_eof, progressed;
     LIBSSH2_CHANNEL *channel;
     unsigned char upstream[32768], downstream[32768];
     size_t upstream_offset, upstream_len, downstream_offset, downstream_len;
@@ -52,18 +52,19 @@ ZW_SSH_RELAY *zw_ssh_relay_create(int fd, LIBSSH2_CHANNEL *channel) {
 }
 
 int zw_ssh_relay_step(ZW_SSH_RELAY *r) {
+    r->progressed = 0;
     /* Zero channel reads indicate no decrypted packet unless channel_eof says
        otherwise. EAGAIN is flow control, never EOF or a dropped write. */
     if (!r->socket_eof && r->upstream_len == 0) {
         ssize_t n = recv(r->fd, r->upstream, sizeof(r->upstream), 0);
-        if (n > 0) { r->upstream_len = (size_t)n; r->upstream_offset = 0; }
+        if (n > 0) { r->progressed = 1; r->upstream_len = (size_t)n; r->upstream_offset = 0; }
         else if (n == 0) r->socket_eof = 1;
         else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return -1;
     }
     if (r->upstream_len) {
         ssize_t n = libssh2_channel_write(r->channel,
             (char *)r->upstream + r->upstream_offset, r->upstream_len);
-        if (n > 0) { r->upstream_offset += (size_t)n; r->upstream_len -= (size_t)n; }
+        if (n > 0) { r->progressed = 1; r->upstream_offset += (size_t)n; r->upstream_len -= (size_t)n; }
         else if (n < 0 && n != LIBSSH2_ERROR_EAGAIN) return -1;
     }
     if (r->socket_eof && !r->upstream_len && !r->sent_eof) {
@@ -73,13 +74,13 @@ int zw_ssh_relay_step(ZW_SSH_RELAY *r) {
     }
     if (!r->channel_eof && !r->downstream_len) {
         ssize_t n = libssh2_channel_read(r->channel, (char *)r->downstream, sizeof(r->downstream));
-        if (n > 0) { r->downstream_len = (size_t)n; r->downstream_offset = 0; }
+        if (n > 0) { r->progressed = 1; r->downstream_len = (size_t)n; r->downstream_offset = 0; }
         else if (n < 0 && n != LIBSSH2_ERROR_EAGAIN) return -1;
         else if (n == 0 && libssh2_channel_eof(r->channel)) r->channel_eof = 1;
     }
     if (r->downstream_len) {
         ssize_t n = send(r->fd, r->downstream + r->downstream_offset, r->downstream_len, 0);
-        if (n > 0) { r->downstream_offset += (size_t)n; r->downstream_len -= (size_t)n; }
+        if (n > 0) { r->progressed = 1; r->downstream_offset += (size_t)n; r->downstream_len -= (size_t)n; }
         else if (n == 0) return -1;
         else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return -1;
     }
@@ -88,6 +89,20 @@ int zw_ssh_relay_step(ZW_SSH_RELAY *r) {
         if (r->socket_eof && !r->upstream_len && r->sent_eof) return 1;
     }
     return 0;
+}
+
+void zw_ssh_relay_wait(ZW_SSH_RELAY *r, int transport_fd, LIBSSH2_SESSION *session, int timeout_ms) {
+    /* Continue draining decrypted packets without an artificial bandwidth
+       ceiling. Idle waits remain bounded for cancellation and sibling work. */
+    if (r->progressed) return;
+    struct pollfd fds[2] = {
+        { r->fd, 0, 0 }, { transport_fd, POLLIN, 0 }
+    };
+    if (!r->socket_eof && !r->upstream_len) fds[0].events |= POLLIN;
+    if (r->downstream_len) fds[0].events |= POLLOUT;
+    if (session && (libssh2_session_block_directions(session) & LIBSSH2_SESSION_BLOCK_OUTBOUND))
+        fds[1].events |= POLLOUT;
+    (void)poll(fds, 2, timeout_ms);
 }
 
 void zw_ssh_relay_interrupt(ZW_SSH_RELAY *relay) {
@@ -511,6 +526,15 @@ int zw_libssh2_auth_result(LIBSSH2_SESSION *session, int *partial, char *methods
     return libssh2_userauth_last_result(session, partial, methods, capacity, length);
 }
 int zw_libssh2_last_error_code(LIBSSH2_SESSION *session) { return libssh2_session_last_errno(session); }
+int zw_libssh2_transport_failed(LIBSSH2_SESSION *session) {
+    switch (libssh2_session_last_errno(session)) {
+    case LIBSSH2_ERROR_SOCKET_NONE:
+    case LIBSSH2_ERROR_SOCKET_SEND:
+    case LIBSSH2_ERROR_SOCKET_RECV:
+    case LIBSSH2_ERROR_SOCKET_DISCONNECT: return 1;
+    default: return 0;
+    }
+}
 const char *zw_libssh2_last_error(LIBSSH2_SESSION *session) { int code = 0; char *message = NULL; libssh2_session_last_error(session, &message, &code, 0); return message ? message : ""; }
 int zw_libssh2_auth_private_key(LIBSSH2_SESSION *session, const char *user, const char *private_key_path, const char *passphrase) {
     libssh2_userauth_result_reset(session);
@@ -1025,4 +1049,39 @@ int zw_ssh_forward_connect_ready(int fd) {
     if (rc <= 0) return rc < 0 && errno != EINTR ? -1 : 0;
     int error = 0; socklen_t length = sizeof(error);
     return getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &length) == 0 && !error ? 1 : -1;
+}
+
+/* One nonblocking native operation per call; the owner retains phase/channel. */
+int zw_libssh2_shared_shell_step(LIBSSH2_SESSION *session, const char *term, int cols, int rows, LIBSSH2_CHANNEL **channel, int *phase) {
+    int rc;
+    if (*phase == 0) {
+        *channel = libssh2_channel_open_session(session);
+        if (!*channel) { rc = libssh2_session_last_errno(session); return rc == LIBSSH2_ERROR_EAGAIN ? 1 : -1; }
+        *phase = 1;
+    }
+    if (*phase == 1) {
+        rc = libssh2_channel_request_pty_ex(*channel, term, (unsigned int)strlen(term), NULL, 0, cols, rows, 0, 0);
+        if (rc) return rc == LIBSSH2_ERROR_EAGAIN ? 1 : -1;
+        *phase = 2;
+    }
+    if (*phase == 2) {
+        rc = libssh2_channel_shell(*channel);
+        if (rc) return rc == LIBSSH2_ERROR_EAGAIN ? 1 : -1;
+        *phase = 3;
+    }
+    return 0;
+}
+
+/* Drain only an already submitted channel-open, then close that child. PTY
+   and shell requests need not complete before channel_free can own teardown.
+   An outstanding open keeps its original session-level retry state pinned. */
+int zw_libssh2_shared_shell_cancel_step(LIBSSH2_SESSION *session, LIBSSH2_CHANNEL **channel, int *phase) {
+    if (*phase == 0) {
+        *channel = libssh2_channel_open_session(session);
+        if (!*channel) return libssh2_session_last_errno(session) == LIBSSH2_ERROR_EAGAIN ? 1 : -1;
+        *phase = 1;
+    }
+    int rc = zw_libssh2_channel_release(*channel);
+    if (rc == 0) *channel = NULL;
+    return rc;
 }

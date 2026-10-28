@@ -18,13 +18,35 @@ pub const Timeline = struct {
     max_events: usize,
     max_bytes: usize,
     bytes: usize = 0,
+    /// Retained bytes alone cannot reconstruct the VT state at their start.
+    evicted_events: u64 = 0,
     mutex: std.atomic.Mutex = .unlocked,
 
     pub const Event = struct {
         timestamp_ms: i64,
         stream_offset: u64,
-        payload: []u8,
+        payload: []const u8,
+        storage: *Payload,
         kind: enum { output, resize, application } = .output,
+    };
+
+    const Payload = struct {
+        allocator: std.mem.Allocator,
+        bytes: []u8,
+        refs: std.atomic.Value(usize) = .init(1),
+
+        fn create(allocator: std.mem.Allocator, bytes: []const u8) !*Payload {
+            const self = try allocator.create(Payload);
+            errdefer allocator.destroy(self);
+            self.* = .{ .allocator = allocator, .bytes = try allocator.dupe(u8, bytes) };
+            return self;
+        }
+        fn release(self: *Payload) void {
+            if (self.refs.fetchSub(1, .acq_rel) != 1) return;
+            @memset(self.bytes, 0);
+            self.allocator.free(self.bytes);
+            self.allocator.destroy(self);
+        }
     };
 
     pub fn init(allocator: std.mem.Allocator, max_events: usize, max_bytes: usize) !Timeline {
@@ -34,39 +56,35 @@ pub const Timeline = struct {
 
     pub fn deinit(self: *Timeline) void {
         for (self.events.items) |event| {
-            @memset(event.payload, 0);
-            self.allocator.free(event.payload);
+            event.storage.release();
         }
         self.events.deinit(self.allocator);
         self.* = undefined;
     }
 
-    /// Appends one received stream segment, evicting oldest segments as needed.
-    pub fn append(self: *Timeline, timestamp_ms: i64, stream_offset: u64, payload: []const u8) !void {
+    /// Immutable segments let export pin history without copying all bytes
+    /// while the producer holds the terminal guard.
+    fn appendEvent(self: *Timeline, timestamp_ms: i64, stream_offset: u64, bytes: []const u8, kind: @FieldType(Event, "kind")) !void {
+        if (bytes.len > self.max_bytes) return error.EventTooLarge;
+        const storage = try Payload.create(self.allocator, bytes);
+        errdefer storage.release();
         self.lock();
         defer self.mutex.unlock();
-        if (payload.len > self.max_bytes) return error.EventTooLarge;
-        while (self.events.items.len >= self.max_events or self.bytes + payload.len > self.max_bytes) {
-            self.evictOldest();
-        }
-        const owned = try self.allocator.dupe(u8, payload);
-        errdefer self.allocator.free(owned);
-        try self.events.append(self.allocator, .{ .timestamp_ms = timestamp_ms, .stream_offset = stream_offset, .payload = owned });
-        self.bytes += owned.len;
+        try self.events.ensureUnusedCapacity(self.allocator, 1);
+        while (self.events.items.len >= self.max_events or self.bytes + bytes.len > self.max_bytes) self.evictOldest();
+        self.events.appendAssumeCapacity(.{ .timestamp_ms = timestamp_ms, .stream_offset = stream_offset, .payload = storage.bytes, .storage = storage, .kind = kind });
+        self.bytes += bytes.len;
     }
-
+    pub fn append(self: *Timeline, timestamp_ms: i64, stream_offset: u64, payload: []const u8) !void {
+        try self.appendEvent(timestamp_ms, stream_offset, payload, .output);
+    }
     pub fn appendApplication(self: *Timeline, record: @import("../host/terminal_service.zig").ApplicationRecord, stream_offset: u64) !void {
         return self.appendApplicationAt(record, stream_offset, record.timestamp_ms);
     }
     pub fn appendApplicationAt(self: *Timeline, record: @import("../host/terminal_service.zig").ApplicationRecord, stream_offset: u64, event_ms: i64) !void {
         const payload = try std.json.Stringify.valueAlloc(self.allocator, record, .{});
-        errdefer self.allocator.free(payload);
-        self.lock();
-        defer self.mutex.unlock();
-        if (payload.len > self.max_bytes) return error.EventTooLarge;
-        while (self.events.items.len >= self.max_events or self.bytes + payload.len > self.max_bytes) self.evictOldest();
-        try self.events.append(self.allocator, .{ .timestamp_ms = event_ms, .stream_offset = stream_offset, .payload = payload, .kind = .application });
-        self.bytes += payload.len;
+        defer self.allocator.free(payload);
+        try self.appendEvent(event_ms, stream_offset, payload, .application);
     }
 
     pub fn appendTap(self: *Timeline, tap: *const raw_stream_tap.Tap, timestamp_ms: i64) !void {
@@ -82,14 +100,7 @@ pub const Timeline = struct {
         if (cols == 0 or rows == 0) return error.InvalidGeometry;
         var buffer: [32]u8 = undefined;
         const bytes = try std.fmt.bufPrint(&buffer, "{d}x{d}", .{ cols, rows });
-        self.lock();
-        defer self.mutex.unlock();
-        if (bytes.len > self.max_bytes) return error.EventTooLarge;
-        while (self.events.items.len >= self.max_events or self.bytes + bytes.len > self.max_bytes) self.evictOldest();
-        const owned = try self.allocator.dupe(u8, bytes);
-        errdefer self.allocator.free(owned);
-        try self.events.append(self.allocator, .{ .timestamp_ms = timestamp_ms, .stream_offset = stream_offset, .payload = owned, .kind = .resize });
-        self.bytes += owned.len;
+        try self.appendEvent(timestamp_ms, stream_offset, bytes, .resize);
     }
 
     pub fn eventCount(self: *const Timeline) usize {
@@ -105,8 +116,8 @@ pub const Timeline = struct {
     }
 
     // The producer must never wait for a slow export sink while it owns the
-    // PTY guard. Copy the bounded transcript under the lock; serialize/write
-    // the owned snapshot after releasing it.
+    // PTY guard. Pin immutable segments under the lock; serialize/write
+    // the snapshot after releasing it.
     fn snapshot(self: *Timeline) !Timeline {
         return self.snapshotWithAllocator(self.allocator);
     }
@@ -114,12 +125,13 @@ pub const Timeline = struct {
         self.lock();
         defer self.mutex.unlock();
         var copy = try Timeline.init(allocator, self.max_events, self.max_bytes);
+        copy.evicted_events = self.evicted_events;
         errdefer copy.deinit();
         try copy.events.ensureTotalCapacity(allocator, self.events.items.len);
         for (self.events.items) |event| {
-            const payload = try allocator.dupe(u8, event.payload);
-            copy.events.appendAssumeCapacity(.{ .timestamp_ms = event.timestamp_ms, .stream_offset = event.stream_offset, .kind = event.kind, .payload = payload });
-            copy.bytes += payload.len;
+            _ = event.storage.refs.fetchAdd(1, .monotonic);
+            copy.events.appendAssumeCapacity(event);
+            copy.bytes += event.payload.len;
         }
         return copy;
     }
@@ -155,7 +167,9 @@ pub const Timeline = struct {
     }
 
     pub fn exportCastUnlocked(self: *const Timeline, writer: *std.Io.Writer, cols: u16, rows: u16) !void {
-        try writer.print("{{\"version\":2,\"width\":{d},\"height\":{d}}}\n", .{ cols, rows });
+        try writer.print("{{\"version\":2,\"width\":{d},\"height\":{d}", .{ cols, rows });
+        if (self.evicted_events > 0) try writer.print(",\"zerowork\":{{\"replay_baseline\":\"unavailable\",\"evicted_events\":{d}}}", .{self.evicted_events});
+        try writer.writeAll("}\n");
         const origin = if (self.events.items.len == 0) 0 else self.events.items[0].timestamp_ms;
         // PTY reads may split a UTF-8 scalar. Keep its prefix across events so
         // JSON contains Unicode text, rather than Latin-1 escapes of UTF-8 bytes.
@@ -258,9 +272,9 @@ pub const Timeline = struct {
     fn evictOldest(self: *Timeline) void {
         if (self.events.items.len == 0) return;
         const event = self.events.orderedRemove(0);
+        self.evicted_events +|= 1;
         self.bytes -= event.payload.len;
-        @memset(event.payload, 0);
-        self.allocator.free(event.payload);
+        event.storage.release();
     }
 };
 
@@ -380,4 +394,15 @@ test "timeline export releases producer lock before writing and keeps a consiste
         try std.testing.expect(std.mem.indexOf(u8, sink.output.written(), "BEFORE") != null);
         try std.testing.expect(std.mem.indexOf(u8, sink.output.written(), "AFTER") == null);
     }
+}
+
+test "timeline snapshot pins immutable bytes after producer eviction and destruction" {
+    var timeline = try Timeline.init(std.testing.allocator, 2, 16);
+    try timeline.append(1, 0, "old output");
+    var frozen = try timeline.snapshotWithAllocator(std.testing.allocator);
+    defer frozen.deinit();
+    try std.testing.expect(frozen.events.items[0].payload.ptr == timeline.events.items[0].payload.ptr);
+    try timeline.append(2, 10, "replacement");
+    timeline.deinit();
+    try std.testing.expectEqualStrings("old output", frozen.events.items[0].payload);
 }

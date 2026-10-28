@@ -7,24 +7,24 @@
 
 ## 直接进入
 
-| 场景 | 交互入口 | 截图 |
+| 场景 | 交互入口 | 状态入口 |
 | --- | --- | --- |
-| 本地 ZSH · 展开侧栏 | [local](index.html?mode=local) | [展开](verification/local-expanded.png) |
-| 本地 ZSH · 折叠侧栏 | [local / collapsed](index.html?mode=local&sidebar=collapsed) | [折叠](verification/local-collapsed.png) |
-| SSH 在线 | [ssh](index.html?mode=ssh) | [在线](verification/ssh-online.png) |
-| SSH 组与内置命令流 | [group](index.html?mode=group) | [组页](verification/ssh-group-commands.png) |
-| SFTP 双栏工作区 | [sftp](index.html?mode=sftp) | [双栏](verification/sftp-dual.png) |
+| 本地 ZSH · 展开侧栏 | [local](index.html?mode=local) | [展开](index.html?mode=local) |
+| 本地 ZSH · 折叠侧栏 | [local / collapsed](index.html?mode=local&sidebar=collapsed) | [折叠](index.html?mode=local&sidebar=collapsed) |
+| SSH 在线 | [ssh](index.html?mode=ssh) | [在线](index.html?mode=ssh) |
+| SSH 组与内置命令流 | [group](index.html?mode=group) | [组页](index.html?mode=group) |
+| SFTP 双栏工作区 | [sftp](index.html?mode=sftp) | [双栏](index.html?mode=sftp) |
 | SSH 认证 | [auth](index.html?mode=auth) | 可直接输入任意演示文本并确认 |
 | SSH 连接失败 | [failed](index.html?mode=failed) | 重试或关闭失败页签 |
 | 空工作区 | [empty](index.html?mode=empty) | 本地 / 快捷连接入口 |
-| 无主机侧栏 | [empty / hosts=empty](index.html?mode=empty&hosts=empty) | [空态](verification/sidebar-empty-no-search.png) |
-| 有主机侧栏 | [local](index.html?mode=local) | [展开搜索](verification/sidebar-hosts-search.png) |
+| 无主机侧栏 | [empty / hosts=empty](index.html?mode=empty&hosts=empty) | [空态](index.html?mode=empty&hosts=empty) |
+| 有主机侧栏 | [local](index.html?mode=local) | [展开搜索](index.html?mode=local) |
 
 窗口基准：**1440 × 900 CSS / 逻辑像素**，对应 `src/main.zig` 的应用默认窗口。评审工具位于窗口外；页面最小宽度 1488px，较小浏览器通过滚动查看，不缩小字体或控件。设置弹窗不随工作区放大。
 
 公共参数：`theme=dark|light|sauber`；`sidebar=collapsed`。页面上方的场景选择、主题按钮和重置按钮属于**设计评审工具**，不计入产品窗口。页面下方始终标记本地模拟边界。
 
-以 `docs/UI_V3` 为静态服务器根目录，例如已有的 `http://127.0.0.1:5179/workspace/index.html`。本模块没有打包、安装依赖；也可以从 `index.html` 本地打开。设置、设计中心、组件链接均为相对路径。
+以仓库根目录为静态服务器根目录，访问 `http://127.0.0.1:5179/docs/UI_V3/workspace/index.html`，以便读取共享应用图标和 SVG 资源。本模块没有打包、安装依赖；也可以从 `index.html` 本地打开。设置、设计中心、组件链接均为相对路径。
 
 ## 页面与功能覆盖
 
@@ -110,12 +110,12 @@
 - 全局传输管理器可以打开并展示已完成的多项任务；广播确认与身份浮卡实际打开。
 - `node --check app.js`、`git diff --check` 通过。
 
-截图：
+HTML 原型入口：
 
-- [SSH 组命令流](verification/ssh-group-commands.png)
-- [广播确认](verification/broadcast-confirm.png)、[新增成员未自动批准](verification/broadcast-frozen-members.png)
-- [身份浮卡](verification/connection-popover.png)
-- [上传确认](verification/transfer-confirm.png)、[冲突处理](verification/transfer-conflict.png)、[传输管理器](verification/transfer-manager.png)
+- [SSH 组命令流](index.html?mode=group)
+- [广播确认](index.html?mode=group)、[新增成员未自动批准](index.html?mode=group)
+- [身份浮卡](index.html?mode=ssh)
+- [上传确认](index.html?mode=sftp)、[冲突处理](index.html?mode=sftp)、[传输管理器](index.html?mode=sftp)
 
 未作为实机事实验证的项目：真实文件系统 / SSH / SFTP / AI / 钥匙串、原生 IME / VoiceOver、macOS 系统文件选择器和真实复制。这些在原稿中明确为模拟。页面不连接任意深度的真实远端文件树或完整 Shell / VT；固定目录与只读文件预览用于基础交互路径，不宣称覆盖所有协议能力。
 
@@ -175,13 +175,13 @@
 - 共享连接表单已实际输入名称/地址并走三步；Notes→终端多行保持和确认由主线程实际核验。其他新增拖拽/快捷键/异常分支属于可操作设计实现，不能据此宣称都已在原生引擎验收。
 - `node --check app.js` 通过。仅HTML/CSS/JS与本模块说明/截图，无原生代码、构建产物或提交。
 
-本轮截图：[最小窗口与状态浮卡](verification/compact-status.png)、[独立历史页](verification/history-independent.png)、[AI最终空态](verification/ai-empty-final.png)、[AI完整对话](verification/ai-complete.png)、[模型滑块](verification/ai-model-slider.png)、[端口转发](verification/port-forward-complete.png)。较早截图仅表示当时原型状态；最新入口以HTML为准。真实SSH/SFTP/AI/钥匙串/系统文件选择器、任意深远端文件树、完整VT、原生IME/VoiceOver不由浏览器模拟证明。
+本轮状态入口：[最小窗口与状态浮卡](index.html?mode=local&size=compact)、[独立历史页](index.html?mode=history)、[AI最终空态](index.html?mode=ai)、[AI完整对话](index.html?mode=ai)、[模型滑块](index.html?mode=ai)、[端口转发](index.html?mode=ssh)。历史截图已清理，状态以可编辑 HTML 为准。真实SSH/SFTP/AI/钥匙串/系统文件选择器、任意深远端文件树、完整VT、原生IME/VoiceOver不由浏览器模拟证明。
 
 最终实测样式记录：[computed-style-final.json](verification/computed-style-final.json)，浏览器DPR2/100%缩放、1440×900 APP、600×456 AI、224px侧栏；各页面最后控制台未见脚本错误。
 
 跨模块笔记附件保存实际 `{type, source, text, name}` 只读快照，预览按附件快照显示原文（保留换行、转义HTML），不会套用示例远端日志；预算按该文本长度估算，不固定按4 KB计算。`noteContext`只进入附件，不重复塞入问题输入区。
 
-主线程最终复验：`@ai 分析服务日志` 直接输入后，终端保留特殊命令记录，问题完整进入当前AI草稿但不发送；预算弹层显示6.5k/200k的组成且在APP边界内。笔记跨模块附件点击显示真实Markdown原文，问题输入保持空，快照来源和字符数可见；证据见 `../notes/verification/notes-workspace-attachment.png`。本次复验使用更新后的 `complete-notes` 资源版本。
+主线程最终复验：`@ai 分析服务日志` 直接输入后，终端保留特殊命令记录，问题完整进入当前AI草稿但不发送；预算弹层显示6.5k/200k的组成且在APP边界内。笔记跨模块附件点击显示真实Markdown原文，问题输入保持空，快照来源和字符数可见；证据见 [笔记与工作区原型](../notes/index.html)。本次复验使用更新后的 `complete-notes` 资源版本。
 
 ## 2026-10-25 V3逐项审计更新
 
@@ -192,7 +192,7 @@
 
 当前版本以[功能组件契约](COMPONENTS.md)为准，`?component=id`加载同一模型与控制器；没有复制第二套组件。页签使用`../shared/functional.js`的`V3.tab`与公共功能外壳样式。主机右键、页签右键和终端中键菜单分开；终端右键粘贴到原输入区，不执行，剪贴板不可访问时明确提示⌘V。单终端不再添加内容顶部工具横幅，搜索、历史、导出等由中键菜单及快捷键进入，分栏成员保留必要pane头部。折叠侧栏主机浮卡包含类型、状态、会话数与地址；页签浮卡包含身份、状态和目录/跳板。命令块与普通文档同起点，移除时间戳样式遗留的50px缩进。底栏延迟并入连接状态。链路浮卡在render重建后按语义锚点重新查找元素，不再定位已销毁节点。
 
-AI继续复用`docs/SPEC/prototypes/v2/index-dark.html`与`vanta.css`的三点入口、600×456浮窗、14px握柄、三窗控、只读owner、75%用户气泡和输入控制顺序，不另起侧栏设计。`verification/consistency/`保存本轮截图与针对性验证。
+AI继续复用`docs/SPEC/prototypes/v2/index-dark.html`与`vanta.css`的三点入口、600×456浮窗、14px握柄、三窗控、只读owner、75%用户气泡和输入控制顺序，不另起侧栏设计。`verification/consistency/`保存针对性验证记录，效果状态通过 HTML 原型查看。
 
 
 ## 本轮修正契约（2026-10-25）
@@ -209,7 +209,7 @@ AI继续复用`docs/SPEC/prototypes/v2/index-dark.html`与`vanta.css`的三点�
 
 ## 2026-10-26 二轮评审更新
 
-当前以 [二轮效果图](../review-followup-20261026.html)、[修改与逐入口检查记录](../REVIEW_FOLLOWUP_20261026.md) 为准。侧栏为显示/隐藏，不保留图标折叠态；保存主机与会话分离，主机菜单不操作任意一条同主机会话的转发。旧验证截图作为历史记录保留。传输使用共享 `transfer-row`，消息使用共享 `feedback`，具体语义、时长和位置见设计指南。
+当前以 [二轮效果图](../review-followup-20261026.html)、[修改与逐入口检查记录](../REVIEW_FOLLOWUP_20261026.md) 为准。侧栏为显示/隐藏，不保留图标折叠态；保存主机与会话分离，主机菜单不操作任意一条同主机会话的转发。旧验证截图已清理，相关状态通过 HTML 原型查看。传输使用共享 `transfer-row`，消息使用共享 `feedback`，具体语义、时长和位置见设计指南。
 
 
 ## 2026-10-27 SFTP 确认框与文件菜单
@@ -218,6 +218,9 @@ AI继续复用`docs/SPEC/prototypes/v2/index-dark.html`与`vanta.css`的三点�
 
 文件右键菜单为 224×154，使用 34px 行高、14px 图标和左对齐文字；重命名仍为禁用状态。菜单沿用点击位置与边界约束。HTML 与原生使用各自真实数据，内容不同不视为布局偏差。
 
-效果图：[上传确认](../reference/sftp-overlay-polish-20261027/html-confirm-upload.png)、[文件菜单实机效果](../reference/sftp-overlay-polish-20261027/native-file-menu.png)。原生截图：[上传确认](../reference/sftp-overlay-polish-20261027/native-confirm-upload.png)、[文件菜单](../reference/sftp-overlay-polish-20261027/native-file-menu.png)、[小窗口下载确认](../reference/sftp-overlay-polish-20261027/native-confirm-download-compact.png)。测量记录见同目录 measurements.json。
+HTML 原型：[SFTP 文件工作区](index.html?mode=sftp)、[小窗口](index.html?mode=sftp&size=compact)。选中文件后打开上传/下载确认，或右键打开文件菜单；历史原生截图已清理，既有尺寸与验收结论保留。
 
 验证覆盖原生真实鼠标拖拽上传/下载及外部文件投放、传输内容校验、860×480 小窗口确认框边界与底层提示关闭；文件工作区相关测试通过。App 产物为 0.2.2，仅构建 .app。
+
+
+2026-10-28：历史回看与AI执行合并为[同一PATCH主方案](../../DESIGN/V0.2.6_AI_SESSION_EXECUTION.md#16-全局历史会话与原会话回看)。两入口共用session-history renderer；阅读位置保存逻辑行/文字锚，resize后重算进度。原生实现状态及局部修复见主方案§17。

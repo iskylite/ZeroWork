@@ -56,7 +56,7 @@ const Fixture = struct {
     fn publish(self: *Fixture, is_error: bool, has_action: bool) void {
         self.operation += 1;
         const action_id = self.notice_host.registerAction(owner, .view_result, .{ .context = self, .invoke = action }) catch return;
-        _ = self.notice_host.coordinator.publishNotification(.{ .definition_id = "fixture.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = self.operation, .event_revision = 1, .phase = if (is_error) .failed else .succeeded, .severity = if (is_error) .failure else .info, .title = if (is_error) "验证错误" else if (has_action) "有结果可查看" else "普通消息", .detail = "仅验证原生展示，未执行远程操作", .actions = if (has_action) &.{.{ .kind = .view_result, .action_id = action_id, .label = "查看" }} else &.{} }, host.localClock() catch return) catch return;
+        _ = self.notice_host.coordinator.publishNotification(.{ .definition_id = "fixture.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = self.operation, .event_revision = 1, .phase = if (is_error) .failed else .succeeded, .severity = if (is_error) .failure else .info, .owner_name = "prod-web-01", .title = if (is_error) "验证错误" else if (has_action) "有结果可查看" else "普通消息", .detail = "仅验证原生展示，未执行远程操作", .actions = if (has_action) &.{.{ .kind = .view_result, .action_id = action_id, .label = "查看" }} else &.{} }, host.localClock() catch return) catch return;
         self.cx.requestRedraw();
     }
     fn long(self: *Fixture) void {
@@ -77,6 +77,13 @@ const Fixture = struct {
     }
     fn failure(self: *Fixture) void {
         self.publish(true, false);
+    }
+    fn connectionFailure(self: *Fixture) void {
+        self.operation += 1;
+        const ended_owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(99), .generation = 1 } };
+        _ = self.notice_host.coordinator.publishNotification(.{ .definition_id = "fixture.feedback", .owner = .{ .window_id = 1, .content = ended_owner }, .owner_name = "ScaleX40-AI01", .operation_id = self.operation, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "连接失败: HandshakeFailed" }, host.localClock() catch return) catch return;
+        self.notice_host.coordinator.ownerEnded(ended_owner);
+        self.cx.requestRedraw();
     }
     fn action(raw: *anyopaque, _: host.notifications.NotificationEvent) !void {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -162,7 +169,7 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     self.history = try @import("ui/notification_history.zig").View.mount(cx, scope, &self.notice_host, bell);
     const row = try ui.box(cx, .{ .direction = .row, .gap = 12 }, .{});
     const Spec = struct { label: []const u8, id: []const u8, callback: *const fn (*Fixture) void };
-    inline for ([_]Spec{ .{ .label = "命令失败", .id = "fixture.command-error", .callback = Fixture.commandHint }, .{ .label = "典型通知", .id = "fixture.scenes", .callback = Fixture.scenes }, .{ .label = "完成与取消", .id = "fixture.outcomes", .callback = Fixture.outcomes }, .{ .label = "长消息", .id = "fixture.long", .callback = Fixture.long }, .{ .label = "普通消息", .id = "fixture.normal", .callback = Fixture.normal }, .{ .label = "带查看动作", .id = "fixture.action", .callback = Fixture.actionable }, .{ .label = "错误消息", .id = "fixture.error", .callback = Fixture.failure }, .{ .label = "切换遮挡", .id = "fixture.cover", .callback = Fixture.toggle }, .{ .label = "就地确认", .id = "fixture.local", .callback = Fixture.local } }) |spec| {
+    inline for ([_]Spec{ .{ .label = "命令失败", .id = "fixture.command-error", .callback = Fixture.commandHint }, .{ .label = "典型通知", .id = "fixture.scenes", .callback = Fixture.scenes }, .{ .label = "完成与取消", .id = "fixture.outcomes", .callback = Fixture.outcomes }, .{ .label = "长消息", .id = "fixture.long", .callback = Fixture.long }, .{ .label = "普通消息", .id = "fixture.normal", .callback = Fixture.normal }, .{ .label = "带查看动作", .id = "fixture.action", .callback = Fixture.actionable }, .{ .label = "错误消息", .id = "fixture.error", .callback = Fixture.failure }, .{ .label = "连接失败", .id = "fixture.connection-failure", .callback = Fixture.connectionFailure }, .{ .label = "切换遮挡", .id = "fixture.cover", .callback = Fixture.toggle }, .{ .label = "就地确认", .id = "fixture.local", .callback = Fixture.local } }) |spec| {
         const button = try ui.widgets.Button(.{ .label = spec.label, .on_click = cx.on(Fixture, self, spec.callback) }).mount(scope, cx);
         button.meta.ownership.meta.test_id = spec.id;
         if (comptime std.mem.eql(u8, spec.id, "fixture.local")) self.local_anchor = button;

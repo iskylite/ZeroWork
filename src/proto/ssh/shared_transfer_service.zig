@@ -55,6 +55,7 @@ pub const Service = struct {
     };
     const Request = struct {
         operation: Operation,
+        deadline_ns: i128 = std.math.maxInt(i128),
         done: std.atomic.Value(bool) = .init(false),
         result: Result = .success,
         attributes: c.ZW_SFTP_ATTRIBUTES = undefined,
@@ -171,7 +172,7 @@ pub const Service = struct {
     }
 
     fn call(self: *Service, operation: Operation) !Result {
-        var request: Request = .{ .operation = operation };
+        var request: Request = .{ .operation = operation, .deadline_ns = @import("../../platform/realtime.zig").monotonicNs() + 30 * std.time.ns_per_s };
         self.lock();
         if (self.parent_released.load(.acquire)) {
             self.unlock();
@@ -242,6 +243,14 @@ pub const Service = struct {
         if (self.io_owner) |owner| {
             if (owner != current) return error.WrongIoOwner;
         } else self.io_owner = current;
+        // Never return borrowed RPC arguments while libssh2 may retain them.
+        // Escalate to the transport owner, which settles the request only
+        // after actual parent release through sessionReleased().
+        const now = @import("../../platform/realtime.zig").monotonicNs();
+        if (!self.faulted.load(.acquire)) {
+            if (self.pending) |request| if (now >= request.deadline_ns) return error.SftpRequestTimeout;
+            for (self.readers.items) |reader| if (reader.retryExpired(now)) return error.SftpRequestTimeout;
+        }
         if (self.readonly_retry) |reader| {
             if (reader.step(self.session)) return;
             self.readonly_retry = null;
@@ -537,4 +546,21 @@ test "shared transfer actual parent release resolves a pending RPC without borro
     const close_result = try shared.call(.{ .close = &value });
     try std.testing.expect(close_result.close.consumed and close_result.close.receipt == .released);
     try std.testing.expectError(error.TransferTransportClosed, shared.call(.{ .read = .{ .file = &value, .bytes = &bytes } }));
+}
+
+test "shared transfer timeout keeps borrowed request pinned until actual parent release" {
+    var session: ssh.Session = .{ .state = .active };
+    const shared = try Service.init(std.testing.allocator, &session);
+    defer shared.deinitLocal() catch unreachable;
+    var bytes: [4]u8 = undefined;
+    var value: Service.File = .{ .native = null };
+    var request: Service.Request = .{ .operation = .{ .read = .{ .file = &value, .bytes = &bytes } }, .deadline_ns = 0 };
+    shared.pending = &request;
+    try std.testing.expectError(error.SftpRequestTimeout, shared.step());
+    try std.testing.expect(shared.pending == &request);
+    try std.testing.expect(!request.done.load(.acquire));
+    session.state = .closed;
+    try shared.sessionReleased();
+    try std.testing.expect(request.done.load(.acquire));
+    try std.testing.expectEqual(ssh.ReleaseReceipt.released, shared.closeReceipt());
 }

@@ -80,6 +80,7 @@ pub const Thread = struct {
                 }
                 self.worker.presentation_attached.store(false, .release);
                 if (failure.? != error.ShellEnded and failure.? != error.ForwardParentClosing) {
+                    self.worker.transportFailed();
                     self.worker.reconnect.suspect(null);
                     self.failed.store(true, .release);
                 }

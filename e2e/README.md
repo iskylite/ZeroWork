@@ -68,3 +68,6 @@ AI gateway 专项默认跳过；明确开启后必须同时提供 `ZEROWORK_AI_G
 旧 `auth_challenge_view` 当前没有生产调用入口。使用 `zig build auth-challenge-preview -Dtest-mode=true` 构建隔离原生验收窗口，再运行 `node e2e/legacy_auth_native.ts /tmp/legacy-auth-new-run dark`（另测 `light`）。窗口复用真实 View 和 InteractiveBridge，覆盖五种认证、标准／最小尺寸、输入遮罩、提交／取消、首次密钥三个决定，以及变更密钥必须完整输入 `yes` 的限制；不建立 SSH、不写信任记录或钥匙串。图标与三主题重着色由 `zig build test-ui -Dui-test-filter='auth challenge'` 验证。
 
 生产转发完整回归使用 `node e2e/forward_controls_native.ts /tmp/forward-new-run dark`（另测 `light`）。只点击一次主机入口；同一 SSH transport 应包含一个 PTY channel 和一个只读系统识别 channel。对端仅将与生产 `remote_os.command` 完全相同的探测记为 `os_probe` 并拒绝执行，其他 exec 仍导致验收失败。三种转发均需完成 8192 字节精确往返、停止后拒绝连接；收尾保留原始 peer trace，再检查唯一 transport、通道数和流量，不能靠删除失败断言通过。
+
+
+历史PATCH局部回归：`node e2e/patch_history_native.ts zig-out/bin/zerowork /tmp/zerowork-history-review`。先构建最新test-mode二进制；runner只在独立临时数据目录写种子cast/索引，通过主机菜单打开归档，核对Esc、搜索后Esc、1440×900及860×480卡片与内容，保存真实Metal截图。它不连接SSH，也不代表真实远端resize、正常Quit或完整新PATCH已验收。

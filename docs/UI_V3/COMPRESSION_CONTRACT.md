@@ -22,7 +22,7 @@
 | 失败 | “上下文压缩失败”；“摘要服务暂时不可用（HTTP503）”；“原上下文与可见历史均未改变。”；“重试压缩” | 不提交待定摘要、不改变原请求历史 |
 | 成功 | “上下文已压缩”；“历史输入：3,375 tokens（估算） → 1,458 tokens（估算）”；“可见历史与附件已保留；后续请求使用摘要 + 最近两轮。” | 原可见10条记录不变；仅requestHistory投影为摘要+最近2轮；重新计算用量，不按固定比例缩放 |
 
-截图中的具体token数来自当前夹具，不是固定产品常量。原生应显示服务返回的真实统计；没有真实统计时必须明确标注估算。原生摘要请求必须不携带可执行工具；失败/取消不提交；摘要提交须绑定原owner与有效请求版本。HTML定时器同时绑定owner对象和单调请求代次，切换会话不把结果提交给当前其它owner。
+原型中的具体token数来自当前夹具，不是固定产品常量。原生应显示服务返回的真实统计；没有真实统计时必须明确标注估算。原生摘要请求必须不携带可执行工具；失败/取消不提交；摘要提交须绑定原owner与有效请求版本。HTML定时器同时绑定owner对象和单调请求代次，切换会话不把结果提交给当前其它owner。
 
 ## 尺寸与布局
 
@@ -43,12 +43,6 @@
 
 已在浏览器操作：载入五轮→压缩→取消；载入失败→压缩→失败→重试→成功；无历史禁用；生成中禁用；成功后打开用量浮层。取消后10条可见消息保留、发送恢复；验证消息流无压缩卡且无摘要查看入口；失败后可重试；成功后仍10条、历史文本12950字符，用量重新估算为3375→1458 tokens。
 
-- `verification/review-20261026/compression-running.png`
-- `verification/review-20261026/compression-cancelled.png`
-- `verification/review-20261026/compression-failed.png`
-- `verification/review-20261026/compression-success.png`
-- `verification/review-20261026/compression-usage.png`
-- `verification/review-20261026/compression-empty.png`
-- `verification/review-20261026/compression-generating.png`
+状态通过[工作区 HTML 原型](workspace/index.html?mode=ai)下方“上下文压缩验证（原型模拟）”控件选择；运行、取消、失败、成功、用量、空态和生成中均由现有 HTML/CSS/JS 呈现。
 
 本聊天未执行真实模型摘要或原生UI测试。原生负责会话另行交接报告 `/private/tmp/zw-compaction-native-final/report.json` passed：气泡344宽、状态314×84；真实HTTP夹具验证失败/取消/重试、保留可见历史及下一次请求使用memory+最近两轮；示例484→107 tokens为估算。该结果来自原生负责人的实际报告，不以HTML截图代替。外部LLM摘要质量及KVM规划助手历史/摘要服务接线仍不在本次HTML验证内。

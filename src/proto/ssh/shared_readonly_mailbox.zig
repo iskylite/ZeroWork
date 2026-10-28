@@ -39,12 +39,13 @@ pub const Mailbox = struct {
     parent_released: bool = false,
     cleanup_unknown: bool = false,
     consumer_released: bool = false,
+    startup_deadline: i128,
     pub fn init(a: std.mem.Allocator, endpoint: readonly.EndpointRef, key: readonly.OperationKey) !*Mailbox {
         try readonly.validateEndpoint(endpoint);
         try readonly.validateKey(endpoint, key, false);
         const self = try a.create(Mailbox);
         errdefer a.destroy(self);
-        self.* = .{ .allocator = a, .endpoint = endpoint, .key = key };
+        self.* = .{ .allocator = a, .endpoint = endpoint, .key = key, .startup_deadline = clock.monotonicNs() + 30 * std.time.ns_per_s };
         try self.results.ensureTotalCapacity(a, 34);
         errdefer self.results.deinit(a);
         var ready = try readonly.OwnedResult.init(key, endpoint, 0, 0, "");
@@ -121,6 +122,14 @@ pub const Mailbox = struct {
         self.lock();
         defer self.unlock();
         return self.work != null or !self.initialized and !self.closing;
+    }
+    /// A pinned native retry can only be abandoned by releasing its parent.
+    pub fn retryExpired(self: *Mailbox, now: i128) bool {
+        self.lock();
+        defer self.unlock();
+        if (!self.initialized and !self.closing and now >= self.startup_deadline) return true;
+        const work = self.work orelse return false;
+        return work.retry and now >= work.deadline;
     }
     pub fn canReleaseParent(self: *Mailbox) bool {
         self.lock();
@@ -312,4 +321,24 @@ fn exerciseAllocation(a: std.mem.Allocator) !void {
 }
 test "shared readonly mailbox allocation failure retains no accepted request or parent reference" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseAllocation, .{});
+}
+
+test "readonly retry deadline covers native EAGAIN without releasing its work" {
+    const identity = @import("../../host/identity.zig");
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(501), .generation = 1 };
+    const endpoint: readonly.EndpointRef = .{ .binding_id = 1, .binding_generation = 1, .resource_owner = .{ .session = owner }, .origin_session = owner };
+    const mailbox = try Mailbox.init(std.testing.allocator, endpoint, .{ .owner = .{ .session = owner }, .operation_id = 1 });
+    defer {
+        mailbox.sessionReleased();
+        mailbox.deinit() catch unreachable;
+        mailbox.destroy();
+    }
+    try std.testing.expect(mailbox.retryExpired(mailbox.startup_deadline));
+    const key: readonly.OperationKey = .{ .owner = .{ .session = owner }, .operation_id = 2 };
+    try mailbox.submit(key, .{ .endpoint = endpoint, .request_id = 2, .path = "/text", .action = .{ .read_text = .{} } });
+    mailbox.work.?.retry = true;
+    mailbox.requestClose();
+    try std.testing.expect(mailbox.retryExpired(mailbox.work.?.deadline));
+    try std.testing.expectEqual(readonly.ReleaseReceipt.awaiting, mailbox.closeReceipt());
+    try std.testing.expect(mailbox.work != null);
 }

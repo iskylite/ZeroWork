@@ -881,7 +881,7 @@ test "transfer projection MD5 phase comes from the real engine and remains pausa
     var session: Ssh.Session = .{};
     engine.attachSession(&session);
     engine.remote_metadata = .{ .context = &peer, .size = Md5PhasePeer.size, .stat = Md5PhasePeer.stat };
-    engine.remote_files = .{ .context = &peer, .open_read = Md5PhasePeer.openRead, .stat_handle = Md5PhasePeer.statHandle, .read = Md5PhasePeer.read, .close = Md5PhasePeer.close, .release = Md5PhasePeer.release };
+    engine.remote_files = .{ .stage_download = false, .context = &peer, .open_read = Md5PhasePeer.openRead, .stat_handle = Md5PhasePeer.statHandle, .read = Md5PhasePeer.read, .close = Md5PhasePeer.close, .release = Md5PhasePeer.release };
     var manager = try backend.Manager.init(std.testing.allocator, engine.engine(), 1, .{ .max_attempts = 1 });
     defer manager.deinit();
     const job = try manager.enqueue(.{ .session_id = 101, .direction = .download, .sources = &.{ "a", "b" }, .remote_dir = "/readonly", .local_dir = directory, .md5_check = true });

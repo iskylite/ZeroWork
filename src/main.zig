@@ -28,6 +28,12 @@ const ProcessWindows = struct {
         try self.pending.append(std.heap.c_allocator, .{ .source = .{ .window_id = source.window_id, .workspace_id = source.workspace_id }, .connection = connection });
     }
 
+    fn queueTab(self: *ProcessWindows, source: *application_host_mod.ApplicationHost, id: ws.SessionId) !void {
+        var connection = try source.freezeTabWindowConnection(id);
+        errdefer connection.deinit();
+        try self.pending.append(std.heap.c_allocator, .{ .source = .{ .window_id = source.window_id, .workspace_id = source.workspace_id }, .connection = connection });
+    }
+
     /// Execute between MultiWindowApp ticks: creating a native App while its
     /// windows array is being rendered would invalidate the runtime iterator.
     fn drain(self: *ProcessWindows, registry: *FontRegistry) void {
@@ -3380,7 +3386,8 @@ const MenuHost = struct {
         self.state.show(kind, .{
             .capability_snapshot = self.capabilitiesForTab(self.context_tab),
             .has_saved_connection = if (self.workspace) |workspace| if (self.context_tab) |index| if (index < workspace.tabs.items.len) workspace.tabs.items[index].host_snapshot != null else false else null else null,
-            .new_window_available = process_windows != null and self.captured_asset != null,
+            .new_window_available = process_windows != null and (self.captured_asset != null or self.captured_tab != null),
+            .reuse_connection_available = if (self.context_tab) |index| if (self.workspace) |workspace| workspace.tabs.items[index].runtime != null else false else false,
             .local_session = self.isLocalTarget(),
             .read_only = self.localTargetReadonly(),
             .transfer_available = self.transferTargetAvailable(),
@@ -3688,6 +3695,7 @@ const MenuHost = struct {
             .export_selection, .export_session, .download_file => "download",
             .upload_file => "upload",
             .new_tab => "plus",
+            .reuse_connection => "copy",
             .new_window => "app-window",
             .start_background_socks, .manage_background_socks => "plug-zap",
             .edit_host => "settings",
@@ -3953,9 +3961,16 @@ const MenuHost = struct {
                     workspace.newSession(host) catch |err| workspace.statusFailure(@errorName(err));
                 }
             },
+            .reuse_connection => {
+                if (self.context_tab) |tab| workspace.reuseSessionFromTab(tab) catch |err| workspace.statusFailure(@errorName(err));
+            },
             .new_window => {
                 const process = process_windows orelse return;
                 const source = if (self.transfer_host) |transfer| transfer.application else return;
+                if (self.context_tab) |index| {
+                    process.queueTab(source, workspace.tabs.items[index].id) catch |err| workspace.statusFailure(@errorName(err));
+                    return;
+                }
                 const asset = self.captured_asset orelse return;
                 _ = workspace.registry.get(asset) catch {
                     workspace.status("主机配置已更改，请重新打开菜单");
@@ -4321,7 +4336,12 @@ const HistoryHost = struct {
     fn onRowAction(raw: *anyopaque, index: usize, action: @import("ui/history_row.zig").Action) void {
         const self: *HistoryHost = @ptrCast(@alignCast(raw));
         self.runRowAction(index, action) catch |err| {
-            if (self.workspace) |workspace| workspace.status(if (err == error.FileNotFound) "历史录制文件不存在" else @errorName(err));
+            if (self.workspace) |workspace| workspace.status(switch (err) {
+                error.FileNotFound => "历史录制文件不存在",
+                error.RecordingBaselineUnavailable => "记录起始状态已淘汰，无法准确回放；仍可导出保留内容",
+                error.UnsupportedRecordingBaseline => "记录状态版本不受支持",
+                else => @errorName(err),
+            });
         };
     }
 
@@ -5618,6 +5638,13 @@ const SettingsHost = struct {
             }
             return;
         }
+        // A slow log syscall retains its own writer. Poll the real close
+        // receipt before erasing directories; never join it on the UI thread.
+        if (applog.shutdownStep() != .released) {
+            process.data_cleanup_pending = true;
+            self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+            return;
+        }
         self.quiesceDataWriters(process) catch |err| {
             self.dataCleanupFailure("后台资源", err);
             return;
@@ -5626,7 +5653,6 @@ const SettingsHost = struct {
             self.dataCleanupFailure("清除标记", err);
             return;
         };
-        applog.shutdown();
         @import("config/credential_store.zig").eraseScope() catch |err| {
             self.dataCleanupFailure("钥匙串", err);
             return;

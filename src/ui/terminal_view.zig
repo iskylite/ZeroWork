@@ -90,6 +90,8 @@ pub const TerminalViewNode = struct {
     rows_box: *ui.Node,
     cx: *ui.Cx,
     worker: ?*Presentation = null,
+    archive_read_only: bool = false,
+    history_help: ?*ui.Node = null,
     terminal_surface: ?*TerminalSurface = null,
     legacy_document: ?*@import("terminal_document.zig").Document = null,
     terminal_theme: ?terminal_service.Theme = null,
@@ -335,7 +337,9 @@ pub const TerminalViewNode = struct {
         track.behavior.events.on_event = historyEvent;
         track.behavior.events.event_context = @ptrCast(self);
         try bar.appendChild(cx.allocator, track);
-        try bar.appendChild(cx.allocator, try ui.text(cx, "拖动回放 · 可选择复制 · ESC 返回实时流", .{ .font_size = 10.5, .color = c.fg_2 }));
+        const help = try ui.text(cx, if (self.archive_read_only) "历史归档 · 可选择复制与搜索" else "拖动回放 · 可选择复制 · ESC 返回实时流", .{ .font_size = 10.5, .color = c.fg_2 });
+        try bar.appendChild(cx.allocator, help);
+        self.history_help = help;
         // Reserve a separate card above the terminal viewport. The card must
         // participate in layout rather than cover replay rows as an overlay.
         try self.root.insertChildBefore(cx.allocator, bar, self.rows_box);
@@ -373,6 +377,7 @@ pub const TerminalViewNode = struct {
     }
 
     pub fn closeHistory(self: *TerminalViewNode) void {
+        if (self.archive_read_only) return;
         if (self.history_dragging) self.cx.releasePointerCapture();
         self.history.close();
         if (self.terminal_surface) |surface| {
@@ -2870,6 +2875,8 @@ pub const TerminalViewNode = struct {
     /// Installs normal selection/search/Escape handling for an archive pane,
     /// with no SSH worker and no text-input client.
     pub fn bindArchived(self: *TerminalViewNode) void {
+        self.archive_read_only = true;
+        if (self.history_help) |help| help.setTextContent(self.cx.allocator, "历史归档 · 可选择复制与搜索") catch {};
         self.tombstone.end("历史归档 · 只读");
         self.root.behavior.events.key_context = @ptrCast(self);
         self.root.behavior.events.event_context = @ptrCast(self);
@@ -3346,6 +3353,7 @@ pub const TerminalViewNode = struct {
         thread: *Presentation,
         status: *ui.Node,
         failed_shown: bool = false,
+        last_frame_error: ?anyerror = null,
         paste_prompt_shown: bool = false,
         last_blink_ms: i64 = 0,
         seen_generation: *u64,
@@ -3365,6 +3373,19 @@ pub const TerminalViewNode = struct {
         perf_last_run_ms: i64 = 0,
         perf_last_log_ms: i64 = 0,
 
+        fn consume(self: *FrameHook) bool {
+            const changed = self.view.consumeWorkerText(self.cx, self.worker, self.seen_generation, self.scratch) catch |err| {
+                // A retained disconnected pane can report the same stale
+                // owner on every layout pass. Log once per error episode;
+                // keep polling so a reconnected provider can recover.
+                if (self.last_frame_error == null or self.last_frame_error.? != err) applog.warn(.ui, "frame consume failed: {s}", .{@errorName(err)});
+                self.last_frame_error = err;
+                return false;
+            };
+            self.last_frame_error = null;
+            return changed;
+        }
+
         fn run(ctx: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
             const self: *FrameHook = @ptrCast(@alignCast(ctx));
             const view = self.view;
@@ -3373,10 +3394,7 @@ pub const TerminalViewNode = struct {
             // 1. Consume any freshly published frame. Text-side errors only
             //    stall the display for one frame; they must never be confused
             //    with connection failures.
-            const consumed = view.consumeWorkerText(self.cx, self.worker, self.seen_generation, self.scratch) catch |err| blk: {
-                applog.warn(.ui, "frame consume failed: {s}", .{@errorName(err)});
-                break :blk false;
-            };
+            const consumed = self.consume();
 
             // 2. Session state transitions (unchanged policy).
             const connection = self.thread.reconnectSnapshot() orelse return .done;
@@ -3525,6 +3543,10 @@ pub const TerminalViewNode = struct {
         const view: *TerminalViewNode = @ptrCast(@alignCast(raw));
         if (view.cx.focus_manager.getFocused() != view.root) return .ignored;
         if (view.history.selected != null and key == .escape) {
+            if (view.search_open) {
+                view.closeSearch();
+                return .handled;
+            }
             view.closeHistory();
             return .handled;
         }
@@ -5952,4 +5974,87 @@ test "custom command input sizes its text and caret advance with the actual pain
     try std.testing.expectApproxEqAbs(@as(f32, 71.25), view.local_input_cache.w, 0.001);
     try std.testing.expectApproxEqAbs(@as(f32, 71.25), view.localInputAdvance(view.local_editor.text.items[0..view.local_editor.caret]), 0.001);
     try std.testing.expect(painter.calls >= 2);
+}
+
+test "disconnected terminal frame errors log once and resume after recovery" {
+    const Runtime = @import("../host/runtime_service.zig").Runtime;
+    const Callbacks = struct {
+        fn reconnect(_: *anyopaque) ?@import("../vt/reconnect.zig").Control.Snapshot {
+            return null;
+        }
+        fn publication(_: *anyopaque, _: SessionHandle) !?@import("../host/runtime_service.zig").NotificationPublication {
+            return null;
+        }
+    };
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const directory = try tmp.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(directory);
+    applog.init(.{ .dir = directory, .keep_days = 0, .min_level = .warn }, std.testing.io);
+    defer applog.shutdown();
+    var transport: @import("terminal_surface_tests.zig").FakeTransport = undefined;
+    try transport.init(4, 16);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 400);
+    var view = try TerminalViewNode.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    var table: Runtime.VTable = undefined;
+    table.reconnectSnapshot = Callbacks.reconnect;
+    table.notificationPublication = Callbacks.publication;
+    var runtime: Runtime = .{ .context = &transport, .vtable = &table };
+    var seen: u64 = 0;
+    var scratch: [1]u8 = undefined;
+    var hook: TerminalViewNode.FrameHook = .{ .view = &view, .cx = cx, .worker = &runtime, .thread = &runtime, .status = undefined, .seen_generation = &seen, .scratch = &scratch };
+    view.frame_hook = &hook;
+    defer view.frame_hook = null;
+    for ([_]anyerror{ error.StaleOwner, error.SessionNotWritable }) |failure| {
+        transport.snapshot_error = failure;
+        for (0..1000) |_| try std.testing.expect(!hook.consume());
+    }
+    transport.snapshot_error = null;
+    _ = hook.consume();
+    try std.testing.expect(hook.last_frame_error == null);
+    try std.testing.expect(view.terminal_surface.?.snapshot != null);
+    transport.snapshot_error = error.StaleOwner;
+    view.terminal_surface.?.force_snapshot = true;
+    try std.testing.expect(!hook.consume());
+    try std.testing.expectEqual(applog.FlushResult.complete, applog.flush(1000));
+    applog.shutdown();
+    try std.testing.expectEqual(applog.CloseReceipt.released, applog.shutdownStep());
+    var iterator = tmp.dir.iterate();
+    const log = (try iterator.next(std.testing.io)).?;
+    const bytes = try tmp.dir.readFileAlloc(std.testing.io, log.name, std.testing.allocator, .limited(4096));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqual(@as(usize, 3), std.mem.count(u8, bytes, "frame consume failed:"));
+    try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, bytes, "StaleOwner"));
+}
+
+test "history archive Escape closes search but never exits the read-only document" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    var wire: [text_frame.header_bytes + 4]u8 = undefined;
+    text_frame.encodeHeader(wire[0..text_frame.header_bytes], .{}, 80, 1, 0, 4);
+    @memcpy(wire[text_frame.header_bytes..], "test");
+    try view.history.append(1, &wire);
+    view.bindArchived();
+    try view.mountHistoryBar();
+    try std.testing.expect(view.openHistory());
+    view.focus();
+    _ = TerminalViewNode.onWorkerKeyDown(.escape, .{}, &view);
+    try std.testing.expect(view.history.selected != null);
+    try std.testing.expect(view.history_bar.?.style.display == .flex);
+    view.search_open = true;
+    _ = TerminalViewNode.onWorkerKeyDown(.escape, .{}, &view);
+    try std.testing.expect(!view.search_open);
+    try std.testing.expect(view.history.selected != null);
+    view.closeHistory();
+    try std.testing.expect(view.history.selected != null);
 }

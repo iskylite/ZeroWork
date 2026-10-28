@@ -38,7 +38,21 @@ pub const CloseRiskSnapshot = @import("../host/process_service.zig").CloseRiskSn
 pub const ExecHandle = @import("../host/process_service.zig").ExecHandle;
 pub const ExecRequest = @import("../host/process_service.zig").ExecRequest;
 pub const ExecSnapshot = @import("../host/process_service.zig").ExecSnapshot;
-const PendingWrite = struct { sequence: u64, mode: u64, bytes: []u8, consumed: usize = 0, failure: ?terminal.WriteFailure = null, submission: bool = false };
+const PendingWrite = struct {
+    sequence: u64,
+    mode: u64,
+    bytes: []u8,
+    consumed: usize = 0,
+    failure: ?terminal.WriteFailure = null,
+    submission: bool = false,
+    mode_bound: bool = false,
+    key: ?terminal.KeyEvent = null,
+
+    fn deinit(self: PendingWrite, allocator: std.mem.Allocator) void {
+        allocator.free(self.bytes);
+        if (self.key) |key| allocator.free(key.utf8);
+    }
+};
 const ExecJob = struct {
     handle: ExecHandle,
     command_text: []u8,
@@ -159,7 +173,7 @@ const Entry = struct {
         return self;
     }
     fn destroy(self: *Entry) void {
-        for (self.writes.items) |write| self.allocator.free(write.bytes);
+        for (self.writes.items) |write| write.deinit(self.allocator);
         self.writes.deinit(self.allocator);
         self.receipts.deinit(self.allocator);
         for (self.jobs.items) |job| {
@@ -189,8 +203,22 @@ const Entry = struct {
         const write = self.writes.orderedRemove(0);
         self.pending_bytes -= write.bytes.len - write.consumed;
         self.receipts.appendAssumeCapacity(.{ .input_sequence = write.sequence, .mode_revision = write.mode, .consumed_bytes = write.consumed, .state = state, .failure = write.failure });
-        self.allocator.free(write.bytes);
+        write.deinit(self.allocator);
         @import("../platform/presentation_wakeup.zig").notify();
+    }
+    fn synchronizeWrite(self: *Entry, write: *PendingWrite) !void {
+        // Never change a frame after a prefix has reached the PTY. Paste and
+        // mouse frames retain the mode in which they were approved/captured.
+        if (write.consumed > 0 or write.mode == self.mode_revision) return;
+        if (write.mode_bound or self.modes.keyboard_disabled) return error.StaleMode;
+        if (write.key) |key| {
+            const bytes = try self.controller.?.encodeKey(self.handle, self.mode_revision, key, self.allocator);
+            self.pending_bytes = self.pending_bytes - write.bytes.len + bytes.len;
+            self.allocator.free(write.bytes);
+            write.bytes = bytes;
+        }
+        // Plain text bytes have no mode-dependent encoding.
+        write.mode = self.mode_revision;
     }
     fn finish(self: *Entry, cleanup: host.CloseReceipt) void {
         if (self.trusted) |*bridge| bridge.deinit();
@@ -801,7 +829,7 @@ pub const LocalAdapter = struct {
             @memcpy(bytes[6..][0..paste.text.len], paste.text);
             @memcpy(bytes[6 + paste.text.len ..], "\x1b[201~");
         } else @memcpy(bytes, paste.text);
-        entry.writes.appendAssumeCapacity(.{ .sequence = sequence, .mode = paste.mode_revision, .bytes = bytes });
+        entry.writes.appendAssumeCapacity(.{ .sequence = sequence, .mode = paste.mode_revision, .bytes = bytes, .mode_bound = true });
         entry.pending_bytes += count;
         entry.wakeup.notify();
         entry.last_input_sequence = sequence;
@@ -817,7 +845,12 @@ pub const LocalAdapter = struct {
         if (entry.modes.keyboard_disabled) return error.KeyboardDisabled;
         const bytes = try entry.controller.?.encodeKey(entry.handle, request.mode_revision, request.event, self.allocator);
         errdefer self.allocator.free(bytes);
-        return queueEncoded(entry, request.input_sequence, request.mode_revision, bytes, request.event.key == .enter and request.event.action != .release);
+        var key = request.event;
+        key.utf8 = try self.allocator.dupe(u8, key.utf8);
+        errdefer self.allocator.free(key.utf8);
+        const result = try queueEncoded(entry, request.input_sequence, request.mode_revision, bytes, request.event.key == .enter and request.event.action != .release);
+        if (result.queued_bytes > 0) entry.writes.items[entry.writes.items.len - 1].key = key else self.allocator.free(key.utf8);
+        return result;
     }
     fn serviceMouse(raw: *anyopaque, binding: host.ServiceHandle, request: terminal.MouseRequest) !terminal.Submission {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));
@@ -828,7 +861,9 @@ pub const LocalAdapter = struct {
         if (request.event.modifiers.alt) return error.ReservedApplicationGesture;
         const bytes = try entry.controller.?.encodeMouse(entry.handle, request.mode_revision, request.geometry_revision, request.event, self.allocator);
         errdefer self.allocator.free(bytes);
-        return queueEncoded(entry, request.input_sequence, request.mode_revision, bytes, false);
+        const result = try queueEncoded(entry, request.input_sequence, request.mode_revision, bytes, false);
+        if (result.queued_bytes > 0) entry.writes.items[entry.writes.items.len - 1].mode_bound = true;
+        return result;
     }
     fn inputGate(entry: *Entry, sequence: u64, mode_revision: u64) !void {
         if (sequence == 0 or mode_revision == 0) return error.InvalidInput;
@@ -1080,11 +1115,16 @@ fn run(entry: *Entry) void {
                 if (!input_started) flushReply(entry, transport);
                 if (entry.writes.items.len > 0 and entry.reply_offset == entry.reply_len) {
                     const write = &entry.writes.items[0];
-                    if (write.consumed == 0 and write.mode != entry.mode_revision) {
-                        write.failure = .stale_mode;
+                    entry.synchronizeWrite(write) catch |err| {
+                        write.failure = if (err == error.StaleMode) .stale_mode else .transport_failed;
                         entry.completeWrite(.failed);
                         entry.mutex.unlock();
                         pause();
+                        continue;
+                    };
+                    if (write.bytes.len == write.consumed) {
+                        entry.completeWrite(.completed);
+                        entry.mutex.unlock();
                         continue;
                     }
                     const result = transport.write(write.bytes[write.consumed..]) catch {
@@ -1367,10 +1407,10 @@ fn pollExec(entry: *Entry, job: *ExecJob, closing: bool) void {
         command.cancel(entry.handle) catch {};
         return;
     };
-    job.stdout.clearRetainingCapacity();
-    job.stdout.appendSliceAssumeCapacity(result.stdout);
-    job.stderr.clearRetainingCapacity();
-    job.stderr.appendSliceAssumeCapacity(result.stderr);
+    // Command capture is append-only. Copy just the new bytes while holding
+    // the session guard, rather than recopying all prior output every tick.
+    job.stdout.appendSliceAssumeCapacity(result.stdout[job.stdout.items.len..]);
+    job.stderr.appendSliceAssumeCapacity(result.stderr[job.stderr.items.len..]);
     job.exit = result.exit;
     job.timed_out = result.timed_out;
     job.truncated = result.truncated;
@@ -1384,4 +1424,48 @@ fn pollExec(entry: *Entry, job: *ExecJob, closing: bool) void {
         if (job.cleanup == .released) job.command = null;
         job.done = true;
     }
+}
+
+test "local adapter queued ordinary input follows live modes while paste and mouse stay bound" {
+    const a = std.testing.allocator;
+    var vt = try Vt.init(a, 3, 32);
+    defer vt.destroy();
+    var slot = try TextSlot.init(a, 4096);
+    defer slot.deinit(a);
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(1), .generation = 1 };
+    var entry: Entry = undefined;
+    entry.allocator = a;
+    entry.handle = owner;
+    entry.controller = try Controller.init(.{ .owner = owner, .engine = VtEngine.from(Vt, &vt), .text_slot = &slot });
+    const old_mode = vt.snapshot().mode_revision;
+    var key: PendingWrite = .{ .sequence = 1, .mode = old_mode, .bytes = try entry.controller.?.encodeKey(owner, old_mode, .{ .key = .arrow_up }, a), .key = .{ .key = .arrow_up, .utf8 = try a.dupe(u8, "") } };
+    defer key.deinit(a);
+    var text: PendingWrite = .{ .sequence = 2, .mode = old_mode, .bytes = try a.dupe(u8, "中文") };
+    defer text.deinit(a);
+    var bound: PendingWrite = .{ .sequence = 3, .mode = old_mode, .bytes = try a.dupe(u8, "\x1b[200~paste\x1b[201~"), .mode_bound = true };
+    defer bound.deinit(a);
+    entry.pending_bytes = key.bytes.len + text.bytes.len + bound.bytes.len;
+    _ = try vt.feed("\x1b[?2004h\x1b[?1h");
+    const state = vt.snapshot();
+    entry.mode_revision = state.mode_revision;
+    entry.modes = state.modes;
+    try entry.synchronizeWrite(&key);
+    try entry.synchronizeWrite(&text);
+    try std.testing.expectEqualStrings("\x1bOA", key.bytes);
+    try std.testing.expectEqualStrings("中文", text.bytes);
+    try std.testing.expectEqual(state.mode_revision, key.mode);
+    try std.testing.expectEqual(state.mode_revision, text.mode);
+    try std.testing.expectEqual(key.bytes.len + text.bytes.len + bound.bytes.len, entry.pending_bytes);
+    try std.testing.expectError(error.StaleMode, entry.synchronizeWrite(&bound));
+    try std.testing.expectEqualStrings("\x1b[200~paste\x1b[201~", bound.bytes);
+    // Mouse uses the same bound frame rule; a partially written frame is
+    // always finished unchanged rather than re-encoded or restarted.
+    bound.consumed = 1;
+    try entry.synchronizeWrite(&bound);
+    key.consumed = 1;
+    entry.mode_revision += 1;
+    try entry.synchronizeWrite(&key);
+    try std.testing.expectEqualStrings("\x1bOA", key.bytes);
+    entry.modes.keyboard_disabled = true;
+    try std.testing.expectError(error.StaleMode, entry.synchronizeWrite(&text));
 }

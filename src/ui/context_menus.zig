@@ -16,6 +16,7 @@ pub const Action = enum {
     export_selection,
     new_tab,
     new_window,
+    reuse_connection,
     clone_host,
     edit_host,
     pin_host,
@@ -66,7 +67,7 @@ fn catalogAction(action: Action) ?actions.ActionId {
         .toggle_timestamp => .toggle_timestamp,
         .history => .open_history,
         .export_selection, .export_session => .export_record,
-        .new_tab => .create_sibling_session,
+        .new_tab, .reuse_connection => .create_sibling_session,
         .edit_host => .edit_connection,
         .reconnect => .reconnect,
         .close_session => .request_close,
@@ -84,6 +85,7 @@ pub fn isEnabled(action: Action, context: Context) bool {
     if (projection(action, context)) |value| if (!value.enabled) return false;
     return switch (action) {
         .new_window => context.new_window_available,
+        .reuse_connection => context.reuse_connection_available and !context.session_ended,
         .ask_ai, .copy, .export_selection => context.has_selection,
         .reconnect => context.session_ended,
         .paste => !context.read_only,
@@ -99,6 +101,7 @@ pub const Context = struct {
     capability_snapshot: ?capabilities.Snapshot = null,
     has_saved_connection: ?bool = null,
     new_window_available: bool = false,
+    reuse_connection_available: bool = false,
     local_session: bool = false,
     read_only: bool = false,
     has_selection: bool = false,
@@ -124,8 +127,9 @@ pub fn items(kind: Kind, context: Context) []const Item {
 const tab_menu = [_]Item{
     .{ .action = .rename_tab, .label = "重命名页签", .icon = "pencil", .shortcut = "⌘⇧R" },
     .{ .action = .tab_color, .label = "页签颜色", .icon = "palette" },
-    .{ .action = .new_tab, .label = "新建同主机会话", .icon = "plus" },
-    .{ .action = .clone_session, .label = "镜像复制会话", .icon = "copy" },
+    .{ .action = .new_tab, .label = "新标签连接", .icon = "plus" },
+    .{ .action = .reuse_connection, .label = "复用连接", .icon = "copy" },
+    .{ .action = .new_window, .label = "新窗口连接", .icon = "app-window" },
     .{ .action = .edit_host, .label = "编辑主机配置", .icon = "settings" },
     .{ .action = .view_jump_chain, .label = "通信链路", .icon = "network" },
     .{ .action = .open_theme, .label = "全局主题", .icon = "palette" },
@@ -261,7 +265,7 @@ test "context menus keep terminal and host actions separate" {
 
 test "tab menu carries session lifecycle actions, disjoint from text ops" {
     const tab = items(.tab, .{});
-    try std.testing.expectEqual(@as(usize, 10), tab.len);
+    try std.testing.expectEqual(@as(usize, 11), tab.len);
     try std.testing.expectEqual(Action.rename_tab, tab[0].action);
     // Terminal text operations never appear on the tab menu (zero-overlap rule).
     for (tab) |item| {
@@ -270,9 +274,24 @@ test "tab menu carries session lifecycle actions, disjoint from text ops" {
         try std.testing.expect(item.action != .search);
     }
     // Danger styling on disconnect+close.
-    try std.testing.expect(tab[9].danger);
-    try std.testing.expectEqual(Action.close_session, tab[9].action);
+    try std.testing.expect(tab[10].danger);
+    try std.testing.expectEqual(Action.close_session, tab[10].action);
     // "Close others" requires multiple open tabs.
     try std.testing.expect(!isEnabled(.close_others, .{ .multi_tabs = false }));
     try std.testing.expect(isEnabled(.close_others, .{ .multi_tabs = true }));
+}
+
+test "SSH connection actions are confined to the tab menu" {
+    const tab = items(.tab, .{});
+    try std.testing.expectEqual(Action.new_tab, tab[2].action);
+    try std.testing.expectEqual(Action.reuse_connection, tab[3].action);
+    try std.testing.expectEqual(Action.new_window, tab[4].action);
+    for ([_]Context{ .{}, .{ .has_selection = true }, .{ .local_session = true } }) |context| {
+        for (items(.terminal, context)) |item| {
+            try std.testing.expect(item.action != .new_tab and item.action != .reuse_connection and item.action != .new_window);
+        }
+    }
+    try std.testing.expect(!isEnabled(.reuse_connection, .{}));
+    try std.testing.expect(isEnabled(.reuse_connection, .{ .reuse_connection_available = true }));
+    try std.testing.expect(!isEnabled(.reuse_connection, .{ .reuse_connection_available = true, .session_ended = true }));
 }

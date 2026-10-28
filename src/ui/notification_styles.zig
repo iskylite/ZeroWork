@@ -1,5 +1,4 @@
-//! V3 shared feedback: 340px stack, CSS 10x12 padding, 9px radius,
-//! 16px leading icon and 19px close control; host behavior stays coordinated.
+//! Compact feedback uses the notification list's typography and text alignment.
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 pub const edge = 12;
@@ -11,7 +10,10 @@ pub fn overlay(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn card(_: *const ui.ThemeTokens) ui.BoxStyle {
     // Zenit borders paint inside the box; include the CSS one-pixel border
     // in each content inset without shrinking the reference padding.
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .align_items = .stretch, .padding = .{ .left = 13, .right = 13, .top = 9, .bottom = 9 }, .gap = 4, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 1, .color = theme.current().border, .radius = ui.arb.px(9) }, .shadow = .{ .offset_y = 24, .blur = 70, .color = theme.current().shadow }, .hit_behavior = .@"opaque", .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .align_items = .stretch, .padding = .{ .left = 17, .right = 17, .top = 9, .bottom = 9 }, .gap = 4, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 1, .color = theme.current().border, .radius = ui.arb.px(12) }, .shadow = .{ .offset_y = 16, .blur = 40, .color = theme.current().shadow }, .hit_behavior = .@"opaque", .flex_shrink = 0 };
+}
+pub fn body(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .direction = .column, .padding = .{ .left = 22 }, .gap = 4, .flex_shrink = 0 };
 }
 pub fn header(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .direction = .row, .align_items = .center, .gap = 8 };
@@ -20,7 +22,7 @@ pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = ui.arb.px(12), .font_weight = 500, .line_height = 18.0 / 12.0, .color = theme.current().fg_1, .text_overflow = .ellipsis, .selectable = false };
 }
 pub fn detail(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = ui.arb.px(11), .line_height = 18.0 / 11.0, .color = theme.current().fg_2, .wrap = .word, .selectable = false };
+    return .{ .font_size = ui.arb.px(11), .line_height = 18.0 / 11.0, .color = theme.current().fg_2, .text_overflow = .ellipsis, .selectable = false };
 }
 pub fn textBox(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .min_width = 0, .height = .{ .px = 18 }, .flex = 1 };
@@ -29,7 +31,7 @@ pub fn close(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = ui.arb.px(19) }, .height = .{ .px = ui.arb.px(19) }, .padding = .ZERO, .gap = 0, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .border = .{ .radius = ui.arb.px(7) }, .flex_shrink = 0 };
 }
 pub fn icon() ui.Style {
-    return .{ .width = .{ .px = ui.arb.px(16) }, .height = .{ .px = ui.arb.px(16) }, .margin = .{ .top = ui.arb.px(1) }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = ui.arb.px(14) }, .height = .{ .px = ui.arb.px(14) }, .flex_shrink = 0 };
 }
 pub fn closeIcon() ui.Style {
     return .{ .width = .{ .px = ui.arb.px(12) }, .height = .{ .px = ui.arb.px(12) }, .flex_shrink = 0 };

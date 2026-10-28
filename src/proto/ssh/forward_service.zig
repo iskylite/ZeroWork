@@ -29,6 +29,12 @@ pub const Service = struct {
     pending: ?Start = null,
     stop_requested: std.atomic.Value(bool) = .init(false),
     parent_close_requested: std.atomic.Value(bool) = .init(false),
+    /// Borrowed by an upstream Relay only while registered. Its acknowledgement
+    /// precedes Worker teardown or rebinding this facade to a successor.
+    relay_registered: std.atomic.Value(bool) = .init(false),
+    relay_detach: std.atomic.Value(bool) = .init(false),
+    relay_next: ?*Service = null,
+    relay_session: ssh.Session = .{},
     // These fields belong exclusively to the current native IO owner.
     listener: ?*socks.Socks5Listener = null,
     transport_paused: bool = false,
@@ -48,6 +54,41 @@ pub const Service = struct {
         self.lock();
         defer self.unlock();
         return self.published;
+    }
+    /// The upstream Relay stays the sole native IO owner. Each borrowing tab
+    /// supplies its own identity and listener, sharing only the parent socket.
+    pub fn stepShared(self: *Service, parent: *ssh.Session) !void {
+        if (self.relay_session.handle == null) self.relay_session = .{
+            .state = .active,
+            .handle = parent.handle,
+            .socket_fd = parent.socket_fd,
+            .borrowed_transport = true,
+            .shared_gate = parent,
+            .resource_key = self.snapshot().origin,
+        };
+        try self.step(&self.relay_session);
+    }
+    pub fn detachSharedStep(self: *Service) !ssh.ReleaseReceipt {
+        try self.transportLost();
+        const receipt = try self.detachReceipt();
+        if (receipt != .released) return receipt;
+        try self.sessionReleased();
+        self.relay_session = .{ .state = .closed };
+        return .released;
+    }
+    /// Called only after the upstream parent actually released all children,
+    /// with its Relay joined. No borrowed native handle is inspected here.
+    pub fn sharedParentReleased(self: *Service) !void {
+        self.adoptIoAfterOwnerStopped();
+        self.relay_session = .{ .state = .closed };
+        try self.sessionReleased();
+    }
+    pub fn prepareSharedReplacement(self: *Service, origin: ?operations.OperationKey) !void {
+        if (self.relay_registered.load(.acquire)) return error.PreviousTransportNotReleased;
+        try self.prepareReplacement();
+        self.lock();
+        defer self.unlock();
+        self.published.origin = origin;
     }
     /// Memory-only acceptance against the actual original forward binding.
     pub fn start(self: *Service, origin: operations.OperationKey, binding: sessions.ServiceHandle, key: operations.OperationKey, options: socks.Options) !void {
@@ -199,6 +240,9 @@ pub const Service = struct {
         self.transport_paused = true;
         if (self.listener) |listener| try listener.ownerPause();
         if (self.listener != null) self.publish(.paused, .awaiting, null);
+    }
+    pub fn detachReceipt(self: *Service) !ssh.ReleaseReceipt {
+        return if (self.listener) |listener| try listener.ownerDetachReceipt() else .released;
     }
     /// The parent owner supplies this only after Session.closeReceipt released.
     pub fn sessionReleased(self: *Service) !void {

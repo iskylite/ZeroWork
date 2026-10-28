@@ -36,6 +36,10 @@ pub const Adapter = struct {
     /// `ghostty_terminal_vt_write`).
     cwd_owned: ?[]u8 = null,
     version: u64 = 1,
+    // Scalar UI change probes observe the last completed mutation; they must
+    // not wait for Ghostty parsing/history work just to decide whether to read.
+    published_version: std.atomic.Value(u64) = .init(1),
+    published_event_sequence: std.atomic.Value(u64) = .init(0),
     theme_revision: u64 = 0,
     cells_dirty: bool = true,
     style_version: u64 = 1,
@@ -190,6 +194,13 @@ pub const Adapter = struct {
         return if (self.cwd_owned) |cwd| try allocator.dupe(u8, cwd) else null;
     }
 
+    /// UI reads must yield rather than spin behind terminal parsing/search.
+    pub fn tryCopyCwd(self: *Adapter, allocator: std.mem.Allocator) !?[]u8 {
+        if (!self.mutex.tryLock()) return error.WorkerBusy;
+        defer self.mutex.unlock();
+        return if (self.cwd_owned) |cwd| try allocator.dupe(u8, cwd) else null;
+    }
+
     /// Discard the previous prompt's path before an explicit shell report.
     pub fn clearCwd(self: *Adapter) void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
@@ -309,12 +320,13 @@ pub const Adapter = struct {
         defer self.mutex.unlock();
         return self.snapshotLocked();
     }
-    /// UI consumers can avoid copying an unchanged semantic event history.
-    /// This has the same serialized ownership as a VT projection snapshot.
-    pub fn semanticSequence(self: *Adapter) u64 {
-        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
-        defer self.mutex.unlock();
-        return self.event_sequence;
+    /// Scalar probes refer to completed mutations. A later owned projection
+    /// still validates its version; these probes never expose mutable cells.
+    pub fn publishedVersion(self: *const Adapter) u64 {
+        return self.published_version.load(.acquire);
+    }
+    pub fn semanticSequence(self: *const Adapter) u64 {
+        return self.published_event_sequence.load(.acquire);
     }
 
     pub fn snapshotLocked(self: *Adapter) engine.Snapshot {
@@ -352,10 +364,21 @@ pub const Adapter = struct {
             self.modes = modes;
             self.mode_revision +|= 1;
         }
+        self.published_version.store(self.version, .release);
+        self.published_event_sequence.store(self.event_sequence, .release);
     }
     pub fn copyProjection(self: *Adapter, allocator: std.mem.Allocator) !engine.Projection {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
+        return self.copyProjectionLocked(allocator);
+    }
+    /// Contention is a deferred UI read, never a connection failure.
+    pub fn tryCopyProjection(self: *Adapter, allocator: std.mem.Allocator) !engine.Projection {
+        if (!self.mutex.tryLock()) return error.WorkerBusy;
+        defer self.mutex.unlock();
+        return self.copyProjectionLocked(allocator);
+    }
+    fn copyProjectionLocked(self: *Adapter, allocator: std.mem.Allocator) !engine.Projection {
         if (c.ghostty_render_state_update(self.render_state, self.terminal) != c.GHOSTTY_SUCCESS) return error.GhosttyRenderStateFailed;
         var result = try projection.capture(self, allocator);
         result.output_sequence = self.output_sequence;

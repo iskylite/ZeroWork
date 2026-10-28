@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ZeroWork · 历史会话回看</title></head>
+<body><p>正在打开工作区历史… <a id="workspace">打开历史会话</a></p>
+<script>
+const params=new URLSearchParams(location.search);
+params.set('mode','ssh');
+params.set('historyScene',params.get('historyScene')||params.get('state')||'list');
+params.delete('state');
+const target='../index.html?'+params;
+document.getElementById('workspace').href=target;
+location.replace(target);
+</script></body></html>

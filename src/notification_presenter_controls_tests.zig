@@ -64,6 +64,86 @@ fn cycled(comptime text: []const u8, comptime length: usize) [length]u8 {
     return result;
 }
 
+test "notification sources appear once below event titles for every built-in kind and plugin phase" {
+    const Probe = struct {
+        fn owns(_: *anyopaque, _: host.notifications.Target) bool {
+            return true;
+        }
+        fn activate(_: *anyopaque, _: host.notifications.Target) bool {
+            return true;
+        }
+        fn feedback(_: *anyopaque, _: []const u8) void {}
+        fn name(_: *anyopaque, _: host.ContentOwner) []const u8 {
+            return "prod-web-01";
+        }
+    };
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{}, .{}) };
+    defer notice.coordinator.deinit();
+    defer notice.windows.deinit(a);
+    var probe: u8 = 0;
+    const window = try notice.registerWindow(.{ .context = &probe, .owns = Probe.owns, .activate = Probe.activate, .feedback = Probe.feedback, .owner_name = Probe.name });
+    try notice.registerDefinition(.{ .id = "audit.plugin", .category = .connection_change });
+    const owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(1) } };
+    const presenter = try Presenter.mount(cx, scope, &notice, window);
+    const trigger = try ui.widgets.Button(.{ .label = "通知" }).mount(scope, cx);
+    try cx.root.?.appendChild(a, trigger);
+    const history = try @import("ui/notification_history.zig").View.mount(cx, scope, &notice, trigger);
+    const Case = enum { transfer_done, transfer_failed, transfer_cancelled, disconnected, recovered, reconnect_failed, ai_ready, ai_failed, ai_unverified, ai_cancelled, feedback_failure, feedback_warning, command_error, plugin_accepted, plugin_verifying, plugin_succeeded, plugin_failed, plugin_cancelled, plugin_unknown };
+    for (std.enums.values(Case), 0..) |case, index| {
+        notice.coordinator.clearHistory();
+        const operation: u64 = @intCast(index + 1);
+        switch (case) {
+            .transfer_done, .transfer_failed, .transfer_cancelled => try notice.publishTransfer(owner, operation, 1, .{ .result = if (case == .transfer_done) .succeeded else if (case == .transfer_failed) .failed else .cancelled, .resources_released = true, .notify_complete = true, .details = .{ .object = "backup.tar.gz" } }),
+            .disconnected, .recovered, .reconnect_failed => try notice.publishReconnectDetails(owner, operation, 1, if (case == .disconnected) .disconnected else if (case == .recovered) .recovered else .failed, .{ .object = "prod-web-01" }),
+            .ai_ready, .ai_failed, .ai_unverified, .ai_cancelled => try notice.publishAi(owner, operation, 1, .{ .result = if (case == .ai_ready) .succeeded else if (case == .ai_failed) .failed else if (case == .ai_unverified) .unverified else .cancelled, .resources_released = true, .final_answer = true }),
+            .feedback_failure, .feedback_warning => try notice.publishFeedbackSeverity(window, owner, "连接失败: HandshakeFailed", if (case == .feedback_failure) .failure else .warning),
+            .command_error => _ = try notice.publish(.{ .definition_id = "host.command_error", .owner = .{ .window_id = @backingInt(window), .content = owner }, .operation_id = operation, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "命令执行失败", .detail = "command not found" }),
+            else => _ = try notice.publish(.{ .definition_id = "audit.plugin", .owner = .{ .window_id = @backingInt(window), .content = owner }, .operation_id = operation, .event_revision = 1, .phase = switch (case) {
+                .plugin_accepted => .accepted,
+                .plugin_verifying => .verifying,
+                .plugin_succeeded => .succeeded,
+                .plugin_failed => .failed,
+                .plugin_cancelled => .cancelled,
+                else => .outcome_unknown,
+            }, .title = "插件连接状态", .object_name = "prod-web-01" }),
+        }
+        if (case == .transfer_cancelled or case == .ai_cancelled) {
+            try std.testing.expectEqual(@as(usize, 0), notice.coordinator.notification_records.items.len);
+            continue;
+        }
+        const record = notice.coordinator.notification_records.items[0];
+        try std.testing.expectEqualStrings("prod-web-01", record.event.owner_name);
+        try std.testing.expect(std.mem.indexOf(u8, record.event.title, record.event.owner_name) == null);
+        const now = record.published_ms;
+        for (0..8) |_| {
+            // The active owner also needs its source line now that titles
+            // contain only the event, and equal object names must not repeat.
+            try presenter.update(now, true, owner, .{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } });
+            cx.layout();
+        }
+        if (case != .command_error) {
+            try std.testing.expectEqualStrings(record.event.title, presenter.slots[0].title.getText().?.content);
+            const source = presenter.slots[0].source;
+            try std.testing.expect(source.style.display == .flex);
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source.getText().?.content, "prod-web-01"));
+        }
+        history.open.set(true);
+        for (0..8) |_| {
+            cx.layout();
+            _ = cx.render();
+        }
+        try std.testing.expectEqualStrings(record.event.title, historyNode(history.root, "notifications.history.title").?.getText().?.content);
+        try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, historyNode(history.root, "notifications.history.summary").?.getText().?.content, "prod-web-01"));
+        history.open.set(false);
+    }
+}
+
 test "notification host retains structured details and dispatches built-in actions to original result kind" {
     const Probe = struct {
         kind: ?host.notifications.Kind = null,
@@ -186,6 +266,7 @@ test "notification history compact rows retain full long detail behind an explic
         _ = cx.render();
     }
     const details = historyNode(view.root, "notifications.history.details").?;
+    try std.testing.expectEqual(@as(usize, 1), details.children.items.len);
     try std.testing.expectEqualStrings(&detail, details.children.items[0].getText().?.content);
     try std.testing.expect(details.globalRect().h > view.scroll.container.globalRect().h);
     try std.testing.expect(view.scroll.container.globalRect().h <= 320);
@@ -237,5 +318,44 @@ test "notification history background blur follows material changes without repl
         try std.testing.expectEqual(theme.current().overlay, view.root.getBackground());
         try std.testing.expectEqual(theme.current().fg_1, view.root.children.items[0].children.items[1].getText().?.color);
         try std.testing.expect(historyNode(view.root, "notifications.history.empty") != null);
+    }
+}
+
+test "notification history expands only independent details without repeating title or owner" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{}, .{}) };
+    defer notice.coordinator.deinit();
+    const trigger = try ui.widgets.Button(.{ .label = "通知" }).mount(scope, cx);
+    try cx.root.?.appendChild(a, trigger);
+    const view = try @import("ui/notification_history.zig").View.mount(cx, scope, &notice, trigger);
+    for ([_][]const u8{ "", " \n\t", "Failure", "Local Terminal", "backup.zip", "Permission denied\nexit 1" }, 1..) |detail, operation| {
+        notice.coordinator.clearHistory();
+        const record = try notice.coordinator.publishNotification(.{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = .{ .session = .{ .session_id = @fromBackingInt(1) } } }, .operation_id = operation, .event_revision = 1, .phase = .failed, .severity = .failure, .title = "Failure", .owner_name = "Local Terminal", .object_name = "backup.zip", .detail = detail }, .{ .local_minute = 0, .monotonic_ms = 0 });
+        _ = record;
+        view.open.set(true);
+        for (0..8) |_| {
+            cx.layout();
+            _ = cx.render();
+        }
+        const expand = historyNode(view.root, "notifications.history.expand");
+        if (operation < 6) {
+            try std.testing.expect(expand == null);
+            try std.testing.expect(historyNode(view.root, "notifications.history.details") == null);
+        } else {
+            const rect = expand.?.globalRect();
+            cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
+            for (0..8) |_| {
+                cx.layout();
+                _ = cx.render();
+            }
+            const details = historyNode(view.root, "notifications.history.details").?;
+            try std.testing.expectEqual(@as(usize, 1), details.children.items.len);
+            try std.testing.expectEqualStrings(detail, details.children.items[0].getText().?.content);
+        }
     }
 }

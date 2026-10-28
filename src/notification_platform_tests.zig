@@ -479,12 +479,12 @@ test "ordinary feedback stays quiet and explicitly typed failure retains severit
     host.setWindowFocus(id, false);
     try host.publishFeedback(id, target.owner, "已复制");
     try std.testing.expectEqual(@as(usize, 0), host.coordinator.notification_records.items.len);
-    try host.publishFeedbackSeverity(id, target.owner, "X40 · 会话 3 连接失败: ChallengeTimeout", .failure);
-    try host.publishFeedbackSeverity(id, target.owner, "X40 · 会话 3 连接失败: ChallengeTimeout", .failure);
+    try host.publishFeedbackSeverity(id, target.owner, "连接失败: ChallengeTimeout", .failure);
+    try host.publishFeedbackSeverity(id, target.owner, "连接失败: ChallengeTimeout", .failure);
     try std.testing.expectEqual(@as(usize, 1), host.coordinator.notification_records.items.len);
     const fact = host.coordinator.notification_records.items[0];
     try std.testing.expectEqualStrings("host.feedback", fact.event.definition_id);
-    try std.testing.expectEqualStrings("X40 · 会话 3 连接失败: ChallengeTimeout", fact.event.title);
+    try std.testing.expectEqualStrings("连接失败: ChallengeTimeout", fact.event.title);
     try std.testing.expectEqual(.failure, fact.event.severity);
     try std.testing.expectEqual(.failed, fact.event.phase);
     try std.testing.expect(!fact.event.system_enabled);

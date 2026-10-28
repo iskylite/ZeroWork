@@ -21,6 +21,53 @@ const key: P.OperationKey = .{ .owner = .{ .session = .{ .session_id = @fromBack
 const direct = [_]P.Hop{.{ .name = "DB", .host = "db.example", .user = "admin" }};
 const route = [_]P.Hop{ .{ .name = "Bastion-01", .host = "b1.example", .user = "ops" }, .{ .name = "Bastion-02", .host = "b2.example", .user = "ops" }, direct[0] };
 
+test "connection progress button focus does not turn a log disclosure into a filled action" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try f.show(f.snapshot(&direct));
+    f.cx.focus_manager.setFocusWithReason(f.view.toggle_button, .click);
+    _ = f.cx.render();
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, f.view.toggle_button.getBackground());
+    f.cx.focus_manager.setFocusWithReason(f.view.toggle_button, .tab);
+    _ = f.cx.render();
+    try std.testing.expect(f.view.toggle_button.style.outline() != null);
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, f.view.toggle_button.getBackground());
+    f.record(0, 1, .transport, .started);
+    try f.show(f.snapshot(&direct));
+    _ = f.cx.render();
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, f.view.toggle_button.getBackground());
+    try std.testing.expect(!ui.Color.eql(f.view.cancel_button.?.getBackground(), f.view.footer.getBackground()));
+    try std.testing.expectEqual(@as(f32, 96), f.view.cancel_button.?.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 32), f.view.cancel_button.?.globalRect().h);
+}
+
+test "connection progress full values survive updates and keyboard tooltips close with their modal" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const hops = [_]P.Hop{.{ .name = "Production database with a long name", .user = "operations-administrator", .host = "2001:db8:1234:5678:abcd:ef01:2345:6789", .port = 2222 }};
+    try f.show(f.snapshot(&hops));
+    const full = "Production database with a long name\noperations-administrator@[2001:db8:1234:5678:abcd:ef01:2345:6789]:2222";
+    try std.testing.expectEqualStrings(full, f.view.identity_tip_label.getText().?.content);
+    const slot = &f.view.slots[1];
+    slot.node.behavior.events.on_focus.?.invoke();
+    try std.testing.expect(slot.tip_open.peek());
+    // A progress update replaces the owned snapshot while focus stays on the row.
+    f.record(0, 1, .transport, .started);
+    try f.show(f.snapshot(&hops));
+    try std.testing.expectEqualStrings(full, slot.tip_label.getText().?.content);
+    try std.testing.expectEqualStrings(full, slot.node.behavior.interaction.a11y.?.label.?);
+    try std.testing.expect(slot.tip_open.peek());
+    slot.node.behavior.events.on_blur.?.invoke();
+    try std.testing.expect(!slot.tip_open.peek());
+    slot.node.behavior.events.on_focus.?.invoke();
+    f.view.identity_tip_open.set(true);
+    f.view.hide();
+    try std.testing.expect(!slot.tip_open.peek());
+    try std.testing.expect(!f.view.identity_tip_open.peek());
+}
+
 const Fixture = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
@@ -91,22 +138,22 @@ test "connection progress view direct and routed facts keep the current hop dist
     try std.testing.expectEqual(@as(usize, 2), f.view.slot_count);
     try std.testing.expectEqualStrings("admin@db.example:22", f.view.endpoint.getText().?.content);
     try std.testing.expectEqualStrings("TCP 连接中", f.view.slots[1].status.getText().?.content);
-    try std.testing.expectEqual(@as(f32, 760), f.view.dialog.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 348), f.view.dialog.globalRect().h);
-    try std.testing.expectEqualStrings("尝试 1", f.view.attempt.getText().?.content);
-    try std.testing.expectEqual(@as(f32, 56), f.view.identity_chip.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 24), f.view.identity_chip.globalRect().h);
-    try std.testing.expect(f.view.attempt.globalRect().w >= 38);
+    try std.testing.expectEqual(@as(f32, 640), f.view.dialog.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 358), f.view.dialog.globalRect().h);
+    try std.testing.expectEqualStrings("第 1 次尝试", f.view.attempt.getText().?.content);
+    try std.testing.expectEqual(@as(f32, 68), f.view.identity_chip.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 20), f.view.identity_chip.globalRect().h);
+    try std.testing.expect(f.view.attempt.globalRect().w >= 64);
     try std.testing.expectEqual(@as(f32, 16), f.view.attempt.globalRect().h);
     try std.testing.expect(f.view.root.parent != null);
-    try std.testing.expectEqualStrings("直连 DB · 正在连接", f.view.title.getText().?.content);
+    try std.testing.expectEqualStrings("DB", f.view.title.getText().?.content);
     for (f.view.slots[0..f.view.slot_count]) |slot| {
         const r = slot.node.globalRect();
-        try std.testing.expectApproxEqAbs(r.x + 12, slot.name.globalRect().x, 0.01);
-        try std.testing.expectApproxEqAbs(r.y + 12, slot.name.globalRect().y, 0.01);
-        try std.testing.expectApproxEqAbs(r.y + 13, slot.endpoint.globalRect().y, 0.01);
+        try std.testing.expectApproxEqAbs(r.x + 34, slot.name.globalRect().x, 0.01);
+        try std.testing.expectApproxEqAbs(r.y + 9, slot.name.globalRect().y, 0.01);
+        try std.testing.expectApproxEqAbs(r.y + 10, slot.endpoint.globalRect().y, 0.01);
         try std.testing.expectEqual(ui.types.Display.none, slot.user.style.display);
-        try std.testing.expectApproxEqAbs(r.y + 13, slot.status.globalRect().y, 0.01);
+        try std.testing.expectApproxEqAbs(r.y + 10, slot.status.globalRect().y, 0.01);
     }
     try std.testing.expect(f.view.footer_hint.globalRect().x >= f.view.footer.globalRect().x);
     try std.testing.expectApproxEqAbs(f.view.cancel_button.?.globalRect().x + f.view.cancel_button.?.globalRect().w / 2, f.view.cancel_label.?.globalRect().x + f.view.cancel_label.?.globalRect().w / 2, 0.01);
@@ -135,11 +182,13 @@ test "connection progress view failed summary remains outside folded logs and re
     try f.show(source);
     f.view.retry();
     try std.testing.expectEqual(@as(usize, 0), f.retries);
-    try std.testing.expectEqualStrings("第 2 跳 Bastion-02 · SSH 认证失败", f.view.summary_title.getText().?.content);
+    try std.testing.expectEqualStrings("SSH 认证失败", f.view.summary_title.getText().?.content);
     try std.testing.expect(std.mem.indexOf(u8, f.view.summary_detail.getText().?.content, "后续受阻：DB") != null);
     try std.testing.expectEqualStrings("受阻 · 未连接", f.view.slots[3].status.getText().?.content);
-    try std.testing.expectEqual(@as(f32, 364), f.view.dialog.globalRect().h);
-    try std.testing.expectEqualStrings("2 级跳板 · DB · 连接失败", f.view.title.getText().?.content);
+    try std.testing.expect(f.view.dialog.globalRect().h <= 884);
+    try std.testing.expectEqualStrings("连接失败", f.view.state_label.getText().?.content);
+    try std.testing.expect(f.view.summary.globalRect().y < f.view.chain_scroll.container.globalRect().y);
+    try std.testing.expectEqualStrings("DB", f.view.title.getText().?.content);
     try std.testing.expect(f.view.close_disabled.peek());
     f.view.close();
     try std.testing.expect(f.view.isVisible());
@@ -157,23 +206,22 @@ test "connection progress view failed summary remains outside folded logs and re
     try std.testing.expectEqual(@as(@TypeOf(f.view.logs_scroll.container.style.display), .none), f.view.logs_scroll.container.style.display);
     f.view.toggleLogs();
     f.cx.layout();
-    try std.testing.expectEqual(@as(f32, 580), f.view.dialog.globalRect().h);
+    try std.testing.expect(f.view.dialog.globalRect().h <= 884);
     try std.testing.expectApproxEqAbs(f.view.dialog.globalRect().y + f.view.dialog.globalRect().h, f.view.footer.globalRect().y + f.view.footer.globalRect().h, 0.01);
     _ = ledger.record(key, 0, .session, .released);
     source.cleanup = .released;
     source.resources = ledger.snapshot();
     try f.show(source);
     try std.testing.expect(!f.view.close_disabled.peek());
-    try std.testing.expectApproxEqAbs(f.view.footer.globalRect().x + 484, f.view.close_button.?.globalRect().x, 0.01);
-    try std.testing.expectApproxEqAbs(f.view.footer.globalRect().x + 580, f.view.retry_button.?.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(f.view.close_button.?.globalRect().x + f.view.close_button.?.globalRect().w + 8, f.view.retry_button.?.globalRect().x, 0.01);
+    try std.testing.expect(f.view.retry_button.?.globalRect().x + f.view.retry_button.?.globalRect().w <= f.view.footer.globalRect().x + f.view.footer.globalRect().w);
     try std.testing.expectEqualStrings("已释放", f.view.slots[1].status.getText().?.content);
     try std.testing.expectEqualStrings("失败 · 已释放", f.view.slots[2].status.getText().?.content);
     f.view.toggleLogs();
     f.cx.layout();
-    const panel_rect = f.view.dialog.globalRect();
     const body_rect = f.view.body_scroll.container.globalRect();
     const toggle_rect = f.view.toggle_button.globalRect();
-    try std.testing.expectApproxEqAbs(panel_rect.x + 24, f.view.endpoint.globalRect().x, 0.01);
+    try std.testing.expectApproxEqAbs(f.view.title.globalRect().x + f.view.title.globalRect().w + 8, f.view.endpoint.globalRect().x, 0.01);
     try std.testing.expect(toggle_rect.y >= body_rect.y);
     try std.testing.expect(toggle_rect.y + toggle_rect.h <= body_rect.y + body_rect.h + 0.01);
     // A native theme/style replay may run after the initial mount. The next
@@ -263,7 +311,7 @@ test "connection progress view cancellation keeps its original modal until relea
     try std.testing.expectEqual(@as(usize, 0), f.closes);
     source.cleanup = .released;
     try f.show(source);
-    try std.testing.expectEqualStrings("直连 DB · 连接已取消", f.view.title.getText().?.content);
+    try std.testing.expectEqualStrings("DB", f.view.title.getText().?.content);
     try std.testing.expectEqualStrings("连接已取消", f.view.summary_title.getText().?.content);
     f.view.close();
     try std.testing.expect(!f.view.isVisible());

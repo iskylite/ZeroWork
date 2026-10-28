@@ -387,6 +387,13 @@ pub const Socks5Listener = struct {
         for (self.clients.items) |conn| _ = self.stepClose(conn);
         self.reapClosed();
     }
+    /// A borrowed Session cannot invalidate sibling channels by freeing its
+    /// parent. Settle our own native clients/listener before detaching it.
+    pub fn ownerDetachReceipt(self: *Socks5Listener) !ssh_session.ReleaseReceipt {
+        try self.ownerPause();
+        self.cancelRemote();
+        return self.ownerReceipt();
+    }
     /// The caller has obtained the real parent Session release receipt. No
     /// native child pointer is inspected after that receipt invalidated it.
     pub fn ownerSessionReleased(self: *Socks5Listener) !void {
@@ -1437,4 +1444,24 @@ test "listener admission cap rejects excess sockets and returns the slot after c
     try std.testing.expectEqual(@as(u64, 2), listener.stats().connections_total);
     listener.stop();
     try std.testing.expectEqual(@as(u32, 0), listener.stats().connections_active);
+}
+
+test "shared listener detach retains pending native child until release" {
+    const a = std.testing.allocator;
+    // No native handle: closeChannelReceipt must retain the child as unknown.
+    var session: ssh_session.Session = .{ .state = .active, .borrowed_transport = true };
+    const listener = try Socks5Listener.initOwnerDriven(a, &session);
+    defer listener.deinit();
+    const client = try a.create(ClientConn);
+    client.* = .{ .fd = -1, .deadline = std.math.maxInt(i128), .channel = .{ .handle = @ptrFromInt(16) } };
+    try listener.clients.append(a, client);
+    listener.stats_active.store(1, .monotonic);
+    listener.active_admissions.store(1, .monotonic);
+    try std.testing.expectEqual(ssh_session.ReleaseReceipt.awaiting, try listener.ownerDetachReceipt());
+    try std.testing.expectEqual(@as(usize, 1), listener.clients.items.len);
+    try std.testing.expect(client.channel != null);
+    // Simulate the IO owner's subsequent real channel release receipt.
+    client.channel = null;
+    try std.testing.expectEqual(ssh_session.ReleaseReceipt.released, try listener.ownerDetachReceipt());
+    try std.testing.expectEqual(@as(usize, 0), listener.clients.items.len);
 }

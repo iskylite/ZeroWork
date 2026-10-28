@@ -496,7 +496,8 @@ pub const Surface = struct {
             errdefer self.cx.destroyDetached(root);
             root.meta.ownership.meta.test_id = test_id;
             const selected = try leaf(self.cx, S.selection(self.cx.tokens));
-            (try selected.style.ensureExtFallible(self.cx.allocator)).z_index = 4;
+            // Paint the selection before glyphs: opaque terminal theme colors
+            // must remain a background rather than covering the selected ink.
             try root.appendChild(self.cx.allocator, selected);
             try self.viewport.appendChild(self.cx.allocator, root);
             self.rows.appendAssumeCapacity(.{ .root = root, .test_id = test_id, .selected = selected });
@@ -940,6 +941,13 @@ pub const Surface = struct {
                 },
             } catch |err| {
                 if (err == error.WorkerBusy or err == error.InputFull or err == error.InputQueueFull or err == error.ReceiptQueueFull or err == error.TrustedEditPending) return;
+                // These failures precede admission. Keep ordinary input in
+                // order until refresh adopts the worker's modes/input epoch;
+                // retrying an unaccepted item cannot duplicate a PTY write.
+                if (item != .mouse and (err == error.StaleMode or err == error.StaleInput)) {
+                    self.force_snapshot = true;
+                    return;
+                }
                 if (item == .bytes) {
                     self.pending_bytes -= item.bytes.len;
                     self.cx.allocator.free(item.bytes);
@@ -1053,7 +1061,7 @@ pub const Surface = struct {
     }
     fn onCanvasEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
         return switch (event) {
-            .mouse_down, .mouse_move, .mouse_up => input.onEvent(@ptrCast(@alignCast(raw orelse return .ignored)), event),
+            .mouse_down, .mouse_move, .mouse_up, .double_click => input.onEvent(@ptrCast(@alignCast(raw orelse return .ignored)), event),
             // The specialized callback declares the canvas as a scroll owner.
             // Deliver a wheel event exactly once after generic dispatch.
             else => .ignored,

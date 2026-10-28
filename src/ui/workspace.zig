@@ -303,6 +303,7 @@ pub const SessionBridge = struct {
     context: ?*anyopaque = null,
     create: ?*const fn (?*anyopaque, hosts_mod.HostConfig, HostId, usize, []const u8) anyerror!void = null,
     recreate: ?*const fn (?*anyopaque, SessionId) anyerror!void = null,
+    reuse: ?*const fn (?*anyopaque, SessionId) anyerror!void = null,
     connected: ?*const fn (?*anyopaque, SessionId, u64) void = null,
     failed: ?*const fn (?*anyopaque, SessionId, u64, []const u8) void = null,
     cleanup: ?*const fn (?*anyopaque, SessionId, u64) void = null,
@@ -434,6 +435,7 @@ pub const Workspace = struct {
     close_bridge: CloseBridge = .{},
     notification_attention_bridge: NotificationAttentionBridge = .{},
     session_bridge: SessionBridge = .{},
+    pending_shared_connection: ?@import("../host/runtime_service.zig").SharedLease = null,
     external_auth: ?ExternalAuthentication = null,
     close_others_keep: ?SessionId = null,
     // ── Close-confirmation card (see requestCloseTab) ─────────────────
@@ -1305,7 +1307,7 @@ pub const Workspace = struct {
             tab_box.behavior.events.on_blur = .{ .callback = tabLeave, .context = select_ctx };
             const icon_slot = try ui.box(self.cx, tab_styles.iconSlot(), .{});
             const connection_color = if (group_id != null) app_theme.current().fg_2 else if (tab.?.failed) self.palette.red else if (tab.?.plugin_renderer != null) (if (tab.?.content_ready) self.palette.green else self.palette.fg_muted) else if (tab.?.terminal == null) (if (tab.?.file_ready) self.palette.green else self.palette.fg_muted) else if (tab.?.terminal.?.tombstone.state != .active) self.palette.fg_muted else if (tab.?.runtime != null or (tab.?.local and tab.?.local_state == .running)) self.palette.green else self.palette.fg_muted;
-            const type_icon = try ui.iconTint(self.cx, if (group_id != null) ui.icons.get("panels-top-left").? else if (tab.?.local) (session_icon.forOs(@import("../proto/ssh/remote_os.zig").local()) orelse session_icon.resolve(.terminal)) else if (tab.?.plugin_protocol_id.len != 0) session_icon.forConnection(self.plugins, tab.?.plugin_protocol_id, self.tabOs(tab.?), tab.?.archived) else if (tab.?.host_snapshot) |saved| session_icon.forConnection(self.plugins, saved.value.protocolId(), self.tabOs(tab.?), tab.?.archived) else session_icon.forTab(tab.?.local, tab.?.archived, tab.?.terminal != null), connection_color, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
+            const type_icon = try ui.iconTint(self.cx, if (group_id != null) ui.icons.get("panels-top-left").? else self.tabIcon(tab.?), connection_color, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
             try icon_slot.appendChild(self.cx.allocator, type_icon);
             const number = try ui.text(self.cx, "", .{ .font_size = 10, .font_weight = 500, .color = app_theme.current().fg_2, .selectable = false });
             number.meta.ownership.meta.test_id = "tabs.ordinal";
@@ -1357,6 +1359,30 @@ pub const Workspace = struct {
         self.refreshCommandIcons();
         self.refreshNotificationAttention();
         self.cx.requestRedraw();
+    }
+
+    fn tabShowsHistory(tab: *const SessionTab) bool {
+        return tab.archived or (if (tab.terminal) |terminal| terminal.history.selected != null else false);
+    }
+
+    fn tabIcon(self: *Workspace, tab: *SessionTab) ui.SvgAsset {
+        if (tabShowsHistory(tab)) return session_icon.resolve(.history);
+        if (tab.local) return session_icon.forOs(@import("../proto/ssh/remote_os.zig").local()) orelse session_icon.resolve(.terminal);
+        if (tab.plugin_protocol_id.len != 0) return session_icon.forConnection(self.plugins, tab.plugin_protocol_id, self.tabOs(tab), false);
+        if (tab.host_snapshot) |saved| return session_icon.forConnection(self.plugins, saved.value.protocolId(), self.tabOs(tab), false);
+        return session_icon.forTab(tab.local, false, tab.terminal != null);
+    }
+
+    fn refreshHistoryTabIcons(self: *Workspace) void {
+        for (self.tab_nodes.items) |node| {
+            const index = self.tabIndexById(node.tab_id) orelse continue;
+            const tab = self.tabs.items[index];
+            const old = node.type_icon.getIcon() orelse continue;
+            if (tabShowsHistory(tab) == (old.icon_id == session_icon.resolve(.history).icon_id.?)) continue;
+            const asset = self.tabIcon(tab);
+            node.type_icon.setIcon(.{ .icon_id = asset.icon_id.?, .rep = asset.pickRep(14).?, .tint = old.tint });
+            node.type_icon.markRenderDirty();
+        }
     }
 
     fn tabOs(self: *Workspace, tab: *SessionTab) session_icon.Os {
@@ -2903,6 +2929,7 @@ pub const Workspace = struct {
         cancelled: bool,
         failure: ?anyerror,
         cleanup: @import("../host/operation.zig").Cleanup,
+        automatic_retry_pending: bool = false,
         logs: [128]LogRecord = undefined,
         log_count: usize = 0,
         dropped: usize = 0,
@@ -2962,9 +2989,10 @@ pub const Workspace = struct {
                 .resources = resources,
                 .finished = finished,
                 .attached = false,
-                .attachment_failed = finished and tab.failed,
+                .attachment_failed = finished and tab.failed and job.automatic_retry_deadline_ns == null,
                 .cancelled = cancelled,
-                .failure = if (finished) job.err else null,
+                .failure = if (finished and job.automatic_retry_deadline_ns == null) job.err else null,
+                .automatic_retry_pending = job.automatic_retry_deadline_ns != null,
                 .cleanup = if (resources.hasUnknown() or job.cleanup_unknown) .unknown else if (finished and resources.released()) .released else if (cancelled) .releasing else .not_started,
             };
             if (result.hop_count > result.hops.len) return null;
@@ -2979,6 +3007,17 @@ pub const Workspace = struct {
                 result.attached = runtime.isAttached();
             };
             return result;
+        }
+        return null;
+    }
+
+    pub fn initialConnectionRetryDeadline(self: *Workspace, key: OperationKey) ?i128 {
+        if (self.shutting_down) return null;
+        for (self.connect_jobs.items) |job| {
+            if (job.operation_key == null or !job.operation_key.?.eql(key) or job.cancelled.load(.acquire)) continue;
+            const tab = self.findTicket(job.ticket) orelse return null;
+            if (tab.closing or !job.drained or !job.resource_ledger.snapshot().released()) return null;
+            return job.automatic_retry_deadline_ns;
         }
         return null;
     }
@@ -3832,10 +3871,15 @@ pub const Workspace = struct {
     pub fn cancelSessionCreation(self: *Workspace, id: SessionId) void {
         for (self.connect_jobs.items) |job| if (job.ticket.session_id == id) {
             const was_cancelled = job.cancelled.swap(true, .acq_rel);
+            const retry_pending = job.automatic_retry_deadline_ns != null;
+            if (retry_pending) {
+                job.automatic_retry_deadline_ns = null;
+                job.err = null;
+            }
             // Installation may have drained the creation result before the
             // host accepted attached. Cancel must still poll the real runtime
             // destructor and publish its create-cleanup receipt exactly once.
-            if (!was_cancelled and job.drained and job.runtime != null) job.drained = false;
+            if (!was_cancelled and job.drained and (job.runtime != null or retry_pending)) job.drained = false;
             job.host_key_bridge.cancel();
             job.auth_bridge.cancel();
             if (self.host_key_job == job) self.hideHostKeyConfirm();
@@ -3967,6 +4011,22 @@ pub const Workspace = struct {
         try recreate(self.session_bridge.context, source.id);
     }
 
+    pub fn reuseSessionFromTab(self: *Workspace, index: usize) !void {
+        if (index >= self.tabs.items.len) return error.InvalidTab;
+        const source = self.tabs.items[index];
+        if (source.archived or source.closing or source.runtime == null) return error.SessionNotConnected;
+        const reuse = self.session_bridge.reuse orelse return error.SessionHostUnavailable;
+        const previous_group = self.creation_group;
+        const previous_output = self.command_output;
+        self.creation_group = self.creationGroupFor(source.id);
+        self.command_output = null;
+        defer {
+            self.creation_group = previous_group;
+            self.command_output = previous_output;
+        }
+        try reuse(self.session_bridge.context, source.id);
+    }
+
     /// Mirror the source's OSC directory into a distinct session. This takes
     /// an owned snapshot under the VT lock before starting the async job.
     /// A missing OSC directory explicitly skips cd; never invent a path or
@@ -4042,6 +4102,8 @@ pub const Workspace = struct {
             job.progress_history_dropped +|= removed.journal.dropped;
         }
         job.progress_history.appendAssumeCapacity(.{ .key = previous, .journal = job.progress.snapshot() });
+        if (job.automatic_retry_deadline_ns != null) job.connection_attempts += 1 else job.connection_attempts = 1;
+        job.automatic_retry_deadline_ns = null;
         job.host_key_bridge.reset();
         job.auth_bridge.resetForAttempt();
         job.cancelled.store(false, .release);
@@ -4056,9 +4118,9 @@ pub const Workspace = struct {
         job.progress.begin(next.attempt_id orelse 0);
         job.ready.store(false, .release);
         tab.failed = false;
-        tab.remote_retrying = true;
+        tab.remote_retrying = tab.runtime != null;
         tab.remote_retry_deadline = null;
-        if (tab.remote_notice) |notice| notice.update(.{ .state = .reconnecting });
+        if (tab.runtime != null) if (tab.remote_notice) |notice| notice.update(.{ .state = .reconnecting });
         tab.terminal.?.clearPendingPaste();
         tab.terminal.?.paste_confirmation_pending = false;
         if (tab.runtime) |runtime| {
@@ -4139,6 +4201,7 @@ pub const Workspace = struct {
         const ticket = self.identities.newTicket();
         const job = try ConnectJob.create(ticket, host, self.registry.hosts, self.app_config.*, self.io);
         errdefer job.destroy();
+        if (self.pending_shared_connection) |lease| job.shared_connection = lease.retain();
         job.operation_key = operation;
         job.resource_ledger.key = operation;
         job.progress.begin(if (operation) |key| key.attempt_id orelse 0 else 0);
@@ -4271,12 +4334,29 @@ pub const Workspace = struct {
             }
             const target = tab.?;
             if (job.err) |err| {
+                if (self.session_bridge.retry_ssh != null and job.canAutomaticallyRetry()) {
+                    const receipt = job.failedCleanupReceipt();
+                    if (receipt == .awaiting) continue;
+                    if (receipt == .released) {
+                        // Keep transient failures in diagnostics; only an exhausted
+                        // attempt publishes failure feedback or replaces terminal text.
+                        const delay_ms: i128 = @as(i128, job.connection_attempts) * 500;
+                        job.automatic_retry_deadline_ns = @import("../platform/realtime.zig").monotonicNs() + delay_ms * std.time.ns_per_ms;
+                        applog.info(.workspace, "connect retry scheduled session={d} attempt={d}/3 delay_ms={d} cause={s}", .{ target.id, job.connection_attempts + 1, delay_ms, @errorName(err) });
+                        if (self.session_bridge.failed) |failed| failed(self.session_bridge.context, target.id, target.generation, @errorName(err));
+                        job.drained = true;
+                        self.notifyConnectionCleanup(job, .released);
+                        continue;
+                    }
+                }
                 target.failed = true;
+                var failure_buffer: [512]u8 = undefined;
+                const failure_title = std.fmt.bufPrint(&failure_buffer, "连接失败: {s}", .{@import("../proto/ssh/handshake_failure.zig").description(err) orelse @errorName(err)}) catch "连接失败";
                 var buffer: [768]u8 = undefined;
-                const text = std.fmt.bufPrint(&buffer, "{s} · 会话 {d} 连接失败: {s}", .{ target.titleSlice(), target.id, @import("../proto/ssh/handshake_failure.zig").description(err) orelse @errorName(err) }) catch "连接失败";
+                const text = std.fmt.bufPrint(&buffer, "{s} · 会话 {d} {s}", .{ target.titleSlice(), target.id, failure_title }) catch failure_title;
                 target.terminal.?.setOutput(self.cx, text) catch {};
                 if (self.active_tab == self.tabIndex(target.id)) self.status(text);
-                self.notifyConnectionFailure(job, text);
+                self.notifyConnectionFailure(job, failure_title);
                 const cleanup_receipt = job.failedCleanupReceipt();
                 if (cleanup_receipt != .released) {
                     if (cleanup_receipt == .unknown) job.cleanup_unknown = true;
@@ -4381,7 +4461,7 @@ pub const Workspace = struct {
                     if (current.connection_id == host.connection_id and std.mem.eql(u8, current.host, host.host) and current.port == host.port and std.mem.eql(u8, current.user, host.user)) session_icon.setHostNode(row.view.dot, self.plugins, current.protocolId(), kind);
                 }
             }
-            for (self.tab_nodes.items) |node| if (node.tab_id == tab.tab_id) session_icon.setNode(node.type_icon, kind);
+            for (self.tab_nodes.items) |node| if (node.tab_id == tab.tab_id and !tabShowsHistory(tab)) session_icon.setNode(node.type_icon, kind);
             self.cx.requestRedraw();
         }
     }
@@ -4447,6 +4527,7 @@ pub const Workspace = struct {
                     },
                 };
             }
+            workspace.refreshHistoryTabIcons();
             workspace.drainCloseReceipts();
             if (workspace.pollGroupWorkspace()) return .needs_layout;
             if ((workspace.close_others_keep != null or workspace.window_close_request != null) and (workspace.confirming_id == null or workspace.window_close_reconcile)) workspace.continueCloseOthers();

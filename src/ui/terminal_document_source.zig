@@ -21,7 +21,7 @@ pub const Source = struct {
     }
     fn snapshot(raw: *anyopaque, binding: Binding, allocator: std.mem.Allocator) !terminal.TerminalSnapshot {
         const self = try get(raw, binding);
-        return .{ .owner = self.owner, .geometry_revision = 1, .input_revision = 1, .read_only = true, .eof_seen = false, .projection = try self.adapter.copyProjection(allocator) };
+        return .{ .owner = self.owner, .geometry_revision = 1, .input_revision = 1, .read_only = true, .eof_seen = false, .projection = try self.adapter.tryCopyProjection(allocator) };
     }
     fn searchSnapshot(raw: *anyopaque, binding: Binding, allocator: std.mem.Allocator) !terminal.SearchSnapshot {
         const self = try get(raw, binding);

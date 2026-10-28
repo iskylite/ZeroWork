@@ -1,0 +1,50 @@
+/** Isolated archive regression: no connection, credentials or live shell. */
+import assert from 'node:assert/strict';
+import {spawn} from 'node:child_process';
+import {mkdir, mkdtemp, open, writeFile, readFile, rm, realpath} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {resolve, join} from 'node:path';
+import {createHash} from 'node:crypto';
+import {waitForServerReady, query, clickTestId, key, waitFor, screenshot, resizeWindow, mouseMove, request} from '../zig-out/share/zenit/harness/client.ts';
+const binary=resolve(process.argv[2]||'zig-out/bin/zerowork');
+const out=resolve(process.argv[3]||'/tmp/zerowork-patch-review-evidence/native');
+const isolated=await realpath(await mkdtemp(join(tmpdir(),'zw-history-review-'))),data=join(isolated,'data'),rpc=join(isolated,'rpc');
+for(const path of [out,rpc,join(data,'logs/history')])await mkdir(path,{recursive:true});
+await writeFile(join(data,'config.toml'),'[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\n');
+await writeFile(join(data,'hosts.toml'),'[registry]\nschema_version=2\nrevision=1\nnext_connection_id=2\nnext_group_id=1\n[[hosts]]\nconnection_id=1\nrevision=1\nprotocol="ssh"\nname="Archive regression"\nhost="127.0.0.1"\nport=65530\nuser="fixture"\n');
+const started=Date.now()-60000;
+await writeFile(join(data,'logs/history/index.tsv'),`1\t${started}\t${started+30000}\t30000\t0\tArchive regression\tfixture\tlogs/history/review.cast\tssh\t1\n`);
+await writeFile(join(data,'logs/history/review.cast'),JSON.stringify({version:2,width:80,height:24})+'\n'+JSON.stringify([0,'o','Archive regression\r\n中文 ANSI \u001b[32mPASS\u001b[0m\r\n'])+'\n'+JSON.stringify([1,'r','120x30'])+'\n'+JSON.stringify([2,'o','AFTER RESIZE\r\n'])+'\n');
+process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
+const log=await open(join(out,'app.log'),'w');
+const child=spawn(binary,[],{env:{...process.env,ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1',ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0'},stdio:['ignore',log.fd,log.fd]});
+const exited=new Promise(r=>child.once('close',r));
+const report:any={binary,sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),checks:[],limits:['Seeded archive; no real SSH resize or normal Quit acceptance.']};
+const shown=(n:any)=>n.visible!==false&&n.hidden!==true&&n.rect.w>0&&n.rect.h>0&&(n.effective_opacity??1)>0;
+const visible=async(id:string)=>await waitFor(async()=>(await query(id)).find(shown)||null,10000);
+const text=(n:any):string=>(n.text||'')+(n.children||[]).map(text).join('');
+try{
+ await waitForServerReady();await resizeWindow(1440,900);
+ if(!(await query('sidebar.host')).some(shown))assert((await clickTestId('sidebar.restore')).ok);
+ const host=await visible('sidebar.host');await mouseMove(host.rect.x+80,host.rect.y+host.rect.h/2);
+ assert((await request('POST','/mouse_down',{x:host.rect.x+80,y:host.rect.y+host.rect.h/2,button:'right'})).ok);
+ await request('POST','/mouse_up',{x:host.rect.x+80,y:host.rect.y+host.rect.h/2,button:'right'});
+ await visible('context.menu.history');assert((await clickTestId('context.menu.history')).ok);
+ await visible('history.record.replay');assert((await clickTestId('history.record.replay')).ok);
+ await mouseMove(600,20);
+ const card=await visible('terminal.history.card');assert(!text(card).includes('返回实时'));
+ assert((await query('terminal.row')).some(n=>text(n).includes('AFTER RESIZE')));
+ assert((await key('escape')).ok);await visible('terminal.history.card');
+ assert((await query('terminal.row')).some(n=>text(n).includes('AFTER RESIZE')));
+ report.checks.push('Archive uses original renderer; Esc preserves card and recorded content; no return-live hint.');
+ assert((await key('f',{cmd:true})).ok);await visible('terminal.search');assert((await key('escape')).ok);
+ await waitFor(async()=>!(await query('terminal.search')).some(shown)||null,10000);await visible('terminal.history.card');
+ await writeFile(join(out,'archive.tree.json'),JSON.stringify(await query('terminal.history.card'),null,2));
+ assert((await screenshot(join(out,'archive-after-escape.png'))).ok);
+ await resizeWindow(860,480);await visible('terminal.history.card');
+ assert((await screenshot(join(out,'archive-compact.png'))).ok);
+ report.checks.push('Search/Esc and compact archive remain readable.');
+ report.ok=true;
+}catch(error){report.ok=false;report.error=String(error);try{await screenshot(join(out,'failure.png'));}catch{}throw error;}
+finally{await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));child.kill('SIGTERM');await exited;await log.close();await rm(isolated,{recursive:true,force:true});}
+console.log(JSON.stringify(report,null,2));

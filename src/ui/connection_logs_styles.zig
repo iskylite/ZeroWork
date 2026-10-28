@@ -5,7 +5,8 @@ const ui = @import("ui");
 const progress_styles = @import("connection_progress_styles.zig");
 pub const theme = @import("app_theme.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
-pub const width = progress_styles.width;
+// The independent log reader retains its approved diagnostic viewport.
+pub const width: f32 = 760;
 pub const header_height: f32 = 40;
 pub const identity_height: f32 = 24;
 pub const meta_height: f32 = 16;

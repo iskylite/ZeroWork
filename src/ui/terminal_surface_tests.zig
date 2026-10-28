@@ -2230,3 +2230,126 @@ test "terminal surface focus click never creates stale selection anchors but a d
     try std.testing.expect(surface.selection != null);
     surface.clearSelection();
 }
+
+test "terminal surface preserves unaccepted text and keys across stale modes and input epochs" {
+    var transport: FakeTransport = undefined;
+    try transport.init(3, 32);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 160);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    _ = try view.refreshTerminalService(owner, true);
+    const surface = view.terminal_surface.?;
+
+    // Change worker modes after the UI frame, then withhold its next frame.
+    try transport.controller.feedOutput(owner, 1, "\x1b[?2004h\x1b[?1h", 1);
+    transport.snapshot_error = error.WorkerBusy;
+    try surface.queueText("中文");
+    try surface.pending.append(a, .{ .key = .{ .key = .arrow_up } });
+    try surface.queueText(" tail");
+    try std.testing.expectEqual(@as(usize, 3), surface.pending.items.len);
+    try std.testing.expectEqualStrings("", transport.written.items);
+    _ = try view.refreshTerminalService(owner, true);
+    try std.testing.expectEqual(@as(usize, 3), surface.pending.items.len);
+    try std.testing.expect(surface.error_message == null);
+
+    transport.snapshot_error = null;
+    _ = try view.refreshTerminalService(owner, true);
+    try std.testing.expectEqualStrings("中文\x1bOA tail", transport.written.items);
+    try std.testing.expectEqual(@as(usize, 0), surface.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), surface.pending_bytes);
+    try std.testing.expect(surface.error_message == null);
+    try surface.pump();
+    try std.testing.expectEqualStrings("中文\x1bOA tail", transport.written.items);
+
+    // An input epoch can also advance independently of the last UI frame.
+    transport.sequence = 10;
+    try surface.queueText("once");
+    try std.testing.expectEqual(@as(usize, 1), surface.pending.items.len);
+    _ = try view.refreshTerminalService(owner, true);
+    try std.testing.expectEqual(@as(u64, 11), transport.sequence);
+    try std.testing.expectEqualStrings("中文\x1bOA tailonce", transport.written.items);
+    try std.testing.expect(surface.error_message == null);
+    try surface.pump();
+    try std.testing.expectEqualStrings("中文\x1bOA tailonce", transport.written.items);
+}
+
+test "terminal surface double click selects complete colored filenames and copies once" {
+    var transport: FakeTransport = undefined;
+    try transport.init(4, 100);
+    defer transport.deinit();
+    const filename = "clusbench-4.5.2-3.20261023+gitf77ff02.x86_64.rpm";
+    try transport.controller.feedOutput(owner, 1, "prefix \x1b[31m" ++ filename ++ "\x1b[0m neighbor\r\n中文文件-e\u{301}.tar.gz next", 1);
+    var clipboard: TestClipboard = .{};
+    var sdk = TestSdk.init(a, &clipboard, &TestClipboard.vtable, .{ .clipboard = true });
+    defer sdk.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setSystemSdk(&sdk);
+    cx.setViewport(1100, 220);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    _ = cx.render();
+    _ = try view.refreshTerminalService(owner, false);
+    _ = cx.render();
+    const surface = view.terminal_surface.?;
+    surface.feedback.publish = struct {
+        fn publish(_: ?*anyopaque, _: *ui.Cx, _: identity.SessionHandle, _: []const u8) !void {}
+    }.publish;
+    const x = surface.root.globalRect().x + surface.contentPadding().left + surface.bodyX();
+    const y = surface.root.globalRect().y + surface.contentPadding().top + surface.options.row_height * 0.5;
+    // Click the right half of the final '.' cell. Native double-click synthesis
+    // must preserve punctuation, stop at spaces, and publish one clipboard write.
+    const hit = x + 46.8 * surface.options.cell_width;
+    for (0..2) |_| {
+        cx.handleMouseDownEx(hit, y, .left, .{});
+        cx.handleMouseUpEx(hit, y, .left, .{});
+    }
+    const copied = (try view.copySelectionText(a)).?;
+    defer a.free(copied);
+    try std.testing.expectEqualStrings(filename, copied);
+    try std.testing.expectEqual(@as(usize, 1), clipboard.writes);
+    try std.testing.expect(!surface.dragging and !cx.dispatcher.hasPointerCapture());
+    try std.testing.expect(surface.rows.items[0].selected.style.display == .flex);
+    try std.testing.expectEqual(@as(i16, 0), surface.rows.items[0].selected.style.z_index());
+    const event = surface.root.behavior.events.on_event.?;
+    _ = event(.{ .double_click = .{ .x = x + 2.8 * surface.options.cell_width, .y = y + surface.options.row_height } }, surface.root.behavior.events.event_context);
+    const unicode = (try view.copySelectionText(a)).?;
+    defer a.free(unicode);
+    try std.testing.expectEqualStrings("中文文件-e\u{301}.tar.gz", unicode);
+    // A regular click still clears the selection.
+    cx.handleMouseDownEx(x, y, .left, .{});
+    cx.handleMouseUpEx(x, y, .left, .{});
+    try std.testing.expect(!view.hasSelection());
+}
+
+test "terminal surface double click spans soft wrapped filenames but stops at hard newline" {
+    var transport: FakeTransport = undefined;
+    try transport.init(6, 20);
+    defer transport.deinit();
+    const filename = "clusbench-4.5.2-3.20261023+gitf77ff02.tar.gz";
+    try transport.controller.feedOutput(owner, 1, filename ++ "\r\nnext", 1);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 240);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    _ = cx.render();
+    _ = try view.refreshTerminalService(owner, false);
+    _ = cx.render();
+    const surface = view.terminal_surface.?;
+    const x = surface.root.globalRect().x + surface.contentPadding().left + surface.bodyX() + 3.5 * surface.options.cell_width;
+    const y = surface.root.globalRect().y + surface.contentPadding().top + 1.5 * surface.options.row_height;
+    _ = surface.root.behavior.events.on_event.?(.{ .double_click = .{ .x = x, .y = y } }, surface.root.behavior.events.event_context);
+    const copied = (try view.copySelectionText(a)).?;
+    defer a.free(copied);
+    try std.testing.expectEqualStrings(filename, copied);
+}

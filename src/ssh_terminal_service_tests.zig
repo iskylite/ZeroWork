@@ -226,3 +226,35 @@ test "SSH terminal loss settles an unapplied resize before publishing the final 
         try std.testing.expectEqual(@as(u64, 2), value.applied_theme_revision);
     }
 }
+
+test "nonblocking terminal reads yield on worker contention and recover unchanged ownership" {
+    var f: Fixture = .{};
+    try f.init();
+    defer f.deinit();
+    var runtime = @import("plugins/ssh/runtime_binding.zig").borrow(&f.native);
+    const service = f.provider.service();
+    _ = try f.worker.vt.feed("\x1b]133;A\x07");
+    const version = f.worker.vt.snapshot().version;
+    const sequence = f.worker.vt.semanticSequence();
+    try std.testing.expect(sequence > 0);
+    try std.testing.expect(f.worker.vt.mutex.tryLock());
+    {
+        defer f.worker.vt.mutex.unlock();
+        try std.testing.expectEqual(version, runtime.sourceVersion());
+        try std.testing.expectEqual(sequence, runtime.semanticSequence());
+        try std.testing.expectError(error.WorkerBusy, runtime.copyCwd(a));
+        try std.testing.expectError(error.WorkerBusy, runtime.copyProjection(a));
+        try std.testing.expectError(error.WorkerBusy, service.snapshot(a));
+        try std.testing.expectError(error.WorkerBusy, f.provider.source.service().snapshot(a));
+    }
+    _ = try f.worker.vt.feed("after contention");
+    var snapshot = try runtime.copyProjection(a);
+    defer snapshot.deinit(a);
+    try std.testing.expectEqualStrings("a", snapshot.grapheme(snapshot.cells[0]));
+    try std.testing.expect(runtime.sourceVersion() > version);
+    try std.testing.expectEqual(snapshot.version, runtime.sourceVersion());
+    try std.testing.expect((try runtime.copyCwd(a)) == null);
+    var recovered = try service.snapshot(a);
+    defer recovered.deinit(a);
+    try std.testing.expect(recovered.owner.eql(owner));
+}

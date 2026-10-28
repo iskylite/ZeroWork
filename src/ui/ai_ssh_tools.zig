@@ -68,14 +68,20 @@ pub const Bridge = struct {
         const tab = app.workspace.sessionTab(id) orelse return error.StaleSession;
         const runtime = tab.runtime orelse return error.ServiceUnavailable;
         const config = tab.host_snapshot orelse return error.ServiceUnavailable;
-        const text = try runtime.workerPtr().searchText(allocator);
+        // The assembler consumes at most 1024 recent lines. Bound capture
+        // before taking the VT guard instead of formatting all scrollback.
+        var lines = try runtime.readLines(.{ .max_lines = 1024, .max_bytes = @max(1, @min(1024 * 1024, @import("../ai/card.zig").contextBudget(context_window) * 4)) }, allocator);
+        defer lines.deinit(allocator);
+        const text = try std.mem.join(allocator, "\n", lines.lines);
         defer allocator.free(text);
         const cwd = try runtime.workerPtr().copyCwd(allocator);
         defer if (cwd) |value| allocator.free(value);
         var terminal_view = tab.terminal;
         const selection = if (terminal_view) |*view| view.copySelectionText(allocator) catch null else null;
         defer if (selection) |value| allocator.free(value);
-        return @import("../ai/session_snapshot_context.zig").assembleText(allocator, text, .{ .host = config.value.host, .user = config.value.user, .hops = @intCast(@max(config.value.route.len, config.value.jump_chain.len)) }, cwd, selection, redact, context_window);
+        var assembled = try @import("../ai/session_snapshot_context.zig").assembleText(allocator, text, .{ .host = config.value.host, .user = config.value.user, .hops = @intCast(@max(config.value.route.len, config.value.jump_chain.len)) }, cwd, selection, redact, context_window);
+        assembled.truncated = assembled.truncated or lines.truncated;
+        return assembled;
     }
     pub fn init(allocator: std.mem.Allocator) Bridge {
         return .{ .allocator = allocator };

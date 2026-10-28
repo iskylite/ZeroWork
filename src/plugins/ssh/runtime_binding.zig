@@ -52,7 +52,7 @@ fn requestCurrentDirectory(raw: *anyopaque) anyerror!void {
 }
 fn copyCwd(raw: *anyopaque, allocator: std.mem.Allocator) anyerror!?[]u8 {
     if (get(raw).torn_down) return error.SessionClosed;
-    return get(raw).workerPtr().copyCwd(allocator);
+    return get(raw).workerPtr().vt.tryCopyCwd(allocator);
 }
 fn searchText(raw: *anyopaque, allocator: std.mem.Allocator) anyerror![]u8 {
     if (get(raw).torn_down) return error.SessionClosed;
@@ -85,7 +85,7 @@ fn forwardService(raw: *anyopaque, binding: session.ServiceHandle, exit_index: ?
 fn captureExport(raw: *anyopaque, allocator: std.mem.Allocator) !@import("../../vt/timeline.zig").Timeline.ExportSnapshot {
     const runtime = get(raw);
     if (runtime.torn_down) return error.SessionClosed;
-    return .{ .timeline = try runtime.worker.timelinePtr().snapshotWithAllocator(allocator), .cols = runtime.worker.options.cols, .rows = runtime.worker.options.rows };
+    return .{ .timeline = try runtime.worker.timelinePtr().snapshotWithAllocator(allocator), .cols = runtime.worker.recording_initial_cols, .rows = runtime.worker.recording_initial_rows };
 }
 fn exportTimeline(raw: *anyopaque, io: std.Io, dir: std.Io.Dir, path: []const u8) anyerror!void {
     return get(raw).exportTimeline(io, dir, path);
@@ -115,12 +115,15 @@ fn terminalService(raw: *anyopaque) !terminal.Service {
     }
     return native.terminal_provider.?.service();
 }
+fn reuseConnection(raw: *anyopaque) !service.SharedLease {
+    return get(raw).worker.reuseConnection();
+}
 fn osDetection(raw: *anyopaque) service.OsDetection {
     const worker = get(raw).workerPtr();
     return .{ .kind = worker.detected_os.load(.acquire), .pending = !worker.os_probe_finished.load(.acquire) };
 }
 fn sourceVersion(raw: *anyopaque) u64 {
-    return get(raw).workerPtr().vt.snapshot().version;
+    return get(raw).workerPtr().vt.publishedVersion();
 }
 fn captureAiSelection(raw: *anyopaque, allocator: std.mem.Allocator, owner: identity.SessionHandle, selected: @import("../../vt/engine.zig").Selection, version: u64) anyerror!@import("../../host/ai_terminal_selection.zig").Captured {
     return get(raw).workerPtr().captureAiSelection(allocator, owner, selected, version);
@@ -129,7 +132,7 @@ fn semanticSequence(raw: *anyopaque) u64 {
     return get(raw).workerPtr().vt.semanticSequence();
 }
 fn copyProjection(raw: *anyopaque, allocator: std.mem.Allocator) anyerror!@import("../../vt/snapshot.zig").Projection {
-    return get(raw).workerPtr().vt.copyProjection(allocator);
+    return get(raw).workerPtr().vt.tryCopyProjection(allocator);
 }
 fn hasJoined(raw: *anyopaque) bool {
     return get(raw).threadPtr().joined;
@@ -179,4 +182,4 @@ fn encodeKey(raw: *anyopaque, event: terminal.KeyEvent, allocator: std.mem.Alloc
     if (native.torn_down or !isConnected(raw)) return error.SessionClosed;
     return native.workerPtr().vt.encodeKey(event, allocator);
 }
-const vtable: service.Runtime.VTable = .{ .osDetection = osDetection, .documentSource = documentSource, .terminalService = terminalService, .encodeKey = encodeKey, .releaseStep = releaseStep, .cleanupReleased = cleanupReleased, .reconnectSnapshot = reconnectSnapshot, .requestReconnect = requestReconnect, .acknowledgeAttached = acknowledgeAttached, .isAttached = isAttached, .isConnected = isConnected, .markAttached = markAttached, .setScrollbackLimit = setScrollbackLimit, .setInputBufferEnabled = setInputBufferEnabled, .copyCwd = copyCwd, .requestCurrentDirectory = requestCurrentDirectory, .searchText = searchText, .readLines = readLines, .readonlyProvider = readonlyProvider, .notificationSnapshot = notificationSnapshot, .execService = execService, .transferService = transferService, .forwardService = forwardService, .exportTimeline = exportTimeline, .captureExport = captureExport, .sourceVersion = sourceVersion, .captureAiSelection = captureAiSelection, .semanticSequence = semanticSequence, .copyProjection = copyProjection, .hasJoined = hasJoined, .isStopping = isStopping, .hasFailed = hasFailed, .textSlot = textSlot, .reconnectState = reconnectState, .inputFreeCapacity = inputFreeCapacity, .requestResize = requestResize, .searchViewportOffset = searchViewportOffset, .locateSearchRow = locateSearchRow, .copySelection = copySelection, .pushInputFrom = pushInputFrom, .allowsBufferedOrdinaryInput = allowsBufferedOrdinaryInput, .discardBufferedInput = discardBufferedInput, .notificationPublication = notificationPublication };
+const vtable: service.Runtime.VTable = .{ .reuseConnection = reuseConnection, .osDetection = osDetection, .documentSource = documentSource, .terminalService = terminalService, .encodeKey = encodeKey, .releaseStep = releaseStep, .cleanupReleased = cleanupReleased, .reconnectSnapshot = reconnectSnapshot, .requestReconnect = requestReconnect, .acknowledgeAttached = acknowledgeAttached, .isAttached = isAttached, .isConnected = isConnected, .markAttached = markAttached, .setScrollbackLimit = setScrollbackLimit, .setInputBufferEnabled = setInputBufferEnabled, .copyCwd = copyCwd, .requestCurrentDirectory = requestCurrentDirectory, .searchText = searchText, .readLines = readLines, .readonlyProvider = readonlyProvider, .notificationSnapshot = notificationSnapshot, .execService = execService, .transferService = transferService, .forwardService = forwardService, .exportTimeline = exportTimeline, .captureExport = captureExport, .sourceVersion = sourceVersion, .captureAiSelection = captureAiSelection, .semanticSequence = semanticSequence, .copyProjection = copyProjection, .hasJoined = hasJoined, .isStopping = isStopping, .hasFailed = hasFailed, .textSlot = textSlot, .reconnectState = reconnectState, .inputFreeCapacity = inputFreeCapacity, .requestResize = requestResize, .searchViewportOffset = searchViewportOffset, .locateSearchRow = locateSearchRow, .copySelection = copySelection, .pushInputFrom = pushInputFrom, .allowsBufferedOrdinaryInput = allowsBufferedOrdinaryInput, .discardBufferedInput = discardBufferedInput, .notificationPublication = notificationPublication };

@@ -104,7 +104,7 @@ test "file transfer fault active READ retains original IO owner until paused exp
     var session: ssh.Session = .{};
     engine.attachSession(&session);
     engine.remote_metadata = .{ .context = &peer, .size = Peer.size, .stat = Peer.stat };
-    engine.remote_files = .{ .context = &peer, .open_read = Peer.open, .stat_handle = Peer.statHandle, .read = Peer.read, .close = Peer.close, .release = Peer.releaseContext };
+    engine.remote_files = .{ .stage_download = false, .context = &peer, .open_read = Peer.open, .stat_handle = Peer.statHandle, .read = Peer.read, .close = Peer.close, .release = Peer.releaseContext };
     const id = try engine.open(.{ .direction = .download, .sources = &.{"a"}, .remote_dir = "/frozen", .local_dir = directory });
     try await(&peer.blocked);
     const before = peer.metadata.load(.acquire);

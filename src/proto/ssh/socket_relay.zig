@@ -25,6 +25,8 @@ pub const Relay = struct {
     state: std.atomic.Value(u8) = .init(0), // 0 running, 1 EOF, 2 failure, 3 cancelled
     session: ?*Session = null,
     forward: std.atomic.Value(?*Forward) = .init(null),
+    forwards_mutex: std.atomic.Mutex = .unlocked,
+    shared_forwards: ?*Forward = null,
 
     /// Consumes fd on success and failure; channel remains owned by its Session.
     pub fn start(allocator: std.mem.Allocator, fd: c_int, channel: *Channel) !*Relay {
@@ -65,14 +67,18 @@ pub const Relay = struct {
                 self.state.store(2, .release);
                 return;
             };
+            self.stepSharedForwards() catch |err| {
+                std.log.err("relay shared forward IO owner violation: {s}", .{@errorName(err)});
+                self.state.store(2, .release);
+                return;
+            };
             const result = c.zw_ssh_relay_step(self.native);
             if (result != 0) {
                 self.state.store(if (result > 0) 1 else 2, .release);
                 return;
             }
-            // Nonblocking channel/socketpair operations ensure cancellation
-            // never waits for a remote packet. A bounded pause avoids spin.
-            c.zw_ssh_relay_pause();
+            const session = self.session;
+            c.zw_ssh_relay_wait(self.native, if (session) |s| s.socket_fd else -1, if (session) |s| s.handle else null, if (self.forward.load(.acquire) != null) 5 else 20);
         }
         self.state.store(3, .release);
     }
@@ -81,6 +87,44 @@ pub const Relay = struct {
     /// fallible initialization. Only this Relay then performs native work.
     pub fn bindForward(self: *Relay, forward: *Forward) void {
         self.forward.store(forward, .release);
+    }
+    fn lockForwards(self: *Relay) void {
+        while (!self.forwards_mutex.tryLock()) std.atomic.spinLoopHint();
+    }
+    pub fn bindSharedForward(self: *Relay, forward: *Forward) void {
+        self.lockForwards();
+        defer self.forwards_mutex.unlock();
+        std.debug.assert(!forward.relay_registered.load(.acquire));
+        forward.relay_detach.store(false, .release);
+        forward.relay_next = self.shared_forwards;
+        forward.relay_registered.store(true, .release);
+        self.shared_forwards = forward;
+    }
+    fn stepSharedForwards(self: *Relay) !void {
+        const session = self.session orelse return;
+        self.lockForwards();
+        defer self.forwards_mutex.unlock();
+        var link = &self.shared_forwards;
+        while (link.*) |forward| {
+            if (forward.relay_detach.load(.acquire)) {
+                if (try forward.detachSharedStep() == .released) {
+                    link.* = forward.relay_next;
+                    forward.relay_next = null;
+                    // Last access: the owning Worker can now destroy/rebind it.
+                    forward.relay_registered.store(false, .release);
+                    continue;
+                }
+            } else try forward.stepShared(session);
+            link = &forward.relay_next;
+        }
+    }
+    /// Transfer unfinished facades with the joined parent graph. Their owners
+    /// remain blocked until Route publishes actual native child release.
+    pub fn takeSharedForwards(self: *Relay) ?*Forward {
+        self.stopAndJoin();
+        const forwards = self.shared_forwards;
+        self.shared_forwards = null;
+        return forwards;
     }
 
     pub fn stopAndJoin(self: *Relay) void {

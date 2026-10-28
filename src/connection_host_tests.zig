@@ -107,6 +107,100 @@ const Fixture = struct {
     }
 };
 
+const DroppingPeer = struct {
+    listener: Socket,
+    accepted: std.atomic.Value(u8) = .init(0),
+    stopped: std.atomic.Value(bool) = .init(false),
+
+    fn run(self: *DroppingPeer) void {
+        while (!self.stopped.load(.acquire)) {
+            var descriptors = [_]std.c.pollfd{.{ .fd = self.listener.fd, .events = std.c.POLL.IN, .revents = 0 }};
+            if (std.c.poll(&descriptors, 1, 20) <= 0) continue;
+            const fd = std.c.accept(self.listener.fd, null, null);
+            if (fd < 0) return;
+            const banner = "SSH-2.0-ZeroWork_retry_fixture\r\n";
+            _ = std.c.send(fd, banner.ptr, banner.len, 0);
+            _ = std.c.shutdown(fd, std.c.SHUT.RDWR);
+            c.zw_ssh_socket_close(fd);
+            _ = self.accepted.fetchAdd(1, .acq_rel);
+        }
+    }
+};
+
+const FailureFeedback = struct {
+    count: usize = 0,
+    fn publish(raw: ?*anyopaque, _: ?@import("host/identity.zig").ContentOwner, _: []const u8, kind: Workspace.StatusKind) void {
+        const self: *FailureFeedback = @ptrCast(@alignCast(raw.?));
+        if (kind == .failure) self.count += 1;
+    }
+};
+
+test "connection host retries real dropped handshakes three times and reports only final failure" {
+    var peer: DroppingPeer = .{ .listener = try Socket.init(true) };
+    defer peer.listener.deinit();
+    const server = try std.Thread.spawn(.{}, DroppingPeer.run, .{&peer});
+    defer server.join();
+    defer peer.stopped.store(true, .release);
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var feedback: FailureFeedback = .{};
+    f.workspace.status_feedback = .{ .context = &feedback, .publish = FailureFeedback.publish };
+    const first = try f.application.create(.{ .name = "Dropping peer", .host = "127.0.0.1", .port = peer.listener.port, .user = "fixture", .auth_mode = .password, .password = "fixture-password" }, 1, 0, "");
+    var saw_pending = false;
+    const deadline = clock.monotonicNs() + 5 * std.time.ns_per_s;
+    while (clock.monotonicNs() < deadline) {
+        try f.tick();
+        const job = f.workspace.connect_jobs.items[0];
+        if (job.automatic_retry_deadline_ns != null) {
+            saw_pending = true;
+            try std.testing.expectEqual(@as(usize, 0), feedback.count);
+            try std.testing.expectEqual(@import("ui/connection_progress_view.zig").State.retrying, f.host.progress.source.?.value.state);
+            try std.testing.expectEqualStrings("正在准备重试连接", f.host.progress.summary_title.getText().?.content);
+        }
+        if (job.drained and job.connection_attempts == 3) break;
+    }
+    const job = f.workspace.connect_jobs.items[0];
+    try std.testing.expect(saw_pending);
+    try std.testing.expect(job.drained);
+    try std.testing.expect(job.resource_ledger.snapshot().released());
+    try std.testing.expectEqual(@as(u8, 3), peer.accepted.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 3), job.connection_attempts);
+    try std.testing.expectEqual(@as(usize, 2), job.progress_history.items.len);
+    try std.testing.expectEqual(@as(usize, 1), feedback.count);
+    try std.testing.expectEqual(.none, f.workspace.tabs.items[0].remote_notice.?.root.style.display);
+    try std.testing.expect(job.operation_key.?.attempt_id == 3);
+    try std.testing.expect(!job.operation_key.?.eql(first.operation));
+    try std.testing.expectEqual(@import("ui/connection_progress_view.zig").State.failed, f.host.progress.source.?.value.state);
+}
+
+test "connection host cancellation during retry delay prevents another TCP connection" {
+    var peer: DroppingPeer = .{ .listener = try Socket.init(true) };
+    defer peer.listener.deinit();
+    const server = try std.Thread.spawn(.{}, DroppingPeer.run, .{&peer});
+    defer server.join();
+    defer peer.stopped.store(true, .release);
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    _ = try f.application.create(.{ .name = "Cancel retry", .host = "127.0.0.1", .port = peer.listener.port, .user = "fixture", .auth_mode = .password, .password = "fixture-password" }, 1, 0, "");
+    const deadline = clock.monotonicNs() + 2 * std.time.ns_per_s;
+    while (f.workspace.connect_jobs.items[0].automatic_retry_deadline_ns == null and clock.monotonicNs() < deadline) try f.tick();
+    const job = f.workspace.connect_jobs.items[0];
+    try std.testing.expect(job.automatic_retry_deadline_ns != null);
+    const after_delay = job.automatic_retry_deadline_ns.? + 50 * std.time.ns_per_ms;
+    const button = f.host.progress.cancel_button.?;
+    f.cx.setFocus(button);
+    f.cx.handleKeyDown(.@"return", .{});
+    try f.tick();
+    try std.testing.expect(job.cancelled.load(.acquire));
+    while (clock.monotonicNs() < after_delay) try f.tick();
+    try std.testing.expect(job.automatic_retry_deadline_ns == null);
+    try std.testing.expectEqualStrings("连接已取消", f.host.progress.summary_title.getText().?.content);
+    try std.testing.expectEqual(@as(u8, 1), peer.accepted.load(.acquire));
+    try std.testing.expectEqual(@as(u64, 1), job.operation_key.?.attempt_id.?);
+}
+
 test "connection host mounts and disposes the actual Workspace ApplicationHost and native modal scopes" {
     var f: Fixture = undefined;
     try f.init();
@@ -118,20 +212,24 @@ test "connection host mounts and disposes the actual Workspace ApplicationHost a
 }
 
 test "connection host keeps a failed original owner while a foreign challenge waits and transfers only after explicit close" {
-    var refused = try Socket.init(false);
-    defer refused.deinit();
+    var peer: DroppingPeer = .{ .listener = try Socket.init(true) };
+    defer peer.listener.deinit();
+    const server = try std.Thread.spawn(.{}, DroppingPeer.run, .{&peer});
+    defer server.join();
+    defer peer.stopped.store(true, .release);
     var pending = try Socket.init(true);
     defer pending.deinit();
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
-    const first = try f.application.create(.{ .name = "Original", .host = "127.0.0.1", .port = refused.port, .user = "fixture", .auth_mode = .password, .password = "fixture-password" }, 1, 0, "");
-    const deadline = clock.monotonicNs() + 3 * std.time.ns_per_s;
+    _ = try f.application.create(.{ .name = "Original", .host = "127.0.0.1", .port = peer.listener.port, .user = "fixture", .auth_mode = .password, .password = "fixture-password" }, 1, 0, "");
+    const deadline = clock.monotonicNs() + 5 * std.time.ns_per_s;
     while (clock.monotonicNs() < deadline) {
         try f.tick();
-        if (f.host.progress.source) |source| if (source.value.key.eql(first.operation) and source.value.state == .failed and source.value.cleanup == .released) break;
+        if (f.host.progress.source) |source| if (source.value.state == .failed and source.value.cleanup == .released) break;
     }
-    try std.testing.expect(f.host.progress.matches(first.operation));
+    const first = f.workspace.connect_jobs.items[0].operation_key.?;
+    try std.testing.expect(f.host.progress.matches(first));
     try std.testing.expect(!f.host.progress.close_disabled.peek());
     const second = try f.application.create(.{ .name = "Queued", .host = "127.0.0.1", .port = pending.port, .user = "fixture", .auth_mode = .password, .password = "fixture-password" }, 2, 0, "");
     // This test supplies only a typed UI challenge. The second real TCP
@@ -145,7 +243,7 @@ test "connection host keeps a failed original owner while a foreign challenge wa
     try std.testing.expect(offered);
     try f.tick();
     try std.testing.expect(f.host.last_error == null);
-    try std.testing.expect(f.host.progress.matches(first.operation));
+    try std.testing.expect(f.host.progress.matches(first));
     try std.testing.expect(!f.host.authentication.isVisible());
     f.cx.setFocus(f.host.progress.close_button.?);
     f.cx.handleKeyDown(.@"return", .{});

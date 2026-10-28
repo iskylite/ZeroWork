@@ -346,6 +346,7 @@ pub const ApplicationHost = struct {
     mappings: std.ArrayList(Mapping) = .empty,
     history_closes: std.ArrayList(HistoryClose) = .empty,
     pending_source: ?*const SourceSnapshot = null,
+    pending_shared_connection: ?@import("../host/runtime_service.zig").SharedLease = null,
     previous_sessions: workspace_mod.SessionBridge = .{},
     previous_close: workspace_mod.CloseBridge = .{},
     previous_window_close: workspace_mod.WindowCloseBridge = .{},
@@ -410,7 +411,7 @@ pub const ApplicationHost = struct {
         self.previous_sessions = self.workspace.session_bridge;
         self.previous_close = self.workspace.close_bridge;
         self.previous_window_close = self.workspace.window_close_bridge;
-        self.workspace.session_bridge = .{ .context = self, .create = bridgeCreate, .recreate = bridgeRecreate, .connected = bridgeConnected, .failed = bridgeFailed, .cleanup = bridgeCleanup, .cleanup_status = bridgeCleanupStatus, .create_local = bridgeCreateLocal, .duplicate_local = bridgeDuplicateLocal, .retry_local = bridgeRetryLocal, .retry_ssh = bridgeRetrySsh };
+        self.workspace.session_bridge = .{ .context = self, .create = bridgeCreate, .recreate = bridgeRecreate, .reuse = bridgeReuse, .connected = bridgeConnected, .failed = bridgeFailed, .cleanup = bridgeCleanup, .cleanup_status = bridgeCleanupStatus, .create_local = bridgeCreateLocal, .duplicate_local = bridgeDuplicateLocal, .retry_local = bridgeRetryLocal, .retry_ssh = bridgeRetrySsh };
         // Resource teardown belongs to the five typed close steps. The old
         // aggregate cleanup callback is replaced by close_extension.
         self.workspace.close_bridge = .{ .context = self, .risk = bridgeRisk, .impact = bridgeImpact, .close_state = bridgeCloseState, .request_close = bridgeClose, .confirm = if (self.previous_close.confirm != null) bridgeConfirm else null };
@@ -749,6 +750,18 @@ pub const ApplicationHost = struct {
         return WindowConnection.init(self.allocator, self.workspace.registry.hosts[index], self.workspace.app_config.*, self.workspace.registry.hosts, host_id, index);
     }
 
+    /// Freeze the selected tab's connection, including unsaved/deleted hosts.
+    pub fn freezeTabWindowConnection(self: *ApplicationHost, id: LegacySessionId) !WindowConnection {
+        if (self.workspace.shutting_down or self.windowClosePending()) return error.WorkspaceClosed;
+        const mapping = self.findLegacyId(id) orelse return error.StaleSession;
+        if (mapping.source) |source| {
+            const frozen = source.value;
+            return WindowConnection.init(self.allocator, frozen.host, frozen.global_config, frozen.route_hosts, frozen.host_id, frozen.source_index);
+        }
+        const value = self.sessions.connectionEnvelope(mapping.handle) orelse return error.ConnectionEnvelopeUnavailable;
+        return .{ .envelope = try @import("session_lifecycle.zig").Snapshot(connection_envelope.Envelope).init(self.allocator, value) };
+    }
+
     /// Called only after the destination workspace has mounted and registered
     /// its own WindowId. This never consults the currently active native view.
     pub fn createWindowConnection(self: *ApplicationHost, source: *const WindowConnection) !session.Accepted {
@@ -1063,6 +1076,13 @@ pub const ApplicationHost = struct {
                     _ = try self.sessions.createCleanupReceipt(mapping.handle, mapping.create_operation, .unknown);
                 };
             }
+            if (!self.windowClosePending()) if (self.workspace.initialConnectionRetryDeadline(mapping.create_operation)) |deadline| {
+                const state = self.sessions.queryState(mapping.handle) orelse continue;
+                if (state.lifecycle == .failed and state.create_cleanup == .released) {
+                    if (@import("../platform/realtime.zig").monotonicNs() >= deadline) _ = try self.sessions.retry(mapping.handle);
+                    pending = true;
+                }
+            };
             if (self.supportsIntegration(mapping.handle, "transport_loss") and mapping.reconnect_ticket != null) {
                 const state = self.sessions.queryState(mapping.handle) orelse continue;
                 if (state.lifecycle == .closing or state.lifecycle == .closed or self.workspace.shutting_down) {
@@ -1481,6 +1501,24 @@ pub const ApplicationHost = struct {
     fn bridgeCreate(context: ?*anyopaque, host: hosts.HostConfig, host_id: workspace_mod.HostId, index: usize, input: []const u8) !void {
         const self: *ApplicationHost = @ptrCast(@alignCast(context orelse return error.MissingApplicationHost));
         _ = try self.create(host, host_id, index, input);
+    }
+
+    fn bridgeReuse(context: ?*anyopaque, id: LegacySessionId) !void {
+        const self: *ApplicationHost = @ptrCast(@alignCast(context orelse return error.MissingApplicationHost));
+        if (self.workspace.shutting_down or self.windowClosePending()) return error.WorkspaceClosed;
+        if (self.pending_shared_connection != null or self.pending_source != null) return error.ReentrantCreate;
+        const tab = self.workspace.sessionTab(id) orelse return error.StaleSession;
+        const runtime = tab.runtime orelse return error.SessionNotConnected;
+        const mapping = self.findLegacyId(id) orelse return error.StaleSession;
+        const source = mapping.source orelse return error.ConnectionEnvelopeUnavailable;
+        const lease = try runtime.reuseConnection();
+        defer lease.release();
+        self.pending_shared_connection = lease;
+        defer self.pending_shared_connection = null;
+        // Reuse the normal frozen-source envelope path with a fresh host owner.
+        var connection = try WindowConnection.init(self.allocator, source.value.host, source.value.global_config, source.value.route_hosts, source.value.host_id, source.value.source_index);
+        defer connection.deinit();
+        _ = try self.createWindowConnection(&connection);
     }
 
     fn bridgeRecreate(context: ?*anyopaque, id: LegacySessionId) !void {
@@ -2089,6 +2127,8 @@ test "cancelled SSH late ready never attaches and unknown cleanup retains retry 
     workspace.model = .{ .allocator = std.testing.allocator, .window = @fromBackingInt(0), .workspace = @fromBackingInt(0) };
     defer workspace.model.deinit();
     workspace.tabs = .empty;
+    workspace.connect_jobs = .empty;
+    workspace.shutting_down = false;
     const app = try ApplicationHost.init(std.testing.allocator, &workspace);
     defer app.deinit();
     const receipt_domain = try session.SessionHost.init(std.testing.allocator, &.{adapter});
@@ -2122,6 +2162,8 @@ test "application close keeps its receipt when completion publication runs out o
     workspace.model = .{ .allocator = std.testing.allocator, .window = @fromBackingInt(0), .workspace = @fromBackingInt(0) };
     defer workspace.model.deinit();
     workspace.tabs = .empty;
+    workspace.connect_jobs = .empty;
+    workspace.shutting_down = false;
     const app = try ApplicationHost.init(std.testing.allocator, &workspace);
     defer app.deinit();
     const receipt_domain = try session.SessionHost.init(failing.allocator(), &.{adapter});
@@ -2486,4 +2528,29 @@ test "running SSH scrollback follows host edits and restored global inheritance 
     registry.hosts[0].scrollback_explicit = false;
     try std.testing.expectEqual(@as(u32, 40000), currentScrollbackLimit(&registry, source, 40000));
     try std.testing.expectEqual(@as(u32, 0), currentScrollbackLimit(&registry, source, 0));
+}
+
+test "tab new window freezes source after its saved host is removed" {
+    const a = std.testing.allocator;
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(71) };
+    const key: OperationKey = .{ .owner = .{ .session = owner }, .operation_id = 1 };
+    const target: hosts.HostConfig = .{ .connection_id = @fromBackingInt(17), .revision = 1, .name = "original", .host = "original.invalid", .user = "tester" };
+    var source = try freezeSource(a, target, .{}, &.{}, 17, 0, "");
+    defer source.deinit();
+    var workspace: workspace_mod.Workspace = undefined;
+    workspace.shutting_down = false;
+    // No registry access is valid here: the source tab may outlive its asset.
+    var app: ApplicationHost = undefined;
+    app.allocator = a;
+    app.workspace = &workspace;
+    app.window_close = null;
+    app.mappings = .empty;
+    defer app.mappings.deinit(a);
+    try app.mappings.append(a, .{ .handle = owner, .create_operation = key, .legacy_id = 41, .legacy_generation = 1, .tab_id = @fromBackingInt(8), .owner = .{ .session = owner }, .source = source });
+    var frozen = try app.freezeTabWindowConnection(41);
+    defer frozen.deinit();
+    try std.testing.expectEqualStrings("original.invalid", frozen.remote.?.value.host.host);
+    try std.testing.expectEqualStrings("tester", frozen.remote.?.value.host.user);
+    try std.testing.expectEqual(@as(u64, 17), frozen.remote.?.value.host_id);
+    try std.testing.expectError(error.StaleSession, app.freezeTabWindowConnection(42));
 }

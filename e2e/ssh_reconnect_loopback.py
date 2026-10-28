@@ -91,7 +91,12 @@ class Fixture:
                     if not attempt.shell.is_set():
                         raise RuntimeError("missing-shell")
                     channel.settimeout(0.1)
-                    channel.sendall(b"first-ready\r\n" if index == 1 else b"second-ready\r\n")
+                    if index == 1:
+                        channel.sendall(b"first-ready\r\n" + b"retained output\r\n" * 60)
+                    else:
+                        if self.mode == "manual-clear":
+                            channel.sendall(b"\x1b[3J\x1b[2J\x1b[H")
+                        channel.sendall(b"second-ready\r\n")
                     while transport.is_active() and not self.stop.is_set():
                         try:
                             payload = channel.recv(65536)
@@ -101,6 +106,8 @@ class Fixture:
                             break
                         self.received.setdefault(index, bytearray()).extend(payload)
                         if b"DROP" in payload:
+                            # Simulate transport loss, without SSH CHANNEL_EOF.
+                            connection.shutdown(socket.SHUT_RDWR)
                             break
                     break
             except (EOFError, OSError):
@@ -108,9 +115,9 @@ class Fixture:
             except Exception as error:
                 self.errors.append(type(error).__name__ + ":" + str(error))
             finally:
+                transport.close()
                 if channel is not None:
                     channel.close()
-                transport.close()
 
     def close(self):
         self.stop.set()
@@ -122,13 +129,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--runner", required=True)
     parser.add_argument("--output", required=True)
-    parser.add_argument("--mode", choices=["manual", "automatic", "manual-race", "initial-failure", "cancel-reconnect"])
+    parser.add_argument("--mode", choices=["manual", "manual-clear", "automatic", "manual-race", "initial-failure", "cancel-reconnect"])
     options = parser.parse_args()
     output = Path(options.output)
     output.mkdir(parents=True, exist_ok=True)
     key = paramiko.RSAKey.generate(2048)
     cases = []
-    for mode in ([options.mode] if options.mode else ["manual", "automatic", "manual-race", "initial-failure", "cancel-reconnect"]):
+    for mode in ([options.mode] if options.mode else ["manual", "manual-clear", "automatic", "manual-race", "initial-failure", "cancel-reconnect"]):
         fixture = Fixture(mode, key)
         fixture.thread.start()
         with tempfile.TemporaryDirectory(prefix="zerowork-reconnect-") as directory:

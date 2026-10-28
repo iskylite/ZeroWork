@@ -9,12 +9,26 @@ pub const ReleaseReceipt = @import("../proto/ssh/session.zig").ReleaseReceipt;
 pub const ArchiveRequest = struct { session_id: u64, retention_days: u16 };
 pub const NotificationPublication = struct { text_generation: u64, output_sequence: u64, at_tail: bool };
 pub const OsDetection = struct { kind: @import("../proto/ssh/remote_os.zig").Kind = .unknown, pending: bool = false };
+/// A provider-owned reference to an authenticated transport. Copies must retain.
+pub const SharedLease = struct {
+    context: *anyopaque,
+    retain_fn: *const fn (*anyopaque) void,
+    release_fn: *const fn (*anyopaque) void,
+    pub fn retain(self: SharedLease) SharedLease {
+        self.retain_fn(self.context);
+        return self;
+    }
+    pub fn release(self: SharedLease) void {
+        self.release_fn(self.context);
+    }
+};
 pub const Runtime = struct {
     context: *anyopaque,
     vtable: *const VTable,
     torn_down: bool = false,
     released: bool = false,
     pub const VTable = struct {
+        reuseConnection: ?*const fn (*anyopaque) anyerror!SharedLease = null,
         osDetection: ?*const fn (*anyopaque) OsDetection = null,
         releaseStep: *const fn (*anyopaque, ?ArchiveRequest) ReleaseReceipt,
         cleanupReleased: *const fn (*anyopaque) bool,
@@ -59,6 +73,10 @@ pub const Runtime = struct {
         discardBufferedInput: *const fn (*anyopaque) void,
         notificationPublication: *const fn (*anyopaque, identity.SessionHandle) anyerror!?NotificationPublication,
     };
+    pub fn reuseConnection(self: *Runtime) !SharedLease {
+        if (self.torn_down) return error.SessionClosed;
+        return (self.vtable.reuseConnection orelse return error.UnsupportedService)(self.context);
+    }
     pub fn osDetection(self: *Runtime) OsDetection {
         if (self.torn_down) return .{};
         return if (self.vtable.osDetection) |invoke| invoke(self.context) else .{};

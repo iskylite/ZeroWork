@@ -169,6 +169,7 @@ pub const View = struct {
             const assets = [_]ui.SvgAsset{ ui.icons.info, ui.icons.circle_check, ui.icons.triangle_alert, ui.icons.circle_alert };
             try main.appendChild(self.cx.allocator, try ui.iconTint(self.cx, assets[@backingInt(record.event.severity)], feedback.statusInk(@backingInt(record.event.severity)), .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 }));
             const title = try ui.text(self.cx, record.event.title, S.text(false));
+            title.meta.ownership.meta.test_id = "notifications.history.title";
             title.setStyleInline(self.cx.allocator, S.line());
             try main.appendChild(self.cx.allocator, title);
             const age = try ui.text(self.cx, "", .{ .font_size = 10.5, .line_height = 18.0 / 10.5, .color = theme.current().fg_2, .selectable = false });
@@ -177,7 +178,8 @@ pub const View = struct {
             try self.rows.append(self.cx.allocator, .{ .fact_id = record.fact_id, .age = age });
             const secondary = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 22 }, .padding = .{ .left = 22 }, .direction = .row, .align_items = .center, .gap = 6, .min_width = 0, .flex_shrink = 0 }, .{});
             try card.appendChild(self.cx.allocator, secondary);
-            const first_line = std.mem.trim(u8, record.event.detail[0 .. std.mem.indexOfScalar(u8, record.event.detail, '\n') orelse record.event.detail.len], " \t\r");
+            const detail = extraDetail(record.event);
+            const first_line = std.mem.trim(u8, detail[0 .. std.mem.indexOfScalar(u8, detail, '\n') orelse detail.len], " \t\r");
             const preview = if (record.event.object_name.len > 0 and !std.mem.eql(u8, record.event.object_name, record.event.owner_name)) record.event.object_name else first_line;
             const summary_text = try std.fmt.allocPrint(self.cx.allocator, "{s}{s}{s}{s}", .{ record.event.owner_name, if (record.event.owner_name.len > 0 and (preview.len > 0 or record.owner_ended)) " · " else "", if (record.owner_ended) "会话已结束" else preview, if (record.owner_ended and preview.len > 0) " · 详情已保留" else "" });
             defer self.cx.allocator.free(summary_text);
@@ -188,13 +190,16 @@ pub const View = struct {
             // The common single action stays inline. Additional actions remain
             // available with the complete content in the expanded section.
             if (record.event.actions.len > 0) try self.mountAction(scope, secondary, record, 0);
-            const expanded = self.expanded_fact == record.fact_id;
-            const expand_handler = try scope.createState(Expand, .{ .view = self, .fact_id = record.fact_id });
-            const expand = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = if (expanded) ui.icons.chevron_up else ui.icons.chevron_down, .icon_size = @as(f32, 12), .variant = .ghost, .a11y_label = if (expanded) "收起通知详情" else "展开通知详情", .base_style = S.expand(), .on_click = self.cx.on(Expand, expand_handler, Expand.toggle) }).mount(scope, self.cx);
-            expand.meta.ownership.meta.test_id = "notifications.history.expand";
-            expand.behavior.interaction.a11y.?.expanded = expanded;
-            try secondary.appendChild(self.cx.allocator, expand);
-            if (self.pending_detail_focus == record.fact_id) self.cx.setFocus(expand);
+            const expandable = detail.len > 0 or record.event.actions.len > 1;
+            const expanded = expandable and self.expanded_fact == record.fact_id;
+            if (expandable) {
+                const expand_handler = try scope.createState(Expand, .{ .view = self, .fact_id = record.fact_id });
+                const expand = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = if (expanded) ui.icons.chevron_up else ui.icons.chevron_down, .icon_size = @as(f32, 12), .variant = .ghost, .a11y_label = if (expanded) "收起通知详情" else "展开通知详情", .base_style = S.expand(), .on_click = self.cx.on(Expand, expand_handler, Expand.toggle) }).mount(scope, self.cx);
+                expand.meta.ownership.meta.test_id = "notifications.history.expand";
+                expand.behavior.interaction.a11y.?.expanded = expanded;
+                try secondary.appendChild(self.cx.allocator, expand);
+                if (self.pending_detail_focus == record.fact_id) self.cx.setFocus(expand);
+            }
             if (expanded) {
                 const details = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = .{ .left = 22, .top = 4, .bottom = 2 }, .direction = .column, .gap = 4, .min_width = 0, .flex_shrink = 0 }, .{});
                 details.meta.ownership.meta.test_id = "notifications.history.details";
@@ -202,15 +207,10 @@ pub const View = struct {
                 var text_style = S.text(true);
                 text_style.wrap = .word;
                 text_style.text_overflow = .clip;
-                for ([_][]const u8{ record.event.owner_name, record.event.object_name, record.event.detail }) |text| {
-                    if (text.len == 0) continue;
-                    const line = try ui.text(self.cx, text, text_style);
+                if (detail.len > 0) {
+                    const line = try ui.text(self.cx, detail, text_style);
                     line.setStyleInline(self.cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
                     try details.appendChild(self.cx.allocator, line);
-                }
-                if (record.owner_ended) {
-                    const ended = try ui.text(self.cx, "会话已结束", text_style);
-                    try details.appendChild(self.cx.allocator, ended);
                 }
                 if (record.event.actions.len > 1) {
                     const actions = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .flex_wrap = .wrap, .gap = 6, .flex_shrink = 0 }, .{});
@@ -277,3 +277,13 @@ pub const View = struct {
         self.rows.deinit(self.cx.allocator);
     }
 };
+
+// Source and object already have their own summary line. Only independent
+// detail text (or additional actions) warrants an expandable section.
+fn extraDetail(event: host.notifications.NotificationEvent) []const u8 {
+    const detail = std.mem.trim(u8, event.detail, " \t\r\n");
+    for ([_][]const u8{ event.title, event.owner_name, event.object_name }) |value| {
+        if (std.mem.eql(u8, detail, std.mem.trim(u8, value, " \t\r\n"))) return "";
+    }
+    return detail;
+}

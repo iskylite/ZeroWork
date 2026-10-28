@@ -4,7 +4,7 @@
 
 - 设置：以完整模块 `settings/index.html` 的既有确认设计为准。保留单行模型、卡片、分类导航、固定操作栏及原有交互。本轮不修改其源模板、控制器、样式。组件故事只能选择显示既有组件，不能反向改变完整模块。
 - 连接：以此前确认的完整连接向导/模块结构为准。保留三步结构、原有字段与卡片、颜色、圆角和操作栏。本轮仅按用户明确问题修复：步骤条固定、路径箭头、访问方式选择块、密码保存交互。整机改变挂载方式不改变连接模块设计。
-- 参考证据：`verification/connection-protocols-audit.md`、`connection/verification/connection-form.png`、`verification/settings-overview.png`、`verification/models-one-line-final.png`。
+- 参考证据：`verification/connection-protocols-audit.md`、[完整连接原型](connection/index.html)、[设置总览](settings/index.html)、[模型配置](settings/index.html?state=ai-populated)。
 
 现有UI_V3目录未跟踪，缺少拆分前源码版本；历史连接单文件也未找回。不能将当前源码副本声称为恢复出的拆分前文件。以上冻结确认的完整模块设计约束；本轮设置源校验见 `verification/frozen-settings-source.json`。连接定点改动单列报告。以后任何跨范围设计变化必须先取得用户确认，不以组件抽取为理由重画冻结模块。
 

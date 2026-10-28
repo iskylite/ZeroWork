@@ -333,6 +333,13 @@ pub const Host = struct {
             if (!registered) return error.UnregisteredNotificationAction;
         };
         var gated = event;
+        // The host owns source identity; plugins may publish just the event.
+        if (gated.owner_name.len == 0) {
+            if (previous) |record| gated.owner_name = record.event.owner_name;
+            if (gated.owner_name.len == 0) if (window) |current| if (current.owner_name) |resolve| {
+                gated.owner_name = bounded(resolve(current.context, event.owner.content), 256);
+            };
+        }
         for (self.windows.items) |registration| if (@backingInt(registration.id) == event.owner.window_id) {
             gated.system_enabled = event.system_enabled and !registration.focused;
             break;

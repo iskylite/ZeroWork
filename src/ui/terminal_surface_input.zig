@@ -103,6 +103,16 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
             if (self.modal_open == null or !self.modal_open.?.get()) cancelPaste(self);
             return .ignored;
         },
+        .double_click => |mouse| {
+            if (mouse.button != .left or mouse.modifiers.alt or reportsMouse(self)) return .ignored;
+            selectWord(self, mouse.x, mouse.y) catch |err| {
+                if (err == error.StaleProjection) {
+                    self.force_snapshot = true;
+                    self.cx.requestRedraw();
+                } else self.showError(err);
+            };
+            return .stop;
+        },
         .mouse_down => |mouse| {
             self.cx.setFocus(self.host);
             if (reportsMouse(self) and !mouse.modifiers.alt) {
@@ -254,6 +264,67 @@ fn beginSelection(self: *Surface, x: f32, y: f32) !void {
     const end = try self.service.createAnchor(point);
     self.selection = .{ .start = start, .end = end, .rectangle = self.rectangle };
     self.force_snapshot = true;
+}
+// File names and paths are uninterrupted terminal tokens. Punctuation such as
+// '.', '-', '+', and '/' is deliberately retained; only whitespace separates.
+fn wordBoundary(projection: terminal.Projection, row: usize, col: u16) bool {
+    const line = projection.visible_rows[row];
+    if (col >= line.cell_count) return true;
+    const cell = projection.cells[line.cell_start + col];
+    if (cell.width == .wide_tail) return false;
+    const text = projection.grapheme(cell);
+    if (text.len == 0) return true;
+    const cp = std.unicode.utf8Decode(text[0 .. std.unicode.utf8ByteSequenceLength(text[0]) catch return true]) catch return true;
+    return switch (cp) {
+        0...32, 0x7f, 0x85, 0xa0, 0x1680, 0x2000...0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000 => true,
+        else => false,
+    };
+}
+fn selectWord(self: *Surface, x: f32, y: f32) !void {
+    const projection = (self.snapshot orelse return error.SnapshotUnavailable).projection;
+    if (projection.visible_rows.len == 0) return;
+    // Drag selection rounds to the closest boundary; a double click targets
+    // the cell under the pointer, including its right half.
+    const point = try pointAt(self, x - self.options.cell_width * 0.5, y);
+    var first_row: usize = point.row;
+    var first_col = point.col;
+    if (wordBoundary(projection, first_row, first_col)) return;
+    var last_row = first_row;
+    var last_col = first_col;
+    while (true) {
+        if (first_col > 0) {
+            if (wordBoundary(projection, first_row, first_col - 1)) break;
+            first_col -= 1;
+        } else {
+            if (first_row == 0 or !projection.visible_rows[first_row].continuation or !projection.visible_rows[first_row - 1].wraps) break;
+            const previous = projection.visible_rows[first_row - 1];
+            if (previous.cell_count == 0 or wordBoundary(projection, first_row - 1, previous.cell_count - 1)) break;
+            first_row -= 1;
+            first_col = previous.cell_count - 1;
+        }
+    }
+    while (true) {
+        last_col += 1;
+        const line = projection.visible_rows[last_row];
+        if (last_col < line.cell_count) {
+            if (wordBoundary(projection, last_row, last_col)) break;
+        } else {
+            if (!line.wraps or last_row + 1 >= projection.visible_rows.len or !projection.visible_rows[last_row + 1].continuation or wordBoundary(projection, last_row + 1, 0)) break;
+            last_row += 1;
+            last_col = 0;
+        }
+    }
+    const anchors = blk: {
+        const start = try self.service.createAnchor(.{ .row = @intCast(first_row), .col = first_col, .source_version = projection.version });
+        errdefer self.releaseAnchorLater(start);
+        const end = try self.service.createAnchor(.{ .row = @intCast(last_row), .col = last_col, .source_version = projection.version });
+        break :blk .{ .start = start, .end = end };
+    };
+    clearSelection(self);
+    self.selection = .{ .start = anchors.start, .end = anchors.end, .rectangle = false };
+    try renderSelection(self);
+    self.cx.requestRedraw();
+    try copySelection(self);
 }
 fn updateSelection(self: *Surface, x: f32, y: f32) !void {
     const previous = self.selection orelse return;

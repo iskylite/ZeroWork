@@ -76,6 +76,14 @@ suspected after three keepalive intervals without authenticated inbound SSH
 packets (effective interval is at least two seconds); terminal output itself
 is not required. A replacement transport starts a fresh liveness window.
 
+Initial SSH terminal connections retry transient transport/handshake failures
+up to three total attempts, waiting 500 ms and 1000 ms before the two retries.
+Each retry releases the previous graph and rebuilds the frozen route with a
+fresh operation identity and per-hop timeout. Intermediate failures stay in
+connection logs; only the final failure publishes a notification. Cancelling
+also stops a pending retry. Authentication, host-key and algorithm/configuration
+failures require user action and are not automatically retried by this policy.
+
 The main executable is written to `zig-out/bin/zerowork`. The same directory contains `zw_ipc.so`, which is required for local shell integration. Run the application using either command:
 
 ```sh
@@ -111,6 +119,21 @@ node e2e/reported_ui_regressions.ts /tmp/zerowork-ui-check
 This window verification script launches `zig-out/bin/zerowork` directly in a separate process with a temporary data directory. It checks the sidebar, status control, popovers, and terminal rendering using the real native window and a local PTY, then saves reports and screenshots to the specified directory. It does not install the application and does not validate DMG installation. See [e2e/README.md](e2e/README.md) for more Harness usage.
 
 To return to a normal build after testing, run `zig build -j2` again. Do not use `-Dtest-mode=true` for release builds.
+
+Diagnostic logging uses a dedicated writer with its own IO lifetime. Producers
+copy records into a fixed 256-entry queue (at most 2 KiB per record); 32 entries
+are reserved for warnings/errors. Full queues and lock contention drop records
+without blocking producers, with counters exposed by `applog.snapshot()` and a
+summary written by the owner. Oversized records carry a truncation marker.
+`requestFlush`/`pollFlush` acknowledge accepted records only after file sync;
+`flush(timeout_ms)` is for bounded CLI/test waits. `shutdownStep` stops admission
+and polls actual resource release; final-process `shutdown` waits approximately
+200 ms at most. A stuck IO retains its writer and prevents replacement writers
+or data-directory deletion until a real release. Accepted records still queued
+at the close deadline may be dropped and counted; the kernel call already in
+progress cannot be forcibly cancelled. File errors disable disk retries and
+stderr failures disable that mirror. Run focused regressions with
+`zig test src/applog_tests.zig -lc`.
 
 The isolated test wrapper creates a temporary canonical data directory and removes it on exit. Use it for test targets so recordings and configuration never enter the account’s real App data. Normal app data lives in `~/Library/Application Support/com.zerowork.app`, cache in `~/Library/Caches/com.zerowork.app`, and diagnostics in `~/Library/Logs/com.zerowork.app`; saved credentials use the app’s Keychain vault. Existing `~/.zerowork` is migrated on startup. Settings → Data & Logs → Export & Cleanup → Clear All Application Data… clears owned data and exits; deleting the `.app` alone keeps user data.
 

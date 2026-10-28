@@ -113,7 +113,7 @@
 
 Codex IAB，1280×720 CSS px、DPR 2、100%：八个分类及全部 24 张设置卡片逐项展开；模型行实测 44px 高（同一行三个文本中心点对齐）；模型测试失败 → 查看错误详情 → 关闭；模态遮罩与设置窗口矩形一致（x100/y121.5/1080×560）；并发冲突 → 保留草稿并重试实际保存成功；快捷键解除 → 恢复默认 → 使用；通知拒绝 → 测试提示；有活动会话 → 清理确认被阻塞；钥匙串缺失 → 详情；未来插件卡片与网格开关产生待保存更改。`node --check app.js` 通过。
 
-状态截图保存在本目录 [verification](verification/)：`models-single-line.png`、`model-error-contained.png`、`notifications-permission.png`、`cleanup-blocked.png`、`plugins-extension.png`、`save-conflict-resolved.png`、`save-failure-draft.png`、`shortcuts-current.png`。
+状态通过[设置 HTML 原型](index.html)中的分类及评审控件查看；历史截图已清理。
 
 ### 明确保留的实现边界
 

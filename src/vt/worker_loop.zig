@@ -16,6 +16,8 @@ pub const Loop = struct {
     /// an empty change plan and kqueue would never wake the loop).
     interest: Interest = .{ .read = false, .write = false },
     stopped: bool = false,
+    ready_events: [8]std.posix.Kevent = undefined,
+    ready_count: usize = 0,
     wakeup: ?*const @import("../platform/wakeup.zig").Wakeup = null,
 
     pub fn setWakeup(self: *Loop, wake: *const @import("../platform/wakeup.zig").Wakeup) !void {
@@ -39,11 +41,20 @@ pub const Loop = struct {
     /// Wait once and dispatch all socket events returned by kqueue.
     pub fn step(self: *Loop, timeout_ms: u32) !void {
         if (self.stopped) return error.WorkerStopped;
-        var events: [8]std.posix.Kevent = undefined;
+        try self.wait(timeout_ms);
+        try self.dispatchReady();
+    }
+    pub fn wait(self: *Loop, timeout_ms: u32) !void {
+        if (self.stopped) return error.WorkerStopped;
         const started = if (output_timing.enabled) output_timing.now() else 0;
-        const ready = try self.queue.wait(&events, timeout_ms);
+        const ready = try self.queue.wait(&self.ready_events, timeout_ms);
         if (output_timing.enabled) output_timing.wait(self.socket_fd, started, timeout_ms, ready.len);
-        for (ready) |event| {
+        self.ready_count = ready.len;
+    }
+    pub fn dispatchReady(self: *Loop) !void {
+        const count = self.ready_count;
+        self.ready_count = 0;
+        for (self.ready_events[0..count]) |event| {
             if (self.wakeup) |wake| if (event.ident == @as(usize, @intCast(wake.read_fd))) {
                 wake.drain();
                 continue;

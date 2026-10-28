@@ -76,7 +76,7 @@ pub const Provider = struct {
             const projection = try frame.projection.clone(allocator);
             return .{ .owner = self.source.owner, .output_sequence = projection.output_sequence, .geometry_revision = self.geometry.revision, .input_revision = self.input_sequence, .read_only = !self.acceptsInput(), .eof_seen = self.ended(), .projection = projection, .applied_theme_revision = projection.theme_revision };
         }
-        var projection = try self.native.worker.vt.copyProjection(allocator);
+        var projection = try self.native.worker.vt.tryCopyProjection(allocator);
         errdefer projection.deinit(allocator);
         _ = try get(raw, binding);
         self.updateGeometry(projection.cols, projection.rows);

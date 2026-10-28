@@ -106,7 +106,7 @@ pub const Host = struct {
         for (current.hops[0..current.hop_count], hops[0..current.hop_count]) |hop, *destination| destination.* = .{ .name = hop.name, .host = hop.host, .user = hop.user, .port = hop.port };
         const waiting = if (challenge) |request| request.identity.key.eql(key) else false;
         const is_host_key = if (challenge) |request| request.kind == .host_key_unknown or request.kind == .host_key_changed else false;
-        const state: Progress.State = if (current.cancelled) .cancelled else if (current.failure != null or current.attachment_failed) .failed else if (waiting) (if (is_host_key) .waiting_host_key else .waiting_auth) else if (current.journal.completed) (if (current.finished) .attaching else .protocol_ready) else if ((key.attempt_id orelse 1) > 1) .retrying else .connecting;
+        const state: Progress.State = if (current.cancelled) .cancelled else if (current.automatic_retry_pending) .retrying else if (current.failure != null or current.attachment_failed) .failed else if (waiting) (if (is_host_key) .waiting_host_key else .waiting_auth) else if (current.journal.completed) (if (current.finished) .attaching else .protocol_ready) else if ((key.attempt_id orelse 1) > 1) .retrying else .connecting;
         const failure: ?Progress.Failure = if (current.failure != null or current.attachment_failed) .{
             .hop = if (current.journal.failure) |entry| entry.hop else null,
             .phase = if (current.journal.failure) |entry| entry.phase else null,
@@ -201,6 +201,10 @@ pub const Host = struct {
     }
     fn cancel(raw: *anyopaque, key: operations.OperationKey) void {
         const self: *Host = @ptrCast(@alignCast(raw));
+        if (self.workspace.connectionProgress(key)) |current| if (current.automatic_retry_pending) {
+            const id = self.application.legacyForHandle(key.owner.session) orelse return;
+            self.workspace.cancelSessionCreation(id);
+        };
         _ = self.application.sessions.cancel(key) catch false;
     }
     fn retry(raw: *anyopaque, key: operations.OperationKey) !void {

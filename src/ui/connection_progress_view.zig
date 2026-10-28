@@ -82,6 +82,22 @@ const ActionContext = struct {
         if (self.view.matches(self.key)) self.view.copyLogs();
     }
 };
+const TipFocus = struct {
+    cx: *ui.Cx,
+    open: *ui.Signal(bool),
+    previous_focus: ?ui.HandlerRef,
+    previous_blur: ?ui.HandlerRef,
+    fn focus(self: *TipFocus) void {
+        if (self.previous_focus) |handler| handler.invoke();
+        self.open.set(true);
+        self.cx.requestRedraw();
+    }
+    fn blur(self: *TipFocus) void {
+        if (self.previous_blur) |handler| handler.invoke();
+        self.open.set(false);
+        self.cx.requestRedraw();
+    }
+};
 const HopSlot = struct {
     view: *View,
     key: OperationKey,
@@ -91,6 +107,12 @@ const HopSlot = struct {
     endpoint: *ui.Node = undefined,
     user: *ui.Node = undefined,
     status: *ui.Node = undefined,
+    marker: *ui.Node = undefined,
+    skin: *ui.Signal(ui.BoxStyle) = undefined,
+    tip_content: *ui.Node = undefined,
+    tip_label: *ui.Node = undefined,
+    tip_open: *ui.Signal(bool) = undefined,
+    tip_id: [64]u8 = @splat(0),
     id: [48]u8 = @splat(0),
     fn choose(self: *HopSlot) void {
         if (!self.view.matches(self.key)) return;
@@ -98,11 +120,19 @@ const HopSlot = struct {
         self.view.filter = if (self.view.filter == self.hop) null else self.hop;
         self.view.following = true;
         self.view.new_logs = 0;
+        if (!self.view.logs_expanded) self.view.toggleLogs();
         self.view.refreshCards() catch {};
         self.view.refreshLogs() catch {};
     }
 };
 const Marker = struct { key: OperationKey, sequence: u64 };
+const ActionSkin = struct {
+    base: *ui.Signal(ui.BoxStyle),
+    hover: *ui.Signal(?ui.BoxStyle),
+    pressed: *ui.Signal(?ui.BoxStyle),
+    width: f32,
+    primary: bool,
+};
 
 pub const View = struct {
     cx: *ui.Cx,
@@ -127,8 +157,18 @@ pub const View = struct {
     retry_requested: bool = false,
     copy_result: ?bool = null,
     action_scope: ?*ui.Scope = null,
+    action_skins: [3]ActionSkin = undefined,
+    action_skin_count: usize = 0,
     chain_scope: ?*ui.Scope = null,
     title: *ui.Node,
+    state_label: *ui.Node = undefined,
+    state_badge: *ui.Node = undefined,
+    route_label: *ui.Node = undefined,
+    toggle_icon: *ui.Node = undefined,
+    copy_label: *ui.Node = undefined,
+    identity_tip_content: *ui.Node = undefined,
+    identity_tip_label: *ui.Node = undefined,
+    identity_tip_open: *ui.Signal(bool) = undefined,
     header_icon: *ui.Node = undefined,
     header_spinner: *ui.Node = undefined,
     spinner_color: *ui.Signal(?ui.Color),
@@ -225,15 +265,32 @@ pub const View = struct {
         self.compact = cx.viewport.width <= 860 or cx.viewport.height <= 480;
         const header = try ui.box(cx, S.attemptHeader(self.compact), .{});
         self.header = header;
-        self.header_icon = try ui.iconTint(cx, ui.icons.get("network").?, S.theme.current().accent, S.icon(18));
+        self.header_icon = try ui.iconTint(cx, ui.icons.get("network").?, S.theme.current().accent, S.icon(22));
         try header.appendChild(cx.allocator, self.header_icon);
-        self.header_spinner = try ui.widgets.Spinner(.{ .size = 18, .stroke_width = 2, .color = self.spinner_color }).mount(scope, cx);
+        self.header_spinner = try ui.widgets.Spinner(.{ .size = 22, .stroke_width = 2, .color = self.spinner_color }).mount(scope, cx);
         self.header_spinner.meta.ownership.meta.test_id = "connection.progress.spinner";
         self.header_spinner.setDisplay(.none);
         try header.appendChild(cx.allocator, self.header_spinner);
-        self.title = try self.appendLabel(header, "连接进度", S.text(13, 700, false));
-        self.title.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 20 }, .flex = 1, .min_width = 0 });
-        self.header_action = try ui.box(cx, S.iconButton(22), .{});
+        const identity_tip = try ui.widgets.Tooltip(.{ .text = "", .open_delay_ms = 450, .position = .bottom_start, .width = @as(f32, 420), .wrap = .word, .font_size = 11, .background = S.theme.popupInset(), .text_color = S.theme.current().fg_1 }).mount(scope, cx);
+        identity_tip.wrapper.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .flex = 1, .min_width = 0 });
+        const identity = identity_tip.trigger;
+        identity.setStyleInline(cx.allocator, S.identity());
+        self.identity_tip_content = identity_tip.content;
+        self.identity_tip_label = identity_tip.content.children.items[0];
+        self.identity_tip_open = identity_tip.open.?;
+        identity_tip.content.meta.ownership.meta.test_id = "connection.progress.identity.tooltip";
+        try header.appendChild(cx.allocator, identity_tip.wrapper);
+        self.title = try self.appendLabel(identity, "连接进度", S.targetTitle());
+        self.title.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 26 }, .min_width = 0, .max_width = 200, .flex_shrink = 1 });
+        self.title.meta.ownership.meta.test_id = "connection.progress.target";
+        self.endpoint = try self.appendLabel(identity, "", S.text(11, 400, true));
+        self.endpoint.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0, .flex = 1 });
+        self.endpoint.meta.ownership.meta.test_id = "connection.progress.endpoint";
+        self.state_badge = try ui.box(cx, S.stateBadge(false), .{});
+        self.state_label = try self.appendLabel(self.state_badge, "正在连接", S.text(10.5, 500, false));
+        self.state_label.meta.ownership.meta.test_id = "connection.progress.state";
+        try header.appendChild(cx.allocator, self.state_badge);
+        self.header_action = try ui.box(cx, S.iconButton(28), .{});
         try header.appendChild(cx.allocator, self.header_action);
         try modal.body.appendChild(cx.allocator, header);
         const body = try ui.box(cx, S.body(self.compact), .{});
@@ -245,11 +302,10 @@ pub const View = struct {
         self.body_scroll.container.meta.ownership.meta.test_id = "connection.progress.body";
         try body.appendChild(cx.allocator, self.body_scroll.container);
         const content = self.body_scroll.content;
-        const identity_row = try ui.box(cx, S.row(24), .{});
-        self.endpoint = try self.appendLabel(identity_row, "", S.text(11, 400, true));
-        self.endpoint.setTextColor(S.theme.current().fg_1);
-        self.endpoint.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .flex = 1, .min_width = 0 });
-        self.endpoint.meta.ownership.meta.test_id = "connection.progress.endpoint";
+        const identity_row = try ui.box(cx, S.row(20), .{});
+        self.route_label = try self.appendLabel(identity_row, "连接路径", S.text(11, 500, false));
+        self.route_label.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .flex = 1, .min_width = 0 });
+        self.route_label.meta.ownership.meta.test_id = "connection.progress.route";
         const chip = try ui.box(cx, S.chip(), .{});
         self.identity_chip = chip;
         self.attempt = try ui.text(cx, "", S.attemptText());
@@ -257,13 +313,11 @@ pub const View = struct {
         self.attempt.meta.ownership.meta.test_id = "connection.progress.attempt";
         try chip.appendChild(cx.allocator, self.attempt);
         try identity_row.appendChild(cx.allocator, chip);
-        try content.appendChild(cx.allocator, identity_row);
         self.chain_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
         self.chain_scroll.container.setStyleInline(cx.allocator, S.chainScroll());
         self.chain_scroll.container.meta.ownership.meta.test_id = "connection.progress.chain";
-        try content.appendChild(cx.allocator, self.chain_scroll.container);
         self.summary = try ui.box(cx, S.notice(false), .{});
-        self.summary_title = try self.appendLabel(self.summary, "", S.paragraph(12, 500));
+        self.summary_title = try self.appendLabel(self.summary, "", S.paragraph(14, 600));
         self.summary_title.meta.ownership.meta.test_id = "connection.progress.summary.title";
         self.summary_detail = try self.appendLabel(self.summary, "", S.paragraph(11, 400));
         self.summary_detail.meta.ownership.meta.test_id = "connection.progress.summary.detail";
@@ -277,19 +331,24 @@ pub const View = struct {
         self.authentication_area = try ui.box(cx, S.authentication(), .{});
         self.authentication_area.meta.ownership.meta.test_id = "connection.progress.authentication";
         try content.appendChild(cx.allocator, self.authentication_area);
+        try content.appendChild(cx.allocator, identity_row);
+        try content.appendChild(cx.allocator, self.chain_scroll.container);
         const log_controls = try ui.box(cx, S.row(30), .{});
-        const toggle = try ui.widgets.Button(.{ .variant = .secondary, .a11y_label = "展开或收起阶段日志", .on_click = cx.on(View, self, toggleLogs) }).mount(scope, cx);
+        const toggle = try ui.widgets.Button(.{ .variant = .ghost, .focus_ring = S.focusRing(), .hover_style = S.ghostHover(false), .pressed_style = S.ghostHover(true), .base_style = S.disclosure(), .a11y_label = "查看连接日志", .on_click = cx.on(View, self, toggleLogs) }).mount(scope, cx);
         prepareCustomButton(toggle);
         self.toggle_button = toggle;
-        toggle.setStyleInline(cx.allocator, S.button(140, 30, false));
+        toggle.setStyleInline(cx.allocator, S.disclosure());
+        toggle.unsetStyleInline(.{ .background = ui.Color.TRANSPARENT });
         toggle.meta.ownership.meta.test_id = "connection.progress.logs.toggle";
-        self.toggle_label = try ui.text(cx, "展开阶段日志", S.text(12, 500, false));
+        toggle.behavior.interaction.a11y.?.expanded = false;
+        self.toggle_icon = try ui.iconTint(cx, ui.icons.chevron_right, S.theme.current().fg_2, S.icon(12));
+        try toggle.appendChild(cx.allocator, self.toggle_icon);
+        self.toggle_label = try ui.text(cx, "查看连接日志", S.text(11, 500, false));
         try toggle.appendChild(cx.allocator, self.toggle_label);
         try log_controls.appendChild(cx.allocator, toggle);
-        self.log_help = try self.appendLabel(log_controls, "日志不含凭据", S.text(11, 400, false));
-        self.log_help.setStyleInline(cx.allocator, .{ .width = .{ .px = 160 }, .height = .{ .px = 16 }, .flex_shrink = 0, .min_width = 0 });
-        try log_controls.appendChild(cx.allocator, try ui.spacer(cx));
-        self.jump_button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "回到阶段日志底部", .on_click = cx.on(View, self, jumpToBottom) }).mount(scope, cx);
+        self.log_help = try self.appendLabel(log_controls, "日志不含凭据", S.text(10, 400, false));
+        self.log_help.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .flex = 1, .min_width = 0 });
+        self.jump_button = try ui.widgets.Button(.{ .variant = .ghost, .focus_ring = S.focusRing(), .hover_style = S.actionHover(false, false), .pressed_style = S.actionHover(false, true), .a11y_label = "回到阶段日志底部", .on_click = cx.on(View, self, jumpToBottom) }).mount(scope, cx);
         prepareCustomButton(self.jump_button);
         self.jump_button.setStyleInline(cx.allocator, S.button(154, 28, false));
         self.jump_button.setDisplay(.none);
@@ -297,7 +356,7 @@ pub const View = struct {
         self.jump_label = try ui.text(cx, "回到底部", S.text(11, 400, false));
         try self.jump_button.appendChild(cx.allocator, self.jump_label);
         try log_controls.appendChild(cx.allocator, self.jump_button);
-        self.copy_host = try ui.box(cx, S.iconButton(28), .{});
+        self.copy_host = try ui.box(cx, S.copyButton(), .{});
         try log_controls.appendChild(cx.allocator, self.copy_host);
         try content.appendChild(cx.allocator, log_controls);
         self.logs_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
@@ -365,6 +424,8 @@ pub const View = struct {
     pub fn hide(self: *View) void {
         if (!self.visible and !self.open.peek() and self.authentication_area.style.display == .none) return;
         self.visible = false;
+        self.identity_tip_open.set(false);
+        for (self.slots[0..self.slot_count]) |slot| slot.tip_open.set(false);
         self.open.set(false);
         self.authentication_area.setDisplay(.none);
         self.cx.requestRedraw();
@@ -382,11 +443,17 @@ pub const View = struct {
         _ = self.header_icon.setTint(c.accent);
         self.spinner_color.set(c.accent);
         self.title.setTextColor(c.fg_1);
-        self.endpoint.setTextColor(c.fg_1);
+        self.endpoint.setTextColor(c.fg_2);
+        self.route_label.setTextColor(c.fg_1);
+        self.identity_tip_content.setBackground(S.theme.popupInset());
+        self.identity_tip_label.setTextColor(c.fg_1);
+        if (self.copy_icon != null) self.copy_label.setTextColor(c.fg_1);
         self.identity_chip.setStyleInline(self.cx.allocator, S.chip());
         self.footer.setStyleInline(self.cx.allocator, S.footer(self.compact));
         self.attempt.setTextColor(c.fg_2);
-        self.toggle_button.setStyleInline(self.cx.allocator, S.button(140, 30, false));
+        self.toggle_button.setStyleInline(self.cx.allocator, S.disclosure());
+        self.toggle_button.unsetStyleInline(.{ .background = ui.Color.TRANSPARENT });
+        ui.hooks.updateFocusRingConfig(self.cx, self.toggle_button, S.focusRing());
         self.toggle_label.setTextColor(c.fg_1);
         self.log_help.setTextColor(c.fg_2);
         self.jump_button.setStyleInline(self.cx.allocator, S.button(154, 28, false));
@@ -396,17 +463,23 @@ pub const View = struct {
         if (self.copy_icon) |node| _ = node.setTint(c.fg_2);
         if (self.close_icon) |node| _ = node.setTint(c.fg_2);
         for (self.slots[0..self.slot_count]) |slot| {
+            ui.hooks.updateFocusRingConfig(self.cx, slot.node, S.focusRing());
             slot.name.setTextColor(c.fg_1);
             slot.endpoint.setTextColor(c.fg_2);
             slot.user.setTextColor(c.fg_2);
+            slot.tip_content.setBackground(S.theme.popupInset());
+            slot.tip_label.setTextColor(c.fg_1);
         }
         for (self.connectors[0..self.slot_count -| 1]) |connector| {
             _ = connector.icon.setTint(c.fg_3);
             connector.label.setTextColor(c.fg_2);
         }
-        if (self.cancel_button) |node| node.setStyleInline(self.cx.allocator, S.button(112, 34, false));
-        if (self.close_button) |node| node.setStyleInline(self.cx.allocator, S.button(88, 34, false));
-        if (self.retry_button) |node| node.setStyleInline(self.cx.allocator, S.button(156, 34, true));
+        for (self.action_skins[0..self.action_skin_count]) |skin| {
+            skin.base.set(S.button(skin.width, 32, skin.primary));
+            skin.hover.set(S.actionHover(skin.primary, false));
+            skin.pressed.set(S.actionHover(skin.primary, true));
+        }
+        for ([_]?*ui.Node{ self.cancel_button, self.close_button, self.retry_button, self.jump_button }) |button_node| if (button_node) |node| ui.hooks.updateFocusRingConfig(self.cx, node, S.focusRing());
         if (self.cancel_label) |node| node.setTextColor(S.actionText(false).color);
         if (self.close_label) |node| node.setTextColor(S.actionText(false).color);
         if (self.retry_label) |node| node.setTextColor(S.actionText(true).color);
@@ -424,7 +497,10 @@ pub const View = struct {
         if (!self.visible) return;
         self.logs_expanded = !self.logs_expanded;
         self.logs_scroll.container.setDisplay(if (self.logs_expanded) .flex else .none);
-        self.toggle_label.setTextContent(self.cx.allocator, if (self.logs_expanded) "收起阶段日志" else "展开阶段日志") catch {};
+        self.toggle_label.setTextContent(self.cx.allocator, if (self.logs_expanded) "收起连接日志" else "查看连接日志") catch {};
+        self.toggle_button.behavior.interaction.a11y.?.expanded = self.logs_expanded;
+        const asset = if (self.logs_expanded) ui.icons.chevron_down else ui.icons.chevron_right;
+        if (asset.icon_id) |id| if (asset.pickRep(12)) |rep| self.toggle_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = S.theme.current().fg_2 });
         self.resize();
         self.cx.requestRedraw();
     }
@@ -436,7 +512,7 @@ pub const View = struct {
     }
     pub fn cancel(self: *View) void {
         const source = if (self.source) |*source| &source.value else return;
-        if (!self.visible or self.cancel_requested or source.attached or source.cleanup == .released) return;
+        if (!self.visible or self.cancel_requested or source.attached or (source.cleanup == .released and source.state != .retrying)) return;
         self.cancel_requested = true;
         self.cancel_disabled.set(true);
         self.callbacks.cancel(self.callbacks.context, source.key);
@@ -483,24 +559,27 @@ pub const View = struct {
 
     fn refresh(self: *View) !void {
         const source = &self.source.?.value;
-        const spinning = source.file_session and !source.attached and source.state != .failed and source.state != .cancelled and !self.cancel_requested;
+        const spinning = !source.attached and !self.cancel_requested and (source.state == .connecting or source.state == .retrying or source.state == .protocol_ready or source.state == .attaching);
         self.header_spinner.setDisplay(if (spinning) .flex else .none);
         self.header_icon.setDisplay(if (spinning) .none else .flex);
         const target = source.hops[source.hops.len - 1];
         var buffer: [2048]u8 = undefined;
-        try self.endpoint.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "{s}@{s}:{d}", .{ target.user, target.host, target.port }));
-        try self.attempt.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "尝试 {d}", .{source.key.attempt_id.?}));
-        const state_label: []const u8 = if (source.attached) "已接入会话" else if (source.state == .failed) "连接失败" else if (source.state == .retrying) "重试完整链路" else if (source.state == .cancelled or self.cancel_requested) (if (source.cleanup == .released) "连接已取消" else "正在取消连接") else "正在连接";
-        const title = if (source.hops.len == 1) try std.fmt.allocPrint(self.cx.allocator, "直连 {s} · {s}", .{ target.name, state_label }) else try std.fmt.allocPrint(self.cx.allocator, "{d} 级跳板 · {s} · {s}", .{ source.hops.len - 1, target.name, state_label });
-        defer self.cx.allocator.free(title);
-        try self.title.setTextContent(self.cx.allocator, title);
+        try self.endpoint.setTextContent(self.cx.allocator, try formatEndpoint(&buffer, target));
+        try self.fullValueTip(self.identity_tip_content, self.identity_tip_label, target, null);
+        try self.attempt.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "第 {d} 次尝试", .{source.key.attempt_id.?}));
+        const state_label: []const u8 = if (source.attached) "已接入" else if (source.state == .failed) "连接失败" else if (source.state == .retrying) "正在重试" else if (source.state == .cancelled or self.cancel_requested) (if (source.cleanup == .released) "已取消" else "正在取消") else if (source.state == .waiting_auth) "等待认证" else if (source.state == .waiting_host_key) "等待确认" else "正在连接";
+        try self.title.setTextContent(self.cx.allocator, target.name);
+        try self.state_label.setTextContent(self.cx.allocator, state_label);
+        self.state_badge.setStyleInline(self.cx.allocator, S.stateBadge(source.state == .failed));
+        self.state_label.setTextColor(if (source.state == .failed) S.theme.current().danger_ink else S.theme.current().accent_ink);
+        try self.route_label.setTextContent(self.cx.allocator, if (source.hops.len == 1) (if (source.file_session) "连接路径 · SFTP 直连" else "连接路径 · 直连") else try std.fmt.bufPrint(&buffer, "连接路径 · {d} 级跳板{s}", .{ source.hops.len - 1, if (source.file_session) " · SFTP" else "" }));
         self.authentication_area.setDisplay(if (source.inline_authentication and !source.attached) .flex else .none);
         self.retry_disabled.set(self.retry_requested or !self.canRetry());
         self.cancel_disabled.set(self.cancel_requested or source.attached);
         self.close_disabled.set(!self.canDismiss());
         self.header_disabled.set(if (source.state == .failed or source.state == .cancelled) !self.canDismiss() else self.cancel_requested or source.attached);
         const icon = ui.icons.get(if (source.state == .failed) "triangle-alert" else "network").?;
-        if (icon.icon_id) |id| if (icon.pickRep(18)) |rep| self.header_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = if (source.state == .failed) S.theme.current().danger_ink else S.theme.current().accent });
+        if (icon.icon_id) |id| if (icon.pickRep(22)) |rep| self.header_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = if (source.state == .failed) S.theme.current().danger_ink else S.theme.current().accent });
         try self.refreshCards();
         try self.refreshSummary();
         try self.refreshResources();
@@ -512,6 +591,7 @@ pub const View = struct {
         self.clearNodes(self.copy_host);
         self.clearNodes(self.footer);
         if (self.action_scope) |scope| scope.dispose();
+        self.action_skin_count = 0;
         const scope = try self.scope.childScope();
         self.action_scope = scope;
         const ctx = try self.cx.allocator.create(ActionContext);
@@ -521,27 +601,30 @@ pub const View = struct {
                 allocator.destroy(@as(*ActionContext, @ptrCast(@alignCast(ptr))));
             }
         }.destroy);
-        const close_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "关闭或取消当前连接", .disabled = self.header_disabled, .on_click = self.cx.on(ActionContext, ctx, ActionContext.close) }).mount(scope, self.cx);
+        const close_button = try ui.widgets.Button(.{ .variant = .ghost, .focus_ring = S.focusRing(), .hover_style = S.ghostHover(false), .pressed_style = S.ghostHover(true), .icon_only = true, .base_style = S.iconButton(28), .a11y_label = "关闭或取消当前连接", .disabled = self.header_disabled, .on_click = self.cx.on(ActionContext, ctx, ActionContext.close) }).mount(scope, self.cx);
         prepareCustomButton(close_button);
         self.close_icon = try ui.iconTint(self.cx, ui.icons.x, S.theme.current().fg_2, S.icon(16));
         try close_button.appendChild(self.cx.allocator, self.close_icon.?);
-        close_button.setStyleInline(self.cx.allocator, S.iconButton(22));
+        close_button.setStyleInline(self.cx.allocator, S.iconButton(28));
+        close_button.unsetStyleInline(.{ .background = ui.Color.TRANSPARENT });
         close_button.meta.ownership.meta.test_id = "connection.progress.close";
         try self.header_action.appendChild(self.cx.allocator, close_button);
-        const copy_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "复制阶段日志", .disabled = self.copy_disabled, .on_click = self.cx.on(ActionContext, ctx, ActionContext.copy) }).mount(scope, self.cx);
+        const copy_button = try ui.widgets.Button(.{ .variant = .ghost, .focus_ring = S.focusRing(), .hover_style = S.ghostHover(false), .pressed_style = S.ghostHover(true), .base_style = S.copyButton(), .a11y_label = "复制连接日志", .disabled = self.copy_disabled, .on_click = self.cx.on(ActionContext, ctx, ActionContext.copy) }).mount(scope, self.cx);
         prepareCustomButton(copy_button);
         self.copy_icon = try ui.iconTint(self.cx, ui.icons.copy, S.theme.current().fg_2, S.icon(16));
         try copy_button.appendChild(self.cx.allocator, self.copy_icon.?);
-        copy_button.setStyleInline(self.cx.allocator, S.iconButton(28));
+        self.copy_label = try ui.text(self.cx, "复制日志", S.text(11, 500, false));
+        try copy_button.appendChild(self.cx.allocator, self.copy_label);
+        copy_button.setStyleInline(self.cx.allocator, S.copyButton());
+        copy_button.unsetStyleInline(.{ .background = ui.Color.TRANSPARENT });
         copy_button.meta.ownership.meta.test_id = "connection.progress.logs.copy";
         try self.copy_host.appendChild(self.cx.allocator, copy_button);
-        self.cancel_button = try self.button(self.footer, scope, ctx, "取消连接", 112, false, self.cancel_disabled, ActionContext.cancel, "connection.progress.cancel");
-        try self.footer.appendChild(self.cx.allocator, try ui.spacer(self.cx));
-        const hint = try self.appendLabel(self.footer, "取消后释放本次完整链路", S.text(11, 400, false));
+        const hint = try self.appendLabel(self.footer, "关闭窗口将取消本次连接", S.text(10.5, 400, false));
         self.footer_hint = hint;
-        hint.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 220 }, .height = .{ .px = 16 }, .flex_shrink = 0, .min_width = 0 });
-        self.close_button = try self.button(self.footer, scope, ctx, "关闭", 88, false, self.close_disabled, ActionContext.close, "connection.progress.dismiss");
-        self.retry_button = try self.button(self.footer, scope, ctx, "重试完整链路", 156, true, self.retry_disabled, ActionContext.retry, "connection.progress.retry");
+        hint.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .flex = 1, .min_width = 0 });
+        self.cancel_button = try self.button(self.footer, scope, ctx, "取消连接", 96, false, self.cancel_disabled, ActionContext.cancel, "connection.progress.cancel");
+        self.close_button = try self.button(self.footer, scope, ctx, "关闭", 72, false, self.close_disabled, ActionContext.close, "connection.progress.dismiss");
+        self.retry_button = try self.button(self.footer, scope, ctx, "重新连接", 112, true, self.retry_disabled, ActionContext.retry, "connection.progress.retry");
     }
     fn buildChain(self: *View) !void {
         self.clearNodes(self.chain_scroll.content);
@@ -550,7 +633,7 @@ pub const View = struct {
         self.chain_scope = scope;
         const source = &self.source.?.value;
         self.slot_count = source.hops.len + 1;
-        self.chain_scroll.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = @as(f32, @floatFromInt(self.slot_count)) * 54 - 12 } });
+        self.chain_scroll.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = @as(f32, @floatFromInt(self.slot_count)) * 36 + 8 } });
         self.chain_scroll.content.setStyleInline(self.cx.allocator, S.chain(self.slot_count, @min(S.width, self.cx.viewport.width - 16) - 32));
         for (0..self.slot_count) |index| {
             if (index != 0) {
@@ -564,21 +647,34 @@ pub const View = struct {
             }
             const slot = &self.slots[index];
             slot.* = .{ .view = self, .key = source.key, .hop = if (index == 0) null else index - 1 };
-            slot.node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "筛选该节点的阶段日志", .on_click = self.cx.on(HopSlot, slot, HopSlot.choose) }).mount(scope, self.cx);
+            const tip = try ui.widgets.Tooltip(.{ .text = "", .open_delay_ms = 450, .position = .bottom_start, .width = @as(f32, 420), .wrap = .word, .font_size = 11, .background = S.theme.popupInset(), .text_color = S.theme.current().fg_1 }).mount(scope, self.cx);
+            tip.wrapper.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 36 }, .flex_shrink = 0 });
+            tip.trigger.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .fill(), .min_width = 0 });
+            slot.tip_content = tip.content;
+            slot.tip_label = tip.content.children.items[0];
+            slot.tip_open = tip.open.?;
+            tip.content.meta.ownership.meta.test_id = try std.fmt.bufPrint(&slot.tip_id, "connection.progress.hop.tooltip.{d}", .{index});
+            slot.skin = try scope.createSignal(ui.BoxStyle, S.card(false));
+            slot.node = try ui.widgets.Button(.{ .variant = .ghost, .focus_ring = S.focusRing(), .hover_style = S.ghostHover(false), .pressed_style = S.ghostHover(true), .base_style = slot.skin, .a11y_label = "查看该节点的连接日志", .on_click = self.cx.on(HopSlot, slot, HopSlot.choose) }).mount(scope, self.cx);
+            const focus_tip = try scope.createState(TipFocus, .{ .cx = self.cx, .open = slot.tip_open, .previous_focus = slot.node.behavior.events.on_focus, .previous_blur = slot.node.behavior.events.on_blur });
+            slot.node.behavior.events.on_focus = self.cx.on(TipFocus, focus_tip, TipFocus.focus);
+            slot.node.behavior.events.on_blur = self.cx.on(TipFocus, focus_tip, TipFocus.blur);
             prepareCustomButton(slot.node);
-            slot.node.setStyleInline(self.cx.allocator, S.card(false));
             slot.node.meta.ownership.meta.test_id = try std.fmt.bufPrint(&slot.id, "connection.progress.hop.{d}", .{index});
-            slot.name = try self.cardLabel(slot.node, 18, S.text(12, 500, false));
-            slot.name.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 130 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
-            slot.endpoint = try self.cardLabel(slot.node, 14, S.text(9.5, 400, true));
+            slot.marker = try ui.iconTint(self.cx, ui.icons.circle_check, S.theme.current().fg_3, S.icon(14));
+            try slot.node.appendChild(self.cx.allocator, slot.marker);
+            slot.name = try self.cardLabel(slot.node, 18, S.text(11, 500, false));
+            slot.name.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 128 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+            slot.endpoint = try self.cardLabel(slot.node, 16, S.text(11, 400, true));
             slot.user = try self.cardLabel(slot.node, 14, S.text(10, 400, false));
             slot.user.setDisplay(.none);
-            var status_style = S.text(10, 400, false);
-            status_style.line_height = 1.6;
+            var status_style = S.text(10.5, 400, false);
+            status_style.text_align = .end;
             slot.status = try self.cardLabel(slot.node, 16, status_style);
-            slot.status.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 130 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+            slot.status.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 108 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
             slot.endpoint.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0, .flex = 1 });
-            try self.chain_scroll.content.appendChild(self.cx.allocator, slot.node);
+            try tip.trigger.appendChild(self.cx.allocator, slot.node);
+            try self.chain_scroll.content.appendChild(self.cx.allocator, tip.wrapper);
         }
     }
     fn refreshCards(self: *View) !void {
@@ -586,15 +682,16 @@ pub const View = struct {
         const fault = self.currentFailure();
         var buffer: [1536]u8 = undefined;
         for (self.slots[0..self.slot_count]) |*slot| {
-            slot.node.setStyleInline(self.cx.allocator, S.card(slot.hop != null and slot.hop == self.filter));
+            var card_style = S.card(slot.hop != null and slot.hop == self.filter);
             if (slot.hop) |hop| {
                 const item = source.hops[hop];
                 try slot.name.setTextContent(self.cx.allocator, item.name);
-                try slot.endpoint.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "{s}@{s}:{d}", .{ item.user, item.host, item.port }));
+                try slot.endpoint.setTextContent(self.cx.allocator, if (hop + 1 == source.hops.len) "目标主机" else try formatEndpoint(&buffer, item));
                 try slot.user.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&buffer, "身份  {s}", .{item.user}));
+                try self.fullValueTip(slot.tip_content, slot.tip_label, item, slot.node);
                 const latest = self.latestEvent(hop);
                 var label: []const u8 = if (source.state == .retrying) "等待整链重建" else "等待上游";
-                var color = S.theme.current().fg_3;
+                var color = S.theme.current().fg_2;
                 if (source.attached) {
                     label = "在线";
                     color = S.theme.current().ok;
@@ -609,37 +706,63 @@ pub const View = struct {
                         color = S.theme.current().ok;
                     } else {
                         label = try std.fmt.bufPrint(&buffer, "{s}{s}", .{ phaseName(event.phase), if (event.status == .succeeded) "完成" else "中" });
-                        color = S.theme.current().accent;
+                        color = S.theme.current().accent_ink;
                     }
                 }
                 try slot.status.setTextContent(self.cx.allocator, label);
                 slot.status.setTextColor(color);
+                const current = source.state != .failed and source.state != .cancelled and !self.cancel_requested and source.cleanup == .not_started and if (self.latestEvent(null)) |event| event.hop == hop and !(event.phase == .ready and event.status == .succeeded) else false;
+                if (current and self.filter != hop) card_style.background = S.theme.current().accent.withAlpha(18);
+                const mark = if (fault != null and fault.?.hop == hop) ui.icons.circle_alert else if (current) ui.icons.get("circle-dot").? else if (latest != null and latest.?.phase == .ready and latest.?.status == .succeeded) ui.icons.circle_check else ui.icons.get("circle").?;
+                setMarker(slot.marker, mark, color);
             } else {
-                try slot.name.setTextContent(self.cx.allocator, "Local");
-                try slot.endpoint.setTextContent(self.cx.allocator, "连接来源 · 本机进程");
+                try slot.name.setTextContent(self.cx.allocator, "本机");
+                try slot.endpoint.setTextContent(self.cx.allocator, "连接起点");
                 try slot.user.setTextContent(self.cx.allocator, "连接来源  本机进程");
+                try slot.tip_label.setTextContent(self.cx.allocator, "本机\n连接起点");
+                slot.tip_content.behavior.interaction.a11y.?.label = slot.tip_label.getText().?.content;
                 try slot.status.setTextContent(self.cx.allocator, if (source.local_ready) "已就绪" else "准备中");
-                slot.status.setTextColor(if (source.local_ready) S.theme.current().ok else S.theme.current().fg_3);
+                slot.status.setTextColor(if (source.local_ready) S.theme.current().ok else S.theme.current().fg_2);
+                setMarker(slot.marker, if (source.local_ready) ui.icons.circle_check else ui.icons.get("circle").?, if (source.local_ready) S.theme.current().ok else S.theme.current().fg_2);
             }
+            slot.skin.set(card_style);
         }
+    }
+    fn fullValueTip(self: *View, content: *ui.Node, label: *ui.Node, hop: Hop, button_node: ?*ui.Node) !void {
+        var address: [2048]u8 = undefined;
+        const full = try std.fmt.allocPrint(self.cx.allocator, "{s}\n{s}", .{ hop.name, try formatEndpoint(&address, hop) });
+        defer self.cx.allocator.free(full);
+        try label.setTextContent(self.cx.allocator, full);
+        content.behavior.interaction.a11y.?.label = label.getText().?.content;
+        if (button_node) |node| node.behavior.interaction.a11y.?.label = label.getText().?.content;
     }
     fn refreshSummary(self: *View) !void {
         const source = &self.source.?.value;
         const fault = self.currentFailure();
         self.summary.setStyleInline(self.cx.allocator, S.notice(fault != null or source.state == .failed));
+        self.summary_title.setTextColor(if (fault != null or source.state == .failed) S.theme.current().danger_ink else S.theme.current().fg_1);
         self.cancel_button.?.setDisplay(if (source.state == .failed or source.state == .cancelled) .none else .flex);
         self.close_button.?.setDisplay(if (source.state == .failed or source.state == .cancelled) .flex else .none);
         self.retry_button.?.setDisplay(if (source.state == .failed) .flex else .none);
-        self.footer_hint.setDisplay(if (source.state == .failed or source.state == .cancelled) .none else .flex);
-        try self.footer_hint.setTextContent(self.cx.allocator, if (source.state == .failed or source.state == .cancelled) "" else "取消后释放本次完整链路");
+        try self.footer_hint.setTextContent(self.cx.allocator, if (source.state == .failed or source.state == .cancelled or self.cancel_requested) switch (source.cleanup) {
+            .not_started => "正在确认连接状态",
+            .releasing => "正在结束上一次连接…",
+            .unknown => "连接结束状态待核实",
+            .released => if (self.canRetry()) "可以重新连接" else "连接已结束",
+        } else "关闭窗口将取消本次连接");
+        try self.cancel_label.?.setTextContent(self.cx.allocator, if (self.cancel_requested) "正在取消…" else "取消连接");
+        try self.retry_label.?.setTextContent(self.cx.allocator, if (source.state == .failed and source.cleanup == .unknown) "暂不可重试" else if (source.state == .failed and source.cleanup != .released) "等待连接结束" else "重新连接");
+        if (self.close_icon) |icon| if (icon.parent) |button_node| {
+            button_node.behavior.interaction.a11y.?.label = if (source.state == .failed or source.state == .cancelled) "关闭连接结果" else "取消连接";
+        };
         var title = std.Io.Writer.Allocating.init(self.cx.allocator);
         defer title.deinit();
         var detail = std.Io.Writer.Allocating.init(self.cx.allocator);
         defer detail.deinit();
         if (fault) |failure| {
-            if (failure.hop) |hop| try title.writer.print("第 {d} 跳 {s} · {s}失败", .{ hop + 1, source.hops[hop].name, if (failure.phase) |phase| phaseName(phase) else "连接" }) else try title.writer.writeAll("连接失败");
+            try title.writer.print("{s}失败", .{if (failure.phase) |phase| phaseName(phase) else "连接"});
             try detail.writer.writeAll(failure.reason);
-            try detail.writer.print("；{s}", .{cleanupText(source.cleanup)});
+            if (source.hops.len > 1) if (failure.hop) |hop| try detail.writer.print("\n第 {d} 跳 · {s}", .{ hop + 1, source.hops[hop].name });
             if (failure.hop) |hop| if (hop + 1 < source.hops.len) {
                 try detail.writer.writeAll("\n后续受阻：");
                 for (source.hops[hop + 1 ..], 0..) |item, index| {
@@ -660,9 +783,40 @@ pub const View = struct {
         } else if (source.state == .protocol_ready or source.state == .attaching) {
             try title.writer.writeAll("协议已就绪，正在接入会话");
             try detail.writer.writeAll("等待会话接入结果。");
+        } else if (source.state == .retrying and source.cleanup == .released) {
+            try title.writer.writeAll("正在准备重试连接");
+            try detail.writer.writeAll("上次连接未完成，将自动重建完整链路。");
+        } else if (source.state == .waiting_auth) {
+            try title.writer.writeAll("需要完成身份认证");
+            try detail.writer.writeAll("请完成服务器要求的身份认证后继续。");
+        } else if (source.state == .waiting_host_key) {
+            try title.writer.writeAll("需要确认主机身份");
+            try detail.writer.writeAll("核对服务器指纹，确认后继续连接。");
         } else if (self.latestEvent(null)) |event| {
-            try title.writer.print("{s}第 {d} 跳 {s}", .{ if (source.state == .waiting_auth) "等待认证 · " else if (source.state == .waiting_host_key) "等待核对主机密钥 · " else if (source.state == .retrying) "正在重新连接" else "正在连接", event.hop + 1, source.hops[event.hop].name });
-            try detail.writer.print("当前阶段：{s}。", .{phaseName(event.phase)});
+            if (event.status == .succeeded and event.phase != .ready) {
+                try title.writer.print("{s}已完成", .{phaseName(event.phase)});
+                try detail.writer.writeAll("等待下一阶段的连接结果。");
+            } else {
+                try title.writer.writeAll(switch (event.phase) {
+                    .transport => "正在建立网络连接",
+                    .tunnel => "正在建立跳板隧道",
+                    .handshake => "正在进行 SSH 握手",
+                    .host_key => "正在核对主机身份",
+                    .authentication => "正在验证登录身份",
+                    .shell => "正在准备终端",
+                    .ready => "正在接入会话",
+                });
+                try detail.writer.writeAll(switch (event.phase) {
+                    .transport => "等待目标服务器响应。",
+                    .tunnel => "正在建立通往下一节点的转发通道。",
+                    .handshake => "正在协商 SSH 协议和加密方式。",
+                    .host_key => "正在校验服务器主机密钥。",
+                    .authentication => "等待服务器确认认证结果。",
+                    .shell => "SSH 认证已完成，正在创建终端通道。",
+                    .ready => "协议已就绪，等待会话接入结果。",
+                });
+            }
+            if (source.hops.len > 1) try detail.writer.print("\n第 {d} 跳 · {s}。", .{ event.hop + 1, source.hops[event.hop].name });
             if (event.hop + 1 < source.hops.len) try detail.writer.writeAll(if (source.state == .retrying) "其余节点等待整链重建。" else "其余节点等待上游完成。");
         } else {
             try title.writer.writeAll(if (source.state == .retrying) "正在从 Local 重建完整链路" else "正在准备连接");
@@ -810,7 +964,7 @@ pub const View = struct {
         const source = if (self.source) |*source| &source.value else return;
         const natural = self.body_scroll.content.globalRect().h;
         const fallback = if (self.currentFailure() != null or source.state == .failed) S.failed_height else S.normal_height;
-        const height = @min(if (natural > 0) natural + (if (self.compact) @as(f32, 114) else 134) else fallback, @max(100, self.cx.viewport.height - 16));
+        const height = @min(if (natural > 0) natural + (if (self.compact) @as(f32, 118) else 126) else fallback, @max(100, self.cx.viewport.height - 16));
         const panel = S.panel(height, self.cx.viewport.width);
         if (!std.meta.eql(self.dialog.style.width, panel.width.?) or !std.meta.eql(self.dialog.style.height, panel.height.?)) self.dialog.setStyleInline(self.cx.allocator, panel);
     }
@@ -850,6 +1004,7 @@ pub const View = struct {
     fn currentFailure(self: *const View) ?Failure {
         const source = &self.source.?.value;
         if (source.failure) |fault| return fault;
+        if (source.state == .retrying or source.state == .cancelled) return null;
         const fault = source.journal.failure orelse return null;
         if (fault.status != .failed) return null;
         return .{ .hop = fault.hop, .phase = fault.phase, .reason = failureText(fault.failure) };
@@ -905,9 +1060,11 @@ pub const View = struct {
     fn button(self: *View, parent: *ui.Node, scope: *ui.Scope, ctx: *ActionContext, label_text: []const u8, w: f32, primary: bool, disabled: ?*ui.Signal(bool), comptime callback: *const fn (*ActionContext) void, id: []const u8) !*ui.Node {
         const variant: ui.widgets.button.ButtonVariant = if (primary) .primary else .secondary;
         const source: ui.Source(bool) = if (disabled) |signal| .{ .signal = signal } else .{ .value = false };
-        const node = try ui.widgets.Button(.{ .variant = variant, .a11y_label = label_text, .disabled = source, .on_click = self.cx.on(ActionContext, ctx, callback) }).mount(scope, self.cx);
+        const skin: ActionSkin = .{ .base = try scope.createSignal(ui.BoxStyle, S.button(w, 32, primary)), .hover = try scope.createSignal(?ui.BoxStyle, S.actionHover(primary, false)), .pressed = try scope.createSignal(?ui.BoxStyle, S.actionHover(primary, true)), .width = w, .primary = primary };
+        self.action_skins[self.action_skin_count] = skin;
+        self.action_skin_count += 1;
+        const node = try ui.widgets.Button(.{ .variant = variant, .focus_ring = S.focusRing(), .hover_style = skin.hover, .pressed_style = skin.pressed, .base_style = skin.base, .a11y_label = label_text, .disabled = source, .on_click = self.cx.on(ActionContext, ctx, callback) }).mount(scope, self.cx);
         prepareCustomButton(node);
-        node.setStyleInline(self.cx.allocator, S.button(w, 34, primary));
         node.meta.ownership.meta.test_id = id;
         const style = S.actionText(primary);
         const button_label = try ui.text(self.cx, label_text, style);
@@ -998,4 +1155,14 @@ fn resourceName(kind: ssh.ResourceKind) []const u8 {
         .relay_worker => "转发任务",
         .rtt_channel => "延迟检测通道",
     };
+}
+
+fn setMarker(node: *ui.Node, asset: ui.SvgAsset, color: ui.Color) void {
+    if (asset.icon_id) |id| if (asset.pickRep(14)) |rep| node.setIcon(.{ .icon_id = id, .rep = rep, .tint = color });
+}
+
+fn formatEndpoint(buffer: []u8, hop: Hop) ![]const u8 {
+    const ipv6 = std.mem.indexOfScalar(u8, hop.host, ':') != null and !std.mem.startsWith(u8, hop.host, "[");
+    if (ipv6) return std.fmt.bufPrint(buffer, "{s}@[{s}]:{d}", .{ hop.user, hop.host, hop.port });
+    return std.fmt.bufPrint(buffer, "{s}@{s}:{d}", .{ hop.user, hop.host, hop.port });
 }

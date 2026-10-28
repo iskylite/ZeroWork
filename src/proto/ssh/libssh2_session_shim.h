@@ -45,6 +45,7 @@ int zw_ssh_relay_step(ZW_SSH_RELAY *relay);
 void zw_ssh_relay_interrupt(ZW_SSH_RELAY *relay);
 void zw_ssh_relay_destroy(ZW_SSH_RELAY *relay);
 void zw_ssh_relay_pause(void);
+void zw_ssh_relay_wait(ZW_SSH_RELAY *relay, int transport_fd, LIBSSH2_SESSION *session, int timeout_ms);
 LIBSSH2_SESSION *zw_libssh2_session_create(void);
 int zw_libssh2_session_handshake(LIBSSH2_SESSION *session, int socket_fd);
 int zw_libssh2_session_handshake_driven(LIBSSH2_SESSION *session, const ZW_SSH_DRIVE *drive);
@@ -79,6 +80,7 @@ typedef struct { char *text; size_t capacity; size_t length; } ZW_SSH_AUTH_RESPO
 typedef int (*zw_ssh_auth_prompts_cb)(void *ctx, const ZW_SSH_AUTH_PROMPT *prompts, size_t count, ZW_SSH_AUTH_RESPONSE *responses);
 int zw_libssh2_auth_keyboard_interactive_batch(LIBSSH2_SESSION *session, const char *user, zw_ssh_auth_prompts_cb callback, void *ctx);
 int zw_libssh2_last_error_code(LIBSSH2_SESSION *session);
+int zw_libssh2_transport_failed(LIBSSH2_SESSION *session);
 const char *zw_libssh2_last_error(LIBSSH2_SESSION *session);
 int zw_libssh2_auth_private_key(LIBSSH2_SESSION *session, const char *user, const char *private_key_path, const char *passphrase);
 int zw_libssh2_auth_methods_driven(LIBSSH2_SESSION *session, const char *user, char *methods, size_t capacity, size_t *length, const ZW_SSH_DRIVE *drive);
@@ -172,3 +174,6 @@ int zw_libssh2_sftp_mkdir(LIBSSH2_SFTP *sftp, const char *path);
 int zw_libssh2_sftp_fstat_attributes(LIBSSH2_SFTP_HANDLE *handle, ZW_SFTP_ATTRIBUTES *attrs);
 unsigned long zw_libssh2_sftp_status(LIBSSH2_SFTP *sftp);
 #endif
+
+int zw_libssh2_shared_shell_step(LIBSSH2_SESSION *session, const char *term, int cols, int rows, LIBSSH2_CHANNEL **channel, int *phase);
+int zw_libssh2_shared_shell_cancel_step(LIBSSH2_SESSION *session, LIBSSH2_CHANNEL **channel, int *phase);

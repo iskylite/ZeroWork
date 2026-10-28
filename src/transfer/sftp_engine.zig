@@ -71,6 +71,8 @@ pub const RemoteMetadata = struct {
 /// also permits a controlled service to exercise the production scheduler.
 pub const ReadPurpose = enum { fingerprint, prefix, transfer, checksum, repair };
 pub const RemoteFiles = struct {
+    /// Disable staging for adapters that require observing each data read.
+    stage_download: bool = true,
     context: ?*anyopaque = null,
     open_read: *const fn (?*anyopaque, *ssh_session.Session, [:0]const u8, ReadPurpose) anyerror!ssh_session.SftpHandle = openRead,
     stat_handle: *const fn (?*anyopaque, *ssh_session.Session, *ssh_session.SftpHandle) anyerror!ssh_session.SftpAttributes = handleStat,
@@ -420,6 +422,7 @@ const Runtime = struct {
         part_path: ?[]u8 = null,
         remote_path: ?[:0]u8 = null,
         local: ?std.Io.File = null,
+        source_cache: ?std.Io.File = null,
         remote: ?ssh_session.SftpHandle = null,
         size: u64 = 0,
         offset: u64 = 0,
@@ -569,7 +572,7 @@ pub const OwnedCheckpoint = struct {
     fn releaseStorage(self: *OwnedCheckpoint) void {
         if (self._payload) |*p| {
             const file = &p.continuation.file;
-            std.debug.assert(file.local == null and file.remote == null);
+            std.debug.assert(file.local == null and file.remote == null and file.source_cache == null);
             const allocator = std.heap.c_allocator;
             if (file.local_path) |path| allocator.free(path);
             if (file.part_path) |path| allocator.free(path);
@@ -1639,6 +1642,10 @@ pub const SftpEngine = struct {
             .completed => |completion| {
                 if (completion.kind != .skipped) return error.InvalidState;
                 const file = &job.runtime.file;
+                if (file.source_cache) |cache| {
+                    cache.close(io);
+                    file.source_cache = null;
+                }
                 if (file.local) |handle| {
                     handle.close(io);
                     file.local = null;
@@ -1937,7 +1944,7 @@ pub const SftpEngine = struct {
             .source_open => try sourceScanOpen(io, job),
             .source_scan => try self.sourceScanTurn(io, job),
             .source_close => {
-                if (!self.closeFileHandle(job)) return .waiting;
+                if (!self.closeFileHandle(io, job)) return .waiting;
                 const file = &rt.file;
                 const has_partial = if (job.spec.direction == .download)
                     (if (job.owned_temp) |temp| temp.created else false)
@@ -1962,7 +1969,7 @@ pub const SftpEngine = struct {
                 }
             },
             .target_retry_close => {
-                if (!self.closeFileHandle(job)) return .waiting;
+                if (!self.closeFileHandle(io, job)) return .waiting;
                 const actual = try observeTarget(io, job, rt.file.remote_path.?);
                 try offerConflict(job, actual, .open_remote);
             },
@@ -1971,7 +1978,7 @@ pub const SftpEngine = struct {
             .prefix_open => try prefixOpen(io, job),
             .prefix_scan => try self.prefixTurn(io, job),
             .prefix_close => {
-                if (!self.closeFileHandle(job)) return .waiting;
+                if (!self.closeFileHandle(io, job)) return .waiting;
                 const file = &rt.file;
                 if (job.spec.direction == .download) {
                     file.local.?.close(io);
@@ -2072,11 +2079,15 @@ pub const SftpEngine = struct {
                     file.target_stamp = target;
                     file.target_capture_needed = false;
                 }
-                if (!self.closeFileHandle(job)) return .waiting;
+                if (!self.closeFileHandle(io, job)) return .waiting;
                 rt.phase = .finalize_file;
             },
             .finalize_file => {
                 const file = &rt.file;
+                if (file.source_cache) |cache| {
+                    cache.close(io);
+                    file.source_cache = null;
+                }
                 if (file.local) |local| {
                     if (job.spec.direction == .download) {
                         try local.sync(io);
@@ -2099,7 +2110,7 @@ pub const SftpEngine = struct {
             .checksum_local => try checksumLocalTurn(io, job),
             .checksum_remote => try self.checksumRemoteTurn(job),
             .checksum_close => {
-                if (!self.closeFileHandle(job)) return .waiting;
+                if (!self.closeFileHandle(io, job)) return .waiting;
                 rt.phase = .checksum_compare;
             },
             .checksum_compare => try checksumCompare(job),
@@ -2178,6 +2189,11 @@ pub const SftpEngine = struct {
             if (!original.same(rt.scan_stamp.?)) return error.SourceChanged;
         } else file.initial_stamp = rt.scan_stamp;
         if (file.fingerprint) |original| if (!original.stamp.same(rt.scan_stamp.?)) return error.SourceChanged;
+        if (job.spec.direction == .download and !file.restoring and job.remote_files.stage_download) {
+            // Unlinked, private scratch: no pathname can be adopted by another
+            // job, and every exit closes it before publishing a checkpoint.
+            file.source_cache = createSourceCache() catch null;
+        }
         rt.phase = .source_scan;
     }
 
@@ -2192,6 +2208,11 @@ pub const SftpEngine = struct {
                 try self.readRemote(job, file.buffer[0..want]);
             try stopCheckpoint(job);
             if (count == 0 or count > want) return error.SourceChanged;
+            if (file.source_cache) |cache| cache.writePositionalAll(io, file.buffer[0..count], rt.scan_offset) catch {
+                // Low local disk space falls back to the existing remote pass.
+                cache.close(io);
+                file.source_cache = null;
+            };
             rt.scan_hash.update(file.buffer[0..count]);
             rt.scan_offset += count;
             return;
@@ -2300,7 +2321,10 @@ pub const SftpEngine = struct {
                 break :blk written;
             },
             .download => blk: {
-                const got = try self.readRemote(job, file.buffer[0..want]);
+                const got = if (file.source_cache) |cache|
+                    try cache.readPositional(io, &.{file.buffer[0..want]}, chunk.offset + start)
+                else
+                    try self.readRemote(job, file.buffer[0..want]);
                 if (got > want) return error.SftpReadFailed;
                 try stopCheckpoint(job);
                 if (got > 0) try file.local.?.writePositionalAll(io, file.buffer[0..got], chunk.offset + start);
@@ -2326,13 +2350,17 @@ pub const SftpEngine = struct {
         }
     }
 
-    fn closeFileHandle(self: *SftpEngine, job: *Job) bool {
+    fn closeFileHandle(self: *SftpEngine, io: std.Io, job: *Job) bool {
         const rt = &job.runtime;
         if (rt.file.remote) |*handle| {
             const result = job.remote_files.close(job.remote_files.context, handle);
             if (result.consumed) rt.file.remote = null;
             if (result.receipt == .awaiting) return false;
             if (result.receipt != .released) {
+                if (rt.file.source_cache) |cache| {
+                    cache.close(io);
+                    rt.file.source_cache = null;
+                }
                 _ = self.observeTransportFailure(job);
                 rt.unknown_close = true;
                 job.release_unknown.store(true, .release);
@@ -2495,7 +2523,7 @@ pub const SftpEngine = struct {
     fn publishFile(io: std.Io, job: *Job) !void {
         const rt = &job.runtime;
         const file = &rt.file;
-        std.debug.assert(file.local == null and file.remote == null);
+        std.debug.assert(file.local == null and file.remote == null and file.source_cache == null);
         try stopCheckpoint(job);
         if (job.spec.md5_check) {
             const remote = try FileStamp.remote(try job.remote_metadata.stat(job.remote_metadata.context, job.session.?, file.remote_path.?));
@@ -2530,6 +2558,10 @@ pub const SftpEngine = struct {
 
     fn cleanupTurn(self: *SftpEngine, io: std.Io, job: *Job) Turn {
         const rt = &job.runtime;
+        if (rt.file.source_cache) |cache| {
+            cache.close(io);
+            rt.file.source_cache = null;
+        }
         if (rt.file.remote != null) {
             if (rt.outcome == .paused and job.spec.direction == .upload and rt.file.target_capture_needed) {
                 rt.file.target_stamp = if (job.remote_files.stat_handle(job.remote_files.context, job.session.?, &rt.file.remote.?)) |value|
@@ -2538,7 +2570,7 @@ pub const SftpEngine = struct {
                     null;
                 rt.file.target_capture_needed = false;
             }
-            if (!self.closeFileHandle(job)) return .waiting;
+            if (!self.closeFileHandle(io, job)) return .waiting;
             return .advanced;
         }
         if (rt.file.local) |file| {
@@ -2625,7 +2657,7 @@ pub const SftpEngine = struct {
 
     fn clearFile(job: *Job) void {
         const file = &job.runtime.file;
-        std.debug.assert(file.local == null and file.remote == null);
+        std.debug.assert(file.local == null and file.remote == null and file.source_cache == null);
         if (file.local_path) |path| std.heap.c_allocator.free(path);
         if (file.part_path) |path| std.heap.c_allocator.free(path);
         if (file.remote_path) |path| std.heap.c_allocator.free(path);
@@ -2667,6 +2699,17 @@ fn engineConflictSnapshot(ctx: *anyopaque, allocator: std.mem.Allocator, id: Eng
 }
 fn engineResolveConflict(ctx: *anyopaque, id: EngineJobId, request: conflict_types.Request) anyerror!void {
     return (@as(*SftpEngine, @ptrCast(@alignCast(ctx)))).resolveConflict(id, request);
+}
+
+extern "c" fn mkstemp(template: [*:0]u8) c_int;
+fn createSourceCache() !std.Io.File {
+    var template = "/tmp/zerowork-sftp-source-XXXXXX".*;
+    const fd = mkstemp(&template);
+    if (fd < 0) return error.SourceCacheUnavailable;
+    errdefer _ = std.c.close(fd);
+    if (std.c.unlink(&template) != 0) return error.SourceCacheUnavailable;
+    if (std.c.fcntl(fd, std.c.F.SETFD, @as(c_int, std.c.FD_CLOEXEC)) < 0) return error.SourceCacheUnavailable;
+    return .{ .handle = fd, .flags = .{ .nonblocking = false } };
 }
 
 fn stopCheckpoint(job: *Job) !void {
@@ -3496,7 +3539,8 @@ const OwnerTestService = struct {
     fn bind(self: *OwnerTestService, engine: *SftpEngine) void {
         self.caller = std.Thread.getCurrentId();
         engine.remote_metadata = .{ .context = self, .size = size, .stat = stat, .target_stat = targetStat };
-        engine.remote_files = .{ .context = self, .open_read = openRead, .stat_handle = statHandle, .open_write = openWrite, .create_exclusive = createExclusive, .read = read, .write = write, .close = close, .release = release };
+        // Fault-injection peers exercise the uncached remote-read fallback.
+        engine.remote_files = .{ .stage_download = false, .context = self, .open_read = openRead, .stat_handle = statHandle, .open_write = openWrite, .create_exclusive = createExclusive, .read = read, .write = write, .close = close, .release = release };
     }
     fn unblock(self: *OwnerTestService) void {
         self.metadata_release.store(true, .release);
@@ -4180,7 +4224,8 @@ const ResumePeer = struct {
     fn bind(self: *ResumePeer, engine: *SftpEngine) void {
         self.caller = std.Thread.getCurrentId();
         engine.remote_metadata = .{ .context = self, .size = size, .stat = stat, .target_stat = stat };
-        engine.remote_files = .{ .context = self, .open_read = openRead, .open_write = openWrite, .create_exclusive = createExclusive, .truncate = truncate, .stat_handle = statHandle, .read = read, .write = write, .close = close, .release = releaseContext };
+        // Fault-injection peers exercise the uncached remote-read fallback.
+        engine.remote_files = .{ .stage_download = false, .context = self, .open_read = openRead, .open_write = openWrite, .create_exclusive = createExclusive, .truncate = truncate, .stat_handle = statHandle, .read = read, .write = write, .close = close, .release = releaseContext };
     }
     fn unblock(self: *ResumePeer) void {
         self.release.store(true, .release);
@@ -6063,4 +6108,99 @@ test "sftp pacing pending credit yields promptly to pause and cancellation" {
     try std.testing.expectEqual(manager.EngineState.cancelled, engineStateOf(job.state.load(.acquire)));
     try std.testing.expectEqual(manager.JobCleanup.released, SftpEngine.cleanupOf(job));
     try std.testing.expectEqual(bytes_at_pause, peer.wire_bytes.load(.acquire));
+}
+
+test "sftp staged download preserves full fingerprint and avoids a second remote payload pass" {
+    for ([_]bool{ false, true }) |md5| {
+        var local = std.testing.tmpDir(.{});
+        defer local.cleanup();
+        var remote = std.testing.tmpDir(.{});
+        defer remote.cleanup();
+        const directory = try local.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+        defer std.testing.allocator.free(directory);
+        const bytes = resumeBytes();
+        try remote.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = &bytes });
+        var peer: ResumePeer = .{ .dir = remote.dir, .block_at = null };
+        const engine = try SftpEngine.init(std.testing.allocator);
+        defer {
+            peer.unblock();
+            engine.deinit();
+        }
+        var session: ssh_session.Session = .{};
+        engine.attachSession(&session);
+        peer.bind(engine);
+        engine.remote_files.stage_download = true;
+        _ = try engine.open(.{ .direction = .download, .sources = &.{"a"}, .remote_dir = "/remote", .local_dir = directory, .md5_check = md5, .pacing_kbps = 0 });
+        try awaitWorker(&engine.owner_done);
+        const job = engine.jobs.items[0];
+        try std.testing.expectEqual(manager.EngineState.succeeded, engineStateOf(job.state.load(.acquire)));
+        try std.testing.expectEqual(manager.JobCleanup.released, SftpEngine.cleanupOf(job));
+        try expectFileBytes(local.dir, "a", &bytes);
+        try std.testing.expectEqual(@as(u64, bytes.len) * @as(u64, if (md5) 2 else 1), peer.wire_bytes.load(.acquire));
+        try std.testing.expect(job.runtime.file.source_cache == null);
+    }
+}
+
+test "sftp staged download cancellation releases scratch before publishing cleanup" {
+    var local = std.testing.tmpDir(.{});
+    defer local.cleanup();
+    var remote = std.testing.tmpDir(.{});
+    defer remote.cleanup();
+    const directory = try local.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(directory);
+    const bytes = resumeBytes();
+    try remote.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = &bytes });
+    var peer: ResumePeer = .{ .dir = remote.dir, .block_purpose = .fingerprint };
+    const engine = try SftpEngine.init(std.testing.allocator);
+    defer {
+        peer.unblock();
+        engine.deinit();
+    }
+    var session: ssh_session.Session = .{};
+    engine.attachSession(&session);
+    peer.bind(engine);
+    engine.remote_files.stage_download = true;
+    const id = try engine.open(.{ .direction = .download, .sources = &.{"a"}, .remote_dir = "/remote", .local_dir = directory, .pacing_kbps = 0 });
+    try awaitWorker(&peer.blocked);
+    const job = engine.jobs.items[0];
+    try std.testing.expect(job.runtime.file.source_cache != null);
+    engine.cancel(id);
+    peer.unblock();
+    try awaitWorker(&engine.owner_done);
+    try std.testing.expectEqual(manager.EngineState.cancelled, engineStateOf(job.state.load(.acquire)));
+    try std.testing.expectEqual(manager.JobCleanup.released, SftpEngine.cleanupOf(job));
+    try std.testing.expect(job.runtime.file.source_cache == null);
+}
+
+test "sftp staged preflight pause releases scratch and safely restarts source validation" {
+    var local = std.testing.tmpDir(.{});
+    defer local.cleanup();
+    var remote = std.testing.tmpDir(.{});
+    defer remote.cleanup();
+    const directory = try local.dir.realPathFileAlloc(std.testing.io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(directory);
+    const bytes = resumeBytes();
+    try remote.dir.writeFile(std.testing.io, .{ .sub_path = "a", .data = &bytes });
+    var peer: ResumePeer = .{ .dir = remote.dir, .block_purpose = .fingerprint };
+    const engine = try SftpEngine.init(std.testing.allocator);
+    defer {
+        peer.unblock();
+        engine.deinit();
+    }
+    var session: ssh_session.Session = .{};
+    engine.attachSession(&session);
+    peer.bind(engine);
+    engine.remote_files.stage_download = true;
+    const first = try engine.open(.{ .direction = .download, .sources = &.{"a"}, .remote_dir = "/remote", .local_dir = directory, .pacing_kbps = 0 });
+    const paused = try pauseResumePeer(engine, &peer, first);
+    try std.testing.expect(paused.runtime.file.source_cache == null);
+    try std.testing.expectEqual(@as(u64, 0), paused.checkpoint.?.file.offset);
+    const second = try engine.resumeJob(first);
+    try awaitWorker(&engine.owner_done);
+    const resumed = engine.jobs.items[1];
+    try std.testing.expectEqual(second, resumed.id);
+    try std.testing.expectEqual(manager.EngineState.succeeded, engineStateOf(resumed.state.load(.acquire)));
+    try std.testing.expectEqual(manager.JobCleanup.released, SftpEngine.cleanupOf(resumed));
+    try std.testing.expect(resumed.runtime.file.source_cache == null);
+    try expectFileBytes(local.dir, "a", &bytes);
 }

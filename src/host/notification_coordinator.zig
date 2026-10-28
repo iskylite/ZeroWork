@@ -585,6 +585,8 @@ pub const NotificationEvent = struct {
     event_revision: u64,
     phase: Phase,
     severity: Severity = .info,
+    /// Event/result only. Put the session name in owner_name and the target in
+    /// object_name so every presentation can keep source identity below it.
     title: []const u8,
     detail: []const u8 = "",
     owner_name: []const u8 = "",

@@ -17,6 +17,7 @@ pub const Route = struct {
         channel: ?Channel = null,
         relay: ?*sockets.Relay = null,
         forward: ?*Forward = null,
+        shared_forwards: ?*Forward = null,
     };
 
     /// Includes final target. All earlier entries authenticate without shell.
@@ -153,6 +154,7 @@ pub const Route = struct {
             if (hop.relay) |relay| {
                 hop.session.recordResource(.relay_worker, .releasing);
                 hop.session.recordResource(.relay_socket, .releasing);
+                hop.shared_forwards = relay.takeSharedForwards();
                 relay.deinit();
                 hop.session.recordResource(.relay_worker, .released);
                 hop.session.recordResource(.relay_socket, .released);
@@ -174,6 +176,12 @@ pub const Route = struct {
             const receipt = hop.session.closeReceipt();
             if (receipt != .released) return receipt;
             if (hop.forward) |forward| forward.sessionReleased() catch return .unknown;
+            while (hop.shared_forwards) |forward| {
+                forward.sharedParentReleased() catch return .unknown;
+                hop.shared_forwards = forward.relay_next;
+                forward.relay_next = null;
+                forward.relay_registered.store(false, .release);
+            }
             hop.channel = null;
             self.initialized -= 1;
         }

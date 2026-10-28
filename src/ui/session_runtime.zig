@@ -110,6 +110,8 @@ pub fn workerRuntimeOptions(app_config: config.Config) @import("../vt/ssh_worker
 
 /// Host identity the UI wants to connect to (from hosts.toml or quick connect).
 pub const HostTarget = struct {
+    shared_connection: ?@import("../host/runtime_service.zig").SharedLease = null,
+    connection_lifetime: ?@import("../vt/shared_ssh_connection.zig").Lifetime = null,
     source_owner: ?identity.AssetOwner = null,
     protocol: hosts_mod.Protocol = .ssh,
     auth_mode: hosts_mod.AuthMode = .agent,
@@ -214,6 +216,7 @@ pub const SessionRuntime = struct {
         errdefer runtime.library.deinit();
         applog.info(.ssh, "session init: {s}@{s}:{d} auth={s}", .{ user, host, target.port, @tagName(target.auth_mode) });
         var worker_options = workerRuntimeOptions(app_config);
+        worker_options.shared_connection = target.shared_connection;
         worker_options.scrollback = target.scrollback orelse app_config.ui.scrollback_limit;
         // Per-host values override global SSH policy when present; absent host
         // fields inherit the persisted application settings.
@@ -232,6 +235,7 @@ pub const SessionRuntime = struct {
             applog.err(.ssh, "session init FAILED {s}@{s}:{d}: {s}", .{ user, host, target.port, @errorName(err) });
             return err;
         };
+        worker.connection_lifetime = target.connection_lifetime;
         applog.info(.ssh, "session init done: worker+pty+loop ready", .{});
         errdefer worker.deinit();
         const checkpoint = try allocator.create(CheckpointController);
@@ -425,7 +429,6 @@ pub const SessionRuntime = struct {
     fn persistClosedArchive(self: *SessionRuntime, session_id: u64, retention_days: u16) !void {
         if (self.archive_written) return;
         const dir = self.log_directory orelse return error.LogDirectoryUnavailable;
-        const dimensions = self.worker.resize_dims.load(.acquire);
         try archiveTimeline(self.allocator, self.checkpoint.io, dir, self.worker.timelinePtr(), .{
             .id = session_id,
             .saved_connection_id = self.saved_connection_id,
@@ -433,7 +436,7 @@ pub const SessionRuntime = struct {
             .ended_ms = realtime.milliseconds(undefined),
             .host = self.host,
             .user = self.user,
-        }, if (dimensions == 0) self.worker.options.cols else @truncate(dimensions), if (dimensions == 0) self.worker.options.rows else @truncate(dimensions >> 16), retention_days);
+        }, self.worker.recording_initial_cols, self.worker.recording_initial_rows, retention_days);
         self.archive_written = true;
     }
 };
