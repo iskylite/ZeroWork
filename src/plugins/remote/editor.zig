@@ -3452,10 +3452,11 @@ fn paintAuthLabels(group: *ui.Node) void {
         if (choice.children.items.len < 2) continue;
         const node = choice.children.items[1];
         if (node.getText()) |old| {
-            if (old.font_size == 12 and old.line_height == 1.5) continue;
+            if (old.font_size == 12 and old.line_height == 1.5 and !old.selectable) continue;
             var props = old;
             props.font_size = 12;
             props.line_height = 1.5;
+            props.selectable = false;
             node.setText(props);
         }
     }
@@ -3503,6 +3504,24 @@ fn ownedId(w: *RemoteEditor, buf: []u8, comptime format: []const u8, value: usiz
 test "refAllDecls forces analysis of the full mounting path" {
     std.testing.refAllDecls(RemoteEditor);
     std.testing.refAllDecls(@This());
+}
+
+test "authentication radio labels cannot create a text selection highlight" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    const selected = try scope.createSignal(?[]const u8, "password");
+    const group = try ui.widgets.RadioGroup(.{ .options = &auth_options, .value = selected, .horizontal = true }).mount(scope, cx);
+    cx.root = group;
+    paintAuthLabels(group);
+    for (group.children.items) |choice| {
+        const label = choice.children.items[1];
+        try std.testing.expect(!label.getText().?.selectable);
+    }
+    selected.set("private_key");
+    paintAuthLabels(group);
+    for (group.children.items) |choice| try std.testing.expect(!choice.children.items[1].getText().?.selectable);
 }
 
 test "Draft.validate rejects empty name host user and zero port" {

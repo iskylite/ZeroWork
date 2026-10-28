@@ -10,6 +10,8 @@ AR=${AR:-"xcrun ar"}
 RANLIB=${RANLIB:-"xcrun ranlib"}
 
 command -v xcrun >/dev/null 2>&1 || { echo "build_ssh_deps: xcrun is required" >&2; exit 1; }
+export CC AR RANLIB
+
 test -x "$SSH/configure" || { echo "build_ssh_deps: missing $SSH/configure" >&2; exit 1; }
 
 # Always rebuild both archives from vendored sources. In particular, do not let a
@@ -27,3 +29,5 @@ make -C "$MBED/library" libmbedcrypto.a CC="$CC" AR="$AR" -j"$JOBS"
 
 test -s "$MBED/library/libmbedcrypto.a"
 test -s "$SSH/src/.libs/libssh2.a"
+
+python3 "$ROOT/scripts/verify_ssh_deps.py" --record

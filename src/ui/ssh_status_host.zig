@@ -84,6 +84,7 @@ pub const Controls = struct {
     grid_label: *ui.Node,
     more_button: *ui.Node,
     theme_button: *ui.Node,
+    theme_label: *ui.Node,
     progress_slot: *ui.Node,
     file_icon: *ui.Node,
     chain_button: *ui.Node,
@@ -146,6 +147,7 @@ pub fn mountStatusBar(cx: *ui.Cx, scope: *ui.Scope, status_node: *ui.Node) !Stat
     try id.appendChild(cx.allocator, status_node);
     const chevron = try ui.iconTint(cx, ui.icons.chevron_up, S.theme.current().fg_2, .{});
     chevron.setStyleInline(cx.allocator, S.triggerChevron());
+    chevron.setDisplay(.none);
     try id.appendChild(cx.allocator, chevron);
     try left.appendChild(cx.allocator, id);
     const rtt = try metric(cx, scope, left, "往返延迟", "status.connection.rtt", 64, ui.icons.activity, hover, disabled);
@@ -167,20 +169,22 @@ pub fn mountStatusBar(cx: *ui.Cx, scope: *ui.Scope, status_node: *ui.Node) !Stat
     chain_icon.setStyleInline(cx.allocator, S.metricIcon());
     try chain.appendChild(cx.allocator, chain_icon);
     const chain_label = try ui.text(cx, "连接链路", S.triggerText(false));
-    chain_label.setStyleInline(cx.allocator, S.metricLabel(86));
+    chain_label.setStyleInline(cx.allocator, S.metricLabel(80));
+    chain_label.meta.ownership.meta.test_id = "status.connection.chain.state";
+    chain_icon.meta.ownership.meta.test_id = "status.connection.chain.icon";
     try chain.appendChild(cx.allocator, chain_label);
     try bar.appendChild(cx.allocator, chain);
     const socks = try makeButton(cx, scope, "端口转发", "status.connection.forward", S.metricTrigger(28), hover, disabled);
     const socks_icon = try ui.iconTint(cx, ui.icons.get("plug-zap").?, S.theme.current().fg_2, .{});
     socks_icon.setStyleInline(cx.allocator, S.metricIcon());
+    socks_icon.meta.ownership.meta.test_id = "status.connection.forward.icon";
     try socks.appendChild(cx.allocator, socks_icon);
     const forward_label = try ui.text(cx, "端口转发", S.triggerText(false));
-    forward_label.setStyleInline(cx.allocator, S.metricLabel(86));
+    forward_label.setStyleInline(cx.allocator, S.metricLabel(80));
     try socks.appendChild(cx.allocator, forward_label);
-    // The existing SOCKS controller retains its label and click channel.
-    const socks_label = try ui.text(cx, "SOCKS5", S.triggerText(false));
-    socks_label.setDisplay(.none);
-    try socks.appendChild(cx.allocator, socks_label);
+    // Bind the runtime projection to the visible label, including compact layouts.
+    const socks_label = forward_label;
+    socks_label.meta.ownership.meta.test_id = "status.connection.forward.state";
     try bar.appendChild(cx.allocator, socks);
     const broadcast_enabled = try scope.createSignal(bool, false);
     const broadcast_style = try scope.createSignal(S.ButtonStyle, S.metricTrigger(28));
@@ -195,14 +199,18 @@ pub fn mountStatusBar(cx: *ui.Cx, scope: *ui.Scope, status_node: *ui.Node) !Stat
     try bar.appendChild(cx.allocator, broadcast);
     cx.detachChild(bar, broadcast);
     try bar.insertChildBefore(cx.allocator, broadcast, chain);
-    const theme = try makeButton(cx, scope, "全局主题 · 应用与全部终端", "status.connection.theme", S.metricTrigger(28), hover, theme_disabled);
+    const theme = try makeButton(cx, scope, "全局主题 · 应用与全部终端", "status.connection.theme", S.metricTrigger(80), hover, theme_disabled);
     const theme_icon = try ui.iconTint(cx, ui.icons.palette, S.theme.current().fg_2, .{});
     theme_icon.setStyleInline(cx.allocator, S.metricIcon());
     try theme.appendChild(cx.allocator, theme_icon);
+    const theme_label = try ui.text(cx, "主题配色", S.triggerText(false));
+    theme_label.setStyleInline(cx.allocator, S.metricLabel(80));
+    theme_label.meta.ownership.meta.test_id = "status.connection.theme.label";
+    try theme.appendChild(cx.allocator, theme_label);
     try bar.appendChild(cx.allocator, theme);
-    const progress = try ui.box(cx, .{ .height = .fill(), .direction = .row, .align_items = .center, .gap = 10, .margin = .{ .left = 6 }, .flex_shrink = 0 }, .{});
+    const progress = try ui.box(cx, .{ .height = .fill(), .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
     try bar.appendChild(cx.allocator, progress);
-    const controls = try scope.createState(Controls, .{ .bar = bar, .identity_button = id, .identity_label = status_node, .state_dot = dot, .rtt_button = rtt.button, .rtt_label = rtt.label, .encoding_button = encoding.button, .encoding_label = encoding.label, .grid_button = grid.button, .grid_label = grid.label, .more_button = more, .theme_button = theme, .progress_slot = progress, .file_icon = file_icon, .chain_button = chain, .chain_label = chain_label, .forward_label = forward_label, .socks_button = socks, .broadcast_button = broadcast, .broadcast_icon = broadcast_icon, .broadcast_style = broadcast_style, .broadcast_label = broadcast_label, .icons = .{ id_icon, chevron, rtt.icon, encoding.icon, grid.icon, more_icon, socks_icon, theme_icon }, .disabled = disabled, .theme_disabled = theme_disabled });
+    const controls = try scope.createState(Controls, .{ .bar = bar, .identity_button = id, .identity_label = status_node, .state_dot = dot, .rtt_button = rtt.button, .rtt_label = rtt.label, .encoding_button = encoding.button, .encoding_label = encoding.label, .grid_button = grid.button, .grid_label = grid.label, .more_button = more, .theme_button = theme, .theme_label = theme_label, .progress_slot = progress, .file_icon = file_icon, .chain_button = chain, .chain_label = chain_label, .forward_label = forward_label, .socks_button = socks, .broadcast_button = broadcast, .broadcast_icon = broadcast_icon, .broadcast_style = broadcast_style, .broadcast_label = broadcast_label, .icons = .{ id_icon, chevron, rtt.icon, encoding.icon, grid.icon, more_icon, socks_icon, theme_icon }, .disabled = disabled, .theme_disabled = theme_disabled });
     return .{ .bar = bar, .details = left, .grid = grid.label, .progress_slot = progress, .socks_chip = socks, .socks_label = socks_label, .chain_trigger = chain, .chain_icon = chain_icon, .chain_hover = hover, .controls = controls };
 }
 fn makeButton(cx: *ui.Cx, scope: *ui.Scope, name: []const u8, id: []const u8, style: S.ButtonStyle, hover: *ui.Signal(?S.ButtonStyle), disabled: *ui.Signal(bool)) !*ui.Node {
@@ -275,7 +283,7 @@ pub const Host = struct {
         self.file_active = null;
         controls.file_icon.setDisplay(.none);
         controls.icons[0].setDisplay(.none);
-        controls.icons[1].setDisplay(.flex);
+        controls.icons[1].setDisplay(.none);
         controls.more_button.setDisplay(.none);
         controls.chain_button.setDisplay(if (next == null) .none else .flex);
         controls.socks_button.setDisplay(if (next == null) .none else .flex);
@@ -356,29 +364,56 @@ pub const Host = struct {
         if (self.colors == null or !std.meta.eql(self.colors.?, colors)) {
             controls.identity_label.setTextColor(colors.fg_1);
             for ([_]*ui.Node{ controls.chain_button, controls.socks_button }) |node| node.setBackground(ui.Color.TRANSPARENT);
-            for ([_]*ui.Node{ controls.rtt_label, controls.encoding_label, controls.grid_label }) |node| node.setTextColor(colors.fg_2);
+            for ([_]*ui.Node{ controls.rtt_label, controls.encoding_label, controls.grid_label, controls.theme_label }) |node| node.setTextColor(colors.fg_2);
             for (controls.icons) |node| _ = node.setTint(colors.fg_2);
             _ = controls.file_icon.setTint(colors.fg_2);
             try self.info.retheme();
             self.detail.dirty = true;
             self.colors = colors;
         }
+        // Always-visible status projection: independent of opening the chain card.
+        const ForwardColors = @import("socks_info_styles.zig");
+        var chain_color = colors.fg_2;
+        var chain_text: []const u8 = "连接链路 · 未连接";
+        if (self.active) |source| {
+            const state = source.connectionInfo().state;
+            switch (state) {
+                .online => {
+                    chain_color = ForwardColors.text(.success);
+                    chain_text = "连接链路 · 在线";
+                },
+                .disconnected => {
+                    chain_color = ForwardColors.text(.danger);
+                    chain_text = "连接链路 · 已断开";
+                },
+                .unknown => {
+                    chain_color = ForwardColors.text(.warning);
+                    chain_text = if (source.details.hops[source.details.hop_count - 1].status == .releasing) "连接链路 · 断开中" else "连接链路 · 连接中";
+                },
+            }
+        }
+        try self.text(controls.chain_label, "连接链路");
+        const chain_ink = ForwardColors.statusBarInk(chain_color);
+        controls.chain_label.setTextColor(chain_ink);
+        if (controls.chain_button.behavior.interaction.a11y) |*props| props.description = chain_text;
+        for (controls.chain_button.children.items) |child| if (child.getIcon() != null) {
+            _ = child.setTint(chain_ink);
+        };
         const identity_width: f32 = if (self.active != null) S.identity_width else 96;
-        controls.icons[1].setStyleInline(self.cx.allocator, .{ .inset = .{ .left = .{ .px = identity_width - 24 }, .top = .{ .px = 6 } } });
         controls.identity_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = identity_width } });
         controls.identity_label.setDisplay(.flex);
-        controls.icons[1].setDisplay(if (self.file_active != null) .none else .flex);
-        const full_width: f32 = identity_width + 232 + 102 + 20 + controls.progress_slot.globalRect().w;
+        controls.icons[1].setDisplay(.none);
+        const full_width: f32 = identity_width + 232 + 80 + 80 + 80 + 20 + controls.progress_slot.globalRect().w;
         const narrow = controls.bar.globalRect().w < full_width;
         const empty = self.active == null and self.file_active == null;
         controls.theme_button.setDisplay(if (empty) .none else .flex);
         controls.narrow = narrow;
         controls.rtt_button.setDisplay(.none);
         controls.rtt_label.setDisplay(if (self.active == null) .none else .flex);
-        const compact_actions = controls.bar.globalRect().w < 1100;
-        controls.chain_label.setDisplay(if (compact_actions) .none else .flex);
-        controls.forward_label.setDisplay(if (compact_actions) .none else .flex);
-        for ([_]*ui.Node{ controls.chain_button, controls.socks_button }) |node| node.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (compact_actions) @as(f32, 28) else 86 } });
+        controls.chain_label.setDisplay(.flex);
+        controls.forward_label.setDisplay(.flex);
+        controls.chain_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 80 } });
+        controls.socks_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 80 } });
         for ([_]*ui.Node{ controls.encoding_button, controls.grid_button }) |node| node.setDisplay(if (empty or narrow or self.file_active != null) .none else .flex);
         self.detail.reanchor(controls.bar.globalRect().y);
         try self.detail.flush();

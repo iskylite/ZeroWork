@@ -3,6 +3,7 @@ const kqueue = @import("../platform/kqueue.zig");
 const Interest = @import("worker_interest.zig").Interest;
 const Handler = @import("worker_dispatch.zig").Handler;
 const dispatch = @import("worker_dispatch.zig").dispatch;
+const output_timing = @import("output_timing.zig");
 
 /// Worker-thread orchestration for one SSH socket. Protocol adapters own the
 /// Session and WorkerIo; this type owns readiness registration and dispatch.
@@ -39,7 +40,9 @@ pub const Loop = struct {
     pub fn step(self: *Loop, timeout_ms: u32) !void {
         if (self.stopped) return error.WorkerStopped;
         var events: [8]std.posix.Kevent = undefined;
+        const started = if (output_timing.enabled) output_timing.now() else 0;
         const ready = try self.queue.wait(&events, timeout_ms);
+        if (output_timing.enabled) output_timing.wait(self.socket_fd, started, timeout_ms, ready.len);
         for (ready) |event| {
             if (self.wakeup) |wake| if (event.ident == @as(usize, @intCast(wake.read_fd))) {
                 wake.drain();

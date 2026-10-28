@@ -823,14 +823,26 @@ libssh2_channel_forward_cancel(LIBSSH2_LISTENER *listener)
  *
  * Accept a connection
  */
+/* A shared IO owner must get control back even when sibling channels keep
+ * the socket continuously readable. Preserve queued packets for their owners. */
+static int channel_drain_packets(LIBSSH2_SESSION *session)
+{
+    unsigned int packets;
+    int rc = 0;
+    for(packets = 0; packets < 32; ++packets) {
+        rc = _libssh2_transport_read(session);
+        if(rc <= 0)
+            return rc;
+    }
+    return LIBSSH2_ERROR_EAGAIN;
+}
+
 static LIBSSH2_CHANNEL *
 channel_forward_accept(LIBSSH2_LISTENER *listener)
 {
     int rc;
 
-    do {
-        rc = _libssh2_transport_read(listener->session);
-    } while(rc > 0);
+    rc = channel_drain_packets(listener->session);
 
     if(_libssh2_list_first(&listener->queue)) {
         LIBSSH2_CHANNEL *channel = _libssh2_list_first(&listener->queue);
@@ -2118,11 +2130,8 @@ ssize_t _libssh2_channel_read(LIBSSH2_CHANNEL *channel, int stream_id,
         channel->read_state = libssh2_NB_state_idle;
     }
 
-    /* Process all pending incoming packets. Tests prove that this way
-       produces faster transfers. */
-    do {
-        rc = _libssh2_transport_read(session);
-    } while(rc > 0);
+    /* Batch pending packets without starving sibling work and cancellation. */
+    rc = channel_drain_packets(session);
 
     /* A peer may close its transport immediately after CHANNEL_EOF/CLOSE.
        That must not hide the already queued tail or replace channel EOF
@@ -2387,9 +2396,7 @@ _libssh2_channel_write(LIBSSH2_CHANNEL *channel, int stream_id,
 
         /* drain the incoming flow first, mostly to make sure we get all
          * pending window adjust packets */
-        do
-            rc = _libssh2_transport_read(session);
-        while(rc > 0);
+        rc = channel_drain_packets(session);
 
         if((rc < 0) && (rc != LIBSSH2_ERROR_EAGAIN)) {
             return _libssh2_error(channel->session, rc,
@@ -2719,9 +2726,15 @@ int _libssh2_channel_close(LIBSSH2_CHANNEL * channel)
     if(channel->close_state == libssh2_NB_state_sent) {
         /* We must wait for the remote SSH_MSG_CHANNEL_CLOSE message */
 
-        while(!channel->remote.close && !rc &&
-               (session->socket_state != LIBSSH2_SOCKET_DISCONNECTED))
+        unsigned int packets = 0;
+        while(!channel->remote.close && rc >= 0 &&
+               (session->socket_state != LIBSSH2_SOCKET_DISCONNECTED)) {
             rc = _libssh2_transport_read(session);
+            /* Other channels can stream indefinitely. Yield without losing
+               this channel's close state or retaining the entire IO owner. */
+            if(++packets == 32 && rc >= 0 && !channel->remote.close)
+                return LIBSSH2_ERROR_EAGAIN;
+        }
     }
 
     if(rc != LIBSSH2_ERROR_EAGAIN) {
@@ -3088,4 +3101,121 @@ libssh2_channel_signal_ex(LIBSSH2_CHANNEL *channel,
     BLOCK_ADJUST(rc, channel->session,
                  channel_signal(channel, signame, signame_len));
     return rc;
+}
+
+/* ZeroWork local extension: keep each direct-tcpip open's resumable state
+ * outside the Session's legacy single-open slot. Transport encryption/write
+ * state and the channel registry remain shared and have one IO-thread owner.
+ * _libssh2_transport_send retains/validates a partial write's buffer identity;
+ * unrelated opens may wait for that write, but not for its remote reply. */
+#define ZW_OPEN_FIELDS(X) \
+    X(open_state) X(open_packet_requirev_state) X(open_channel) \
+    X(open_packet) X(open_packet_len) X(open_data) X(open_data_len) \
+    X(open_local_channel)
+struct zw_open_state {
+    libssh2_nonblocking_states open_state;
+    packet_requirev_state_t open_packet_requirev_state;
+    LIBSSH2_CHANNEL *open_channel;
+    unsigned char *open_packet;
+    size_t open_packet_len;
+    unsigned char *open_data;
+    size_t open_data_len;
+    uint32_t open_local_channel;
+};
+typedef struct zw_ssh_direct_open {
+    struct zw_ssh_direct_open *next;
+    struct zw_open_state state;
+    LIBSSH2_FREE_FUNC((*free_fn));
+    void *abstract;
+    size_t message_len;
+    unsigned char message[];
+} ZW_SSH_DIRECT_OPEN;
+
+static void zw_direct_destroy(ZW_SSH_DIRECT_OPEN *op)
+{
+    /* Session creation uses libssh2's allocator. Retain its callback and
+       abstract value so terminal cleanup can run after session_free. */
+    if(op->state.open_packet)
+        op->free_fn(op->state.open_packet, &op->abstract);
+    if(op->state.open_data)
+        op->free_fn(op->state.open_data, &op->abstract);
+    free(op);
+}
+
+int zw_libssh2_direct_open_step(LIBSSH2_SESSION *session,
+                               ZW_SSH_DIRECT_OPEN **all,
+                               ZW_SSH_DIRECT_OPEN **operation,
+                               const char *host, unsigned short port,
+                               LIBSSH2_CHANNEL **channel)
+{
+    ZW_SSH_DIRECT_OPEN *op;
+    struct zw_open_state saved;
+    int rc;
+    if(!session || !all || !operation || !host || !*host || !port ||
+       !channel || session->api_block_mode)
+        return LIBSSH2_ERROR_BAD_USE;
+    if(!*operation) {
+        size_t len = strlen(host);
+        unsigned char *p;
+        if(len > 1024)
+            return LIBSSH2_ERROR_INVAL;
+        op = calloc(1, sizeof(*op) + len + 25);
+        if(!op)
+            return LIBSSH2_ERROR_ALLOC;
+        op->free_fn = session->free;
+        op->abstract = session->abstract;
+        op->message_len = len + 25; /* host + origin 127.0.0.1 + lengths/ports */
+        p = op->message;
+        _libssh2_store_str(&p, host, len);
+        _libssh2_store_u32(&p, port);
+        _libssh2_store_str(&p, "127.0.0.1", 9);
+        _libssh2_store_u32(&p, 0);
+        op->next = *all;
+        *all = op;
+        *operation = op;
+    }
+    op = *operation;
+#define ZW_SAVE(name) saved.name = session->name; session->name = op->state.name;
+    ZW_OPEN_FIELDS(ZW_SAVE)
+#undef ZW_SAVE
+    *channel = libssh2_channel_open_ex(session, "direct-tcpip", 12,
+                                      LIBSSH2_CHANNEL_WINDOW_DEFAULT,
+                                      LIBSSH2_CHANNEL_PACKET_DEFAULT,
+                                      (const char *)op->message,
+                                      (unsigned int)op->message_len);
+    rc = *channel ? 0 : libssh2_session_last_errno(session);
+#define ZW_RESTORE(name) op->state.name = session->name; session->name = saved.name;
+    ZW_OPEN_FIELDS(ZW_RESTORE)
+#undef ZW_RESTORE
+    if(rc == LIBSSH2_ERROR_EAGAIN)
+        return 1;
+    {
+        ZW_SSH_DIRECT_OPEN **link = all;
+        while(*link && *link != op)
+            link = &(*link)->next;
+        if(*link)
+            *link = op->next;
+    }
+    *operation = NULL;
+    zw_direct_destroy(op);
+    return *channel ? 0 : rc ? rc : LIBSSH2_ERROR_CHANNEL_FAILURE;
+}
+
+void zw_libssh2_direct_open_released(ZW_SSH_DIRECT_OPEN **all)
+{
+    while(*all) {
+        ZW_SSH_DIRECT_OPEN *op = *all;
+        *all = op->next;
+        /* session_free already released op->state.open_channel through the
+           native channel registry. Never free or inspect that pointer here. */
+        zw_direct_destroy(op);
+    }
+}
+#undef ZW_OPEN_FIELDS
+
+/* Read-only retry ownership query for the sole nonblocking IO owner. A zero
+ * channel window returns EAGAIN before any write arguments are retained. */
+LIBSSH2_API int zw_libssh2_channel_write_pending(LIBSSH2_CHANNEL *channel)
+{
+    return channel && channel->write_state != libssh2_NB_state_idle;
 }

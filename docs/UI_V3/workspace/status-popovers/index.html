@@ -1,0 +1,22 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>连接状态弹层</title><style>
+*{box-sizing:border-box}body{margin:0;padding:40px;background:repeating-linear-gradient(8deg,#141720,#141720 24px,#272d3b 25px);font:13px/1.5 -apple-system,sans-serif;color:#f4f4f5}main{display:flex;align-items:flex-start;gap:24px;flex-wrap:wrap}.bubble{width:380px;padding:16px;background:rgba(41,42,48,.94);backdrop-filter:blur(20px);border:1px solid #ffffff15;border-radius:11px;box-shadow:0 12px 32px #0005}header{height:28px;display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600;margin-bottom:12px}header .status{margin-left:auto;font-size:12px;color:#4bd18a}button{height:30px;font-size:13px;border:0;border-radius:7px;background:#383940;color:#eee;padding:6px 12px;cursor:pointer}header button{background:transparent;padding:3px 6px}.summary{background:#202127;padding:12px;border-radius:8px;margin-bottom:14px}.summary strong{font-size:15px}.address{font:13px/22px Menlo,monospace;color:#c8c8d0}.fact{display:flex;justify-content:space-between;margin:8px 0;color:#a1a1aa}.fact b{color:#f4f4f5;font-weight:400}footer{display:flex;gap:8px;margin-top:16px}.primary{background:#6366f1;margin-left:auto}.node{background:#202127;border-radius:8px;padding:12px;display:flex;align-items:center;gap:12px}.node .state{color:#4bd18a;margin-left:auto;font-size:12px}.arrow{font-size:11px;color:#a1a1aa;margin:6px 12px}.bar{margin-top:28px;display:flex;justify-content:flex-end;gap:24px;align-items:center;background:#18181cee;border-radius:10px;padding:8px 12px;color:#a1a1aa}.transfer{background:transparent;font-size:11px;color:#a1a1aa;padding:4px 8px}.transfer:hover{background:#303036}.green{color:#61c797}#tasks{position:fixed;right:40px;bottom:80px;display:none;width:380px}.empty{text-align:left;padding:12px;color:#a1a1aa;background:#202127;border-radius:8px;display:flex;gap:12px;align-items:center}.empty strong{display:block;color:#f4f4f5;font-size:15px;margin-bottom:6px}
+.theme-entry{display:inline-flex;align-items:center;gap:6px}.theme-entry svg{width:14px;height:14px}</style><main><article class="bubble"><header>⌘ 会话连接 <span class="status">在线</span><button>×</button></header><section class="summary"><strong>ScaleX40-AI01</strong><div class="address">root@10.2.209.201:22</div></section><div class="fact">协议 <b>SSH · 交互式 Shell</b></div><div class="fact">延迟 <b>23 ms</b></div><div class="fact">加密 <b>aes128-ctr</b></div><div class="fact">会话 <b>会话 1 · 12 分钟</b></div><div class="fact">路径 <b>直连</b></div><footer><button>复制信息</button><button aria-label="连接日志">▤</button><button style="margin-left:auto" disabled>重新连接</button></footer></article><article class="bubble"><header>♧ 连接链路 <span class="status">在线</span><button>×</button></header><div class="node"><div>▣</div><div><b>本机</b><div class="address">macOS · SSH 客户端</div></div><span class="state">就绪</span></div><div class="arrow">↓ SSH 隧道</div><div class="node"><div>⌘</div><div><b>ScaleX40-AI01</b><div class="address">root@10.2.209.201:22</div></div><span class="state">在线</span></div><div class="fact">端到端延迟 <b>23 ms</b></div><footer><button>编辑路径</button><button>▤</button><button class="primary">测试全链路</button></footer></article></main><div class="bar"><span class="green">♧ 连接链路</span><span class="green">↗ 端口转发</span><span class="theme-entry"><!-- @license lucide-static v1.31.0 - ISC -->
+<svg
+  class="lucide lucide-palette"
+  xmlns="http://www.w3.org/2000/svg"
+  width="24"
+  height="24"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="2"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+>
+  <path d="M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z" />
+  <circle cx="13.5" cy="6.5" r=".5" fill="currentColor" />
+  <circle cx="17.5" cy="10.5" r=".5" fill="currentColor" />
+  <circle cx="6.5" cy="12.5" r=".5" fill="currentColor" />
+  <circle cx="8.5" cy="7.5" r=".5" fill="currentColor" />
+</svg>
+主题配色</span><button class="transfer">⇅ 传输 · 空闲</button></div></html>

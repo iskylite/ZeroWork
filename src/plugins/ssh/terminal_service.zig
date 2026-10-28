@@ -54,12 +54,28 @@ pub const Provider = struct {
     }
     fn status(raw: *anyopaque, binding: Binding) !terminal.Status {
         const self = try get(raw, binding);
-        const state = self.native.worker.vt.snapshot();
+        const state = try self.native.worker.vt.trySnapshot();
         self.updateGeometry(state.cols, state.rows);
+        // A lost transport cannot acknowledge its queued resize. Retain the
+        // actual final grid so that theme/read-only frames remain available.
+        if (!self.writable()) if (self.pending_geometry) |pending| {
+            self.geometry = .{ .revision = pending.revision, .cols = state.cols, .rows = state.rows };
+            self.pending_geometry = null;
+        };
         return .{ .owner = self.source.owner, .writable = self.acceptsInput(), .eof_seen = self.ended(), .geometry = self.geometry, .output_sequence = state.output_sequence, .bell_count = state.bell_count, .pending_input_bytes = self.native.worker.input.pending() + if (self.pending_paste) |p| p.bytes.len - p.offset else @as(usize, 0), .mode_revision = state.mode_revision, .modes = state.modes, .applied_theme_revision = if (self.applied_theme) |t| t.revision else 0 };
     }
     fn snapshot(raw: *anyopaque, binding: Binding, allocator: std.mem.Allocator) !terminal.TerminalSnapshot {
         const self = try get(raw, binding);
+        if (self.native.worker.text.structured.load(.acquire)) {
+            const frame = try self.native.worker.text.projections.acquire();
+            defer frame.release();
+            // Only live status may acknowledge a resize: an older frame can
+            // have the same dimensions as a newer, still pending request.
+            // After acknowledgement, wait for cells matching that geometry.
+            if (self.pending_geometry != null or frame.projection.cols != self.geometry.cols or frame.projection.rows != self.geometry.rows) return error.WorkerBusy;
+            const projection = try frame.projection.clone(allocator);
+            return .{ .owner = self.source.owner, .output_sequence = projection.output_sequence, .geometry_revision = self.geometry.revision, .input_revision = self.input_sequence, .read_only = !self.acceptsInput(), .eof_seen = self.ended(), .projection = projection, .applied_theme_revision = projection.theme_revision };
+        }
         var projection = try self.native.worker.vt.copyProjection(allocator);
         errdefer projection.deinit(allocator);
         _ = try get(raw, binding);
@@ -79,6 +95,7 @@ pub const Provider = struct {
         if (!self.native.worker.vt.mutex.tryLock()) return error.WorkerBusy;
     }
     fn submit(self: *Provider, sequence: u64, bytes: []const u8) !terminal.Submission {
+        self.native.worker.text.timing.accepted(sequence, self.native.worker.input.write_index.load(.acquire) + bytes.len);
         if (bytes.len != 0) self.native.worker.replay.submit(&self.native.worker.input, bytes, if (self.writable()) .application else .ordinary, @import("../../vt/reconnect_replay.zig").InputMode.from(self.native.worker.vt.modes)) catch |err| return if (err == error.Full) error.InputFull else err;
         self.input_sequence = sequence;
         return .{ .input_sequence = sequence, .queued_bytes = bytes.len };
@@ -128,7 +145,10 @@ pub const Provider = struct {
         }
         // Adapter serializes appearance updates with VT feed/capture. There
         // is no UI access to the worker's socket or raw-output consumer.
-        try self.native.worker.vt.setTheme(value);
+        try self.lock();
+        defer self.native.worker.vt.mutex.unlock();
+        try self.native.worker.vt.setThemeLocked(value);
+        self.native.worker.text.requestProjection();
         self.applied_theme = value;
     }
     fn textSlot(raw: *anyopaque, binding: Binding) !*@import("../../vt/text_slot.zig").TextSlot {
@@ -137,7 +157,7 @@ pub const Provider = struct {
     fn receipt(raw: *anyopaque, binding: Binding) !?terminal.WriteReceipt {
         const self = try get(raw, binding);
         if (self.pending_paste) |*p| {
-            const state = self.native.worker.vt.snapshot();
+            const state = try self.native.worker.vt.trySnapshot();
             if (!self.writable() or state.mode_revision != p.mode) {
                 const sequence = p.sequence;
                 const mode = p.mode;
@@ -166,7 +186,7 @@ pub const Provider = struct {
         const decision = (terminal.PastePolicy{}).inspect(text);
         if (decision == .reject or text.len == 0) return error.InvalidPaste;
         if (!self.writable()) return error.SessionNotWritable;
-        return .{ .binding = binding, .input_revision = self.input_sequence, .mode_revision = self.native.worker.vt.snapshot().mode_revision, .text = try allocator.dupe(u8, text), .requires_confirmation = decision == .confirm };
+        return .{ .binding = binding, .input_revision = self.input_sequence, .mode_revision = (try self.native.worker.vt.trySnapshot()).mode_revision, .text = try allocator.dupe(u8, text), .requires_confirmation = decision == .confirm };
     }
     fn commitPaste(raw: *anyopaque, binding: Binding, paste: terminal.Paste, sequence: u64, confirmed: bool) !terminal.Submission {
         const self = try get(raw, binding);
@@ -206,7 +226,8 @@ pub const Provider = struct {
     }
     fn scroll(raw: *anyopaque, binding: Binding, value: terminal.Scroll) !void {
         const self = try get(raw, binding);
-        return self.source.service().scroll(value);
+        try self.source.service().scroll(value);
+        self.native.worker.text.requestProjection();
     }
     fn lines(raw: *anyopaque, binding: Binding, limits: terminal.LineLimits, allocator: std.mem.Allocator) !terminal.Lines {
         const self = try get(raw, binding);

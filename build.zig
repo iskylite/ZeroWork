@@ -15,6 +15,10 @@ pub fn build(b: *std.Build) void {
         } },
     });
     const optimize = b.standardOptimizeOption(.{});
+    const verify_ssh = b.addSystemCommand(&.{ "python3", "scripts/verify_ssh_deps.py" });
+    verify_ssh.setCwd(b.path("."));
+    verify_ssh.has_side_effects = true;
+    b.step("verify-ssh-deps", "Verify SSH source, configuration and archive provenance").dependOn(&verify_ssh.step);
     const test_mode = b.option(bool, "test-mode", "Enable the Zenit UI automation harness") orelse false;
     const plugin_fixture = b.option(bool, "plugin-fixture", "Link the non-terminal plugin acceptance fixture (test builds only)") orelse false;
     if (plugin_fixture and !test_mode) @panic("plugin-fixture requires -Dtest-mode=true; it must not enter production builds");
@@ -108,6 +112,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{.{ .name = "zerowork", .module = core }},
         }),
     });
+    exe.step.dependOn(&verify_ssh.step);
     const application_options = b.addOptions();
     application_options.addOption(bool, "plugin_fixture", plugin_fixture);
     application_options.addOption(bool, "test_mode", test_mode);
@@ -273,6 +278,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
     tests.root_module.linkSystemLibrary("ssh2", .{});
+    tests.step.dependOn(&verify_ssh.step);
     tests.root_module.linkSystemLibrary("mbedcrypto", .{});
     tests.root_module.linkSystemLibrary("z", .{});
 
@@ -335,6 +341,7 @@ pub fn build(b: *std.Build) void {
             local_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
             local_tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
             local_tests.root_module.linkSystemLibrary("ssh2", .{});
+            local_tests.step.dependOn(&verify_ssh.step);
             local_tests.root_module.linkSystemLibrary("mbedcrypto", .{});
             local_tests.root_module.linkSystemLibrary("z", .{});
             addCoreTextBridgeForTest(zenit_dep, local_tests);
@@ -400,6 +407,7 @@ pub fn build(b: *std.Build) void {
     appearance_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     appearance_tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
     appearance_tests.root_module.linkSystemLibrary("ssh2", .{});
+    appearance_tests.step.dependOn(&verify_ssh.step);
     appearance_tests.root_module.linkSystemLibrary("mbedcrypto", .{});
     appearance_tests.root_module.linkSystemLibrary("z", .{});
 
@@ -441,6 +449,7 @@ pub fn build(b: *std.Build) void {
     ui_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     ui_tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
     ui_tests.root_module.linkSystemLibrary("ssh2", .{});
+    ui_tests.step.dependOn(&verify_ssh.step);
     ui_tests.root_module.linkSystemLibrary("mbedcrypto", .{});
     ui_tests.root_module.linkSystemLibrary("z", .{});
 
@@ -472,6 +481,7 @@ pub fn build(b: *std.Build) void {
     plugin_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     plugin_tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
     plugin_tests.root_module.linkSystemLibrary("ssh2", .{});
+    plugin_tests.step.dependOn(&verify_ssh.step);
     plugin_tests.root_module.linkSystemLibrary("mbedcrypto", .{});
     plugin_tests.root_module.linkSystemLibrary("z", .{});
     addCoreTextBridgeForTest(zenit_dep, plugin_tests);
@@ -495,31 +505,72 @@ pub fn build(b: *std.Build) void {
     transport_runner.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     transport_runner.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
     transport_runner.root_module.linkSystemLibrary("ssh2", .{});
+    transport_runner.step.dependOn(&verify_ssh.step);
     transport_runner.root_module.linkSystemLibrary("mbedcrypto", .{});
     transport_runner.root_module.linkSystemLibrary("z", .{});
     b.step("transport-acceptance", "Build the opt-in real SSH independent transport runner").dependOn(&b.addInstallArtifact(transport_runner, .{}).step);
 
-    const fixed_forward_runner = b.addExecutable(.{ .name = "fixed-forward-runner", .root_module = b.createModule(.{
-        .root_source_file = b.path("src/fixed_forward_runner.zig"),
-        .target = target,
-        .optimize = optimize,
-    }) });
-    fixed_forward_runner.root_module.addImport("ui", zenit_dep.module("ui"));
-    fixed_forward_runner.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
-    fixed_forward_runner.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
-    fixed_forward_runner.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
-    fixed_forward_runner.root_module.addIncludePath(b.path("vendor/libssh2/include"));
-    fixed_forward_runner.root_module.addIncludePath(b.path("src/proto/ssh"));
-    fixed_forward_runner.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c" }, .flags = &.{"-std=c11"} });
-    fixed_forward_runner.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
-    fixed_forward_runner.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
-    fixed_forward_runner.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
-    fixed_forward_runner.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
-    fixed_forward_runner.root_module.linkSystemLibrary("ssh2", .{});
-    fixed_forward_runner.root_module.linkSystemLibrary("mbedcrypto", .{});
-    fixed_forward_runner.root_module.linkSystemLibrary("z", .{});
-    addCoreTextBridgeForTest(zenit_dep, fixed_forward_runner);
-    b.step("forward-acceptance", "Build the real local/remote/SOCKS forwarding acceptance runner").dependOn(&b.addInstallArtifact(fixed_forward_runner, .{}).step);
+    const hardening = b.step("ssh-hardening-acceptance", "Build owned SSH timeout and liveness acceptance runners");
+    for ([_]struct { name: []const u8, source: []const u8 }{
+        .{ .name = "ssh-connection-wait-runner", .source = "src/ssh_connection_wait_runner.zig" },
+        .{ .name = "ssh-hardening-runner", .source = "src/ssh_hardening_runner.zig" },
+        .{ .name = "ssh-auth-loopback-runner", .source = "src/ssh_auth_loopback_runner.zig" },
+    }) |spec| {
+        const runner = b.addExecutable(.{ .name = spec.name, .root_module = b.createModule(.{
+            .root_source_file = b.path(spec.source),
+            .target = target,
+            .optimize = optimize,
+        }) });
+        runner.step.dependOn(&verify_ssh.step);
+        runner.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
+        runner.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
+        runner.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+        runner.root_module.addIncludePath(b.path("src/proto/ssh"));
+        runner.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c" }, .flags = &.{"-std=c11"} });
+        runner.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
+        runner.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
+        runner.root_module.linkSystemLibrary("ssh2", .{});
+        runner.root_module.linkSystemLibrary("mbedcrypto", .{});
+        runner.root_module.linkSystemLibrary("z", .{});
+        runner.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
+        runner.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+        runner.root_module.link_libc = true;
+        hardening.dependOn(&b.addInstallArtifact(runner, .{}).step);
+    }
+
+    const forward_acceptance = b.step("forward-acceptance", "Build real forwarding and production Worker/Relay lifecycle acceptance runners");
+    for ([_]struct { name: []const u8, source: []const u8 }{
+        .{ .name = "fixed-forward-runner", .source = "src/fixed_forward_runner.zig" },
+        .{ .name = "socks-worker-host-runner", .source = "src/socks_worker_host_runner.zig" },
+        .{ .name = "forward-load-runner", .source = "src/forward_load_runner.zig" },
+        .{ .name = "ssh-connection-details-runner", .source = "src/ssh_connection_details_runner.zig" },
+    }) |runner| {
+        const fixed_forward_runner = b.addExecutable(.{ .name = runner.name, .root_module = b.createModule(.{
+            .root_source_file = b.path(runner.source),
+            .target = target,
+            .optimize = optimize,
+        }) });
+        fixed_forward_runner.root_module.addImport("ui", zenit_dep.module("ui"));
+        fixed_forward_runner.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
+        fixed_forward_runner.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
+        fixed_forward_runner.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
+        fixed_forward_runner.root_module.addImport("generated_ghostty_vt", ghostty_translate.createModule());
+        fixed_forward_runner.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
+        fixed_forward_runner.root_module.linkSystemLibrary("ghostty-vt", .{});
+        fixed_forward_runner.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+        fixed_forward_runner.root_module.addIncludePath(b.path("src/proto/ssh"));
+        fixed_forward_runner.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c" }, .flags = &.{"-std=c11"} });
+        fixed_forward_runner.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
+        fixed_forward_runner.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
+        fixed_forward_runner.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
+        fixed_forward_runner.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+        fixed_forward_runner.root_module.linkSystemLibrary("ssh2", .{});
+        fixed_forward_runner.step.dependOn(&verify_ssh.step);
+        fixed_forward_runner.root_module.linkSystemLibrary("mbedcrypto", .{});
+        fixed_forward_runner.root_module.linkSystemLibrary("z", .{});
+        addCoreTextBridgeForTest(zenit_dep, fixed_forward_runner);
+        forward_acceptance.dependOn(&b.addInstallArtifact(fixed_forward_runner, .{}).step);
+    }
 
     const forward_preview = b.addExecutable(.{ .name = "forward-config-preview", .root_module = b.createModule(.{
         .root_source_file = b.path("src/forward_config_preview_runner.zig"),
@@ -535,6 +586,7 @@ pub fn build(b: *std.Build) void {
     forward_preview.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     forward_preview.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
     forward_preview.root_module.linkSystemLibrary("ssh2", .{});
+    forward_preview.step.dependOn(&verify_ssh.step);
     forward_preview.root_module.linkSystemLibrary("mbedcrypto", .{});
     forward_preview.root_module.linkSystemLibrary("z", .{});
     forward_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });

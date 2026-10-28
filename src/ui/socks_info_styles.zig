@@ -7,6 +7,12 @@ pub const ButtonRole = enum { test_proxy, control, ordinary, icon };
 
 pub fn text(role: TextRole) ui.Color {
     const c = theme.current();
+    if (theme.currentName() == .dark) switch (role) {
+        .success => return ui.Color.rgba(0x4b, 0xd1, 0x8a, 255),
+        .warning => return ui.Color.rgba(0xe8, 0xbd, 0x71, 255),
+        .danger => return ui.Color.rgba(0xff, 0x9d, 0x9d, 255),
+        else => {},
+    };
     return switch (role) {
         .primary => c.fg_1,
         .secondary => c.fg_2,
@@ -15,6 +21,11 @@ pub fn text(role: TextRole) ui.Color {
         .success => c.ok_ink,
         .danger => c.danger_ink,
     };
+}
+
+/// Bottom-bar status stays readable without competing with the content pane.
+pub fn statusBarInk(color: ui.Color) ui.Color {
+    return ui.Color.lerp(color, theme.current().fg_2, 0.25);
 }
 
 pub fn panel() ui.BoxStyle {
@@ -36,12 +47,12 @@ pub fn pointer() ui.BoxStyle {
 pub fn button(role: ButtonRole) ui.BoxStyle {
     return .{ .background = if (role == .icon) ui.Color.TRANSPARENT else theme.current().surface_2, .border = .{ .width = 0, .radius = if (role == .icon) 7 else 8 } };
 }
-pub const width: f32 = 344;
-pub const normal_height: f32 = 271;
-pub const body_height: f32 = 144;
-pub const chrome_height: f32 = 127;
+pub const width: f32 = 380;
+pub const normal_height: f32 = 290;
+pub const body_height: f32 = 159;
+pub const chrome_height: f32 = 131;
 pub fn header() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 26 }, .direction = .row, .align_items = .center, .gap = 8, .margin = .{ .bottom = 12 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 8, .margin = .{ .bottom = 12 }, .flex_shrink = 0 };
 }
 pub fn body() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 0, .flex_shrink = 0, .min_width = 0 };

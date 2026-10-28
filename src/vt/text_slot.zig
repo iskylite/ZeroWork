@@ -18,6 +18,12 @@ pub const TextSlot = struct {
     /// Producer-side ring depth. Generation N lands in buffer N % depth.
     const depth: usize = 3;
 
+    projections: @import("projection_slot.zig").Slot = .{},
+    structured_supported: bool = true,
+    structured: std.atomic.Value(bool) = .init(false),
+    projection_requested: std.atomic.Value(bool) = .init(false),
+    producer_wakeup: ?*const @import("../platform/wakeup.zig").Wakeup = null,
+    timing: @import("input_timing.zig").Trace = .{},
     buffers: [depth][]u8,
     lengths: [depth]usize = @splat(0),
     generation: std.atomic.Value(u64) = .init(0),
@@ -35,8 +41,24 @@ pub const TextSlot = struct {
         return .{ .buffers = buffers };
     }
     pub fn deinit(self: *TextSlot, allocator: std.mem.Allocator) void {
+        self.projections.deinit();
         for (self.buffers) |buf| allocator.free(buf);
         self.* = undefined;
+    }
+    pub fn enableStructured(self: *TextSlot) void {
+        if (!self.structured_supported) return;
+        if (!self.structured.swap(true, .acq_rel)) self.requestProjection();
+    }
+    pub fn requestProjection(self: *TextSlot) void {
+        self.projection_requested.store(true, .release);
+        if (self.producer_wakeup) |wake| wake.notify();
+    }
+    pub fn publishOwnedProjection(self: *TextSlot, projection: @import("snapshot.zig").Projection, geometry_revision: u64) !u64 {
+        if (!self.canPublish()) return error.ConsumerBehind;
+        try self.projections.publish(projection, geometry_revision);
+        // Single producer: the earlier capacity check remains valid. UI can
+        // only free capacity. No legacy text payload is generated in this mode.
+        return self.publish("") catch unreachable;
     }
     pub fn publish(self: *TextSlot, bytes: []const u8) !u64 {
         return self.publishParts(&.{bytes});
@@ -78,7 +100,9 @@ pub const TextSlot = struct {
     pub fn acknowledge(self: *TextSlot, seen: u64) ?u64 {
         const current = self.generation.load(.acquire);
         if (current == seen) return null;
+        const was_full = current -% self.consumed.load(.monotonic) >= depth;
         self.consumed.store(current, .release);
+        if (was_full) if (self.producer_wakeup) |wake| wake.notify();
         return current;
     }
 

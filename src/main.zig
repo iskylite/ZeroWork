@@ -3619,7 +3619,7 @@ const MenuHost = struct {
                 else => item.label,
             } else item.label;
             if (item.separator_before and !host_asset_menu) {
-                const line = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 1 }, .margin = .{ .top = 4, .right = 0, .bottom = 4, .left = 0 }, .background = c.border, .flex_shrink = 0 }, .{});
+                const line = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 8 }, .margin = ui.Padding.all(4), .flex_shrink = 0 }, .{});
                 try self.panel.appendChild(self.allocator, line);
                 try self.rows.append(self.allocator, line);
             }
@@ -4419,6 +4419,7 @@ const SettingsHost = struct {
     nav_list: *ui.Node = undefined,
     navigation: ?*ui.Node = null,
     header_title: ?*ui.Node = null,
+    header_icon: ?*ui.Node = null,
     layout: ?*ui.Node = null,
     /// Right content column (rebuilt on page switch / save / discard).
     content: *ui.Node = undefined,
@@ -5887,7 +5888,7 @@ const SettingsHost = struct {
         try self.content.appendChild(self.cx.allocator, try ui.text(self.cx, page.description, .{ .font_size = 11, .color = p.fg_muted }));
 
         // Rows: one per settings key of this page — mockup .row spec:
-        // min-h 38, 8px 纵向 padding, 底边线 #F2F9F4；.rn 标签列（.t 12.5·500
+        // min-h 38, 8px 纵向 padding；.rn 标签列（.t 12.5·500
         // + .d 10 fg3），右侧控件列。
         var key_buffer: [16]settings_pages_mod.ConfigKey = undefined;
         const page_keys = model.pageKeys(&key_buffer);
@@ -5898,7 +5899,6 @@ const SettingsHost = struct {
                 .align_items = .center,
                 .gap = 12,
                 .padding = .{ .left = 0, .right = 0, .top = 8, .bottom = 8 },
-                .border = .{ .width = 1, .color = ui.Color.rgb(0xF2, 0xF9, 0xF4), .radius = 0, .side_widths = .{ -1, -1, 1, -1 } },
             }, .{});
             // zenit flex 只是权重：主轴撑满必须显式 .width = .fill()。
             const labels = try ui.box(self.cx, .{ .direction = .column, .gap = 1, .flex = 1, .width = .fill(), .min_width = 0 }, .{});
@@ -7090,6 +7090,9 @@ const AppNavHost = struct {
     fn rethemeChrome(self: *AppNavHost) void {
         const c = app_theme.current();
         if (self.settings) |settings| if (settings.header_title) |title| title.setTextColor(c.fg_1);
+        if (self.settings) |settings| if (settings.header_icon) |icon| {
+            _ = icon.setTint(c.accent);
+        };
         if (self.settings) |settings| if (settings.search_input) |input| settings_content_view.styles.paintSearch(self.cx, &input);
         if (self.chrome.toolbar_tint) |tint| tint.set(c.fg_2);
         if (self.chrome.transfer_badge) |badge| badge.setBackground(c.ok);
@@ -8591,7 +8594,9 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     settings_card.meta.ownership.meta.test_id = "settings.panel";
     try settings_panel.appendChild(cx.allocator, settings_card);
     const settings_header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = @import("ui/v3_geometry.zig").settings_header }, .flex_shrink = 0, .direction = .row, .align_items = .center, .padding = .{ .left = 18, .right = 18, .top = 15, .bottom = 10 }, .gap = 10 }, .{});
-    try settings_header.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.settings, app_theme.current().accent, .{ .width = .{ .px = 20 }, .height = .{ .px = 20 } }));
+    const settings_header_icon = try ui.iconTint(cx, ui.icons.settings, app_theme.current().accent, .{ .width = .{ .px = 20 }, .height = .{ .px = 20 } });
+    settings_header_icon.meta.ownership.meta.test_id = "settings.header.icon";
+    try settings_header.appendChild(cx.allocator, settings_header_icon);
     const settings_header_title = try ui.text(cx, "偏好设置", .{ .font_size = 14, .font_weight = 700, .color = app_theme.current().fg_1 });
     settings_header_title.meta.ownership.meta.test_id = "settings.header.title";
     try settings_header.appendChild(cx.allocator, settings_header_title);
@@ -8626,6 +8631,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     settings_host.nav_list = settings_nav_list;
     settings_host.navigation = settings_nav;
     settings_host.header_title = settings_header_title;
+    settings_host.header_icon = settings_header_icon;
     settings_host.layout = settings_body;
     settings_host.content = settings_content;
     settings_host.card = settings_card;
@@ -9615,6 +9621,10 @@ const TransferHost = struct {
     manager_panel: ?*transfer_manager_view.Panel = null,
     session_panel: ?*transfer_manager_view.Panel = null,
     status_transfer: ?*@import("ui/status_transfer_view.zig").View = null,
+    transfer_preview: bool = false,
+    transfer_pinned: bool = false,
+    transfer_suppressed: bool = false,
+    transfer_leave_ms: ?u64 = null,
     ticker_scope: ?transfer_manager_view.Scope = null,
     ticker_scope_arena: ?std.heap.ArenaAllocator = null,
     ticker_last_refresh_ms: u64 = 0,
@@ -10934,6 +10944,7 @@ const TransferHost = struct {
     fn hookRun(ctx: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *TransferHost = @ptrCast(@alignCast(ctx));
         self.poll();
+        self.updateTransferPreview();
         return .done;
     }
 
@@ -11133,19 +11144,56 @@ const TransferHost = struct {
         return .{ .session = tab.content_owner.session };
     }
     fn showCurrentTransfers(self: *TransferHost) void {
-        // Refresh freezes the actual current roster before a click captures it.
+        const panel = self.session_panel orelse return;
+        if (panel.root.style.display != .none and self.transfer_pinned) {
+            panel.hide();
+            self.transfer_pinned = false;
+            self.transfer_suppressed = true;
+            return;
+        }
+        self.transfer_pinned = true;
+        self.openCurrentTransfers();
+    }
+    fn openCurrentTransfers(self: *TransferHost) void {
         self.ticker_last_refresh_ms = 0;
         self.refreshProgressRow();
         const captured = self.ticker_scope orelse return;
         const panel = self.session_panel orelse return;
-        if (panel.root.style.display != .none) {
-            panel.hide();
-            return;
-        }
         self.closeManagerPopover();
         panel.selected_scope = captured;
         panel.refresh(wallClockMsTransfer(), .{ .window_chunks = self.workspace.app_config.transfer.window_chunks, .chunk_kb = self.workspace.app_config.transfer.chunk_kb }) catch return;
         panel.show();
+        self.transfer_preview = true;
+    }
+    fn updateTransferPreview(self: *TransferHost) void {
+        const ticker = self.status_transfer orelse return;
+        const panel = self.session_panel orelse return;
+        const x = self.cx.mouse_x;
+        const y = self.cx.mouse_y;
+        const trigger = ticker.root.globalRect();
+        const inside = ticker.root.isDisplayedInTree() and x >= trigger.x and x <= trigger.x + trigger.w and y >= trigger.y and y <= trigger.y + trigger.h;
+        const shown = panel.root.style.display != .none;
+        if (self.transfer_preview and !shown) {
+            self.transfer_preview = false;
+            self.transfer_pinned = false;
+            self.transfer_suppressed = true;
+        }
+        if (!inside) self.transfer_suppressed = false;
+        if (inside and !shown and !self.transfer_suppressed) self.openCurrentTransfers();
+        if (!self.transfer_preview or self.transfer_pinned) return;
+        const rect = panel.root.globalRect();
+        const in_panel = x >= rect.x and x <= rect.x + rect.w and y >= rect.y and y <= rect.y + rect.h;
+        if (inside or in_panel) self.transfer_leave_ms = null else {
+            const now = wallClockMsTransfer();
+            if (self.transfer_leave_ms) |started| {
+                if (now -| started >= 150) {
+                    panel.dismiss();
+                    self.transfer_preview = false;
+                    self.transfer_leave_ms = null;
+                }
+            } else self.transfer_leave_ms = now;
+        }
+        self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
     }
     const FileTrayLink = struct {
         tab: *ws.SessionTab,
@@ -11233,7 +11281,7 @@ const TransferHost = struct {
             const pct = if (value.state == .running) (if (value.total_bytes == 0) "传输中" else std.fmt.bufPrint(&pct_buffer, "{d:.0}%", .{fraction * 100}) catch "") else transfer_manager_view.phaseLabel(std.meta.stringToEnum(transfer_manager_view.Phase, @tagName(value.state)) orelse .queued);
             const counts = std.fmt.bufPrint(&count_buffer, "{d}传·{d}候", .{ running, waiting }) catch "";
             view.update(self.manager.sourceName(index) orelse "传输任务", pct, counts, fraction, self.manager.jobs.items[index].spec.direction == .upload);
-        } else view.update("暂无传输", "", "", 0, false);
+        } else view.update("传输 · 空闲", "", "", 0, false);
         if (self.session_panel) |panel| if (panel.root.style.display != .none) {
             panel.refresh(now, .{ .window_chunks = self.workspace.app_config.transfer.window_chunks, .chunk_kb = self.workspace.app_config.transfer.chunk_kb }) catch {};
         };
@@ -11288,6 +11336,8 @@ fn dataStartupAlert(err: anyerror, reset_pending: bool) bool {
 }
 
 pub fn main() !void {
+    @import("vt/input_timing.zig").configure();
+    @import("vt/output_timing.zig").configure();
     try @import("platform/ui_fonts.zig").register();
     const presentation = @import("platform/presentation_wakeup.zig");
     presentation.wake_fn = struct {
@@ -11402,6 +11452,7 @@ pub fn main() !void {
         // at this next loop boundary without another timed wait before painting.
         windows.config.pump_timeout_ms = if (changed) 0 else 16;
         if (!try windows.tick()) break;
+        @import("vt/input_timing.zig").frameReturned();
         if (process.data_cleanup_exit) break;
         if (process.data_cleanup_pending) {
             process.data_cleanup_pending = false;

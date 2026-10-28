@@ -6,5 +6,5 @@
     .dependencies = .{
         .zenit = .{ .path = "vendor/zenit" },
     },
-    .paths = .{ "build.zig", "build.zig.zon", "src", "tools/mockups", "README.md", "LICENSE", "vendor/DEPENDENCIES.md", "vendor/zenit", "vendor/libvterm", "vendor/libssh2", "vendor/mbedtls", "scripts/verify_vendor_zenit.py", "scripts/build_ssh_deps.sh", "scripts/ssh_smoke.sh" },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "tools/mockups", "README.md", "LICENSE", "vendor/DEPENDENCIES.md", "vendor/zenit", "vendor/libvterm", "vendor/libssh2", "vendor/mbedtls", "scripts/verify_vendor_zenit.py", "scripts/build_ssh_deps.sh", "scripts/verify_ssh_deps.py", "scripts/ssh_smoke.sh" },
 }

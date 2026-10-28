@@ -36,6 +36,8 @@ pub const Adapter = struct {
     /// `ghostty_terminal_vt_write`).
     cwd_owned: ?[]u8 = null,
     version: u64 = 1,
+    theme_revision: u64 = 0,
+    cells_dirty: bool = true,
     style_version: u64 = 1,
     output_sequence: u64 = 0,
     bell_count: u64 = 0,
@@ -255,7 +257,7 @@ pub const Adapter = struct {
         self.bell_seen = false;
         c.ghostty_terminal_vt_write(self.terminal, bytes.ptr, bytes.len);
         if (bytes.len > 0) self.output_sequence +|= 1;
-        try self.refreshLocked();
+        self.cells_dirty = true;
         if (bytes.len > 0) {
             self.row_metadata.observe(self.terminal, self.rows, metadata_before, self.wall_clock_ms());
             observed = true;
@@ -294,6 +296,12 @@ pub const Adapter = struct {
             return err;
         };
         self.refreshVersions();
+    }
+
+    pub fn trySnapshot(self: *Adapter) !engine.Snapshot {
+        if (!self.mutex.tryLock()) return error.WorkerBusy;
+        defer self.mutex.unlock();
+        return self.snapshotLocked();
     }
 
     pub fn snapshot(self: *Adapter) engine.Snapshot {
@@ -348,8 +356,12 @@ pub const Adapter = struct {
     pub fn copyProjection(self: *Adapter, allocator: std.mem.Allocator) !engine.Projection {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
-        try self.refreshLocked();
-        return projection.capture(self, allocator);
+        if (c.ghostty_render_state_update(self.render_state, self.terminal) != c.GHOSTTY_SUCCESS) return error.GhosttyRenderStateFailed;
+        var result = try projection.capture(self, allocator);
+        result.output_sequence = self.output_sequence;
+        result.bell_count = self.bell_count;
+        result.theme_revision = self.theme_revision;
+        return result;
     }
     /// Configure defaults through Ghostty's public ABI. Existing OSC 4/10/11/12
     /// overrides remain owned by Ghostty and take precedence until reset.
@@ -357,6 +369,10 @@ pub const Adapter = struct {
         if (theme.revision == 0) return error.InvalidTheme;
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
+        return self.setThemeLocked(theme);
+    }
+    pub fn setThemeLocked(self: *Adapter, theme: engine.Theme) !void {
+        if (theme.revision == 0) return error.InvalidTheme;
         var palette: [256]c.GhosttyColorRgb = undefined;
         if (c.ghostty_terminal_get(self.terminal, c.GHOSTTY_TERMINAL_DATA_COLOR_PALETTE_DEFAULT, @ptrCast(&palette)) != c.GHOSTTY_SUCCESS) return error.ThemeUnavailable;
         for (theme.ansi, 0..) |value, index| palette[index] = themeRgb(value);
@@ -376,6 +392,7 @@ pub const Adapter = struct {
         };
         var cursor_blink = theme.cursor_blinking;
         if (c.ghostty_terminal_set(self.terminal, c.GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_STYLE, @ptrCast(&cursor_style)) != c.GHOSTTY_SUCCESS or c.ghostty_terminal_set(self.terminal, c.GHOSTTY_TERMINAL_OPT_DEFAULT_CURSOR_BLINK, @ptrCast(&cursor_blink)) != c.GHOSTTY_SUCCESS) return error.ThemeUnavailable;
+        self.theme_revision = theme.revision;
         defer self.refreshVersions();
         try self.refreshLocked();
     }
@@ -472,6 +489,7 @@ pub const Adapter = struct {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();
         if (row >= self.rows) return null;
+        if (self.cells_dirty) self.refreshLocked() catch return null;
         const start = @as(usize, @intCast(row)) * self.cols;
         return .{ .abs_row = row, .cells = self.cells[start .. start + self.cols], .received_at_ms = 0 };
     }
@@ -582,6 +600,7 @@ pub const Adapter = struct {
     }
 
     fn selectionTextFromCells(self: *Adapter, selection: engine.Selection, allocator: std.mem.Allocator) ![]u8 {
+        if (self.cells_dirty) try self.refreshLocked();
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(allocator);
         const start_row = @min(selection.start_row, @as(u64, self.rows - 1));
@@ -615,6 +634,8 @@ pub const Adapter = struct {
     }
 
     fn refreshLocked(self: *Adapter) !void {
+        self.cells_dirty = false;
+        errdefer self.cells_dirty = true;
         if (c.ghostty_render_state_update(self.render_state, self.terminal) != c.GHOSTTY_SUCCESS) return error.GhosttyRenderStateFailed;
         var iterator: c.GhosttyRenderStateRowIterator = null;
         if (c.ghostty_render_state_row_iterator_new(null, &iterator) != c.GHOSTTY_SUCCESS) return error.GhosttyRenderStateFailed;
@@ -717,7 +738,7 @@ test "Ghostty adapter maps Ghostty SGR attributes" {
     var adapter = try Adapter.init(std.testing.allocator, 2, 12);
     defer adapter.destroy();
     _ = try adapter.feed("\x1b[1;3;4;9mX");
-    const attrs = adapter.cells[0].attrs;
+    const attrs = adapter.lineAt(0).?.cells[0].attrs;
     try std.testing.expect((attrs & @import("cell.zig").attrMask(.bold)) != 0);
     try std.testing.expect((attrs & @import("cell.zig").attrMask(.italic)) != 0);
     try std.testing.expect((attrs & @import("cell.zig").attrMask(.underline)) != 0);
@@ -728,11 +749,11 @@ test "Ghostty adapter maps parsed text and wide cells" {
     var adapter = try Adapter.init(std.testing.allocator, 3, 12);
     defer adapter.destroy();
     _ = try adapter.feed("A界B");
-    try std.testing.expectEqual(@as(u21, 'A'), adapter.cells[0].codepoint);
-    try std.testing.expectEqual(@as(u21, '界'), adapter.cells[1].codepoint);
-    try std.testing.expectEqual(@import("cell.zig").Width.wide_lead, adapter.cells[1].width);
-    try std.testing.expectEqual(@import("cell.zig").Width.wide_tail, adapter.cells[2].width);
-    try std.testing.expectEqual(@as(u21, 'B'), adapter.cells[3].codepoint);
+    try std.testing.expectEqual(@as(u21, 'A'), adapter.lineAt(0).?.cells[0].codepoint);
+    try std.testing.expectEqual(@as(u21, '界'), adapter.lineAt(0).?.cells[1].codepoint);
+    try std.testing.expectEqual(@import("cell.zig").Width.wide_lead, adapter.lineAt(0).?.cells[1].width);
+    try std.testing.expectEqual(@import("cell.zig").Width.wide_tail, adapter.lineAt(0).?.cells[2].width);
+    try std.testing.expectEqual(@as(u21, 'B'), adapter.lineAt(0).?.cells[3].codepoint);
 }
 
 test "Ghostty formatter copies a viewport selection" {
@@ -793,10 +814,10 @@ test "Ghostty resolves indexed colors without changing the RGBA wire format" {
     var adapter = try Adapter.init(std.testing.allocator, 2, 12);
     defer adapter.destroy();
     _ = try adapter.feed("\x1b[31mR\x1b[48;5;196mB\x1b[0mD");
-    try std.testing.expect(adapter.cells[0].fg != Cell.blank().fg);
-    try std.testing.expectEqual(@as(u32, 0xff0000ff), adapter.cells[1].bg);
-    try std.testing.expectEqual(Cell.blank().fg, adapter.cells[2].fg);
-    try std.testing.expectEqual(Cell.blank().bg, adapter.cells[2].bg);
+    try std.testing.expect(adapter.lineAt(0).?.cells[0].fg != Cell.blank().fg);
+    try std.testing.expectEqual(@as(u32, 0xff0000ff), adapter.lineAt(0).?.cells[1].bg);
+    try std.testing.expectEqual(Cell.blank().fg, adapter.lineAt(0).?.cells[2].fg);
+    try std.testing.expectEqual(Cell.blank().bg, adapter.lineAt(0).?.cells[2].bg);
 }
 test "notification parser distinguishes actual BEL from OSC terminators across feeds" {
     var adapter = try Adapter.init(std.testing.allocator, 3, 24);

@@ -40,6 +40,42 @@ Before the first build, or after the source verification script has cleaned the 
 zig build -j2
 ```
 
+SSH-linked build targets verify the source/configuration/archive receipt on every
+build. After changing vendored SSH sources or their build options, rerun
+`./scripts/build_ssh_deps.sh`; `zig build verify-ssh-deps` checks the receipt
+without building the application.
+
+Focused SSH hardening checks (owned local peers, no remote credentials):
+
+```sh
+python3 scripts/test_verify_ssh_deps.py
+sh scripts/test_ssh_native.sh
+zig test src/proto/ssh/keepalive_watch.zig
+zig build ssh-hardening-acceptance -j2
+python3 e2e/ssh_connection_wait.py --runner zig-out/bin/ssh-connection-wait-runner --output /tmp/ssh-waits.json
+python3 e2e/ssh_hardening.py --runner zig-out/bin/ssh-hardening-runner --output /tmp/ssh-hardening.json
+zig build forward-acceptance -j2
+python3 e2e/ssh_mixed_load.py --runner zig-out/bin/socks-worker-host-runner --out /tmp/ssh-mixed-load
+python3 e2e/ssh_auth_loopback.py --runner zig-out/bin/ssh-auth-loopback-runner --output /tmp/ssh-auth.json
+```
+
+The mixed-load fixture uses one actual production WorkerThread/session for PTY
+echo, a 256 KiB SFTP upload and cancelled download, 16 active forwards, and one
+forward whose 32 KiB remote window is never replenished. It delays one close
+acknowledgement and checks independent sibling cleanup, terminal response,
+exact upload/forward bytes, partial-file removal, and listener-port reuse.
+Results are local acceptance measurements, not remote-host performance claims.
+
+Connection timeout is one network budget per hop, including DNS/TCP, opening
+the next-hop tunnel, handshake, authentication exchanges and shell creation.
+Human trust/authentication prompts retain their separate timeout. A stalled
+system resolver may finish in the background after cancellation; at most 16
+resolver workers may be outstanding, and each owns and releases its inputs
+and eventual result. Active terminal sessions with keepalive enabled become
+suspected after three keepalive intervals without authenticated inbound SSH
+packets (effective interval is at least two seconds); terminal output itself
+is not required. A replacement transport starts a fresh liveness window.
+
 The main executable is written to `zig-out/bin/zerowork`. The same directory contains `zw_ipc.so`, which is required for local shell integration. Run the application using either command:
 
 ```sh

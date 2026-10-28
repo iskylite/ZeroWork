@@ -13,6 +13,8 @@ typedef int (*zw_ssh_cancel_cb)(void *ctx);
 typedef struct {
     int socket_fd;
     unsigned int timeout_ms;
+    /* Optional shared monotonic deadline; human prompts extend it. */
+    long long *deadline_ms;
     zw_ssh_cancel_cb cancelled;
     void *ctx;
 } ZW_SSH_DRIVE;
@@ -22,6 +24,8 @@ typedef struct {
 int zw_ssh_socket_connect_cancellable(const char *host, unsigned short port,
     unsigned int timeout_ms, zw_ssh_cancel_cb cancelled, void *ctx);
 int zw_ssh_socket_last_error(void);
+int zw_ssh_socket_last_gai_error(void);
+long long zw_ssh_monotonic_ms(void);
 void zw_ssh_socket_close(int socket_fd);
 void zw_ssh_socket_interrupt(int socket_fd);
 /* Consumes the descriptor only on 0. A failure must not be blindly retried:
@@ -86,7 +90,17 @@ int zw_libssh2_auth_keyboard_interactive_batch_driven(LIBSSH2_SESSION *session, 
 int zw_libssh2_open_shell_driven(LIBSSH2_SESSION *session, const char *term, int cols, int rows, LIBSSH2_CHANNEL **channel, const ZW_SSH_DRIVE *drive);
 int zw_ssh_private_key_readable(const char *path);
 LIBSSH2_CHANNEL *zw_libssh2_open_shell(LIBSSH2_SESSION *session, const char *term, int cols, int rows);
+int zw_libssh2_open_direct_tcpip_driven(LIBSSH2_SESSION *session, const char *host, unsigned short port, LIBSSH2_CHANNEL **output, const ZW_SSH_DRIVE *drive);
 LIBSSH2_CHANNEL *zw_libssh2_open_direct_tcpip(LIBSSH2_SESSION *session, const char *host, unsigned short port);
+/* Per-request native open state. Pending replies must not block unrelated
+   forwarding targets. Only the Session IO owner calls these functions. */
+typedef struct zw_ssh_direct_open ZW_SSH_DIRECT_OPEN;
+int zw_libssh2_direct_open_step(LIBSSH2_SESSION *session,
+    ZW_SSH_DIRECT_OPEN **all, ZW_SSH_DIRECT_OPEN **operation,
+    const char *host, unsigned short port, LIBSSH2_CHANNEL **channel);
+/* After native Session release only: frees retained request buffers without
+   dereferencing any channel or the released Session. */
+void zw_libssh2_direct_open_released(ZW_SSH_DIRECT_OPEN **all);
 LIBSSH2_CHANNEL *zw_libssh2_open_exec(LIBSSH2_SESSION *session, const char *command);
 /* Single nonblocking remote forwarding operations. Listener stays owned until
    cancel returns 0 or the owning Session release receipt is complete. */
@@ -111,6 +125,7 @@ int zw_libssh2_channel_exit_status(LIBSSH2_CHANNEL *channel);
 void zw_libssh2_session_set_timeout(LIBSSH2_SESSION *session, long timeout_ms);
 void zw_libssh2_session_config_keepalive(LIBSSH2_SESSION *session, unsigned int interval_sec);
 int zw_libssh2_session_send_keepalive(LIBSSH2_SESSION *session);
+unsigned long zw_libssh2_session_received_packets(LIBSSH2_SESSION *session);
 int zw_libssh2_session_set_compression(LIBSSH2_SESSION *session, int enabled);
 void zw_libssh2_session_nonblocking(LIBSSH2_SESSION *session);
 void zw_libssh2_session_set_blocking(LIBSSH2_SESSION *session);
@@ -125,6 +140,8 @@ void zw_libssh2_session_disconnect_free(LIBSSH2_SESSION *session);
 /* Release receipts: 0 = native free completed, 1 = EAGAIN (still owned),
    -1 = unknown (still owned). No channel-only helper interrupts its Session. */
 int zw_libssh2_channel_release(LIBSSH2_CHANNEL *channel);
+/* True only once a native channel write owns its retry arguments. */
+int zw_libssh2_channel_write_pending(LIBSSH2_CHANNEL *channel);
 int zw_libssh2_session_release(LIBSSH2_SESSION *session);
 /* Final whole-Session release only. Does not close/recycle the owned fd. */
 void zw_libssh2_session_abort_io(LIBSSH2_SESSION *session, int socket_fd);

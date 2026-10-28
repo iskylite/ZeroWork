@@ -96,7 +96,7 @@ pub fn tileIdentity(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 9.5, .line_height = 14.0 / 9.5, .color = theme.current().fg_2, .text_overflow = .ellipsis };
 }
 pub fn toggle(enabled: bool) ButtonStyle {
-    return .{ .width = .{ .px = 30 }, .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .justify = if (enabled) .end else .start, .padding = .{ .left = 2, .right = 2 }, .background = if (enabled) theme.current().accent else theme.current().border, .corner_radius = 9, .border_width = 0, .gap = 0 };
+    return .{ .width = .{ .px = 30 }, .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .justify = if (enabled) .end else .start, .padding = .{ .left = 2, .right = 2 }, .background = if (enabled) theme.current().action_accent else theme.switchTrackOff(), .corner_radius = 9, .border_width = 0, .gap = 0 };
 }
 pub fn toggleKnob(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .background = ui.Color.WHITE, .border = .{ .radius = 7 }, .flex_shrink = 0 };

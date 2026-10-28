@@ -127,7 +127,11 @@ pub const Host = struct {
             try self.ssh_status.updateActive(null);
             return;
         }
-        const snapshot = self.application.sshConnectionDetails(tab.content_owner.session) catch {
+        const snapshot = self.application.sshConnectionDetails(tab.content_owner.session) catch |err| {
+            if (err == error.WorkerBusy) {
+                self.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
+                return;
+            }
             try self.ssh_status.updateActive(null);
             return;
         };
@@ -192,7 +196,7 @@ pub const Host = struct {
         const colors = theme.current();
         if (self.colors == null or !std.meta.eql(self.colors.?, colors)) {
             self.trigger_hover.set(S.triggerHover());
-            _ = self.trigger_icon.setTint(colors.fg_2);
+            // The SSH status host owns the trigger's live state tint.
             self.view.retheme() catch {};
             self.logs.retheme() catch {};
             self.colors = colors;
@@ -200,7 +204,13 @@ pub const Host = struct {
         if (!self.view.isVisible() and !self.logs.isVisible() and !self.ssh_status.info.isVisible()) return .done;
         const key = self.key orelse return .done;
         if (key.owner != .session) return .done;
-        const snapshot = self.application.sshConnectionDetails(key.owner.session) catch {
+        const snapshot = self.application.sshConnectionDetails(key.owner.session) catch |err| {
+            // A contended snapshot is not a stale session. Invalidating here
+            // cancels the live RTT and permanently expires the open card.
+            if (err == error.WorkerBusy) {
+                self.cx.scheduleRedrawAfterNs(33 * std.time.ns_per_ms);
+                return .done;
+            }
             self.view.invalidate(key);
             self.ssh_status.invalidate(key);
             self.log_expired = true;

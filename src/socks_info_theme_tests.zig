@@ -3,6 +3,7 @@
 const std = @import("std");
 const ui = @import("ui");
 const socks = @import("ui/socks_info_view.zig");
+const ForwardColors = @import("ui/socks_info_styles.zig");
 const theme = @import("ui/app_theme.zig");
 const layers = @import("ui/background_layers.zig");
 const assets = @import("config/background_asset.zig");
@@ -76,16 +77,16 @@ test "socks global material paints retained foreground from every theme with loc
         try std.testing.expectEqual(c.overlay, view.root.getBackground());
         try std.testing.expectEqual(ui.Color.TRANSPARENT, view.pointer.getBackground());
         try std.testing.expectEqual(c.border, view.root.style.border.color);
-        try std.testing.expectEqual(c.surface_2, view.copy_button.getBackground());
-        try std.testing.expectEqual(c.accent, view.config_button.getBackground());
+        try std.testing.expectEqual(theme.popupAction(), view.copy_button.getBackground());
+        try std.testing.expectEqual(theme.popupAction(), view.config_button.getBackground());
         try std.testing.expectEqual(c.fg_1, view.address.getText().?.color);
         try std.testing.expectEqual(c.fg_3, view.route.getText().?.color);
-        try std.testing.expectEqual(c.ok_ink, view.status.getText().?.color);
-        try std.testing.expectEqual(c.fg_2, view.control_text.getText().?.color);
+        try std.testing.expectEqual(ForwardColors.text(.success), view.status.getText().?.color);
+        try std.testing.expectEqual(c.danger_ink, view.control_text.getText().?.color);
         try std.testing.expectEqual(c.fg_2, view.message.getText().?.color);
         try std.testing.expectEqual(@as(f32, 12), view.root.style.backdrop_blur());
         try std.testing.expectEqual(socks.State.running, view.state);
-        try std.testing.expectEqualStrings("original-target", view.exit.getText().?.content);
+        try std.testing.expectEqualStrings("出口 original-target", view.exit.getText().?.content);
         try std.testing.expectEqualStrings("original-route", view.route.getText().?.content);
         try std.testing.expectEqualStrings("127.0.0.1:1081", view.address.getText().?.content);
         try std.testing.expectEqual(original_id, view.root.id);
@@ -98,7 +99,7 @@ test "socks global material paints retained foreground from every theme with loc
         }
         var painted_original = false;
         for (items) |item| switch (item) {
-            .text_run => |run| if (std.mem.eql(u8, run.content, "original-target")) {
+            .text_run => |run| if (std.mem.eql(u8, run.content, "出口 original-target")) {
                 try std.testing.expectEqual(c.fg_2, run.color);
                 painted_original = true;
             },
@@ -113,12 +114,13 @@ test "socks global material paints retained foreground from every theme with loc
         _ = frame(cx);
         const c = theme.current();
         const expected = switch (state) {
-            .running => c.ok_ink,
-            .connecting, .paused => c.warn_ink,
-            .failed => c.danger_ink,
-            .off => c.fg_3,
+            .running => ForwardColors.text(.success),
+            .connecting, .paused => ForwardColors.text(.warning),
+            .failed => ForwardColors.text(.danger),
+            .off => c.fg_2,
         };
         try std.testing.expectEqual(expected, view.status.getText().?.color);
+        try std.testing.expectEqual(if (state == .running or state == .paused or state == .connecting) theme.popupAction() else c.accent, view.control_button.getBackground());
         try std.testing.expectEqual(c.danger_ink, view.message.getText().?.color);
         try std.testing.expectEqual(state, view.state);
         try std.testing.expectEqual(@as(usize, 0), receipt.actions);

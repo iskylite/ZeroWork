@@ -20,9 +20,10 @@ logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
 
 class Fixture(paramiko.ServerInterface):
-    def __init__(self, key, delay=0.12, reject_first=False, target_port=None):
+    def __init__(self, key, delay=0.12, reject_first=False, target_port=None, close_delay=0):
         self.key, self.delay = key, delay
         self.reject_first, self.target_port = reject_first, target_port
+        self.close_delay = close_delay
         self.calls, self.errors, self.sessions = [], [], 0
         self.stopped = threading.Event()
         self.listener = socket.socket()
@@ -105,6 +106,17 @@ class Fixture(paramiko.ServerInterface):
         try:
             connection, _ = self.listener.accept()
             self.transport = paramiko.Transport(connection)
+            if self.close_delay:
+                original_send = self.transport._send_message
+                def send_message(message):
+                    if message.asbytes()[0] == 97:
+                        def delayed():
+                            if not self.stopped.wait(self.close_delay) and self.transport.is_active():
+                                original_send(message)
+                        threading.Thread(target=delayed, daemon=True).start()
+                    else:
+                        original_send(message)
+                self.transport._send_message = send_message
             self.transport.add_server_key(self.key)
             self.transport.get_security_options().kex = ["diffie-hellman-group14-sha256"]
             self.transport.start_server(server=self)
@@ -144,8 +156,8 @@ def main():
     key = paramiko.RSAKey.generate(2048)
     fingerprint = "SHA256:" + base64.b64encode(hashlib.sha256(key.asbytes()).digest()).decode().rstrip("=")
     cases = []
-    for mode in ["direct", "cancel", "timeout", "reject", "route", "probe", "probe-default"]:
-        target = Fixture(key, reject_first=mode == "reject")
+    for mode in ["direct", "slow-close", "cancel", "timeout", "reject", "route", "probe", "probe-default"]:
+        target = Fixture(key, reject_first=mode == "reject", close_delay=0.35 if mode == "slow-close" else 0)
         parent = Fixture(key, delay=0.08, target_port=target.port) if mode == "route" else None
         fixtures = ([parent] if parent else []) + [target]
         with tempfile.TemporaryDirectory(prefix="zerowork-rtt-") as directory:
@@ -169,7 +181,7 @@ def main():
             for index, algorithm, c2s, s2c, actual_fingerprint, _ in rows:
                 fixture = fixtures[int(index)]
                 metadata_matches &= fixture.negotiated == {"algorithm": algorithm, "c2s": c2s, "s2c": s2c} and actual_fingerprint == fingerprint
-            expected_sessions = 0 if mode == "probe-default" else 1 if mode in ("direct", "route", "probe") else 2
+            expected_sessions = 0 if mode == "probe-default" else 1 if mode in ("direct", "slow-close", "route", "probe") else 2
             case = {"mode": mode, "exit_code": result.returncode, "metadata_matches_server": metadata_matches, "trust_store_unchanged": store.read_bytes() == before, "calls": [fixture.calls for fixture in fixtures], "sample_channels": [fixture.sessions for fixture in fixtures], "errors": [fixture.errors for fixture in fixtures]}
             case["passed"] = result.returncode == 0 and "DETAILS_RTT_OK" in result.stderr and metadata_matches and case["trust_store_unchanged"] and all(fixture.sessions == expected_sessions and not fixture.errors and not any(call.startswith("UNEXPECTED") for call in fixture.calls) for fixture in fixtures)
             cases.append(case)

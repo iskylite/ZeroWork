@@ -54,7 +54,9 @@ class Connection(paramiko.ServerInterface):
         return True
 
     def check_channel_exec_request(self, channel, command):
-        self.calls.append("UNEXPECTED_EXEC")
+        # The production Worker queues this exact read-only OS probe at
+        # startup. Refuse it without executing anything on the fixture.
+        self.calls.append('os_probe' if command == b'sh -c "uname -s; cat /etc/os-release" || cmd /c ver' else "UNEXPECTED_EXEC")
         return False
 
     def check_channel_direct_tcpip_request(self, channel_id, origin, target):
@@ -142,13 +144,29 @@ class Connection(paramiko.ServerInterface):
     def serve(self, sock):
         try:
             self.transport = paramiko.Transport(sock)
-            if self.peer.hold_second_open:
+            if self.peer.hold_second_open or getattr(self.peer, 'direct_open_delay', 0):
                 original_send = self.transport._send_message
                 def send_message(message):
                     raw = message.asbytes()
-                    if raw[0] == 91 and self.calls.count({"direct": ["shared.fixture", 4242]}) >= 2:
+                    if raw[0] == 91 and self.peer.hold_second_open and self.calls.count({"direct": ["shared.fixture", 4242]}) >= 2:
                         self.calls.append("open_reply_withheld")
                         self.peer.open_held.set()
+                        return
+                    if raw[0] == 91 and self.channels.get(int.from_bytes(raw[1:5], 'big')) == 'forward' and getattr(self.peer, 'direct_open_delay', 0):
+                        if getattr(self.peer, 'delay_first_direct_only', False) and getattr(self, '_first_delayed', False):
+                            original_send(message)
+                            return
+                        self._first_delayed = True
+                        self.peer.open_held.set()
+                        # sshd connects targets asynchronously. Delay only this
+                        # confirmation, allowing other SSH requests to proceed.
+                        def delayed():
+                            if not self.peer.stop_flag.wait(self.peer.direct_open_delay) and self.transport.is_active():
+                                self.calls.append('delayed_direct_confirmation')
+                                original_send(message)
+                        worker = threading.Thread(target=delayed, daemon=True)
+                        self.peer.workers.append(worker)
+                        worker.start()
                         return
                     original_send(message)
                 self.transport._send_message = send_message
@@ -342,7 +360,8 @@ def main():
                 shell_count = 1 if index == args.hops else 0
                 proxy_count = (2 if args.mode == "parent-open-close" else expected_channels) if index == selected else 0
                 payload_valid = all(data in (payload, b"") for data in connection.forward_by_channel.values()) if args.mode == "parent-open-close" else all(data == payload for data in connection.forward_by_channel.values())
-                reused &= connection.calls.count("auth") == 1 and connection.calls.count("session") == shell_count and connection.calls.count("pty") == shell_count and connection.calls.count("shell") == shell_count and connection.calls.count({"direct": ["shared.fixture", 4242]}) == proxy_count and "UNEXPECTED_EXEC" not in connection.calls and len(connection.forward_by_channel) == proxy_count and payload_valid
+                probe_count = shell_count if args.worker else 0
+                reused &= connection.calls.count("auth") == 1 and connection.calls.count("session") == shell_count + probe_count and connection.calls.count('os_probe') == probe_count and connection.calls.count("pty") == shell_count and connection.calls.count("shell") == shell_count and connection.calls.count({"direct": ["shared.fixture", 4242]}) == proxy_count and "UNEXPECTED_EXEC" not in connection.calls and len(connection.forward_by_channel) == proxy_count and payload_valid
                 if current.next_endpoint:
                     reused &= connection.calls.count({"direct": list(current.next_endpoint)}) == 1
         closed = all(connection.closed.is_set() for current in peers for connection in current.connections)

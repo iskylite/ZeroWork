@@ -18,6 +18,7 @@ pub const Snapshot = struct {
     stats: socks.Stats = .{},
     cleanup: ssh.ReleaseReceipt = .released,
     failure: ?anyerror = null,
+    diagnostics: @import("forward_diagnostics.zig").Journal = .{},
 };
 const Start = struct { origin: operations.OperationKey, binding: sessions.ServiceHandle, key: operations.OperationKey, options: socks.Options };
 
@@ -65,6 +66,8 @@ pub const Service = struct {
         self.published.phase = .starting;
         self.published.cleanup = .awaiting;
         self.published.failure = null;
+        self.published.diagnostics = .{};
+        self.published.diagnostics.add("已提交启动，等待 SSH IO 调度", null, null);
         self.stop_requested.store(false, .release);
         self.parent_close_requested.store(false, .release);
     }
@@ -112,6 +115,7 @@ pub const Service = struct {
         if (self.listener) |listener| {
             self.published.port = listener.port();
             self.published.stats = listener.stats();
+            self.published.diagnostics = listener.diagnostics;
         } else self.published.port = 0;
     }
     /// Native-owner only. No mutex encloses libssh2 or native retries.
@@ -142,6 +146,9 @@ pub const Service = struct {
                     return;
                 };
                 self.listener.?.startWithOptions(request.options) catch |err| {
+                    self.lock();
+                    self.published.diagnostics = self.listener.?.diagnostics;
+                    self.unlock();
                     self.listener.?.deinit();
                     self.listener = null;
                     self.publish(.failed, .released, err);
@@ -160,6 +167,9 @@ pub const Service = struct {
                 const reason = listener.last_failure orelse error.ForwardListenFailed;
                 const receipt = listener.ownerStop();
                 if (receipt == .released) {
+                    self.lock();
+                    self.published.diagnostics = listener.diagnostics;
+                    self.unlock();
                     listener.deinit();
                     self.listener = null;
                 }
@@ -211,7 +221,7 @@ pub const Service = struct {
     }
     pub fn prepareReplacement(self: *Service) !void {
         if (self.listener) |listener| {
-            if (listener.session != null or listener.pending_open != null or listener.pending_close != null) return error.PreviousTransportNotReleased;
+            if (listener.session != null or listener.clients.items.len != 0) return error.PreviousTransportNotReleased;
             // Native ownership ended with the real parent receipt. The old
             // Worker/Relay has stopped local ticks before this explicit move.
             listener.owner_thread = null;

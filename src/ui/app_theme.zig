@@ -49,7 +49,7 @@ pub const material_ratio = struct {
     pub const surface_1: f32 = 0.95;
     pub const surface_2: f32 = 0.90;
     pub const well: f32 = 0.80;
-    pub const overlay: f32 = 0.65;
+    pub const overlay: f32 = 0.16;
     pub const hover: f32 = 0.75;
     pub const tab_on: f32 = 0.65;
 };
@@ -71,14 +71,14 @@ pub fn materialParameters() struct { transparency: f32, blur: f32 } {
 /// surface_1   44.67778560%              141      55.294118%
 /// surface_2   30.56901120%              177      69.411765%
 /// well        21.16316160%              201      78.823529%
-/// overlay     11.75731200%              225      88.235294%
+/// overlay     4.00000000%               245      96.078431%
 /// hover       23.51462400%              195      76.470588%
 /// tab_on      16.46023680%              213      83.529412%
 pub const material_transparency_base = struct {
     pub const surface_1: f32 = 0.446777856;
     pub const surface_2: f32 = 0.305690112;
     pub const well: f32 = 0.211631616;
-    pub const overlay: f32 = 0.117573120;
+    pub const overlay: f32 = 0.04;
     pub const hover: f32 = 0.235146240;
     pub const tab_on: f32 = 0.164602368;
 };
@@ -88,7 +88,7 @@ pub const material_transparency_span = struct {
     pub const surface_1: f32 = 0.670166784;
     pub const surface_2: f32 = 0.752467968;
     pub const well: f32 = 0.728953344;
-    pub const overlay: f32 = 0.646652160;
+    pub const overlay: f32 = 0.12;
     pub const hover: f32 = 0.646652160;
     pub const tab_on: f32 = 0.599622912;
 };
@@ -114,6 +114,15 @@ pub fn bindMaterial(cx: *ui.Cx, scope: *ui.Scope, node: *ui.Node, comptime role:
 /// Blur already-painted window content behind overlays, never their foreground.
 /// Even when the configured background blur is zero, use 12 logical px to suppress
 /// lower-layer text ghosting. This samples app content, not the desktop.
+/// Quiet, opaque content surface inside an overlay; independent of wallpaper alpha.
+pub fn popupInset() ui.Color {
+    const c = current();
+    return ui.Color.lerp(c.overlay.withAlpha(255), c.well.withAlpha(255), 0.3);
+}
+pub fn popupAction() ui.Color {
+    const c = current();
+    return ui.Color.lerp(c.overlay.withAlpha(255), c.fg_2.withAlpha(255), 0.12);
+}
 pub fn overlayGlass() ui.GlassParams {
     return .{ .backdrop_blur = @max(12, material_blur), .capture_current_target = false, .glass_intensity = 0, .specular_opacity = 0, .refraction_level = 0, .warp_gain = 0 };
 }
@@ -121,10 +130,10 @@ pub fn overlayGlass() ui.GlassParams {
 test "global material parameters derive role ratios with readable overlay at endpoints" {
     const saved = materialParameters();
     defer _ = setMaterialParameters(saved.transparency, saved.blur);
-    for ([_]f32{ 0, 25, 75, 100 }, [_]u8{ 225, 184, 101, 89 }) |percent, overlay_alpha| {
+    for ([_]f32{ 0, 25, 75, 100 }, [_]u8{ 245, 237, 222, 214 }) |percent, overlay_alpha| {
         _ = setMaterialParameters(percent, percent * 0.5);
         try std.testing.expectEqual(overlay_alpha, current().overlay.a);
-        try std.testing.expect(current().overlay.a >= 89);
+        try std.testing.expect(current().overlay.a >= 214);
         try std.testing.expect(current().surface_1.a < current().surface_2.a);
         try std.testing.expect(current().surface_2.a < current().well.a);
         try std.testing.expect(current().well.a < current().overlay.a);
@@ -133,7 +142,7 @@ test "global material parameters derive role ratios with readable overlay at end
     }
     _ = setMaterialParameters(75, 0);
     try std.testing.expectEqual(@as(f32, 12), overlayGlass().backdrop_blur);
-    try std.testing.expectEqual(@as(u8, 101), current().overlay.a);
+    try std.testing.expectEqual(@as(u8, 222), current().overlay.a);
 }
 
 /// Tracks actual image visibility for host/preview bookkeeping only. It never
@@ -175,6 +184,11 @@ fn completeColors(value: Colors) Colors {
 /// Imported palettes may provide a very pale accent; select a readable ink.
 pub fn actionForeground(background: ui.Color) ui.Color {
     return if (contrast(background, ui.Color.WHITE) >= contrast(background, hex(0x101014))) ui.Color.WHITE else hex(0x101014);
+}
+/// An unchecked control stays neutral, including on pale single-hue palettes.
+pub fn switchTrackOff() ui.Color {
+    const c = baseColors();
+    return ui.Color.lerp(c.surface_2, c.fg_3, 0.35);
 }
 fn luminance(c: ui.Color) f64 {
     var result: f64 = 0;
@@ -245,7 +259,7 @@ pub fn colors(name: Name) Colors {
             .well = hex(0x0c0c0f),
             .well_border = hex(0x26262c),
             .terminal = hex(0x0a0a0d),
-            .overlay = hex(0x18181c),
+            .overlay = hex(0x292a30),
             .hover = hex(0x202026),
             .tab_on = hex(0x1e1e23),
             .fg_1 = hex(0xf4f4f5),
@@ -416,8 +430,8 @@ fn widgetTokensFrom(c: Colors, dark: bool) ui.ThemeTokens {
     t.checkbox_disabled_border = c.well_border;
     t.checkbox_disabled_checked_bg = c.well_border;
     t.switch_track_on = c.action_accent;
-    t.switch_thumb = actionForeground(c.action_accent);
-    t.switch_track_off = c.well_border;
+    t.switch_thumb = ui.Color.WHITE;
+    t.switch_track_off = ui.Color.lerp(c.surface_2.withAlpha(255), c.fg_3, 0.35);
     t.list_hover_bg = c.hover;
     t.list_selection_bg = c.selection;
     t.list_selection_hover_bg = c.selection;

@@ -79,6 +79,8 @@ pub fn main(init: std.process.Init) !void {
     const forward_options: ForwardOptions = .{ .mode = forward_mode, .requested_port = 0, .target = if (forward_mode == .socks5) .{} else try @import("proto/ssh/socks5_listener.zig").Target.init(if (forward_mode == .remote) "127.0.0.1" else "shared.fixture", target_port) };
     if (!std.fs.path.isAbsolute(controls)) return error.OwnedControlsRequired;
     const reconnect = std.mem.eql(u8, mode, "reconnect");
+    const rtt_contention = std.mem.eql(u8, mode, "rtt-contention") or std.mem.eql(u8, mode, "slow-target");
+    var details: ssh.ConnectionDetails.Store = .{};
     var arena = std.heap.ArenaAllocator.init(init.gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -99,6 +101,7 @@ pub fn main(init: std.process.Init) !void {
     var accepted = try domain.create(.{ .temporary_ssh = .{ .structured_endpoint = .{ .host = "127.0.0.1", .port = port, .user = "shared-fixture" }, .auth_options = .{ .password = "shared-secret" } } }, target);
     var trust: Trust = .{ .fingerprint = fingerprint, .key = accepted.operation };
     var options: ssh.Options = .{ .host = "127.0.0.1", .port = port, .user = "shared-fixture", .auth = .{ .password = "shared-secret" }, .operation_key = accepted.operation, .open_shell = true, .host_key_store = &store, .host_key_observer = .{ .ctx = &trust, .callback = Trust.observe }, .connect_timeout_ms = 3000 };
+    if (rtt_contention) options.connection_details = &details;
     var session = try ssh.Session.connect(&library, options);
     defer session.close();
     authority.session = &session;
@@ -130,6 +133,8 @@ pub fn main(init: std.process.Init) !void {
     var heartbeats: usize = 0;
     var heartbeat_at = clock.monotonicNs();
     var stop_started: i128 = 0;
+    var rtt_started: ?i128 = null;
+    var rtt_done = false;
     const heartbeat = "TTY_HEARTBEAT\n";
     const deadline = clock.monotonicNs() + 18 * std.time.ns_per_s;
     while (clock.monotonicNs() < deadline) {
@@ -168,8 +173,24 @@ pub fn main(init: std.process.Init) !void {
             .would_block => {},
             .eof => return error.ParentShellClosed,
         }
+        // Same order as SshWorker: queued RTT runs before the forward batch.
+        if (rtt_contention) try session.stepRtt(clock.monotonicNs());
         try service.step(&session);
         const value = service.snapshot();
+        if (rtt_contention and !rtt_done) {
+            if (rtt_started) |started| {
+                const snapshot = try details.snapshot(accepted.operation);
+                if (snapshot.target_rtt_sample) |sample| {
+                    if (value.stats.connections_active == 0) return error.RttMissedForwardTraffic;
+                    const elapsed_ms = @divTrunc(clock.monotonicNs() - started, std.time.ns_per_ms);
+                    try write(init.io, try std.fs.path.join(a, &.{ controls, "rtt.json" }), try std.fmt.allocPrint(a, "{{\"queue_and_sample_ms\":{d},\"rtt_ms\":{d},\"active_forwards\":{d}}}\n", .{ elapsed_ms, sample.duration_ms.?, value.stats.connections_active }));
+                    rtt_done = true;
+                } else if (clock.monotonicNs() - started > std.time.ns_per_s) return error.RttStarvedByForwardBatch;
+            } else if (session.direct_opens != null) {
+                _ = try details.request(accepted.operation, null, 1500);
+                rtt_started = clock.monotonicNs();
+            }
+        }
         if (value.phase == .running and (!ready or (resumed and !exists(init.io, resumed_path)))) {
             if (local_port != 0 and value.port != local_port) return error.ListeningPortChanged;
             local_port = value.port;
@@ -202,7 +223,7 @@ pub fn main(init: std.process.Init) !void {
         pause();
     }
     const final = service.snapshot();
-    if (!ready or !stopping or final.cleanup != .released or final.stats.connections_active != 0 or shell_bytes == 0 or heartbeats == 0 or (reconnect and !resumed)) return error.SharedForwardIncomplete;
+    if (!ready or !stopping or final.cleanup != .released or final.stats.connections_active != 0 or shell_bytes == 0 or heartbeats == 0 or (reconnect and !resumed) or (rtt_contention and !rtt_done)) return error.SharedForwardIncomplete;
     const stop_ms = @divTrunc(clock.monotonicNs() - stop_started, std.time.ns_per_ms);
     // A stopped SOCKS listener must not close, deauthenticate or replace the PTY.
     const marker = "AFTER_SOCKS_STOP\n";

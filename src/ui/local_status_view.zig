@@ -458,7 +458,7 @@ test "Local status rethemes dark to light in place without changing triggers or 
         _ = cx.render();
     }
     try std.testing.expect(cx.isFocused(view.theme_button));
-    try std.testing.expectEqual(light.selection, view.theme_button.getBackground());
+    try std.testing.expectEqual(light.hover, view.theme_button.getBackground());
     S.theme.select(.dark);
     cx.setTheme(S.theme.widgetTheme(.dark));
     view.retheme();
@@ -467,7 +467,7 @@ test "Local status rethemes dark to light in place without changing triggers or 
         cx.layout();
         _ = cx.render();
     }
-    try std.testing.expectEqual(dark.selection, view.theme_button.getBackground());
+    try std.testing.expectEqual(dark.hover, view.theme_button.getBackground());
     try std.testing.expect(view.theme_button.style.outline() == null);
     try std.testing.expect(view.currentOwner().?.eql(value.owner));
     try std.testing.expectEqual(value.source_revision, view.source_revision);

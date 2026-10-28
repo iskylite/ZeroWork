@@ -61,6 +61,55 @@ Terminal acceptance additionally extends only the compile-time test Harness: mou
 - Status: verified official `libssh2-1.11.1.tar.xz` archive vendored under `vendor/libssh2/`.
 - Official archive SHA-256: `9954cb54c4f548198a7cbebad248bdc87dd64bd26185708a294b2b50771e3769`
 
+Local patch `2026-10-27-independent-forward-opens` adds ZeroWork's opaque
+direct-tcpip open contexts in `src/channel.c`, and keeps replies for other
+channels queued while matching a response in `src/packet.c`. Each pending target retains its
+own channel-open/reply state; the transport, native channel registry and IO
+thread remain shared. This prevents an unresponsive target from blocking other
+forwarding targets or RTT samples. Context buffers remain owned until native
+completion or the parent Session's actual release. The upstream revision,
+crypto backend and license are unchanged; `scripts/build_ssh_deps.sh` rebuilds
+the patched source into the static library.
+
+Local patch `2026-10-28-channel-close-reply` keeps `_libssh2_channel_close`
+reading after unrelated positive packet results until the matching channel's
+CLOSE arrives or transport IO would block. An EOF or a sibling's data packet
+must not be treated as the close acknowledgement and release ownership early.
+The delayed-close RTT fixture covers this together with preserving the measured
+RTT while native cleanup is still pending.
+
+Local patch `2026-10-28-bounded-channel-dispatch` caps each channel
+read/write/forward-accept input drain and close-acknowledgement drain at 32
+transport packets. At the limit it yields EAGAIN, retaining queued packets
+and the pending close state. A continuously readable sibling cannot monopolize
+the shared IO owner. `scripts/test_ssh_native.sh` feeds an endless stream of
+valid IGNORE packets through these native entry points and verifies bounded
+return without falsely acknowledging close. A read-only native write-state query
+distinguishes a pinned send from a zero-window wait, allowing cancelled forwards
+to close without waiting for the peer to grant more data window. The production mixed-load fixture
+is `e2e/ssh_mixed_load.py` (PTY + SFTP + 16 forwarded channels, delayed close).
+
+Local patch `2026-10-28-ssh-hardening`:
+
+- Backports the READLINK/REALPATH string-length bound from upstream
+  [2dae3024897e1898d389835151f4e9606227721d](https://github.com/libssh2/libssh2/commit/2dae3024897e1898d389835151f4e9606227721d)
+  into the existing 1.11.1 parser (its minimum packet-size guard is retained).
+- Backports the full-packet cipher length bound from upstream
+  [97acf3dfda80c91c3a8c9f2372546301d4a1a7a8](https://github.com/libssh2/libssh2/commit/97acf3dfda80c91c3a8c9f2372546301d4a1a7a8).
+- Corrects the Mbed TLS cipher encrypt/decrypt direction and disables its PKCS#7 padding for SSH CBC, which already has protocol
+  padding; rejects any cipher output length different from the input buffer.
+  This local correction is covered by NIST CBC known-answer/segmented roundtrip and actual
+  loopback CBC-only negotiation, as well as normal CTR peers.
+- Exposes a read-only authenticated packet sequence accessor to the owning
+  worker for liveness detection. No payload, new crypto backend or library
+  replacement is introduced.
+
+`scripts/build_ssh_deps.sh` writes an ignored local receipt binding vendored
+source content, build scripts, compiler/SDK, environment options, generated
+configuration and both static archives. Every application/test/runner link
+against SSH depends on `scripts/verify_ssh_deps.py`; stale or missing artifacts
+fail with a rebuild instruction. `zig build verify-ssh-deps` checks explicitly.
+
 ### Mbed TLS
 
 - Tag: `v3.6.7` / release `mbedtls-3.6.7`

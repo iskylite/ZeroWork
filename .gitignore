@@ -107,3 +107,7 @@ playwright-report/
 
 # Session notice validation screenshots.
 /docs/UI_V3/workspace/session-notice/*reference.png
+
+# Locally rebuilt SSH dependency provenance
+/vendor/.ssh-build-receipt.json
+/vendor/.ssh-build-receipt.tmp

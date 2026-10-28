@@ -119,12 +119,12 @@ test "SSH status host mounts exact live bar geometry and publishes only authorit
     defer f.deinit();
     try f.update(try snapshot(key, "DB-A"), false);
     const Item = struct { node: *ui.Node, x: f32, w: f32 };
-    for ([_]Item{ .{ .node = f.bar.controls.identity_button, .x = 0, .w = 138 }, .{ .node = f.bar.controls.encoding_button, .x = 144, .w = 68 }, .{ .node = f.bar.controls.grid_button, .x = 218, .w = 82 }, .{ .node = f.bar.chain_trigger, .x = 928, .w = 86 }, .{ .node = f.bar.controls.theme_button, .x = 1112, .w = 28 } }) |item| {
+    for ([_]Item{ .{ .node = f.bar.controls.identity_button, .x = 0, .w = 118 }, .{ .node = f.bar.controls.encoding_button, .x = 124, .w = 68 }, .{ .node = f.bar.controls.grid_button, .x = 198, .w = 82 }, .{ .node = f.bar.chain_trigger, .x = 894, .w = 80 }, .{ .node = f.bar.controls.theme_button, .x = 1066, .w = 80 } }) |item| {
         const r = item.node.globalRect();
         try std.testing.expectApproxEqAbs(8 + item.x, r.x, 0.1);
         try std.testing.expectEqual(item.w, r.w);
         try std.testing.expectEqual(@as(f32, 26), r.h);
-        try std.testing.expectEqual(@as(f32, 862), r.y);
+        try std.testing.expectApproxEqAbs(f.bar.controls.identity_button.globalRect().y, r.y, 0.1);
     }
     try std.testing.expectEqualStrings("已连接", f.bar.controls.identity_label.getText().?.content);
     try std.testing.expectEqualStrings("UTF-8", f.bar.controls.encoding_label.getText().?.content);
@@ -187,7 +187,7 @@ test "SSH status host metrics remain static and collapsed state follows sidebar"
     try std.testing.expectEqual(.none, f.bar.controls.more_button.style.display);
     f.bar.controls.sidebar_width = 48;
     try f.update(try snapshot(key, "DB-A"), false);
-    try std.testing.expectEqual(@as(f32, 138), f.bar.controls.identity_button.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 118), f.bar.controls.identity_button.globalRect().w);
     try std.testing.expectEqual(.flex, f.bar.controls.identity_label.style.display);
 }
 
@@ -305,7 +305,8 @@ test "SSH status host projects only the original ready SFTP attachment without t
 
     try f.update(try snapshot(key, "DB-A"), false);
     try std.testing.expect(f.host.file_active == null);
-    for ([_]*ui.Node{ f.bar.controls.rtt_label, f.bar.controls.encoding_button, f.bar.controls.grid_button, f.bar.chain_trigger, f.bar.socks_chip, f.bar.controls.icons[1] }) |node| try std.testing.expectEqual(.flex, node.style.display);
+    for ([_]*ui.Node{ f.bar.controls.rtt_label, f.bar.controls.encoding_button, f.bar.controls.grid_button, f.bar.chain_trigger, f.bar.socks_chip }) |node| try std.testing.expectEqual(.flex, node.style.display);
+    try std.testing.expectEqual(.none, f.bar.controls.icons[1].style.display);
     try std.testing.expectEqual(.none, f.bar.controls.file_icon.style.display);
     try std.testing.expectEqualStrings("已连接", f.bar.controls.identity_label.getText().?.content);
     try std.testing.expectEqualStrings("UTF-8", f.bar.controls.encoding_label.getText().?.content);
@@ -373,4 +374,43 @@ test "status transfer ticker displays only the filename and retains a plain file
     try std.testing.expectEqualStrings("普通文件.txt", ticker.name.getText().?.content);
     try std.testing.expectEqualStrings("50%", ticker.percent.getText().?.content);
     try std.testing.expectEqual(@as(f32, 124), ticker.fill.style.width.px);
+    ticker.update("传输 · 空闲", "", "", 0, false);
+    f.settle();
+    const trigger = ticker.root.globalRect();
+    const label = ticker.name.globalRect();
+    try std.testing.expect(trigger.w < 110);
+    try std.testing.expectApproxEqAbs(@as(f32, 7), trigger.x + trigger.w - label.x - label.w, 0.1);
+}
+
+test "SSH chain bottom bar reports online negotiating and disconnected without opening a card" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const C = @import("ui/socks_info_styles.zig");
+    var source = try snapshot(key, "DB-A");
+    try f.update(source, false);
+    f.settle();
+    try std.testing.expect(!f.host.info.isVisible());
+    try std.testing.expectEqualStrings("连接链路", f.bar.controls.chain_label.getText().?.content);
+    try std.testing.expectEqual(C.statusBarInk(C.text(.success)), f.bar.controls.chain_label.getText().?.color);
+    for (f.bar.controls.chain_button.children.items) |child| if (child.getIcon()) |icon| {
+        try std.testing.expectEqual(C.statusBarInk(C.text(.success)), icon.tint);
+    };
+    source.hops[source.hop_count - 1].status = .negotiating;
+    source.revision += 1;
+    try f.update(source, false);
+    f.settle();
+    try std.testing.expectEqualStrings("连接链路", f.bar.controls.chain_label.getText().?.content);
+    try std.testing.expectEqual(C.statusBarInk(C.text(.warning)), f.bar.controls.chain_label.getText().?.color);
+    for (f.bar.controls.chain_button.children.items) |child| if (child.getIcon()) |icon| {
+        try std.testing.expectEqual(C.statusBarInk(C.text(.warning)), icon.tint);
+    };
+    try f.host.updateActive(.{ .details = source, .ended = true });
+    f.settle();
+    try std.testing.expectEqualStrings("连接链路", f.bar.controls.chain_label.getText().?.content);
+    try std.testing.expectEqual(C.statusBarInk(C.text(.danger)), f.bar.controls.chain_label.getText().?.color);
+    for (f.bar.controls.chain_button.children.items) |child| if (child.getIcon()) |icon| {
+        try std.testing.expectEqual(C.statusBarInk(C.text(.danger)), icon.tint);
+    };
+    try std.testing.expect(!f.host.info.isVisible());
 }

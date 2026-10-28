@@ -5,6 +5,7 @@
 comptime {
     _ = @import("transfer/sftp_engine.zig");
     _ = @import("ui/wizard.zig");
+    _ = @import("plugins/remote/editor.zig");
     _ = @import("ui/workspace.zig");
     _ = @import("file_application_host_tests.zig");
 }

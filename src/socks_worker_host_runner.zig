@@ -139,10 +139,32 @@ pub fn main(init: std.process.Init) !void {
         backend.deinit() catch {};
     };
     _ = try backend.start(accepted.handle, .{ .exit_index = exit_index, .listener = .{ .requested_port = 0 } });
+    // Owned mixed-load acceptance uses the actual shared SFTP mailbox.
+    const mixed = std.mem.eql(u8, mode, "mixed");
+    const transfer = @import("transfer/manager.zig");
+    const transfer_binding: transfer.ServiceHandle = .{ .resource_owner = .{ .session = accepted.handle }, .origin_session = accepted.handle, .kind = .transfer, .binding_id = 9001, .binding_generation = 1 };
+    const shared = if (mixed) try worker.transferService(transfer_binding) else null;
+    const upload_path = try std.fs.path.join(a, &.{ controls, "upload.bin" });
+    var upload_done = false;
+    var download_cancelled = false;
+    var transfer_job: ?transfer.EngineJobId = null;
+    if (shared) |service| {
+        const payload = try a.alloc(u8, 256 * 1024);
+        @memset(payload, 'U');
+        try write(init.io, upload_path, payload);
+        const api = service.engine();
+        transfer_job = try api.open(api.ctx, .{ .session_id = @backingInt(accepted.handle.session_id), .transfer_binding = transfer_binding, .direction = .upload, .sources = &.{upload_path}, .remote_dir = "/", .local_dir = controls, .md5_check = false });
+    }
     const frames = try a.alloc(u8, @import("vt/text_slot.zig").TextSlot.default_capacity);
     var frame_generation: u64 = 0;
     var shell_bytes: usize = 0;
     var heartbeats: usize = 0;
+    var echo_count: usize = 0;
+    var echo_pending = false;
+    var echo_sent: i128 = 0;
+    var echo_max_ns: i128 = 0;
+    var echo_marker: [64]u8 = undefined;
+    var echo_marker_len: usize = 0;
     var ready = false;
     var paused = false;
     var resumed = false;
@@ -158,6 +180,26 @@ pub fn main(init: std.process.Init) !void {
         if (try worker.text.take(frame_generation, frames)) |frame| {
             frame_generation = frame.generation;
             shell_bytes += frame.text.len;
+            if (mixed and echo_pending and std.mem.indexOf(u8, frame.text, echo_marker[0..echo_marker_len]) != null) {
+                echo_max_ns = @max(echo_max_ns, clock.monotonicNs() - echo_sent);
+                echo_count += 1;
+                echo_pending = false;
+            }
+        }
+        if (shared) |service| {
+            const api = service.engine();
+            while (api.poll(api.ctx)) |event| {
+                if (transfer_job == null or event.job != transfer_job.? or event.state == .running or event.job_cleanup != .released) continue;
+                if (!upload_done) {
+                    if (event.state != .succeeded) return error.MixedUploadFailed;
+                    upload_done = true;
+                    transfer_job = try api.open(api.ctx, .{ .session_id = @backingInt(accepted.handle.session_id), .transfer_binding = transfer_binding, .direction = .download, .sources = &.{"/source.bin"}, .remote_dir = "/", .local_dir = controls, .md5_check = false, .pacing_kbps = 128 });
+                } else {
+                    if (event.state != .cancelled) return error.MixedCancelFailed;
+                    download_cancelled = true;
+                    transfer_job = null;
+                }
+            }
         }
         const runtime = thread.reconnectSnapshot();
         if (ready and reconnect and !paused and exists(init.io, pause_path) and runtime.cleanup == .released and (runtime.phase == .waiting or runtime.phase == .ended)) {
@@ -177,8 +219,9 @@ pub fn main(init: std.process.Init) !void {
             _ = try backend.safeTick();
         }
         if (!paused or resumed) {
-            if (runtime.phase == .active and clock.monotonicNs() >= heartbeat_at) {
-                worker.pushInput("TTY_HEARTBEAT\r\n") catch |err| {
+            if (runtime.phase == .active and clock.monotonicNs() >= heartbeat_at and (!mixed or !echo_pending)) {
+                const heartbeat = if (mixed) try std.fmt.bufPrint(&echo_marker, "TTY_{d}_END\r\n", .{heartbeats}) else "TTY_HEARTBEAT\r\n";
+                worker.pushInput(heartbeat) catch |err| {
                     // The real attached receipt schedules replay's input gate
                     // in the next owner tick. Application input waits for it.
                     if (err == error.DisconnectedApplicationInput) {
@@ -187,6 +230,11 @@ pub fn main(init: std.process.Init) !void {
                     }
                     return err;
                 };
+                if (mixed) {
+                    echo_marker_len = heartbeat.len - 2;
+                    echo_sent = clock.monotonicNs();
+                    echo_pending = true;
+                }
                 heartbeats += 1;
                 heartbeat_at = clock.monotonicNs() + 15 * std.time.ns_per_ms;
             }
@@ -200,9 +248,14 @@ pub fn main(init: std.process.Init) !void {
                 if (ready and !stopping and exists(init.io, stop_path)) {
                     stopping = true;
                     stop_started = clock.monotonicNs();
+                    if (shared) |service| {
+                        if (!upload_done or service.read_bytes.load(.acquire) == 0) return error.MixedLoadNotStarted;
+                        const api = service.engine();
+                        api.cancel(api.ctx, transfer_job orelse return error.MissingTransferJob);
+                    }
                     if (parent_close) close_key = try domain.requestClose(accepted.handle, .{ .release_forwards = .{ .context = &authority, .run = Authority.releaseForwards } }) else _ = backend.requestStop(accepted.handle);
                 }
-                if (stopping and value.cleanup == .released) {
+                if (stopping and value.cleanup == .released and (!mixed or download_cancelled)) {
                     if (close_key) |key| _ = try domain.closeReceipt(accepted.handle, key, .release_forwards, .released);
                     break;
                 }
@@ -226,6 +279,15 @@ pub fn main(init: std.process.Init) !void {
         try write(init.io, try std.fs.path.join(a, &.{ controls, "runner-report.json" }), try std.fmt.allocPrint(a, "{{\"real_worker_thread\":true,\"real_shared_host\":true,\"same_native_session\":true,\"parent_close_under_withheld_ack\":{},\"parent_close_under_withheld_open\":{},\"tty_after_forward_stop\":false,\"active\":{d},\"bytes_up\":{d},\"bytes_down\":{d},\"stop_ms\":{d},\"forward_cleanup_released\":true,\"parent_cleanup_released\":true}}\n", .{ std.mem.eql(u8, mode, "parent-close"), std.mem.eql(u8, mode, "parent-open-close"), final.stats.connections_active, final.stats.bytes_up, final.stats.bytes_down, stop_ms }));
         std.debug.print("PASS worker-parent-close withheld_ack=true cleanup=released\n", .{});
         return;
+    }
+    if (shared) |service| {
+        if (echo_count < 20 or echo_max_ns >= 500 * std.time.ns_per_ms) return error.MixedTerminalLatencyExceeded;
+        service.requestClose();
+        const until = clock.monotonicNs() + 3 * std.time.ns_per_s;
+        while (service.closeReceipt() != .released and clock.monotonicNs() < until) pause();
+        if (service.closeReceipt() != .released or service.backend.faultJobCount() != 0) return error.MixedSftpCleanupPending;
+        try service.routingReleased(transfer_binding);
+        try write(init.io, try std.fs.path.join(a, &.{ controls, "mixed-report.json" }), try std.fmt.allocPrint(a, "{{\"upload_bytes\":{d},\"download_bytes\":{d},\"eagain_count\":{d},\"terminal_echoes\":{d},\"terminal_max_ms\":{d},\"cancel_released\":true,\"sftp_released\":true}}\n", .{ service.written_bytes.load(.acquire), service.read_bytes.load(.acquire), service.would_block_count.load(.acquire), echo_count, @divTrunc(echo_max_ns, std.time.ns_per_ms) }));
     }
     try worker.pushInput("AFTER_SOCKS_STOP\n");
     var marker_seen = false;

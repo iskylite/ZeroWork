@@ -62,6 +62,7 @@ pub fn onKey(self: *Surface, key: ui.events.KeyCode, modifiers: ui.events.Modifi
 fn enqueueKey(self: *Surface, event: terminal.KeyEvent) !void {
     if (self.snapshot == null or self.snapshot.?.read_only) return error.ReadOnlyTerminal;
     if (self.pending.items.len >= 256) return error.InputQueueFull;
+    if (self.timing) |trace| trace.begin(self.next_input + self.pending.items.len);
     try self.pending.append(self.cx.allocator, .{ .key = event });
     try self.pump();
 }

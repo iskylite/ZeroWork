@@ -61,6 +61,8 @@ pub const Route = struct {
         }
         for (options, 0..) |original, i| {
             var current = original;
+            var deadline = c.zw_ssh_monotonic_ms() + @as(c_longlong, if (current.connect_timeout_ms == 0) 8000 else current.connect_timeout_ms);
+            current.network_deadline_ms = &deadline;
             current.hop_index = i;
             current.hop_count = options.len;
             current.open_shell = i + 1 == options.len and original.open_shell;
@@ -77,8 +79,7 @@ pub const Route = struct {
                 current.report(.tunnel, .started, null);
                 // This phase targets the next hop. Attribute forwarding failures
                 // to that edge, rather than reporting a generic target failure.
-                parent.session.setBlocking();
-                parent.channel = parent.session.openDirectTcpip(current.host, current.port) catch |err| {
+                parent.channel = parent.session.openDirectTcpipDriven(current.host, current.port, current) catch |err| {
                     current.report(.tunnel, .failed, err);
                     return err;
                 };

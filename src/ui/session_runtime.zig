@@ -154,6 +154,7 @@ pub const SessionRuntime = struct {
     worker: *SshWorker,
     thread: *WorkerThread,
     checkpoint: *CheckpointController,
+    checkpoint_writer: ?*@import("../vt/checkpoint_writer.zig").Writer = null,
     host: [:0]u8,
     user: [:0]u8,
     terminal_type: [:0]u8,
@@ -260,7 +261,12 @@ pub const SessionRuntime = struct {
             applog.err(.ssh, "session recording unavailable: {s}", .{@errorName(err)});
         };
         errdefer checkpoint.deinit();
-        if (log_directory != null) worker.bindCheckpoint(checkpoint);
+        const checkpoint_writer = if (log_directory != null) @import("../vt/checkpoint_writer.zig").Writer.start(allocator, checkpoint) catch |err| unavailable: {
+            applog.err(.ssh, "session recording writer unavailable: {s}", .{@errorName(err)});
+            break :unavailable null;
+        } else null;
+        errdefer if (checkpoint_writer) |writer| writer.deinit();
+        worker.io.checkpoint_writer = checkpoint_writer;
         const thread = try WorkerThread.start(allocator, worker);
         errdefer thread.deinit();
         applog.info(.ssh, "worker thread started", .{});
@@ -270,6 +276,7 @@ pub const SessionRuntime = struct {
             .worker = worker,
             .thread = thread,
             .checkpoint = checkpoint,
+            .checkpoint_writer = checkpoint_writer,
             .host = host,
             .user = user,
             .terminal_type = terminal_type,
@@ -334,6 +341,8 @@ pub const SessionRuntime = struct {
             applog.warn(.workspace, "session {d} archive failed: {s}", .{ request.session_id, @errorName(err) });
         };
         self.thread.deinit(); // joins the worker thread and frees worker+thread
+        if (self.checkpoint_writer) |writer| writer.deinit();
+        self.checkpoint_writer = null;
         const log_io = self.checkpoint.io;
         self.checkpoint.deinit();
         if (self.log_directory) |dir| dir.close(log_io);

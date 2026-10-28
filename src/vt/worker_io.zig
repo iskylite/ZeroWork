@@ -2,10 +2,10 @@ const std = @import("std");
 const FeedBridge = @import("feed_bridge.zig").FeedBridge;
 const InputQueue = @import("input_queue.zig").InputQueue;
 const ChannelWriter = @import("channel_pump.zig").ChannelWriter;
-const pumpInputBatch = @import("channel_pump.zig").pumpInputBatch;
 const Handler = @import("worker_dispatch.zig").Handler;
 const Timeline = @import("timeline.zig").Timeline;
 const CheckpointController = @import("checkpoint_controller.zig").Controller;
+const output_timing = @import("output_timing.zig");
 pub const Read = @import("../host/terminal_service.zig").Read;
 
 pub const ChannelReader = struct {
@@ -25,8 +25,12 @@ pub const WorkerIo = struct {
     writer: ChannelWriter,
     read_buffer: []u8,
     write_buffer: []u8,
+    // A native EAGAIN retry must retain the exact pointer, length and bytes.
+    write_len: usize = 0,
+    write_blocked: bool = false,
     timeline: ?*Timeline = null,
     checkpoint: ?*CheckpointController = null,
+    checkpoint_writer: ?*@import("checkpoint_writer.zig").Writer = null,
     stream_offset: u64 = 0,
     reply_buffer: [4096]u8 = undefined,
     reply_len: usize = 0,
@@ -37,6 +41,9 @@ pub const WorkerIo = struct {
     /// A readiness EOF is only a hangup hint. Buffered protocol/PTY bytes
     /// remain readable until the transport itself returns .eof.
     hangup_seen: bool = false,
+    /// A full batch does not prove libssh2's internal packet queue is empty.
+    /// Continue on the next worker turn without waiting for socket readiness.
+    read_budget_exhausted: bool = false,
     /// Monotonic arrival time for shell readiness; independent of burst logs.
     last_output_ns: i128 = 0,
     // Burst-arrival diagnostics: timestamps the first and last data read of
@@ -58,8 +65,11 @@ pub const WorkerIo = struct {
     }
 
     fn drainOutput(self: *WorkerIo, max_empty_retries: u8) !void {
+        self.read_budget_exhausted = false;
         if (self.closed) return;
         if (self.read_buffer.len == 0) return error.EmptyReadBuffer;
+        const started = if (output_timing.enabled) output_timing.now() else 0;
+        var retries: u32 = 0;
         // Drain the socket in one wakeup: aggregating reads into a single
         // feed+publish pass cuts per-batch projection work and keeps the SSH
         // receive window moving under sustained output (dmesg without tail).
@@ -89,6 +99,7 @@ pub const WorkerIo = struct {
                     // instead of draining back-to-back like the OpenSSH client.
                     if (eagain_retries >= max_empty_retries) break;
                     eagain_retries += 1;
+                    if (output_timing.enabled) retries += 1;
                     std.Thread.yield() catch {};
                     continue;
                 },
@@ -103,6 +114,9 @@ pub const WorkerIo = struct {
             }
         }
 
+        self.read_budget_exhausted = total == self.read_buffer.len and !eof and read_error == null;
+        const parsed = if (output_timing.enabled) output_timing.now() else 0;
+        defer if (output_timing.enabled) output_timing.read(@intFromPtr(self), started, parsed, total, if (read_error != null) "error" else if (eof) "eof" else if (total == self.read_buffer.len) "full" else "would_block", retries);
         // Never discard a successfully read prefix when a later read reports
         // EOF or an error. Publication backpressure is handled by FeedBridge;
         // an actual parser failure must reach the owning worker.
@@ -115,6 +129,7 @@ pub const WorkerIo = struct {
     }
 
     pub fn feedOutput(self: *WorkerIo, bytes: []const u8) !void {
+        if (@import("input_timing.zig").enabled) if (self.feed.text_slot) |slot| slot.timing.received(self.feed.engine.snapshot().output_sequence + 1);
         self.last_output_ns = @import("../platform/realtime.zig").monotonicNs();
         const timestamp_ms = if (self.timestamp_fn) |timestamp_fn| timestamp_fn(self.timestamp_ctx orelse unreachable) else 0;
         // Session-recording side effects are best-effort: a timeline or
@@ -123,6 +138,10 @@ pub const WorkerIo = struct {
         if (self.timeline) |timeline| timeline.append(timestamp_ms, self.stream_offset, bytes) catch |err| {
             std.log.warn("[worker] timeline append dropped: {s}", .{@errorName(err)});
             self.timeline = null;
+        };
+        if (self.checkpoint_writer) |writer| writer.append(bytes, timestamp_ms) catch |err| {
+            std.log.warn("[worker] recording queue stopped: {s}", .{@errorName(err)});
+            self.checkpoint_writer = null;
         };
         if (self.checkpoint) |checkpoint| _ = checkpoint.append(bytes, timestamp_ms) catch |err| {
             std.log.warn("[worker] checkpoint append dropped: {s}", .{@errorName(err)});
@@ -169,11 +188,24 @@ pub const WorkerIo = struct {
     /// starting a reply so UTF-8 and bracketed pastes are never bisected.
     pub fn pumpWrites(self: *WorkerIo) !void {
         if (self.closed) return;
+        self.write_blocked = false;
         if (!self.repliesPending()) {
-            if (self.input.pending() != 0) {
-                _ = try pumpInputBatch(self.input, self.writer, self.write_buffer, 4);
-                if (self.input.pending() != 0) return;
+            for (0..4) |_| {
+                if (self.write_len == 0) self.write_len = self.input.peek(self.write_buffer).len;
+                if (self.write_len == 0) break;
+                const count = try self.writer.write(self.write_buffer[0..self.write_len]);
+                if (count > self.write_len) return error.InvalidWriteCount;
+                if (count == 0) {
+                    self.write_blocked = true;
+                    return;
+                }
+                try self.input.consume(count);
+                if (self.feed.text_slot) |slot| slot.timing.written(0, self.input.read_index.load(.acquire));
+                // A positive result completes this call; the next call may
+                // take a new queue snapshot, including newly arrived keys.
+                self.write_len = 0;
             }
+            if (self.input.pending() != 0) return;
             self.reply_len = try self.feed.engine.readReply(&self.reply_buffer);
             self.reply_offset = 0;
         }
@@ -182,6 +214,7 @@ pub const WorkerIo = struct {
             const count = try self.writer.write(bytes);
             if (count > bytes.len) return error.InvalidWriteCount;
             self.reply_offset += count;
+            self.write_blocked = count == 0;
         }
     }
 
@@ -195,12 +228,18 @@ pub const WorkerIo = struct {
     pub fn pollChannelRead(self: *WorkerIo) !void {
         try self.drainOutput(0);
     }
+    pub fn readTimeout(self: *const WorkerIo, timeout_ms: u32) u32 {
+        return if (self.read_budget_exhausted) 0 else timeout_ms;
+    }
     fn onClosed(ctx: *anyopaque) void {
         @as(*WorkerIo, @ptrCast(@alignCast(ctx))).hangup_seen = true;
     }
 
     pub fn resetTransport(self: *WorkerIo, reader: ChannelReader, writer: ChannelWriter) void {
+        self.read_budget_exhausted = false;
         if (self.output_filter) |filter| if (filter.finish) |finish| finish(filter.context, self) catch {};
+        self.write_len = 0;
+        self.write_blocked = false;
         self.reply_offset = 0;
         self.reply_len = 0;
         // Old peer queries never become input to a successor shell.
@@ -460,4 +499,103 @@ test "worker IO sends VT replies through partial writes without bisecting paste 
     worker.resetTransport(worker.reader, worker.writer);
     try worker.pumpWrites();
     try std.testing.expectEqualStrings(paste ++ "\x1b[1;1RKEY", channel.sent[0..channel.sent_len]);
+}
+
+test "worker IO pins an EAGAIN write while new input arrives" {
+    const RetryWriter = struct {
+        bytes: [32]u8 = undefined,
+        length: usize = 0,
+        address: usize = 0,
+        retry: bool = false,
+        accepted: [64]u8 = undefined,
+        used: usize = 0,
+        fn write(raw: *anyopaque, bytes: []const u8) !usize {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!self.retry and self.used == 0) {
+                self.length = bytes.len;
+                self.address = @intFromPtr(bytes.ptr);
+                @memcpy(self.bytes[0..bytes.len], bytes);
+                self.retry = true;
+                return 0;
+            }
+            if (self.retry) {
+                try std.testing.expectEqual(self.address, @intFromPtr(bytes.ptr));
+                try std.testing.expectEqualStrings(self.bytes[0..self.length], bytes);
+                self.retry = false;
+            }
+            @memcpy(self.accepted[self.used..][0..bytes.len], bytes);
+            self.used += bytes.len;
+            return bytes.len;
+        }
+    };
+    var input = try InputQueue.init(std.testing.allocator, 64);
+    defer input.deinit(std.testing.allocator);
+    var engine: FakeEngine = .{};
+    var channel: FakeChannel = .{ .output = "" };
+    var writer: RetryWriter = .{};
+    var read_buffer: [32]u8 = undefined;
+    var write_buffer: [32]u8 = undefined;
+    var worker: WorkerIo = .{ .feed = .{ .engine = VtEngine.from(FakeEngine, &engine) }, .input = &input, .reader = .{ .ctx = &channel, .read_fn = FakeChannel.read }, .writer = .{ .ctx = &writer, .write_fn = RetryWriter.write }, .read_buffer = &read_buffer, .write_buffer = &write_buffer };
+    try input.push("first");
+    try worker.pumpWrites();
+    try std.testing.expect(worker.write_blocked);
+    try input.push("second");
+    try worker.pumpWrites();
+    try std.testing.expectEqualStrings("firstsecond", writer.accepted[0..writer.used]);
+    try std.testing.expect(!worker.write_blocked);
+    try std.testing.expectEqual(@as(usize, 0), input.pending());
+}
+
+test "worker IO drains buffered packets after socket readiness disappears without timer pacing" {
+    const BufferedChannel = struct {
+        channel: FakeChannel = .{ .output = "abcdefghijklmn" },
+        fd: i32,
+        signal_consumed: bool = false,
+        fn read(ctx: *anyopaque, buffer: []u8) !Read {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            if (!self.signal_consumed) {
+                var signal: [1]u8 = undefined;
+                if (std.c.read(self.fd, &signal, 1) != 1) return error.ReadFailed;
+                self.signal_consumed = true;
+            }
+            return FakeChannel.read(&self.channel, buffer);
+        }
+    };
+    var pipe: [2]c_int = undefined;
+    if (std.c.pipe(&pipe) != 0) return error.PipeFailed;
+    defer _ = std.c.close(pipe[0]);
+    defer _ = std.c.close(pipe[1]);
+    var channel: BufferedChannel = .{ .fd = pipe[0] };
+    var engine: FakeEngine = .{};
+    var input = try InputQueue.init(std.testing.allocator, 8);
+    defer input.deinit(std.testing.allocator);
+    var read_buffer: [4]u8 = undefined;
+    var write_buffer: [4]u8 = undefined;
+    var worker: WorkerIo = .{
+        .feed = .{ .engine = VtEngine.from(FakeEngine, &engine) },
+        .input = &input,
+        .reader = .{ .ctx = &channel, .read_fn = BufferedChannel.read },
+        .writer = .{ .ctx = &channel.channel, .write_fn = FakeChannel.write },
+        .read_buffer = &read_buffer,
+        .write_buffer = &write_buffer,
+    };
+    var loop = try @import("worker_loop.zig").Loop.init(pipe[0], worker.handler());
+    defer loop.deinit();
+    try loop.setInterest(.{ .read = true });
+    try std.testing.expectEqual(@as(isize, 1), std.c.write(pipe[1], "x", 1));
+    const started = output_timing.now();
+    try loop.step(worker.readTimeout(1000)); // The sole socket wakeup.
+    try worker.pollChannelRead();
+    try std.testing.expect(worker.read_budget_exhausted);
+    while (worker.read_budget_exhausted) {
+        try loop.step(worker.readTimeout(1000)); // No socket bytes remain.
+        try worker.pollChannelRead();
+    }
+    try std.testing.expect(output_timing.now() - started < std.time.ns_per_s);
+    try std.testing.expectEqualStrings("abcdefghijklmn", engine.fed[0..engine.fed_len]);
+    try std.testing.expectEqual(@as(u32, 1000), worker.readTimeout(1000));
+    // Transport replacement must not inherit the previous queue's state.
+    worker.read_budget_exhausted = true;
+    worker.resetTransport(worker.reader, worker.writer);
+    try std.testing.expectEqual(@as(u32, 1000), worker.readTimeout(1000));
 }

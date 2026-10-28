@@ -3258,12 +3258,12 @@ pub const Workspace = struct {
         }, .{});
         try subtitle.appendChild(allocator, try ui.text(cx, "此会话仍有任务运行，关闭将影响以下内容。", .{
             .font_size = 11,
-            .color = p.fg_muted,
+            .color = p.fg_secondary,
             .wrap = .word,
         }));
         try card.appendChild(allocator, subtitle);
 
-        // Risk rows (category → detail, thin dividers between rows) — the
+        // Risk rows (category → detail, separated by spacing) — the
         // mockup-close-confirm rule list: 传输 / AI / SOCKS5 / 历史 plus the
         // live-session SSH row. setRiskDetail rewrites details by category at
         // show time; rows without live state keep the design-text default.
@@ -3279,14 +3279,7 @@ pub const Workspace = struct {
             .direction = .column,
             .margin = .{ .top = 12, .right = 0, .bottom = 0, .left = 0 },
         }, .{});
-        for (risk_specs, 0..) |spec, row_index| {
-            if (row_index > 0) {
-                try rows.appendChild(allocator, try ui.box(cx, .{
-                    .width = .fill(),
-                    .height = .{ .px = 1 },
-                    .background = ui.Color.rgb(0xF2, 0xF9, 0xF4),
-                }, .{}));
-            }
+        for (risk_specs) |spec| {
             const row = try ui.box(cx, .{
                 .width = .fill(),
                 .direction = .row,
@@ -4280,7 +4273,7 @@ pub const Workspace = struct {
             if (job.err) |err| {
                 target.failed = true;
                 var buffer: [768]u8 = undefined;
-                const text = std.fmt.bufPrint(&buffer, "{s} · 会话 {d} 连接失败: {s}", .{ target.titleSlice(), target.id, @errorName(err) }) catch "连接失败";
+                const text = std.fmt.bufPrint(&buffer, "{s} · 会话 {d} 连接失败: {s}", .{ target.titleSlice(), target.id, @import("../proto/ssh/handshake_failure.zig").description(err) orelse @errorName(err) }) catch "连接失败";
                 target.terminal.?.setOutput(self.cx, text) catch {};
                 if (self.active_tab == self.tabIndex(target.id)) self.status(text);
                 self.notifyConnectionFailure(job, text);

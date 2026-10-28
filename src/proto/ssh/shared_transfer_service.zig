@@ -349,6 +349,10 @@ pub const Service = struct {
                 const handle = try nativeFile(op.file);
                 const count = c.zw_libssh2_sftp_write(handle.handle, op.bytes.ptr, op.bytes.len);
                 if (count < 0) return self.nativeError(count);
+                // libssh2 may return zero after sending only part of an SFTP
+                // packet: no payload has been acknowledged yet. Keep this RPC
+                // and its arguments pinned, just as for native EAGAIN.
+                if (count == 0 and op.bytes.len != 0) return error.WouldBlock;
                 _ = self.written_bytes.fetchAdd(@intCast(count), .monotonic);
                 return .{ .number = @intCast(count) };
             },

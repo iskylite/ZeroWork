@@ -393,7 +393,7 @@ fn resultText(entry: Progress.progress.Journal.Entry) []const u8 {
             error.ConnectionTimeout, error.Timeout => "连接超时",
             error.ConnectionRefused => "连接被拒绝",
             error.Cancelled => "已取消",
-            else => @errorName(failure),
+            else => @import("../proto/ssh/handshake_failure.zig").description(failure) orelse @errorName(failure),
         } else "连接失败",
     };
 }

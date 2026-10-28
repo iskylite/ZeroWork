@@ -185,8 +185,10 @@ pub fn providerSelect() ButtonStyle {
 pub fn paintSwitch(cx: *ui.Cx, node: *ui.Node, enabled: bool) void {
     node.setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_width }, .height = .{ .px = geometry.switch_height }, .gap = 0, .padding = .ZERO, .flex_shrink = 0 });
     const track = node.children.items[0];
-    track.setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_width }, .height = .{ .px = geometry.switch_height }, .background = if (enabled) theme.current().accent else theme.current().border, .border = .{ .width = 0, .radius = 9 } });
-    track.children.items[0].setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_thumb }, .height = .{ .px = geometry.switch_thumb }, .translate_x = if (enabled) 14 else 2, .translate_y = 0, .background = ui.Color.WHITE, .border = .{ .radius = 7 } });
+    track.setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_width }, .height = .{ .px = geometry.switch_height }, .background = if (enabled) theme.current().action_accent else theme.switchTrackOff(), .border = .{ .width = 0, .radius = 9 } });
+    // Pin the thumb to the track's layout coordinates. A translated absolute
+    // child can retain its old composite position inside a material overlay.
+    track.children.items[0].setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_thumb }, .height = .{ .px = geometry.switch_thumb }, .inset = .{ .left = .{ .px = if (enabled) 14 else 2 }, .top = .{ .px = 2 } }, .translate_x = 0, .translate_y = 0, .background = ui.Color.WHITE, .border = .{ .radius = 7 } });
 }
 pub fn shortcutGroup(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 4, .flex_shrink = 0 };

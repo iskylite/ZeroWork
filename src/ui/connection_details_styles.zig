@@ -3,7 +3,7 @@
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
 pub const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
-pub const width: f32 = 344;
+pub const width: f32 = 380;
 pub const node_width: f32 = 430;
 pub const node_height: f32 = 370;
 pub const margin: f32 = 8;
@@ -12,11 +12,11 @@ pub const gap: f32 = 6;
 pub const pointer_size: f32 = 12;
 
 pub fn height(hops: usize) f32 {
-    return 318 + @as(f32, @floatFromInt(hops -| 1)) * 74;
+    return 312 + @as(f32, @floatFromInt(hops -| 1)) * 82;
 }
 pub fn panel(h: f32, viewport_width: f32) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = @min(width, @max(0, viewport_width - margin * 2)) }, .height = .{ .px = h }, .direction = .column, .padding = ui.Padding.all(15), .gap = 0, .background = c.overlay, .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
+    return .{ .width = .{ .px = @min(width, @max(0, viewport_width - margin * 2)) }, .height = .{ .px = h }, .direction = .column, .padding = ui.Padding.all(16), .gap = 0, .background = c.overlay, .border = .{ .radius = 11 }, .shadow = .{ .offset_y = 24, .blur = 32, .color = c.shadow } };
 }
 pub fn wrapper() ui.BoxStyle {
     return .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 } };
@@ -38,14 +38,15 @@ pub fn row(h: f32) ui.BoxStyle {
 }
 pub fn info() ui.BoxStyle {
     var result = row(26);
-    result.padding = .{ .left = 6, .right = 6 };
+    result.padding = .{ .left = 10, .right = 10 };
+    result.gap = 8;
     result.border = .{ .radius = 7 };
     return result;
 }
 pub fn card() ButtonStyle {
     // Button keeps its empty default content slot. The explicit cardContent
     // owns the Figma 8 px gaps so that slot adds no extra horizontal gap.
-    return .{ .width = .fill(), .height = .{ .px = 52 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 0, .padding = ui.Padding.all(10), .corner_radius = 8, .border_width = 0, .background = theme.current().well, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 60 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 0, .padding = ui.Padding.all(10), .corner_radius = 8, .border_width = 0, .background = theme.popupInset(), .flex_shrink = 0 };
 }
 pub fn cardContent() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .row, .align_items = .center, .gap = 8, .min_width = 0 };
@@ -80,14 +81,14 @@ pub fn title() ui.TextStyle {
     return text(13, 700, 20, false);
 }
 pub fn name() ui.TextStyle {
-    return text(11.5, 500, 18, false);
+    return text(13, 600, 20, false);
 }
 pub fn endpoint() ui.TextStyle {
-    return text(10.5, 400, 17, true);
+    return text(12, 400, 18, true);
 }
 pub fn infoText(trailing_value: bool) ui.TextStyle {
-    var result = text(if (trailing_value) 10.5 else 11, if (trailing_value) 500 else 400, 16, false);
-    result.color = if (trailing_value) theme.current().fg_2 else theme.current().fg_1;
+    var result = text(12, if (trailing_value) 500 else 400, 16, false);
+    result.color = if (trailing_value) theme.current().fg_1 else theme.current().fg_2;
     result.text_align = if (trailing_value) .end else .start;
     return result;
 }
@@ -102,7 +103,7 @@ pub fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };
 }
 pub fn action(size: f32, surface: bool) ButtonStyle {
-    return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .gap = 0, .corner_radius = 7, .border_width = 0, .background = if (surface) theme.current().surface_2 else ui.Color.TRANSPARENT, .flex_shrink = 0 };
+    return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .gap = 0, .corner_radius = 7, .border_width = 0, .background = if (surface) theme.popupAction() else ui.Color.TRANSPARENT, .flex_shrink = 0 };
 }
 pub fn hover() ButtonStyle {
     return .{ .background = theme.current().hover };
@@ -178,12 +179,12 @@ pub fn primary() ButtonStyle {
 // V3 chain-only styles keep the shared node detail modal on its existing recipe.
 pub fn chainHeader() ui.BoxStyle {
     var style = header();
-    style.height = .{ .px = 26 };
+    style.height = .{ .px = 28 };
     style.gap = 8;
     return style;
 }
 pub fn chainTitle() ui.TextStyle {
-    return text(12, 700, 20, false);
+    return text(15, 600, 20, false);
 }
 pub fn chainBody() ui.BoxStyle {
     var style = stack();
@@ -197,8 +198,8 @@ pub fn chainFooter() ui.BoxStyle {
     return style;
 }
 pub fn chainAction(w: f32, primary_action: bool) ButtonStyle {
-    return .{ .width = .{ .px = w }, .height = .{ .px = 30 }, .padding = .{}, .gap = 0, .font_size = 11, .text_color = if (primary_action) theme.actionForeground(theme.current().action_accent) else theme.current().fg_1, .background = if (primary_action) theme.current().action_accent else theme.current().well, .corner_radius = 8, .border_width = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = 30 }, .padding = .{}, .gap = 0, .font_size = 13, .text_color = if (primary_action) theme.actionForeground(theme.current().action_accent) else theme.current().fg_1, .background = if (primary_action) theme.current().action_accent else theme.popupAction(), .corner_radius = 8, .border_width = 0 };
 }
-pub fn chainBadge(online: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = 46 }, .height = .{ .px = 18 }, .padding = .{ .left = 3, .right = 3 }, .background = if (online) theme.current().ok.withAlpha(26) else theme.current().surface_2, .border = .{ .radius = 5 }, .flex_shrink = 0 };
+pub fn chainBadge(_: bool) ui.BoxStyle {
+    return .{ .width = .{ .px = 46 }, .height = .{ .px = 18 }, .padding = .{ .left = 3, .right = 3 }, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 5 }, .flex_shrink = 0 };
 }

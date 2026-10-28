@@ -223,10 +223,10 @@ pub fn summaryOptions(_: *const ui.ThemeTokens) ui.TextStyle {
 }
 
 // Field error prototype 319:703127: 10.5px / 16px, input32 + gap4 + error16.
-// Radios communicate selection through their circle; the theme's transparent
-// focus token otherwise opts the entire option into a filled focus surface.
+// Keep keyboard focus visible without the theme's filled focus surface.
+// A zero-width outline reaches the renderer as a filled rectangle.
 pub fn radioFocus() ui.FocusRingConfig {
-    return .{ .color = theme.current().accent, .width = 0, .offset = 0 };
+    return .{ .color = theme.current().accent, .width = 1, .offset = 2 };
 }
 
 pub fn fieldRow() ui.BoxStyle {

@@ -107,7 +107,7 @@ pub fn main(init: std.process.Init) !void {
     c.zw_libssh2_session_set_timeout(session.handle.?, 1000);
     if (c.zw_ssh_socket_set_nonblocking(fd) != 0) return error.NonblockingFailed;
     c.zw_libssh2_session_nonblocking(session.handle.?);
-    const drive: c.ZW_SSH_DRIVE = .{ .socket_fd = fd, .timeout_ms = 1000, .cancelled = null, .ctx = null };
+    const drive: c.ZW_SSH_DRIVE = .{ .socket_fd = fd, .timeout_ms = 1000, .deadline_ms = null, .cancelled = null, .ctx = null };
     if (c.zw_libssh2_session_handshake_driven(session.handle.?, &drive) != 0) return error.HandshakeFailed;
     if (c.zw_libssh2_auth_password_driven(session.handle.?, "fixture", "fixture-password", &drive) != 0) return error.AuthFailed;
     session.state = .active;

@@ -129,7 +129,7 @@ pub const SshWorker = struct {
     search_row: std.atomic.Value(usize) = .init(0),
     search_seq: std.atomic.Value(u32) = .init(0),
     applied_search_seq: u32 = 0,
-    next_keepalive_ns: i128 = 0,
+    keepalive_watch: @import("../proto/ssh/keepalive_watch.zig").Watch = .{},
     /// IO-owner only. An SSH CHANNEL_EOF is independent of transport loss.
     shell_eof_ns: ?i128 = null,
     shell_exit_code: ?i32 = null,
@@ -174,7 +174,7 @@ pub const SshWorker = struct {
         worker.allocator = allocator;
         worker.library = library;
         worker.options = session_options;
-        worker.next_keepalive_ns = realtime.monotonicNs() + @as(i128, runtime.keepalive_sec) * std.time.ns_per_s;
+        worker.keepalive_watch = .{};
         worker.shell_eof_ns = null;
         worker.shell_exit_code = null;
         worker.session = session;
@@ -200,6 +200,7 @@ pub const SshWorker = struct {
         worker.input = input;
         worker.wakeup = wakeup;
         worker.input.wakeup = &worker.wakeup;
+        worker.text.producer_wakeup = &worker.wakeup;
         worker.read_buffer = read_buffer;
         worker.write_buffer = write_buffer;
         worker.timeline = timeline;
@@ -320,13 +321,18 @@ pub const SshWorker = struct {
     }
 
     pub fn step(self: *SshWorker, timeout_ms: u32) !void {
+        if (self.text.projection_requested.swap(false, .acq_rel)) self.io.feed.republish_pending = true;
         try self.applyPendingScrollbackLimit();
         for (self.forward_services[0..self.forward_count]) |service| if (service) |value| if (value.parentCloseRequested()) return error.ForwardParentClosing;
         if (!self.loop_active) return error.WorkerStopped;
         if (self.io.closed) return self.finishShellStep();
         const shared_pending = if (self.shared_transfer) |shared| shared.hasPending() else false;
         const forward_pending = if (self.targetForward()) |service| service.hasListener() else false;
-        self.loop.step(if (shared_pending) @min(timeout_ms, 1) else if (forward_pending) @min(timeout_ms, 5) else if (self.exec_bridge.hasPending()) @min(timeout_ms, 10) else timeout_ms) catch |err| {
+        const wait_ms = if (shared_pending) @min(timeout_ms, 1) else if (forward_pending or self.input.pending() != 0 or self.io.repliesPending()) @min(timeout_ms, 5) else if (self.exec_bridge.hasPending()) @min(timeout_ms, 10) else timeout_ms;
+        // A bounded read can leave packets in libssh2 even when the socket is
+        // empty. Yield through the rest of this step, but don't sleep before
+        // the next batch; only would-block returns us to readiness waiting.
+        self.loop.step(self.io.readTimeout(self.io.feed.publicationTimeout(wait_ms, realtime.milliseconds(undefined)))) catch |err| {
             // A readable event can consume protocol EOF before a writable
             // event from the same batch reports that the shell is closed.
             if (self.io.closed) return self.finishShellStep();
@@ -336,7 +342,7 @@ pub const SshWorker = struct {
         // UI-side backpressure retry: a text frame publication deferred while
         // the UI was a generation behind is retried here. This must never be
         // classified as a connection failure — only socket/VT errors are.
-        if (self.io.feed.republish_pending) self.io.feed.publishCurrentText(realtime.milliseconds(undefined));
+        self.publishPendingPresentation();
         // SSH flow-control deadlock breaker: probe the channel EVERY step.
         // libssh2's channel_read entry force-sends the receive-window adjust
         // the remote needs to keep sending, and the remote stops (and no
@@ -355,21 +361,11 @@ pub const SshWorker = struct {
         if (self.shared_transfer) |shared| try shared.step();
         if (self.targetForward()) |service| try service.step(&self.session);
         try self.enqueueStartupIfReady(realtime.monotonicNs(), @max(self.shell_opened_ns, self.io.last_output_ns));
-        if (self.options.keepalive_sec != 0) {
-            const now = realtime.monotonicNs();
-            if (now >= self.next_keepalive_ns) {
-                // EAGAIN is expected while the worker socket is busy; the
-                // next step retries without classifying it as a disconnect.
-                const keepalive_rc = @import("generated_ssh_session").zw_libssh2_session_send_keepalive(self.session.handle.?);
-                // LIBSSH2_ERROR_EAGAIN means the non-blocking socket cannot
-                // accept the packet yet. Retry shortly; it is not a lost
-                // connection and must not enter reconnect handling.
-                self.next_keepalive_ns = now + if (keepalive_rc == -37)
-                    @as(i128, 50) * std.time.ns_per_ms
-                else
-                    @as(i128, self.options.keepalive_sec) * std.time.ns_per_s;
-            }
-        }
+        self.stepKeepalive() catch |err| {
+            @import("../platform/applog.zig").err(.ssh, "keepalive failed host={s}:{d}: {s}", .{ self.options.host, self.options.port, @errorName(err) });
+            self.reconnect.suspect(null);
+            return err;
+        };
         self.io.diagBurstIfQuiet(realtime.milliseconds(undefined));
         // Apply the latest UI-requested PTY/grid resize (if any). Session
         // resize first: on transient libssh2 EAGAIN it fails and we simply
@@ -385,23 +381,36 @@ pub const SshWorker = struct {
             self.io.feed.publishCurrentText(realtime.milliseconds(undefined));
             self.applied_search_seq = search_seq;
         }
-        // Writable interest is demand-driven. Recompute it after every poll so
-        // partial writes and replayed input cannot leave a stale kqueue flag.
-        // The libssh2 channel window is refunded from INSIDE channel_read:
-        // when that WINDOW_ADJUST send hits EAGAIN (send buffer full), read
-        // returns "no data" and the loop waits on READ only — but the remote
-        // has stopped sending (window exhausted) and never wakes us. Watching
-        // WRITE until the pending adjust drains breaks that deadlock ("output
-        // freezes until a keypress").
+        // EAGAIN may mean remote channel-window exhaustion, even while the
+        // TCP socket is writable. Suppress level-triggered WRITE spinning;
+        // the bounded pending-input tick above retries after any sibling IO.
         if (self.presentation_attached.load(.acquire) and !self.startup_pending.load(.acquire)) {
             _ = self.replay.attached(&self.input, self.options.operation_key, replay_mod.InputMode.from(self.vt.snapshot().modes)) catch false;
         }
         _ = self.replay.snapshot(&self.input);
         const needs_write = self.input.pending() != 0 or self.io.repliesPending();
-        const next_interest = @import("worker_interest.zig").Interest{ .read = true, .write = needs_write };
+        const next_interest = @import("worker_interest.zig").Interest{ .read = true, .write = needs_write and !self.io.write_blocked };
         if (!std.meta.eql(self.loop.interest, next_interest)) {
             std.log.debug("[worker] interest change write={} pending={d}", .{ next_interest.write, self.input.pending() });
             try self.loop.setInterest(next_interest);
+        }
+    }
+
+    /// IO-owner only, including while the transport is ended or awaiting
+    /// reconnect. Presentation updates do not require a live SSH socket.
+    pub fn publishPendingPresentation(self: *SshWorker) void {
+        if (self.text.projection_requested.swap(false, .acq_rel)) self.io.feed.republish_pending = true;
+        if (self.io.feed.republish_pending) self.io.feed.publishCurrentText(realtime.milliseconds(undefined));
+    }
+
+    fn stepKeepalive(self: *SshWorker) !void {
+        const native = @import("generated_ssh_session");
+        const now = realtime.monotonicNs();
+        const packets = native.zw_libssh2_session_received_packets(self.session.handle.?);
+        if (try self.keepalive_watch.step(now, packets, self.options.keepalive_sec)) {
+            const rc = native.zw_libssh2_session_send_keepalive(self.session.handle.?);
+            if (rc != 0 and rc != -37) @import("../platform/applog.zig").err(.ssh, "keepalive send rc={d} detail={s}", .{ rc, std.mem.span(native.zw_libssh2_last_error(self.session.handle.?)) });
+            try self.keepalive_watch.sent(now, rc, self.options.keepalive_sec);
         }
     }
 
@@ -562,6 +571,7 @@ pub const SshWorker = struct {
         self.os_probe = self.exec_bridge.diagnostic(@import("../proto/ssh/remote_os.zig").command, .{ .timeout_ms = 3000, .capture_cap = 8192 }) catch null;
         self.os_probe_finished.store(self.os_probe == null, .release);
         if (self.shared_transfer) |shared| shared.transportReplaced();
+        self.keepalive_watch = .{};
         self.jump_route = replacement_route;
         self.loop = replacement_loop;
         self.loop_active = true;
@@ -1105,4 +1115,53 @@ test "live scrollback requests apply to existing SSH engine and zero removes the
     var unlimited = try worker.vt.copyProjection(a);
     defer unlimited.deinit(a);
     try std.testing.expect(unlimited.scrollback.total_rows >= 3000);
+}
+
+test "queued RTT gets the next channel-open turn under continuous forwarding" {
+    const ConnectionDetails = @import("../proto/ssh/connection_details.zig");
+    const key: ConnectionDetails.OperationKey = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(7) } }, .operation_id = 2, .attempt_id = 1 };
+    var store: ConnectionDetails.Store = .{};
+    try store.begin(key, 1, .session);
+    store.negotiated(key, 0, .{});
+    // No native call is reached: the existing forward owns the open slot.
+    var session: Session = .{ .state = .active, .handle = @ptrFromInt(16), .resource_key = key, .connection_details = &store };
+    const first: Session.OpenTicket = .{ .kind = .forward, .id = 10 };
+    const next: Session.OpenTicket = .{ .kind = .forward, .id = 11 };
+    try std.testing.expect(session.claimChannelOpen(first));
+    const id = try store.request(key, null, 1500);
+    try session.stepRtt(1);
+    try std.testing.expectEqual(.waiting, session.rtt.?.phase);
+    try std.testing.expect(session.claimChannelOpen(first));
+    session.finishChannelOpen(first);
+    // The forwarding loop must yield before admitting its next client.
+    try std.testing.expect(!session.claimChannelOpen(next));
+    try std.testing.expect(!session.claimChannelOpen(.{ .kind = .exec, .id = 12 }));
+    const sample: Session.OpenTicket = .{ .kind = .rtt, .id = id };
+    try std.testing.expect(session.claimChannelOpen(sample));
+    try std.testing.expect(!session.claimChannelOpen(next));
+    try store.cancel(key, id);
+    try session.stepRtt(2);
+    try std.testing.expect(session.claimChannelOpen(next));
+}
+
+test "queued RTT expires without disturbing the current channel owner" {
+    const Details = @import("../proto/ssh/connection_details.zig");
+    const key: Details.OperationKey = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(7) } }, .operation_id = 2, .attempt_id = 1 };
+    var store: Details.Store = .{};
+    try store.begin(key, 1, .session);
+    store.negotiated(key, 0, .{});
+    var session: Session = .{ .state = .active, .handle = @ptrFromInt(16), .resource_key = key, .connection_details = &store };
+    const owner: Session.OpenTicket = .{ .kind = .exec, .id = 10 };
+    try std.testing.expect(session.claimChannelOpen(owner));
+    const id = try store.request(key, null, 1500);
+    try session.stepRtt(1);
+    try session.stepRtt(1500 * std.time.ns_per_ms + 1);
+    const sample = (try store.snapshot(key)).hops[0].rtt_sample.?;
+    try std.testing.expectEqual(id, sample.request_id);
+    try std.testing.expectEqual(.unavailable, sample.status);
+    try std.testing.expectEqual(.timed_out, sample.reason.?);
+    try std.testing.expectEqual(.released, sample.cleanup);
+    try std.testing.expect(sample.started_ns == null and sample.duration_ms == null);
+    try std.testing.expect(session.rtt == null);
+    try std.testing.expectEqual(owner, session.channel_open.?);
 }

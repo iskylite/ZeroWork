@@ -165,7 +165,8 @@ test "record cleanup modal retained theme and background publication preserves c
     theme.selectTokens(tokens);
     f.publish.publish(f.cx, theme.widgetTheme(.dark));
     f.frame();
-    try std.testing.expectEqual(custom.overlay, view.dialog.getBackground());
+    // Imported RGB values share the same material alpha as built-in palettes.
+    try std.testing.expectEqual(custom.overlay.withAlpha(theme.materialAlpha("overlay")), view.dialog.getBackground());
     try std.testing.expectEqual(custom.action_danger, backgroundTarget(view.primary));
     try std.testing.expectEqual(custom.danger_ink, view.headline.getText().?.color);
 }

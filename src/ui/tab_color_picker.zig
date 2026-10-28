@@ -107,8 +107,7 @@ fn find(node: *ui.Node, id: u32) ?*ui.Node {
     for (node.children.items) |child| if (find(child, id)) |result| return result;
     return null;
 }
-// Zenit paints the 1px border without adding it to Yoga padding. HTML uses
-// border-box: 14px padding + 1px border, so native content starts at 15px.
+// Match the shared HTML popover: 14px padding without an outline.
 fn panel() ui.BoxStyle {
-    return .{ .width = .{ .px = 344 }, .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(15), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 1, .color = theme.current().border, .radius = 11 }, .shadow = .{ .blur = 24, .offset_y = 8, .color = theme.current().shadow } };
+    return .{ .width = .{ .px = 344 }, .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(14), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = 11 }, .shadow = .{ .blur = 24, .offset_y = 8, .color = theme.current().shadow } };
 }

@@ -297,6 +297,9 @@ pub const Options = struct {
     display_name: []const u8 = "",
     term: [:0]const u8 = "xterm-256color",
     connect_timeout_ms: u32 = 15_000,
+    /// Borrowed for synchronous creation only. Shared by DNS/TCP/handshake/
+    /// authentication/shell in this hop; human interaction extends it.
+    network_deadline_ms: ?*c_longlong = null,
     keepalive_sec: u16 = 30,
     compression: bool = false,
     cols: u16 = 80,
@@ -350,7 +353,7 @@ pub const Options = struct {
 };
 
 fn nativeDrive(options: Options, fd: c_int) c.ZW_SSH_DRIVE {
-    return .{ .socket_fd = fd, .timeout_ms = options.connect_timeout_ms, .cancelled = if (options.cancel_token != null) Session.connectCancelled else null, .ctx = if (options.cancel_token) |token| @constCast(token) else null };
+    return .{ .socket_fd = fd, .timeout_ms = options.connect_timeout_ms, .deadline_ms = options.network_deadline_ms, .cancelled = if (options.cancel_token != null) Session.connectCancelled else null, .ctx = if (options.cancel_token) |token| @constCast(token) else null };
 }
 
 fn checkDriveResult(result: c_int) !void {
@@ -404,8 +407,17 @@ const NativeAuthBackend = struct {
     user: [:0]const u8,
     drive: c.ZW_SSH_DRIVE,
     callback_error: ?anyerror = null,
+    network_end_ms: c_longlong,
+
+    fn resumeNetwork(self: *NativeAuthBackend) void {
+        // AuthMachine may wait for a password/passphrase between native calls.
+        // That user interaction has its own deadline, not the network budget.
+        if (self.drive.deadline_ms) |deadline| deadline.* += c.zw_ssh_monotonic_ms() - self.network_end_ms;
+    }
 
     pub fn query(self: *NativeAuthBackend) !auth_flow.Advertised {
+        self.resumeNetwork();
+        defer self.network_end_ms = c.zw_ssh_monotonic_ms();
         var methods: [1024]u8 = undefined;
         var length: usize = 0;
         const result = c.zw_libssh2_auth_methods_driven(self.handle, self.user.ptr, &methods, methods.len, &length, &self.drive);
@@ -418,6 +430,8 @@ const NativeAuthBackend = struct {
     }
 
     pub fn attempt(self: *NativeAuthBackend, auth: Auth, conversation: *auth_flow.Conversation) !auth_flow.Attempt {
+        self.resumeNetwork();
+        defer self.network_end_ms = c.zw_ssh_monotonic_ms();
         self.callback_error = null;
         const rc = switch (auth) {
             .password => |password| c.zw_libssh2_auth_password_driven(self.handle, self.user.ptr, password.ptr, &self.drive),
@@ -664,6 +678,7 @@ pub const Session = struct {
     const RttOperation = struct {
         request: ConnectionDetails.Request,
         sample: ConnectionDetails.Sample,
+        queued_ns: i128,
         channel: ?Channel = null,
         acquired: bool = false,
         phase: enum { waiting, opening, closing } = .waiting,
@@ -688,6 +703,7 @@ pub const Session = struct {
     source_owner: ?identity.AssetOwner = null,
     connection_details: ?*ConnectionDetails.Store = null,
     channel_open: ?OpenTicket = null,
+    direct_opens: ?*c.ZW_SSH_DIRECT_OPEN = null,
     rtt: ?RttOperation = null,
     rtt_io_owner: ?std.Thread.Id = null,
     /// After an ambiguous close(2), never close this numeric fd again: another
@@ -722,6 +738,12 @@ pub const Session = struct {
     /// An EAGAIN open retains its ticket, including a cancelled RTT request.
     pub fn claimChannelOpen(self: *Session, ticket: OpenTicket) bool {
         if (self.channel_open) |current| return std.meta.eql(current, ticket);
+        // A forward batch can finish one open and start the next before the
+        // worker calls stepRtt again. Reserve the next free turn for an already
+        // waiting sample, while allowing the current native open to settle.
+        if (self.rtt) |sample| if (sample.phase == .waiting) {
+            if (!std.meta.eql(ticket, OpenTicket{ .kind = .rtt, .id = sample.request.id })) return false;
+        };
         self.channel_open = ticket;
         return true;
     }
@@ -742,10 +764,12 @@ pub const Session = struct {
     }
     fn publishRtt(self: *Session, finished: bool) void {
         const value = self.rtt orelse return;
+        std.log.debug("[ssh-rtt] publish phase={s} status={s} reason={any} cleanup={s}", .{ @tagName(value.phase), @tagName(value.sample.status), value.sample.reason, @tagName(value.sample.cleanup) });
         if (self.connection_details) |store| if (self.resource_key) |key| store.publish(key, self.resource_hop, value.sample, finished);
     }
     fn completeRtt(self: *Session) void {
         const value = self.rtt orelse return;
+        std.log.debug("[ssh-rtt] request={d} phase={s} status={s} reason={any}", .{ value.request.id, @tagName(value.phase), @tagName(value.sample.status), value.sample.reason });
         self.finishChannelOpen(.{ .kind = .rtt, .id = value.request.id });
         self.publishRtt(true);
         self.rtt = null;
@@ -763,7 +787,7 @@ pub const Session = struct {
         } else self.rtt_io_owner = current_thread;
         if (self.rtt == null) {
             const request = store.take(key, self.resource_hop) orelse return;
-            self.rtt = .{ .request = request, .sample = .{ .request_id = request.id } };
+            self.rtt = .{ .request = request, .sample = .{ .request_id = request.id }, .queued_ns = now_ns };
         }
         const value = &self.rtt.?;
         const previous = value.sample;
@@ -772,6 +796,12 @@ pub const Session = struct {
             value.sample.reason = .cancelled;
         }
         if (value.phase == .waiting) {
+            // No native resource exists yet: expire the queued request without
+            // releasing or interrupting another operation's channel-open slot.
+            if (value.sample.reason == null and @max(0, now_ns - value.queued_ns) >= @as(i128, value.request.timeout_ms) * std.time.ns_per_ms) {
+                value.sample.status = .unavailable;
+                value.sample.reason = .timed_out;
+            }
             if (value.sample.reason != null) {
                 self.completeRtt();
                 return;
@@ -781,10 +811,14 @@ pub const Session = struct {
             value.sample.started_ns = @import("../../platform/realtime.zig").monotonicNs();
             value.sample.cleanup = .releasing;
         }
-        const elapsed = @max(0, now_ns - value.sample.started_ns.?);
+        const elapsed = @max(0, now_ns - value.queued_ns);
         if (elapsed >= @as(i128, value.request.timeout_ms) * std.time.ns_per_ms) {
-            if (value.sample.reason == null) value.sample.reason = .timed_out;
-            value.sample.status = .unavailable;
+            // The RTT ends at OPEN_CONFIRMATION. A delayed CLOSE reply keeps
+            // ownership unresolved, but cannot invalidate a measured result.
+            if (value.phase == .opening) {
+                if (value.sample.reason == null) value.sample.reason = .timed_out;
+                value.sample.status = .unavailable;
+            }
             if (value.acquired and value.sample.cleanup != .unknown) self.recordResource(.rtt_channel, .unknown);
             value.sample.cleanup = .unknown;
         }
@@ -868,7 +902,10 @@ pub const Session = struct {
         }
     }
 
-    pub fn connect(library: *const Library, options: Options) !Session {
+    pub fn connect(library: *const Library, supplied: Options) !Session {
+        var deadline = c.zw_ssh_monotonic_ms() + @as(c_longlong, if (supplied.connect_timeout_ms == 0) 8000 else supplied.connect_timeout_ms);
+        var options = supplied;
+        options.network_deadline_ms = supplied.network_deadline_ms orelse &deadline;
         try options.prepareDetails();
         options.report(.transport, .started, null);
         if (options.resource_ledger) |ledger| {
@@ -883,16 +920,24 @@ pub const Session = struct {
             return error.Cancelled;
         };
         if (options.connection_details) |store| store.status(options.operation_key.?, options.hop_index, .negotiating);
-        const fd = c.zw_ssh_socket_connect_cancellable(options.host.ptr, options.port, options.connect_timeout_ms, if (options.cancel_token != null) connectCancelled else null, if (options.cancel_token) |token| @constCast(token) else null);
+        const remaining = options.network_deadline_ms.?.* - c.zw_ssh_monotonic_ms();
+        if (remaining <= 0) {
+            options.report(.transport, .failed, error.ConnectionTimedOut);
+            return error.ConnectionTimedOut;
+        }
+        const fd = c.zw_ssh_socket_connect_cancellable(options.host.ptr, options.port, @intCast(@min(remaining, std.math.maxInt(u32))), if (options.cancel_token != null) connectCancelled else null, if (options.cancel_token) |token| @constCast(token) else null);
         if (fd < 0) {
             if (options.connection_details) |store| store.status(options.operation_key.?, options.hop_index, .released);
             if (options.cancel_token) |token| if (token.load(.acquire)) {
                 options.report(.transport, .cancelled, error.Cancelled);
                 return error.Cancelled;
             };
-            @import("../../platform/applog.zig").err(.ssh, "socket connect failed host={s}:{d} errno={d}", .{ options.host, options.port, c.zw_ssh_socket_last_error() });
-            options.report(.transport, .failed, error.ConnectFailed);
-            return error.ConnectFailed;
+            const socket_error = c.zw_ssh_socket_last_error();
+            const gai_error = c.zw_ssh_socket_last_gai_error();
+            const failure = if (gai_error != 0) error.HostResolutionFailed else if (socket_error == @backingInt(std.c.E.TIMEDOUT)) error.ConnectionTimedOut else if (socket_error == @backingInt(std.c.E.CONNREFUSED)) error.ConnectionRefused else error.ConnectFailed;
+            @import("../../platform/applog.zig").err(.ssh, "socket connect failed host={s}:{d} errno={d} gai={d}", .{ options.host, options.port, socket_error, gai_error });
+            options.report(.transport, .failed, failure);
+            return failure;
         }
         options.report(.transport, .succeeded, null);
         return connectOverFd(library, options, fd);
@@ -906,7 +951,10 @@ pub const Session = struct {
     /// Consumes an already connected socket even on failure. A ProxyJump
     /// supervisor supplies a socketpair endpoint backed by its channel relay.
     /// Host-key verification still uses the requested target host and port.
-    pub fn connectOverFd(library: *const Library, options: Options, fd: c_int) !Session {
+    pub fn connectOverFd(library: *const Library, supplied: Options, fd: c_int) !Session {
+        var deadline = c.zw_ssh_monotonic_ms() + @as(c_longlong, if (supplied.connect_timeout_ms == 0) 8000 else supplied.connect_timeout_ms);
+        var options = supplied;
+        options.network_deadline_ms = supplied.network_deadline_ms orelse &deadline;
         var phase: ConnectionProgress.Phase = .handshake;
         options.report(phase, .started, null);
         return connectOverFdWithPhase(library, options, fd, &phase) catch |err| {
@@ -937,18 +985,27 @@ pub const Session = struct {
         // negotiation; the shim retains the server fallback ordering.
         if (c.zw_libssh2_session_set_compression(self.handle.?, if (options.compression) 1 else 0) != 0)
             return error.CompressionConfigurationFailed;
-        // Cipher policy: chacha20+hmac-sha2 in this libssh2 build makes sshd
-        // send in intermittent trickles (the "long-output stalls"); prefer
-        // AES-CTR which streams back-to-back. Best-effort: negotiation still
-        // succeeds if the server only offers other ciphers.
-        _ = c.zw_libssh2_session_prefer_stream_ciphers(self.handle.?);
+        // Keep the backend's supported fallback algorithms while preferring CTR.
+        const cipher_rc = c.zw_libssh2_session_prefer_stream_ciphers(self.handle.?);
+        if (cipher_rc != 0) {
+            @import("../../platform/applog.zig").err(.ssh, "cipher preferences failed rc={d}", .{cipher_rc});
+            return error.CipherConfigurationFailed;
+        }
         try self.enterIoMode();
         const drive = nativeDrive(options, self.socket_fd);
         const handshake_rc = c.zw_libssh2_session_handshake_driven(self.handle.?, &drive);
-        try checkDriveResult(handshake_rc);
         if (handshake_rc != 0) {
-            @import("../../platform/applog.zig").err(.ssh, "handshake failed rc={d} fd={d}", .{ handshake_rc, self.socket_fd });
-            return error.HandshakeFailed;
+            const diagnostic = @import("handshake_failure.zig");
+            const native_code = c.zw_libssh2_last_error_code(self.handle.?);
+            const native_message = c.zw_libssh2_last_error(self.handle.?);
+            var message_buffer: [1024]u8 = undefined;
+            const message = if (native_message != null) std.mem.span(native_message) else "";
+            @import("../../platform/applog.zig").err(.ssh, "handshake failed host={s}:{d} hop={d} rc={d} libssh2_code={d} fd={d} message={s}", .{
+                options.host,                                                                                    options.port, options.hop_index, handshake_rc, native_code, self.socket_fd,
+                diagnostic.logMessage(&message_buffer, if (message.len > 0) message else "(no libssh2 detail)"),
+            });
+            try checkDriveResult(handshake_rc);
+            return diagnostic.fromCode(handshake_rc);
         }
         if (options.cancel_token) |token| if (token.load(.acquire)) return error.Cancelled;
         options.report(phase.*, .succeeded, null);
@@ -970,7 +1027,11 @@ pub const Session = struct {
         if (options.host_key_store) |store| {
             if (store.persist_path) |path| self.host_key_store_path = try std.heap.c_allocator.dupe(u8, path);
         }
-        const verification = try verifyHostKey(options, server_key, key_fingerprint.slice());
+        const verification = blk: {
+            const start = c.zw_ssh_monotonic_ms();
+            defer options.network_deadline_ms.?.* += c.zw_ssh_monotonic_ms() - start;
+            break :blk try verifyHostKey(options, server_key, key_fingerprint.slice());
+        };
         self.host_key_verification = verification.checked;
         self.host_key_acceptance = verification.acceptance;
         if (options.cancel_token) |token| if (token.load(.acquire)) return error.Cancelled;
@@ -980,8 +1041,9 @@ pub const Session = struct {
         if (c.zw_libssh2_session_cipher_sc(self.handle.?)) |cipher_name| {
             std.log.info("[ssh] negotiated cipher: {s}", .{std.mem.span(cipher_name)});
         }
-        _ = c.zw_libssh2_session_prefer_rsa_sha2(self.handle.?);
-        var backend: NativeAuthBackend = .{ .handle = self.handle.?, .socket_fd = self.socket_fd, .user = options.user, .drive = drive };
+        const signature_rc = c.zw_libssh2_session_prefer_rsa_sha2(self.handle.?);
+        if (signature_rc != 0) @import("../../platform/applog.zig").warn(.ssh, "RSA signature preference unavailable rc={d}; retaining native defaults", .{signature_rc});
+        var backend: NativeAuthBackend = .{ .handle = self.handle.?, .socket_fd = self.socket_fd, .user = options.user, .drive = drive, .network_end_ms = c.zw_ssh_monotonic_ms() };
         const authenticated = try auth_flow.authenticate(.{
             .endpoint = .{ .host = options.host, .port = options.port, .user = options.user },
             .auth = options.auth,
@@ -1187,6 +1249,18 @@ pub const Session = struct {
         return .{ .handle = @ptrCast(raw.?) };
     }
 
+    /// Exclusive route-creation owner only; shares this hop's network budget.
+    pub fn openDirectTcpipDriven(self: *Session, host: [:0]const u8, port: u16, options: Options) !Channel {
+        try self.enterIoMode();
+        const drive = nativeDrive(options, self.socket_fd);
+        var raw: ?*c.LIBSSH2_CHANNEL = null;
+        const rc = c.zw_libssh2_open_direct_tcpip_driven(self.handle.?, host.ptr, port, &raw, &drive);
+        try checkDriveResult(rc);
+        if (rc != 0 or raw == null) return error.OpenDirectTcpipFailed;
+        self.recordResource(.tunnel, .owned);
+        return .{ .handle = @ptrCast(raw.?) };
+    }
+
     pub fn openDirectTcpip(self: *Session, host: [:0]const u8, port: u16) !Channel {
         if (self.state != .active) return error.SessionNotActive;
         if (host.len == 0 or port == 0) return error.InvalidTunnelTarget;
@@ -1195,6 +1269,18 @@ pub const Session = struct {
         const raw = c.zw_libssh2_open_direct_tcpip(self.handle.?, host.ptr, port);
         if (raw != null or c.zw_libssh2_session_last_error(self.handle.?) != -37) self.finishChannelOpen(ticket);
         if (raw == null) return error.OpenDirectTcpipFailed;
+        self.recordResource(.tunnel, .owned);
+        return .{ .handle = @ptrCast(raw.?) };
+    }
+
+    /// Independent forwarding requests share the transport and channel registry,
+    /// but retain their own native open/reply state on this sole IO owner.
+    pub fn stepDirectTcpip(self: *Session, host: [:0]const u8, port: u16, pending: *?*c.ZW_SSH_DIRECT_OPEN) !?Channel {
+        if (self.state != .active) return error.SessionNotActive;
+        var raw: ?*c.LIBSSH2_CHANNEL = null;
+        const rc = c.zw_libssh2_direct_open_step(self.handle.?, &self.direct_opens, pending, host.ptr, port, &raw);
+        if (rc == 1) return null;
+        if (rc < 0) return error.OpenDirectTcpipFailed;
         self.recordResource(.tunnel, .owned);
         return .{ .handle = @ptrCast(raw.?) };
     }
@@ -1271,6 +1357,7 @@ pub const Session = struct {
             }
             // Native session_free owns every child channel, including a shell
             // that failed halfway through creation and was never published.
+            c.zw_libssh2_direct_open_released(&self.direct_opens);
             self.handle = null;
             self.channel = null;
             self.recordResource(.shell, .released);

@@ -30,7 +30,7 @@ const Mutex = struct {
     }
 };
 
-pub const Options = struct { scrollback_limit: u32 = 25000, term: []const u8 = "xterm-256color", cols: u16 = 80, rows: u16 = 24, output_capacity: usize = 1024 * 1024, recording: ?recording_mod.Options = null };
+pub const Options = struct { scrollback_limit: u32 = 25000, term: []const u8 = "xterm-256color", cols: u16 = 80, rows: u16 = 24, output_capacity: usize = 1024 * 1024, retain_raw_output: bool = true, recording: ?recording_mod.Options = null };
 pub const ProcessSnapshot = @import("../host/process_service.zig").ProcessSnapshot;
 pub const CwdSnapshot = @import("../host/process_service.zig").CwdSnapshot;
 pub const ExecRisk = @import("../host/process_service.zig").ExecRisk;
@@ -151,6 +151,8 @@ const Entry = struct {
         var text = try TextSlot.init(allocator, TextSlot.default_capacity);
         errdefer text.deinit(allocator);
         self.* = .{ .wakeup = wakeup, .allocator = allocator, .handle = request.handle, .key = request.key, .options = frozen_options, .recording_retention_days = .init(if (options.recording) |recording| recording.log.retention_days else 14), .cwd = cwd, .term = term, .output = output, .text = text, .geometry = .{ .revision = 1, .cols = options.cols, .rows = options.rows } };
+        self.text.producer_wakeup = &self.wakeup;
+        self.text.structured_supported = false;
         errdefer self.writes.deinit(allocator);
         try self.writes.ensureTotalCapacity(allocator, 64);
         try self.receipts.ensureTotalCapacity(allocator, 64);
@@ -697,6 +699,7 @@ pub const LocalAdapter = struct {
         const bytes = try self.allocator.dupe(u8, request.bytes);
         entry.writes.appendAssumeCapacity(.{ .sequence = request.input_sequence, .mode = request.mode_revision, .bytes = bytes, .submission = request.submission });
         entry.pending_bytes += bytes.len;
+        entry.text.timing.accepted(request.input_sequence, 0);
         entry.wakeup.notify();
         if (bytes.len != 0) if (entry.trusted) |*bridge| bridge.markInput();
         entry.last_input_sequence = request.input_sequence;
@@ -845,6 +848,7 @@ pub const LocalAdapter = struct {
         } else {
             entry.writes.appendAssumeCapacity(.{ .sequence = sequence, .mode = mode_revision, .bytes = bytes, .submission = submission });
             entry.pending_bytes += bytes.len;
+            entry.text.timing.accepted(sequence, 0);
             entry.wakeup.notify();
             if (entry.trusted) |*bridge| bridge.markInput();
         }
@@ -1099,6 +1103,7 @@ fn run(entry: *Entry) void {
                             // Keep metadata on its 250ms deadline, not per keystroke.
                         }
                         if (write.consumed == write.bytes.len) {
+                            entry.text.timing.written(write.sequence, null);
                             if (write.submission) entry.controller.?.recordSubmission(entry.handle) catch {};
                             entry.completeWrite(.completed);
                         }
@@ -1113,7 +1118,7 @@ fn run(entry: *Entry) void {
             }
             var buffer: [4096]u8 = undefined;
             for (0..16) |_| {
-                const free = entry.output.freeCapacity();
+                const free = if (entry.options.retain_raw_output) entry.output.freeCapacity() else buffer.len;
                 if (free == 0 or entry.eof) break;
                 const read = transport.read(buffer[0..@min(buffer.len, free)]) catch |err| {
                     entry.terminal_error = @errorName(err);
@@ -1121,8 +1126,9 @@ fn run(entry: *Entry) void {
                 };
                 switch (read) {
                     .bytes => |count| {
-                        entry.output.push(buffer[0..count]) catch unreachable;
+                        if (entry.options.retain_raw_output) entry.output.push(buffer[0..count]) catch unreachable;
                         entry.output_sequence += 1;
+                        entry.text.timing.received(entry.output_sequence);
                         if (entry.recording) |recording| recording.appendOutput(entry.handle, buffer[0..count], nowMs());
                         if (entry.terminal_error == null) entry.controller.?.feedOutput(entry.handle, entry.output_sequence, buffer[0..count], nowMs()) catch |err| {
                             entry.terminal_error = @errorName(err);

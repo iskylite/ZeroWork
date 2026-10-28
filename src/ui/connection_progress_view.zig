@@ -982,7 +982,7 @@ pub fn failureText(err: ?anyerror) []const u8 {
         error.HostKeyRevoked => "服务器主机密钥已被撤销",
         error.Cancelled => "已取消",
         error.SftpSubsystemDenied => "服务器拒绝 SFTP 子系统",
-        else => @errorName(failure),
+        else => @import("../proto/ssh/handshake_failure.zig").description(failure) orelse @errorName(failure),
     } else "连接失败";
 }
 fn prepareCustomButton(button: *ui.Node) void {

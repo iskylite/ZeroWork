@@ -96,6 +96,16 @@ pub const FeedBridge = struct {
         }
     }
 
+    /// A throttled burst tail is due at publication cadence, not the transport's
+    /// idle timeout. A full slot waits for consumer wakeup instead of polling.
+    pub fn publicationTimeout(self: *const FeedBridge, timeout_ms: u32, now_ms: i64) u32 {
+        if (!self.republish_pending) return timeout_ms;
+        const slot = self.text_slot orelse return timeout_ms;
+        if (!slot.canPublish()) return timeout_ms;
+        const remaining = @max(0, min_publish_interval_ms - (now_ms -% self.last_publish_ms));
+        return @min(timeout_ms, @as(u32, @intCast(remaining)));
+    }
+
     /// Retry entry point for a deferred/throttled publication; called from
     /// the worker step loop, not from the read path.
     pub fn publishCurrentText(self: *FeedBridge, now_ms: i64) void {
@@ -112,6 +122,7 @@ pub const FeedBridge = struct {
         while (self.publication_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
         self.publication = .{ .text_generation = generation, .output_sequence = snapshot.output_sequence, .vt_version = projection.version };
         self.publication_lock.store(false, .release);
+        slot.timing.published(snapshot.output_sequence);
         self.last_publish_ms = now_ms;
         self.republish_pending = false;
         @import("../platform/presentation_wakeup.zig").notify();
@@ -123,6 +134,17 @@ pub const FeedBridge = struct {
         // recomputed on every read just for the publish to fail — burning
         // the CPU that starved the reader and caused periodic stutter.
         if (!slot.canPublish()) return error.ConsumerBehind;
+        if (slot.structured.load(.acquire)) {
+            var projection = try self.engine.copyProjection(std.heap.page_allocator);
+            errdefer projection.deinit(std.heap.page_allocator);
+            const generation = try slot.publishOwnedProjection(projection, 1);
+            while (self.publication_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
+            self.publication = .{ .text_generation = generation, .output_sequence = projection.output_sequence, .vt_version = projection.version };
+            self.publication_lock.store(false, .release);
+            slot.timing.published(projection.output_sequence);
+            @import("../platform/presentation_wakeup.zig").notify();
+            return;
+        }
         const snapshot = self.engine.snapshot();
         const styled = try @import("text_projection_styled.zig").renderVisibleTextStyled(self.engine, std.heap.page_allocator);
         defer std.heap.page_allocator.free(styled.text);
@@ -145,6 +167,7 @@ pub const FeedBridge = struct {
         while (self.publication_lock.swap(true, .acquire)) std.atomic.spinLoopHint();
         self.publication = .{ .text_generation = generation, .output_sequence = snapshot.output_sequence, .vt_version = snapshot.version };
         self.publication_lock.store(false, .release);
+        slot.timing.published(snapshot.output_sequence);
         // TextSlot's wake can already have been handled before this receipt
         // was committed. Notify again so the main thread can observe both.
         @import("../platform/presentation_wakeup.zig").notify();
@@ -329,4 +352,17 @@ test "notification feed publication receipt excludes throttled and rejected futu
     bridge.publishCurrentText(140);
     try std.testing.expectEqual(@as(u64, 4), bridge.notificationPublication().?.output_sequence);
     try std.testing.expectEqual(text.generation.load(.acquire), bridge.notificationPublication().?.text_generation);
+}
+
+test "deferred burst publication uses display deadline instead of idle transport timeout" {
+    var engine: FakeEngine = .{};
+    var slot = try TextSlot.init(std.testing.allocator, 128);
+    defer slot.deinit(std.testing.allocator);
+    var feed: FeedBridge = .{ .engine = VtEngine.from(FakeEngine, &engine), .text_slot = &slot, .republish_pending = true, .last_publish_ms = 100 };
+    try std.testing.expectEqual(@as(u32, 6), feed.publicationTimeout(50, 102));
+    try std.testing.expectEqual(@as(u32, 0), feed.publicationTimeout(50, 109));
+    for (0..3) |_| _ = try slot.publish("x");
+    try std.testing.expectEqual(@as(u32, 50), feed.publicationTimeout(50, 109));
+    _ = slot.acknowledge(0);
+    try std.testing.expectEqual(@as(u32, 0), feed.publicationTimeout(50, 109));
 }

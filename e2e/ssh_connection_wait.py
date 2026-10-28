@@ -29,6 +29,9 @@ class Server(paramiko.ServerInterface):
 
     def hold(self, stage):
         self.calls.append(stage)
+        if self.stage == "budget" and stage in ("methods", "password", "pty"):
+            self.reached.set()
+            time.sleep(0.09)
         if self.stage == stage:
             self.reached.set()
             self.release.wait(5)
@@ -183,7 +186,7 @@ def main():
     records = []
     host_key = paramiko.RSAKey.generate(2048)
     with tempfile.TemporaryDirectory(prefix="zerowork-connection-wait-") as directory:
-        cases = [("banner", "cancel"), ("banner", "timeout"), ("methods", "cancel"), ("methods", "timeout"), ("password", "cancel"), ("password", "timeout"), ("keyboard-response", "cancel"), ("channel", "cancel"), ("pty", "cancel"), ("shell", "cancel"), ("agent-identities", "cancel"), ("agent-identities", "timeout"), ("shell-success", "success"), ("keyboard-delay", "success")]
+        cases = [("budget", "timeout"), ("banner", "cancel"), ("banner", "timeout"), ("methods", "cancel"), ("methods", "timeout"), ("password", "cancel"), ("password", "timeout"), ("keyboard-response", "cancel"), ("channel", "cancel"), ("pty", "cancel"), ("shell", "cancel"), ("agent-identities", "cancel"), ("agent-identities", "timeout"), ("shell-success", "success"), ("keyboard-delay", "success")]
         for stage, mode in cases:
             result = run_case(args.runner, host_key, stage, mode, directory)
             records.append(result)

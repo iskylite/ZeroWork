@@ -56,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
         var session = try ssh.Session.connect(&library, options);
         defer session.close();
         try std.testing.expect(session.channel == null);
-        const timeout: u32 = if (std.mem.eql(u8, mode, "timeout")) 30 else 1500;
+        const timeout: u32 = if (std.mem.eql(u8, mode, "timeout")) 30 else if (std.mem.eql(u8, mode, "slow-close")) 250 else 1500;
         const request = try facts.request(key, 0, timeout);
         const begin = clock.monotonicNs();
         try session.stepRtt(begin);
@@ -103,8 +103,14 @@ pub fn main(init: std.process.Init) !void {
         } else {
             try verify(&facts, key, 1);
             try std.testing.expect(sample.duration_ms.? >= 50);
+            if (std.mem.eql(u8, mode, "slow-close")) {
+                try std.testing.expect(observed_unknown);
+                try std.testing.expectEqual(.ready, sample.status);
+                try std.testing.expect(sample.reason == null);
+                try std.testing.expect(sample.duration_ms.? < timeout);
+            }
         }
-        if (!std.mem.eql(u8, mode, "direct")) {
+        if (!std.mem.eql(u8, mode, "direct") and !std.mem.eql(u8, mode, "slow-close")) {
             // Cancellation/rejection/timeout must not poison a live transport.
             try session.measureRtt(1500, null);
             try verify(&facts, key, 1);

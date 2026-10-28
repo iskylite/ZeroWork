@@ -500,6 +500,12 @@ fn toggleRow(self: *View, label: []const u8, value: *ui.Signal(bool), persist: b
     try row.appendChild(self.cx.allocator, try ui.text(self.cx, label, S.text(11, 400, false)));
     try row.appendChild(self.cx.allocator, try ui.spacer(self.cx));
     const toggle = try ui.widgets.Switch(.{ .checked = value, .on_change = if (persist) self.cx.on(View, self, View.persistChanged) else self.cx.on(View, self, View.autoChanged) }).mount(self.scope, self.cx);
+    try self.scope.createEffect(.{ .cx = self.cx, .node = toggle, .value = value, .theme_signal = try self.cx.themeSignal(self.scope) }, struct {
+        fn paint(ctx: anytype) void {
+            _ = ctx.theme_signal.get();
+            @import("../config/settings_styles.zig").paintSwitch(ctx.cx, ctx.node, ctx.value.get());
+        }
+    }.paint);
     try row.appendChild(self.cx.allocator, toggle);
     try self.content.appendChild(self.cx.allocator, row);
     return toggle;

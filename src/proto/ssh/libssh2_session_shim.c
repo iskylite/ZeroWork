@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <poll.h>
 #include <stdio.h>
@@ -12,6 +13,8 @@
 #include <unistd.h>
 #include <time.h>
 #include <stdlib.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 /* Interrupt this owned connection without recycling its descriptor. The
    ordinary Session cleanup remains responsible for the one final close. */
@@ -104,6 +107,8 @@ void zw_libssh2_library_exit(void) { libssh2_exit(); }
 #define ZW_CONNECT_TIMEOUT_MS 8000
 
 static _Thread_local int zw_last_connect_errno = 0;
+static _Thread_local int zw_last_gai_error = 0;
+int zw_ssh_socket_last_gai_error(void) { return zw_last_gai_error; }
 int zw_ssh_socket_last_error(void) { return zw_last_connect_errno; }
 
 static long long mono_ms(void) {
@@ -112,13 +117,15 @@ static long long mono_ms(void) {
     return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
 }
 
+long long zw_ssh_monotonic_ms(void) { return mono_ms(); }
+
 struct zw_drive_wait {
     const ZW_SSH_DRIVE *options;
     long long deadline;
     int failure;
 };
 static struct zw_drive_wait drive_begin(const ZW_SSH_DRIVE *options) {
-    struct zw_drive_wait wait = { options, mono_ms() + (options->timeout_ms ? options->timeout_ms : ZW_CONNECT_TIMEOUT_MS), 0 };
+    struct zw_drive_wait wait = { options, options->deadline_ms ? *options->deadline_ms : mono_ms() + (options->timeout_ms ? options->timeout_ms : ZW_CONNECT_TIMEOUT_MS), 0 };
 #ifdef SO_NOSIGPIPE
     int enabled = 1;
     (void)setsockopt(options->socket_fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
@@ -209,6 +216,88 @@ static int wait_connected(int socket_fd, unsigned int timeout_ms,
     return 0;
 }
 
+/* getaddrinfo has no portable cancellation. The bounded resolver owns copies
+   of all inputs; an abandoned call releases its result when libc returns.
+   Never pthread_cancel libc's resolver, and never retain the caller's token. */
+struct zw_resolve {
+    pthread_mutex_t mutex;
+    char *host;
+    char service[6];
+    struct addrinfo hints, *addresses;
+    int done, abandoned, result;
+};
+static atomic_uint zw_resolver_count = 0;
+static void resolve_free(struct zw_resolve *job) {
+    if (job->addresses) freeaddrinfo(job->addresses);
+    pthread_mutex_destroy(&job->mutex);
+    free(job->host);
+    free(job);
+}
+static void *resolve_worker(void *raw) {
+    struct zw_resolve *job = raw;
+    struct addrinfo *addresses = NULL;
+    int result = getaddrinfo(job->host, job->service, &job->hints, &addresses);
+    pthread_mutex_lock(&job->mutex);
+    job->addresses = addresses;
+    job->result = result;
+    job->done = 1;
+    int abandoned = job->abandoned;
+    pthread_mutex_unlock(&job->mutex);
+    if (abandoned) resolve_free(job);
+    atomic_fetch_sub(&zw_resolver_count, 1);
+    return NULL;
+}
+static int resolve_addresses(const char *host, const char *service,
+    const struct addrinfo *hints, long long deadline,
+    zw_ssh_cancel_cb cancelled, void *ctx, struct addrinfo **addresses) {
+    struct in6_addr numeric;
+    if (inet_pton(AF_INET, host, &numeric) == 1 || inet_pton(AF_INET6, host, &numeric) == 1) {
+        struct addrinfo numeric_hints = *hints;
+        numeric_hints.ai_flags |= AI_NUMERICHOST | AI_NUMERICSERV;
+        zw_last_gai_error = getaddrinfo(host, service, &numeric_hints, addresses);
+        return zw_last_gai_error ? -1 : 0;
+    }
+    if (atomic_fetch_add(&zw_resolver_count, 1) >= 16) {
+        atomic_fetch_sub(&zw_resolver_count, 1);
+        zw_last_connect_errno = EAGAIN;
+        return -1;
+    }
+    struct zw_resolve *job = calloc(1, sizeof(*job));
+    if (!job) { atomic_fetch_sub(&zw_resolver_count, 1); zw_last_connect_errno = ENOMEM; return -1; }
+    job->host = strdup(host);
+    if (!job->host) { free(job); atomic_fetch_sub(&zw_resolver_count, 1); zw_last_connect_errno = ENOMEM; return -1; }
+    int rc = pthread_mutex_init(&job->mutex, NULL);
+    if (rc) { free(job->host); free(job); atomic_fetch_sub(&zw_resolver_count, 1); zw_last_connect_errno = rc; return -1; }
+    job->hints = *hints;
+    snprintf(job->service, sizeof(job->service), "%s", service);
+    pthread_t thread;
+    rc = pthread_create(&thread, NULL, resolve_worker, job);
+    if (rc) { resolve_free(job); atomic_fetch_sub(&zw_resolver_count, 1); zw_last_connect_errno = rc; return -1; }
+    pthread_detach(thread);
+    for (;;) {
+        int stop = connect_cancelled(cancelled, ctx);
+        if (!stop && mono_ms() >= deadline) { zw_last_connect_errno = ETIMEDOUT; stop = 1; }
+        pthread_mutex_lock(&job->mutex);
+        if (job->done) {
+            if (!stop) {
+                *addresses = job->addresses;
+                job->addresses = NULL;
+                zw_last_gai_error = job->result;
+            }
+            pthread_mutex_unlock(&job->mutex);
+            resolve_free(job);
+            return stop || zw_last_gai_error ? -1 : 0;
+        }
+        if (stop) {
+            job->abandoned = 1;
+            pthread_mutex_unlock(&job->mutex);
+            return -1;
+        }
+        pthread_mutex_unlock(&job->mutex);
+        (void)poll(NULL, 0, 10);
+    }
+}
+
 int zw_ssh_socket_connect(const char *host, unsigned short port, unsigned int timeout_ms) {
     return zw_ssh_socket_connect_cancellable(host, port, timeout_ms, NULL, NULL);
 }
@@ -216,105 +305,53 @@ int zw_ssh_socket_connect(const char *host, unsigned short port, unsigned int ti
 int zw_ssh_socket_connect_cancellable(const char *host, unsigned short port,
     unsigned int timeout_ms, zw_ssh_cancel_cb cancelled, void *ctx) {
     zw_last_connect_errno = 0;
+    zw_last_gai_error = 0;
     if (connect_cancelled(cancelled, ctx)) return -1;
     if (timeout_ms == 0) timeout_ms = ZW_CONNECT_TIMEOUT_MS;
     const long long deadline = mono_ms() + (long long)timeout_ms;
-    struct addrinfo hints;
-    struct addrinfo *addresses = NULL;
-    struct addrinfo *address;
+    struct addrinfo hints = {0}, *addresses = NULL;
     char service[6];
-    int socket_fd = -1;
-    int connected = 0;
-    memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    /* Numeric IPv4 host entries (the normal SSH host asset form) must not
-       take an unreachable IPv6 candidate first inside an app process. */
-    struct in_addr numeric_v4;
-    if (inet_pton(AF_INET, host, &numeric_v4) == 1) hints.ai_family = AF_INET;
-    (void)snprintf(service, sizeof(service), "%u", (unsigned int)port);
-    int gai = getaddrinfo(host, service, &hints, &addresses);
-    if (gai != 0) { zw_last_connect_errno = gai; return -1; }
-    for (address = addresses; address; address = address->ai_next) {
-
-        // First reachability attempt can fail instantly (cold ARP/first
-        // route lookup, EHOSTUNREACH/ENETUNREACH) even though the host is
-        // reachable — retry transient errors briefly before giving up.
-        for (;;) {
-            if (connect_cancelled(cancelled, ctx)) goto finish;
-            long long remaining = deadline - mono_ms();
-            if (remaining <= 0) break;
-            socket_fd = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
-            if (socket_fd < 0) {
-                if (errno == EMFILE || errno == ENFILE) break;
-                continue;
-            }
-            int flags = fcntl(socket_fd, F_GETFL, 0);
-            if (flags < 0 || fcntl(socket_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-                zw_last_connect_errno = errno;
-                close(socket_fd);
-                socket_fd = -1;
-                break;
-            }
-            if (connect(socket_fd, address->ai_addr, address->ai_addrlen) == 0) {
-                goto connected;
-            }
-            if (errno == EINPROGRESS && wait_connected(socket_fd, (unsigned int)(remaining > 0x7fffffffLL ? 0x7fffffffLL : remaining), cancelled, ctx) == 0) {
-                goto connected;
-            }
-            if (connect_cancelled(cancelled, ctx)) goto finish;
-            /* IMPORTANT: keep the socket O_NONBLOCK after connect. The
-               worker drives this session with kqueue + a nonblocking
-               libssh2 session; a blocking socket makes libssh2's transport
-               recv() BLOCK THE WORKER THREAD whenever the TCP buffer runs
-               dry mid-burst (EAGAIN semantics silently void). That stalled
-               the whole event loop inside recv() until the remote happened
-               to send more — the "output trickle / multi-second dead air"
-               bug. libssh2 blocking mode (used only during handshake/auth)
-               is fine with nonblocking sockets too: it polls internally
-               via _libssh2_wait_socket. */
-            int transient = (errno == EHOSTUNREACH || errno == ENETUNREACH ||
-                             errno == ENETDOWN || errno == ETIMEDOUT ||
-                             errno == ECONNREFUSED || errno == EAGAIN);
+    snprintf(service, sizeof(service), "%u", (unsigned int)port);
+    if (resolve_addresses(host, service, &hints, deadline, cancelled, ctx, &addresses)) return -1;
+    int connected_fd = -1;
+    unsigned int candidates = 0;
+    for (struct addrinfo *a = addresses; a; a = a->ai_next) ++candidates;
+    for (struct addrinfo *address = addresses; address; address = address->ai_next, --candidates) {
+        if (connect_cancelled(cancelled, ctx)) break;
+        long long remaining = deadline - mono_ms();
+        if (remaining <= 0) { zw_last_connect_errno = ETIMEDOUT; break; }
+        /* Reserve time for every candidate. An unreachable first address
+           must not consume the entire DNS+TCP deadline. Refusal is final for
+           this address; retry belongs to a new user/connection attempt. */
+        unsigned int allowance = (unsigned int)(remaining / candidates);
+        if (!allowance) allowance = 1;
+        int fd = socket(address->ai_family, address->ai_socktype, address->ai_protocol);
+        if (fd < 0) { zw_last_connect_errno = errno; if (errno == EMFILE || errno == ENFILE) break; continue; }
+        int no_delay = 1;
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 ||
+            setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &no_delay, sizeof(no_delay)) < 0) {
             zw_last_connect_errno = errno;
-            close(socket_fd);
-            socket_fd = -1;
-            if (!transient) break;
-            remaining = deadline - mono_ms();
-            if (remaining <= 0) break;
-            unsigned int delay = (unsigned int)(remaining < 300 ? remaining : 300);
-            do {
-                if (connect_cancelled(cancelled, ctx)) goto finish;
-                unsigned int slice = cancelled && delay > 50 ? 50 : delay;
-                usleep((useconds_t)(slice * 1000));
-                delay -= slice;
-            } while (delay > 0);
+            close(fd);
+            continue;
         }
-        continue;
-    connected:
-        {
-            if (connect_cancelled(cancelled, ctx)) goto finish;
-            struct sockaddr_storage peer;
-            socklen_t peer_len = sizeof(peer);
-            if (getpeername(socket_fd, (struct sockaddr *)&peer, &peer_len) != 0) {
-                zw_last_connect_errno = errno;
-                close(socket_fd);
-                socket_fd = -1;
-                continue;
-            }
-            connected = 1;
+        int rc = connect(fd, address->ai_addr, address->ai_addrlen);
+        if (rc != 0 && errno == EINPROGRESS) rc = wait_connected(fd, allowance, cancelled, ctx);
+        int failure = rc ? errno : 0;
+        if (connect_cancelled(cancelled, ctx)) { close(fd); break; }
+        if (!rc) {
+            connected_fd = fd;
             zw_last_connect_errno = 0;
+            break;
         }
-        break;
+        zw_last_connect_errno = failure;
+        close(fd);
     }
-finish:
-    freeaddrinfo(addresses);
-    if (!connected) {
-        if (socket_fd >= 0) close(socket_fd);
-        if (!zw_last_connect_errno) zw_last_connect_errno = ETIMEDOUT;
-        return -1;
-    }
-    return socket_fd;
+    if (addresses) freeaddrinfo(addresses);
+    if (connected_fd < 0 && !zw_last_connect_errno) zw_last_connect_errno = ETIMEDOUT;
+    return connected_fd;
 }
 void zw_ssh_socket_close(int socket_fd) { if (socket_fd >= 0) close(socket_fd); }
 int zw_ssh_socket_set_blocking(int socket_fd) {
@@ -645,7 +682,12 @@ static void zw_batch_adapter(const char *name, int name_len, const char *instruc
     int answer_rc = bridge->callback(bridge->ctx, group, (size_t)count, answers);
     /* Human prompt time has its own scoped challenge deadline. Do not charge
        it against the network wait timeout or restart the wire operation. */
-    if (bridge->wait) bridge->wait->deadline += mono_ms() - prompt_start;
+    if (bridge->wait) {
+        long long elapsed = mono_ms() - prompt_start;
+        bridge->wait->deadline += elapsed;
+        if (bridge->wait->options->deadline_ms)
+            *bridge->wait->options->deadline_ms += elapsed;
+    }
     if (answer_rc != 0) goto cleanup;
     /* Validate every response before exposing any of the group to libssh2. */
     for (int i = 0; i < count; ++i)
@@ -719,6 +761,22 @@ LIBSSH2_CHANNEL *zw_libssh2_open_shell(LIBSSH2_SESSION *session, const char *ter
     }
     return channel;
 }
+int zw_libssh2_open_direct_tcpip_driven(LIBSSH2_SESSION *session,
+    const char *host, unsigned short port, LIBSSH2_CHANNEL **output,
+    const ZW_SSH_DRIVE *options) {
+    struct zw_drive_wait wait = drive_begin(options);
+    *output = NULL;
+    for (;;) {
+        int rc = drive_check(&wait);
+        if (rc) return rc;
+        *output = libssh2_channel_direct_tcpip_ex(session, host, port, "127.0.0.1", 0);
+        if (*output) return 0;
+        rc = libssh2_session_last_errno(session);
+        if (rc != LIBSSH2_ERROR_EAGAIN) return rc ? rc : LIBSSH2_ERROR_CHANNEL_FAILURE;
+        rc = drive_again(session, &wait);
+        if (rc) return rc;
+    }
+}
 LIBSSH2_CHANNEL *zw_libssh2_open_direct_tcpip(LIBSSH2_SESSION *session, const char *host, unsigned short port) {
     if (!session || !host || !host[0] || port == 0) return NULL;
     return libssh2_channel_direct_tcpip_ex(session, host, port, "127.0.0.1", 0);
@@ -769,16 +827,37 @@ int zw_libssh2_session_prefer_rsa_sha2(LIBSSH2_SESSION *session) {
 }
 
 int zw_libssh2_session_prefer_stream_ciphers(LIBSSH2_SESSION *session) {
-    /* chacha20-poly1305 + hmac-sha2-256 in this libssh2 build degrades sshd's
-       send pattern to an intermittent trickle (measured: 3-9 bursty wakes vs
-       a single back-to-back wake with CTR). Prefer AES-CTR (ARMv8 hardware
-       path, what the OpenSSH client negotiates on this host: aes128-gcm).
-       AES-GCM is unavailable in this vendored build (METHOD_NOT_SUPPORTED). */
-    static const char *const prefs =
-        "aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,aes256-gcm@openssh.com";
-    int rc1 = libssh2_session_method_pref(session, LIBSSH2_METHOD_CRYPT_CS, prefs);
-    int rc2 = libssh2_session_method_pref(session, LIBSSH2_METHOD_CRYPT_SC, prefs);
-    return (rc1 == 0 && rc2 == 0) ? 0 : -1;
+    /* Reorder the compiled-in list rather than replacing it with a subset.
+       AES-CTR remains preferred; all other backend-supported ciphers remain
+       available in their original order for server compatibility. */
+    static const char *const preferred[] = { "aes128-ctr", "aes192-ctr", "aes256-ctr" };
+    const char **supported = NULL;
+    int count = libssh2_session_supported_algs(session, LIBSSH2_METHOD_CRYPT_CS, &supported);
+    if (count < 0) return count;
+    size_t length = 1;
+    for (int i = 0; i < count; ++i) length += strlen(supported[i]) + 1;
+    char *prefs = malloc(length);
+    if (!prefs) { libssh2_free(session, supported); return LIBSSH2_ERROR_ALLOC; }
+    prefs[0] = 0;
+    for (size_t p = 0; p < sizeof(preferred)/sizeof(preferred[0]); ++p)
+        for (int i = 0; i < count; ++i) if (!strcmp(supported[i], preferred[p])) {
+            if (prefs[0]) strcat(prefs, ",");
+            strcat(prefs, supported[i]);
+        }
+    for (int i = 0; i < count; ++i) {
+        int preferred_cipher = 0;
+        for (size_t p = 0; p < sizeof(preferred)/sizeof(preferred[0]); ++p)
+            if (!strcmp(supported[i], preferred[p])) preferred_cipher = 1;
+        if (!preferred_cipher) {
+            if (prefs[0]) strcat(prefs, ",");
+            strcat(prefs, supported[i]);
+        }
+    }
+    int rc = libssh2_session_method_pref(session, LIBSSH2_METHOD_CRYPT_CS, prefs);
+    if (!rc) rc = libssh2_session_method_pref(session, LIBSSH2_METHOD_CRYPT_SC, prefs);
+    free(prefs);
+    libssh2_free(session, supported);
+    return rc;
 }
 void zw_libssh2_channel_close_free(LIBSSH2_CHANNEL *channel) {
     if (!channel) return;

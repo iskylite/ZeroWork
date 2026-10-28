@@ -113,13 +113,13 @@ test "connection details view copies direct and ordered route facts in the V3 no
         var source = try snapshot(count);
         source.revision = count;
         try f.show(source);
-        try std.testing.expectEqual(@as(f32, 344), f.view.chrome.globalRect().w);
+        try std.testing.expectEqual(@as(f32, 380), f.view.chrome.globalRect().w);
         try std.testing.expectEqual(S.height(count), f.view.chrome.globalRect().h);
         try std.testing.expectEqual(count + 1, f.view.row_count);
-        try std.testing.expectEqual(@as(f32, 52), f.view.rows[1].?.globalRect().h);
+        try std.testing.expectEqual(@as(f32, 60), f.view.rows[1].?.globalRect().h);
         try std.testing.expectApproxEqAbs(@as(f32, 34), f.view.row_names[1].?.globalRect().x - f.view.rows[1].?.globalRect().x, 0.01);
         try std.testing.expectApproxEqAbs(@as(f32, 10.5), f.view.row_names[1].?.globalRect().y - f.view.rows[1].?.globalRect().y, 0.01);
-        try std.testing.expectEqual(@as(f32, 314), f.view.source_label.?.parent.?.globalRect().w);
+        try std.testing.expectEqual(@as(f32, 348), f.view.source_label.?.parent.?.globalRect().w);
         try std.testing.expectEqualStrings("DB-Master", f.view.row_names[count].?.getText().?.content);
         source.hops[count - 1].endpoint.name.bytes[0] = 'x';
         try std.testing.expectEqualStrings("DB-Master", f.view.row_names[count].?.getText().?.content);

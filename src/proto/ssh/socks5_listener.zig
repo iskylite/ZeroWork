@@ -124,6 +124,7 @@ const ClientConn = struct {
     host: ?[:0]u8 = null,
     port: u16 = 0,
     channel: ?ssh_channel.Channel = null,
+    open_context: ?*native.ZW_SSH_DIRECT_OPEN = null,
     up: [buf_size]u8 = undefined,
     up_len: usize = 0,
     up_sent: usize = 0,
@@ -132,6 +133,7 @@ const ClientConn = struct {
     down_len: usize = 0,
     down_sent: usize = 0,
     deadline: i128,
+    step_started: i128 = 0,
 };
 
 pub const Socks5Listener = struct {
@@ -141,6 +143,8 @@ pub const Socks5Listener = struct {
     remote_listen_pending: bool = false,
     remote_cancel_unknown: bool = false,
     last_failure: ?anyerror = null,
+    diagnostics: @import("forward_diagnostics.zig").Journal = .{},
+    listen_started: i128 = 0,
     /// Exclusive no-shell lease while running; its owner must not call libssh2
     /// until stop has joined the IO thread. The Session outlives this listener.
     session: ?*ssh_session.Session = null,
@@ -160,8 +164,7 @@ pub const Socks5Listener = struct {
     listen_fd: std.posix.fd_t = -1, // 单一关闭者：stop()（accept 线程不关）
     accept_thread: ?std.Thread = null,
     clients: std.ArrayList(*ClientConn) = .empty,
-    pending_open: ?*ClientConn = null,
-    pending_close: ?*ClientConn = null,
+    next_client: usize = 0,
 
     // —— 跨线程发布（UI chip 与统计） ——
     state_raw: std.atomic.Value(u8) = .init(@backingInt(ListenerState.off)),
@@ -227,6 +230,9 @@ pub const Socks5Listener = struct {
         }
         if (options.mode == .remote and native.zw_ssh_forward_target_valid(options.target.name().ptr) == 0) return error.RemoteTargetRequiresIp;
         if (options.mode == .remote and self.session == null) return error.SessionNotActive;
+        self.listen_started = clock.monotonicNs();
+        self.diagnostics = .{};
+        self.diagnostics.add("复用已认证 SSH 连接", null, null);
         self.options = options;
         self.last_failure = null;
         self.remote_cancel_unknown = false;
@@ -234,9 +240,11 @@ pub const Socks5Listener = struct {
         const address: BindAddress = if (options.bind127) .loopback else .any;
         if (options.mode != .remote) {
             const listen = openListenSocket(options.requested_port, address) catch |err| {
+                self.diagnostics.add("本机绑定 / 监听失败", self.listen_started, err);
                 self.state_raw.store(@backingInt(ListenerState.error_state), .release);
                 return err;
             };
+            self.diagnostics.add("本机绑定 / 监听就绪", self.listen_started, null);
             self.listen_fd = listen.fd;
             self.bound_port.store(listen.port, .release);
         } else self.bound_port.store(0, .release);
@@ -342,12 +350,33 @@ pub const Socks5Listener = struct {
             _ = self.ownerStop();
             return;
         }
-        if (self.options.mode == .remote) {
-            self.stepRemoteListener();
-            if (self.remote_listener != null and !self.owner_paused) _ = self.acceptRemote();
-        } else _ = self.acceptOne();
-        for (self.clients.items) |conn| _ = self.stepClient(conn);
-        self.reapClosed();
+        if (self.options.mode == .remote) self.stepRemoteListener();
+        // A channel read may drain the TCP socket into libssh2's other
+        // channels. Those bytes (and local SOCKS state transitions) must not
+        // wait for another socket event or the worker's idle timeout. Visit
+        // every client once per pass; bound the burst to yield to PTY/RTT.
+        const deadline = clock.monotonicNs() + 2 * std.time.ns_per_ms;
+        var visits: usize = 0;
+        for (0..8) |_| {
+            var progressed = if (self.options.mode == .remote)
+                (if (self.remote_listener != null and !self.owner_paused) self.acceptRemote() else false)
+            else
+                self.acceptOne();
+            const count = self.clients.items.len;
+            for (0..count) |_| {
+                self.next_client %= count;
+                const conn = self.clients.items[self.next_client];
+                self.next_client = (self.next_client + 1) % count;
+                progressed = self.stepClient(conn) or progressed;
+                visits += 1;
+                if (visits >= 64 or clock.monotonicNs() >= deadline) {
+                    self.reapClosed();
+                    return;
+                }
+            }
+            self.reapClosed();
+            if (!progressed) break;
+        }
     }
     /// Pause keeps the local listener/port. Only the original native owner
     /// drains children; it never closes the parent PTY Session to do so.
@@ -370,7 +399,7 @@ pub const Socks5Listener = struct {
     }
     pub fn ownerResume(self: *Socks5Listener, session: *ssh_session.Session) !void {
         try self.ownerCheck();
-        if (self.session != null or self.pending_open != null or self.pending_close != null) return error.PreviousTransportNotReleased;
+        if (self.session != null or self.clients.items.len != 0) return error.PreviousTransportNotReleased;
         if (session.state != .active or session.handle == null) return error.SessionNotActive;
         self.session = session;
         self.owner_paused = false;
@@ -473,10 +502,12 @@ pub const Socks5Listener = struct {
         session.finishChannelOpen(ticket);
         self.remote_listen_pending = false;
         if (result == null or actual <= 0 or actual > 65535) {
+            self.diagnostics.add("SSH 远端监听申请失败", self.listen_started, error.RemoteForwardListenDenied);
             self.last_failure = error.RemoteForwardListenDenied;
             self.state_raw.store(@backingInt(ListenerState.error_state), .release);
             return;
         }
+        self.diagnostics.add("SSH 远端监听申请完成", self.listen_started, null);
         self.remote_listener = result;
         self.bound_port.store(@intCast(actual), .release);
         self.state_raw.store(@backingInt(ListenerState.listening), .release);
@@ -508,8 +539,13 @@ pub const Socks5Listener = struct {
         _ = self.stats_total.fetchAdd(1, .monotonic);
         _ = self.stats_active.fetchAdd(1, .monotonic);
         _ = self.active_admissions.fetchAdd(1, .monotonic);
+        conn.step_started = clock.monotonicNs();
+        self.diagnostics.add("收到远端转发连接", null, null);
         conn.fd = native.zw_ssh_forward_connect(self.options.target.name().ptr, self.options.target.port);
-        if (conn.fd >= 0) conn.stage = .connecting_local else self.last_failure = error.RemoteTargetConnectFailed;
+        if (conn.fd >= 0) conn.stage = .connecting_local else {
+            self.last_failure = error.RemoteTargetConnectFailed;
+            self.diagnostics.add("本机目标 TCP 连接失败", conn.step_started, error.RemoteTargetConnectFailed);
+        }
         return true;
     }
 
@@ -530,6 +566,8 @@ pub const Socks5Listener = struct {
             return true;
         };
         conn.* = .{ .fd = fd, .deadline = clock.monotonicNs() + @as(i128, handshake_guard_ms) * std.time.ns_per_ms };
+        conn.step_started = clock.monotonicNs();
+        self.diagnostics.add("接受本机连接", null, null);
         if (self.options.mode == .local) {
             conn.host = self.allocator.dupeSentinel(u8, self.options.target.name(), 0) catch {
                 self.allocator.destroy(conn);
@@ -552,16 +590,21 @@ pub const Socks5Listener = struct {
     }
 
     fn stepClient(self: *Socks5Listener, conn: *ClientConn) bool {
-        if (conn.stage != .stream and conn.stage != .closing and clock.monotonicNs() >= conn.deadline) self.beginClose(conn);
+        if (conn.stage != .stream and conn.stage != .closing and clock.monotonicNs() >= conn.deadline) {
+            self.diagnostics.add("连接建立超时", conn.step_started, error.TimedOut);
+            self.beginClose(conn);
+        }
         return switch (conn.stage) {
             .connecting_local => blk: {
                 const ready = native.zw_ssh_forward_connect_ready(conn.fd);
                 if (ready < 0) {
+                    self.diagnostics.add("本机目标 TCP 连接失败", conn.step_started, error.RemoteTargetConnectFailed);
                     self.last_failure = error.RemoteTargetConnectFailed;
                     self.beginClose(conn);
                     break :blk true;
                 }
                 if (ready == 0) break :blk false;
+                self.diagnostics.add("本机目标 TCP 连接完成", conn.step_started, null);
                 conn.stage = .stream;
                 conn.deadline = clock.monotonicNs() + @as(i128, io_guard_ms) * std.time.ns_per_ms;
                 break :blk true;
@@ -643,6 +686,8 @@ pub const Socks5Listener = struct {
                     return true;
                 };
                 conn.port = request.port;
+                self.diagnostics.add("SOCKS 协商 / CONNECT 请求解析完成", conn.step_started, null);
+                conn.step_started = clock.monotonicNs();
                 conn.stage = .opening;
             },
             else => unreachable,
@@ -685,9 +730,7 @@ pub const Socks5Listener = struct {
         return true;
     }
     fn stepOpen(self: *Socks5Listener, conn: *ClientConn) bool {
-        if (self.pending_open != null and self.pending_open != conn) return false;
-        if (self.pending_close != null) return false;
-        if (self.owner_paused and self.pending_open != conn) {
+        if (self.owner_paused and conn.open_context == null) {
             if (self.options.mode == .socks5) self.queueReply(conn, .network_unreachable, .closing) else self.beginClose(conn);
             return true;
         }
@@ -695,18 +738,15 @@ pub const Socks5Listener = struct {
             self.beginClose(conn);
             return true;
         };
-        self.pending_open = conn;
-        const channel = session.openDirectTcpip(conn.host.?, conn.port) catch |err| {
-            if (err == error.ChannelOpenBusy) return false;
-            if (err == error.OpenDirectTcpipFailed and native.zw_libssh2_session_last_error(session.handle.?) == -37) return false;
-            self.pending_open = null;
+        const channel = (session.stepDirectTcpip(conn.host.?, conn.port, &conn.open_context) catch |err| {
             if (conn.stage == .closing) return true;
+            self.diagnostics.add("SSH 目标 TCP 通道建立失败", conn.step_started, err);
             if (self.options.mode != .socks5) self.last_failure = err;
             if (self.options.mode == .socks5) self.queueReply(conn, tunnelErrorReply(err), .closing) else self.beginClose(conn);
             return true;
-        };
-        self.pending_open = null;
+        }) orelse return false;
         conn.channel = channel;
+        self.diagnostics.add("SSH 目标 TCP 通道建立完成", conn.step_started, null);
         if (conn.stage != .closing) {
             if (self.options.mode == .socks5) self.queueReply(conn, .succeeded, .stream) else {
                 conn.stage = .stream;
@@ -809,14 +849,17 @@ pub const Socks5Listener = struct {
                 return false;
             }
         }
-        if (self.pending_open == conn) return self.stepOpen(conn);
-        if (conn.write_pending) return self.stepWrite(conn);
+        if (conn.open_context != null) return self.stepOpen(conn);
+        if (conn.write_pending) {
+            const channel = if (conn.channel) |*value| value else return false;
+            if (native.zw_libssh2_channel_write_pending(@ptrCast(channel.handle)) != 0) return self.stepWrite(conn);
+            // Waiting for a remote window owns no native write buffer. A
+            // cancelled client must not wait forever for that window to grow.
+            conn.write_pending = false;
+        }
         if (conn.channel) |*channel| {
-            if (self.pending_close != null and self.pending_close != conn) return false;
-            self.pending_close = conn;
             const session = self.session orelse return false;
             if (session.closeChannelReceipt(channel) != .released) return false;
-            self.pending_close = null;
             conn.channel = null;
             return true;
         }
@@ -826,7 +869,7 @@ pub const Socks5Listener = struct {
         var i: usize = 0;
         while (i < self.clients.items.len) {
             const conn = self.clients.items[i];
-            if (conn.stage != .closing or conn.channel != null or self.pending_open == conn or conn.write_pending) {
+            if (conn.stage != .closing or conn.channel != null or conn.open_context != null or conn.write_pending) {
                 i += 1;
                 continue;
             }
@@ -838,13 +881,13 @@ pub const Socks5Listener = struct {
         }
     }
     fn releaseAfterTransport(self: *Socks5Listener) void {
-        self.pending_open = null;
-        self.pending_close = null;
+        self.next_client = 0;
         // The real Session release receipt invalidates all remote listener handles.
         self.remote_listener = null;
         self.remote_listen_pending = false;
         self.remote_cancel_unknown = false;
         for (self.clients.items) |conn| {
+            conn.open_context = null;
             conn.write_pending = false;
             conn.channel = null;
             self.beginClose(conn);

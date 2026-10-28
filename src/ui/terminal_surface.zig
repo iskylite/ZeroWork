@@ -61,6 +61,7 @@ pub const Surface = struct {
         publish: *const fn (?*anyopaque, *ui.Cx, identity.SessionHandle, []const u8) anyerror!void = publishFeedback,
     };
     feedback: Feedback = .{},
+    timing: ?*@import("../vt/input_timing.zig").Trace = null,
     cx: *ui.Cx,
     host: *ui.Node,
     root: *ui.Node,
@@ -180,8 +181,15 @@ pub const Surface = struct {
         message.setDisplay(.none);
         self.* = .{ .cx = cx, .host = host, .root = root, .viewport = viewport, .service = service, .owner = owner, .options = owned_options, .composite = @import("terminal_document.zig").Document.init(cx.allocator, service, owner), .caret = caret, .preedit_node = preedit, .message = message, .message_root = message_root };
         self.service = self.composite.service();
+        if (service.textSlot()) |slot| slot.enableStructured() else |_| {}
         self.scrollbar = try @import("terminal_scrollbar.zig").mount(cx, root);
         try host.appendChild(cx.allocator, root);
+        if (@import("../vt/input_timing.zig").enabled) {
+            if (service.textSlot()) |slot| {
+                self.timing = &slot.timing;
+                @import("../vt/input_timing.zig").attach(&slot.timing, @backingInt(owner.session_id), owner.generation);
+            } else |_| {}
+        }
         return self;
     }
     pub fn install(self: *Surface) void {
@@ -200,6 +208,7 @@ pub const Surface = struct {
         self.host.behavior.interaction.text_input_client = .{ .context = self, .text_len = textLen, .copy_text = copyText, .selection = imeSelection, .frame_for_range = frameForRange, .range_at_point = rangeAtPoint };
     }
     pub fn destroy(self: *Surface) void {
+        if (self.timing) |trace| @import("../vt/input_timing.zig").detach(trace);
         self.host.behavior.interaction.text_input_client = null;
         self.host.behavior.events.on_event = null;
         self.host.behavior.events.on_key_down = null;
@@ -616,6 +625,7 @@ pub const Surface = struct {
         try self.renderSelection();
         try self.renderCaret();
         try self.buildDocument();
+        if (self.timing) |trace| trace.applied(self.snapshot.?.output_sequence);
         self.cx.requestRedraw();
     }
     fn renderTime(self: *Surface, row: *Row, timestamp: ?i64) !void {
@@ -858,6 +868,7 @@ pub const Surface = struct {
         // copy even if the first pump cannot acquire the worker guard.
         try self.pending.ensureUnusedCapacity(self.cx.allocator, 1);
         const owned = try self.cx.allocator.dupe(u8, bytes);
+        if (self.timing) |trace| trace.begin(self.next_input + self.pending.items.len);
         self.pending.appendAssumeCapacity(.{ .bytes = owned });
         self.pending_bytes += bytes.len;
         self.pump() catch |err| {

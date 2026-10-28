@@ -2,6 +2,44 @@ const std = @import("std");
 const ui = @import("ui");
 const m = @import("ui/socks_config_view.zig");
 const C = struct { saved: usize = 0, tested: usize = 0, cancelled: usize = 0, exposure: bool = false };
+test "forwarding switches follow palette and distinguish both positions" {
+    const theme = @import("ui/app_theme.zig");
+    defer theme.select(.sauber);
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 700);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    cx.root = root;
+    var c: C = .{};
+    var publication: @import("ui/shell_styles.zig").ThemePublication = .{};
+    const v = try m.View.mount(cx, scope, .{ .context = &c, .save = save, .test_cb = test_cb, .cancel = cancel, .confirm_exposure = exposure });
+    if (!v.portaled) try root.appendChild(cx.allocator, v.root);
+    for ([_][]const u8{ "forest", "plum", "sand" }) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        publication.publish(cx, theme.widgetTheme(theme.currentName()));
+        try v.show(.{ .auto_start = false, .persist = true }, &.{});
+        cx.layout();
+        const off_track = v.auto.children.items[0];
+        const on_track = v.persist.children.items[0];
+        try std.testing.expectEqual(theme.switchTrackOff(), switchBackground(off_track));
+        try std.testing.expectEqual(theme.current().action_accent, switchBackground(on_track));
+        try std.testing.expectEqual(@as(f32, 2), off_track.children.items[0].style.ext.?.inset.left.px);
+        try std.testing.expectEqual(@as(f32, 14), on_track.children.items[0].style.ext.?.inset.left.px);
+        v.auto_value.set(true);
+        v.persist_value.set(false);
+        cx.layout();
+        try std.testing.expectEqual(theme.current().action_accent, switchBackground(off_track));
+        try std.testing.expectEqual(theme.switchTrackOff(), switchBackground(on_track));
+    }
+}
+fn switchBackground(node: *ui.Node) ui.Color {
+    if (node.frame_state.frame_local.runtime.transitions) |slots| if (slots.find(.background)) |slot| {
+        if (slot.active) return slot.to_color;
+    };
+    return node.getBackground();
+}
 fn save(p: *anyopaque, d: m.Draft) void {
     _ = d;
     @as(*C, @ptrCast(@alignCast(p))).saved += 1;

@@ -311,11 +311,11 @@ pub const View = struct {
         self.chrome.setStyleInline(self.cx.allocator, S.panel(self.panelHeight(), self.cx.viewport.width));
         const state: ChainState = if (self.expired) .{ .text = "已过期", .online = false } else chainStatus(snapshot.*);
         const header = try ui.box(self.cx, S.chainHeader(), .{});
-        try header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.network, S.theme.current().accent, S.icon(14)));
+        try header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.network, S.theme.current().accent, S.icon(16)));
         self.source_label = try label(self.cx, header, if (snapshot.source == .@"test") "连接链路 · 最近检测" else "连接链路", S.chainTitle(), .{ .width = .fill(), .height = .{ .px = 20 }, .flex = 1, .min_width = 0 });
-        self.source_status = try label(self.cx, header, state.text, S.text(9, 400, 18, false), .{ .width = .{ .px = 40 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
-        self.source_status.?.setTextColor(if (state.online) S.theme.current().ok_ink else S.theme.current().fg_2);
-        try header.appendChild(self.cx.allocator, try self.iconAction(scope, .close, ui.icons.x, "关闭连接链路", "connection.details.close", false, null, 24, false));
+        self.source_status = try label(self.cx, header, state.text, S.text(12, 500, 18, false), .{ .width = .{ .px = 40 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        self.source_status.?.setTextColor(if (state.online) @import("socks_info_styles.zig").text(.success) else S.theme.current().fg_2);
+        try header.appendChild(self.cx.allocator, try self.iconAction(scope, .close, ui.icons.x, "关闭连接链路", "connection.details.close", false, null, 28, false));
         try self.chrome.appendChild(self.cx.allocator, header);
         try self.chrome.appendChild(self.cx.allocator, try ui.box(self.cx, S.spacer(12), .{}));
         const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, self.cx);
@@ -331,7 +331,7 @@ pub const View = struct {
         try self.card(scope, nodes, .local, 0, "本机", "macOS · SSH 客户端", true, "就绪");
         for (snapshot.hops[0..snapshot.hop_count], 0..) |hop, i| {
             const connector = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 22 }, .padding = .{ .left = 18 }, .direction = .row, .align_items = .center, .flex_shrink = 0 }, .{});
-            _ = try label(self.cx, connector, "↓ SSH 隧道", S.text(9, 400, 14, false), S.labelBox(14));
+            _ = try label(self.cx, connector, "↓ SSH 隧道", S.text(11, 400, 16, false), S.labelBox(16));
             try nodes.appendChild(self.cx.allocator, connector);
             var endpoint_buffer: [1400]u8 = undefined;
             try self.card(scope, nodes, .{ .hop = i }, i + 1, displayName(&hop), try endpoint(&endpoint_buffer, hop.endpoint), !self.expired and hopOnline(snapshot.source, hop.status), if (self.expired) "已过期" else statusText(snapshot.source, hop.status));
@@ -344,12 +344,13 @@ pub const View = struct {
         self.rtt_label = rtt_row.trailing;
         self.feedback_label = try label(self.cx, scroll.content, self.feedback, S.text(10, 400, 18, false), S.labelBox(18));
         self.feedback_label.?.meta.ownership.meta.test_id = "connection.details.feedback";
+        self.feedback_label.?.setDisplay(if (self.feedback.len == 0) .none else .flex);
         try self.chrome.appendChild(self.cx.allocator, try ui.box(self.cx, S.spacer(14), .{}));
         const footer = try ui.box(self.cx, S.chainFooter(), .{});
         footer.meta.ownership.meta.test_id = "connection.details.footer";
         try footer.appendChild(self.cx.allocator, try self.textAction(scope, .edit, "编辑连接路径", "connection.details.edit", self.callbacks.edit == null or target.endpoint.asset_owner == null, target.endpoint.asset_owner, 96, false));
-        try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .copy, ui.icons.copy, "复制链路", "connection.details.copy", self.callbacks.copy == null, null, 24, true));
-        try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .logs, ui.icons.get("file-text").?, "连接日志", "connection.details.logs", self.callbacks.logs == null, null, 24, true));
+        try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .copy, ui.icons.copy, "复制链路", "connection.details.copy", self.callbacks.copy == null, null, 28, true));
+        try footer.appendChild(self.cx.allocator, try self.iconAction(scope, .logs, ui.icons.get("file-text").?, "连接日志", "connection.details.logs", self.callbacks.logs == null, null, 28, true));
         try footer.appendChild(self.cx.allocator, try ui.spacer(self.cx));
         try footer.appendChild(self.cx.allocator, try self.textAction(scope, .sample, "测试全链路", "connection.details.sample", self.expired or self.callbacks.request_sample == null or !canSample(snapshot.*), null, 90, true));
         try self.chrome.appendChild(self.cx.allocator, footer);
@@ -377,11 +378,11 @@ pub const View = struct {
         };
         try content.appendChild(self.cx.allocator, try ui.iconTint(self.cx, asset, if (selection == .local) S.theme.current().fg_2 else S.theme.current().accent, S.icon(16)));
         const identity_box = try ui.box(self.cx, S.cardIdentity(), .{});
-        self.row_names[index] = try label(self.cx, identity_box, name, S.text(11, 700, 16, false), S.labelBox(16));
-        _ = try label(self.cx, identity_box, address, S.text(9, 400, 14, true), S.labelBox(14));
+        self.row_names[index] = try label(self.cx, identity_box, name, S.name(), S.labelBox(20));
+        _ = try label(self.cx, identity_box, address, S.endpoint(), S.labelBox(18));
         try content.appendChild(self.cx.allocator, identity_box);
-        const state_node = try label(self.cx, content, state, .{ .font_size = 8, .line_height = 2.25, .text_align = .center, .color = if (online) S.theme.current().ok_ink else S.theme.current().fg_2 }, S.chainBadge(online));
-        try content.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.chevron_right, S.theme.current().fg_2, S.icon(12)));
+        const state_node = try label(self.cx, content, state, .{ .font_size = 11, .line_height = 18.0 / 11.0, .text_align = .center, .color = if (online) @import("socks_info_styles.zig").text(.success) else S.theme.current().fg_2 }, S.chainBadge(online));
+        try content.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.chevron_right, S.theme.current().fg_2, S.icon(14)));
         self.row_status[index] = state_node;
         try button.appendChild(self.cx.allocator, content);
         try parent.appendChild(self.cx.allocator, button);
@@ -391,7 +392,7 @@ pub const View = struct {
     const Info = struct { root: *ui.Node, primary: *ui.Node, trailing: *ui.Node };
     fn info(self: *View, parent: *ui.Node, asset: ui.SvgAsset, primary: []const u8, tail: []const u8, online: bool) !Info {
         const row = try ui.box(self.cx, S.info(), .{});
-        try row.appendChild(self.cx.allocator, try ui.iconTint(self.cx, asset, if (online) S.theme.current().ok else S.theme.current().fg_2, S.icon(14)));
+        try row.appendChild(self.cx.allocator, try ui.iconTint(self.cx, asset, if (online) S.theme.current().ok else S.theme.current().fg_2, S.icon(16)));
         const first = try label(self.cx, row, primary, S.infoText(false), S.infoLabel());
         const last = try label(self.cx, row, tail, S.infoText(true), S.trailing());
         if (online) last.setTextColor(S.theme.current().ok);
@@ -566,7 +567,10 @@ pub const View = struct {
         return result.toOwnedSlice();
     }
     fn refreshFeedback(self: *View) void {
-        if (self.feedback_label) |node| node.setTextContent(self.cx.allocator, self.feedback) catch {};
+        if (self.feedback_label) |node| {
+            node.setTextContent(self.cx.allocator, self.feedback) catch {};
+            node.setDisplay(if (self.feedback.len == 0) .none else .flex);
+        }
         self.cx.requestRedraw();
     }
     fn sampleLabel(self: *const View, buffer: []u8, hop: details.Hop, usable: ?details.Sample) ![]const u8 {

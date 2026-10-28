@@ -1648,8 +1648,13 @@ _libssh2_packet_requirev(LIBSSH2_SESSION *session,
             ret = _libssh2_packet_askv(session, packet_types, data,
                                        data_len, match_ofs, match_buf,
                                        match_len);
-            state->start = 0;
-            return ret;
+            if(ret == 0) {
+                state->start = 0;
+                return 0;
+            }
+            /* ZeroWork: a packet of this type can belong to a different
+               channel. Leave it queued for its owner and keep waiting for
+               the requested match, rather than failing this operation. */
         }
     }
 

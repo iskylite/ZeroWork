@@ -117,7 +117,7 @@ _libssh2_mbedtls_cipher_init(_libssh2_cipher_ctx *ctx,
     if(!ctx)
         return -1;
 
-    op = encrypt == 0 ? MBEDTLS_ENCRYPT : MBEDTLS_DECRYPT;
+    op = encrypt ? MBEDTLS_ENCRYPT : MBEDTLS_DECRYPT;
 
     cipher_info = mbedtls_cipher_info_from_type(algo);
     if(!cipher_info)
@@ -125,6 +125,10 @@ _libssh2_mbedtls_cipher_init(_libssh2_cipher_ctx *ctx,
 
     mbedtls_cipher_init(ctx);
     ret = mbedtls_cipher_setup(ctx, cipher_info);
+    /* SSH supplies packet padding itself. CBC's default PKCS#7 padding
+       changes the wire length and can exceed the caller's block buffer. */
+    if(!ret && mbedtls_cipher_info_get_mode(cipher_info) == MBEDTLS_MODE_CBC)
+        ret = mbedtls_cipher_set_padding_mode(ctx, MBEDTLS_PADDING_NONE);
     if(!ret)
         ret = mbedtls_cipher_setkey(ctx,
                   secret,
@@ -167,7 +171,10 @@ _libssh2_mbedtls_cipher_crypt(_libssh2_cipher_ctx *ctx,
 
         if(!ret) {
             olen += finish_olen;
-            memcpy(block, output, olen);
+            if(olen != blocklen)
+                ret = MBEDTLS_ERR_CIPHER_BAD_INPUT_DATA;
+            else
+                memcpy(block, output, olen);
         }
 
         _libssh2_mbedtls_safe_free(output, osize);

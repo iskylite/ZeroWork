@@ -133,6 +133,12 @@ def run_mode(runner, out, mode):
     controls = out / mode
     controls.mkdir()
     peer = Peer()
+    if mode == 'rtt-contention':
+        # Keep multiple channel opens queued, as a busy SOCKS proxy does.
+        peer.direct_open_delay = .12
+    if mode == 'slow-target':
+        peer.direct_open_delay = 2
+        peer.delay_first_direct_only = True
     peer.deny_remote = mode == 'denied'
     peer.remote_cancelled = threading.Event()
     peer.thread.start()
@@ -149,44 +155,68 @@ def run_mode(runner, out, mode):
             result.update(passed=True, rejection='RemoteForwardListenDenied', false_ready=False)
             return result
         ready = wait_file(controls/'ready.json', child)
-        payload = bytes(range(256)) * 513 + b'fixed-forward-payload'
+        count = 16 if mode == 'rtt-contention' else 2
+        payload = bytes(range(256)) * (65 if mode == 'rtt-contention' else 513) + b'fixed-forward-payload'
         errors=[]
-        def roundtrip():
+        timings={}
+        def roundtrip(index):
             client = None
+            started = time.monotonic()
             try:
-                client = connect_proxy(ready['local_port']) if mode == 'socks5' else socket.create_connection(('127.0.0.1',ready['local_port']), timeout=4)
+                client = connect_proxy(ready['local_port']) if mode in ('socks5', 'rtt-contention', 'slow-target') else socket.create_connection(('127.0.0.1',ready['local_port']), timeout=4)
                 client.settimeout(5)
                 client.sendall(payload)
                 assert recv_exact(client,len(payload)) == payload
+                timings[index] = round((time.monotonic() - started) * 1000)
             except Exception as error:
                 errors.append(repr(error))
             finally:
                 if client:
                     client.close()
-        clients=[threading.Thread(target=roundtrip) for _ in range(2)]
-        for worker in clients: worker.start()
+        clients=[threading.Thread(target=roundtrip, args=(index,)) for index in range(count)]
+        if mode == 'slow-target':
+            clients[0].start()
+            assert peer.open_held.wait(2), 'slow open did not reach the server'
+            clients[1].start()
+        else:
+            for worker in clients: worker.start()
+        if mode in ('rtt-contention', 'slow-target'):
+            sample = wait_file(controls/'rtt.json', child)
+            assert sample['queue_and_sample_ms'] < 1000 and sample['active_forwards'] > 0, sample
+            result['rtt'] = sample
         for worker in clients: worker.join(7)
         assert not errors and not any(worker.is_alive() for worker in clients), errors
+        if mode == 'slow-target':
+            assert timings[0] >= 1500 and timings[1] < 1000, timings
+            result['roundtrip_ms'] = timings
         (controls/'stop').write_text('stop\n')
         output,_=child.communicate(timeout=10)
         (controls/'runner.log').write_text(output)
         assert child.returncode==0,output
         native=json.loads((controls/'runner-report.json').read_text())
         assert native['same_native_session'] and native['tty_after_forward_stop'] and native['forward_cleanup_released']
-        assert native['bytes_up']==len(payload)*2 and native['bytes_down']==len(payload)*2,native
+        assert native['bytes_up']==len(payload)*count and native['bytes_down']==len(payload)*count,native
         if mode=='remote':
             assert peer.remote_cancelled.wait(2),'server did not observe cancellation'
             assert echo.bytes==len(payload)*2,echo.bytes
         with socket.socket() as probe:
             probe.settimeout(.3)
             assert probe.connect_ex(('127.0.0.1',ready['local_port']))!=0,'listener remained after stop'
-        result.update(passed=True,native=native,payload_bytes_each_client=len(payload),clients=2,ssh_connections=len(peer.connections),remote_cancelled=peer.remote_cancelled.is_set(),calls=[connection.calls for connection in peer.connections])
+        result.update(passed=True,native=native,payload_bytes_each_client=len(payload),clients=count,ssh_connections=len(peer.connections),remote_cancelled=peer.remote_cancelled.is_set(),calls=[connection.calls for connection in peer.connections])
+        if mode == 'rtt-contention':
+            calls = peer.connections[0].calls
+            direct = [i for i, call in enumerate(calls) if isinstance(call, dict) and 'direct' in call]
+            samples = [i for i, call in enumerate(calls) if call == 'session']
+            assert len(samples) == 2 and direct[0] < samples[1] < calls.index('delayed_direct_confirmation'), calls
         assert len(peer.connections)==1,'forward opened duplicate SSH transport'
         assert 'UNEXPECTED_EXEC' not in str(result['calls'])
         return result
     finally:
         if child.poll() is None:
-            child.kill();child.communicate()
+            child.kill()
+        if not (controls/'runner.log').exists():
+            output, _ = child.communicate()
+            (controls/'runner.log').write_text(output)
         echo.close();peer.stop()
 
 
@@ -194,16 +224,18 @@ def main():
     parser=argparse.ArgumentParser()
     parser.add_argument('--runner',type=Path,required=True)
     parser.add_argument('--out',type=Path,required=True)
+    parser.add_argument('--mode', choices=('local','remote','socks5','denied','rtt-contention','slow-target'))
     args=parser.parse_args()
     args.out.mkdir(parents=True,exist_ok=False)
     results=[]
     try:
-        for mode in ('local','remote','socks5','denied'):
+        modes = (args.mode,) if args.mode else ('local','remote','socks5','denied','rtt-contention','slow-target')
+        for mode in modes:
             result=run_mode(args.runner.resolve(),args.out.resolve(),mode)
             results.append(result)
             print(json.dumps({'mode':mode,'passed':result['passed']}),flush=True)
     finally:
         (args.out/'results.json').write_text(json.dumps({'scope':'owned real SSH loopback, production sole native owner, no GUI/system host','results':results},indent=2)+'\n')
-    assert len(results)==4 and all(r['passed'] for r in results)
+    assert len(results)==len(modes) and all(r['passed'] for r in results)
 
 if __name__=='__main__':main()

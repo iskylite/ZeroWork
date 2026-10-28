@@ -376,6 +376,7 @@ pub const Host = struct {
         } else .off;
         const desired = self.desiredForward(self.activeSession() orelse return);
         const mode = if (desired) |d| d.mode else .socks5;
+        var log_buffer: [4096]u8 = undefined;
         info.update(.{
             .mode = mode,
             .configured = host.socks_enabled or desired != null,
@@ -391,6 +392,7 @@ pub const Host = struct {
             .uploaded = stats.bytes_up,
             .downloaded = stats.bytes_down,
             .error_text = if (value) |snapshot| if (snapshot.failure) |err| @errorName(err) else "" else "",
+            .logs = if (value) |snapshot| snapshot.diagnostics.format(&log_buffer) else "",
             .test_result = if (value != null and self.probe_key != null and value.?.key.eql(self.probe_key.?)) self.probe_message[0..self.probe_message_len] else "",
         }) catch {};
     }
@@ -404,6 +406,7 @@ pub const Host = struct {
             return;
         }
         switch (action) {
+            .logs, .logs_back => {},
             .start => self.commandToggle(null),
             .stop => _ = self.stopForSession(self.activeSession() orelse return),
             .config => self.showConfig(),
@@ -479,18 +482,33 @@ pub const Host = struct {
     }
     pub fn refreshChip(self: *Host) void {
         const label = self.chip_label orelse return;
-        var buffer: [64]u8 = undefined;
-        const mode = if (self.activeSession()) |legacy| if (self.desiredForward(legacy)) |d| d.mode else .socks5 else .socks5;
-        const name = modeName(mode);
-        const text = if (self.activeSnapshot()) |value| switch (value.phase) {
-            .ready => std.fmt.bufPrint(&buffer, "{s} :{d} ● {d}", .{ name, value.local_port, value.stats.connections_active }) catch "🧦 SOCKS5",
-            .connecting => std.fmt.bufPrint(&buffer, "{s} …", .{name}) catch "转发 …",
-            .paused => std.fmt.bufPrint(&buffer, "🧦 :{d} ◌ 已暂停", .{value.local_port}) catch "🧦 已暂停",
-            .failed, .cleanup_unknown => "🧦 SOCKS5 ✕",
-            .closing => "🧦 SOCKS5",
-            .closed => if (value.failure != null) "🧦 SOCKS5 ✕" else "🧦 SOCKS5",
-        } else name;
-        label.setTextContent(self.allocator, text) catch return;
+        const snapshot = self.activeSnapshot();
+        const state_description: []const u8 = if (snapshot) |value| switch (value.phase) {
+            .ready => "运行中",
+            .connecting => "启动中",
+            .paused => "已暂停",
+            .failed => "启动失败",
+            .cleanup_unknown => "清理异常",
+            .closing => "停止中",
+            .closed => if (value.failure != null) "失败" else "已停止",
+        } else "未启动";
+        label.setTextContent(self.allocator, "端口转发") catch return;
+        if (self.chip) |chip| if (chip.behavior.interaction.a11y) |*props| {
+            props.description = state_description;
+        };
+        const colors = @import("app_theme.zig").current();
+        const ForwardColors = @import("socks_info_styles.zig");
+        const state_color = (if (snapshot) |value| switch (value.phase) {
+            .ready => ForwardColors.text(.success),
+            .connecting, .paused, .closing => ForwardColors.text(.warning),
+            .failed, .cleanup_unknown => ForwardColors.text(.danger),
+            .closed => if (value.failure != null) ForwardColors.text(.danger) else colors.fg_2,
+        } else colors.fg_2);
+        const state_ink = ForwardColors.statusBarInk(state_color);
+        label.setTextColor(state_ink);
+        if (self.chip) |chip| for (chip.children.items) |child| {
+            if (child.getIcon() != null) _ = child.setTint(state_ink);
+        };
         label.markRenderDirty();
     }
     fn poll(self: *Host) void {

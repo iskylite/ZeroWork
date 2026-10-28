@@ -99,3 +99,11 @@ libssh2_keepalive_send(LIBSSH2_SESSION *session,
 
     return 0;
 }
+
+/* ZeroWork: authenticated receive progress, queried only by the Session IO
+   owner. No packet payload or mutable native state escapes this accessor. */
+LIBSSH2_API unsigned long
+zw_libssh2_session_received_packets(LIBSSH2_SESSION *session)
+{
+    return session->remote.seqno;
+}

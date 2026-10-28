@@ -70,7 +70,7 @@ pub fn main(init: std.process.Init) !void {
         .user = "fixture",
         .auth = if (std.mem.startsWith(u8, stage, "agent")) .agent else if (std.mem.startsWith(u8, stage, "keyboard")) .keyboard_interactive else .{ .password = "fixture-password" },
         .keyboard_prompt = .{ .ctx = &prompts, .callback = Prompt.answer },
-        .open_shell = std.mem.eql(u8, stage, "channel") or std.mem.eql(u8, stage, "pty") or std.mem.startsWith(u8, stage, "shell"),
+        .open_shell = std.mem.eql(u8, stage, "channel") or std.mem.eql(u8, stage, "pty") or std.mem.startsWith(u8, stage, "shell") or std.mem.eql(u8, stage, "budget"),
         .host_key_decision = .trust_once,
         .connect_timeout_ms = if (cancelling) 3000 else 180,
         .cancel_token = &token,

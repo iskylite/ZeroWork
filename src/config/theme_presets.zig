@@ -13,7 +13,7 @@ pub fn tokens(comptime T: type, id: []const u8) ?T {
         .well = 0x0c0c0fff,
         .well_border = 0x26262cff,
         .terminal = 0x0a0a0dff,
-        .overlay = 0x18181cff,
+        .overlay = 0x292a30ff,
         .hover = 0x202026ff,
         .tab_on = 0x1e1e23ff,
         .fg_1 = 0xf4f4f5ff,

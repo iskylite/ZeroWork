@@ -73,6 +73,9 @@ pub const Event = struct {
     exit_code: ?i32 = null,
 };
 pub const Projection = struct {
+    output_sequence: u64 = 0,
+    bell_count: u64 = 0,
+    theme_revision: u64 = 0,
     version: u64,
     style_version: u64,
     mode_revision: u64,

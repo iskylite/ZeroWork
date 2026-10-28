@@ -91,6 +91,7 @@ pub const Thread = struct {
             var receipt = self.worker.releaseConnection();
             self.publishRelease(shell_ended, receipt, failure.?);
             while (!self.stop_requested.load(.acquire)) {
+                self.worker.publishPendingPresentation();
                 if (receipt == .awaiting) {
                     pause();
                     receipt = self.worker.releaseConnection();

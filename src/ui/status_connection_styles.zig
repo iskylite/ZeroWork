@@ -1,13 +1,13 @@
 //! V3 workspace identity popover: 344px, labeled facts and fixed actions.
 //! Status triggers: 358:1407192; retained fixed hit areas and icon positions.
 const ui = @import("ui");
-pub const identity_width: f32 = 138;
+pub const identity_width: f32 = 118;
 const shared = @import("connection_details_styles.zig");
 pub const theme = shared.theme;
 pub const ButtonStyle = shared.ButtonStyle;
-pub const width: f32 = 344;
+pub const width: f32 = 380;
 // Duration shares the session row; the existing route summary adds one 27px row.
-pub const height: f32 = 334;
+pub const height: f32 = 348;
 pub const margin: f32 = 8;
 pub const anchor_gap: f32 = 6;
 
@@ -18,7 +18,7 @@ pub fn panel(h: f32, viewport_width: f32) ui.BoxStyle {
     var result = shared.panel(h, viewport_width);
     result.width = .{ .px = @min(width, @max(0, viewport_width - margin * 2)) };
     result.gap = 0;
-    result.padding = ui.Padding.all(15);
+    result.padding = ui.Padding.all(16);
     result.border = .{ .radius = 11 };
     return result;
 }
@@ -27,7 +27,7 @@ pub fn content() ui.BoxStyle {
 }
 pub fn header() ui.BoxStyle {
     var result = shared.header();
-    result.height = .{ .px = 26 };
+    result.height = .{ .px = 28 };
     return result;
 }
 pub fn body() ui.BoxStyle {
@@ -45,13 +45,13 @@ pub fn scroll() ui.BoxStyle {
     return shared.scroll();
 }
 pub fn title() ui.TextStyle {
-    return shared.text(12, 700, 20, false);
+    return shared.text(15, 600, 20, false);
 }
 pub fn titleBox() ui.BoxStyle {
-    return .{ .width = .{ .px = 72 }, .height = .{ .px = 20 }, .flex_shrink = 0 };
+    return .{ .width = .{ .px = 88 }, .height = .{ .px = 20 }, .flex_shrink = 0 };
 }
 pub fn infoText(is_trailing: bool) ui.TextStyle {
-    var style = shared.text(11, 400, 18, is_trailing);
+    var style = shared.text(12, 400, 18, is_trailing);
     style.color = if (is_trailing) theme.current().fg_1 else theme.current().fg_2;
     style.text_align = if (is_trailing) .end else .start;
     style.selectable = is_trailing;
@@ -64,7 +64,7 @@ pub fn trailing() ui.BoxStyle {
     return shared.trailing();
 }
 pub fn address() ui.TextStyle {
-    var result = shared.text(11, 400, 18, true);
+    var result = shared.text(12, 400, 18, true);
     result.color = theme.current().fg_1;
     result.selectable = true;
     return result;
@@ -140,7 +140,7 @@ pub fn textAction(w: f32, surface: bool) ButtonStyle {
     var style = shared.action(30, surface);
     style.width = .{ .px = w };
     style.text_color = theme.current().fg_1;
-    style.font_size = 11;
+    style.font_size = 13;
     style.corner_radius = 8;
     return style;
 }

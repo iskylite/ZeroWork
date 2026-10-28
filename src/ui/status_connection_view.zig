@@ -236,10 +236,12 @@ pub const View = struct {
         self.content_scope = scope;
         self.content.setStyleInline(self.cx.allocator, S.content());
         const header = try ui.box(self.cx, S.header(), .{});
-        try header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.terminal, S.theme.current().accent, S.icon(14)));
+        try header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.terminal, S.theme.current().accent, S.icon(16)));
         _ = try label(self.cx, header, "会话连接", S.title(), S.titleBox());
         try header.appendChild(self.cx.allocator, try ui.spacer(self.cx));
-        self.close_button = try self.button(scope, header, .close, "关闭会话连接", "status.connection.close", ui.icons.x, 24, false, null);
+        self.state = try label(self.cx, header, "", S.infoText(true), .{ .height = .{ .px = 18 }, .min_width = 40, .flex_shrink = 0 });
+        self.state.meta.ownership.meta.test_id = "status.connection.state";
+        self.close_button = try self.button(scope, header, .close, "关闭会话连接", "status.connection.close", ui.icons.x, 28, false, null);
         try self.content.appendChild(self.cx.allocator, header);
         try self.content.appendChild(self.cx.allocator, try ui.box(self.cx, .{ .height = .{ .px = 12 }, .flex_shrink = 0 }, .{}));
         self.scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, self.cx);
@@ -247,10 +249,13 @@ pub const View = struct {
         self.scroll.container.meta.ownership.meta.test_id = "status.connection.viewport";
         self.scroll.content.setStyleInline(self.cx.allocator, S.body());
         try self.content.appendChild(self.cx.allocator, self.scroll.container);
-        self.name = try self.fact("连接", "status.connection.name");
-        self.address = try self.fact("身份", "status.connection.address");
+        const summary = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = ui.Padding.all(12), .direction = .column, .gap = 4, .margin = .{ .bottom = 10 }, .background = S.theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
+        self.name = try label(self.cx, summary, "", @import("connection_details_styles.zig").text(15, 600, 24, false), .{ .width = .fill(), .height = .{ .px = 24 }, .min_width = 0 });
+        self.name.meta.ownership.meta.test_id = "status.connection.name";
+        self.address = try label(self.cx, summary, "", S.address(), .{ .width = .fill(), .height = .{ .px = 20 }, .min_width = 0 });
+        self.address.meta.ownership.meta.test_id = "status.connection.address";
+        try self.scroll.content.appendChild(self.cx.allocator, summary);
         _ = try self.factValue("协议", "SSH · 交互式 Shell", "status.connection.protocol");
-        self.state = try self.fact("状态", "status.connection.state");
         self.latency = try self.fact("延迟", "status.connection.latency");
         self.cipher = try self.fact("加密", "status.connection.cipher");
         self.session = try self.fact("会话", "status.connection.session");
@@ -267,7 +272,7 @@ pub const View = struct {
         self.copy_button = try self.textButton(scope, actions, .copy, "复制信息", "status.connection.copy", 90, true, null);
         self.logs_button = try self.button(scope, actions, .logs, "连接日志", "status.connection.logs", ui.icons.get("file-text").?, 28, true, self.logs_disabled);
         self.feedback_label = try label(self.cx, actions, "", S.infoText(true), S.feedbackBox());
-        self.reconnect_button = try self.textButton(scope, actions, .reconnect, "重新连接", "status.connection.reconnect", 74, false, self.reconnect_disabled);
+        self.reconnect_button = try self.textButton(scope, actions, .reconnect, "重新连接", "status.connection.reconnect", 88, false, self.reconnect_disabled);
         try self.content.appendChild(self.cx.allocator, actions);
         self.pointer = try ui.iconTint(self.cx, ui.icons.chevron_down, S.theme.current().fg_3, S.icon(12));
         self.pointer.setDisplay(.none);
@@ -312,7 +317,7 @@ pub const View = struct {
             .disconnected => "已断开",
         });
         const online = !self.expired and source.state == .online;
-        self.state.setTextColor(if (online) S.theme.current().ok_ink else S.theme.current().fg_2);
+        self.state.setTextColor(if (online) @import("socks_info_styles.zig").text(.success) else S.theme.current().fg_2);
 
         var buffer: [4096]u8 = undefined;
         try self.latency.setTextContent(self.cx.allocator, if (online and source.latency_ms != null) try std.fmt.bufPrint(&buffer, "{d} ms", .{source.latency_ms.?}) else "未知");
@@ -359,7 +364,7 @@ pub const View = struct {
     }
     fn feedback(self: *View, text: []const u8, success: bool) void {
         self.feedback_label.setTextContent(self.cx.allocator, text) catch {};
-        self.feedback_label.setTextColor(if (success) S.theme.current().ok_ink else S.theme.current().danger_ink);
+        self.feedback_label.setTextColor(if (success) @import("socks_info_styles.zig").text(.success) else S.theme.current().danger_ink);
         self.cx.requestRedraw();
     }
     fn anchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {

@@ -4,4 +4,7 @@
 .v3-icon-action{width:var(--v3-icon-action-size);height:var(--v3-icon-action-size);min-height:var(--v3-icon-action-size);padding:0;display:inline-flex;align-items:center;justify-content:center;border:0;border-radius:7px;cursor:pointer}.v3-icon-action svg{width:var(--v3-icon-size);height:var(--v3-icon-size)}.v3-icon-action:disabled{cursor:default}
 .v3-control-toggle{width:var(--v3-switch-width);height:var(--v3-switch-height);min-height:var(--v3-switch-height);padding:2px;border:0;border-radius:20px;cursor:pointer}.v3-control-toggle>:first-child{display:block;width:var(--v3-switch-thumb);height:var(--v3-switch-thumb);border-radius:50%}.v3-control-toggle[aria-checked=true]>:first-child,.v3-control-toggle.on>:first-child{transform:translateX(12px)}
 /* Toolbars consume the same icon action geometry instead of the legacy 30px rule. */
+/* Match native switch semantics on every palette: neutral off, filled action on. */
+.v3-control-toggle:not(.on):not([aria-checked=true]){background-color:color-mix(in srgb,var(--surface-2-base) 65%,var(--fg-3) 35%)}
+.v3-control-toggle.on,.v3-control-toggle[aria-checked=true]{background-color:var(--action-accent)}
 .toolbar .v3-icon-action{width:var(--v3-icon-action-size);min-width:var(--v3-icon-action-size);height:var(--v3-icon-action-size);min-height:var(--v3-icon-action-size)}.toolbar .v3-icon-action svg{width:var(--v3-icon-size);height:var(--v3-icon-size)}

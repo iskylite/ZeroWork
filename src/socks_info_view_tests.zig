@@ -22,7 +22,7 @@ test "socks card mounts hidden, copies live values and dispatches actions" {
     if (!view.portaled) try root.appendChild(cx.allocator, view.wrapper);
     try std.testing.expect(view.root.style.display == .none);
     try view.update(.{ .state = .running, .port = 1081, .bind = "127.0.0.1", .host = "db", .exit = "db", .session_id = 201, .route = "via jump", .connections = 2, .uploaded = 1024 });
-    try std.testing.expectEqualStrings("归属 db #201 ·", view.owner.getText().?.content);
+    try std.testing.expectEqualStrings("#db", view.owner.getText().?.content);
     view.show(.{ .x = 1180, .y = 670, .w = 80, .h = 20 });
     cx.layout();
     _ = view.updateGeometry();
@@ -32,6 +32,17 @@ test "socks card mounts hidden, copies live values and dispatches actions" {
     try std.testing.expectEqual(view_mod.Action.test_proxy, sink.last.?);
     view.dispatch(.stop);
     try std.testing.expectEqual(view_mod.Action.stop, sink.last.?);
+    try view.update(.{ .state = .connecting, .logs = "正在申请监听" });
+    const actions_before = sink.actions;
+    view.dispatch(.start);
+    try std.testing.expectEqual(actions_before, sink.actions);
+    view.dispatch(.logs);
+    try std.testing.expect(view.logs_text.style.display == .flex);
+    try std.testing.expectEqualStrings("正在申请监听", view.logs_text.getText().?.content);
+    try view.update(.{ .state = .failed, .error_text = "AddressInUse" });
+    try std.testing.expectEqualStrings("重试", view.control_text.getText().?.content);
+    view.dispatch(.start);
+    try std.testing.expectEqual(view_mod.Action.start, sink.last.?);
 }
 
 test "socks card follows the live trigger through resize without leaving the window" {
@@ -56,8 +67,8 @@ test "socks card follows the live trigger through resize without leaving the win
         _ = cx.render();
     }
     const first = view.root.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 344), first.w, 0.01);
-    try std.testing.expect(first.h >= 271 and first.h < 400);
+    try std.testing.expectApproxEqAbs(@as(f32, 380), first.w, 0.01);
+    try std.testing.expect(first.h >= 288 and first.h < 500);
     try std.testing.expect(view.footer.globalRect().y >= view.body.container.globalRect().y + view.body.container.globalRect().h);
     try std.testing.expectApproxEqAbs(@as(f32, 45), view.footer.globalRect().h, 0.01);
     try std.testing.expectEqual(ui.A11yRole.button, view.test_button.behavior.interaction.a11y.?.role);
@@ -114,4 +125,20 @@ test "socks card long endpoint and failure use scrollable content above fixed ac
     try std.testing.expect(footer.y >= view.body.container.globalRect().y + view.body.container.globalRect().h - 0.5);
     try std.testing.expect(footer.y + footer.h <= card.y + card.h + 0.5);
     try std.testing.expect(card.y >= 7.5 and card.y + card.h <= 472.5);
+}
+
+test "socks diagnostics keep recent measured steps and disclose truncation" {
+    const Journal = @import("proto/ssh/forward_diagnostics.zig").Journal;
+    const clock = @import("platform/realtime.zig");
+    var journal: Journal = .{};
+    for (0..26) |_| journal.add("TCP 通道建立", clock.monotonicNs() - 2 * std.time.ns_per_ms, null);
+    journal.add("监听失败", null, error.AddressInUse);
+    try std.testing.expectEqual(@as(usize, 24), journal.count);
+    try std.testing.expectEqual(@as(usize, 3), journal.dropped);
+    try std.testing.expect(journal.records[0].elapsed_us.? >= 2000);
+    var buffer: [4096]u8 = undefined;
+    const logs = journal.format(&buffer);
+    try std.testing.expect(std.mem.indexOf(u8, logs, "ms") != null);
+    try std.testing.expect(std.mem.indexOf(u8, logs, "AddressInUse") != null);
+    try std.testing.expect(std.mem.indexOf(u8, logs, "已省略 3 条") != null);
 }

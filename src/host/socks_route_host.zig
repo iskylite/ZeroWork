@@ -44,6 +44,7 @@ pub const Snapshot = struct {
     cleanup: sessions.CloseReceipt,
     local_port: u16,
     stats: listener.Stats,
+    diagnostics: @import("../proto/ssh/forward_diagnostics.zig").Journal = .{},
     failure: ?anyerror,
     exit_index: ?usize,
     requested_port: u16,
@@ -369,6 +370,7 @@ pub const Host = struct {
         };
         entry.last.local_port = value.port;
         entry.last.stats = value.stats;
+        entry.last.diagnostics = value.diagnostics;
         entry.last.failure = value.failure;
         // Close hooks may immediately proceed to destroy the Worker after a
         // released receipt. Retain values, never a facade into freed memory.

@@ -619,7 +619,18 @@ test "local adapter serves owned snapshots validates paste and writes real parse
     _ = try write(service, .{ .input_sequence = 1, .bytes = "printf '\\033[?2004h\\033[?1000h\\033[?1006h\\033]7;file://localhost/fake/prompt\\007'; printf '%s_%s\\n' 'MODE' 'READY'\n" });
     try waitText(&rig, service, &output, "MODE_READY");
     _ = try waitWriteReceipt(service);
-    var initial = try snapshot(service);
+    // Raw PTY bytes and a write receipt can arrive before the cadence-limited
+    // viewport. Wait for publication of the observed output, not just any frame.
+    const observed_sequence = (try status(service)).output_sequence;
+    const published_until = native.zw_local_monotonic_ms() + 3000;
+    var initial = published: while (true) {
+        var value = try snapshot(service);
+        if (value.output_sequence >= observed_sequence) break :published value;
+        value.deinit(allocator);
+        if (native.zw_local_monotonic_ms() >= published_until) return error.PublicationTimeout;
+        try rig.tick();
+        pause();
+    };
     defer initial.deinit(allocator);
     try std.testing.expect(initial.owner.eql(accepted.handle) and !initial.read_only);
     try std.testing.expect(initial.projection.modes.bracketed_paste);
@@ -989,4 +1000,53 @@ test "built-in terminal types use actual local PTY TERM and legacy plus numeric 
         try waitText(&rig, service, &output, received);
         try rig.close(accepted.handle);
     };
+}
+
+test "local display progresses without a raw output consumer" {
+    var sandbox = try Sandbox.init();
+    defer sandbox.deinit();
+    var rig = try Rig.initWithOptions(.{ .output_capacity = 4096, .retain_raw_output = false });
+    defer rig.deinit();
+    const accepted = try rig.sessions.create(.{ .local = .{ .initial_cwd = sandbox.path } }, target);
+    const service = try rig.ready(accepted);
+    (try service.textSlot()).enableStructured();
+    // PTY ready precedes ZSH's first prompt/mode negotiation. A rejected
+    // stale-mode request has admitted no bytes; retry the same sequence.
+    const input_until = native.zw_local_monotonic_ms() + 5000;
+    while (true) {
+        _ = write(service, .{ .input_sequence = 1, .bytes = "repeat 9000 printf x; printf '\\n%s_%s\\n' 'DISPLAY' 'TAIL'; exit 0\n" }) catch |err| {
+            if (err != error.StaleMode or native.zw_local_monotonic_ms() >= input_until) return err;
+            pause();
+            continue;
+        };
+        break;
+    }
+    const until = native.zw_local_monotonic_ms() + 8000;
+    while (true) {
+        try rig.tick();
+        if ((try status(service)).eof_seen) break;
+        if (native.zw_local_monotonic_ms() >= until) return error.EofTimeout;
+        pause();
+    }
+    var found = false;
+    while (native.zw_local_monotonic_ms() < until) {
+        try rig.tick();
+        var value = service.snapshot(allocator) catch {
+            pause();
+            continue;
+        };
+        defer value.deinit(allocator);
+        var text: std.ArrayList(u8) = .empty;
+        defer text.deinit(allocator);
+        for (value.projection.cells) |cell| try text.appendSlice(allocator, value.projection.grapheme(cell));
+        if (std.mem.indexOf(u8, text.items, "DISPLAY_TAIL") != null) {
+            found = true;
+            break;
+        }
+        pause();
+    }
+    try std.testing.expect(found);
+    var raw: [64]u8 = undefined;
+    try std.testing.expectEqual(terminal.Read.eof, try service.readOutput(&raw));
+    try rig.close(accepted.handle);
 }
