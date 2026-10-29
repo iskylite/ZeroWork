@@ -123,6 +123,10 @@ pub const SessionTab = struct {
     runtime: ?*SessionRuntime = null,
     failed: bool = false,
     archived: bool = false,
+    archive_document: ?*@import("history_archive.zig").Document = null,
+    /// A task creation is not selectable or a group member until ready commit.
+    owned_pending: bool = false,
+    owned_origin: bool = false,
     closing: bool = false,
     local: bool = false,
     detected_os: session_icon.Os = .unknown,
@@ -422,6 +426,8 @@ pub const Workspace = struct {
     status_feedback: ?struct { context: *anyopaque, publish: *const fn (*anyopaque, ?identity.ContentOwner, []const u8, StatusKind) void } = null,
     command_output: ?*TerminalViewNode = null,
     creation_group: ?u32 = null,
+    owned_creation_pending: bool = false,
+    prepared_group_views: usize = 0,
     creation_tab_color: ?u32 = null,
     /// Status-bar grid-size label; bound to the active tab's terminal so the
     /// live PTY dimensions (frame_cols/frame_rows) replace the static text.
@@ -431,6 +437,7 @@ pub const Workspace = struct {
     menu_bridge: MenuBridge = .{},
     command_bridge: TerminalViewNode.PaletteObserver = .{ .on_command = ignoreCommand },
     input_bridge: ?TerminalViewNode.InputObserver = null,
+    terminal_takeover_handler: ?@import("terminal_view.zig").TakeoverHandler = null,
     error_hint_handler: ?@import("../ai/command_error_hint.zig").Handler = null,
     close_bridge: CloseBridge = .{},
     notification_attention_bridge: NotificationAttentionBridge = .{},
@@ -570,6 +577,7 @@ pub const Workspace = struct {
             // Child scopes dispose before this workspace cleanup. Native
             // renderers must register resource cleanup in their own scope.
             if (tab.host_snapshot) |*snapshot| snapshot.deinit();
+            if (tab.archive_document) |document| document.destroy();
             self.allocator.destroy(tab);
         }
         for (self.click_ctxs.items) |cell| self.allocator.destroy(cell);
@@ -774,8 +782,47 @@ pub const Workspace = struct {
 
     pub fn bindSessionOwner(self: *Workspace, id: SessionId, handle: identity.SessionHandle) !void {
         const tab = self.sessionTab(id) orelse return error.InvalidTab;
-        try self.model.replaceOwner(tab.tab_id, tab.content_owner, .{ .session = handle });
+        if (!tab.owned_pending) try self.model.replaceOwner(tab.tab_id, tab.content_owner, .{ .session = handle });
         tab.content_owner = .{ .session = handle };
+    }
+
+    /// Validate identities and reserve every fallible structure before making
+    /// the pending terminal a member. This is the sole owned member commit.
+    pub fn commitOwnedSession(self: *Workspace, group_owner: identity.GroupOwner, handle: identity.SessionHandle, id: SessionId) !u64 {
+        const tab = self.sessionTab(id) orelse return error.StaleSession;
+        if (!tab.content_owner.eql(.{ .session = handle }) or tab.closing or tab.archived or tab.terminal == null) return error.StaleSession;
+        const group_id = std.math.cast(u32, @backingInt(group_owner.id)) orelse return error.UnknownGroup;
+        const roster = self.group_roster orelse return error.UnknownGroup;
+        const group = roster.findById(group_id) orelse return error.UnknownGroup;
+        if (self.groupClosing(group_id)) return error.GroupClosing;
+        const parent = self.groupTabId(group_id) orelse return error.GroupNotOpen;
+        const parent_index = self.model.indexOf(parent) orelse return error.GroupNotOpen;
+        if (!self.model.tabs.items[parent_index].owner.eql(.{ .group = group_owner })) return error.StaleReference;
+        if (!tab.owned_pending) {
+            if (group.contains(id) and self.model.tabs.items[self.model.indexOf(tab.tab_id) orelse return error.TabClosed].container == parent) return group.membership_revision;
+            return error.MembershipCommitFailed;
+        }
+        if (group.contains(id)) return error.MembershipCommitFailed;
+        const revision = try identity.advance(group.membership_revision);
+        try group.members.ensureUnusedCapacity(roster.allocator, 1);
+        const ambient = self.creation_group;
+        self.creation_group = null;
+        defer self.creation_group = ambient;
+        tab.owned_pending = false;
+        errdefer tab.owned_pending = true;
+        try self.installTabModel(tab);
+        // No fallible work remains after publication of membership.
+        const model_tab = &self.model.tabs.items[self.model.indexOf(tab.tab_id).?];
+        model_tab.container = parent;
+        self.model.active = parent;
+        group.members.appendAssumeCapacity(.{ .pane_id = id, .membership_revision = revision });
+        group.membership_revision = revision;
+        self.active_group_view = group_id;
+        self.group_present_pending = true;
+        if (self.groupView(group_id)) |view| view.dirty = true;
+        self.tab_rebuild_pending = true;
+        self.cx.requestRedraw();
+        return revision;
     }
 
     fn findTicket(self: *const Workspace, ticket: lifecycle.Ticket) ?*SessionTab {
@@ -1164,6 +1211,14 @@ pub const Workspace = struct {
 
     fn installTabModel(self: *Workspace, tab: *SessionTab) !void {
         tab.tab_color = self.creation_tab_color;
+        if (self.owned_creation_pending) {
+            tab.owned_pending = true;
+            tab.owned_origin = true;
+            tab.root.setDisplay(.none);
+            return;
+        }
+        try self.model.tabs.ensureUnusedCapacity(self.allocator, self.prepared_group_views + 1);
+        try self.model.recent.ensureUnusedCapacity(self.allocator, self.prepared_group_views + 1);
         try self.model.append(tab.tab_id, tab.content_owner, tab.titleSlice());
         errdefer self.model.completeClose(tab.tab_id, tab.content_owner) catch {};
         const detail = if (tab.host_snapshot) |saved| blk: {
@@ -1819,6 +1874,91 @@ pub const Workspace = struct {
         } else if (self.tabIndexById(id)) |index| self.presentActiveTab(index);
     }
 
+    pub const PreparedGroupView = struct {
+        workspace: *Workspace,
+        group_id: u32,
+        tab: workspace_model.Tab,
+        view: ?*group_view.View,
+        source_tab: identity.TabId,
+        source_owner: identity.ContentOwner,
+        source_revision: u64,
+        source_container: ?identity.TabId,
+
+        pub fn validate(self: *const PreparedGroupView) !void {
+            const workspace = self.workspace;
+            if (self.view == null) return error.GroupTransactionConsumed;
+            if (workspace.shutting_down or workspace.model.window_close != null) return error.WorkspaceClosed;
+            if (workspace.groupTabId(self.group_id) != null or workspace.groupView(self.group_id) != null) return error.GroupIdentityConflict;
+            const at = workspace.model.indexOf(self.source_tab) orelse return error.SourceChanged;
+            const source = workspace.model.tabs.items[at];
+            if (!source.owner.eql(self.source_owner) or source.revision != self.source_revision or source.container != self.source_container) return error.SourceChanged;
+            if (workspace.model.order_revision == std.math.maxInt(u64)) return error.RevisionExhausted;
+        }
+        /// Called at the safe controller point after the roster transaction
+        /// commits. Storage reservation survives unrelated ordinary tab opens.
+        pub fn commit(self: *PreparedGroupView, roster: *group_model.Roster) !void {
+            try self.validate();
+            const group = roster.findById(self.group_id) orelse return error.UnknownGroup;
+            const source = self.workspace.sessionTab(self.workspace.tabs.items[self.workspace.tabIndexById(self.source_tab) orelse return error.SourceChanged].id) orelse return error.SourceChanged;
+            if (!group.contains(source.id)) return error.SourceChanged;
+            const workspace = self.workspace;
+            workspace.group_roster = roster;
+            workspace.group_views.appendAssumeCapacity(self.view.?);
+            workspace.model.tabs.appendAssumeCapacity(self.tab);
+            workspace.model.recent.appendAssumeCapacity(self.tab.id);
+            workspace.model.order_revision += 1;
+            workspace.model.tabs.items[workspace.model.indexOf(self.source_tab).?].container = self.tab.id;
+            workspace.model.activate(self.tab.id) catch unreachable;
+            workspace.active_group_view = self.group_id;
+            workspace.group_present_pending = true;
+            workspace.tab_rebuild_pending = true;
+            workspace.reveal_active = true;
+            workspace.prepared_group_views -= 1;
+            self.view = null;
+            workspace.cx.requestRedraw();
+        }
+        pub fn deinit(self: *PreparedGroupView) void {
+            if (self.view) |view| {
+                view.deinit(self.workspace.allocator);
+                self.workspace.allocator.destroy(view);
+                self.workspace.allocator.free(self.tab.details);
+                self.workspace.prepared_group_views -= 1;
+                self.view = null;
+            }
+        }
+    };
+
+    pub fn prepareGroupView(self: *Workspace, group_id: u32, name: []const u8, initial_pane: u64) !PreparedGroupView {
+        if (self.shutting_down or self.model.window_close != null) return error.WorkspaceClosed;
+        if (group_id == 0 or self.groupTabId(group_id) != null or self.groupView(group_id) != null) return error.GroupIdentityConflict;
+        const source = self.sessionTab(initial_pane) orelse return error.SourceChanged;
+        if (source.archived or source.owned_pending or source.closing or source.content_owner != .session or source.terminal == null) return error.SourceChanged;
+        const source_at = self.model.indexOf(source.tab_id) orelse return error.SourceChanged;
+        const source_model = self.model.tabs.items[source_at];
+        if (self.model.order_revision == std.math.maxInt(u64)) return error.RevisionExhausted;
+        const view = try self.allocator.create(group_view.View);
+        errdefer self.allocator.destroy(view);
+        view.* = .{ .id = group_id };
+        errdefer view.deinit(self.allocator);
+        try view.panes.ensureUnusedCapacity(self.allocator, 1);
+        const detail = try self.allocator.dupe(u8, "终端组 · 分栏与广播");
+        errdefer self.allocator.free(detail);
+        const label = try std.fmt.allocPrint(self.allocator, "组 · {s}", .{name});
+        defer self.allocator.free(label);
+        var tab: workspace_model.Tab = .{ .id = try tab_ids.allocate(), .owner = .{ .group = .{ .id = @fromBackingInt(group_id) } }, .details = detail };
+        var count = @min(label.len, tab.title.len);
+        while (count > 0 and !std.unicode.utf8ValidateSlice(label[0..count])) count -= 1;
+        @memcpy(tab.title[0..count], label[0..count]);
+        tab.title_len = @intCast(count);
+        const reservations = self.prepared_group_views + 1;
+        try self.group_views.ensureUnusedCapacity(self.allocator, reservations);
+        try self.model.tabs.ensureUnusedCapacity(self.allocator, reservations);
+        try self.model.recent.ensureUnusedCapacity(self.allocator, reservations);
+        try self.terminal_area.children.ensureUnusedCapacity(self.allocator, reservations);
+        self.prepared_group_views = reservations;
+        return .{ .workspace = self, .group_id = group_id, .tab = tab, .view = view, .source_tab = source.tab_id, .source_owner = source.content_owner, .source_revision = source_model.revision, .source_container = source_model.container };
+    }
+
     pub fn openGroup(self: *Workspace, roster: *group_model.Roster, id: u32) !void {
         const group = roster.findById(id) orelse return error.UnknownGroup;
         self.group_roster = roster;
@@ -1826,7 +1966,9 @@ pub const Workspace = struct {
             const created = try self.allocator.create(group_view.View);
             errdefer self.allocator.destroy(created);
             created.* = .{ .id = id };
-            try self.group_views.ensureUnusedCapacity(self.allocator, 1);
+            try self.group_views.ensureUnusedCapacity(self.allocator, self.prepared_group_views + 1);
+            try self.model.tabs.ensureUnusedCapacity(self.allocator, self.prepared_group_views + 1);
+            try self.model.recent.ensureUnusedCapacity(self.allocator, self.prepared_group_views + 1);
             const tab_id = try tab_ids.allocate();
             const title = try std.fmt.allocPrint(self.allocator, "组 · {s}", .{group.name});
             defer self.allocator.free(title);
@@ -1897,7 +2039,7 @@ pub const Workspace = struct {
         for (self.tabs.items) |tab| {
             if (tab.terminal) |*terminal| {
                 terminal.setHistoryHost(null) catch {};
-                terminal.setGrouped(false);
+                terminal.setGrouped(if (tab.archive_document) |document| document.record.descriptor.display.grouped else false);
             }
             if (tab.root.parent != self.terminal_area) {
                 if (tab.root.parent) |parent| self.cx.detachChild(parent, tab.root);
@@ -2532,6 +2674,7 @@ pub const Workspace = struct {
     pub fn selectTab(self: *Workspace, index: usize) void {
         if (self.tabs.items.len == 0) return;
         if (index >= self.tabs.items.len) return;
+        if (self.tabs.items[index].owned_pending) return;
         const tab_id = self.tabs.items[index].tab_id;
         self.restoreStandaloneIfUngrouped(tab_id);
         self.model.activate(tab_id) catch return;
@@ -2758,7 +2901,10 @@ pub const Workspace = struct {
         }
         applog.info(.workspace, "forceCloseTab index={d}", .{index});
         const tab = self.tabs.items[index];
-        self.model.completeClose(tab.tab_id, tab.content_owner) catch return;
+        if (!tab.owned_pending) self.model.completeClose(tab.tab_id, tab.content_owner) catch return;
+        if (tab.owned_origin) {
+            if (self.group_roster) |roster| _ = roster.leavePane(tab.id);
+        }
         if (self.rename_session == tab.id) _ = self.cancelRenameTab();
         for (self.connect_jobs.items) |job| {
             if (job.ticket.matches(tab.ticket())) {
@@ -2804,6 +2950,7 @@ pub const Workspace = struct {
         self.cx.destroyDetached(tab.root);
         if (tab.plugin_protocol_id.len != 0) self.allocator.free(tab.plugin_protocol_id);
         if (tab.host_snapshot) |*snapshot| snapshot.deinit();
+        if (tab.archive_document) |document| document.destroy();
         self.allocator.destroy(tab);
         _ = self.tabs.orderedRemove(index);
         if (self.tabs.items.len == 0) {
@@ -3587,6 +3734,7 @@ pub const Workspace = struct {
         const tab = try self.allocator.create(SessionTab);
         errdefer self.allocator.destroy(tab);
         var terminal = try TerminalViewNode.mount(self.cx);
+        terminal.setTerminalTakeoverHandler(self.terminal_takeover_handler);
         var owned_pane: ?*ui.Node = null;
         var local_scope: ?*ui.Scope = null;
         var terminal_attached = false;
@@ -3784,6 +3932,19 @@ pub const Workspace = struct {
         cell.workspace.newLocalSession(null) catch |err| cell.workspace.statusFailure(@errorName(err));
     }
 
+    pub fn userInputRevision(self: *Workspace, handle: identity.SessionHandle) ?u64 {
+        for (self.tabs.items) |tab| {
+            if (tab.archived or tab.content_owner != .session or !tab.content_owner.session.eql(handle)) continue;
+            const view = if (tab.terminal) |*terminal_view| terminal_view else return null;
+            if (view.terminal_surface) |surface| return if (surface.owner.eql(handle)) surface.user_input_revision else null;
+            return view.user_input_revision;
+        }
+        return null;
+    }
+    pub fn setTerminalTakeoverHandler(self: *Workspace, handler: ?@import("terminal_view.zig").TakeoverHandler) void {
+        self.terminal_takeover_handler = handler;
+        for (self.tabs.items) |tab| if (tab.terminal) |*view| view.setTerminalTakeoverHandler(handler);
+    }
     pub fn bindLocalTerminal(self: *Workspace, id: SessionId, handle: identity.SessionHandle, service: terminal_service.Service) !void {
         const tab = self.sessionTab(id) orelse return error.InvalidTab;
         if (!tab.local or !tab.content_owner.eql(.{ .session = handle })) return error.StaleSession;
@@ -3960,8 +4121,75 @@ pub const Workspace = struct {
     }
 
     /// Opens a durable recording without a worker or transport credentials.
+    pub fn focusArchive(self: *Workspace, key: []const u8) bool {
+        for (self.tabs.items, 0..) |tab, index| if (tab.archive_document) |document| {
+            if (std.mem.eql(u8, document.record.descriptor.archive_key, key) and !tab.closing) {
+                self.selectTab(index);
+                return true;
+            }
+        };
+        return false;
+    }
+
+    /// On success this tab owns the entire decoded document and read lease.
+    pub fn openArchiveDocument(self: *Workspace, document: *@import("history_archive.zig").Document) !void {
+        const descriptor = document.record.descriptor;
+        if (self.focusArchive(descriptor.archive_key)) return error.ArchiveAlreadyOpen;
+        try self.openArchivedContent(descriptor.entry.host, descriptor.entry.user, &document.timeline, &document.reading);
+        const tab = self.tabs.items[self.tabs.items.len - 1];
+        tab.archive_document = document;
+        if (descriptor.display.title.len > 0 and !std.mem.eql(u8, tab.titleSlice(), descriptor.display.title)) {
+            tab.setTitle(descriptor.display.title);
+            if (self.model.beginRename(tab.tab_id)) |ticket| self.model.rename(ticket, tab.titleSlice()) catch {} else |_| {}
+            self.tab_rebuild_pending = true;
+        }
+        self.restoreArchiveDisplay(tab);
+    }
+
+    pub fn restoreArchiveAppearances(self: *Workspace) void {
+        for (self.tabs.items) |tab| if (tab.archive_document != null) self.restoreArchiveDisplay(tab);
+    }
+
+    fn restoreArchiveDisplay(self: *Workspace, tab: *SessionTab) void {
+        const document = tab.archive_document orelse return;
+        const descriptor = document.record.descriptor;
+        const terminal = if (tab.terminal) |*view| view else return;
+        if (descriptor.manifest_revision == 0) {
+            terminal.setArchiveNotice("旧版记录：未保存原布局参数，按可用记录展示");
+            return;
+        }
+        const display = descriptor.display;
+        terminal.setGrouped(display.grouped);
+        terminal.setTimestampGutter(display.timestamps);
+        var fallback = display.font_family == null or display.font_size_px == null or display.line_height == null;
+        if (display.font_family) |family| {
+            const family_id = if (self.font_family_resolver) |resolve| resolve(family) else 0;
+            fallback = fallback or (family_id == 0 and !std.mem.eql(u8, family, "system"));
+            const size = display.font_size_px orelse terminal.terminal_font_size;
+            const line_height = display.line_height orelse terminal.terminal_line_height;
+            if (terminal.terminal_font_family == null or !std.mem.eql(u8, terminal.terminal_font_family.?, family) or terminal.terminal_font_family_id != family_id or terminal.terminal_font_size != size or terminal.terminal_line_height != line_height) {
+                terminal.setTypographyFamily(size, line_height, terminal.terminal_font_weight, family, family_id) catch {
+                    fallback = true;
+                };
+                terminal.history_reading_height = 0;
+                terminal.root.markLayoutDirty();
+            }
+        }
+        const notice: []const u8 = switch (descriptor.coverage) {
+            .partial, .gapped => if (fallback) "记录存在缺口；部分原布局参数不可用，已使用可用样式" else "记录存在缺口，部分输出不可用",
+            .retained => if (fallback) "显示保留片段；部分原布局参数不可用，已使用可用样式" else "显示保留的记录片段",
+            else => if (fallback) "部分原字体或布局参数不可用，已使用可用样式" else "",
+        };
+        if (notice.len > 0) terminal.setArchiveNotice(notice);
+    }
+
+    /// Opens a durable recording without a worker or transport credentials.
     /// Timeline ownership moves only after all fallible UI setup succeeds.
     pub fn openArchivedSession(self: *Workspace, host: []const u8, user: []const u8, history: *@import("history_replay.zig").Timeline) !void {
+        return self.openArchivedContent(host, user, history, null);
+    }
+
+    fn openArchivedContent(self: *Workspace, host: []const u8, user: []const u8, history: *@import("history_replay.zig").Timeline, reading: ?*?@import("history_reading.zig").Model) !void {
         if (self.shutting_down) return error.WorkspaceClosed;
         if (history.frames.items.len == 0) return error.EmptyRecording;
         try self.tabs.ensureUnusedCapacity(self.allocator, 1);
@@ -3970,10 +4198,11 @@ pub const Workspace = struct {
         var snapshot = try HostSnapshot.init(self.allocator, .{ .name = host, .host = host, .user = user });
         errdefer snapshot.deinit();
         var terminal = try TerminalViewNode.mount(self.cx);
+        terminal.setTerminalTakeoverHandler(self.terminal_takeover_handler);
         terminal.completion_enabled = self.app_config.completion.enabled;
         errdefer {
-            tab.terminal.?.releaseBuffers(self.cx);
-            self.cx.destroyDetached(tab.terminal.?.root);
+            terminal.releaseBuffers(self.cx);
+            self.cx.destroyDetached(terminal.root);
         }
         terminal.root.setBackground(self.palette.terminal_bg);
         terminal.setThemeColors(self.palette.fg, self.palette.border, self.palette.accent);
@@ -3986,12 +4215,17 @@ pub const Workspace = struct {
         try tab.terminal.?.attachSearch(self.scope);
         tab.setTitle(host);
         try self.installTabModel(tab);
+        errdefer self.model.completeClose(tab.tab_id, tab.content_owner) catch {};
         try self.terminal_area.appendChild(self.cx.allocator, terminal.root);
         tab.terminal.?.history.deinit();
         tab.terminal.?.history = history.*;
         tab.terminal.?.history.history_id = tab.content_owner.history;
         history.* = @import("history_replay.zig").Timeline.init(history.allocator, history.limit);
         tab.terminal.?.bindArchived();
+        if (reading) |prepared| {
+            tab.terminal.?.history_reading = prepared.*;
+            prepared.* = null;
+        }
         self.tabs.appendAssumeCapacity(tab);
         self.rebuildTabBar() catch {};
         self.selectTab(self.tabs.items.len - 1);
@@ -4227,6 +4461,7 @@ pub const Workspace = struct {
         var snapshot = try HostSnapshot.init(self.allocator, host);
         errdefer snapshot.deinit();
         var terminal = try TerminalViewNode.mount(self.cx);
+        terminal.setTerminalTakeoverHandler(self.terminal_takeover_handler);
         var notice_scope: ?*ui.Scope = null;
         var owned_pane: ?*ui.Node = null;
         var terminal_attached = false;
@@ -4350,7 +4585,7 @@ pub const Workspace = struct {
             }
             const target = tab.?;
             if (job.err) |err| {
-                if (self.session_bridge.retry_ssh != null and job.canAutomaticallyRetry()) {
+                if (!target.owned_origin and self.session_bridge.retry_ssh != null and job.canAutomaticallyRetry()) {
                     const receipt = job.failedCleanupReceipt();
                     if (receipt == .awaiting) continue;
                     if (receipt == .released) {
@@ -4485,7 +4720,10 @@ pub const Workspace = struct {
     fn drainCloseReceipts(self: *Workspace) void {
         while (self.close_receipts.items.len > 0) {
             const receipt = self.close_receipts.orderedRemove(0);
-            if (self.model.isCurrentTarget(receipt)) if (self.tabIndexById(receipt.tab)) |index| self.removeClosedTab(index);
+            if (self.tabIndexById(receipt.tab)) |index| {
+                const tab = self.tabs.items[index];
+                if (self.model.isCurrentTarget(receipt) or (tab.owned_pending and tab.content_owner.eql(receipt.owner))) self.removeClosedTab(index);
+            }
         }
     }
 

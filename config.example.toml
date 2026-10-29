@@ -29,6 +29,8 @@ reconnect_backoff = [1,2,4,8,16]
 [ai]
 default_provider = "anthropic"
 permission_mode = "confirm"
+execution_mode = "auto"
+session_retention = "auto_idle"
 redact_ip = true
 error_hint = true
 

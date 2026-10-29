@@ -55,17 +55,9 @@ const Fixture = struct {
                 .actions = &.{.{ .kind = .locate_owner, .label = "查看来源" }},
             }) catch return;
         }
-        _ = self.notice_host.publish(.{
-            .definition_id = "host.transfer_done",
-            .owner = .{ .window_id = 1, .content = owner },
-            .operation_id = self.operation + 4,
-            .event_revision = 1,
-            .phase = .failed,
-            .severity = .warning,
-            .title = "后台传输批次已停止",
+        self.notice_host.publishTransferBatch(@fromBackingInt(1), owner, self.operation + 4, 1, 3, .blocked, .{
+            .object = "reports 等 3 项",
             .detail = "批次需要你处理权限后才能继续。",
-            .attention = .{ .kind = .transfer_batch_stopped, .requires_action = true, .time_sensitive = true },
-            .actions = &.{.{ .kind = .locate_owner, .label = "查看来源" }},
         }) catch return;
         self.cx.requestRedraw();
     }

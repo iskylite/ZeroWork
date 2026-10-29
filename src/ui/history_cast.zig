@@ -8,6 +8,16 @@ const frame = @import("../vt/text_frame.zig");
 const Timeline = @import("history_replay.zig").Timeline;
 
 pub fn load(allocator: std.mem.Allocator, cast: []const u8) !Timeline {
+    return loadCancelable(allocator, cast, null);
+}
+pub fn loadCancelable(allocator: std.mem.Allocator, cast: []const u8, cancel: ?*const std.atomic.Value(bool)) !Timeline {
+    return loadWithDisplay(allocator, cast, cancel, .{});
+}
+pub fn loadWithDisplay(allocator: std.mem.Allocator, cast: []const u8, cancel: ?*const std.atomic.Value(bool), display: @import("../vt/recording_manifest.zig").Display) !Timeline {
+    // Display color snapshots are historical metadata, never a UI theme.
+    // Keep native cell color tags; the reader resolves them against the live
+    // global palette without changing recorded bytes or literal truecolor.
+    _ = display;
     var lines = std.mem.splitScalar(u8, cast, '\n');
     const header = try std.json.parseFromSlice(std.json.Value, allocator, lines.next() orelse return error.InvalidCast, .{});
     defer header.deinit();
@@ -28,6 +38,9 @@ pub fn load(allocator: std.mem.Allocator, cast: []const u8) !Timeline {
     }
     var adapter = try Adapter.init(allocator, rows, cols);
     defer adapter.destroy();
+    // Cast output has frame-relative timing. Never stamp decoded historical
+    // rows with the wall clock of the machine opening the archive.
+    adapter.wall_clock_ms = replayClockUnknown;
     var timeline = Timeline.init(allocator, 128 * 1024 * 1024);
     errdefer timeline.deinit();
     var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(1) } };
@@ -35,6 +48,7 @@ pub fn load(allocator: std.mem.Allocator, cast: []const u8) !Timeline {
     defer composite.deinit();
     var previous_ms: i64 = 0;
     while (lines.next()) |line| {
+        if (cancel) |token| if (token.load(.acquire)) return error.Cancelled;
         if (std.mem.trim(u8, line, " \r\t").len == 0) continue;
         const event = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
         defer event.deinit();
@@ -96,11 +110,16 @@ pub fn load(allocator: std.mem.Allocator, cast: []const u8) !Timeline {
         const search_bytes = document.text.len + document.rows.len * @sizeOf(@import("../vt/search_snapshot.zig").Row) + document.spans.len * @sizeOf(@import("../vt/search_snapshot.zig").Span);
         if (timeline.bytes + wire.len + search_bytes > timeline.limit) return error.HistoryRecordingTooLarge;
         try timeline.append(ms, wire);
+        timeline.frames.items[timeline.frames.items.len - 1].reverse_colors = snap.modes.reverse_colors;
         timeline.frames.items[timeline.frames.items.len - 1].search = document;
         timeline.bytes += search_bytes;
     }
     if (timeline.frames.items.len == 0) return error.EmptyRecording;
     return timeline;
+}
+
+fn replayClockUnknown() i64 {
+    return 0;
 }
 
 fn dimension(value: std.json.Value) !u16 {

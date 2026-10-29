@@ -252,7 +252,7 @@ pub const RequestTable = struct {
                 entry.targets = targets;
             }
         }
-        return .{ .arena = arena, .captured_scope = captured_scope, .entries = try entries.toOwnedSlice(a) };
+        return .{ .arena = arena, .captured_scope = try captured_scope.clone(a), .entries = try entries.toOwnedSlice(a) };
     }
     pub fn deinit(self: *RequestTable) void {
         self.arena.deinit();
@@ -299,7 +299,7 @@ pub const RequestTable = struct {
         std.crypto.hash.sha2.Sha256.hash(arguments, &hash, .{});
         if (entry.authority != .session_targets) {
             try (self.host_context orelse return error.InvalidHostAuthority).validate();
-            return .{ .json = parsed, .entry = entry, .targets = .{}, .arguments_hash = hash };
+            return .{ .json = parsed, .entry = entry, .targets = .{}, .arguments_hash = hash, .canonical_arguments_hash = try @import("canonical_arguments.zig").digest(allocator, parsed.value) };
         }
         const ids = parsed.value.object.get("session_ids") orelse return error.InvalidToolArguments;
         if (ids != .array or ids.array.items.len == 0 or ids.array.items.len > scope.max_targets) return error.InvalidTargetCount;
@@ -319,6 +319,7 @@ pub const ParsedCall = struct {
     entry: *const Entry,
     targets: scope.Targets,
     arguments_hash: [32]u8,
+    canonical_arguments_hash: ?[32]u8 = null,
     pub fn deinit(self: *ParsedCall) void {
         self.json.deinit();
     }
@@ -583,7 +584,7 @@ pub fn cloneTable(input: *const RequestTable, allocator: std.mem.Allocator) !Req
         }
         entry.targets = targets;
     }
-    return .{ .arena = arena, .captured_scope = input.captured_scope, .entries = entries, .host_context = input.host_context };
+    return .{ .arena = arena, .captured_scope = try input.captured_scope.clone(a), .entries = entries, .host_context = input.host_context };
 }
 
 pub const DynamicInvocation = struct {

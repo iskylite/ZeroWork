@@ -39,6 +39,10 @@ pub const Invocation = struct {
     /// Raw wire correlation hash. Lifecycle journaling must separately hash
     /// canonical validated arguments before accepting an idempotency key.
     arguments_hash: [32]u8,
+    canonical_arguments_hash: [32]u8,
+    /// An internal exact approval token. Never parsed from model arguments or
+    /// serialized into provider tool definitions.
+    approval_sequence: ?u64 = null,
 };
 pub const Receipt = struct {
     conversation_id: identity.ConversationId,

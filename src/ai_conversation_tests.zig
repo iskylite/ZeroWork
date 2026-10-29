@@ -4,6 +4,10 @@ const a = std.testing.allocator;
 const turns = @import("ai/conversation_turn.zig");
 const wire = @import("ai/wire_history.zig");
 const steps = @import("ai/step_events.zig");
+test {
+    _ = @import("ai/conversation_turn.zig");
+    _ = @import("host/terminal_execution.zig");
+}
 fn find(root: *ui.Node, id: []const u8) ?*ui.Node {
     if (std.mem.eql(u8, root.meta.ownership.meta.test_id orelse "", id)) return root;
     for (root.children.items) |child| if (find(child, id)) |node| return node;

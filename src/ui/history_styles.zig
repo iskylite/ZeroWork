@@ -1,23 +1,23 @@
-//! Live Figma V2: 223:330801 / 236:568536, 560x360, header48, body16/56.
+//! Editable HTML baseline: docs/UI_V3/workspace/session-history/app.js.
 const std = @import("std");
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
-pub const row_height: f32 = 80;
-pub const row_gap: f32 = 10;
+pub const row_height: f32 = 60;
+pub const row_gap: f32 = 0;
 pub fn card() ui.BoxStyle {
-    return .{ .width = .{ .px = 560 }, .direction = .column, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 14 }, .overflow = .hidden, .flex_shrink = 0 };
+    return .{ .position = .absolute, .inset = .{ .right = .{ .px = 12 }, .top = .{ .px = 50 } }, .width = .{ .px = 440 }, .padding = ui.Padding.all(16), .direction = .column, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .radius = 12 }, .hit_behavior = .@"opaque", .overflow = .hidden, .flex_shrink = 0 };
 }
 pub fn header() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 48 }, .direction = .row, .align_items = .center, .padding = .{ .left = 16, .right = 11 }, .gap = 6, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 26 }, .direction = .row, .align_items = .center, .margin = .{ .bottom = 12 }, .gap = 8, .flex_shrink = 0 };
 }
 pub fn list() ui.BoxStyle {
-    return .{ .width = .fill(), .direction = .column, .gap = row_gap, .padding = .{ .left = 16, .right = 16, .top = 8, .bottom = 16 } };
+    return .{ .width = .fill(), .direction = .column, .gap = row_gap, .padding = .ZERO };
 }
 pub fn row() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .column, .padding = ui.Padding.all(10), .gap = 6, .background = theme.popupAction(), .border = .{ .radius = 9 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .row, .align_items = .start, .padding = .{ .left = 9, .right = 9, .top = 10, .bottom = 10 }, .gap = 10, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn metadata() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .gap = 12, .flex_shrink = 0 };
 }
 pub fn actions() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .justify = .end, .gap = 8, .flex_shrink = 0 };
@@ -32,7 +32,8 @@ pub fn emptyTitle() ui.TextStyle {
     return .{ .font_size = 13, .font_weight = 500, .line_height = 18.0 / 13.0, .color = theme.current().fg_1, .selectable = false };
 }
 pub fn text(size: f32, weight: u16, secondary: bool) ui.TextStyle {
-    return .{ .font_size = size, .font_weight = weight, .line_height = (if (size == 12) @as(f32, 18) else 16) / size, .color = if (secondary) theme.current().fg_2 else theme.current().fg_1, .text_overflow = .ellipsis, .selectable = false };
+    const line_px: f32 = if (size == 14) 20 else if (size == 13) 18 else if (size == 12) 17 else 16;
+    return .{ .font_size = size, .font_weight = weight, .line_height = line_px / size, .color = if (secondary) theme.current().fg_2 else theme.current().fg_1, .text_overflow = .ellipsis, .selectable = false };
 }
 pub fn chip() ui.BoxStyle {
     return .{ .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .padding = .{ .left = 9, .right = 9 }, .background = theme.popupAction(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
@@ -59,6 +60,7 @@ pub fn repaint(node: *ui.Node, previous: theme.Colors) void {
     for (node.children.items) |child| repaint(child, previous);
 }
 fn remap(value: ui.Color, previous: theme.Colors) ui.Color {
+    if (theme.remapUiSurface(value, previous)) |surface| return surface;
     const current = theme.current();
     inline for (@typeInfo(theme.Colors).@"struct".field_names) |field| if (ui.Color.eql(value, @field(previous, field))) return @field(current, field);
     return value;

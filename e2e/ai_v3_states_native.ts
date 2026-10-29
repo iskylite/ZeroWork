@@ -1,4 +1,5 @@
 /** Existing production AI states through an isolated local SSE provider and native Harness. */
+import {fixtureSessionIds} from './ai_fixture_discovery.ts';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
@@ -18,8 +19,8 @@ const server=createServer(async(req,res)=>{
  res.writeHead(200,{'content-type':'text/event-stream'});
  const data=(delta:any)=>'data: '+JSON.stringify({choices:[{index:0,delta}]})+'\n\n';
  if(mode==='waiting'){res.write(data({content:'正在分析测试上下文。'}));held=res;return;}
- if((mode==='approval'||mode==='accepted')&&!body.messages.some((m:any)=>m.role==='tool')){
-  const spec=body.tools.find((t:any)=>t.function.name==='run_command');assert(spec);const system=body.messages.find((m:any)=>m.role==='system')?.content??'';const identity=Number(system.match(/assistant_session_id=(\d+)/)?.[1]);const ids=spec.function.parameters.properties.session_ids.items.enum??[identity];assert(ids[0]>0);
+ if((mode==='approval'||mode==='accepted')&&!body.messages.some((m:any)=>m.role==='tool'&&m.tool_call_id?.startsWith('v3-safe-'))){
+  const ids=fixtureSessionIds(body,res);if(!ids)return;
   res.end(data({tool_calls:[{index:0,id:'v3-safe-'+mode,type:'function',function:{name:'run_command',arguments:JSON.stringify({session_ids:[ids[0]],command:mode==='accepted'?'printf V3_APPROVAL_ACCEPTED':`printf V3_MUST_NOT_EXECUTE > '${join(iso,'must-not-execute')}'`})}}]})+'data: [DONE]\n\n');return;
  }
  res.end(data({content:mode==='approval'?'该调用已拒绝。':mode==='accepted'?'工具调用已完成。':'已完成只读分析。\n\n保留原始上下文。'})+'data: [DONE]\n\n');

@@ -29,6 +29,8 @@ fn nextValue(value: config.Config, entry: @TypeOf(schema.fields[0])) !values.Val
         .{ .section = "transfer", .key = "download_dir", .text = "/fixture/settings-download" },
         .{ .section = "ai", .key = "default_provider", .text = "audit-provider" },
         .{ .section = "ai", .key = "permission_mode", .text = "auto" },
+        .{ .section = "ai", .key = "execution_mode", .text = "new_pty" },
+        .{ .section = "ai", .key = "session_retention", .text = "keep" },
         .{ .section = "notify", .key = "quiet_hours", .text = "23:00-07:00" },
         .{ .section = "log", .key = "export_format", .text = "txt" },
         .{ .section = "ui.materials.background", .key = "path", .text = "/fixture/settings-background.png" },

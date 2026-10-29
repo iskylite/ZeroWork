@@ -78,6 +78,8 @@ pub const FakeTransport = struct {
     resize_calls: usize = 0,
     scroll_calls: usize = 0,
     read_only: bool = false,
+    input_leased: bool = false,
+    execution: ?terminal.execution.Snapshot = null,
     busy: bool = false,
     receipt_busy: bool = false,
     outcome_busy: bool = false,
@@ -109,6 +111,7 @@ pub const FakeTransport = struct {
         const self = get(raw);
         if (self.busy) return error.WorkerBusy;
         if (self.read_only) return error.ReadOnlyTerminal;
+        if (self.input_leased) return error.TerminalControlled;
         if (request.input_sequence <= self.sequence) return error.StaleInput;
         if (request.mode_revision != self.vt.snapshot().mode_revision) return error.StaleMode;
         try self.written.appendSlice(a, request.bytes);
@@ -239,7 +242,10 @@ pub const FakeTransport = struct {
         }
         try self.controller.setTheme(owner, value, 1);
     }
-    const vtable: terminal.Service.VTable = .{ .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = text, .snapshot = snapshot, .prepare_paste = prepare, .commit_paste = commit, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = applyTheme, .search_snapshot = searchSnapshot, .search_async = beginSearch, .search_tail = searchTail, .trusted_outcome = trustedOutcome };
+    fn executionSnapshot(raw: *anyopaque, _: host.ServiceHandle) !terminal.execution.Snapshot {
+        return get(raw).execution orelse error.ExecutionUnavailable;
+    }
+    const vtable: terminal.Service.VTable = .{ .execution_snapshot = executionSnapshot, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = text, .snapshot = snapshot, .prepare_paste = prepare, .commit_paste = commit, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = applyTheme, .search_snapshot = searchSnapshot, .search_async = beginSearch, .search_tail = searchTail, .trusted_outcome = trustedOutcome };
 };
 
 // Derive the public backend types from Cx's injected SDK; the application test
@@ -710,6 +716,41 @@ test "terminal surface queued text owns its copy across pump receipt backpressur
     try std.testing.expectEqual(@as(usize, 0), surface.pending_bytes);
     try surface.pump();
     try std.testing.expectEqualStrings("echo original next", transport.written.items);
+}
+
+test "terminal surface user input revision excludes focus protocol and unaccepted admission" {
+    var transport: FakeTransport = undefined;
+    try transport.init(3, 16);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 160);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    cx.setFocus(view.root);
+    try transport.controller.feedOutput(owner, 1, "\x1b[?1004h", 100);
+    _ = try view.refreshTerminalService(owner, true);
+    const surface = view.terminal_surface.?;
+    // Actual native focus notification is a VT protocol frame, not user input.
+    try std.testing.expect(std.mem.indexOf(u8, transport.written.items, "\x1b[I") != null);
+    try std.testing.expectEqual(@as(u64, 0), surface.user_input_revision);
+    transport.input_leased = true;
+    const before_rejection = transport.written.items.len;
+    try surface.queueText("rejected-by-real-admission-contract");
+    try std.testing.expectEqual(@as(u64, 0), surface.user_input_revision);
+    try std.testing.expectEqual(before_rejection, transport.written.items.len);
+    try std.testing.expectEqual(@as(usize, 0), surface.pending.items.len);
+    transport.input_leased = false;
+    transport.receipt_busy = true;
+    try surface.queueText("human");
+    try std.testing.expectEqual(@as(u64, 0), surface.user_input_revision);
+    transport.receipt_busy = false;
+    try surface.pump();
+    try std.testing.expectEqual(@as(u64, 1), surface.user_input_revision);
+    try surface.pump();
+    try std.testing.expectEqual(@as(u64, 1), surface.user_input_revision);
 }
 
 test "terminal surface busy Enter retries before the slower host lifecycle deadline" {
@@ -2362,4 +2403,66 @@ test "terminal surface double click spans soft wrapped filenames but stops at ha
     const copied = (try view.copySelectionText(a)).?;
     defer a.free(copied);
     try std.testing.expectEqualStrings(filename, copied);
+}
+
+
+test "terminal surface AI control tag revalidates its exact grant and never submits terminal input" {
+    var transport: FakeTransport = undefined;
+    try transport.init(4, 60);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 240);
+    var view = try View.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    const Handler = struct {
+        calls: usize = 0,
+        task: identity.TaskId,
+        execution: identity.ExecutionId,
+        fn request(raw: *anyopaque, task: identity.TaskId, handle: identity.SessionHandle, execution: identity.ExecutionId) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expect(handle.eql(owner));
+            try std.testing.expect(task.eql(self.task));
+            try std.testing.expect(execution.eql(self.execution));
+            self.calls += 1;
+        }
+    };
+    var handler: Handler = .{ .task = .generate(), .execution = .generate() };
+    view.setTerminalTakeoverHandler(.{ .context = &handler, .request = Handler.request });
+    try view.bindTerminalService(transport.service());
+    _ = try view.refreshTerminalService(owner, true);
+    const surface = view.terminal_surface.?;
+    try std.testing.expect(surface.control_tag == null);
+    transport.execution = .{ .owner = owner, .execution_id = handler.execution, .state = .running, .input_ready = false, .local_released = false, .grant = .{ .execution_id = handler.execution, .task_id = handler.task, .fence = 2, .input_epoch = 3, .ownership_revision = 1 } };
+    _ = try view.refreshTerminalService(owner, true);
+    _ = cx.render();
+    const tag = surface.control_tag.?;
+    try std.testing.expectEqual(.flex, tag.style.display);
+    try std.testing.expectApproxEqAbs(@as(f32, 28), tag.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 12), surface.root.globalRect().x + surface.root.globalRect().w - tag.globalRect().x - tag.globalRect().w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 10), surface.root.globalRect().y + surface.root.globalRect().h - tag.globalRect().y - tag.globalRect().h, 0.01);
+    const button = surface.control_button.?;
+    const r = button.globalRect();
+    cx.handleMouseDown(r.x + r.w / 2, r.y + r.h / 2, .{});
+    cx.handleMouseUp(r.x + r.w / 2, r.y + r.h / 2);
+    try std.testing.expectEqual(@as(usize, 1), handler.calls);
+    try std.testing.expectEqual(@as(usize, 0), transport.written.items.len);
+    try std.testing.expectEqual(@as(u64, 0), surface.user_input_revision);
+    try std.testing.expect(!surface.dragging);
+    // A click read at the old frame cannot act on a fresh lease.
+    transport.execution.?.grant.?.fence += 1;
+    cx.handleMouseDown(r.x + r.w / 2, r.y + r.h / 2, .{});
+    cx.handleMouseUp(r.x + r.w / 2, r.y + r.h / 2);
+    try std.testing.expectEqual(@as(usize, 1), handler.calls);
+    _ = try view.refreshTerminalService(owner, true);
+    cx.handleMouseDown(r.x + r.w / 2, r.y + r.h / 2, .{});
+    transport.execution.?.grant.?.task_id = .generate();
+    _ = try view.refreshTerminalService(owner, true);
+    cx.handleMouseUp(r.x + r.w / 2, r.y + r.h / 2);
+    try std.testing.expectEqual(@as(usize, 1), handler.calls);
+    transport.execution.?.grant = null;
+    transport.execution.?.input_handed_off = true;
+    _ = try view.refreshTerminalService(owner, true);
+    try std.testing.expectEqual(.none, tag.style.display);
 }

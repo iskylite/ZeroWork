@@ -258,3 +258,19 @@ test "nonblocking terminal reads yield on worker contention and recover unchange
     defer recovered.deinit(a);
     try std.testing.expect(recovered.owner.eql(owner));
 }
+
+test "SSH trusted execution fails before input without BootstrapV1 and preserves normal terminal" {
+    var f: Fixture = .{};
+    try f.init();
+    defer f.deinit();
+    const service = f.provider.service();
+    const snapshot = try service.executionSnapshot();
+    try std.testing.expect(!snapshot.interactive_execution and snapshot.state == .unavailable);
+    try std.testing.expectEqualStrings("IntegrationUnavailable", snapshot.failure.?);
+    try std.testing.expectError(error.IntegrationUnavailable, service.executionRequest(.{ .execution_id = .generate(), .task_id = .generate(), .expected_input_epoch = 0, .ownership_revision = 1, .command = "touch never", .command_hash = terminal.execution.digest("touch never") }));
+    try std.testing.expectEqual(@as(usize, 0), f.worker.input.pending());
+    try std.testing.expectEqual(@as(u64, 0), f.provider.input_sequence);
+    var stale = service;
+    stale.binding.binding_generation += 1;
+    try std.testing.expectError(error.StaleOwner, stale.executionSnapshot());
+}

@@ -548,10 +548,10 @@ test "SFTP AI registration prepares only file tools and rejects terminal or revo
     bridge.configureFiles(file_host);
     try bridge.prepare(f.app, accepted.handle);
     try std.testing.expectEqual(@as(usize, 2), bridge.requestTable().?.entries.len);
-    try std.testing.expectEqualSlices(u64, &.{@backingInt(accepted.handle.session_id)}, bridge.toolIds(.list_remote_files).slice());
-    try std.testing.expectEqual(@as(usize, 1), bridge.toolIds(.read_remote_file).len);
-    try std.testing.expectEqual(@as(usize, 0), bridge.toolIds(.run_command).len);
-    try std.testing.expectEqual(@as(usize, 0), bridge.toolIds(.read_terminal).len);
+    try std.testing.expectEqualSlices(u64, &.{@backingInt(accepted.handle.session_id)}, (try bridge.toolIds(.list_remote_files)).slice());
+    try std.testing.expectEqual(@as(usize, 1), (try bridge.toolIds(.read_remote_file)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try bridge.toolIds(.run_command)).len);
+    try std.testing.expectEqual(@as(usize, 0), (try bridge.toolIds(.read_terminal)).len);
     var original = FileBridge.Bridge.init(a);
     defer original.deinit();
     original.files = file_host;

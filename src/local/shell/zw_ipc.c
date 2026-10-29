@@ -23,7 +23,11 @@ int features_(void *module, char ***features) { (void)module; (void)features; re
 int enables_(void *module, int **enables) { (void)module; (void)enables; return 1; }
 int boot_(void *module) {
     (void)module;
+    #ifdef ZW_EXECUTION
+    int fd = number("_zw_exec_fd"), parent = number("_zw_parent");
+#else
     int fd = number("_zw_fd"), parent = number("_zw_parent");
+#endif
     int type = 0; socklen_t length = sizeof(type);
     uid_t uid; gid_t gid;
     pid_t peer = -1; socklen_t peer_length = sizeof(peer);

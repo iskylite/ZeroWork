@@ -160,6 +160,33 @@ pub fn selectionSecondary() ui.Color {
     const ink = ui.Color.lerp(c.fg_2, c.fg_1, 0.25);
     return if (contrast(ink, popupSelection()) >= 4.5) ink else c.fg_1;
 }
+/// Opt-in ink for this execution PATCH's enabled text on explicit final paints.
+/// Callers supply only backgrounds that their own new component actually draws;
+/// this never publishes a palette, changes current(), or affects widget tokens.
+pub fn patchInk(ink: ui.Color, backgrounds: []const ui.Color) ui.Color {
+    if (patchInkPasses(ink, backgrounds)) return ink;
+    const foreground = baseColors().fg_1;
+    for (1..256) |amount| {
+        const candidate = ui.Color.lerp(ink, foreground, @as(f32, @floatFromInt(amount)) / 255);
+        if (patchInkPasses(candidate, backgrounds)) return candidate;
+    }
+    return foreground;
+}
+fn patchInkPasses(ink: ui.Color, backgrounds: []const ui.Color) bool {
+    for (backgrounds) |background| if (contrast(ink, background) < 4.5) return false;
+    return true;
+}
+/// Compose a PATCH fill over a known opaque parent using the actual alpha8.
+pub fn patchPaint(foreground: ui.Color, background: ui.Color) ui.Color {
+    std.debug.assert(background.a == 255);
+    var result = foreground;
+    inline for (.{ "r", "g", "b" }) |channel| {
+        const mixed = @as(u32, @field(foreground, channel)) * foreground.a + @as(u32, @field(background, channel)) * (255 - @as(u32, foreground.a));
+        @field(result, channel) = @intCast((mixed + 127) / 255);
+    }
+    result.a = 255;
+    return result;
+}
 /// Repaint retained UI-derived fills without treating terminal selection as UI chrome.
 pub fn remapUiSurface(color: ui.Color, previous: Colors) ?ui.Color {
     if (ui.Color.eql(color, insetColor(previous))) return popupInset();
@@ -556,6 +583,53 @@ test "layer hierarchy keeps fields and actions readable without perimeter outlin
             try std.testing.expect(contrast(tokens.button_secondary_bg, tokens.button_secondary_fg) >= 4.5);
             try std.testing.expectEqual(@as(f32, 0), overlayPaint().outline.?.width);
             try std.testing.expectEqual(@as(f32, 12), overlayPaint().glass.?.backdrop_blur);
+        }
+    }
+}
+
+test "execution PATCH opt-in ink covers actual approval impact and history warning paints without publication" {
+    const previous = currentName();
+    const parameters = materialParameters();
+    defer {
+        select(previous);
+        _ = setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    var registry = try @import("../config/theme_registry.zig").Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    for (registry.records.items) |record| {
+        selectTokens(record.ui_tokens);
+        for ([_]f32{ 0, 25, 50, 75, 100 }) |transparency| {
+            _ = setMaterialParameters(transparency, 0);
+            const palette = baseColors();
+            const unmodified = current();
+            const widgets = widgetTheme(currentName()).*;
+            const approval_styles = @import("ai_tool_approval_styles.zig");
+            const impact = patchPaint(approval_styles.impactNotice(widgetTheme(currentName())).background.?, approval_styles.panel(widgetTheme(currentName())).background.?);
+            const impact_ink = patchInk(unmodified.warn_ink, &.{impact});
+            try std.testing.expect(contrast(impact_ink, impact) >= 4.5);
+            if (std.mem.eql(u8, record.id, "paper")) try std.testing.expectEqual(hex(0x7f5d20), impact_ink);
+            if (std.mem.eql(u8, record.id, "sand")) try std.testing.expectEqual(hex(0x835b1e), impact_ink);
+            if (std.mem.eql(u8, record.id, "ice")) try std.testing.expectEqual(hex(0x756233), impact_ink);
+            if (contrast(unmodified.warn_ink, impact) >= 4.5) try std.testing.expectEqual(unmodified.warn_ink, impact_ink);
+            const veil = palette.app.withAlpha(@intFromFloat(@round(transparency * 255 / 100)));
+            const history_backgrounds = [_]ui.Color{
+                patchPaint(unmodified.overlay, patchPaint(veil, ui.Color.BLACK)),
+                patchPaint(unmodified.overlay, patchPaint(veil, ui.Color.WHITE)),
+            };
+            const history_ink = patchInk(unmodified.warn_ink, &history_backgrounds);
+            for (history_backgrounds) |background| try std.testing.expect(contrast(history_ink, background) >= 4.5);
+            if (transparency == 25) {
+                if (std.mem.eql(u8, record.id, "paper")) try std.testing.expectEqual(hex(0x89631e), history_ink);
+                if (std.mem.eql(u8, record.id, "sand")) try std.testing.expectEqual(hex(0x8b601d), history_ink);
+                if (std.mem.eql(u8, record.id, "ice")) try std.testing.expectEqual(hex(0x806730), history_ink);
+            }
+            const action_ink = patchInk(unmodified.accent_ink, &.{popupAction()});
+            try std.testing.expect(contrast(action_ink, popupAction()) >= 4.5);
+            if (std.mem.eql(u8, record.id, "dark")) try std.testing.expectEqual(hex(0x9698f5), action_ink);
+            if (contrast(unmodified.accent_ink, popupAction()) >= 4.5) try std.testing.expectEqual(unmodified.accent_ink, action_ink);
+            try std.testing.expectEqual(palette, baseColors());
+            try std.testing.expectEqual(unmodified, current());
+            try std.testing.expect(std.meta.eql(widgets, widgetTheme(currentName()).*));
         }
     }
 }

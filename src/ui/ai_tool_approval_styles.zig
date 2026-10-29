@@ -6,7 +6,7 @@ pub fn wrapper(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = .{ .left = 14, .right = 14, .top = 9 }, .flex_shrink = 0, .direction = .column };
 }
 pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 167.625 }, .padding = ui.Padding.all(11), .flex_shrink = 0, .direction = .column, .background = theme.popupInset(), .border = .{ .width = 0, .radius = 9 }, .overflow = .hidden };
+    return .{ .width = .fill(), .height = .{ .px = 167.625 }, .padding = ui.Padding.all(11), .flex_shrink = 0, .direction = .column, .background = theme.popupAction(), .border = .{ .width = 0, .radius = 9 }, .overflow = .hidden };
 }
 pub fn header(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 22.5 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6, .margin = .{ .bottom = 6 } };
@@ -18,13 +18,13 @@ pub fn content(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 0, .flex_shrink = 0 };
 }
 pub fn commandRow(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 57 }, .padding = .{ .top = 10, .bottom = 10 }, .flex_shrink = 0, .direction = .row, .gap = 6, .min_width = 0, .align_items = .center };
+    return .{ .width = .fill(), .height = .{ .px = 37 }, .padding = .{}, .flex_shrink = 0, .direction = .row, .gap = 6, .min_width = 0, .align_items = .center };
 }
 pub fn footer(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 26.5 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .justify = .end, .gap = 6 };
 }
 pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 11, .font_weight = 400, .line_height = 18.15 / 11.0, .color = theme.current().fg_1 };
+    return .{ .font_size = 13, .font_weight = 700, .line_height = 20.0 / 13.0, .color = theme.current().fg_1 };
 }
 pub fn secondary(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 20.625 / 11.0, .color = theme.current().fg_2, .wrap = .word };
@@ -36,13 +36,13 @@ pub fn impactNotice(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .min_height = 28, .height = .{ .fit = .{} }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 8, .right = 8, .top = 6, .bottom = 6 }, .background = theme.current().warn.withAlpha(20), .corner_radius = 6, .flex_shrink = 0 };
 }
 pub fn command(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 10, .line_height = 17.0 / 10.0, .color = theme.current().fg_1, .use_monospace_font = true, .wrap = .word };
+    return .{ .font_size = 11, .line_height = 17.0 / 11.0, .color = theme.current().fg_1, .use_monospace_font = true, .wrap = .word };
 }
 pub fn impact(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 10, .line_height = 16.0 / 10.0, .color = theme.current().warn_ink, .wrap = .word };
+    return .{ .font_size = 12, .line_height = 18.0 / 12.0, .color = theme.current().warn_ink, .wrap = .word };
 }
 pub fn iconButton(primary: bool) ButtonStyle {
-    return .{ .width = .{ .px = 66 }, .height = .{ .px = 26.5 }, .padding = .{ .left = 8, .right = 8, .top = 5, .bottom = 5 }, .gap = 0, .font_size = 10, .font_weight = 500, .flex_shrink = 0, .corner_radius = 8, .background = if (primary) theme.current().action_accent else theme.popupAction() };
+    return .{ .width = .{ .fit = .{} }, .min_width = 76, .height = .{ .px = 26.5 }, .padding = .{ .left = 8, .right = 8, .top = 4, .bottom = 4 }, .gap = 0, .font_size = 12, .font_weight = 500, .flex_shrink = 0, .corner_radius = 8, .background = if (primary) theme.current().action_accent else theme.popupAction() };
 }
 pub fn disclosureButton() ButtonStyle {
     return .{ .width = .{ .px = 17 }, .height = .{ .px = 17 }, .padding = .{}, .gap = 0, .flex_shrink = 0, .corner_radius = 6, .background = ui.Color.TRANSPARENT };

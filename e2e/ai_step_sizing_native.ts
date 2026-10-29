@@ -1,4 +1,5 @@
 /** Step disclosure sizing against a local SSE fixture and real Local commands. */
+import {fixtureSessionIds} from './ai_fixture_discovery.ts';
 import assert from 'node:assert/strict';
 import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
@@ -15,9 +16,8 @@ const server=createServer(async(req,res)=>{
  let bytes='';for await(const c of req)bytes+=c;const body=JSON.parse(bytes);
  res.writeHead(200,{'content-type':'text/event-stream'});
  if(mode==='thinking'){res.write(frame({reasoning_content:'用户用中文询问我的身份。'}));held=res;return}
- if(!body.messages.slice(body.messages.findLastIndex((m:any)=>m.role==='user')+1).some((m:any)=>m.role==='tool')){
-  const system=body.messages.find((m:any)=>m.role==='system')?.content??'';
-  const id=Number(system.match(/assistant_session_id=(\d+)/)?.[1]);assert(id>0);
+ if(!body.messages.slice(body.messages.findLastIndex((m:any)=>m.role==='user')+1).some((m:any)=>m.role==='tool'&&m.tool_call_id?.startsWith('sizing-'))){
+  const ids=fixtureSessionIds(body,res);if(!ids)return;const id=ids[0];
   const command=mode==='empty'?'true':mode==='long'?"printf 'OUTPUT_LINE\\n%.0s' {1..30}":'printf SHORT_OUTPUT';
   res.end(frame({tool_calls:[{index:0,id:'sizing-'+mode,type:'function',function:{name:'run_command',arguments:JSON.stringify({session_ids:[id],command})}}]})+'data: [DONE]\n\n');return;
  }

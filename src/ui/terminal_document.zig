@@ -1096,7 +1096,28 @@ pub const Document = struct {
         const self = try checked(raw, binding);
         return self.raw.cancelTrustedEdit();
     }
-    const vtable: terminal.Service.VTable = .{ .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = readLines, .theme = theme, .export_recording = exportRecording, .recording_lease = recordingLease, .trusted_snapshot = trustedSnapshot, .trusted_request = trustedRequest, .trusted_outcome = trustedOutcome, .trusted_cancel = trustedCancel, .search_snapshot = searchSnapshot };
+    // Execution belongs to the underlying checked protocol service. Composed
+    // rows and local history reading do not revoke an independent AI lease.
+    // Archived document sources expose no such callbacks and remain unavailable.
+    fn executionSnapshot(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding)) !terminal.execution.Snapshot {
+        return (try checked(raw, binding)).raw.executionSnapshot();
+    }
+    fn executionRequest(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), request: terminal.execution.Request) !void {
+        return (try checked(raw, binding)).raw.executionRequest(request);
+    }
+    fn executionRenew(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), grant: terminal.execution.Grant) !void {
+        return (try checked(raw, binding)).raw.executionRenew(grant);
+    }
+    fn executionRevoke(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), grant: terminal.execution.Grant, takeover: bool) !void {
+        return (try checked(raw, binding)).raw.executionRevoke(grant, takeover);
+    }
+    fn executionOutput(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), id: identity.ExecutionId, allocator: std.mem.Allocator, cursor: u64, max_bytes: usize) !terminal.execution.Output {
+        return (try checked(raw, binding)).raw.executionOutput(id, allocator, cursor, max_bytes);
+    }
+    fn recordingDisplay(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), display: @import("../vt/recording_manifest.zig").Display) !void {
+        return (try checked(raw, binding)).raw.setRecordingDisplay(display);
+    }
+    const vtable: terminal.Service.VTable = .{ .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = readLines, .theme = theme, .export_recording = exportRecording, .recording_lease = recordingLease, .trusted_snapshot = trustedSnapshot, .trusted_request = trustedRequest, .trusted_outcome = trustedOutcome, .trusted_cancel = trustedCancel, .search_snapshot = searchSnapshot, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .recording_display = recordingDisplay };
 };
 
 test "builtin_records native rows and app rows share ordered search selection and scroll" {
@@ -1350,4 +1371,104 @@ test "terminal surface pixel scroll crosses command card gaps without quantizing
         try std.testing.expectApproxEqAbs(original.y.? - next_origin, row.presentation.y.?, 0.001);
         try std.testing.expectApproxEqAbs(original.article_y - next_origin, row.presentation.article_y, 0.001);
     }
+}
+
+test "history composite preserves checked protocol execution and display capabilities" {
+    const Binding = @TypeOf(@as(terminal.Service, undefined).binding);
+    const Fixture = struct {
+        binding: Binding,
+        calls: u8 = 0,
+        owner: identity.SessionHandle,
+        grant: terminal.execution.Grant,
+        fn get(raw: *anyopaque, binding: Binding) !*@This() {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!std.meta.eql(binding, self.binding)) return error.StaleOwner;
+            self.calls += 1;
+            return self;
+        }
+        fn snapshot(raw: *anyopaque, binding: Binding) !terminal.execution.Snapshot {
+            const self = try get(raw, binding);
+            return .{ .owner = self.owner, .state = .idle, .input_epoch = 44, .revision = 9 };
+        }
+        fn request(raw: *anyopaque, binding: Binding, value: terminal.execution.Request) !void {
+            const self = try get(raw, binding);
+            try std.testing.expect(self.grant.execution_id.eql(value.execution_id));
+            try std.testing.expectEqualStrings("true", value.command);
+        }
+        fn renew(raw: *anyopaque, binding: Binding, value: terminal.execution.Grant) !void {
+            const self = try get(raw, binding);
+            try std.testing.expect(std.meta.eql(self.grant, value));
+        }
+        fn revoke(raw: *anyopaque, binding: Binding, value: terminal.execution.Grant, takeover: bool) !void {
+            const self = try get(raw, binding);
+            try std.testing.expect(std.meta.eql(self.grant, value) and takeover);
+        }
+        fn output(raw: *anyopaque, binding: Binding, id: identity.ExecutionId, allocator: std.mem.Allocator, cursor: u64, max_bytes: usize) !terminal.execution.Output {
+            const self = try get(raw, binding);
+            try std.testing.expect(self.grant.execution_id.eql(id));
+            try std.testing.expectEqual(@as(u64, 11), cursor);
+            try std.testing.expectEqual(@as(usize, 32), max_bytes);
+            return .{ .bytes = try allocator.dupe(u8, "raw protocol output"), .start_cursor = cursor, .next_cursor = cursor + 19, .gap = false, .truncated = false };
+        }
+        fn display(raw: *anyopaque, binding: Binding, value: @import("../vt/recording_manifest.zig").Display) !void {
+            _ = try get(raw, binding);
+            try std.testing.expectEqualStrings("original title", value.title);
+            try std.testing.expect(value.grouped);
+        }
+    };
+    const a = std.testing.allocator;
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 4, 32);
+    defer adapter.destroy();
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(77), .generation = 4 };
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = owner };
+    var hooks = source.service().vtable.*;
+    hooks.execution_snapshot = Fixture.snapshot;
+    hooks.execution_request = Fixture.request;
+    hooks.execution_renew = Fixture.renew;
+    hooks.execution_revoke = Fixture.revoke;
+    hooks.execution_output = Fixture.output;
+    hooks.recording_display = Fixture.display;
+    var fixture: Fixture = .{ .binding = source.service().binding, .owner = owner, .grant = .{ .execution_id = identity.ExecutionId.generate(), .task_id = identity.TaskId.generate(), .fence = 8, .input_epoch = 44, .ownership_revision = 2 } };
+    var document = Document.init(a, .{ .binding = fixture.binding, .context = &fixture, .vtable = &hooks }, owner);
+    defer document.deinit();
+    document.enabled = true;
+    document.pixel_scrolling = true;
+    document.follow = false;
+    document.top = 15;
+    const service = document.service();
+    try std.testing.expect(std.meta.eql(fixture.binding, service.binding));
+    const state = try service.executionSnapshot();
+    try std.testing.expect(state.owner.eql(owner) and state.state == .idle and state.input_epoch == 44);
+    try service.executionRequest(.{ .execution_id = fixture.grant.execution_id, .task_id = fixture.grant.task_id, .expected_input_epoch = 44, .ownership_revision = 2, .command = "true", .command_hash = terminal.execution.digest("true") });
+    try service.executionRenew(fixture.grant);
+    try service.executionRevoke(fixture.grant, true);
+    var output = try service.executionOutput(fixture.grant.execution_id, a, 11, 32);
+    defer output.deinit(a);
+    try std.testing.expectEqualStrings("raw protocol output", output.bytes);
+    try service.setRecordingDisplay(.{ .title = "original title", .grouped = true });
+    try std.testing.expectEqual(@as(u8, 6), fixture.calls);
+    try std.testing.expectEqual(@as(usize, 15), document.top);
+    try std.testing.expect(!document.follow);
+    var stale = service;
+    stale.binding.binding_generation +%= 1;
+    try std.testing.expectError(error.StaleOwner, stale.executionSnapshot());
+    try std.testing.expectEqual(@as(u8, 6), fixture.calls);
+}
+
+test "history composite archived source cannot create a protocol execution capability" {
+    const a = std.testing.allocator;
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 4, 32);
+    defer adapter.destroy();
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(99) } };
+    var document = Document.init(a, source.service(), source.owner);
+    defer document.deinit();
+    const service = document.service();
+    const grant: terminal.execution.Grant = .{ .execution_id = identity.ExecutionId.generate(), .task_id = identity.TaskId.generate(), .fence = 1, .input_epoch = 0, .ownership_revision = 1 };
+    try std.testing.expectEqual(terminal.execution.State.unavailable, (try service.executionSnapshot()).state);
+    try std.testing.expectError(error.IntegrationUnavailable, service.executionRequest(.{ .execution_id = grant.execution_id, .task_id = grant.task_id, .expected_input_epoch = 0, .ownership_revision = 1, .command = "true", .command_hash = terminal.execution.digest("true") }));
+    try std.testing.expectError(error.IntegrationUnavailable, service.executionRenew(grant));
+    try std.testing.expectError(error.IntegrationUnavailable, service.executionRevoke(grant, false));
+    try std.testing.expectError(error.IntegrationUnavailable, service.executionOutput(grant.execution_id, a, 0, 32));
+    try std.testing.expectError(error.RecordingUnavailable, service.setRecordingDisplay(.{ .title = "readonly" }));
+    try std.testing.expectError(error.ReadOnlyDocument, service.write(.{ .input_sequence = 1, .bytes = "forbidden" }));
 }

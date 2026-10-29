@@ -23,8 +23,12 @@ test "floating material follows portaled owners rather than widget kinds" {
     menu.chrome.setStyleInline(w.cx.allocator, .{ .outline = .{ .width = 1, .color = ui.Color.WHITE } });
     menu.chrome.setBorderColor(ui.Color.WHITE);
     try shell.appendChild(w.cx.allocator, menu.wrapper);
+    const independent = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .enter_transition = .none, .exit_transition = .none, .width = 220 }).mount(w.scope, w.cx);
+    try w.cx.root.?.appendChild(w.cx.allocator, independent.wrapper);
+    const inner_card = try ui.box(w.cx, .{ .background = theme.popupInset(), .width = .fill(), .height = .{ .px = 32 } }, .{});
+    try menu.content.appendChild(w.cx.allocator, inner_card);
     const hint = try ui.widgets.Tooltip(.{ .text = "Model metadata", .open = open }).mount(w.scope, w.cx);
-    try menu.content.appendChild(w.cx.allocator, hint.wrapper);
+    try inner_card.appendChild(w.cx.allocator, hint.wrapper);
     const root_hint = try ui.widgets.Tooltip(.{ .text = "Workspace metadata", .open = open }).mount(w.scope, w.cx);
     try w.cx.root.?.appendChild(w.cx.allocator, root_hint.wrapper);
     for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
@@ -37,6 +41,7 @@ test "floating material follows portaled owners rather than widget kinds" {
             try std.testing.expectEqual(theme.layerBackground(2), menu.chrome.getBackground());
             try std.testing.expectEqual(theme.layerBackground(3), hint.content.getBackground());
             try std.testing.expectEqual(theme.layerBackground(1), root_hint.content.getBackground());
+            try std.testing.expectEqual(theme.layerBackground(1), independent.chrome.getBackground());
             try std.testing.expectEqual(ui.Color.TRANSPARENT, menu.chrome.style.border.color);
             try std.testing.expectEqual(@as(f32, 0), menu.chrome.style.outline().?.width);
             try std.testing.expect(menu.chrome.getBackground().a > shell.getBackground().a);
@@ -44,11 +49,29 @@ test "floating material follows portaled owners rather than widget kinds" {
             try std.testing.expectEqual(@as(f32, 12), hint.content.style.glass_params().?.backdrop_blur);
         }
     }
+    // Reopening the retained nested surface keeps its real L3 owner chain.
+    open.set(false);
+    w.frame();
+    open.set(true);
+    w.frame();
+    try std.testing.expectEqual(theme.layerBackground(2), menu.chrome.getBackground());
+    try std.testing.expectEqual(theme.layerBackground(3), hint.content.getBackground());
     // Reparenting the same widgets changes material, without remount or type change.
     w.cx.detachChild(shell, menu.wrapper);
     try w.cx.root.?.appendChild(w.cx.allocator, menu.wrapper);
     w.frame();
     try std.testing.expectEqual(theme.layerBackground(1), menu.chrome.getBackground());
+    try std.testing.expectEqual(theme.layerBackground(2), hint.content.getBackground());
+    _ = theme.setMaterialParameters(100, 24);
+    w.publish.publish(w.cx, theme.widgetTheme(theme.currentName()));
+    w.frame();
+    for ([_]*ui.Node{ menu.chrome, independent.chrome, hint.content, root_hint.content }) |node|
+        try std.testing.expectEqual(@as(f32, 24), node.style.backdrop_blur());
+    open.set(false);
+    w.frame();
+    open.set(true);
+    w.frame();
+    try std.testing.expectEqual(theme.layerBackground(1), independent.chrome.getBackground());
     try std.testing.expectEqual(theme.layerBackground(2), hint.content.getBackground());
 }
 

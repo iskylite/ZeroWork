@@ -43,10 +43,20 @@ pub const Controller = struct {
     /// Ordinary shell suggestions use only this owner's observed submissions.
     /// A contiguous match may replace the full buffer through TrustedEdit.
     pub fn historyMenu(self: *Controller, query: []const u8, now_ms: i64, output: []completion.Match) []completion.Match {
+        return self.historyMatches(query, now_ms, output, false);
+    }
+
+    /// Without a shell editing provider, acceptance can only append a suffix.
+    pub fn historyPrefixMenu(self: *Controller, query: []const u8, now_ms: i64, output: []completion.Match) []completion.Match {
+        return self.historyMatches(query, now_ms, output, true);
+    }
+
+    fn historyMatches(self: *Controller, query: []const u8, now_ms: i64, output: []completion.Match, prefix_only: bool) []completion.Match {
         if (!self.enabled or query.len == 0) return output[0..0];
         var count: usize = 0;
         for (self.candidates.items) |candidate| {
             if (candidate.source != .history or std.mem.indexOf(u8, candidate.text, query) == null or std.mem.eql(u8, candidate.text, query)) continue;
+            if (prefix_only and !std.mem.startsWith(u8, candidate.text, query)) continue;
             const score = @as(f64, @floatFromInt(candidate.frequency)) + 1.0 / (1.0 + @as(f64, @floatFromInt(@max(0, now_ms - candidate.last_used_ms))));
             if (output.len == 0) break;
             var index = @min(count, output.len - 1);
@@ -116,4 +126,17 @@ test "ordinary history menu uses contiguous owner history and caps supplied slot
     try std.testing.expectEqual(@as(usize, 0), controller.historyMenu("", 100, &output).len);
     controller.enabled = false;
     try std.testing.expectEqual(@as(usize, 0), controller.historyMenu("worker", 100, &output).len);
+}
+
+test "observed completion history only offers appendable prefixes" {
+    var controller = Controller.init(std.testing.allocator, true);
+    defer controller.deinit();
+    try controller.add("find . -name __pycache__", .history, 1, 100);
+    try controller.add("sudo find /tmp", .history, 10, 100);
+    try controller.add("find", .history, 10, 100);
+    try controller.add("find builtin", .builtin, 10, 100);
+    var output: [6]completion.Match = undefined;
+    const matches = controller.historyPrefixMenu("find", 100, &output);
+    try std.testing.expectEqual(@as(usize, 1), matches.len);
+    try std.testing.expectEqualStrings("find . -name __pycache__", matches[0].candidate.text);
 }

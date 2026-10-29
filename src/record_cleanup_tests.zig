@@ -300,3 +300,76 @@ test "record cleanup never follows a recording symlink or a replaced history dir
     defer a.free(bytes);
     try std.testing.expectEqualStrings("user bytes stay", bytes);
 }
+
+test "record cleanup manifest group waits for reader then commits a shared tombstone" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cast_path = "logs/history/session-local-11-22-33-44.cast";
+    const raw_path = "logs/session-local-11-22-33-44.raw";
+    const sidecar = "logs/history/session-local-11-22-33-44.session.json";
+    try addCast(tmp.dir, 1, cast_path);
+    try rawFile(tmp.dir, raw_path);
+    const manifest = archive_mod.manifest;
+    const cast = try manifest.openManaged(io, tmp.dir, cast_path);
+    defer cast.close(io);
+    const raw = try manifest.openManaged(io, tmp.dir, raw_path);
+    defer raw.close(io);
+    const cast_stat = try cast.stat(io);
+    const raw_stat = try raw.stat(io);
+    const cast_checksum = try manifest.fingerprint(io, cast, cast_stat.size);
+    const raw_checksum = try manifest.fingerprint(io, raw, raw_stat.size);
+    const generation: manifest.Generation = .{ .session_id = 1, .session_generation = 1, .initial_cols = 80, .initial_rows = 24, .receive_time_origin = 0 };
+    try manifest.save(a, io, tmp.dir, sidecar, .{
+        .archive_key = "11111111111111111111111111111111",
+        .recording_id = "22222222222222222222222222222222",
+        .source_kind = .local,
+        .started_ms = 10,
+        .ended_ms = 11,
+        .state = .closed,
+        .recording = .{ .generations = &.{generation} },
+        .coverage = .complete,
+        .files = &.{ .{ .path = cast_path, .kind = .cast, .committed_length = cast_stat.size, .checksum = &cast_checksum }, .{ .path = raw_path, .kind = .raw, .committed_length = raw_stat.size, .checksum = &raw_checksum } },
+    });
+    var archive = archiveFor(tmp.dir);
+    var resolved = try archive.resolveRecord(a, .{ .recording_id = "22222222222222222222222222222222" });
+    defer resolved.deinit();
+    var group = try archive.acquireRecord(a, resolved.descriptor);
+    defer group.deinit();
+    var plan = try cleanup.Controller.freeze(a, io, tmp.dir, false);
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), plan.records.items.len);
+    try plan.begin(false);
+    try std.testing.expectEqual(@as(usize, 1), (try complete(&plan)).failed);
+    try std.testing.expect(exists(tmp.dir, cast_path) and exists(tmp.dir, raw_path));
+    group.deinit();
+    try plan.retryFailed(false);
+    try std.testing.expectEqual(@as(usize, 1), (try complete(&plan)).deleted);
+    try std.testing.expect(!exists(tmp.dir, cast_path) and !exists(tmp.dir, raw_path));
+    try std.testing.expect(exists(tmp.dir, sidecar));
+    try std.testing.expectError(error.RecordRemoved, archive.resolveRecord(a, .{ .archive_key = "11111111111111111111111111111111" }));
+    const tombstone = try manifest.load(a, io, tmp.dir, sidecar);
+    defer tombstone.deinit();
+    try std.testing.expectEqualStrings("UserRemoved", tombstone.value.failure.?);
+    try std.testing.expectEqual(@as(usize, 0), try indexCount(tmp.dir));
+}
+
+test "record cleanup metadata-only unrecorded entry commits removal without inventing a cast" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var archive = archiveFor(tmp.dir);
+    const ids = archive_mod.MetadataIdentity.generate();
+    const id = std.fmt.bytesToHex(ids.recording_id.bytes, .lower);
+    const publication: archive_mod.MetadataPublication = .{ .identity = ids, .owner = .{ .session_id = @fromBackingInt(7) }, .source_kind = .local, .started_ms = 1, .ended_ms = 2, .initial_cols = 80, .initial_rows = 24, .display = .{ .title = "not recorded" }, .reason = .RecordingDisabled };
+    _ = try archive.publishMetadata(publication);
+    var plan = try cleanup.Controller.freeze(a, io, tmp.dir, false);
+    defer plan.deinit();
+    try std.testing.expectEqual(@as(usize, 1), plan.records.items.len);
+    try std.testing.expectEqual(@as(usize, 0), plan.records.items[0].files.items.len);
+    try plan.begin(false);
+    const receipt = try complete(&plan);
+    try std.testing.expectEqual(@as(usize, 1), receipt.deleted);
+    try std.testing.expectEqual(@as(usize, 0), receipt.failed);
+    try std.testing.expectError(error.RecordRemoved, archive.resolveRecord(a, .{ .recording_id = &id }));
+    try std.testing.expect((try archive.publishMetadata(publication)).removed);
+    try std.testing.expectEqual(@as(usize, 0), try indexCount(tmp.dir));
+}

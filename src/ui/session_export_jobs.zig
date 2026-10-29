@@ -7,16 +7,42 @@ const Timeline = @import("../vt/timeline.zig").Timeline;
 const RecordLease = @import("../vt/session_archive.zig").RecordLease;
 const wake = @import("../platform/presentation_wakeup.zig");
 
+/// A small immutable export request. Actual catalogue/manifest/checksum reads
+/// happen in Job.execute after the native destination dialog has returned.
+pub const ArchiveRecord = struct {
+    allocator: std.mem.Allocator,
+    archive: @import("../vt/session_archive.zig").Archive,
+    key: []u8,
+    revision: u64,
+    pub fn capture(allocator: std.mem.Allocator, archive: @import("../vt/session_archive.zig").Archive, key: []const u8, revision: u64) !ArchiveRecord {
+        const copy = try allocator.dupe(u8, key);
+        errdefer allocator.free(copy);
+        const directory = try archive.dir.openDir(archive.io, ".", .{});
+        var owned = archive;
+        owned.allocator = allocator;
+        owned.dir = directory;
+        return .{ .allocator = allocator, .archive = owned, .key = copy, .revision = revision };
+    }
+    pub fn deinit(self: *ArchiveRecord) void {
+        self.archive.dir.close(self.archive.io);
+        self.allocator.free(self.key);
+    }
+};
+
 pub const Source = union(enum) {
     live: Timeline.ExportLease,
     frozen: Timeline.ExportSnapshot,
     archive: RecordLease,
+    archive_group: @import("../vt/session_archive.zig").RecordGroupLease,
+    archive_record: ArchiveRecord,
     none,
     pub fn deinit(self: *Source) void {
         switch (self.*) {
             .live => |lease| lease.release(lease.context),
             .frozen => |*frozen| frozen.timeline.deinit(),
             .archive => |*lease| lease.deinit(),
+            .archive_group => |*lease| lease.deinit(),
+            .archive_record => |*record| record.deinit(),
             .none => {},
         }
         self.* = .none;
@@ -70,24 +96,35 @@ pub const Job = struct {
                 try self.writeTimeline(&frozen, lease.cols, lease.rows);
             },
             .frozen => |*frozen| try self.writeTimeline(&frozen.timeline, frozen.cols, frozen.rows),
-            .archive => |*lease| {
-                const bytes = try lease.readAll(self.allocator, 128 * 1024 * 1024);
-                defer self.allocator.free(bytes);
-                self.source.deinit();
-                const Sink = struct {
-                    job: *Job,
-                    bytes: []const u8,
-                    pub fn validate(s: @This()) !void {
-                        if (s.job.cancel.load(.acquire)) return error.Cancelled;
-                    }
-                    pub fn write(s: @This(), kind: Export.Kind, path: []const u8) !void {
-                        try Export.writeArchive(s.job.allocator, s.job.io, .cwd(), kind, path, s.bytes);
-                    }
-                };
-                _ = try Export.run(self.allocator, self.format, self.path, Sink{ .job = self, .bytes = bytes });
+            .archive => |*lease| try self.writeArchive(lease),
+            .archive_group => |*lease| try self.writeArchive(lease.cast()),
+            .archive_record => |*request| {
+                var record = try request.archive.resolveRecord(self.allocator, .{ .archive_key = request.key });
+                defer record.deinit();
+                if (record.descriptor.manifest_revision != request.revision) return error.StaleArchiveRevision;
+                if (record.descriptor.replayability == .baseline_unavailable and self.format != .cast) return error.RecordingBaselineUnavailable;
+                if (self.cancel.load(.acquire)) return error.Cancelled;
+                var lease = try request.archive.acquireRecordForExport(self.allocator, record.descriptor);
+                defer lease.deinit();
+                try self.writeArchive(lease.cast());
             },
             .none => return error.RecordingUnavailable,
         }
+    }
+    fn writeArchive(self: *Job, lease: *const RecordLease) !void {
+        const bytes = try lease.readAll(self.allocator, 128 * 1024 * 1024);
+        defer self.allocator.free(bytes);
+        const Sink = struct {
+            job: *Job,
+            bytes: []const u8,
+            pub fn validate(s: @This()) !void {
+                if (s.job.cancel.load(.acquire)) return error.Cancelled;
+            }
+            pub fn write(s: @This(), kind: Export.Kind, path: []const u8) !void {
+                try Export.writeArchive(s.job.allocator, s.job.io, .cwd(), kind, path, s.bytes);
+            }
+        };
+        _ = try Export.run(self.allocator, self.format, self.path, Sink{ .job = self, .bytes = bytes });
     }
     fn writeTimeline(self: *Job, timeline: *const Timeline, cols: u16, rows: u16) !void {
         const Sink = struct {
@@ -236,4 +273,35 @@ test "export worker reports write failures and consumes its owned snapshot" {
     job.thread = null;
     try std.testing.expectEqual(error.EmptyPath, job.failure.?);
     try std.testing.expect(job.source == .none);
+}
+
+test "history archive export resolves and reads the immutable recording on its worker" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(std.testing.io, "logs/history");
+    const bytes = "{\"version\":2,\"width\":12,\"height\":2}\n[0,\"o\",\"真实保留内容\\r\\n\"]\n";
+    const file = try tmp.dir.createFile(std.testing.io, "logs/history/retained.cast", .{});
+    try file.writeStreamingAll(std.testing.io, bytes);
+    file.close(std.testing.io);
+    var archive: @import("../vt/session_archive.zig").Archive = .{ .allocator = a, .io = std.testing.io, .dir = tmp.dir };
+    try archive.append(.{ .id = 1, .started_ms = 1, .ended_ms = 2, .duration_ms = 1, .host = "closed", .user = "u", .cast_path = "logs/history/retained.cast", .source_kind = .local });
+    var catalog = try archive.loadCatalog(a);
+    defer catalog.deinit();
+    const descriptor = catalog.entries.items[0];
+    const source = try ArchiveRecord.capture(a, archive, descriptor.archive_key, descriptor.manifest_revision);
+    const directory = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    const path = try std.fs.path.join(a, &.{ directory, "result.cast" });
+    defer a.free(path);
+    const job = try Job.start(a, std.testing.io, .{ .archive_record = source }, .cast, path);
+    defer job.deinit();
+    job.thread.?.join();
+    job.thread = null;
+    try std.testing.expect(job.done.load(.acquire));
+    try std.testing.expect(job.failure == null);
+    try std.testing.expect(job.source == .none);
+    const result = try tmp.dir.readFileAlloc(std.testing.io, "result.cast", a, .limited(4096));
+    defer a.free(result);
+    try std.testing.expectEqualStrings(bytes, result);
 }

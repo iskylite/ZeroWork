@@ -15,6 +15,10 @@ pub fn appendForOwnerWithImages(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, 
     const root = try ui.boxStyled(cx, S.list, .{});
     root.meta.ownership.meta.test_id = "ai.tool.results";
     for (store.records.items) |record| if (record.owner.eql(owner)) {
+        if (record.execution != null) {
+            try root.appendChild(cx.allocator, try @import("ai_execution_result_view.zig").mount(cx, scope, store, record, null, on_toggle));
+            continue;
+        }
         const state = try State.mount(cx, scope, record);
         for (record.images) |reference| try state.appendImage(reference, app);
         state.on_toggle = on_toggle;
@@ -59,17 +63,23 @@ pub const State = struct {
         const disclosure = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0 }, .{});
         disclosure.meta.ownership.meta.test_id = "ai.tool.result.disclosure";
         var all_succeeded = record.targets.len > 0;
-        var unknown = false;
-        var cancelled = false;
+        var unknown = record.error_status == .unknown;
+        var cancelled = record.error_status == .cancelled or record.error_status == .timed_out;
         for (record.targets) |target| {
             all_succeeded = all_succeeded and target.result.status == .succeeded;
             unknown = unknown or target.result.remote_effect_unknown or target.result.status == .unknown or !target.result.local_released;
             cancelled = cancelled or target.result.status == .cancelled or target.result.status == .timed_out;
         }
+        if (record.host) |fact| {
+            all_succeeded = fact.status == .succeeded;
+            unknown = fact.status == .outcome_unknown or fact.receipt.remote_effect_unknown or !fact.receipt.local_released;
+            cancelled = fact.status == .cancelled_unsent;
+        }
         const palette = @import("app_theme.zig").current();
-        header.setStyleInline(cx.allocator, .{ .background = palette.well });
-        self.status_icon = try ui.iconTint(cx, if (all_succeeded) ui.icons.check else if (unknown) ui.icons.get("circle-help").? else if (cancelled) ui.icons.get("square").? else ui.icons.get("circle-alert").?, if (all_succeeded) palette.ok else if (unknown) palette.warn else palette.fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
+        header.meta.ownership.meta.test_id = "ai.tool.result.header";
+        self.status_icon = try ui.iconTint(cx, if (unknown) ui.icons.get("circle-help").? else if (all_succeeded) ui.icons.check else if (cancelled) ui.icons.get("square").? else ui.icons.get("circle-alert").?, if (unknown) palette.warn else if (all_succeeded) palette.ok else palette.fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
         self.disclosure_icon = try ui.iconTint(cx, ui.icons.chevron_down, palette.fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
+        self.status_icon.?.meta.ownership.meta.test_id = "ai.tool.result.icon";
         self.disclosure_icon.?.setOpacityRaw(0);
         self.status_icon.?.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 4 }, .top = .{ .px = 4 } } });
         self.disclosure_icon.?.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 4 }, .top = .{ .px = 4 } } });
@@ -111,11 +121,15 @@ pub const State = struct {
         self.body_disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, self.body, record.expanded);
         try self.root.appendChild(cx.allocator, self.body_disclosure.root);
         const command_row = try ui.boxStyled(cx, S.commandRow, .{});
+        const command_lines = 1 + std.mem.count(u8, std.mem.trimEnd(u8, record.command, "\r\n"), "\n");
+        const command_height = @max(@as(f32, 27), @as(f32, @floatFromInt(command_lines)) * 16 + 8);
+        command_row.setStyleInline(cx.allocator, .{ .height = .{ .px = command_height } });
         try body.content.appendChild(cx.allocator, command_row);
         const command_scroll = try ui.widgets.ScrollArea(.{ .direction = .both, .height = 27, .rubber_band_x = false }).mount(scope, cx);
         command_scroll.container.setStyleInline(cx.allocator, S.commandViewport(cx.tokens));
+        command_scroll.container.setStyleInline(cx.allocator, .{ .height = .{ .px = command_height } });
         command_scroll.content.setStyleInline(cx.allocator, S.outputContent(cx.tokens));
-        const command = try ui.textStyled(cx, S.output, record.command);
+        const command = try ui.textStyled(cx, S.multilineOutput, record.command);
         command.setStyleInline(cx.allocator, .{ .width = .{ .px = @import("ai_message_view.zig").textWidth(cx, record.command, 11, 400) }, .flex_shrink = 0 });
         command.meta.ownership.meta.test_id = "ai.tool.result.command";
         try command_scroll.content.appendChild(cx.allocator, command);
@@ -216,9 +230,20 @@ pub const State = struct {
         try self.image_content.?.appendChild(self.cx.allocator, raster);
     }
     pub fn select(self: *State, index: usize) !void {
+        if (self.record.host) |fact| {
+            try self.identity.setTextContent(self.cx.allocator, "当前对话");
+            const receipt = try std.fmt.allocPrint(self.cx.allocator, "操作 #{d} · {s}", .{ fact.receipt.operation_id, if (fact.receipt.local_released) "本地资源已释放" else "清理待核实" });
+            defer self.cx.allocator.free(receipt);
+            try self.metadata.setTextContent(self.cx.allocator, receipt);
+            var summary: [128]u8 = undefined;
+            try self.feedback.setTextContent(self.cx.allocator, if (!fact.receipt.local_released) "清理待核实" else if (fact.receipt.remote_effect_unknown) "执行结果待核实" else self.record.summary(&summary));
+            try self.showOutput(fact.content, "");
+            return;
+        }
         if (self.record.targets.len == 0) {
             try self.identity.setTextContent(self.cx.allocator, "没有已执行的目标");
             try self.metadata.setTextContent(self.cx.allocator, self.record.error_code orelse "尚未执行");
+            try self.feedback.setTextContent(self.cx.allocator, if (self.record.error_status) |value| statusLabel(value) else if (self.record.decision == false) "已拒绝" else "尚未执行");
             self.stdout_label.?.setDisplay(.none);
             self.stderr_label.?.setDisplay(.none);
             self.stdout_viewport.?.setDisplay(.none);
@@ -249,9 +274,12 @@ pub const State = struct {
         const feedback = if (failureReason(result.error_code)) |reason| try std.fmt.allocPrint(self.cx.allocator, "{s} · {s}", .{ state_label, reason }) else try self.cx.allocator.dupe(u8, state_label);
         defer self.cx.allocator.free(feedback);
         try self.feedback.setTextContent(self.cx.allocator, feedback);
-        const stdout = try displayBytes(self.cx.allocator, result.stdout);
+        try self.showOutput(result.stdout, result.stderr);
+    }
+    fn showOutput(self: *State, output: []const u8, failure: []const u8) !void {
+        const stdout = try displayBytes(self.cx.allocator, output);
         defer self.cx.allocator.free(stdout);
-        const stderr = try displayBytes(self.cx.allocator, result.stderr);
+        const stderr = try displayBytes(self.cx.allocator, failure);
         defer self.cx.allocator.free(stderr);
         try self.stdout.setTextContent(self.cx.allocator, stdout);
         try self.stderr.setTextContent(self.cx.allocator, stderr);
@@ -298,16 +326,20 @@ pub const State = struct {
         self.applyExpanded();
         self.cx.requestRedraw();
     }
-    fn copy(self: *State, bytes: []const u8, success: []const u8) void {
+    fn copy(self: *State, bytes: []const u8, _: []const u8) void {
         const display = displayBytes(self.cx.allocator, bytes) catch return;
         defer self.cx.allocator.free(display);
-        const ok = ui.platform_services.clipboardSetText(self.cx.system_sdk, display);
-        self.feedback.setTextContent(self.cx.allocator, if (ok) success else "复制失败") catch {};
+        // The outcome remains visible after a copy, especially unknown effects.
+        _ = ui.platform_services.clipboardSetText(self.cx.system_sdk, display);
     }
     fn copyCommand(self: *State) void {
         self.copy(self.record.command, if (@import("../ai/plugin_tools.zig").legacyName(self.record.name)) "已复制完整命令 / 路径" else "已复制调用参数");
     }
     fn copyStdout(self: *State) void {
+        if (self.record.host) |fact| {
+            self.copy(fact.content, "已复制结果内容");
+            return;
+        }
         if (self.record.targets.len > 0) self.copy(self.record.targets[self.record.selected].result.stdout, if (@import("../ai/plugin_tools.zig").legacyName(self.record.name)) "已复制 stdout" else "已复制结果内容");
     }
     fn copyStderr(self: *State) void {
@@ -346,6 +378,7 @@ fn displayBytes(allocator: std.mem.Allocator, bytes: []const u8) ![]u8 {
 }
 
 fn toolTitle(name: []const u8) []const u8 {
+    if (@import("ai_tool_titles.zig").title(name)) |label| return label;
     if (std.mem.eql(u8, name, "run_command")) return "执行命令";
     if (std.mem.eql(u8, name, "read_terminal")) return "读取终端";
     if (std.mem.eql(u8, name, "list_remote_files")) return "列出远程文件";

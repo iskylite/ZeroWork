@@ -8,6 +8,7 @@
 #include <pwd.h>
 #include <signal.h>
 #include <spawn.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -27,9 +28,10 @@ struct zw_local_process {
     Member *members;
     size_t member_count;
     int fd, error_fd, pty, eof, error_eof, reaped, exit_observed, closed;
-    int close_phase;
-    uint64_t signal_ms;
+    int close_started, close_phase, close_retry;
+    uint64_t signal_ms, close_retry_ms;
     ZW_LOCAL_EXIT exit;
+    ZW_LOCAL_OBSERVATION_FAILURE observation_failure;
     char *cwd;
 };
 
@@ -42,7 +44,11 @@ static int configure_fd(int fd, int nonblocking) {
     return 0;
 }
 static int process_info(pid_t pid, struct proc_bsdinfo *info) {
-    return proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, info, sizeof(*info)) == sizeof(*info);
+    errno = 0;
+    int bytes = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, info, sizeof(*info));
+    if (bytes == sizeof(*info)) return 1;
+    if (!errno) errno = EIO;
+    return 0;
 }
 static Member member_info(const struct proc_bsdinfo *info) {
     return (Member){ (pid_t)info->pbi_pid, (pid_t)info->pbi_pgid, info->pbi_start_tvsec, info->pbi_start_tvusec };
@@ -54,33 +60,47 @@ static int still_owned(const ZW_LOCAL_PROCESS *p, const Member *member) {
         (pid_t)info.pbi_pgid == member->pgid;
 }
 
+/* Stages: 1 list size, 2 list data, 3 allocation, 4 member metadata,
+ * 5 session trust, 6 wait observation, 7 wait reap, 8 group trust, 9 signal. */
+static int observation_failed(ZW_LOCAL_PROCESS *p, int stage, int error_number, pid_t pid) {
+    if (!error_number) error_number = EIO;
+    p->observation_failure = (ZW_LOCAL_OBSERVATION_FAILURE){stage, error_number, pid};
+    if (getenv("ZEROWORK_LOCAL_CLOSE_DIAGNOSTICS"))
+        fprintf(stderr, "local observation failure owner_pid=%d stage=%d errno=%d pid=%d\n", p->pid, stage, error_number, pid);
+    errno = error_number;
+    return -1;
+}
+
 /* Session numbers alone are not ownership. At least one previously observed
  * process birth identity must survive before a non-empty set may be trusted. */
 static int scan_members(ZW_LOCAL_PROCESS *p) {
     int trusted = (!p->reaped && p->exit_observed) || still_owned(p, &p->leader);
     for (size_t i = 0; !trusted && i < p->member_count; ++i) trusted = still_owned(p, &p->members[i]);
+    errno = 0;
     int size = proc_listpids(PROC_ALL_PIDS, 0, NULL, 0);
-    if (size <= 0 || size > INT_MAX / 2) return -1;
+    if (size <= 0 || size > INT_MAX / 2) return observation_failed(p, 1, size <= 0 ? errno : EOVERFLOW, p->pid);
     size += 1024 * sizeof(pid_t);
     pid_t *pids = malloc((size_t)size);
-    if (!pids) return -1;
+    if (!pids) return observation_failed(p, 3, ENOMEM, p->pid);
+    errno = 0;
     int bytes = proc_listpids(PROC_ALL_PIDS, 0, pids, size);
-    if (bytes <= 0 || bytes >= size) { free(pids); return -1; }
+    if (bytes <= 0 || bytes >= size) { int saved = bytes <= 0 ? errno : EOVERFLOW; free(pids); return observation_failed(p, 2, saved, p->pid); }
     size_t capacity = (size_t)bytes / sizeof(pid_t), count = 0;
     Member *members = capacity ? malloc(capacity * sizeof(Member)) : NULL;
-    if (capacity && !members) { free(pids); return -1; }
+    if (capacity && !members) { free(pids); return observation_failed(p, 3, ENOMEM, p->pid); }
     for (size_t i = 0; i < capacity; ++i) {
         if (pids[i] <= 0 || getsid(pids[i]) != p->sid) continue;
         struct proc_bsdinfo info;
         if (!process_info(pids[i], &info)) {
-            if (kill(pids[i], 0) == 0 || errno != ESRCH) { free(pids); free(members); return -1; }
+            int metadata_error = errno;
+            if (kill(pids[i], 0) == 0 || errno != ESRCH) { pid_t pid = pids[i]; free(pids); free(members); return observation_failed(p, 4, metadata_error, pid); }
             continue;
         }
         if (info.pbi_status == SZOMB) continue;
         members[count++] = member_info(&info);
     }
     free(pids);
-    if (count && !trusted) { free(members); return -1; }
+    if (count && !trusted) { free(members); return observation_failed(p, 5, ESTALE, p->pid); }
     free(p->members);
     p->members = members;
     p->member_count = count;
@@ -90,7 +110,7 @@ static int scan_members(ZW_LOCAL_PROCESS *p) {
 static int signal_groups(ZW_LOCAL_PROCESS *p, int signal_number) {
     for (size_t i = 0; i < p->member_count; ++i) {
         pid_t group = p->members[i].pgid;
-        if (group <= 0 || group == getpgrp()) return -1;
+        if (group <= 0 || group == getpgrp()) return observation_failed(p, 8, EPERM, p->members[i].pid);
         int earlier = 0;
         for (size_t j = 0; j < i; ++j) if (p->members[j].pgid == group) earlier = 1;
         if (earlier) continue;
@@ -99,10 +119,17 @@ static int signal_groups(ZW_LOCAL_PROCESS *p, int signal_number) {
             if (p->members[j].pgid == group && still_owned(p, &p->members[j])) { verified = 1; break; }
         }
         if (!verified) {
-            if (kill(-group, 0) < 0 && errno == ESRCH) continue;
-            return -1;
+            int probe = kill(-group, 0);
+            if (probe < 0 && errno == ESRCH) continue;
+            if (probe < 0 && errno != EPERM) return observation_failed(p, 8, errno, p->members[i].pid);
+            /* Exit can invalidate every scanned birth identity while the
+             * process group still contains unreaped zombies. Darwin may
+             * return EPERM for that group's signal-zero probe. Do not signal
+             * that group, or call the whole cleanup unknown on one sample. */
+            observation_failed(p, 8, probe < 0 ? errno : ESTALE, p->members[i].pid);
+            return -2;
         }
-        if (kill(-group, signal_number) < 0 && errno != ESRCH) return -1;
+        if (kill(-group, signal_number) < 0 && errno != ESRCH) return observation_failed(p, 9, errno, p->members[i].pid);
     }
     return 0;
 }
@@ -326,7 +353,7 @@ int zw_local_read(ZW_LOCAL_PROCESS *p, int stream, unsigned char *buffer, size_t
     return -1;
 }
 int zw_local_write(ZW_LOCAL_PROCESS *p, const unsigned char *bytes, size_t len, size_t *count) {
-    if (!p->pty || p->closed || p->close_phase || p->eof || p->reaped) { errno = EBADF; return -1; }
+    if (!p->pty || p->closed || p->close_started || p->eof || p->reaped) { errno = EBADF; return -1; }
     ssize_t n;
     do { n = write(p->fd, bytes, len); } while (n < 0 && errno == EINTR);
     if (n >= 0) { *count = (size_t)n; return 1; }
@@ -334,7 +361,7 @@ int zw_local_write(ZW_LOCAL_PROCESS *p, const unsigned char *bytes, size_t len, 
     return -1;
 }
 int zw_local_resize(ZW_LOCAL_PROCESS *p, unsigned short cols, unsigned short rows) {
-    if (!p->pty || p->closed || p->close_phase || !cols || !rows) { errno = EINVAL; return -1; }
+    if (!p->pty || p->closed || p->close_started || !cols || !rows) { errno = EINVAL; return -1; }
     struct winsize value = { .ws_col = cols, .ws_row = rows };
     return ioctl(p->fd, TIOCSWINSZ, &value);
 }
@@ -348,9 +375,9 @@ int zw_local_poll_exit(ZW_LOCAL_PROCESS *p, ZW_LOCAL_EXIT *out) {
     siginfo_t pending = {0};
     int probe;
     do { probe = waitid(P_PID, (id_t)p->pid, &pending, WEXITED | WNOHANG | WNOWAIT); } while (probe < 0 && errno == EINTR);
-    if (probe < 0) return -1;
+    if (probe < 0) return observation_failed(p, 6, errno, p->pid);
     if (pending.si_pid == 0) return 0;
-    if (pending.si_pid != p->pid) { errno = ECHILD; return -1; }
+    if (pending.si_pid != p->pid) return observation_failed(p, 6, ECHILD, p->pid);
     /* WNOWAIT proves this is still our unreaped direct child even on Darwin
      * versions where getsid/proc_pidinfo no longer expose zombie metadata. */
     p->exit_observed = 1;
@@ -362,10 +389,10 @@ int zw_local_poll_exit(ZW_LOCAL_PROCESS *p, ZW_LOCAL_EXIT *out) {
     pid_t result;
     do { result = waitpid(p->pid, &status, WNOHANG); } while (result < 0 && errno == EINTR);
     if (result == 0) return 0;
-    if (result < 0) return -1;
+    if (result < 0) return observation_failed(p, 7, errno, p->pid);
     if (WIFEXITED(status)) p->exit = (ZW_LOCAL_EXIT){ 1, WEXITSTATUS(status) };
     else if (WIFSIGNALED(status)) p->exit = (ZW_LOCAL_EXIT){ 2, WTERMSIG(status) };
-    else { errno = ECHILD; return -1; }
+    else return observation_failed(p, 7, ECHILD, p->pid);
     p->reaped = 1; *out = p->exit; return 1;
 }
 int zw_local_foreground(ZW_LOCAL_PROCESS *p, ZW_LOCAL_FOREGROUND *out) {
@@ -396,6 +423,15 @@ int zw_local_foreground(ZW_LOCAL_PROCESS *p, ZW_LOCAL_FOREGROUND *out) {
     free(pids);
     return found;
 }
+int zw_local_interrupt_foreground(ZW_LOCAL_PROCESS *p) {
+    ZW_LOCAL_FOREGROUND foreground;
+    if (!zw_local_foreground(p, &foreground) || foreground.process_group == p->pid ||
+        foreground.session_id != p->sid || tcgetpgrp(p->fd) != foreground.process_group ||
+        !still_owned(p, &p->leader)) return 0;
+    /* No shared transport is aborted, and the shell's own process group is
+     * excluded. This is an interrupt request, not an exit acknowledgment. */
+    return kill(-foreground.process_group, SIGINT) == 0 ? 1 : -1;
+}
 int zw_local_pid(ZW_LOCAL_PROCESS *p) { return p->pid; }
 const char *zw_local_initial_cwd(ZW_LOCAL_PROCESS *p) { return p->cwd; }
 int zw_local_cwd(ZW_LOCAL_PROCESS *p, char *buffer, size_t capacity) {
@@ -408,14 +444,21 @@ int zw_local_cwd(ZW_LOCAL_PROCESS *p, char *buffer, size_t capacity) {
 }
 int zw_local_close_step(ZW_LOCAL_PROCESS *p, uint64_t now) {
     if (p->closed) return 1;
+    p->close_started = 1;
     ZW_LOCAL_EXIT status;
     if (zw_local_poll_exit(p, &status) < 0) return 2;
     if (scan_members(p) < 0) return 2;
-    if (!p->close_phase) {
-        p->close_phase = 1; p->signal_ms = now;
-        if (signal_groups(p, SIGHUP) < 0) return 2;
-    } else if (p->member_count && p->close_phase < 3 && now - p->signal_ms >= 2000) {
-        if (signal_groups(p, p->close_phase == 1 ? SIGTERM : SIGKILL) < 0) return 2;
+    if (!p->close_phase || (p->member_count && p->close_phase < 3 && now - p->signal_ms >= 2000)) {
+        int result = signal_groups(p, !p->close_phase ? SIGHUP : p->close_phase == 1 ? SIGTERM : SIGKILL);
+        if (result == -2) {
+            if (!p->close_retry) { p->close_retry = 1; p->close_retry_ms = now; }
+            /* The owner, birth identities and SID stay unchanged. A fresh
+             * scan must verify ownership before any later signal/release.
+             * Persistent uncertainty remains unknown after this small budget. */
+            return now - p->close_retry_ms < 250 ? 0 : 2;
+        }
+        if (result < 0) return 2;
+        p->close_retry = 0;
         ++p->close_phase; p->signal_ms = now;
     }
     if (p->reaped && p->member_count == 0 && p->eof && p->error_eof) {
@@ -426,6 +469,10 @@ int zw_local_close_step(ZW_LOCAL_PROCESS *p, uint64_t now) {
 int zw_local_destroy(ZW_LOCAL_PROCESS *p) {
     if (!p->closed) return -1;
     free(p->members); free(p->cwd); free(p); return 0;
+}
+int zw_local_observation_failure(ZW_LOCAL_PROCESS *p, ZW_LOCAL_OBSERVATION_FAILURE *out) {
+    if (!p->observation_failure.stage) return 0;
+    *out = p->observation_failure; return 1;
 }
 uint64_t zw_local_monotonic_ms(void) {
     struct timespec value;

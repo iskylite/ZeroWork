@@ -1,17 +1,11 @@
-//! Read-only model for the persistent closed-session history list.
-//!
-//! The history modal must never render design-time sample rows.  This model
-//! loads the RawStreamTap index and exposes only records that actually exist
-//! on disk; replay/export callers receive the indexed cast path verbatim.
+//! Metadata-only catalogue projection. A list refresh never decodes recordings.
 const std = @import("std");
-const Archive = @import("../vt/session_archive.zig").Archive;
-const Entry = @import("../vt/session_archive.zig").Entry;
-
-/// Saved IDs survive rename and distinguish assets with the same name.
+const archive_mod = @import("../vt/session_archive.zig");
+const Archive = archive_mod.Archive;
+const Entry = archive_mod.Entry;
 pub const SourceFilter = union(enum) {
     saved_connection: u64,
     local,
-
     fn matches(self: SourceFilter, entry: Entry) bool {
         return switch (self) {
             .saved_connection => |id| entry.source_kind == .ssh and entry.saved_connection_id == id,
@@ -19,76 +13,107 @@ pub const SourceFilter = union(enum) {
         };
     }
 };
-
+pub const TypeFilter = enum { all, ssh, local };
+pub const page_size = 100;
 pub const Model = struct {
     allocator: std.mem.Allocator,
     archive: *Archive,
+    catalog: ?archive_mod.Catalog = null,
+    // Shallow entry projections; the catalogue arena owns all strings.
     entries: std.ArrayList(Entry) = .empty,
+    visible: std.ArrayList(usize) = .empty,
     source_filter: ?SourceFilter = null,
-
+    type_filter: TypeFilter = .all,
+    query: std.ArrayList(u8) = .empty,
+    page: usize = 0,
     pub fn init(allocator: std.mem.Allocator, archive: *Archive) Model {
         return .{ .allocator = allocator, .archive = archive };
     }
-
     pub fn deinit(self: *Model) void {
-        self.archive.freeEntries(&self.entries);
-        self.source_filter = null;
+        self.entries.deinit(self.allocator);
+        self.visible.deinit(self.allocator);
+        self.query.deinit(self.allocator);
+        if (self.catalog) |*catalog| catalog.deinit();
     }
-
-    /// Legacy rows remain available in the unfiltered list, but cannot be
-    /// attributed to any saved asset or Local source by their display names.
     pub fn refresh(self: *Model, source: ?SourceFilter) !void {
-        var loaded = try self.archive.load(self.allocator);
-        errdefer self.archive.freeEntries(&loaded);
-        var next_entries: std.ArrayList(Entry) = .empty;
-        errdefer next_entries.deinit(self.allocator);
-        // Finish allocations before moving string ownership out of loaded.
-        try next_entries.ensureTotalCapacity(self.allocator, loaded.items.len);
-        for (loaded.items) |entry| {
-            if (source) |filter| if (!filter.matches(entry)) {
-                self.allocator.free(entry.host);
-                self.allocator.free(entry.user);
-                self.allocator.free(entry.cast_path);
-                continue;
-            };
-            next_entries.appendAssumeCapacity(entry);
+        var catalog = try self.archive.loadCatalog(self.allocator);
+        errdefer catalog.deinit();
+        try self.install(&catalog, source);
+    }
+    /// Takes catalogue ownership only after all fallible projection allocation.
+    pub fn install(self: *Model, catalog: *archive_mod.Catalog, source: ?SourceFilter) !void {
+        var entries: std.ArrayList(Entry) = .empty;
+        errdefer entries.deinit(self.allocator);
+        var visible: std.ArrayList(usize) = .empty;
+        errdefer visible.deinit(self.allocator);
+        try entries.ensureTotalCapacity(self.allocator, catalog.entries.items.len);
+        try visible.ensureTotalCapacity(self.allocator, catalog.entries.items.len);
+        for (catalog.entries.items, 0..) |descriptor, index| {
+            if (source) |filter| if (!filter.matches(descriptor.entry)) continue;
+            entries.appendAssumeCapacity(descriptor.entry);
+            visible.appendAssumeCapacity(index);
         }
-        // `load` owns each string; ownership moved to self.entries above.
-        loaded.items.len = 0;
-        loaded.deinit(self.allocator);
-        self.archive.freeEntries(&self.entries);
+        self.entries.deinit(self.allocator);
+        self.visible.deinit(self.allocator);
+        if (self.catalog) |*old| old.deinit();
+        self.catalog = catalog.*;
+        self.entries = entries;
+        self.visible = visible;
         self.source_filter = source;
-        self.entries = next_entries;
-        std.sort.heap(Entry, self.entries.items, {}, lessRecent);
+        self.page = 0;
     }
-
-    fn lessRecent(_: void, a: Entry, b: Entry) bool {
-        if (a.ended_ms != b.ended_ms) return a.ended_ms > b.ended_ms;
-        return a.id > b.id;
+    pub fn applyFilter(self: *Model, query: []const u8, kind: TypeFilter) !void {
+        const copy = try self.allocator.dupe(u8, query);
+        defer self.allocator.free(copy);
+        try self.query.ensureTotalCapacity(self.allocator, copy.len);
+        self.query.clearRetainingCapacity();
+        self.query.appendSliceAssumeCapacity(copy);
+        self.type_filter = kind;
+        self.entries.clearRetainingCapacity();
+        self.visible.clearRetainingCapacity();
+        if (self.catalog) |catalog| for (catalog.entries.items, 0..) |descriptor, index| {
+            const entry = descriptor.entry;
+            if (self.source_filter) |filter| if (!filter.matches(entry)) continue;
+            if (kind == .local and entry.source_kind != .local) continue;
+            if (kind == .ssh and entry.source_kind != .ssh) continue;
+            if (copy.len > 0 and !contains(descriptor.title, copy) and !contains(entry.host, copy) and !contains(entry.user, copy) and !contains(descriptor.endpoint, copy)) continue;
+            self.entries.appendAssumeCapacity(entry);
+            self.visible.appendAssumeCapacity(index);
+        };
+        self.page = 0;
     }
-
     pub fn len(self: *const Model) usize {
         return self.entries.items.len;
     }
     pub fn at(self: *const Model, index: usize) ?Entry {
-        return if (index < self.entries.items.len) self.entries.items[index] else null;
+        return if (index < self.len()) self.entries.items[index] else null;
     }
-
-    /// Returns a real recording path for replay.  Missing files are rejected
-    /// so a stale index cannot produce a fake/empty history row.
+    pub fn descriptorAt(self: *const Model, index: usize) ?archive_mod.Descriptor {
+        return if (index < self.visible.items.len) self.catalog.?.entries.items[self.visible.items[index]] else null;
+    }
+    pub fn pageStart(self: *const Model) usize {
+        return @min(self.len(), self.page * page_size);
+    }
+    pub fn pageEnd(self: *const Model) usize {
+        return @min(self.len(), self.pageStart() + page_size);
+    }
+    /// Compatibility path validation. All readers must still acquire a lease.
     pub fn replayPath(self: *const Model, index: usize) ![]const u8 {
         const entry = self.at(index) orelse return error.InvalidHistoryIndex;
-        var file = try self.archive.dir.openFile(self.archive.io, entry.cast_path, .{});
+        const file = try self.archive.dir.openFile(self.archive.io, entry.cast_path, .{});
         file.close(self.archive.io);
         return entry.cast_path;
     }
-
-    /// Export uses the same durable cast path; the caller performs the native
-    /// save dialog/copy and may choose txt conversion separately.
     pub fn exportPath(self: *const Model, index: usize) ![]const u8 {
         return self.replayPath(index);
     }
 };
+fn contains(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    for (0..haystack.len - needle.len + 1) |index| if (std.ascii.eqlIgnoreCase(haystack[index..][0..needle.len], needle)) return true;
+    return false;
+}
 
 test "history list loads real index, filters stable source, and orders newest first" {
     var tmp = std.testing.tmpDir(.{});
@@ -177,4 +202,26 @@ test "history stable identity isolates duplicate names, renamed assets, Local an
     try std.testing.expectEqual(@as(u64, 4), model.at(0).?.id);
     try model.refresh(null);
     try std.testing.expectEqual(@as(usize, sources.len), model.len());
+}
+
+test "history metadata search and type filter never use display name as source identity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var archive = Archive{ .allocator = std.testing.allocator, .io = std.testing.io, .dir = tmp.dir };
+    try archive.append(.{ .id = 1, .started_ms = 1, .ended_ms = 2, .duration_ms = 1, .host = "同名主机", .user = "Deploy", .cast_path = "logs/history/1.cast", .source_kind = .ssh, .saved_connection_id = 10 });
+    try archive.append(.{ .id = 2, .started_ms = 2, .ended_ms = 3, .duration_ms = 1, .host = "同名主机", .user = "local-user", .cast_path = "logs/history/2.cast", .source_kind = .local });
+    var model = Model.init(std.testing.allocator, &archive);
+    defer model.deinit();
+    try model.refresh(null);
+    try model.applyFilter("DEPLOY", .all);
+    try std.testing.expectEqual(@as(usize, 1), model.len());
+    try std.testing.expectEqual(@as(u64, 1), model.at(0).?.id);
+    try model.applyFilter("同名", .local);
+    try std.testing.expectEqual(@as(usize, 1), model.len());
+    try std.testing.expectEqual(@as(u64, 2), model.at(0).?.id);
+    try model.applyFilter("unmatched", .all);
+    try std.testing.expectEqual(@as(usize, 0), model.len());
+    try model.applyFilter("", .all);
+    try std.testing.expectEqual(@as(usize, 2), model.len());
+    try std.testing.expect(!model.descriptorAt(0).?.can_open);
 }

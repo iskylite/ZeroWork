@@ -15,6 +15,9 @@ pub const Record = struct {
     state: State = .pending,
     failure: ?anyerror = null,
     invalid: bool = false,
+    manifest_path: ?[]const u8 = null,
+    manifest_identity: ?std.Io.File.Stat = null,
+    tombstoned: bool = false,
 };
 pub const Progress = struct {
     total: usize = 0,
@@ -89,6 +92,65 @@ pub const Controller = struct {
             }
             try self.records.append(allocator, record);
         }
+        var catalog = try archive.loadCatalogForCleanup(allocator);
+        defer catalog.deinit();
+        for (catalog.entries.items) |descriptor| {
+            const manifest_path = descriptor.manifest_path orelse continue;
+            const document = descriptor.document orelse continue;
+            var record_index: ?usize = null;
+            for (self.records.items, 0..) |record, index| if (record.key) |key| if (std.mem.eql(u8, key.cast_path, descriptor.entry.cast_path)) {
+                record_index = index;
+                break;
+            };
+            if (record_index == null) {
+                try self.records.append(allocator, .{});
+                record_index = self.records.items.len - 1;
+            }
+            const record = &self.records.items[record_index.?];
+            record.manifest_path = try allocator.dupe(u8, manifest_path);
+            record.manifest_identity = try self.pathStat(manifest_path);
+            record.tombstoned = document.state == .tombstone;
+            for (document.files) |dependency| {
+                const parent_path = std.fs.path.dirname(dependency.path) orelse "";
+                if (!std.mem.eql(u8, parent_path, "logs") and !std.mem.eql(u8, parent_path, "logs/history")) {
+                    record.invalid = true;
+                    record.state = .failed;
+                    record.failure = error.InvalidRecordingPath;
+                    continue;
+                }
+                var found = false;
+                for (record.files.items) |file| if (std.mem.eql(u8, file.path, dependency.path)) {
+                    found = true;
+                    break;
+                };
+                if (found) continue;
+                const stat = self.pathStat(dependency.path) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    else => return err,
+                };
+                try self.addFile(record, dependency.path, stat);
+            }
+            // A crash after cast rename but before manifest publication may
+            // leave the deterministic base cast outside the committed list.
+            // It is still this recording's managed artifact, never user data.
+            if (std.mem.endsWith(u8, manifest_path, ".session.json")) {
+                const base_cast = try std.fmt.allocPrint(allocator, "{s}.cast", .{manifest_path[0 .. manifest_path.len - ".session.json".len]});
+                defer allocator.free(base_cast);
+                var found = false;
+                for (record.files.items) |file| if (std.mem.eql(u8, file.path, base_cast)) {
+                    found = true;
+                    break;
+                };
+                if (!found) {
+                    const stat: ?std.Io.File.Stat = self.pathStat(base_cast) catch |err| switch (err) {
+                        error.FileNotFound => null,
+                        else => return err,
+                    };
+                    if (stat) |value| try self.addFile(record, base_cast, value);
+                }
+            }
+            if (record.tombstoned and record.files.items.len == 0) record.state = .deleted;
+        }
         var iterator = logs.iterate();
         while (try iterator.next(io)) |entry| {
             if (entry.kind != .file or !isRawName(entry.name)) continue;
@@ -101,6 +163,15 @@ pub const Controller = struct {
             errdefer self.freeRecord(&record);
             const raw_path = try std.fmt.allocPrint(allocator, "logs/{s}", .{entry.name});
             defer allocator.free(raw_path);
+            var already_in_manifest = false;
+            for (self.records.items) |existing| {
+                for (existing.files.items) |file_entry| if (std.mem.eql(u8, file_entry.path, raw_path)) {
+                    already_in_manifest = true;
+                    break;
+                };
+                if (already_in_manifest) break;
+            }
+            if (already_in_manifest) continue;
             try self.addFile(&record, raw_path, stat);
             const checkpoint = try std.fmt.allocPrint(allocator, "logs/{s}.checkpoint", .{entry.name[0 .. entry.name.len - 4]});
             defer allocator.free(checkpoint);
@@ -118,16 +189,18 @@ pub const Controller = struct {
             var merged = false;
             if (std.mem.startsWith(u8, entry.name, "session-local-")) {
                 const stem = entry.name[0 .. entry.name.len - 4];
-                for (self.records.items) |*existing| if (existing.key) |key| {
-                    const name = std.fs.path.basename(key.cast_path);
-                    if (name.len == stem.len + 5 and std.mem.startsWith(u8, name, stem)) {
+                for (self.records.items) |*existing| {
+                    const path = if (existing.key) |key| key.cast_path else existing.manifest_path orelse continue;
+                    const name = std.fs.path.basename(path);
+                    const suffix: []const u8 = if (existing.key != null) ".cast" else ".session.json";
+                    if (name.len == stem.len + suffix.len and std.mem.startsWith(u8, name, stem) and std.mem.endsWith(u8, name, suffix)) {
                         try existing.files.appendSlice(allocator, record.files.items);
                         record.files.deinit(allocator);
                         record.files = .empty;
                         merged = true;
                         break;
                     }
-                };
+                }
             }
             if (merged) continue;
             try self.records.append(allocator, record);
@@ -144,6 +217,7 @@ pub const Controller = struct {
         for (record.files.items) |file| self.allocator.free(file.path);
         record.files.deinit(self.allocator);
         if (record.key) |key| self.allocator.free(key.cast_path);
+        if (record.manifest_path) |path| self.allocator.free(path);
     }
     fn addFile(self: *Controller, record: *Record, path: []const u8, stat: ?std.Io.File.Stat) !void {
         const owned = try self.allocator.dupe(u8, path);
@@ -204,9 +278,10 @@ pub const Controller = struct {
     fn removeRecord(self: *Controller, record: *Record) !void {
         if (record.invalid) return error.InvalidRecordingFile;
         // Obtain all references before deleting any path in this recording.
-        const paths = try self.allocator.alloc([]const u8, record.files.items.len);
+        const paths = try self.allocator.alloc([]const u8, record.files.items.len + @as(usize, if (record.manifest_path != null) 1 else 0));
         defer self.allocator.free(paths);
-        for (record.files.items, paths) |file, *path| path.* = file.path;
+        for (record.files.items, paths[0..record.files.items.len]) |file, *path| path.* = file.path;
+        if (record.manifest_path) |path| paths[paths.len - 1] = path;
         var guards = try archive_mod.reserveRemovals(self.allocator, self.io, self.dir, paths);
         defer guards.deinit();
         // Check the complete frozen set before mutating any one file.
@@ -216,6 +291,13 @@ pub const Controller = struct {
                 else => return err,
             };
             if (file.removed or file.identity == null or !sameFile(file.identity.?, stat)) return error.RecordingChanged;
+        }
+        if (record.manifest_path) |path| {
+            if (!record.tombstoned) {
+                if (record.manifest_identity == null or !sameFile(record.manifest_identity.?, try self.pathStat(path))) return error.RecordingChanged;
+                try archive_mod.writeTombstone(self.allocator, self.io, self.dir, path, "UserRemoved");
+                record.tombstoned = true;
+            }
         }
         for (record.files.items) |*file| {
             if (file.removed) continue;

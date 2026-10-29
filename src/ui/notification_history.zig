@@ -257,7 +257,7 @@ pub const View = struct {
                     try details.appendChild(self.cx.allocator, line);
                 }
                 if (sources > 1) for (records) |source| {
-                    if (!source.listed or !host.notifications.sameIncident(record, source)) continue;
+                    if (!source.listed or !host.notifications.sameIncident(record, source) or !self.host.coordinator.isIncidentSource(source)) continue;
                     const source_row = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .gap = 6, .align_items = .center, .flex_shrink = 0 }, .{});
                     const source_label = try std.fmt.allocPrint(self.cx.allocator, "{s} · {s}", .{ source.event.owner_name, if (source.pending()) "待处理" else "已结束" });
                     defer self.cx.allocator.free(source_label);

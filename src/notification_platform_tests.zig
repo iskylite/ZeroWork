@@ -658,3 +658,77 @@ test "notification shared transport submits one OS alert across all background w
     try std.testing.expectEqual(@as(usize, 3), host.coordinator.incidentSourceCount(host.coordinator.notification_records.items[0]));
     try std.testing.expectEqual(@as(usize, 0), host.coordinator.presentation_count);
 }
+
+test "notification opted-in background completion has one OS submission and one retained matching receipt" {
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{ .ai_ready = true, .quiet_hours = "00:00-00:00" }, fake.api());
+    defer host.destroy();
+    fake.push(.{ .kind = 1, .result = 1, .request_id = fake.last_query, .settings = authorized });
+    _ = try host.poll();
+    var window: WindowProbe = .{};
+    const id = try host.registerWindow(window.callbacks());
+    host.setWindowFocus(id, false);
+    const operation = try host.reserveAiOperation(id);
+    try host.publishAi(window.owner, operation, 1, .{ .result = .succeeded, .resources_released = true, .final_answer = true });
+    try std.testing.expectEqual(@as(usize, 1), fake.sends);
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.historyCount(true));
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(false));
+    const fact_id = host.coordinator.notification_records.items[0].fact_id;
+    try std.testing.expectEqual(.pending, host.coordinator.recordFor(fact_id).?.system.disposition);
+    fake.reportSend(2);
+    _ = try host.poll();
+    try std.testing.expectEqual(.scheduled, host.coordinator.recordFor(fact_id).?.system.disposition);
+    try host.publishAi(window.owner, operation, 1, .{ .result = .succeeded, .resources_released = true, .final_answer = true });
+    try std.testing.expectEqual(@as(usize, 1), fake.sends);
+    host.setWindowFocus(id, true);
+    try host.publishAi(window.owner, operation + 1, 2, .{ .result = .succeeded, .resources_released = true, .final_answer = true });
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(false));
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.presentation_count);
+}
+
+test "notification transfer batch source states escalate only multiple sources and resolve without cancelling jobs" {
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
+    defer host.destroy();
+    var window: WindowProbe = .{};
+    const id = try host.registerWindow(window.callbacks());
+    try host.publishTransferBatch(id, window.owner, 9, 1, 1, .blocked, .{ .detail = "Permission denied" });
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.historyCount(false));
+    try host.publishTransferBatch(id, window.owner, 9, 1, 3, .blocked, .{ .detail = "Permission denied" });
+    try host.publishTransferBatch(id, window.owner, 9, 1, 3, .blocked, .{ .detail = "Permission denied" });
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(true));
+    const fact = host.coordinator.notification_records.items[0];
+    host.coordinator.dismissNotification(fact.fact_id);
+    host.coordinator.readHistory();
+    host.coordinator.clearHistory();
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(true));
+    try host.dispatchAction(fact.fact_id, 0);
+    try std.testing.expectEqual(@as(usize, 1), window.activates);
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(true));
+    try host.publishTransferBatch(id, window.owner, 9, 1, 3, .active, .{});
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.historyCount(true));
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.presentation_count);
+    try host.publishTransferBatch(id, window.owner, 9, 2, 3, .blocked, .{});
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(true));
+    try host.publishTransferBatch(id, window.owner, 9, 2, 3, .ended, .{});
+    try std.testing.expectEqual(@as(usize, 0), host.coordinator.historyCount(true));
+    try std.testing.expectEqual(@as(usize, 0), fake.sends);
+}
+
+test "notification a genuinely new recording failure still alerts after cleared resolved history" {
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{ .quiet_hours = "00:00-00:00" }, fake.api());
+    defer host.destroy();
+    var window: WindowProbe = .{};
+    const id = try host.registerWindow(window.callbacks());
+    try host.publishRecordingStatus(id, window.owner.session, "DiskFull");
+    const first = host.coordinator.notification_records.items[0].event.operation_id;
+    try host.publishRecordingStatus(id, window.owner.session, null);
+    host.coordinator.clearHistory();
+    try host.publishRecordingStatus(id, window.owner.session, "AccessDenied");
+    try host.publishRecordingStatus(id, window.owner.session, "AccessDenied");
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.historyCount(true));
+    try std.testing.expectEqual(@as(usize, 1), host.coordinator.presentation_count);
+    try std.testing.expect(host.coordinator.notification_records.items[0].event.operation_id > first);
+    try std.testing.expectEqualStrings("AccessDenied", host.coordinator.notification_records.items[0].event.detail);
+}

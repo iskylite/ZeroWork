@@ -2,7 +2,7 @@ const std = @import("std");
 const ui = @import("ui");
 const S = @import("ai_recovery_styles.zig");
 pub const Action = enum { answer, edit, regenerate };
-pub const Ticket = struct { owner: @import("../ai/tool_scope.zig").Owner, turn: u64 };
+pub const Ticket = struct { owner: @import("../ai/tool_scope.zig").Owner, turn: u64, conversation_id: ?@import("../host/identity.zig").ConversationId = null };
 pub const Envelope = struct { ticket: Ticket, action: Action };
 pub const Snapshot = struct {
     ticket: Ticket,

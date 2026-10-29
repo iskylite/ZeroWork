@@ -46,6 +46,36 @@ fn member(fake: *Fake, id: u64, bindings: []const tools.ToolBinding) tools.Membe
 }
 const binding: tools.ToolBinding = .{ .plugin_id = "example", .definition_id = "example.power_write", .handler = Fake.handler };
 
+test "dynamic tool directory keeps 300 frozen members while each call stays bounded" {
+    const a = std.testing.allocator;
+    var fake: Fake = .{};
+    var ids: [300]u64 = undefined;
+    var members: [300]tools.Member = undefined;
+    for (&ids, &members, 1..) |*id, *target, value| {
+        id.* = value;
+        target.* = member(&fake, value, &.{binding});
+    }
+    const wide: scope.Scope = .{ .owner = .{ .group = 7 }, .members = .{}, .inventory = &ids };
+    var table = try tools.RequestTable.init(a, wide, &.{definition()}, &members);
+    defer table.deinit();
+    var cloned = try tools.cloneTable(&table, a);
+    defer cloned.deinit();
+    ids[299] = 901;
+    var parsed = try cloned.parse(a, cloned.entries[0].provider_name, "{\"session_ids\":[300,17],\"value\":1}");
+    defer parsed.deinit();
+    try std.testing.expectEqualSlices(u64, &.{ 300, 17 }, parsed.targets.slice());
+    try std.testing.expectEqual(@as(usize, 300), cloned.entries[0].targets.len);
+    try std.testing.expectError(error.ToolCapabilityUnavailable, cloned.parse(a, cloned.entries[0].provider_name, "{\"session_ids\":[901],\"value\":1}"));
+    try std.testing.expectError(error.TargetOutsideAssistant, cloned.captured_scope.validate(&.{901}));
+    const wire = try tools.providerDefinitions(&cloned, cloned.arena.allocator());
+    var loop = @import("tool_loop.zig").Loop.init(a, cloned.captured_scope, 1, .{ .context_window = 100_000 });
+    defer loop.deinit();
+    try loop.start(.{ .model = "test", .system = "", .messages = &.{}, .tools = wire, .tool_table = &cloned });
+    try std.testing.expectEqual(@as(usize, 300), loop.scope.memberIds().len);
+    _ = try @import("provider_http.zig").requestBodySize(.openai_compat, try loop.nextRequest(), 100_000);
+    try std.testing.expectError(error.InvalidTargetCount, loop.scope.validate(loop.scope.memberIds()));
+}
+
 test "API2 names are reversible collision-free and preserve all four legacy names" {
     for ([_][]const u8{ "fixture_probe.ping", "a__b.c_d", "plain-name", "run_command", "read_terminal", "list_remote_files", "read_remote_file" }) |id| {
         var encoded: [64]u8 = undefined;

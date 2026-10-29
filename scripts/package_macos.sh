@@ -20,14 +20,18 @@ zig build -j2 -Doptimize=ReleaseFast --prefix "$STAGING/build" --summary all
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$OUT"
 cp "$STAGING/build/bin/zerowork" "$APP/Contents/MacOS/ZeroWork"
 cp "$STAGING/build/bin/zw_ipc.so" "$APP/Contents/MacOS/zw_ipc.so"
+cp "$STAGING/build/bin/zw_execution.so" "$APP/Contents/MacOS/zw_execution.so"
+cp "$STAGING/build/bin/zw_execution_guard" "$APP/Contents/MacOS/zw_execution_guard"
 cp assets/macos/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp LICENSE "$APP/Contents/Resources/LICENSE"
 cp vendor/DEPENDENCIES.md "$APP/Contents/Resources/DEPENDENCIES.md"
 cp docs/UI_V3/assets/fonts/Inter-OFL.txt "$APP/Contents/Resources/Inter-OFL.txt"
 cp docs/UI_V3/assets/fonts/JetBrainsMono-OFL.txt "$APP/Contents/Resources/JetBrainsMono-OFL.txt"
-xcrun strip -S "$APP/Contents/MacOS/ZeroWork" "$APP/Contents/MacOS/zw_ipc.so"
+xcrun strip -S "$APP/Contents/MacOS/ZeroWork" "$APP/Contents/MacOS/zw_ipc.so" "$APP/Contents/MacOS/zw_execution.so" "$APP/Contents/MacOS/zw_execution_guard"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/ZeroWork"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_ipc.so"
+python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_execution.so"
+python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_execution_guard"
 python3 - "$APP" "$VERSION" <<'PY'
 import pathlib,plistlib,sys
 app=pathlib.Path(sys.argv[1]);version=sys.argv[2]

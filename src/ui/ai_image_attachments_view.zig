@@ -181,7 +181,7 @@ pub const View = struct {
             }
             const item = bundle.items[index];
             const content = item.reference.content() orelse return error.EmptyAttachmentResult;
-            try self.updateCard(card, .{ .owner = bundle.owner, .draft_epoch = bundle.draft_epoch, .id = item.id }, content.path, .ready, item.reference);
+            try self.updateCard(card, .{ .owner = bundle.owner, .conversation_id = bundle.conversation_id, .draft_epoch = bundle.draft_epoch, .id = item.id }, content.path, .ready, item.reference);
         }
         self.root.setDisplay(if (self.count > 0) .flex else .none);
     }

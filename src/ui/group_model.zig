@@ -64,12 +64,14 @@ pub const Roster = struct {
     allocator: std.mem.Allocator,
     groups: std.ArrayList(GroupEntry) = .empty,
     next_id: u32 = 1,
+    reserved_groups: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator) Roster {
         return .{ .allocator = allocator };
     }
 
     pub fn deinit(self: *Roster) void {
+        std.debug.assert(self.reserved_groups == 0);
         for (self.groups.items) |*group| group.deinit(self.allocator);
         self.groups.deinit(self.allocator);
         self.* = undefined;
@@ -82,9 +84,50 @@ pub const Roster = struct {
         }
         const owned = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(owned);
-        try self.groups.append(self.allocator, .{ .id = self.next_id, .name = owned, .color = color });
-        self.next_id += 1;
+        if (self.next_id == 0) return error.GroupIdentityExhausted;
+        try self.groups.ensureUnusedCapacity(self.allocator, self.reserved_groups + 1);
+        self.groups.appendAssumeCapacity(.{ .id = self.next_id, .name = owned, .color = color });
+        self.next_id = if (self.next_id == std.math.maxInt(u32)) 0 else self.next_id + 1;
         return &self.groups.items[self.groups.items.len - 1];
+    }
+    pub const PreparedGroup = struct {
+        roster: *Roster,
+        id: u32,
+        entry: ?GroupEntry,
+        pub fn deinit(self: *PreparedGroup) void {
+            if (self.entry) |*entry| {
+                entry.deinit(self.roster.allocator);
+                self.roster.reserved_groups -= 1;
+                self.entry = null;
+            }
+        }
+        /// All storage was reserved before publication. Other ordinary group
+        /// creation respects the reservation, including while durable IO runs.
+        pub fn commit(self: *PreparedGroup) !u32 {
+            const entry = self.entry orelse return error.GroupTransactionConsumed;
+            if (self.roster.findById(self.id) != null) return error.GroupIdentityConflict;
+            self.roster.groups.appendAssumeCapacity(entry);
+            self.roster.reserved_groups -= 1;
+            self.entry = null;
+            return self.id;
+        }
+    };
+    /// Creates a fresh identity even when another group has the same name.
+    /// The caller may durably record the reserved ID before exposing it.
+    pub fn prepareNew(self: *Roster, name: []const u8, color: u32, initial_pane: ?u64) !PreparedGroup {
+        if (name.len == 0) return error.EmptyGroupName;
+        if (self.next_id == 0) return error.GroupIdentityExhausted;
+        const owned = try self.allocator.dupe(u8, name);
+        var entry: GroupEntry = .{ .id = self.next_id, .name = owned, .color = color };
+        errdefer entry.deinit(self.allocator);
+        if (initial_pane) |pane| {
+            entry.membership_revision = 2;
+            try entry.members.append(self.allocator, .{ .pane_id = pane, .membership_revision = 2 });
+        }
+        try self.groups.ensureUnusedCapacity(self.allocator, self.reserved_groups + 1);
+        self.reserved_groups += 1;
+        self.next_id = if (self.next_id == std.math.maxInt(u32)) 0 else self.next_id + 1;
+        return .{ .roster = self, .id = entry.id, .entry = entry };
     }
 
     pub fn find(self: *Roster, name: []const u8) ?*GroupEntry {
@@ -99,15 +142,21 @@ pub const Roster = struct {
 
     /// Idempotent join: joining again does not duplicate a pane.
     pub fn join(self: *Roster, name: []const u8, pane_id: u64, color: u32) !*GroupEntry {
-        const group = try self.createOrGet(name, color);
+        const group = self.find(name) orelse {
+            var prepared = try self.prepareNew(name, color, pane_id);
+            defer prepared.deinit();
+            return self.findById(try prepared.commit()).?;
+        };
         for (group.members.items) |*member| {
             if (member.pane_id == pane_id) {
                 member.active = true;
                 return group;
             }
         }
-        group.membership_revision = try std.math.add(u64, group.membership_revision, 1);
-        try group.members.append(self.allocator, .{ .pane_id = pane_id, .membership_revision = group.membership_revision });
+        const revision = try std.math.add(u64, group.membership_revision, 1);
+        try group.members.ensureUnusedCapacity(self.allocator, 1);
+        group.members.appendAssumeCapacity(.{ .pane_id = pane_id, .membership_revision = revision });
+        group.membership_revision = revision;
         return group;
     }
 
@@ -177,6 +226,61 @@ pub const Roster = struct {
         return null;
     }
 };
+
+test "group transaction reserves publication across other creations and preserves unique identity" {
+    var roster = Roster.init(std.testing.allocator);
+    defer roster.deinit();
+    var pending = try roster.prepareNew("same name", 0, 101);
+    defer pending.deinit();
+    const reserved = pending.id;
+    try std.testing.expectEqual(@as(usize, 0), roster.groups.items.len);
+    for (0..24) |index| {
+        var name: [32]u8 = undefined;
+        _ = try roster.createOrGet(try std.fmt.bufPrint(&name, "other-{d}", .{index}), 0);
+    }
+    try std.testing.expectEqual(reserved, try pending.commit());
+    try std.testing.expectEqual(@as(usize, 25), roster.groups.items.len);
+    try std.testing.expect(roster.findById(reserved).?.contains(101));
+    try std.testing.expectError(error.GroupTransactionConsumed, pending.commit());
+    var second = try roster.prepareNew("same name", 0, null);
+    defer second.deinit();
+    try std.testing.expect(reserved != try second.commit());
+    var abandoned = try roster.prepareNew("abandoned", 0, 102);
+    const abandoned_id = abandoned.id;
+    abandoned.deinit();
+    try std.testing.expect(roster.findById(abandoned_id) == null);
+    try std.testing.expectEqual(@as(usize, 0), roster.reserved_groups);
+}
+
+test "group transaction allocation failures leave no group member or revision changes" {
+    const a = std.testing.allocator;
+    for (0..4) |failure| {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = failure });
+        var roster = Roster.init(failing.allocator());
+        defer roster.deinit();
+        var prepared = roster.prepareNew("atomic", 0, 101) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            try std.testing.expectEqual(@as(usize, 0), roster.groups.items.len);
+            try std.testing.expectEqual(@as(usize, 0), roster.reserved_groups);
+            try std.testing.expectEqual(@as(u32, 1), roster.next_id);
+            continue;
+        };
+        defer prepared.deinit();
+        _ = try prepared.commit();
+    }
+    var failing = std.testing.FailingAllocator.init(a, .{});
+    var roster = Roster.init(failing.allocator());
+    defer roster.deinit();
+    const group = try roster.join("existing", 101, 0);
+    while (group.members.items.len < group.members.capacity) _ = try roster.join("existing", 101 + group.members.items.len, 0);
+    const count = group.members.items.len;
+    const revision = group.membership_revision;
+    failing.fail_index = failing.alloc_index;
+    failing.resize_fail_index = failing.resize_index;
+    try std.testing.expectError(error.OutOfMemory, roster.join("existing", 999, 0));
+    try std.testing.expectEqual(count, group.members.items.len);
+    try std.testing.expectEqual(revision, group.membership_revision);
+}
 
 test "broadcast sends input to every pane and counts echo bytes" {
     const Fake = struct {

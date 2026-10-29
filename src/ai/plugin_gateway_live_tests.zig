@@ -8,22 +8,14 @@ const http = @import("provider_http.zig");
 const trace = @import("tool_trace.zig");
 const scope = @import("tool_scope.zig");
 const Loop = @import("tool_loop.zig");
-const png = "\x89\x50\x4e\x47\x0d\x0a\x1a\x0a\x00\x00\x00\x0d\x49\x48\x44\x52\x00\x00\x00\x80\x00\x00\x00\x60\x08\x06\x00\x00\x00\xd5\x7a\x7a" ++
-    "\x49\x00\x00\x01\x87\x49\x44\x41\x54\x78\x9c\xed\xd2\xc1\x09\x00\x21\x10\x04\xc1\xcd\x3f\x69\x0d\xe2\x90\x52\xae\x69\xfc\xcb\x4e" ++
-    "\xcd\x9a\x59\x7f\x7e\x75\xc1\x08\x01\xa0\xf9\x11\x02\x40\xf3\x23\x04\x80\xe6\x47\x08\x00\xcd\x8f\x10\x00\x9a\x1f\x21\x00\x34\x3f" ++
-    "\x42\x00\x68\x7e\x84\x00\xd0\xfc\x08\x01\xa0\xf9\x11\x02\x40\xf3\x23\x04\x80\xe6\x47\x08\x00\xcd\x8f\x10\x00\x9a\x1f\x21\x00\x34" ++
-    "\x3f\x42\x00\x68\x7e\x84\x00\xd0\xfc\x08\x01\xa0\xf9\x11\x02\x40\xf3\x23\x04\x80\xe6\x47\x08\x00\xcd\x8f\x10\x00\x9a\x1f\x21\x00" ++
-    "\x34\x3f\x42\x00\x68\x7e\x84\x00\xd0\xfc\x08\x01\xa0\xf9\x11\x02\x40\xf3\x23\x04\x80\xe6\x47\x08\x00\xcd\x8f\x10\x00\x9a\x1f\x21" ++
-    "\x00\x34\x3f\x42\x00\x68\x7e\x84\x4f\x03\xea\x2f\xbc\x9f\xbe\x60\x00\x02\x10\x80\x00\x04\x20\x00\x01\x08\x40\x00\x02\x10\x80\x00" ++
-    "\x04\x20\x00\x01\x08\x40\x00\x02\x10\x80\x00\x04\x20\x00\x01\x08\x40\x00\x02\x10\x80\x00\x04\x20\x00\x01\x08\x40\x00\x02\x10\x80" ++
-    "\x00\x04\x20\x00\x01\x08\xc0\x05\xdf\x7f\x3f\x7d\xc1\x00\x04\x20\x00\x01\x08\x40\x00\x02\x10\x80\x00\x04\x20\x00\x01\x08\x40\x00" ++
-    "\x02\x10\x80\x00\x04\x20\x00\x01\x38\x0e\xa8\xfc\x08\x01\xa0\xf9\x11\x02\x40\xf3\x23\x04\x80\xe6\x47\x08\x00\xcd\x8f\x10\x00\x9a" ++
-    "\x1f\x21\x00\x34\x3f\x42\x00\x68\x7e\x84\x00\xd0\xfc\x08\x01\xa0\xf9\x11\x02\x40\xf3\x23\x04\x80\xe6\x47\x08\x00\xcd\x8f\x10\x00" ++
-    "\x9a\x1f\x21\x00\x34\x3f\x42\x00\x68\x7e\x84\x00\xd0\xfc\x08\x01\xa0\xf9\x11\x02\x40\xf3\x23\x04\x80\xe6\x47\x08\x00\xcd\x8f\x10" ++
-    "\x00\x9a\x1f\x21\x00\x34\x3f\x42\x00\x68\x7e\x84\x00\xd0\xfc\x08\x01\xa0\xf9\x11\x02\x40\xf3\x23\x04\x80\xe6\x47\x08\x00\xcd\x8f" ++
-    "\x10\x00\x9a\x1f\x21\x00\x34\x3f\x42\x00\x5c\x1b\xed\x25\xa5\x92\x9a\x03\x15\x44\x00\x00\x00\x00\x49\x45\x4e\x44\xae\x42\x60\x82";
+// Generated outside the process so expected labels never enter provider text.
+const ImageCell = struct { color: []const u8, text: []const u8 };
+const ImageAnswer = struct { top_left: ImageCell, top_right: ImageCell, bottom_left: ImageCell, bottom_right: ImageCell };
+const ImageChallenge = struct { image_sha256: []const u8, expected: ImageAnswer };
+const image_prompt = "Inspect the attached image pixels. Return only a JSON object with keys top_left, top_right, bottom_left, bottom_right, each containing color (one of red, green, blue, yellow) and text (the exact six visible characters). Do not guess; if the image is unavailable say IMAGE_UNAVAILABLE.";
 const schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ids\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":1,\"uniqueItems\":true,\"items\":{\"type\":\"integer\",\"enum\":[101]}}},\"required\":[\"session_ids\"]}";
 const Host = struct {
+    image_bytes: []const u8,
     dispatches: usize = 0,
     fn old(_: *anyopaque, _: Loop.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !Loop.Outcome {
         return error.UnexpectedLegacyDispatch;
@@ -36,7 +28,7 @@ const Host = struct {
         errdefer a.free(output);
         const blocks = try a.alloc(tools.ContentBlock, 1);
         errdefer a.free(blocks);
-        blocks[0] = .{ .image_ref = try @import("image_attachments.zig").ContentRef.create(a, "synthetic-canvas", png, 0, .{}) };
+        blocks[0] = .{ .image_ref = try @import("image_attachments.zig").ContentRef.create(a, "synthetic-canvas", self.image_bytes, 0, .{}) };
         output[0] = .{ .status = .succeeded, .blocks = blocks, .receipt = .{ .operation_id = call.operation_id, .owner = call.parsed.entry.targets[0].owner } };
         return output;
     }
@@ -46,6 +38,8 @@ const Host = struct {
 };
 const ObservedTransport = struct {
     actual: transport.Transport,
+    challenge: ?ImageAnswer = null,
+    expected_text_leaked: bool = false,
     requests: usize = 0,
     image_requests: usize = 0,
     image_count: usize = 0,
@@ -59,6 +53,18 @@ const ObservedTransport = struct {
         const self: *@This() = @ptrCast(@alignCast(raw));
         const decoded = try std.json.parseFromSlice(std.json.Value, a, body, .{});
         defer decoded.deinit();
+        if (self.challenge) |expected| {
+            if (decoded.value.object.get("messages")) |messages| for (messages.array.items) |message| {
+                const content = message.object.get("content") orelse continue;
+                if (content == .string) {
+                    self.expected_text_leaked = self.expected_text_leaked or containsImageLabel(content.string, expected);
+                } else if (content == .array) for (content.array.items) |block| {
+                    if (block.object.get("text")) |text| if (text == .string) {
+                        self.expected_text_leaked = self.expected_text_leaked or containsImageLabel(text.string, expected);
+                    };
+                };
+            };
+        }
         const summary = trace.summarize(decoded.value);
         self.requests += 1;
         if (summary.image_count != 0) {
@@ -74,7 +80,7 @@ const ObservedTransport = struct {
         return .{ .ctx = self, .send = send, .send_stream = stream };
     }
 };
-const Evidence = struct { model: []const u8, protocol: []const u8 = "openai_compat", tool_dispatches: usize, requests: usize, image_requests: usize, wire_image_count: usize, image_sha256: [64]u8, http_statuses: [8]u16, success: bool, error_code: ?[]const u8, answer: []const u8 };
+const Evidence = struct { expected: ImageAnswer, expected_text_leaked: bool, semantics_match: bool, image_hash_match: bool, model: []const u8, protocol: []const u8 = "openai_compat", tool_dispatches: usize, requests: usize, image_requests: usize, wire_image_count: usize, image_sha256: [64]u8, http_statuses: [8]u16, success: bool, error_code: ?[]const u8, answer: []const u8 };
 
 test "API2 LIVE gateway verifies unpredictable text tool result through production native client" {
     const env = testEnvironment();
@@ -158,12 +164,24 @@ test "API2 LIVE gateway model discovery tool image roundtrip through production 
     const models_endpoint = env.get(env.ctx, "ZEROWORK_AI_GATEWAY_MODELS_ENDPOINT") orelse return error.MissingModelsEndpoint;
     const selected_model = env.get(env.ctx, "ZEROWORK_AI_GATEWAY_MODEL") orelse return error.MissingModel;
     const a = std.testing.allocator;
+    const fixture_path = env.get(env.ctx, "ZEROWORK_AI_GATEWAY_IMAGE_FIXTURE") orelse return error.MissingImageFixture;
+    const manifest_path = env.get(env.ctx, "ZEROWORK_AI_GATEWAY_IMAGE_MANIFEST") orelse return error.MissingImageManifest;
+    const image_bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, fixture_path, a, .limited(@import("image_attachments.zig").max_bytes));
+    defer a.free(image_bytes);
+    const manifest_bytes = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, manifest_path, a, .limited(4096));
+    defer a.free(manifest_bytes);
+    const challenge = try std.json.parseFromSlice(ImageChallenge, a, manifest_bytes, .{});
+    defer challenge.deinit();
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(image_bytes, &digest, .{});
+    const expected_hash = std.fmt.bytesToHex(digest, .lower);
+    try std.testing.expectEqualStrings(challenge.value.image_sha256, &expected_hash);
     var native_context: transport.NativeContext = .{ .io = std.testing.io };
     const native = transport.native(&native_context);
     var models_response = try native.send(native.ctx, .{ .method = .GET, .endpoint = models_endpoint, .auth_style = .bearer, .api_key = env.get(env.ctx, "ZEROWORK_AI_GATEWAY_KEY").?, .accept = "application/json", .timeout_ms = 10_000 }, "", a);
     defer models_response.deinit(a);
     try std.testing.expectEqual(@as(u16, 200), models_response.status);
-    const models = try std.json.parseFromSlice(struct { data: []const struct { id: []const u8 } }, a, models_response.body, .{ .ignore_unknown_fields = true });
+    var models = try @import("model_catalog.zig").Catalog.parse(a, models_response.body, .endpoint);
     defer models.deinit();
     var evidence_arena = std.heap.ArenaAllocator.init(a);
     defer evidence_arena.deinit();
@@ -171,17 +189,20 @@ test "API2 LIVE gateway model discovery tool image roundtrip through production 
     var evidence: std.ArrayList(Evidence) = .empty;
     var success_count: usize = 0;
     for ([_][]const u8{selected_model}) |requested_model| {
-        const model_id = for (models.value.data) |entry| {
-            if (std.mem.eql(u8, entry.id, requested_model)) break entry.id;
+        const model_id = for (models.entries) |entry| {
+            if (std.mem.eql(u8, entry.id, requested_model)) {
+                if (!(entry.capability.vision orelse false)) return error.ModelDoesNotDeclareVision;
+                break entry.id;
+            }
         } else continue;
-        var host: Host = .{};
+        var host: Host = .{ .image_bytes = image_bytes };
         const captured: scope.Scope = .{ .owner = .{ .session = 101 }, .members = .{ .ids = .{101} ++ @as([15]u64, @splat(0)), .len = 1 } };
         const definition: tools.ToolDefinition = .{ .id = "synthetic.observe", .schema = schema, .description = "Return the actual synthetic test image. Call once, then inspect its pixels.", .effect = .observe_image };
         const member: tools.Member = .{ .owner = .{ .session_id = @fromBackingInt(101) }, .plugin_id = "synthetic", .context = &host, .bindings = &.{.{ .plugin_id = "synthetic", .definition_id = definition.id, .handler = Host.binding }} };
         var table = try tools.RequestTable.init(a, captured, &.{definition}, &.{member});
         defer table.deinit();
         const wire = try tools.providerDefinitions(&table, table.arena.allocator());
-        var observed: ObservedTransport = .{ .actual = native };
+        var observed: ObservedTransport = .{ .actual = native, .challenge = challenge.value.expected };
         var client = @import("provider_client.zig").Client.init(a, observed.interface(), .openai_compat);
         var config = @import("provider_config.zig").defaults(.openai_compat);
         config.endpoint = chat_endpoint;
@@ -201,42 +222,67 @@ test "API2 LIVE gateway model discovery tool image roundtrip through production 
         manager.retry_policy.max_attempts = 0;
         manager.tool_host = .{ .context = &host, .execute = Host.old, .execute_dynamic = Host.invoke };
         var failure: ?[]const u8 = null;
-        _ = manager.run(binding.asProvider(), config.chatRequest(.{ .model = model_id, .system = "Use synthetic__observe once with session_ids [101]. After its image result is provided, describe the visible colors and their arrangement in one sentence. Do not call other tools and do not call the observation tool again.", .messages = &.{.{ .content = "Please inspect the actual synthetic tool image and report the colors and spatial arrangement you see." }}, .tools = wire, .tool_table = &table, .tool_images = true, .max_output = 512, .timeout_ms = 60_000 })) catch |err| blk: {
+        _ = manager.run(binding.asProvider(), config.chatRequest(.{ .model = model_id, .system = "Use synthetic__observe once with session_ids [101]. After its image result is provided, inspect its pixels and follow the user output format. Do not call other tools and do not call the observation tool again.", .messages = &.{.{ .content = image_prompt }}, .tools = wire, .tool_table = &table, .tool_images = true, .max_output = 2048, .timeout_ms = 120_000 })) catch |err| blk: {
             failure = @errorName(err);
             break :blk .{};
         };
         var answer: std.ArrayList(u8) = .empty;
         defer answer.deinit(a);
         for (manager.cards.cards.items) |card| if (card == .text) try answer.appendSlice(a, card.text);
-        const recognized = recognizesArrangement(answer.items);
-        const success = failure == null and host.dispatches == 1 and observed.image_requests >= 1 and recognized;
+        const recognized = recognizesImageAnswer(a, answer.items, challenge.value.expected);
+        const hash_match = std.mem.eql(u8, &expected_hash, &observed.image_sha256);
+        const success = failure == null and host.dispatches == 1 and observed.requests == 2 and observed.image_requests == 1 and observed.image_count == 1 and observed.statuses[0] == 200 and observed.statuses[1] == 200 and hash_match and recognized and !observed.expected_text_leaked;
         success_count += @intFromBool(success);
-        try evidence.append(ea, .{ .model = try ea.dupe(u8, model_id), .tool_dispatches = host.dispatches, .requests = observed.requests, .image_requests = observed.image_requests, .wire_image_count = observed.image_count, .image_sha256 = observed.image_sha256, .http_statuses = observed.statuses, .success = success, .error_code = failure, .answer = try ea.dupe(u8, answer.items) });
+        try evidence.append(ea, .{ .expected = challenge.value.expected, .expected_text_leaked = observed.expected_text_leaked, .semantics_match = recognized, .image_hash_match = hash_match, .model = try ea.dupe(u8, model_id), .tool_dispatches = host.dispatches, .requests = observed.requests, .image_requests = observed.image_requests, .wire_image_count = observed.image_count, .image_sha256 = observed.image_sha256, .http_statuses = observed.statuses, .success = success, .error_code = failure, .answer = try ea.dupe(u8, answer.items) });
     }
-    const json = try std.json.Stringify.valueAlloc(a, .{ .models_endpoint_status = models_response.status, .models_count = models.value.data.len, .synthetic_image = "128x96 red-left green-right blue-center RGBA PNG", .results = evidence.items }, .{ .whitespace = .indent_2 });
+    const json = try std.json.Stringify.valueAlloc(a, .{ .models_endpoint_status = models_response.status, .models_count = models.entries.len, .synthetic_image = "random four-quadrant color layout with six-character labels visible only in image pixels", .results = evidence.items }, .{ .whitespace = .indent_2 });
     defer a.free(json);
-    const evidence_path = env.get(env.ctx, "ZEROWORK_AI_GATEWAY_EVIDENCE") orelse "/tmp/zerowork-ai-gateway-128x96-evidence.json";
+    const evidence_path = env.get(env.ctx, "ZEROWORK_AI_GATEWAY_EVIDENCE") orelse "/tmp/zerowork-ai-gateway-image-evidence.json";
     try std.Io.Dir.cwd().writeFile(std.testing.io, .{ .sub_path = evidence_path, .data = json });
     try std.testing.expectEqual(@as(usize, 1), evidence.items.len);
     try std.testing.expect(success_count >= 1);
 }
 
-fn containsIgnoreCase(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len > haystack.len) return false;
-    for (0..haystack.len - needle.len + 1) |index| if (std.ascii.eqlIgnoreCase(haystack[index .. index + needle.len], needle)) return true;
+fn containsImageLabel(text: []const u8, expected: ImageAnswer) bool {
+    inline for (@typeInfo(ImageAnswer).@"struct".field_names) |field| {
+        if (std.mem.indexOf(u8, text, @field(expected, field).text) != null) return true;
+    }
     return false;
 }
 
-fn recognizesArrangement(answer: []const u8) bool {
-    return containsIgnoreCase(answer, "red") and containsIgnoreCase(answer, "green") and containsIgnoreCase(answer, "blue") and containsIgnoreCase(answer, "left") and containsIgnoreCase(answer, "right") and
-        (containsIgnoreCase(answer, "center") or containsIgnoreCase(answer, "centre") or containsIgnoreCase(answer, "middle"));
+fn recognizesImageAnswer(a: std.mem.Allocator, answer: []const u8, expected: ImageAnswer) bool {
+    // The manager also retains commentary emitted before the image tool call.
+    // Only the final JSON describes the observed pixels; still parse it strictly.
+    const start = std.mem.indexOfScalar(u8, answer, '{') orelse return false;
+    const end = std.mem.lastIndexOfScalar(u8, answer, '}') orelse return false;
+    if (start >= end) return false;
+    const json = answer[start .. end + 1];
+    const parsed = std.json.parseFromSlice(ImageAnswer, a, json, .{}) catch return false;
+    defer parsed.deinit();
+    inline for (@typeInfo(ImageAnswer).@"struct".field_names) |field| {
+        const actual_cell = @field(parsed.value, field);
+        const expected_cell = @field(expected, field);
+        if (!std.ascii.eqlIgnoreCase(actual_cell.color, expected_cell.color) or !std.mem.eql(u8, actual_cell.text, expected_cell.text)) return false;
+    }
+    return true;
 }
 
-test "gateway visual acceptance recognizes equivalent spatial terms and still requires all colors" {
-    try std.testing.expect(recognizesArrangement("Red on the left, green on the right, blue in the middle."));
-    try std.testing.expect(recognizesArrangement("red left, green right, blue centre"));
-    try std.testing.expect(!recognizesArrangement("red left, green right, yellow center"));
-    try std.testing.expect(!recognizesArrangement("red, green and blue"));
+test "API2 LIVE visual acceptance requires exact color position and unpredictable image text" {
+    const expected: ImageAnswer = .{ .top_left = .{ .color = "red", .text = "K4E2JR" }, .top_right = .{ .color = "green", .text = "8KSGM2" }, .bottom_left = .{ .color = "blue", .text = "W7QJ4R" }, .bottom_right = .{ .color = "yellow", .text = "N9VF6T" } };
+    const correct = "{\"top_left\":{\"color\":\"red\",\"text\":\"K4E2JR\"},\"top_right\":{\"color\":\"green\",\"text\":\"8KSGM2\"},\"bottom_left\":{\"color\":\"blue\",\"text\":\"W7QJ4R\"},\"bottom_right\":{\"color\":\"yellow\",\"text\":\"N9VF6T\"}}";
+    try std.testing.expect(recognizesImageAnswer(std.testing.allocator, correct, expected));
+    const with_commentary = "I will inspect the pixels." ++ correct;
+    try std.testing.expect(recognizesImageAnswer(std.testing.allocator, with_commentary, expected));
+    try std.testing.expect(containsImageLabel("K4E2JR", expected));
+    try std.testing.expect(!containsImageLabel(image_prompt, expected));
+    var swapped = expected;
+    swapped.top_left.color = "green";
+    swapped.top_right.color = "red";
+    try std.testing.expect(!recognizesImageAnswer(std.testing.allocator, correct, swapped));
+    var wrong_text = expected;
+    wrong_text.bottom_right.text = "N9VF6X";
+    try std.testing.expect(!recognizesImageAnswer(std.testing.allocator, correct, wrong_text));
+    try std.testing.expect(!recognizesImageAnswer(std.testing.allocator, "red left green right blue center yellow", expected));
 }
 
 fn testEnvironment() struct { ctx: *anyopaque, get: *const fn (*anyopaque, []const u8) ?[]const u8 } {

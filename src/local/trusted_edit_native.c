@@ -13,8 +13,8 @@
 #include <mach-o/dyld.h>
 
 typedef struct zw_local_edit {
-    int listener, connection;
-    char directory[PATH_MAX], socket_path[104], nonce[33];
+    int listener, connection, execution_listener, execution_connection;
+    char directory[PATH_MAX], socket_path[104], execution_path[104], nonce[33];
 } ZW_LOCAL_EDIT;
 int zw_local_edit_poll_fd(ZW_LOCAL_EDIT *edit) { return edit->connection >= 0 ? edit->connection : edit->listener; }
 static int edit_flags(int fd) {
@@ -48,6 +48,9 @@ void zw_local_edit_destroy(ZW_LOCAL_EDIT *edit) {
     if (!edit) return;
     if (edit->connection >= 0) close(edit->connection);
     if (edit->listener >= 0) close(edit->listener);
+    if (edit->execution_connection >= 0) close(edit->execution_connection);
+    if (edit->execution_listener >= 0) close(edit->execution_listener);
+    if (*edit->execution_path) unlink(edit->execution_path);
     if (*edit->socket_path) unlink(edit->socket_path);
     if (*edit->directory) {
         char path[PATH_MAX];
@@ -62,7 +65,7 @@ void zw_local_edit_destroy(ZW_LOCAL_EDIT *edit) {
 ZW_LOCAL_EDIT *zw_local_edit_create(uint64_t session, uint64_t generation, const char *script, size_t length) {
     ZW_LOCAL_EDIT *edit = calloc(1, sizeof(*edit));
     if (!edit) return NULL;
-    edit->listener = edit->connection = -1;
+    edit->listener = edit->connection = edit->execution_listener = edit->execution_connection = -1;
     char executable[PATH_MAX], resolved[PATH_MAX]; uint32_t capacity = sizeof(executable);
     if (_NSGetExecutablePath(executable, &capacity) || !realpath(executable, resolved)) goto fail;
     char *slash = strrchr(resolved, '/');
@@ -80,6 +83,11 @@ ZW_LOCAL_EDIT *zw_local_edit_create(uint64_t session, uint64_t generation, const
     struct sockaddr_un address = {.sun_family = AF_UNIX};
     strcpy(address.sun_path, edit->socket_path);
     if (bind(edit->listener, (struct sockaddr *)&address, sizeof(address)) || chmod(edit->socket_path, 0600) || listen(edit->listener, 2)) goto fail;
+    if (snprintf(edit->execution_path, sizeof(edit->execution_path), "%s/execution", edit->directory) >= (int)sizeof(edit->execution_path)) goto fail;
+    edit->execution_listener = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (edit->execution_listener < 0 || edit_flags(edit->execution_listener)) goto fail;
+    strcpy(address.sun_path, edit->execution_path);
+    if (bind(edit->execution_listener, (struct sockaddr *)&address, sizeof(address)) || chmod(edit->execution_path, 0600) || listen(edit->execution_listener, 1)) goto fail;
     if (edit_file(edit->directory, "integration.zsh", script, length)) goto fail;
     char *wrapper = NULL; size_t wrapper_length = 0;
     FILE *file = open_memstream(&wrapper, &wrapper_length);
@@ -90,7 +98,7 @@ ZW_LOCAL_EDIT *zw_local_edit_create(uint64_t session, uint64_t generation, const
     fputs("[[ ! -r ${ZDOTDIR-$HOME}/.zshenv ]] || source ${ZDOTDIR-$HOME}/.zshenv\n", file);
     fputs("[[ -o interactive && -o rcs ]] || return\n", file);
     fprintf(file, "typeset -g _zw_session=%llu _zw_generation=%llu _zw_parent=%d _zw_nonce='%s' _zw_socket=", (unsigned long long)session, (unsigned long long)generation, getpid(), edit->nonce);
-    edit_quote(file, edit->socket_path); fputs(" _zw_module_dir=", file); edit_quote(file, resolved);
+    edit_quote(file, edit->socket_path); fputs(" _zw_exec_socket=", file); edit_quote(file, edit->execution_path); fputs(" _zw_module_dir=", file); edit_quote(file, resolved);
     fputs("\nsource ", file); char script_path[PATH_MAX]; snprintf(script_path, sizeof(script_path), "%s/integration.zsh", edit->directory); edit_quote(file, script_path); fputc('\n', file);
     int failed = fclose(file);
     if (!failed) failed = edit_file(edit->directory, ".zshenv", wrapper, wrapper_length);
@@ -126,4 +134,34 @@ int zw_local_edit_write(ZW_LOCAL_EDIT *edit, const unsigned char *buffer, size_t
     ssize_t n = send(edit->connection, buffer, length, MSG_NOSIGNAL);
     if (n >= 0) { *count = (size_t)n; return 1; }
     return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR ? 0 : -1;
+}
+
+/* Independent execution channel: it stays authenticated while edit reconnects. */
+int zw_local_execution_poll_fd(ZW_LOCAL_EDIT *edit) { return edit->execution_connection >= 0 ? edit->execution_connection : edit->execution_listener; }
+int zw_local_execution_read(ZW_LOCAL_EDIT *edit, int shell_pid, unsigned char *buffer, size_t length, size_t *count) {
+    *count = 0;
+    if (edit->execution_connection < 0) {
+        int fd = accept(edit->execution_listener, NULL, NULL);
+        if (fd < 0) return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR ? 0 : -1;
+        uid_t uid; gid_t gid; pid_t peer = -1; socklen_t size = sizeof(peer);
+        if (edit_flags(fd) || getpeereid(fd, &uid, &gid) || uid != getuid() ||
+            getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &peer, &size) || peer != shell_pid) { close(fd); return 0; }
+        edit->execution_connection = fd; return 3;
+    }
+    ssize_t n = read(edit->execution_connection, buffer, length);
+    if (n > 0) { *count = (size_t)n; return 1; }
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)) return 0;
+    close(edit->execution_connection); edit->execution_connection = -1; return 2;
+}
+int zw_local_execution_write(ZW_LOCAL_EDIT *edit, const unsigned char *buffer, size_t length, size_t *count) {
+    *count = 0;
+    if (edit->execution_connection < 0) return -1;
+    ssize_t n = send(edit->execution_connection, buffer, length, MSG_NOSIGNAL);
+    if (n >= 0) { *count = (size_t)n; return 1; }
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR ? 0 : -1;
+}
+
+void zw_local_execution_close(ZW_LOCAL_EDIT *edit) {
+    if (edit->execution_connection >= 0) close(edit->execution_connection);
+    edit->execution_connection = -1;
 }

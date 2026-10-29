@@ -21,6 +21,7 @@ pub const Failure = extern struct {
     }
 };
 pub const RawExit = extern struct { kind: c_int, value: c_int };
+pub const ObservationFailure = extern struct { stage: c_int, error_number: c_int, pid: c_int };
 pub const Exit = @import("../host/process_service.zig").ProcessExit;
 pub const Foreground = @import("../host/process_service.zig").Foreground;
 pub const Read = union(enum) { bytes: usize, would_block, eof };
@@ -36,11 +37,13 @@ pub extern fn zw_local_resize(*Process, u16, u16) c_int;
 pub extern fn zw_local_dimensions(*Process, *u16, *u16) c_int;
 pub extern fn zw_local_poll_exit(*Process, *RawExit) c_int;
 pub extern fn zw_local_foreground(*Process, *Foreground) c_int;
+pub extern fn zw_local_interrupt_foreground(*Process) c_int;
 pub extern fn zw_local_poll_fd(*Process) c_int;
 pub extern fn zw_local_pid(*Process) c_int;
 pub extern fn zw_local_initial_cwd(*Process) [*:0]const u8;
 pub extern fn zw_local_cwd(*Process, [*]u8, usize) c_int;
 pub extern fn zw_local_close_step(*Process, u64) c_int;
+pub extern fn zw_local_observation_failure(*Process, *ObservationFailure) c_int;
 pub extern fn zw_local_destroy(*Process) c_int;
 pub extern fn zw_local_monotonic_ms() u64;
 pub extern fn zw_local_last_error() c_int;

@@ -1,14 +1,14 @@
 /* Workspace/terminal styling comes unchanged from ../workspace/styles.css. */
 :root{--window-width:1440px;--window-height:900px}
-#patch-root{display:contents;font:12.5px/1.6 Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+#patch-root{display:contents;font:12px/18px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
 .session-ai-control{position:absolute;right:12px;bottom:10px;z-index:2;display:flex;align-items:center;gap:6px}
 .session-ai-control>.badge,.session-ai-control>.button{height:28px;min-height:28px;padding:0 9px;font-size:11px;line-height:20px;justify-content:center}
 :is(#patch-root,[data-execution-patch]) button,:is(#patch-root,[data-execution-patch]) input,:is(#patch-root,[data-execution-patch]) textarea,:is(#patch-root,[data-execution-patch]) select{font:inherit;color:inherit}
 :is(#patch-root,[data-execution-patch]) button{border:0;background:none;cursor:pointer;border-radius:6px}
 :is(#patch-root,[data-execution-patch]) button:hover{background:var(--hover)}
 :is(#patch-root,[data-execution-patch]) button:disabled{opacity:.42;cursor:default}
-:is(#patch-root,[data-execution-patch]) button:focus-visible,:is(#patch-root,[data-execution-patch]) a:focus-visible,:is(#patch-root,[data-execution-patch]) summary:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
-:is(#patch-root,[data-execution-patch]) input:focus-visible,:is(#patch-root,[data-execution-patch]) textarea:focus-visible,:is(#patch-root,[data-execution-patch]) select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+:is(#patch-root,[data-execution-patch]) button:focus-visible,:is(#patch-root,[data-execution-patch]) a:focus-visible,:is(#patch-root,[data-execution-patch]) summary:focus-visible{outline:none;background:var(--popup-selected)}
+:is(#patch-root,[data-execution-patch]) input:focus-visible,:is(#patch-root,[data-execution-patch]) textarea:focus-visible,:is(#patch-root,[data-execution-patch]) select:focus-visible{outline:none;background:var(--popup-selected)}
 :is(#patch-root,[data-execution-patch]) a{color:var(--accent);text-decoration:none}
 :is(#patch-root,[data-execution-patch]) p,:is(#patch-root,[data-execution-patch]) h1,:is(#patch-root,[data-execution-patch]) h2,:is(#patch-root,[data-execution-patch]) h3,:is(#patch-root,[data-execution-patch]) pre{margin:0}
 :is(#patch-root,[data-execution-patch]) svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none;vertical-align:middle}
@@ -30,95 +30,103 @@
 .review-tools button{font-size:11px;padding:6px 8px}
 .review-foot{margin-bottom:24px}
 .review-foot a{margin-left:auto}
-:is(#patch-root,[data-execution-patch]) .icon-button{display:inline-grid;place-items:center;width:28px;height:28px;flex:none;color:var(--muted)}
+:is(#patch-root,[data-execution-patch]) .icon-button{display:inline-grid;place-items:center;width:24px;height:24px;flex:none;color:var(--muted)}
 :is(#patch-root,[data-execution-patch]) .owner-pill,:is(#patch-root,[data-execution-patch]) .type-badge{display:inline-flex;align-items:center;gap:4px;white-space:nowrap;color:var(--muted);background:var(--well);border-radius:4px;padding:1px 6px;font-size:10.5px;line-height:19px}
 :is(#patch-root,[data-execution-patch]) .owner-pill.ai{color:var(--accent);background:var(--sel)}
 :is(#patch-root,[data-execution-patch]) .owner-pill.readonly{color:var(--muted)}
-:is(#patch-root,[data-execution-patch]) .text-button{padding:3px 6px;min-height:24px;color:var(--accent);font-size:11px;white-space:nowrap}
-:is(#patch-root,[data-execution-patch]) .button{height:28px;min-height:28px;display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:0 11px;font-size:11.5px;border-radius:7px;white-space:nowrap}
-:is(#patch-root,[data-execution-patch]) .button.secondary{background:var(--hover)}
-:is(#patch-root,[data-execution-patch]) .button.primary{color:var(--accent-fg)}
-:is(#patch-root,[data-execution-patch]) .button.subtle{background:var(--card);color:var(--muted)}
+:is(#patch-root,[data-execution-patch]) .text-button{padding:3px 6px;min-height:24px;color:var(--accent);font:500 12px/18px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;white-space:nowrap}
+:is(#patch-root,[data-execution-patch]) .button{height:30px;min-height:30px;display:inline-flex;align-items:center;justify-content:center;gap:5px;padding:0 11px;font:500 12px/18px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;border-radius:7px;white-space:nowrap}
+:is(#patch-root,[data-execution-patch]) .button.secondary{background:var(--popup-action)}
+:is(#patch-root,[data-execution-patch]) .button.primary{background:linear-gradient(135deg,var(--action-accent),var(--action-accent-2));color:var(--accent-fg)}
+:is(#patch-root,[data-execution-patch]) .button.subtle{background:var(--popup-action);color:var(--muted)}
 :is(#patch-root,[data-execution-patch]) .button.danger-text{color:var(--danger)}
 :is(#patch-root,[data-execution-patch]) .host-notice{display:flex;gap:6px;align-items:flex-start;color:var(--muted);font-size:11px;line-height:18px;flex:none;padding:1px 2px}
 :is(#patch-root,[data-execution-patch]) .host-notice svg{width:13px;height:13px;margin-top:2px;flex:none}
 :is(#patch-root,[data-execution-patch]) .host-notice strong{font-weight:500;color:var(--fg)}
 :is(#patch-root,[data-execution-patch]) .type-badge{padding:0 5px;line-height:18px;flex:none;font-size:10px}
-:is(#patch-root,[data-execution-patch]) .tool-detail{padding:7px 12px 10px;max-height:184px;overflow:auto;scrollbar-width:thin;font-size:11px;line-height:17px;color:var(--muted)}
-:is(#patch-root,[data-execution-patch]) .tool-detail.wide{max-height:224px}
+:is(#patch-root,[data-execution-patch]) .tool-detail{padding:7px 12px 10px;max-height:150px;overflow:auto;scrollbar-width:thin;font-size:11px;line-height:17px;color:var(--muted)}
+:is(#patch-root,[data-execution-patch]) .tool-detail.wide{max-height:150px}
+/* Same-PTY result facts share the existing single card surface and bounded body. */
+#assistant[data-execution-patch] .interval-result>summary>strong{width:84px;flex:none}
+#assistant[data-execution-patch] .interval-result>summary>.ap-projection{font-family:inherit}
+#assistant[data-execution-patch] .interval-result>.tool-detail{display:flex;flex-direction:column;gap:6px;padding:4px 12px 8px;font-size:10.5px;line-height:16px}
+#assistant[data-execution-patch] .interval-result>.tool-detail>*{flex-shrink:0}
+#assistant[data-execution-patch] .interval-result .execution-fact{color:var(--muted);overflow-wrap:anywhere}
+#assistant[data-execution-patch] .interval-result .execution-recording{font-family:var(--mono)}
+#assistant[data-execution-patch] .interval-result .code-block{padding:4px;line-height:16px}
 :is(#patch-root,[data-execution-patch]) .identity-grid{display:grid;grid-template-columns:40px minmax(0,1fr) 40px minmax(0,1fr);gap:3px 8px;margin-bottom:6px;font-size:10.5px}
 :is(#patch-root,[data-execution-patch]) .identity-grid dt{color:var(--muted)}
 :is(#patch-root,[data-execution-patch]) .identity-grid dd{margin:0;color:var(--fg);font-family:var(--mono);overflow-wrap:anywhere}
 :is(#patch-root,[data-execution-patch]) .identity-grid dd.full{grid-column:2/5}
-:is(#patch-root,[data-execution-patch]) .code-block{font:11px/17px var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg);background:var(--well);border-radius:5px;padding:7px 9px}
+:is(#patch-root,[data-execution-patch]) .code-block{font:11px/17px var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;color:var(--fg);background:var(--control-bg);border-radius:5px;padding:7px 9px}
 :is(#patch-root,[data-execution-patch]) .output-label{font:10.5px/17px var(--mono);color:var(--muted);margin:6px 0 1px}
 :is(#patch-root,[data-execution-patch]) .result-row{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;font-size:10.5px}
-:is(#patch-root,[data-execution-patch]) .tool-actions{display:flex;align-items:center;gap:6px;padding:4px 9px 7px;background:var(--card-deep-ft);flex-wrap:wrap;min-height:30px}
+:is(#patch-root,[data-execution-patch]) .tool-actions{display:flex;align-items:center;gap:6px;padding:4px 9px 7px;background:transparent;flex-wrap:wrap;min-height:30px}
 :is(#patch-root,[data-execution-patch]) .tool-actions>span{font-size:10.5px;color:var(--muted);flex:1;min-width:90px}
 :is(#patch-root,[data-execution-patch]) .turn-status{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:10.5px;min-height:24px;flex:none}
 :is(#patch-root,[data-execution-patch]) .turn-status>svg{width:15px;height:15px;color:var(--accent)}
 :is(#patch-root,[data-execution-patch]) .turn-status .label{font-size:11.5px}
 :is(#patch-root,[data-execution-patch]) .draft-state{font-size:10px;color:var(--muted)}
-:is(#patch-root,[data-execution-patch]) .mode-menu{position:absolute;z-index:12;bottom:83px;left:53px;width:296px;max-height:350px;overflow:auto;padding:6px;background:var(--overlay);backdrop-filter:blur(var(--overlay-blur));border-radius:10px;box-shadow:var(--shadow-float);font-size:11.5px}
-:is(#patch-root,[data-execution-patch]) .menu-heading{padding:4px 9px 5px;font-size:10.5px;color:var(--muted);display:flex;justify-content:space-between}
-:is(#patch-root,[data-execution-patch]) .mode-option{width:100%;display:flex;align-items:center;gap:8px;text-align:left;padding:6px 8px;min-height:31px;border-radius:6px}
+:is(#patch-root,[data-execution-patch]) .mode-menu{position:absolute;z-index:12;width:296px;max-height:350px;overflow:auto;padding:6px;background:var(--overlay);backdrop-filter:blur(var(--overlay-blur));border-radius:10px;box-shadow:var(--shadow-float);font-size:11.5px}
+:is(#patch-root,[data-execution-patch]) .menu-heading{padding:4px 9px 6px;font:700 13px/20px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;color:var(--fg);display:flex;align-items:center;gap:7px;white-space:nowrap}:is(#patch-root,[data-execution-patch]) .menu-heading>svg{width:16px;height:16px;color:var(--accent)}:is(#patch-root,[data-execution-patch]) .menu-heading>small{margin-left:auto;font:10.5px/16px var(--mono);font-weight:400}
+:is(#patch-root,[data-execution-patch]) .mode-option{font:500 12px/18px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;width:100%;display:flex;align-items:center;gap:8px;text-align:left;padding:6px 8px;min-height:31px;border-radius:6px}
 :is(#patch-root,[data-execution-patch]) .mode-option .option-label{flex:1}
 :is(#patch-root,[data-execution-patch]) .mode-option .check{width:14px;color:var(--accent);font-size:13px}
-:is(#patch-root,[data-execution-patch]) .mode-option.selected{background:var(--sel)}
-:is(#patch-root,[data-execution-patch]) .mode-option small{font-size:10.5px}
+:is(#patch-root,[data-execution-patch]) .mode-option.selected{background:var(--popup-selected)}
+:is(#patch-root,[data-execution-patch]) .mode-option small{font:11px/16px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
 :is(#patch-root,[data-execution-patch]) .menu-divider{height:1px;background:var(--line);margin:5px 6px}
 :is(#patch-root,[data-execution-patch]) .menu-policy{padding:2px 8px 5px}
 :is(#patch-root,[data-execution-patch]) .menu-policy label{display:block;font-size:10.5px;color:var(--muted);margin-bottom:5px}
-:is(#patch-root,[data-execution-patch]) .menu-policy select{background:var(--well);border:0;border-radius:6px;padding:6px;width:100%;font-size:11px}
+:is(#patch-root,[data-execution-patch]) .menu-policy select{background:var(--control-bg);border:0;border-radius:6px;padding:6px;width:100%;font-size:11px}
 :is(#patch-root,[data-execution-patch]) .menu-bottom{padding:3px 4px;display:flex;justify-content:space-between}
-:is(#patch-root,[data-execution-patch]) .approval{background:var(--card-deep);border-radius:9px;padding:10px 11px;flex:none;font-size:11px}
-:is(#patch-root,[data-execution-patch]) .approval-head{display:flex;gap:7px;align-items:center;font-size:12px;margin-bottom:7px}
-:is(#patch-root,[data-execution-patch]) .approval-head svg{width:14px;height:14px;color:var(--warn-ink)}
+:is(#patch-root,[data-execution-patch]) .approval{background:var(--popup-action);border-radius:9px;padding:10px 11px;flex:none;font-size:11px}
+:is(#patch-root,[data-execution-patch]) .approval-head{display:flex;gap:7px;align-items:center;font:700 13px/20px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;white-space:nowrap;margin-bottom:7px}
+:is(#patch-root,[data-execution-patch]) .approval-head svg{width:16px;height:16px;color:var(--warn-ink)}
 :is(#patch-root,[data-execution-patch]) .approval p{color:var(--muted);line-height:18px}
 :is(#patch-root,[data-execution-patch]) .approval-paths{display:flex;gap:5px;margin:7px 0}
-:is(#patch-root,[data-execution-patch]) .approval-paths button{background:var(--well);font-size:10.5px;padding:4px 7px;flex:1}
-:is(#patch-root,[data-execution-patch]) .approval-paths button.selected{background:var(--sel);color:var(--accent)}
+:is(#patch-root,[data-execution-patch]) .approval-paths button{background:var(--control-bg);font:500 12px/18px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;padding:4px 7px;flex:1}
+:is(#patch-root,[data-execution-patch]) .approval-paths button.selected{background:var(--popup-selected);color:var(--accent)}
 :is(#patch-root,[data-execution-patch]) .approval .code-block{margin:6px 0}
 :is(#patch-root,[data-execution-patch]) .approval-footer{display:flex;align-items:center;justify-content:flex-end;gap:6px;margin-top:8px}
 :is(#patch-root,[data-execution-patch]) .approval-target{font-size:10.5px;line-height:17px;color:var(--muted)}
-:is(#patch-root,[data-execution-patch]) .cleanup-row{background:var(--card-deep);padding:9px 11px;border-radius:8px;display:flex;align-items:center;gap:7px;flex:none;flex-wrap:wrap}
+:is(#patch-root,[data-execution-patch]) .cleanup-row{background:var(--popup-action);padding:9px 11px;border-radius:8px;display:flex;align-items:center;gap:7px;flex:none;flex-wrap:wrap}
 :is(#patch-root,[data-execution-patch]) .cleanup-row div{flex:1;min-width:180px}
-:is(#patch-root,[data-execution-patch]) .cleanup-row strong{font-size:11.5px;font-weight:500}
-:is(#patch-root,[data-execution-patch]) .cleanup-row small{display:block;font-size:10.5px}
-:is(#patch-root,[data-execution-patch]) .cleanup-row>svg{color:var(--ok-ink);width:15px;height:15px}
-:is(#patch-root,[data-execution-patch]) .toast{position:absolute;z-index:30;top:74px;right:24px;background:var(--overlay);backdrop-filter:blur(var(--overlay-blur));box-shadow:var(--shadow-1);border-radius:8px;padding:9px 13px;max-width:360px;font-size:11.5px}
+:is(#patch-root,[data-execution-patch]) .cleanup-row strong{font:700 13px/20px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+:is(#patch-root,[data-execution-patch]) .cleanup-row small{display:block;font:11px/16px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+:is(#patch-root,[data-execution-patch]) .cleanup-title{display:flex;align-items:center;gap:7px;white-space:nowrap}:is(#patch-root,[data-execution-patch]) .cleanup-title>svg{color:var(--accent);width:16px;height:16px}:is(#patch-root,[data-execution-patch]) .cleanup-row[data-state="pending"] .cleanup-title>svg{color:var(--warn-ink)}:is(#patch-root,[data-execution-patch]) .cleanup-row[data-state="cleaned"] .cleanup-title>svg{color:var(--ok-ink)}
+:is(#patch-root,[data-execution-patch]) .toast{position:absolute;z-index:1200;top:74px;right:24px;background:var(--overlay);backdrop-filter:blur(var(--overlay-blur));box-shadow:var(--shadow-1);border-radius:8px;padding:9px 13px;max-width:360px;font-size:11.5px}
 :is(#patch-root,[data-execution-patch]) .toast svg{color:var(--ok-ink);width:14px;height:14px;margin-right:5px}
-:is(#patch-root,[data-execution-patch]) .process-panel{position:absolute;z-index:20;right:24px;top:82px;width:360px;max-height:390px;overflow:auto;background:var(--overlay);backdrop-filter:blur(var(--overlay-blur));border-radius:12px;box-shadow:var(--shadow-float);padding:12px}
-:is(#patch-root,[data-execution-patch]) .process-head{display:flex;align-items:center;margin-bottom:8px;font-size:13px}
+:is(#patch-root,[data-execution-patch]) .process-panel{position:absolute;z-index:60;right:24px;top:82px;width:360px;max-height:390px;overflow:auto;background:var(--overlay);backdrop-filter:blur(var(--overlay-blur));border-radius:12px;box-shadow:var(--shadow-float);padding:12px}
+:is(#patch-root,[data-execution-patch]) .process-head{display:flex;align-items:center;gap:7px;margin-bottom:8px;font:700 13px/20px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;white-space:nowrap}:is(#patch-root,[data-execution-patch]) .process-head>svg{width:16px;height:16px;color:var(--accent)}
 :is(#patch-root,[data-execution-patch]) .process-line{display:grid;grid-template-columns:54px minmax(0,1fr);gap:8px;padding:7px 0;color:var(--muted);font-size:11px}
-:is(#patch-root,[data-execution-patch]) .process-line code{color:var(--fg);display:block;font-size:11px}
-:is(#patch-root,[data-execution-patch]) .process-line p{font-size:10.5px;line-height:17px}
+:is(#patch-root,[data-execution-patch]) .process-line code{color:var(--fg);display:block;font:500 12px/18px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+:is(#patch-root,[data-execution-patch]) .process-line p{font-size:11px;line-height:16px}
 :is(#patch-root,[data-execution-patch]) .process-line time{font:10.5px/17px var(--mono)}
-:is(#patch-root,[data-execution-patch]) .settings-layer{position:absolute;z-index:15;inset:0;background:rgb(0 0 0 / .22);display:flex;align-items:center;justify-content:center;padding:20px}
+:is(#patch-root,[data-execution-patch]) .settings-layer{position:absolute;z-index:1000;inset:0;background:rgb(0 0 0 / var(--material-scrim-alpha,.25));display:flex;align-items:center;justify-content:center;padding:20px}
 :is(#patch-root,[data-execution-patch]) .settings-window{width:980px;height:664px;max-height:100%;background:var(--overlay);backdrop-filter:blur(var(--overlay-blur));border-radius:14px;box-shadow:var(--shadow-float);display:flex;flex-direction:column;overflow:hidden}
-:is(#patch-root,[data-execution-patch]) .settings-title{height:50px;min-height:50px;display:flex;align-items:center;padding:0 20px;font-size:14px;font-weight:600}
+:is(#patch-root,[data-execution-patch]) .settings-title{height:50px;min-height:50px;display:flex;align-items:center;padding:0 20px;gap:7px;font:700 13px/20px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
 :is(#patch-root,[data-execution-patch]) .settings-title .icon-button{margin-left:auto}
 :is(#patch-root,[data-execution-patch]) .settings-layout{display:flex;flex:1;min-height:0}
-:is(#patch-root,[data-execution-patch]) .settings-nav{width:176px;flex:none;padding:6px 10px;border-right:1px solid var(--line);overflow:auto}
+:is(#patch-root,[data-execution-patch]) .settings-nav{width:176px;flex:none;padding:6px 10px;border:0;overflow:auto}
 :is(#patch-root,[data-execution-patch]) .settings-nav button{display:flex;align-items:center;gap:9px;width:100%;min-height:34px;padding:6px 12px;text-align:left;color:var(--muted);font-size:12px}
-:is(#patch-root,[data-execution-patch]) .settings-nav button.active{background:var(--sel);color:var(--accent)}
+:is(#patch-root,[data-execution-patch]) .settings-nav button.active{background:var(--popup-selected);box-shadow:none;color:var(--accent)}
 :is(#patch-root,[data-execution-patch]) .settings-nav svg{width:15px;height:15px}
-:is(#patch-root,[data-execution-patch]) .settings-main{padding:8px 24px 24px;overflow:auto;flex:1;min-width:0;font-size:12.5px}
-:is(#patch-root,[data-execution-patch]) .settings-main h2{font-size:15px;line-height:24px;margin-bottom:4px}
+:is(#patch-root,[data-execution-patch]) .settings-main{padding:8px 24px 24px;overflow:auto;flex:1;min-width:0;font:12px/18px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+:is(#patch-root,[data-execution-patch]) .settings-main h2{display:flex;align-items:center;gap:7px;font:700 13px/20px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;margin-bottom:4px}
 :is(#patch-root,[data-execution-patch]) .settings-main>.subtitle{font-size:11.5px;color:var(--muted);margin-bottom:18px}
 :is(#patch-root,[data-execution-patch]) .setting-section{margin-bottom:17px}
-:is(#patch-root,[data-execution-patch]) .setting-section h3{font-size:12px;font-weight:600;margin-bottom:8px}
-:is(#patch-root,[data-execution-patch]) .setting-card{background:var(--surface-2);border-radius:9px;padding:7px 14px}
+:is(#patch-root,[data-execution-patch]) .setting-section h3{display:flex;align-items:center;gap:7px;font:700 13px/20px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;margin-bottom:8px}
+:is(#patch-root,[data-execution-patch]) .setting-card{background:transparent;border-radius:9px;padding:7px 14px}
 :is(#patch-root,[data-execution-patch]) .setting-radio{display:flex;align-items:flex-start;gap:10px;min-height:48px;padding:8px 0;cursor:pointer}
 :is(#patch-root,[data-execution-patch]) .setting-radio input{margin:5px 0 0;accent-color:var(--primary);width:13px;height:13px}
-:is(#patch-root,[data-execution-patch]) .setting-radio strong{display:block;font-size:12px;font-weight:500;line-height:19px}
-:is(#patch-root,[data-execution-patch]) .setting-radio p{font-size:11px;color:var(--muted);line-height:17px}
-:is(#patch-root,[data-execution-patch]) .default-label{font-size:10px;padding:1px 5px;border-radius:4px;background:var(--well);color:var(--muted);margin-left:5px}
+:is(#patch-root,[data-execution-patch]) .setting-radio strong{display:block;font-size:12px;font-weight:500;line-height:18px}
+:is(#patch-root,[data-execution-patch]) .setting-radio p{font-size:11px;color:var(--muted);line-height:16px}
+:is(#patch-root,[data-execution-patch]) .default-label{font-size:10px;padding:1px 5px;border-radius:4px;background:var(--control-bg);color:var(--muted);margin-left:5px}
 :is(#patch-root,[data-execution-patch]) .setting-inline{display:flex;align-items:center;gap:14px;padding:8px 0;min-height:53px}
 :is(#patch-root,[data-execution-patch]) .setting-inline>div{flex:1}
 :is(#patch-root,[data-execution-patch]) .setting-inline strong{font-size:12px;font-weight:500}
-:is(#patch-root,[data-execution-patch]) .setting-inline p{font-size:11px;color:var(--muted)}
-:is(#patch-root,[data-execution-patch]) .setting-inline select{border:0;background:var(--well);padding:6px 9px;border-radius:6px;width:168px;font-size:11px}
+:is(#patch-root,[data-execution-patch]) .setting-inline p{font-size:11px;line-height:16px;color:var(--muted)}
+:is(#patch-root,[data-execution-patch]) .setting-inline select{border:0;background:var(--control-bg);padding:6px 9px;border-radius:6px;width:168px;font-size:11px}
 :is(#patch-root,[data-execution-patch]) .settings-footer{padding:12px 20px;display:flex;align-items:center;gap:8px;min-height:54px}
 :is(#patch-root,[data-execution-patch]) .settings-footer .save-note{font-size:11px;color:var(--muted);flex:1}
 :is(#patch-root,[data-execution-patch]) .settings-footer .save-error{color:var(--danger);font-size:11px;flex:1}
@@ -152,10 +160,44 @@ body[data-viewport="compact"] :is(#patch-root,[data-execution-patch]) .approval-
 /* Existing workspace shell, header, composer and controls retain shared styles. */
 #assistant[data-execution-patch] .patch-transcript{display:flex;flex-direction:column;gap:7px}
 #assistant[data-execution-patch] .v3-ai-composer{position:relative}
-#assistant[data-execution-patch] .host-notice{padding:7px 9px;border-radius:8px;background:var(--well);color:var(--muted);gap:8px}
+#assistant[data-execution-patch] .host-notice{padding:7px 9px;border-radius:8px;background:var(--popup-action);color:var(--muted);gap:8px}
 #assistant[data-execution-patch] .host-notice>svg{width:18px;height:18px;margin-top:1px;color:var(--accent)}
-#assistant[data-execution-patch] .host-notice-source{display:flex;align-items:center;gap:7px;font-size:10.5px;line-height:16px;color:var(--accent)}
+#assistant[data-execution-patch] .host-notice-source{display:flex;align-items:center;gap:7px;font-size:11px;line-height:16px;color:var(--accent)}
 #assistant[data-execution-patch] .host-notice-source>span{color:var(--muted);font-size:10px}
-#assistant[data-execution-patch] .host-notice-text{display:block;color:var(--fg);font-size:11px;line-height:18px}
+#assistant[data-execution-patch] .host-notice-text{display:block;color:var(--fg);font-size:12px;line-height:18px}
 
 #assistant[data-execution-patch] .ap-card.waiting .ap-status{color:var(--warn-ink)}
+
+/* Role contracts: headings stay on one row; long tool details scroll independently. */
+:is(#patch-root,[data-execution-patch]) .icon-button svg{width:14px;height:14px}
+:is(#patch-root,[data-execution-patch]) .settings-title>svg,:is(#patch-root,[data-execution-patch]) .settings-main h2>svg,:is(#patch-root,[data-execution-patch]) .setting-section h3>svg{width:16px;height:16px;color:var(--muted)}
+:is(#patch-root,[data-execution-patch]) .tool-card{background:var(--popup-action)}
+:is(#patch-root,[data-execution-patch]) .tool-card>summary{display:flex;flex-direction:row;align-items:center;flex-wrap:nowrap;gap:6px;height:32px}
+:is(#patch-root,[data-execution-patch]) .tool-card>summary strong{font:500 12px/18px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;white-space:nowrap;flex:none}
+:is(#patch-root,[data-execution-patch]) .tool-card>summary .ap-projection{min-width:0;flex:1;font:10.5px/16px var(--mono)}
+:is(#patch-root,[data-execution-patch]) .tool-card>summary small{flex:none;font:10.5px/16px var(--mono)}
+:is(#patch-root,[data-execution-patch]) .tool-card:is(.waiting,.unknown) .ap-status{color:var(--warn-ink)}
+:is(#patch-root,[data-execution-patch]) .tool-card:is(.rejected,.failed) .ap-status{color:var(--danger-ink)}
+:is(#patch-root,[data-execution-patch]) .tool-card:is(.taken,.cancelled) .ap-status{color:var(--muted)}
+:is(#patch-root,[data-execution-patch]) .menu-policy .v3-select-trigger,:is(#patch-root,[data-execution-patch]) .setting-inline .v3-select-trigger{background:var(--control-bg);font:12px/18px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+:is(#patch-root,[data-execution-patch]) .setting-inline>.v3-select-host{flex:0 0 168px;width:168px}
+:is(#patch-root,[data-execution-patch]) .v3-select-trigger:focus-visible{background:var(--popup-selected)}
+#app>.v3-select-popover[data-execution-patch-surface] [aria-selected=true]{background:var(--popup-selected)}
+:is(#patch-root,[data-execution-patch]) .settings-footer .button{height:34px;min-height:34px}
+:is(#patch-root,[data-execution-patch]) .cleanup-row .button{height:28px;min-height:28px}
+:is(#patch-root,[data-execution-patch]) .approval p{font:12px/18px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+
+#assistant[data-execution-patch] .host-notice-source>svg{width:16px;height:16px;color:var(--accent);flex:none}
+#assistant[data-execution-patch] .host-notice-source{white-space:nowrap}
+:is(#patch-root,[data-execution-patch]) .settings-window nav button.active{box-shadow:none;background:var(--popup-selected)}
+
+:is(#patch-root,[data-execution-patch]) .ap-status>svg{width:14px;height:14px}
+
+.session-ai-control>.button:focus-visible{background:var(--popup-selected);outline:none}
+
+#app>.v3-select-popover[data-execution-patch-surface]{z-index:1100}
+
+/* Repair only PATCH accent text whose actual popupAction fill fails 4.5:1. */
+#assistant[data-execution-patch] :is(.tool-card,.cleanup-row) .text-button,
+#assistant[data-execution-patch] .tool-card .result-row>.accent,
+#assistant[data-execution-patch] .host-notice-source{color:var(--patch-action-ink,var(--accent))}

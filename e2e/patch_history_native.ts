@@ -30,7 +30,7 @@ try{
  assert((await request('POST','/mouse_down',{x:host.rect.x+80,y:host.rect.y+host.rect.h/2,button:'right'})).ok);
  await request('POST','/mouse_up',{x:host.rect.x+80,y:host.rect.y+host.rect.h/2,button:'right'});
  await visible('context.menu.history');assert((await clickTestId('context.menu.history')).ok);
- await visible('history.record.replay');assert((await clickTestId('history.record.replay')).ok);
+ await visible('history.record');assert((await clickTestId('history.record')).ok);
  await mouseMove(600,20);
  const card=await visible('terminal.history.card');assert(!text(card).includes('返回实时'));
  assert((await query('terminal.row')).some(n=>text(n).includes('AFTER RESIZE')));

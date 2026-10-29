@@ -19,8 +19,11 @@ pub const WorkspaceId = enum(u64) { _ };
 pub const ConversationId = StableId(.conversation);
 pub const TaskId = StableId(.task);
 pub const ExecutionId = StableId(.execution);
+pub const HostOperationId = StableId(.host_operation);
+pub const RecordingId = StableId(.recording);
+pub const ArchiveKey = StableId(.archive);
 
-fn StableId(comptime kind: enum { conversation, task, execution }) type {
+fn StableId(comptime kind: enum { conversation, task, execution, host_operation, recording, archive }) type {
     _ = kind;
     return struct {
         bytes: [16]u8 = @splat(0),
@@ -35,6 +38,20 @@ fn StableId(comptime kind: enum { conversation, task, execution }) type {
         }
         pub fn eql(self: @This(), other: @This()) bool {
             return std.mem.eql(u8, &self.bytes, &other.bytes);
+        }
+        pub fn parse(text: []const u8) !@This() {
+            if (text.len != 32) return error.InvalidIdentity;
+            var result: @This() = .{};
+            _ = std.fmt.hexToBytes(&result.bytes, text) catch return error.InvalidIdentity;
+            if (!result.valid()) return error.InvalidIdentity;
+            return result;
+        }
+        pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+            return parse(try std.json.innerParse([]const u8, allocator, source, options)) catch return error.InvalidCharacter;
+        }
+        pub fn jsonParseFromValue(_: std.mem.Allocator, value: std.json.Value, _: std.json.ParseOptions) !@This() {
+            if (value != .string) return error.UnexpectedToken;
+            return parse(value.string) catch return error.InvalidCharacter;
         }
         pub fn jsonStringify(self: @This(), writer: anytype) !void {
             const text = std.fmt.bytesToHex(self.bytes, .lower);

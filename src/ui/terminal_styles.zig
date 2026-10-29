@@ -18,6 +18,19 @@ pub const body_height: f32 = 22;
 pub fn surface(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .column, .overflow = .hidden };
 }
+/// PATCH §12: controls belong to the exact terminal pane, above its canvas.
+pub fn aiControlTag(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .position = .absolute, .inset = .{ .right = .{ .px = 12 }, .bottom = .{ .px = 10 } }, .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .gap = 6, .z_index = 9, .hit_behavior = .@"opaque", .flex_shrink = 0 };
+}
+pub fn aiControlBadge(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .justify = .center, .gap = 5, .padding = .{ .left = 9, .right = 9 }, .background = theme.popupSelection(), .corner_radius = 5, .flex_shrink = 0 };
+}
+pub fn aiControlText(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 11, .line_height = 20.0 / 11.0, .color = theme.current().accent, .selectable = false };
+}
+pub fn aiControlButton() @FieldType(ui.widgets.ControlShellConfig, "style") {
+    return .{ .height = .{ .px = 28 }, .padding = .{ .left = 9, .right = 9 }, .font_size = 11, .font_weight = 500, .corner_radius = 7, .background = theme.popupAction(), .flex_shrink = 0 };
+}
 pub fn row(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .position = .absolute, .height = .{ .px = body_height }, .flex_shrink = 0 };
 }
@@ -75,7 +88,7 @@ pub fn historyCard(_: *const ui.ThemeTokens) ui.BoxStyle {
         .gap = 12,
         .padding = .{ .left = 14, .right = 14 },
         .margin = .{ .bottom = 8 },
-        .background = c.overlay,
-        .border = .{ .width = 1, .color = c.border, .radius = 10 },
+        .background = c.surface_1,
+        .border = .{ .width = 0, .radius = 11 },
     };
 }

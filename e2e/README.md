@@ -31,6 +31,8 @@ node e2e/workspace.ts --out /absolute/path/to/evidence
 
 `--fixture-dir /absolute/path` 会将指定本地目录复制进本次隔离数据目录，可提供 `config.toml` 和 `hosts.toml`，不会修改原始 fixture 或用户默认数据。报告不复制 fixture 内容。
 
+App历史自动提示专项：构建最新test-mode二进制后，运行 `node e2e/completion_nested_ssh_native.ts /tmp/zerowork-completion-new-run /absolute/path/to/zerowork`。Runner在隔离本地zsh中定义`ede`别名，经系统SSH连接自建loopback服务及真实zsh PTY，验证`find`自动显示先前命令、→仅发送缺少后缀、Enter与Tab原样提交、Esc抑制、登录密码排除及860×480浮层。仅操作自建进程、配置和目录；截图需查看，不代表物理键盘或IME已验收。
+
 `visible` 会等待节点实际获得可见尺寸；`hidden` 会等待节点消失或不可见，可用于确认页签真实移除。`capture` 等待 300ms 让控件进出动画结束后保存视觉证据；它不替代功能完成断言。
 
 `rect` 可按test_id核对实际全局坐标（x/y/width/height，容差0.5px）。`visible/hidden`检查整条祖先可见链，避免隐藏容器内旧节点误判。

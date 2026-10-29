@@ -1,5 +1,6 @@
 //! Headless original-pane reconnect driver; connects only to a local fixture.
 const std = @import("std");
+pub const application_test_mode = true;
 const ui = @import("ui");
 const workspace_mod = @import("ui/workspace.zig");
 const ApplicationHost = @import("ui/application_host.zig").ApplicationHost;
@@ -17,6 +18,11 @@ pub fn main(init: std.process.Init) !void {
     const scenario = args.next() orelse "baseline";
     const fixture = args.next();
     const allocator = std.heap.c_allocator;
+    const requested_directory = std.c.getenv("ZEROWORK_DATA_DIR") orelse return error.MissingIsolatedDataDirectory;
+    var data_paths = try @import("config/paths.zig").Paths.forApplication(allocator);
+    defer data_paths.deinit();
+    if (!data_paths.is_override or !std.mem.eql(u8, data_paths.directory, std.mem.span(requested_directory))) return error.DataDirectoryNotIsolated;
+    std.debug.print("ISOLATED_DATA_DIR_VERIFIED\n", .{});
     const cx = try ui.Cx.init(allocator, init.io);
     defer cx.deinit();
     const scope = try ui.Scope.init(allocator, null, cx.owner);
@@ -53,6 +59,21 @@ pub fn main(init: std.process.Init) !void {
     try attached(app, source, 1);
     try send(app, source, "export SOURCE_ONLY=source; printf 'SOURCE_MARKER\n'\n");
     try contains(app, source, "SOURCE_MARKER");
+    {
+        const service = try app.workspace.sessionTab(source).?.runtime.?.terminalService();
+        const capability = try service.executionSnapshot();
+        if (capability.interactive_execution or capability.state != .unavailable) return error.FalseSshExecutionCapability;
+        const queued_before = native(app, source).worker.input.pending();
+        service.executionRequest(.{ .execution_id = .generate(), .task_id = .generate(), .expected_input_epoch = 0, .ownership_revision = 1, .command = "printf NEVER_INJECTED", .command_hash = @import("host/terminal_execution.zig").digest("printf NEVER_INJECTED") }) catch |err| {
+            if (err != error.IntegrationUnavailable) return err;
+            if (native(app, source).worker.input.pending() != queued_before) return error.UnsupportedPtyInjectedInput;
+            std.debug.print("TRUSTED_PTY_UNAVAILABLE_NO_INPUT\n", .{});
+        };
+    }
+    if (std.mem.eql(u8, scenario, "owned-session") or std.mem.eql(u8, scenario, "owned-saved")) {
+        try ownedSessionScenario(app, source, std.mem.eql(u8, scenario, "owned-saved"));
+        return;
+    }
     const pending_scene = std.mem.startsWith(u8, scenario, "cancel-") or std.mem.startsWith(u8, scenario, "timeout-");
     if (pending_scene) {
         try send(app, source, "printf 'ZW_ARM_REUSE_HOLD_%s\n' READY\n");
@@ -175,6 +196,103 @@ fn tick(app: *ApplicationHost) !void {
     if (app.workspace.pendingAuthentication()) |challenge| try app.workspace.submitAuthentication(challenge.identity, .trust_once);
     var delay: std.c.timespec = .{ .sec = 0, .nsec = 2 * std.time.ns_per_ms };
     _ = std.c.nanosleep(&delay, null);
+}
+
+fn ownedTick(app: *ApplicationHost) !void {
+    try tick(app);
+    app.workspace.cx.advanceFrameClock();
+    app.workspace.cx.layout();
+    _ = app.workspace.cx.render();
+}
+
+fn ownedSessionScenario(app: *ApplicationHost, source: u64, with_saved_source: bool) !void {
+    const identity = @import("host/identity.zig");
+    const lifecycle = @import("host/lifecycle_supervisor.zig");
+    const workspace = app.workspace;
+    var roster = @import("ui/group_model.zig").Roster.init(std.heap.c_allocator);
+    defer roster.deinit();
+    defer {
+        for (workspace.tabs.items) |tab| _ = app.requestCloseLegacy(tab.id) catch {};
+        const end = realtime.monotonicNs() + 8 * std.time.ns_per_s;
+        while (workspace.tabs.items.len > 0 and realtime.monotonicNs() < end) ownedTick(app) catch break;
+        workspace.group_roster = null;
+    }
+    var prepared = try roster.prepareNew("owned-loopback", 0xff00ffff, source);
+    defer prepared.deinit();
+    const group_id = try prepared.commit();
+    try workspace.openGroup(&roster, group_id);
+    const source_owner = app.ownerForLegacy(source).?;
+    var request: lifecycle.OpenRequest = .{ .operation_ref = identity.HostOperationId.generate(), .context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .group = group_id }, .binding_revision = 2, .grant_revision = 1 }, .group = .{ .id = @fromBackingInt(group_id) }, .source = source_owner, .connection_policy = .reuse_only, .retention = .auto_idle };
+    _ = try app.queueOwnedSession(request);
+    try ownedTick(app);
+    var opened = try app.queryOwnedSession(request.operation_ref, request.context);
+    if (opened.state != .prepared or workspace.tabs.items.len != 1 or app.findHandle(opened.session.?) != null or roster.findById(group_id).?.members.items.len != 1) return error.ReservationAcquiredNativeResource;
+    // Test acknowledgement stands in for the journal owner's durable permit.
+    _ = try app.authorizeOwnedSessionDispatch(request.operation_ref, request.context, opened.revision, opened.session.?);
+    const deadline = realtime.monotonicNs() + 8 * std.time.ns_per_s;
+    while (opened.state != .ready and realtime.monotonicNs() < deadline) {
+        try ownedTick(app);
+        opened = try app.queryOwnedSession(request.operation_ref, request.context);
+        if (opened.state == .failed or opened.state == .cleanup_pending) return error.OwnedCreateFailed;
+    }
+    if (opened.state != .ready or !opened.membership_committed) return error.OwnedReadyTimeout;
+    const child = app.legacyForHandle(opened.session.?).?;
+    if (native(app, source).worker.shared_connection != native(app, child).worker.shared_connection) return error.CreatedAnotherTransport;
+    try send(app, child, "test -z \"$SOURCE_ONLY\" && printf 'OWNED_INDEPENDENT_%s\n' CONTEXT\n");
+    try contains(app, child, "OWNED_INDEPENDENT_CONTEXT");
+    _ = try app.queueOwnedSession(request);
+    try ownedTick(app);
+    if (workspace.tabs.items.len != 2 or roster.findById(group_id).?.members.items.len != 2) return error.DuplicateOwnedMember;
+    request.operation_ref = identity.HostOperationId.generate();
+    _ = try app.queueOwnedSession(request);
+    try ownedTick(app);
+    const cancelled = try app.queryOwnedSession(request.operation_ref, request.context);
+    _ = try app.cancelOwnedSession(request.operation_ref, request.context);
+    for (0..3) |_| try ownedTick(app);
+    if ((try app.queryOwnedSession(request.operation_ref, request.context)).state != .cancelled or app.findHandle(cancelled.session.?) != null) return error.PreparedCancelTouchedFactory;
+    const close_operation = identity.HostOperationId.generate();
+    _ = try app.queueSessionClose(close_operation, request.context, opened.session.?, true);
+    try ownedTick(app);
+    if (app.sessions.queryState(opened.session.?).?.close_operation != null) return error.CloseRanBeforeResultAcknowledgement;
+    try app.acknowledgeSessionCloseResult(close_operation);
+    while ((try app.querySessionClose(close_operation, request.context)).state != .closed and realtime.monotonicNs() < deadline) try ownedTick(app);
+    if (workspace.sessionTab(child) != null or roster.findById(group_id).?.members.items.len != 1) return error.OwnedCloseLeftGhost;
+    if (app.sessions.queryState(source_owner).?.lifecycle != .attached) return error.BorrowedSourceClosed;
+    try probe(app, source);
+    if (with_saved_source) {
+        var saved = workspace.sessionTab(source).?.host_snapshot.?.value;
+        saved.connection_id = @fromBackingInt(9901);
+        saved.revision = 1;
+        saved.name = "owned-saved-source";
+        const index = try workspace.appendHost(saved);
+        request.operation_ref = identity.HostOperationId.generate();
+        request.source = null;
+        request.saved_source = .{ .id = workspace.registry.hosts[index].connection_id, .revision = workspace.registry.hosts[index].revision };
+        request.connection_policy = .reuse_only;
+        if (app.queueOwnedSession(request)) |_| return error.SavedReuseOpenedConnection else |err| if (err != error.ReuseUnavailable) return err;
+        request.connection_policy = .prefer_reuse;
+        if (app.queueOwnedSession(request)) |_| return error.SavedFallbackBypassedAuthorization else |err| if (err != error.FallbackAuthorizationRequired) return err;
+        request.connection_policy = .new_only;
+        _ = try app.queueOwnedSession(request);
+        try ownedTick(app);
+        var saved_snapshot = try app.queryOwnedSession(request.operation_ref, request.context);
+        if (saved_snapshot.state != .prepared or saved_snapshot.source != null or saved_snapshot.saved_source == null) return error.SavedSourceBecameFakeSession;
+        _ = try app.authorizeOwnedSessionDispatch(request.operation_ref, request.context, saved_snapshot.revision, saved_snapshot.session.?);
+        const saved_deadline = realtime.monotonicNs() + 8 * std.time.ns_per_s;
+        while (saved_snapshot.state != .ready and realtime.monotonicNs() < saved_deadline) {
+            try ownedTick(app);
+            saved_snapshot = try app.queryOwnedSession(request.operation_ref, request.context);
+            if (saved_snapshot.state == .failed or saved_snapshot.state == .cleanup_pending) return error.SavedOwnedCreateFailed;
+        }
+        if (saved_snapshot.state != .ready) return error.SavedOwnedReadyTimeout;
+        const saved_child = app.legacyForHandle(saved_snapshot.session.?).?;
+        if (native(app, source).worker.shared_connection == native(app, saved_child).worker.shared_connection) return error.SavedNewOnlyReusedTransport;
+        try send(app, saved_child, "test -z \"$SOURCE_ONLY\" && printf 'SAVED_OWNED_%s\n' INDEPENDENT\n");
+        try contains(app, saved_child, "SAVED_OWNED_INDEPENDENT");
+        try probe(app, source);
+        std.debug.print("OWNED_SAVED_SOURCE_OK real_asset_identity=true no_fake_session=true reuse_only_zero_connect=true fallback_authorized=true independent_transport=true\n", .{});
+    }
+    std.debug.print("OWNED_SESSION_OK reserved_zero_native=true reuse_one_transport=true unique_ready_member=true independent_shell=true cancellation_zero_native=true close_after_result=true borrowed_source_survives=true\n", .{});
 }
 const Details = @import("proto/ssh/connection_details.zig");
 fn onlineDetails(app: *ApplicationHost, id: u64) !Details.ConnectionDetailsSnapshot {

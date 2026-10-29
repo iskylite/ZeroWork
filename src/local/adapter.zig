@@ -16,6 +16,9 @@ const VtEngine = @import("../vt/engine.zig").VtEngine;
 const Controller = @import("../vt/terminal_controller.zig").Controller;
 const trusted_mod = @import("trusted_edit.zig");
 const recording_mod = @import("recording.zig");
+const archive_mod = @import("../vt/session_archive.zig");
+const manifest = archive_mod.manifest;
+const execution_mod = @import("execution.zig");
 pub const ContextSnapshot = @import("context_snapshot.zig").Snapshot;
 const Mutex = struct {
     state: std.atomic.Mutex = .unlocked,
@@ -30,7 +33,8 @@ const Mutex = struct {
     }
 };
 
-pub const Options = struct { scrollback_limit: u32 = 25000, term: []const u8 = "xterm-256color", cols: u16 = 80, rows: u16 = 24, output_capacity: usize = 1024 * 1024, retain_raw_output: bool = true, recording: ?recording_mod.Options = null };
+pub const MetadataOptions = struct { io: std.Io, directory: []const u8, retention_days: u16 = 14 };
+pub const Options = struct { metadata: ?MetadataOptions = null, scrollback_limit: u32 = 25000, term: []const u8 = "xterm-256color", cols: u16 = 80, rows: u16 = 24, output_capacity: usize = 1024 * 1024, retain_raw_output: bool = true, recording: ?recording_mod.Options = null };
 pub const ProcessSnapshot = @import("../host/process_service.zig").ProcessSnapshot;
 pub const CwdSnapshot = @import("../host/process_service.zig").CwdSnapshot;
 pub const ExecRisk = @import("../host/process_service.zig").ExecRisk;
@@ -145,6 +149,13 @@ const Entry = struct {
     recording_error: ?[]const u8 = null,
     trusted: ?trusted_mod.Bridge = null,
     trusted_error: ?[]const u8 = null,
+    execution: ?execution_mod.Bridge = null,
+    execution_interrupt_requested: bool = false,
+    execution_interrupt_deadline: i64 = 0,
+    metadata_identity: archive_mod.MetadataIdentity,
+    metadata_started_ms: i64,
+    metadata_display_arena: std.heap.ArenaAllocator,
+    metadata_display: manifest.Display = .{},
 
     fn init(allocator: std.mem.Allocator, request: host.CreateRequest, options: Options) !*Entry {
         const self = try allocator.create(Entry);
@@ -158,13 +169,15 @@ const Entry = struct {
             recording.directory = try allocator.dupe(u8, directory);
         };
         errdefer if (frozen_options.recording) |recording| if (recording.directory) |directory| allocator.free(directory);
+        if (frozen_options.metadata) |*metadata| metadata.directory = try allocator.dupe(u8, metadata.directory);
+        errdefer if (frozen_options.metadata) |metadata| allocator.free(metadata.directory);
         var wakeup = try @import("../platform/wakeup.zig").Wakeup.init();
         errdefer wakeup.deinit();
         var output = try Queue.init(allocator, options.output_capacity);
         errdefer output.deinit(allocator);
         var text = try TextSlot.init(allocator, TextSlot.default_capacity);
         errdefer text.deinit(allocator);
-        self.* = .{ .wakeup = wakeup, .allocator = allocator, .handle = request.handle, .key = request.key, .options = frozen_options, .recording_retention_days = .init(if (options.recording) |recording| recording.log.retention_days else 14), .cwd = cwd, .term = term, .output = output, .text = text, .geometry = .{ .revision = 1, .cols = options.cols, .rows = options.rows } };
+        self.* = .{ .metadata_identity = archive_mod.MetadataIdentity.generate(), .metadata_started_ms = @import("../platform/realtime.zig").milliseconds(undefined), .metadata_display_arena = std.heap.ArenaAllocator.init(allocator), .wakeup = wakeup, .allocator = allocator, .handle = request.handle, .key = request.key, .options = frozen_options, .recording_retention_days = .init(if (options.recording) |recording| recording.log.retention_days else 14), .cwd = cwd, .term = term, .output = output, .text = text, .geometry = .{ .revision = 1, .cols = options.cols, .rows = options.rows } };
         self.text.producer_wakeup = &self.wakeup;
         self.text.structured_supported = false;
         errdefer self.writes.deinit(allocator);
@@ -184,9 +197,12 @@ const Entry = struct {
             self.allocator.destroy(job);
         }
         self.jobs.deinit(self.allocator);
+        if (self.execution) |*execution| execution.deinit();
         if (self.trusted) |*trusted| trusted.deinit();
         if (self.recording) |recording| recording.deinit();
         if (self.options.recording) |recording| if (recording.directory) |directory| self.allocator.free(directory);
+        if (self.options.metadata) |metadata| self.allocator.free(metadata.directory);
+        self.metadata_display_arena.deinit();
         if (self.vt) |*vt| vt.destroy();
         if (self.projection) |*value| value.deinit(std.heap.page_allocator);
         self.text.deinit(self.allocator);
@@ -221,6 +237,8 @@ const Entry = struct {
         write.mode = self.mode_revision;
     }
     fn finish(self: *Entry, cleanup: host.CloseReceipt) void {
+        if (self.execution) |*execution| execution.deinit();
+        self.execution = null;
         if (self.trusted) |*bridge| bridge.deinit();
         self.trusted = null;
         self.cleanup = cleanup;
@@ -250,6 +268,9 @@ pub const LocalAdapter = struct {
         self.* = .{ .allocator = allocator, .options = options };
         self.options.term = term;
         self.options.recording = null;
+        self.options.metadata = null;
+        errdefer if (self.options.metadata) |metadata| self.allocator.free(metadata.directory);
+        if (options.metadata) |metadata| try self.configureMetadata(metadata);
         if (options.recording) |recording| try self.configureRecording(recording);
         return self;
     }
@@ -262,6 +283,13 @@ pub const LocalAdapter = struct {
             entry.pending_scrollback_limit.store(@as(u64, limit) + 1, .release);
             entry.wakeup.notify();
         }
+    }
+    pub fn configureMetadata(self: *LocalAdapter, metadata: MetadataOptions) !void {
+        var paths = try @import("../config/paths.zig").Paths.fromDirectory(self.allocator, metadata.directory);
+        defer paths.deinit();
+        const owned = try self.allocator.dupe(u8, metadata.directory);
+        if (self.options.metadata) |old| self.allocator.free(old.directory);
+        self.options.metadata = .{ .io = metadata.io, .directory = owned, .retention_days = metadata.retention_days };
     }
     pub fn configureRecording(self: *LocalAdapter, options: recording_mod.Options) !void {
         if (options.log.ring_mb == 0 or options.log.checkpoint_sec == 0) return error.InvalidRecordingOptions;
@@ -308,6 +336,7 @@ pub const LocalAdapter = struct {
         for (self.entries.items) |entry| entry.destroy();
         self.entries.deinit(self.allocator);
         if (self.options.recording) |recording| if (recording.directory) |directory| self.allocator.free(directory);
+        if (self.options.metadata) |metadata| self.allocator.free(metadata.directory);
         self.allocator.free(self.options.term);
         self.allocator.destroy(self);
     }
@@ -626,13 +655,84 @@ pub const LocalAdapter = struct {
         return .{ .handle = handle, .stdout = stdout, .stderr = try allocator.dupe(u8, job.stderr.items), .exit = job.exit, .cancelled = job.cancelled, .timed_out = job.timed_out, .truncated = job.truncated, .cleanup = job.cleanup, .done = job.done };
     }
 
-    const service_vtable: terminal.Service.VTable = .{ .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .search_async = serviceSearchAsync, .search_tail = serviceSearchTail, .export_recording = serviceExportRecording, .recording_lease = serviceRecordingLease, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel };
+    const service_vtable: terminal.Service.VTable = .{ .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .search_async = serviceSearchAsync, .search_tail = serviceSearchTail, .export_recording = serviceExportRecording, .recording_lease = serviceRecordingLease, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel, .recording_display = serviceRecordingDisplay, .execution_output = serviceExecutionOutput, .execution_snapshot = serviceExecutionSnapshot, .execution_request = serviceExecutionRequest, .execution_renew = serviceExecutionRenew, .execution_revoke = serviceExecutionRevoke };
+    fn serviceRecordingDisplay(raw: *anyopaque, binding: host.ServiceHandle, display: @import("../vt/recording_manifest.zig").Display) !void {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, false);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        if (entry.recording) |recording| return recording.setDisplay(entry.handle, display);
+        if (entry.options.metadata == null and entry.options.recording == null) return error.RecordingUnavailable;
+        entry.metadata_display = try copyMetadataDisplay(entry.metadata_display_arena.allocator(), display);
+    }
+    fn serviceExecutionOutput(raw: *anyopaque, binding: host.ServiceHandle, id: identity.ExecutionId, allocator: std.mem.Allocator, cursor: u64, max_bytes: usize) !terminal.execution.Output {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, false);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        const execution = if (entry.execution) |*value| value else return error.IntegrationUnavailable;
+        return execution.readOutput(id, allocator, cursor, max_bytes);
+    }
+    fn serviceExecutionSnapshot(raw: *anyopaque, binding: host.ServiceHandle) !terminal.execution.Snapshot {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, false);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        const execution = if (entry.execution) |*value| value else return .{ .owner = entry.handle };
+        if (execution.lease.holder != null and nowMs() >= execution.lease.expires_at) execution.fail("LeaseExpired", false);
+        var value = execution.snapshot;
+        if (entry.recording == null and execution.last_execution == null) {
+            value.interactive_execution = false;
+            value.state = .unavailable;
+            value.failure = entry.recording_error orelse "RecordingDisabled";
+        }
+        return value;
+    }
+    fn serviceExecutionRequest(raw: *anyopaque, binding: host.ServiceHandle, request: terminal.execution.Request) !void {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, true);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        if (entry.close_requested.load(.acquire) or entry.process_state != .running or entry.eof or entry.terminal_error != null) return error.SessionNotWritable;
+        if (entry.recording == null or entry.recording_error != null) return error.RecordingUnavailable;
+        if (entry.writes.items.len != 0 or entry.pending_bytes != 0 or entry.reply_offset != entry.reply_len) return error.InputConflict;
+        const trusted = if (entry.trusted) |*value| value else return error.IntegrationUnavailable;
+        if (trusted.input_dirty or trusted.pending != null or trusted.outcome != null) return error.InputConflict;
+        const snapshot = trusted.snapshot orelse return error.InputConflict;
+        if (!snapshot.editable() or snapshot.buffer.len != 0 or snapshot.lease != 0) return error.InputConflict;
+        const execution = if (entry.execution) |*value| value else return error.IntegrationUnavailable;
+        try execution.begin(request, nowMs());
+        entry.wakeup.notify();
+    }
+    fn serviceExecutionRenew(raw: *anyopaque, binding: host.ServiceHandle, grant: terminal.execution.Grant) !void {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, true);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        const execution = if (entry.execution) |*value| value else return error.IntegrationUnavailable;
+        try execution.renew(grant, nowMs());
+    }
+    fn serviceExecutionRevoke(raw: *anyopaque, binding: host.ServiceHandle, grant: terminal.execution.Grant, takeover: bool) !void {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, false);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        const execution = if (entry.execution) |*value| value else return error.IntegrationUnavailable;
+        const was_submitted = execution.snapshot.submit_sent;
+        try execution.revoke(grant, takeover, nowMs());
+        if (!takeover and was_submitted) {
+            entry.execution_interrupt_requested = true;
+            entry.execution_interrupt_deadline = nowMs() + 2000;
+        }
+        entry.wakeup.notify();
+    }
     fn serviceTrustedSnapshot(raw: *anyopaque, binding: host.ServiceHandle, allocator: std.mem.Allocator) !?terminal.trusted_edit.Snapshot {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));
         const entry = try self.resolve(binding, .terminal, true);
         if (!entry.mutex.tryLock()) return error.WorkerBusy;
         defer entry.mutex.unlock();
         const bridge = if (entry.trusted) |*value| value else return null;
+        if (entry.execution) |*execution| if (execution.lease.holder != null or execution.lease.draining) return null;
         if (!bridge.hello or bridge.disabled or bridge.pending != null or bridge.input_dirty or entry.writes.items.len != 0 or entry.close_requested.load(.acquire)) return null;
         return if (bridge.snapshot) |value| try value.clone(allocator) else null;
     }
@@ -644,6 +744,7 @@ pub const LocalAdapter = struct {
         if (entry.close_requested.load(.acquire) or entry.process_state != .running or entry.eof) return error.SessionNotWritable;
         if (entry.writes.items.len != 0 or entry.reply_offset != entry.reply_len) return error.WorkerBusy;
         const bridge = if (entry.trusted) |*value| value else return error.TrustedEditUnavailable;
+        if (entry.execution) |*execution| if (execution.lease.holder != null or execution.lease.draining) return error.TerminalControlled;
         if (bridge.input_dirty) return error.StaleEdit;
         try bridge.request(request, nowMs());
         entry.wakeup.notify();
@@ -718,13 +819,16 @@ pub const LocalAdapter = struct {
         defer entry.mutex.unlock();
         if (entry.close_requested.load(.acquire) or entry.process_state != .running or entry.eof) return error.SessionNotWritable;
         if (entry.terminal_error != null) return error.TerminalUnavailable;
+        if (entry.execution) |*execution| if (execution.lease.holder != null or execution.lease.draining) return error.TerminalControlled;
         if (entry.trusted) |*bridge| {
             if (bridge.pending != null or bridge.outcome != null) return error.TrustedEditPending;
         }
         if (request.mode_revision != entry.mode_revision) return error.StaleMode;
         if (request.input_sequence <= entry.last_input_sequence) return error.StaleInput;
         if (entry.pending_bytes >= 64 * 1024 or request.bytes.len > 64 * 1024 - entry.pending_bytes or entry.writes.items.len + entry.receipts.items.len >= 64) return error.InputFull;
+        if (entry.execution) |*execution| if (execution.lease.holder != null or execution.lease.draining) return error.TerminalControlled;
         const bytes = try self.allocator.dupe(u8, request.bytes);
+        if (entry.execution) |*execution| try execution.ordinaryInput();
         entry.writes.appendAssumeCapacity(.{ .sequence = request.input_sequence, .mode = request.mode_revision, .bytes = bytes, .submission = request.submission });
         entry.pending_bytes += bytes.len;
         entry.text.timing.accepted(request.input_sequence, 0);
@@ -818,12 +922,15 @@ pub const LocalAdapter = struct {
         defer entry.mutex.unlock();
         if (entry.close_requested.load(.acquire) or entry.process_state != .running or entry.eof) return error.SessionNotWritable;
         if (entry.terminal_error != null) return error.TerminalUnavailable;
+        if (entry.execution) |*execution| if (execution.lease.holder != null or execution.lease.draining) return error.TerminalControlled;
         if (paste.mode_revision != entry.mode_revision) return error.StaleMode;
         if (paste.input_revision != entry.last_input_sequence or sequence <= entry.last_input_sequence) return error.StaleInput;
         const wrapped = entry.modes.bracketed_paste;
         const count = paste.text.len + @as(usize, if (wrapped) 12 else 0);
         if (count > 1024 * 1024 + 12 - entry.pending_bytes or entry.writes.items.len + entry.receipts.items.len >= 64) return error.InputFull;
+        if (entry.execution) |*execution| if (execution.lease.holder != null or execution.lease.draining) return error.TerminalControlled;
         const bytes = try self.allocator.alloc(u8, count);
+        if (entry.execution) |*execution| try execution.ordinaryInput();
         if (wrapped) {
             @memcpy(bytes[0..6], "\x1b[200~");
             @memcpy(bytes[6..][0..paste.text.len], paste.text);
@@ -867,8 +974,10 @@ pub const LocalAdapter = struct {
     }
     fn inputGate(entry: *Entry, sequence: u64, mode_revision: u64) !void {
         if (sequence == 0 or mode_revision == 0) return error.InvalidInput;
+        if (entry.execution) |*execution| if (execution.lease.holder != null or execution.lease.draining) return error.TerminalControlled;
         if (entry.close_requested.load(.acquire) or entry.process_state != .running or entry.eof) return error.SessionNotWritable;
         if (entry.terminal_error != null) return error.TerminalUnavailable;
+        if (entry.execution) |*execution| if (execution.lease.holder != null or execution.lease.draining) return error.TerminalControlled;
         if (mode_revision != entry.mode_revision) return error.StaleMode;
         if (sequence <= entry.last_input_sequence) return error.StaleInput;
     }
@@ -877,6 +986,7 @@ pub const LocalAdapter = struct {
             if (bridge.pending != null or bridge.outcome != null) return error.TrustedEditPending;
         }
         if (entry.pending_bytes >= 64 * 1024 or bytes.len > 64 * 1024 - entry.pending_bytes or entry.writes.items.len + entry.receipts.items.len >= 64) return error.InputFull;
+        if (bytes.len != 0) if (entry.execution) |*execution| try execution.ordinaryInput();
         if (bytes.len == 0) {
             entry.receipts.appendAssumeCapacity(.{ .input_sequence = sequence, .mode_revision = mode_revision, .consumed_bytes = 0, .state = .completed });
             entry.allocator.free(bytes);
@@ -1060,6 +1170,7 @@ fn run(entry: *Entry) void {
         entry.trusted_error = @errorName(err);
         break :blk null;
     };
+    if (entry.trusted) |*trusted| entry.execution = execution_mod.Bridge.init(entry.allocator, entry.handle, trusted.native);
     var failure: native.Failure = .{};
     entry.process = pty.Session.start(entry.allocator, entry.handle, entry.key, .{ .initial_cwd = entry.cwd, .term = entry.term, .cols = entry.options.cols, .rows = entry.options.rows, .bootstrap = if (entry.trusted) |*bridge| bridge.bootstrap() else null }, &failure) catch {
         startFailure(entry, failure.hostFailure());
@@ -1067,7 +1178,7 @@ fn run(entry: *Entry) void {
     };
     entry.mutex.lock();
     if (entry.options.recording) |options| {
-        entry.recording = recording_mod.Recording.init(entry.allocator, entry.handle, options, entry.geometry.cols, entry.geometry.rows, nowMs()) catch |err| blk: {
+        entry.recording = recording_mod.Recording.initWithIdentity(entry.allocator, entry.handle, options, entry.geometry.cols, entry.geometry.rows, nowMs(), entry.metadata_identity) catch |err| blk: {
             entry.recording_error = @errorName(err);
             break :blk null;
         };
@@ -1099,12 +1210,37 @@ fn run(entry: *Entry) void {
             if (closing) bridge.revoke(.integration_lost) else if (entry.pid) |pid| bridge.poll(pid, nowMs());
             if (before != bridge.last_received or was_pending != (bridge.pending != null) or was_hello != bridge.hello or was_disabled != bridge.disabled) @import("../platform/presentation_wakeup.zig").notify();
         }
+        if (entry.execution_interrupt_requested) {
+            // A private preexec event can precede the external process's
+            // foreground-group installation. Retry only a known-unsent local
+            // signal request, never an acknowledged signal or PTY bytes.
+            const interrupted = if (entry.process) |*process| if (process.process) |native_process| native.zw_local_interrupt_foreground(native_process) == 1 else false else false;
+            if (interrupted) entry.execution_interrupt_requested = false else if (nowMs() >= entry.execution_interrupt_deadline) {
+                entry.execution_interrupt_requested = false;
+                if (entry.execution) |*execution| execution.snapshot.failure = "InterruptUnconfirmed";
+            }
+        }
+        if (entry.execution) |*execution| {
+            if (closing) {
+                if (execution.observationGrant() != null or execution.lease.holder != null) execution.fail("SessionClosed", false);
+            } else if (entry.pid) |pid| execution.poll(pid, nowMs());
+            advanceExecution(entry);
+            settleFailedExecution(entry);
+        }
         if (closing) while (entry.writes.items.len > 0) entry.completeWrite(.cancelled);
         if (entry.process) |*process| {
             if (!closing) {
                 if (entry.requested_geometry) |geometry| {
                     applyGeometry(entry, transport, geometry);
                 }
+                if (entry.execution) |*execution| if (execution.wake_pending and entry.writes.items.len == 0 and entry.reply_offset == entry.reply_len) {
+                    // A single protocol wake byte returns zsh 5.9's watched-FD
+                    // poll after its private, hash-verified accept-line. It is
+                    // consumed by the integration's empty keymap, never an
+                    // Enter or a model-provided input byte.
+                    const wake = transport.write("\x00") catch .would_block;
+                    if (wake == .bytes and wake.bytes == 1) execution.wakeCompleted();
+                };
                 const input_modes = entry.vt.?.snapshot();
                 entry.mode_revision = input_modes.mode_revision;
                 entry.modes = input_modes.modes;
@@ -1114,6 +1250,11 @@ fn run(entry: *Entry) void {
                 const input_started = entry.writes.items.len > 0 and entry.writes.items[0].consumed > 0;
                 if (!input_started) flushReply(entry, transport);
                 if (entry.writes.items.len > 0 and entry.reply_offset == entry.reply_len) {
+                    if (entry.execution) |*execution| if (execution.lease.holder != null and entry.writes.items[0].consumed == 0) {
+                        entry.completeWrite(.cancelled);
+                        entry.mutex.unlock();
+                        continue;
+                    };
                     const write = &entry.writes.items[0];
                     entry.synchronizeWrite(write) catch |err| {
                         write.failure = if (err == error.StaleMode) .stale_mode else .transport_failed;
@@ -1166,17 +1307,19 @@ fn run(entry: *Entry) void {
                 };
                 switch (read) {
                     .bytes => |count| {
-                        if (entry.options.retain_raw_output) entry.output.push(buffer[0..count]) catch unreachable;
-                        entry.output_sequence += 1;
-                        entry.text.timing.received(entry.output_sequence);
-                        if (entry.recording) |recording| recording.appendOutput(entry.handle, buffer[0..count], nowMs());
-                        if (entry.terminal_error == null) entry.controller.?.feedOutput(entry.handle, entry.output_sequence, buffer[0..count], nowMs()) catch |err| {
-                            entry.terminal_error = @errorName(err);
-                        };
+                        if (entry.execution) |*execution| {
+                            execution.output(buffer[0..count], .{ .context = entry, .output = executionOutput, .boundary = executionBoundary });
+                            if (entry.recording) |recording| recording.observeRawPosition(entry.handle, execution.raw_received);
+                            advanceExecution(entry);
+                        } else executionOutput(entry, buffer[0..count], 0);
                     },
                     .would_block => break,
                     .eof => {
                         entry.eof = true;
+                        if (entry.execution) |*execution| {
+                            execution.flushOutput(.{ .context = entry, .output = executionOutput, .boundary = executionBoundary });
+                            if (execution.observationGrant() != null) execution.fail("SessionEOF", false);
+                        }
                         entry.controller.?.eof(entry.handle) catch {};
                         break;
                     },
@@ -1252,6 +1395,7 @@ fn run(entry: *Entry) void {
                         .signal => null,
                     } else null);
                 }
+                if (entry.recording == null) publishUnrecordedMetadata(entry);
                 entry.finish(if (jobs_unknown) .unknown else cleanup);
                 entry.mutex.unlock();
                 return;
@@ -1468,4 +1612,180 @@ test "local adapter queued ordinary input follows live modes while paste and mou
     try std.testing.expectEqualStrings("\x1bOA", key.bytes);
     entry.modes.keyboard_disabled = true;
     try std.testing.expectError(error.StaleMode, entry.synchronizeWrite(&text));
+}
+
+fn executionOutput(raw: *anyopaque, bytes: []const u8, raw_start: u64) void {
+    const entry: *Entry = @ptrCast(@alignCast(raw));
+    if (bytes.len == 0) return;
+    if (entry.execution) |*execution| execution.capture(bytes);
+    if (entry.options.retain_raw_output) entry.output.push(bytes) catch {
+        entry.terminal_error = "OutputQueueFull";
+        if (entry.execution) |*execution| execution.fail("OutputQueueFull", false);
+        return;
+    };
+    entry.output_sequence += 1;
+    entry.text.timing.received(entry.output_sequence);
+    if (entry.recording) |recording| {
+        if (entry.execution != null) recording.appendOutputAt(entry.handle, bytes, nowMs(), raw_start) else recording.appendOutput(entry.handle, bytes, nowMs());
+    }
+    if (entry.terminal_error == null) entry.controller.?.feedOutput(entry.handle, entry.output_sequence, bytes, nowMs()) catch |err| {
+        entry.terminal_error = @errorName(err);
+    };
+}
+fn advanceExecution(entry: *Entry) void {
+    const execution = if (entry.execution) |*value| value else return;
+    const observer = execution.observationGrant() orelse return;
+    const recording = entry.recording orelse {
+        execution.fail("RecordingUnavailable", true);
+        return;
+    };
+    const id = std.fmt.bytesToHex(observer.execution_id.bytes, .lower);
+    if (execution.snapshot.state == .preparing) {
+        const fence = execution.lease.holder.?.fence;
+        const output_scope = execution.snapshot.output_scope;
+        entry.mutex.unlock();
+        const result = recording.startExecutionBarrier(entry.handle, &id, output_scope);
+        entry.mutex.lock();
+        if (execution.lease.holder == null or execution.lease.holder.?.fence != fence) return;
+        const barrier = result catch |err| {
+            execution.fail(@errorName(err), true);
+            return;
+        };
+        execution.prepared(barrier.recording_id, barrier.recording_generation, barrier.manifest_revision, nowMs()) catch |err| {
+            execution.fail(@errorName(err), false);
+            return;
+        };
+    }
+    if (execution.startPaired()) {
+        if (execution.lease.holder == null) return;
+        const boundary = execution.start_seen.?;
+        const fence = execution.lease.holder.?.fence;
+        const output_scope = execution.snapshot.output_scope;
+        entry.mutex.unlock();
+        const result = recording.noteExecutionBoundary(entry.handle, &id, .start, boundary.raw_offset, boundary.sequence, output_scope);
+        entry.mutex.lock();
+        if (execution.lease.holder == null or execution.lease.holder.?.fence != fence) return;
+        const receipt = result catch |err| {
+            execution.fail(@errorName(err), true);
+            return;
+        };
+        execution.startCommitted(receipt.manifest_revision, nowMs()) catch |err| {
+            execution.fail(@errorName(err), false);
+            return;
+        };
+        if (execution.snapshot.start) |*start| start.event_sequence = receipt.position.event_sequence;
+    }
+    if (execution.endPaired()) {
+        const boundary = execution.end_seen.?;
+        const output_scope = execution.snapshot.output_scope;
+        entry.mutex.unlock();
+        const result = recording.noteExecutionBoundary(entry.handle, &id, .end, boundary.raw_offset, boundary.sequence, output_scope);
+        entry.mutex.lock();
+        if (!execution.observes(observer)) return;
+        const receipt = result catch |err| {
+            execution.fail(@errorName(err), true);
+            return;
+        };
+        execution.endCommitted(receipt.manifest_revision);
+        if (execution.snapshot.end) |*end| end.event_sequence = receipt.position.event_sequence;
+        const observation: recording_mod.Observation = .{ .output_scope = output_scope, .attribution = execution.snapshot.output_attribution, .reason = execution.snapshot.output_attribution_reason, .process = execution.snapshot.process };
+        entry.mutex.unlock();
+        const sealed_result = if (output_scope == .session_interval) recording.saveInterval(entry.handle, &id, observation) else recording.sealExecution(entry.handle, &id, .exit_confirmed);
+        entry.mutex.lock();
+        if (!execution.observes(observer)) return;
+        const seal = sealed_result catch |err| {
+            execution.fail(@errorName(err), true);
+            return;
+        };
+        if (if (output_scope == .session_interval) !seal.interval_saved else !seal.sealed) {
+            execution.fail(if (output_scope == .session_interval) "IntervalRecordIncomplete" else "RecordSealIncomplete", true);
+            return;
+        }
+        if (output_scope == .session_interval) execution.intervalRecorded(seal.manifest_revision) else execution.sealed(seal.manifest_revision);
+    }
+    const recording_snapshot = recording.snapshot();
+    if (recording_snapshot.storage_failed or (execution.snapshot.output_scope == .exact and recording_snapshot.failure != null)) execution.fail("RecordingDegraded", true);
+}
+
+fn executionBoundary(raw: *anyopaque, _: execution_mod.BoundaryKind, position: terminal.execution.Boundary) void {
+    const entry: *Entry = @ptrCast(@alignCast(raw));
+    if (entry.recording) |recording| _ = recording.markBoundary(entry.handle, position.raw_offset) catch {
+        if (entry.execution) |*execution| execution.fail("RecordingBoundaryFailed", true);
+    };
+}
+
+fn settleFailedExecution(entry: *Entry) void {
+    const execution = if (entry.execution) |*value| value else return;
+    if (execution.snapshot.recording_settled or execution.lease.holder != null) return;
+    const id = execution.last_execution orelse return;
+    switch (execution.snapshot.state) {
+        .cancelled_unsent, .handed_off, .outcome_unknown, .recording_degraded => {},
+        else => return,
+    }
+    const recording = entry.recording orelse {
+        execution.failureSettled(execution.snapshot.manifest_revision, true);
+        return;
+    };
+    const id_text = std.fmt.bytesToHex(id.bytes, .lower);
+    const submitted = execution.snapshot.submit_sent;
+    const failure = execution.snapshot.failure orelse "ExecutionRevoked";
+    const observation: recording_mod.Observation = .{ .output_scope = execution.snapshot.output_scope, .attribution = execution.snapshot.output_attribution, .reason = execution.snapshot.output_attribution_reason, .process = execution.snapshot.process };
+    entry.mutex.unlock();
+    const result = recording.abandonObservedExecution(entry.handle, &id_text, if (submitted) .unknown else .cancelled_unsent, failure, observation);
+    entry.mutex.lock();
+    if (execution.last_execution == null or !execution.last_execution.?.eql(id)) return;
+    const receipt = result catch {
+        execution.failureSettled(execution.snapshot.manifest_revision, true);
+        return;
+    };
+    execution.failureSettled(receipt.manifest_revision, false);
+}
+
+fn copyMetadataDisplay(allocator: std.mem.Allocator, value: manifest.Display) !manifest.Display {
+    var result = value;
+    result.title = try allocator.dupe(u8, value.title);
+    result.host = try allocator.dupe(u8, value.host);
+    result.user = try allocator.dupe(u8, value.user);
+    result.endpoint = try allocator.dupe(u8, value.endpoint);
+    result.cwd = if (value.cwd) |text| try allocator.dupe(u8, text) else null;
+    result.font_family = if (value.font_family) |text| try allocator.dupe(u8, text) else null;
+    result.theme_reference = if (value.theme_reference) |text| try allocator.dupe(u8, text) else null;
+    return result;
+}
+/// No default/headless Local session discovers a user data directory. Metadata
+/// requires its explicit root, or the existing explicit recording configuration
+/// whose initialization failed. IO remains on this original process worker.
+fn publishUnrecordedMetadata(entry: *Entry) void {
+    var paths: ?@import("../config/paths.zig").Paths = null;
+    defer if (paths) |*value| value.deinit();
+    const metadata: MetadataOptions = entry.options.metadata orelse blk: {
+        const recording = entry.options.recording orelse return;
+        const directory = recording.directory orelse directory: {
+            paths = @import("../config/paths.zig").Paths.forApplication(entry.allocator) catch return;
+            break :directory paths.?.directory;
+        };
+        break :blk .{ .io = recording.io, .directory = directory, .retention_days = recording.log.retention_days };
+    };
+    var arena = std.heap.ArenaAllocator.init(entry.allocator);
+    defer arena.deinit();
+    var display = copyMetadataDisplay(arena.allocator(), entry.metadata_display) catch return;
+    display.final_cols = entry.geometry.cols;
+    display.final_rows = entry.geometry.rows;
+    if (entry.reported_cwd_len) |length| display.cwd = arena.allocator().dupe(u8, entry.reported_cwd[0..length]) catch display.cwd;
+    const failure = entry.recording_error;
+    const ended_ms = @import("../platform/realtime.zig").milliseconds(undefined);
+    entry.mutex.unlock();
+    const dir = std.Io.Dir.cwd().createDirPathOpen(metadata.io, metadata.directory, .{}) catch {
+        entry.mutex.lock();
+        entry.recording_error = "MetadataDirectoryUnavailable";
+        return;
+    };
+    defer dir.close(metadata.io);
+    var archive: archive_mod.Archive = .{ .allocator = entry.allocator, .io = metadata.io, .dir = dir };
+    const receipt = archive.publishMetadata(.{ .identity = entry.metadata_identity, .owner = entry.handle, .source_kind = .local, .started_ms = entry.metadata_started_ms, .ended_ms = ended_ms, .initial_cols = entry.options.cols, .initial_rows = entry.options.rows, .display = display, .reason = if (failure != null) .RecordingUnavailable else .RecordingDisabled, .failure = failure, .retention_days = metadata.retention_days });
+    entry.mutex.lock();
+    _ = receipt catch |err| {
+        entry.recording_error = @errorName(err);
+        return;
+    };
 }

@@ -142,7 +142,7 @@ pub const View = struct {
         if (draft) |value| {
             const items = try self.cx.allocator.alloc(attachments.Item, value.items.items.len);
             for (value.items.items, items) |item, *copy| copy.* = .{ .id = item.id, .reference = item.reference.retain() };
-            next = .{ .allocator = self.cx.allocator, .owner = value.owner, .draft_epoch = value.epoch, .items = items };
+            next = .{ .allocator = self.cx.allocator, .owner = value.owner, .conversation_id = value.conversation_id, .draft_epoch = value.epoch, .items = items };
         }
         if (self.pending) |*previous| previous.deinit();
         if (self.pending_candidate) |*previous| previous.reference.release();
@@ -610,7 +610,7 @@ fn candidateMatches(value: ?View.Candidate, draft: ?*const attachments.Draft) bo
 }
 fn itemTicket(source: attachments.Bundle, item: attachments.Item) attachments.Ticket {
     const content = item.reference.content().?;
-    return .{ .owner = source.owner, .draft_epoch = source.draft_epoch, .id = item.id, .terminal_owner = if (content.source == .terminal) content.source.terminal.owner else null };
+    return .{ .owner = source.owner, .conversation_id = source.conversation_id, .draft_epoch = source.draft_epoch, .id = item.id, .terminal_owner = if (content.source == .terminal) content.source.terminal.owner else null };
 }
 fn matches(bundle: ?attachments.Bundle, draft: ?*const attachments.Draft) bool {
     const value = draft orelse return bundle == null;

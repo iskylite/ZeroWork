@@ -36,6 +36,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$ROOT/assets/macos/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 cp zig-out/bin/zerowork "$APP/Contents/MacOS/ZeroWork"
 cp zig-out/bin/zw_ipc.so "$APP/Contents/MacOS/zw_ipc.so"
+cp zig-out/bin/zw_execution.so "$APP/Contents/MacOS/zw_execution.so"
+cp zig-out/bin/zw_execution_guard "$APP/Contents/MacOS/zw_execution_guard"
 cmp zig-out/bin/zerowork "$APP/Contents/MacOS/ZeroWork"
 python3 - "$APP" "$INSTANCE_NAME" "$BUNDLE_ID" "$DATA_DIR" <<'PY'
 import plistlib, sys

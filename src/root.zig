@@ -8,6 +8,21 @@ pub const connection_config_resolver = @import("host/connection_config_resolver.
 pub const transport_factory = @import("host/transport_factory.zig");
 pub const plugin_ui_contract = @import("host/plugin_ui_contract.zig");
 pub const plugin_tools = @import("ai/plugin_tools.zig");
+pub const lifecycle_journal = @import("ai/lifecycle_journal.zig");
+pub const canonical_arguments = @import("ai/canonical_arguments.zig");
+pub const host_queries = @import("ai/host_queries.zig");
+test {
+    _ = canonical_arguments;
+    _ = lifecycle_journal;
+    _ = host_queries;
+    _ = @import("ui/ai_tools.zig");
+    _ = @import("ui/ai_lifecycle_controller.zig");
+    _ = @import("ai/lifecycle_runtime_tests.zig");
+    _ = @import("ai/host_approval.zig");
+    _ = @import("ai/fetch_url.zig");
+    _ = @import("ui/ai_execution_backend.zig");
+    _ = @import("ui/ai_host_queries.zig");
+}
 pub const plugin_content_context = @import("host/content_context.zig");
 pub const plugin_challenge_host = @import("host/challenge_host.zig");
 pub const plugin_operation_store = @import("host/operation_store.zig");

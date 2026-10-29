@@ -133,3 +133,20 @@ test "schema uses string content and actual reconnect backoff values" {
     try std.testing.expect(changed(a, b).isSet(find("ssh", "reconnect_backoff").?));
     for (fields, 0..) |entry, index| try std.testing.expectEqual(index, find(entry.section, entry.key).?);
 }
+
+test "execution policy settings participate in atomic draft change and merge" {
+    const baseline: config.Config = .{};
+    var draft = baseline;
+    draft.ai.execution_mode = .new_pty;
+    draft.ai.session_retention = .keep;
+    const dirty = changed(baseline, draft);
+    try std.testing.expectEqual(@as(usize, 2), dirty.count());
+    try std.testing.expect(dirty.isSet(find("ai", "execution_mode").?));
+    try std.testing.expect(dirty.isSet(find("ai", "session_retention").?));
+    var latest = baseline;
+    latest.ai.permission_mode = .auto;
+    const merged = merge(latest, draft, dirty);
+    try std.testing.expectEqual(config.ExecutionMode.new_pty, merged.ai.execution_mode);
+    try std.testing.expectEqual(config.SessionRetention.keep, merged.ai.session_retention);
+    try std.testing.expectEqual(config.PermissionMode.auto, merged.ai.permission_mode);
+}

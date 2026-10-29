@@ -24,24 +24,55 @@ pub const Targets = struct {
 pub const Scope = struct {
     owner: Owner,
     members: Targets,
-    /// Validate again immediately before dispatch against the live roster.
-    /// A closed session or removed member cannot inherit an approved call.
-    pub fn validate(self: Scope, ids: []const u64) !Targets {
-        if (ids.len == 0 or ids.len > max_targets) return error.InvalidTargetCount;
-        var result: Targets = .{};
+    /// A frozen directory may contain more members than one tool call. Owners
+    /// of a request must clone this slice; the legacy Targets stay call-sized.
+    inventory: ?[]const u64 = null,
+
+    pub fn memberIds(self: *const Scope) []const u64 {
+        return self.inventory orelse self.members.slice();
+    }
+    pub fn clone(self: Scope, allocator: std.mem.Allocator) !Scope {
+        var result = self;
+        if (self.inventory) |ids| result.inventory = try allocator.dupe(u64, ids);
+        return result;
+    }
+    pub fn validateDirectory(self: Scope, ids: []const u64) !void {
+        if (ids.len == 0) return error.InvalidTargetCount;
         for (ids, 0..) |id, i| {
-            if (id == 0 or std.mem.indexOfScalar(u64, self.members.slice(), id) == null) return error.TargetOutsideAssistant;
+            if (id == 0 or std.mem.indexOfScalar(u64, self.memberIds(), id) == null) return error.TargetOutsideAssistant;
             if (std.mem.indexOfScalar(u64, ids[0..i], id) != null) return error.DuplicateTarget;
             switch (self.owner) {
                 .session => |session| if (id != session) return error.TargetOutsideAssistant,
                 .group => {},
             }
-            result.ids[i] = id;
         }
+    }
+    /// Validate again immediately before dispatch against the live roster.
+    /// A closed session or removed member cannot inherit an approved call.
+    pub fn validate(self: Scope, ids: []const u64) !Targets {
+        if (ids.len == 0 or ids.len > max_targets) return error.InvalidTargetCount;
+        try self.validateDirectory(ids);
+        var result: Targets = .{};
+        @memcpy(result.ids[0..ids.len], ids);
         result.len = ids.len;
         return result;
     }
 };
+
+test "frozen directory exceeds one call without granting extra call targets" {
+    var ids: [300]u64 = undefined;
+    for (&ids, 1..) |*id, index| id.* = index;
+    const original: Scope = .{ .owner = .{ .group = 1 }, .members = .{}, .inventory = &ids };
+    const frozen = try original.clone(std.testing.allocator);
+    defer std.testing.allocator.free(frozen.inventory.?);
+    ids[299] = 901;
+    try std.testing.expectEqual(@as(u64, 300), frozen.memberIds()[299]);
+    try frozen.validateDirectory(frozen.memberIds());
+    _ = try frozen.validate(&.{ 300, 17 });
+    try std.testing.expectError(error.InvalidTargetCount, frozen.validate(frozen.memberIds()));
+    try std.testing.expectError(error.TargetOutsideAssistant, frozen.validate(&.{901}));
+    try std.testing.expectError(error.DuplicateTarget, frozen.validateDirectory(&.{ 300, 300 }));
+}
 pub const Tool = enum { run_command, read_terminal, list_remote_files, read_remote_file };
 pub const Call = struct {
     tool: Tool,

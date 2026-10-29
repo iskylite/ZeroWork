@@ -23,6 +23,8 @@ const terms = blk: {
 };
 const binds = [_]Choice{ .{ .label = "127.0.0.1", .value = "127.0.0.1" }, .{ .label = "0.0.0.0", .value = "0.0.0.0" } };
 const permissions = [_]Choice{ .{ .label = "确认后执行", .value = "confirm" }, .{ .label = "自动执行", .value = "auto" } };
+const execution_modes = [_]Choice{ .{ .label = "自行判断", .value = "auto" }, .{ .label = "每次询问", .value = "ask" }, .{ .label = "批处理", .value = "isolated_exec" }, .{ .label = "附加现有 PTY", .value = "attached_pty" }, .{ .label = "新建 PTY", .value = "new_pty" } };
+const retentions = [_]Choice{ .{ .label = "空闲后关闭", .value = "auto_idle" }, .{ .label = "每次询问", .value = "ask" }, .{ .label = "保留任务会话", .value = "keep" } };
 const formats = [_]Choice{ .{ .label = ".txt / .cast", .value = "txt_cast" }, .{ .label = ".txt", .value = "txt" }, .{ .label = ".cast", .value = "cast" } };
 const conflicts = [_]Choice{.{ .label = "每次询问", .value = "ask" }};
 pub fn choices(key: Key) []const Choice {
@@ -31,6 +33,8 @@ pub fn choices(key: Key) []const Choice {
     if (std.mem.eql(u8, key.key, "term")) return &terms;
     if (std.mem.eql(u8, key.key, "socks_bind")) return &binds;
     if (std.mem.eql(u8, key.key, "permission_mode")) return &permissions;
+    if (std.mem.eql(u8, key.key, "execution_mode")) return &execution_modes;
+    if (std.mem.eql(u8, key.key, "session_retention")) return &retentions;
     if (std.mem.eql(u8, key.key, "export_format")) return &formats;
     if (std.mem.eql(u8, key.key, "conflict_policy")) return &conflicts;
     return &.{};
@@ -60,7 +64,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, overlay_parent: *ui.Node, anchor: *ui
         try self.body.content.appendChild(cx.allocator, row);
     }
     // Text/numeric editing commits on Enter; choices and custom values share validation.
-    if (!std.mem.eql(u8, key.key, "permission_mode") and !std.mem.eql(u8, key.key, "conflict_policy") and !std.mem.eql(u8, key.key, "export_format") and !std.mem.eql(u8, key.key, "cursor_style") and !std.mem.eql(u8, key.key, "socks_bind")) {
+    if (!std.mem.eql(u8, key.key, "execution_mode") and !std.mem.eql(u8, key.key, "session_retention") and !std.mem.eql(u8, key.key, "permission_mode") and !std.mem.eql(u8, key.key, "conflict_policy") and !std.mem.eql(u8, key.key, "export_format") and !std.mem.eql(u8, key.key, "cursor_style") and !std.mem.eql(u8, key.key, "socks_bind")) {
         var buffer: [256]u8 = undefined;
         const initial = try editText(controller, key, &buffer);
         if (std.mem.eql(u8, key.key, "term")) {

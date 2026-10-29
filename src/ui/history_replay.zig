@@ -1,6 +1,10 @@
 const std = @import("std");
 const text_frame = @import("../vt/text_frame.zig");
 
+test {
+    _ = @import("history_colors.zig");
+}
+
 /// UI-owned snapshots of frames actually received from the session. This is
 /// an in-memory timeline; persistent RawStreamTap history is a separate source.
 pub const Timeline = struct {
@@ -11,20 +15,21 @@ pub const Timeline = struct {
     selected: ?usize = null,
     history_id: ?@import("../host/identity.zig").HistoryId = null,
     pub const PresentationRow = struct { layout: @import("terminal_record_geometry.zig").Layout = .{}, y: u16, id: @import("../vt/snapshot.zig").RowId, kind: u8, state: u8, timestamp: ?i64 };
-    pub const Entry = struct { time_ms: i64, wire: []u8, presentation: []PresentationRow = &.{}, search: ?@import("../vt/search_snapshot.zig").Document = null, search_allocator: ?std.mem.Allocator = null };
+    pub const ColorRun = struct { start: u32, end: u32, cell: @import("../vt/snapshot.zig").Cell, kind: u8 };
+    pub const Entry = struct { time_ms: i64, wire: []u8, presentation: []PresentationRow = &.{}, search: ?@import("../vt/search_snapshot.zig").Document = null, search_allocator: ?std.mem.Allocator = null, reverse_colors: bool = false, color_runs: []ColorRun = &.{} };
     pub fn projectionStorageBytes(projection: *const @import("../vt/snapshot.zig").Projection) usize {
         var text_bytes: usize = projection.visible_rows.len -| 1;
         var spans: usize = 0;
         for (projection.visible_rows) |row| {
             const cells = projection.cells[row.cell_start..][0..row.cell_count];
             var end = cells.len;
-            while (end > 0 and cells[end - 1].grapheme_len == 0) end -= 1;
+            while (end > 0 and cells[end - 1].grapheme_len == 0 and cells[end - 1].attributes == 0 and cells[end - 1].background == .default and cells[end - 1].underline == 0 and !projection.modes.reverse_colors) end -= 1;
             for (cells[0..end]) |cell| if (cell.width != .wide_tail) {
                 spans += 1;
                 text_bytes += @max(1, cell.grapheme_len);
             };
         }
-        return text_frame.header_bytes + text_bytes + @min(spans, std.math.maxInt(u16)) * text_frame.span_wire_bytes + projection.visible_rows.len * @sizeOf(PresentationRow);
+        return text_frame.header_bytes + text_bytes + @min(spans, std.math.maxInt(u16)) * text_frame.span_wire_bytes + projection.visible_rows.len * @sizeOf(PresentationRow) + spans * @sizeOf(ColorRun);
     }
     pub fn appendProjection(self: *Timeline, at: i64, projection: *const @import("../vt/snapshot.zig").Projection) !void {
         _ = try self.appendProjectionInner(at, projection, false);
@@ -35,20 +40,26 @@ pub const Timeline = struct {
     fn appendProjectionInner(self: *Timeline, at: i64, projection: *const @import("../vt/snapshot.zig").Projection, deduplicate: bool) !bool {
         const wire = try @import("../vt/projection_frame.zig").encode(self.allocator, projection, false);
         errdefer self.allocator.free(wire);
+        const color_runs = try self.captureColors(projection);
+        errdefer self.allocator.free(color_runs);
         if (deduplicate) if (self.latest()) |last| if (std.mem.eql(u8, last.wire, wire) and last.presentation.len == projection.visible_rows.len) {
+            const same_colors = last.reverse_colors == projection.modes.reverse_colors and last.color_runs.len == color_runs.len and for (last.color_runs, color_runs) |saved, next| {
+                if (!std.meta.eql(saved, next)) break false;
+            } else true;
             const same = for (projection.visible_rows, last.presentation) |row, saved| {
                 if (!std.meta.eql(row.id, saved.id) or !std.meta.eql(row.presentation, saved.layout) or row.viewport_y != saved.y or row.application_kind != saved.kind or row.application_state != saved.state) break false;
             } else true;
-            if (same) {
+            if (same and same_colors) {
                 self.allocator.free(wire);
+                self.allocator.free(color_runs);
                 return false;
             }
         };
         const presentation = try self.allocator.alloc(PresentationRow, projection.visible_rows.len);
         errdefer self.allocator.free(presentation);
         for (projection.visible_rows, presentation) |row, *saved| saved.* = .{ .layout = row.presentation, .y = row.viewport_y, .id = row.id, .kind = row.application_kind, .state = row.application_state, .timestamp = row.submitted_wallclock_ms orelse row.received_wallclock_ms };
-        try self.frames.append(self.allocator, .{ .time_ms = at, .wire = wire, .presentation = presentation });
-        self.bytes += wire.len + presentation.len * @sizeOf(PresentationRow);
+        try self.frames.append(self.allocator, .{ .time_ms = at, .wire = wire, .presentation = presentation, .reverse_colors = projection.modes.reverse_colors, .color_runs = color_runs });
+        self.bytes += wire.len + presentation.len * @sizeOf(PresentationRow) + color_runs.len * @sizeOf(ColorRun);
         self.trim();
         return true;
     }
@@ -61,21 +72,53 @@ pub const Timeline = struct {
         defer replacement.deinit();
         try replacement.appendProjection(last.time_ms, projection);
         const next = replacement.frames.pop().?;
-        self.bytes -= last.wire.len + last.presentation.len * @sizeOf(PresentationRow);
+        self.bytes -= last.wire.len + last.presentation.len * @sizeOf(PresentationRow) + last.color_runs.len * @sizeOf(ColorRun);
         self.allocator.free(last.wire);
         if (last.presentation.len > 0) self.allocator.free(last.presentation);
+        self.allocator.free(last.color_runs);
         last.wire = next.wire;
         last.presentation = next.presentation;
-        self.bytes += next.wire.len + next.presentation.len * @sizeOf(PresentationRow);
+        last.reverse_colors = next.reverse_colors;
+        last.color_runs = next.color_runs;
+        self.bytes += next.wire.len + next.presentation.len * @sizeOf(PresentationRow) + next.color_runs.len * @sizeOf(ColorRun);
         self.trim();
     }
     pub fn init(allocator: std.mem.Allocator, limit: usize) Timeline {
         return .{ .allocator = allocator, .limit = limit };
     }
+    /// A live @log view freezes its retained document while incoming output
+    /// continues in an independently bounded live timeline.
+    pub fn clone(self: *const Timeline) !Timeline {
+        var result = Timeline.init(self.allocator, self.limit);
+        errdefer result.deinit();
+        result.history_id = self.history_id;
+        for (self.frames.items) |entry| {
+            const wire = try result.allocator.dupe(u8, entry.wire);
+            errdefer result.allocator.free(wire);
+            const presentation = try result.allocator.dupe(PresentationRow, entry.presentation);
+            errdefer result.allocator.free(presentation);
+            const color_runs = try result.allocator.dupe(ColorRun, entry.color_runs);
+            errdefer result.allocator.free(color_runs);
+            var search: ?@import("../vt/search_snapshot.zig").Document = null;
+            errdefer if (search) |*document| document.deinit(result.allocator);
+            if (entry.search) |document| {
+                const text = try result.allocator.dupe(u8, document.text);
+                errdefer result.allocator.free(text);
+                const rows = try result.allocator.dupe(@import("../vt/search_snapshot.zig").Row, document.rows);
+                errdefer result.allocator.free(rows);
+                const spans = try result.allocator.dupe(@import("../vt/search_snapshot.zig").Span, document.spans);
+                search = .{ .source_version = document.source_version, .alternate_screen = document.alternate_screen, .text = text, .rows = rows, .spans = spans };
+            }
+            try result.frames.append(result.allocator, .{ .time_ms = entry.time_ms, .wire = wire, .presentation = presentation, .search = search, .reverse_colors = entry.reverse_colors, .color_runs = color_runs });
+        }
+        result.bytes = self.bytes;
+        return result;
+    }
     pub fn deinit(self: *Timeline) void {
         for (self.frames.items) |*entry| {
             self.allocator.free(entry.wire);
-            if (entry.presentation.len > 0) self.allocator.free(entry.presentation);
+            self.allocator.free(entry.presentation);
+            self.allocator.free(entry.color_runs);
             if (entry.search) |*document| document.deinit(entry.search_allocator orelse self.allocator);
         }
         self.frames.deinit(self.allocator);
@@ -98,7 +141,9 @@ pub const Timeline = struct {
             const oldest = self.frames.orderedRemove(remove_index);
             self.bytes -= oldest.wire.len;
             self.bytes -= oldest.presentation.len * @sizeOf(PresentationRow);
+            self.bytes -= oldest.color_runs.len * @sizeOf(ColorRun);
             if (oldest.presentation.len > 0) self.allocator.free(oldest.presentation);
+            self.allocator.free(oldest.color_runs);
             if (oldest.search) |document| self.bytes -= document.text.len + document.rows.len * @sizeOf(@import("../vt/search_snapshot.zig").Row) + document.spans.len * @sizeOf(@import("../vt/search_snapshot.zig").Span);
             self.allocator.free(oldest.wire);
             var removed = oldest;
@@ -131,11 +176,44 @@ pub const Timeline = struct {
     /// remain available when that index alone would exceed the history budget.
     pub fn canAttachSearch(self: *const Timeline, document: @import("../vt/search_snapshot.zig").Document) bool {
         const last = self.latest() orelse return false;
-        const frame_bytes = last.wire.len + last.presentation.len * @sizeOf(PresentationRow);
+        const frame_bytes = last.wire.len + last.presentation.len * @sizeOf(PresentationRow) + last.color_runs.len * @sizeOf(ColorRun);
         return searchBytes(document) <= self.limit -| frame_bytes;
     }
     fn searchBytes(document: @import("../vt/search_snapshot.zig").Document) usize {
         return document.text.len + document.rows.len * @sizeOf(@import("../vt/search_snapshot.zig").Row) + document.spans.len * @sizeOf(@import("../vt/search_snapshot.zig").Span);
+    }
+    // Keep only coalesced color semantics for the viewport-only @log fallback.
+    // Full search documents already retain native_cell; no full Projection or
+    // second text copy is retained here. Byte offsets match projection_frame.
+    fn captureColors(self: *Timeline, projection: *const @import("../vt/snapshot.zig").Projection) ![]ColorRun {
+        var runs: std.ArrayList(ColorRun) = .empty;
+        defer runs.deinit(self.allocator);
+        var offset: u32 = 0;
+        for (projection.visible_rows, 0..) |row, index| {
+            const cells = projection.cells[row.cell_start..][0..row.cell_count];
+            var end = cells.len;
+            while (end > 0 and cells[end - 1].grapheme_len == 0 and cells[end - 1].attributes == 0 and cells[end - 1].background == .default and cells[end - 1].underline == 0 and !projection.modes.reverse_colors) end -= 1;
+            for (cells[0..end]) |cell| {
+                if (cell.width == .wide_tail) continue;
+                var style = cell;
+                style.grapheme_start = 0;
+                style.grapheme_len = 0;
+                style.width = .single;
+                style.semantic = 0;
+                const start = offset;
+                offset += @max(1, cell.grapheme_len);
+                if (runs.items.len > 0) {
+                    const last = &runs.items[runs.items.len - 1];
+                    if (last.end == start and last.kind == row.application_kind and std.meta.eql(last.cell, style)) {
+                        last.end = offset;
+                        continue;
+                    }
+                }
+                try runs.append(self.allocator, .{ .start = start, .end = offset, .cell = style, .kind = row.application_kind });
+            }
+            if (index + 1 < projection.visible_rows.len) offset += 1;
+        }
+        return runs.toOwnedSlice(self.allocator);
     }
     /// Legacy recordings contain viewport frames only. Index every retained
     /// frame explicitly; never claim their missing scrollback was persisted.

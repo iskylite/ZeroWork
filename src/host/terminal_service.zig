@@ -136,12 +136,19 @@ pub const Paste = struct {
 };
 
 pub const trusted_edit = @import("trusted_edit.zig");
+pub const execution = @import("terminal_execution.zig");
 
 pub const Service = struct {
     binding: session.ServiceHandle,
     context: *anyopaque,
     vtable: *const VTable,
     pub const VTable = struct {
+        recording_display: ?*const fn (*anyopaque, session.ServiceHandle, @import("../vt/recording_manifest.zig").Display) anyerror!void = null,
+        execution_output: ?*const fn (*anyopaque, session.ServiceHandle, identity.ExecutionId, std.mem.Allocator, u64, usize) anyerror!execution.Output = null,
+        execution_snapshot: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!execution.Snapshot = null,
+        execution_request: ?*const fn (*anyopaque, session.ServiceHandle, execution.Request) anyerror!void = null,
+        execution_renew: ?*const fn (*anyopaque, session.ServiceHandle, execution.Grant) anyerror!void = null,
+        execution_revoke: ?*const fn (*anyopaque, session.ServiceHandle, execution.Grant, bool) anyerror!void = null,
         write: *const fn (*anyopaque, session.ServiceHandle, WriteRequest) anyerror!Submission,
         resize: *const fn (*anyopaque, session.ServiceHandle, Geometry) anyerror!void,
         read: *const fn (*anyopaque, session.ServiceHandle, []u8) anyerror!Read,
@@ -171,6 +178,34 @@ pub const Service = struct {
         search_async: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!*SearchTask = null,
         search_tail: ?*const fn (*anyopaque, session.ServiceHandle, SearchTail, std.mem.Allocator) anyerror!SearchSnapshot = null,
     };
+    pub fn setRecordingDisplay(self: Service, display: @import("../vt/recording_manifest.zig").Display) !void {
+        const call = self.vtable.recording_display orelse return error.RecordingUnavailable;
+        return call(self.context, self.binding, display);
+    }
+    pub fn executionOutput(self: Service, id: identity.ExecutionId, allocator: std.mem.Allocator, cursor: u64, max_bytes: usize) !execution.Output {
+        const call = self.vtable.execution_output orelse return error.IntegrationUnavailable;
+        if (max_bytes == 0 or max_bytes > 65536) return error.InvalidArguments;
+        return call(self.context, self.binding, id, allocator, cursor, max_bytes);
+    }
+    pub fn executionSnapshot(self: Service) !execution.Snapshot {
+        const call = self.vtable.execution_snapshot orelse return .{ .owner = switch (self.binding.resource_owner) {
+            .session => |owner| owner,
+            else => self.binding.origin_session orelse return error.InvalidOwner,
+        } };
+        return call(self.context, self.binding);
+    }
+    pub fn executionRequest(self: Service, request: execution.Request) !void {
+        const call = self.vtable.execution_request orelse return error.IntegrationUnavailable;
+        return call(self.context, self.binding, request);
+    }
+    pub fn executionRenew(self: Service, grant: execution.Grant) !void {
+        const call = self.vtable.execution_renew orelse return error.IntegrationUnavailable;
+        return call(self.context, self.binding, grant);
+    }
+    pub fn executionRevoke(self: Service, grant: execution.Grant, takeover: bool) !void {
+        const call = self.vtable.execution_revoke orelse return error.IntegrationUnavailable;
+        return call(self.context, self.binding, grant, takeover);
+    }
     pub fn trustedSnapshot(self: Service, allocator: std.mem.Allocator) !?trusted_edit.Snapshot {
         const call = self.vtable.trusted_snapshot orelse return null;
         return call(self.context, self.binding, allocator);

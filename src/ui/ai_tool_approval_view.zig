@@ -50,13 +50,14 @@ pub const View = struct {
         try header.appendChild(cx.allocator, disclosure);
         self.title = try ui.textStyled(cx, S.title, "工具调用");
         self.title.meta.ownership.meta.test_id = "ai.approval.title";
+        self.title.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .flex_shrink = 0 });
         try header.appendChild(cx.allocator, self.title);
         self.header_identity = try ui.textStyled(cx, S.headerIdentity, "");
         self.header_identity.meta.ownership.meta.test_id = "ai.approval.target";
         self.header_identity.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
         try header.appendChild(cx.allocator, self.header_identity);
         const state = try ui.text(cx, "待确认", .{ .font_size = 10, .line_height = 1.65, .color = theme.current().fg_2 });
-        state.setStyleInline(cx.allocator, .{ .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = theme.current().well, .corner_radius = 5 });
+        state.setStyleInline(cx.allocator, .{ .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = ui.Color.TRANSPARENT, .corner_radius = 5, .flex_shrink = 0 });
         try header.appendChild(cx.allocator, state);
         self.target_copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制全部目标信息", .base_style = S.disclosureButton(), .on_click = cx.on(View, self, copyTargets) }).mount(scope, cx);
         self.target_copy.meta.ownership.meta.test_id = "ai.approval.copy_targets";
@@ -133,12 +134,12 @@ pub const View = struct {
             const command = try self.cx.allocator.dupe(u8, source.command);
             errdefer self.cx.allocator.free(command);
             const terminal = source.tool_id == null or std.mem.eql(u8, source.tool_id.?, "run_command");
-            try self.title.setTextContent(self.cx.allocator, if (terminal) "执行命令" else "工具调用");
+            try self.title.setTextContent(self.cx.allocator, if (terminal) "执行命令" else @import("ai_tool_titles.zig").title(source.tool_id.?) orelse "工具调用");
             if (self.command_copy.behavior.interaction.a11y) |*attrs| attrs.label = if (terminal) "复制完整命令" else "复制调用参数";
             const target = if (source.group) try self.cx.allocator.dupe(u8, source.target) else if (source.cwd != null or terminal) try std.fmt.allocPrint(self.cx.allocator, "{s} · #{d} · 目录 {s}", .{ source.target, @backingInt(source.owner.session_id), source.cwd orelse "未知" }) else try std.fmt.allocPrint(self.cx.allocator, "{s} · #{d}", .{ source.target, @backingInt(source.owner.session_id) });
             defer self.cx.allocator.free(target);
             try self.identity.setTextContent(self.cx.allocator, target);
-            try self.header_identity.setTextContent(self.cx.allocator, if (source.group) "全部目标" else target);
+            try self.header_identity.setTextContent(self.cx.allocator, if (source.group) "全部目标" else source.target);
             try self.command.setTextContent(self.cx.allocator, command);
             try self.feedback.setTextContent(self.cx.allocator, if (source.group) (if (terminal) "影响 · 上述全部目标各执行一次此命令；写入及业务影响尚未核实。" else "影响 · 上述全部目标各执行一次此调用；写入及业务影响尚未核实。") else "影响 · 尚未核实");
             const target_copy = try self.cx.allocator.dupe(u8, target);
@@ -155,14 +156,14 @@ pub const View = struct {
         self.body.setDisplay(.flex);
         const desired: f32 = if (source.group) 207.625 else 167.625;
         self.card_height = desired;
-        self.target_copy.setDisplay(if (source.group) .flex else .none);
+        self.target_copy.setDisplay(.flex);
         self.footer.setDisplay(.flex);
         self.footer.setStyleInline(self.cx.allocator, S.footer(self.cx.tokens));
         self.group_footer.setDisplay(.none);
         self.tail.setDisplay(.none);
         self.root.setStyleInline(self.cx.allocator, .{ .padding = .{ .left = 14, .right = 14, .top = 9 } });
-        self.identity.setDisplay(if (source.group) .flex else .none);
-        self.identity.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (source.group) 60.625 else 20.625 } });
+        self.identity.setDisplay(.flex);
+        self.identity.setStyleInline(self.cx.allocator, .{ .height = .{ .fit = .{} } });
         self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (source.group) 130.625 else 90.625 } });
         if (self.card.style.height != .px or self.card.style.height.px != desired) self.card.setStyleInline(self.cx.allocator, .{ .height = .{ .px = desired } });
         self.root.setDisplay(.flex);
@@ -197,8 +198,7 @@ pub const View = struct {
     }
     fn copyCommand(self: *View) void {
         const command = self.command_owned orelse return;
-        const copied = ui.platform_services.clipboardSetText(self.cx.system_sdk, command);
-        self.feedback.setTextContent(self.cx.allocator, if (copied) "已复制" else "复制失败") catch {};
+        _ = ui.platform_services.clipboardSetText(self.cx.system_sdk, command);
     }
     fn copyTargets(self: *View) void {
         const targets = self.target_owned orelse return;

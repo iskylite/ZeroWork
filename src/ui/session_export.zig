@@ -90,6 +90,14 @@ pub fn castText(allocator: std.mem.Allocator, cast: []const u8) ![]u8 {
     if (header.value != .object) return error.InvalidCast;
     const version = header.value.object.get("version") orelse return error.InvalidCast;
     if (version != .integer or version.integer != 2) return error.InvalidCast;
+    if (header.value.object.get("zerowork")) |metadata| {
+        if (metadata != .object) return error.InvalidCast;
+        if (metadata.object.get("replay_baseline")) |baseline| {
+            if (baseline != .string) return error.InvalidCast;
+            if (std.mem.eql(u8, baseline.string, "unavailable")) return error.RecordingBaselineUnavailable;
+            return error.UnsupportedRecordingBaseline;
+        }
+    }
     const cols = try dimension(header.value.object.get("width") orelse return error.InvalidCast);
     const rows = try dimension(header.value.object.get("height") orelse return error.InvalidCast);
     var adapter = try Adapter.init(allocator, rows, cols);
@@ -123,4 +131,8 @@ pub fn castText(allocator: std.mem.Allocator, cast: []const u8) ![]u8 {
 fn dimension(value: std.json.Value) !u16 {
     if (value != .integer or value.integer < 1 or value.integer > 1000) return error.InvalidCast;
     return @intCast(value.integer);
+}
+
+test "history retained export never invents plaintext without a replay baseline" {
+    try std.testing.expectError(error.RecordingBaselineUnavailable, castText(std.testing.allocator, "{\"version\":2,\"width\":80,\"height\":24,\"zerowork\":{\"replay_baseline\":\"unavailable\"}}\n[0,\"o\",\"tail\"]\n"));
 }

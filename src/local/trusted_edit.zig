@@ -3,7 +3,7 @@
 const std = @import("std");
 const identity = @import("../host/identity.zig");
 pub const edit = @import("../host/trusted_edit.zig");
-const Native = opaque {};
+pub const Native = opaque {};
 extern fn zw_local_edit_poll_fd(*Native) c_int;
 extern fn zw_local_edit_create(u64, u64, [*]const u8, usize) ?*Native;
 extern fn zw_local_edit_destroy(*Native) void;
@@ -11,7 +11,7 @@ extern fn zw_local_edit_directory(*Native) [*:0]const u8;
 extern fn zw_local_edit_nonce(*Native) [*:0]const u8;
 extern fn zw_local_edit_read(*Native, c_int, [*]u8, usize, *usize) c_int;
 extern fn zw_local_edit_write(*Native, [*]const u8, usize, *usize) c_int;
-const script = @embedFile("shell/integration.zsh");
+const script = @embedFile("shell/integration.zsh") ++ "\n" ++ @embedFile("shell/execution.zsh");
 pub const Bridge = struct {
     allocator: std.mem.Allocator,
     owner: identity.SessionHandle,

@@ -85,7 +85,7 @@ const Fixture = struct {
         for ([_][]const u8{ "ai.approval.accept", "ai.approval.reject" }) |id| {
             const button = self.node(id);
             const r = button.globalRect();
-            try std.testing.expectEqual(@as(f32, 66), r.w);
+            try std.testing.expectEqual(@as(f32, 76), r.w);
             try std.testing.expectEqual(@as(f32, 26.5), r.h);
             try std.testing.expect(r.x >= card.x and r.y >= card.y);
             try std.testing.expect(r.x + r.w <= card.x + card.w + 0.1 and r.y + r.h <= card.y + card.h + 0.1);
@@ -154,12 +154,12 @@ test "AI approval default short command shows entire risk feedback without scrol
     try std.testing.expectEqualStrings("影响 · 尚未核实", f.view.feedback.getText().?.content);
     const title = f.view.title.globalRect();
     const target = f.view.header_identity.globalRect();
-    try std.testing.expectEqualStrings(f.view.identity.getText().?.content, f.view.header_identity.getText().?.content);
+    try std.testing.expectEqualStrings(approval.target, f.view.header_identity.getText().?.content);
     try std.testing.expect(target.x > title.x + title.w);
     try std.testing.expect(@abs((target.y + target.h / 2) - (title.y + title.h / 2)) < 1);
-    try std.testing.expect(f.view.identity.style.display == .none);
+    try std.testing.expect(f.view.identity.style.display == .flex);
     const notice = f.node("ai.approval.impact_notice").globalRect();
-    try std.testing.expectEqual(@as(f32, 28), notice.h);
+    try std.testing.expectEqual(@as(f32, 30), notice.h);
     try std.testing.expect(feedback.y >= notice.y and feedback.y + feedback.h <= notice.y + notice.h + 0.01);
     try std.testing.expect(feedback.w > 0 and feedback.h > 0);
     try std.testing.expect(feedback.x >= body.x and feedback.x + feedback.w <= body.x + body.w + 0.01);
@@ -338,8 +338,8 @@ test "group AI approval preserves complete frozen targets and fixed actions at c
     try std.testing.expectEqualStrings(approval.target, f.view.target_owned.?);
     const button = f.node("ai.approval.accept");
     const reject = f.node("ai.approval.reject");
-    try std.testing.expectEqual(@as(f32, 66), button.globalRect().w);
-    try std.testing.expectEqual(@as(f32, 66), reject.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 76), button.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 76), reject.globalRect().w);
     try std.testing.expectEqual(@as(f32, 26.5), button.globalRect().h);
     try std.testing.expect(button.globalRect().y >= f.view.body.globalRect().y + f.view.body.globalRect().h);
     const original_hash = f.view.arguments_hash;
@@ -353,7 +353,7 @@ test "group AI approval preserves complete frozen targets and fixed actions at c
     try std.testing.expectEqual(@as(usize, 0), f.attempts);
     try std.testing.expectEqual(@as(f32, 572), f.view.card.globalRect().w);
     const standard_accept = f.node("ai.approval.accept");
-    try std.testing.expectEqual(@as(f32, 66), standard_accept.globalRect().w);
+    try std.testing.expectEqual(@as(f32, 76), standard_accept.globalRect().w);
     f.click(standard_accept);
     try std.testing.expectEqual(@as(usize, 1), f.decisions);
     try std.testing.expectEqual(@as(?bool, true), f.last_approved);
@@ -377,4 +377,116 @@ test "AI generic tool approval names the tool call and never invents a working d
     try f.view.update(approval);
     try std.testing.expectEqualStrings("执行命令", f.node("ai.approval.title").getText().?.content);
     try std.testing.expect(std.mem.endsWith(u8, f.view.identity.getText().?.content, "目录 未知"));
+}
+
+test "AI approval long target stays readable in body with fixed header and decisions across themes" {
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    inline for (.{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        var f: Fixture = undefined;
+        try f.init();
+        defer f.deinit();
+        f.cx.setTheme(theme.widgetTheme(name));
+        f.panel.setStyleInline(a, .{ .width = .{ .px = 360 } });
+        var source = Fixture.source(23, "printf 'full target remains visible'");
+        source.target = "original@production-host-with-a-long-name.example.net:2222";
+        source.cwd = "/srv/production/long/deployment/working/directory";
+        try f.view.update(source);
+        f.settle();
+        const title = f.view.title.globalRect();
+        const icon = f.node("ai.approval.disclosure").globalRect();
+        try std.testing.expect(@abs(icon.y + icon.h / 2 - title.y - title.h / 2) < 1);
+        try std.testing.expect(f.view.header_identity.globalRect().w > 0);
+        try std.testing.expectEqualStrings(source.target, f.view.header_identity.getText().?.content);
+        try std.testing.expect(std.mem.indexOf(u8, f.view.identity.getText().?.content, source.cwd.?) != null);
+        try std.testing.expect(f.view.identity.globalRect().h > 0);
+        try std.testing.expectEqual(.flex, f.node("ai.approval.copy_targets").style.display);
+        try std.testing.expectEqual(@as(u8, 255), f.view.card.getBackground().a);
+        try f.visibleActions();
+    }
+}
+
+fn hostSnapshot(kind: @import("ai/host_approval.zig").SubjectKind, detail: []const u8) @import("ai/host_approval.zig").Snapshot {
+    var source: @import("ai/host_approval.zig").Snapshot = .{ .kind = kind, .target = .{}, .detail = .{}, .impact = .{}, .context = undefined, .authority = .local_network_read, .sequence = 1, .operation_id = 2, .turn_id = 1, .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0), .tool = .{}, .call = .{}, .requested_url = .{}, .canonical_url = .{}, .network_policy_revision = 1, .created_at_ms = 0, .expires_at_ms = 1 };
+    source.kind = kind;
+    source.sequence = 1;
+    source.operation_id = 2;
+    source.context = .{ .conversation_id = @import("host/identity.zig").ConversationId.generate(), .task_id = @import("host/identity.zig").TaskId.generate(), .binding = .{ .session = 101 }, .binding_revision = 1, .grant_revision = 1 };
+    const target = "original@long-production-target.example.net";
+    @memcpy(source.target.bytes[0..target.len], target);
+    source.target.len = target.len;
+    @memcpy(source.detail.bytes[0..detail.len], detail);
+    source.detail.len = detail.len;
+    const url = "https://example.com/docs";
+    @memcpy(source.canonical_url.bytes[0..url.len], url);
+    source.canonical_url.len = url.len;
+    return source;
+}
+
+test "host approval all subjects keep icons titles and fixed decisions aligned across themes and sizes" {
+    const Host = @import("ui/ai_host_approval_view.zig");
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    const Callback = struct {
+        fn decide(_: *anyopaque, _: u64, _: [32]u8, _: bool) !void {}
+    };
+    const segments = try a.alloc(u8, "release-notes/".len * 120);
+    for (0..120) |index| @memcpy(segments[index * "release-notes/".len ..][0.."release-notes/".len], "release-notes/");
+    defer a.free(segments);
+    const detail = try std.mem.concat(a, u8, &.{ "https://example.com/", segments, "?version=0.2.6" });
+    defer a.free(detail);
+    inline for (.{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        for ([_]f32{ 600, 360 }) |width| {
+            inline for (.{ .network_url, .lifecycle, .terminal_command }) |kind| {
+                const cx = try ui.Cx.init(a, std.testing.io);
+                defer cx.deinit();
+                cx.setTheme(theme.widgetTheme(name));
+                cx.setViewport(width, 360);
+                const scope = try ui.Scope.init(a, null, cx.owner);
+                defer scope.dispose();
+                cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+                const view = try Host.View.mount(cx, scope, .{ .context = cx, .on_decision = Callback.decide });
+                try cx.root.?.appendChild(a, view.root);
+                try view.update(hostSnapshot(kind, detail));
+                for (0..4) |_| {
+                    cx.layout();
+                    _ = cx.render();
+                }
+                const title = view.title.globalRect();
+                const icon = (switch (@as(@import("ai/host_approval.zig").SubjectKind, kind)) {
+                    .network_url => view.network_icon,
+                    .lifecycle => view.lifecycle_icon,
+                    .terminal_command => view.terminal_icon,
+                }).globalRect();
+                try std.testing.expect(title.w > 0 and title.h >= 20);
+                try std.testing.expect(icon.x + icon.w <= title.x);
+                try std.testing.expect(@abs(icon.y + icon.h / 2 - title.y - title.h / 2) < 1);
+                try std.testing.expect(view.target.globalRect().w > 0);
+                const body = view.body.globalRect();
+                const accept = view.accept.globalRect();
+                const reject = view.reject.globalRect();
+                try std.testing.expect(accept.y >= body.y + body.h);
+                try std.testing.expect(accept.x > reject.x and accept.x + accept.w <= width);
+                try std.testing.expect(accept.y + accept.h <= 360);
+                try std.testing.expectEqual(@as(u8, 255), view.card.getBackground().a);
+                try std.testing.expectEqualStrings(detail, view.requested_url.?);
+                if (kind == .network_url) {
+                    const viewport = find(view.root, "ai.host_approval.url_viewport").?;
+                    try std.testing.expectEqual(@as(f32, 17), view.url.globalRect().h);
+                    try std.testing.expect(view.url.globalRect().w > viewport.globalRect().w);
+                    try std.testing.expectEqual(.none, view.source.style.display);
+                    const before = view.url.globalRect().x;
+                    const vr = viewport.globalRect();
+                    cx.handleScroll(.{ .x = vr.x + 20, .y = vr.y + 10, .dx = -200, .dy = 0 });
+                    cx.layout();
+                    try std.testing.expect(view.url.globalRect().x < before);
+                    try std.testing.expectEqual(accept, view.accept.globalRect());
+                }
+            }
+        }
+    }
 }

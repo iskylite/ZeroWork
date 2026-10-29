@@ -29,7 +29,7 @@
 | 已清理 | [cleanup / cleaned](./?state=cleanup&cleanup=cleaned&theme=dark) | 工作会话变为 @log，组保留，不自动回到单会话 |
 | 保存失败保稿 | [settings-error](./?state=settings-error&theme=dark) | 首次保存失败，保留设置草稿，再次保存成功 |
 
-所有场景共用 `app.js` 的 renderer 与 fixture。`theme=dark|light|sauber` 和 `viewport=default|compact` 可组合；产品画板分别为 1440 × 900 和 860 × 480；最小窗口助手为600 × 358。当前审批占满可用transcript内容区并默认滚动定位，上方消息保留在外层滚动区供回查；实际目标、目录和完整命令初始可见，影响说明可在审批正文内部滚动。菜单正文内部滚动，批准footer、composer及停止按钮保持固定可达。评审栏位于产品画板外。首选入口为 `pty-running`。
+所有场景共用 `app.js` 的 renderer 与 fixture。`theme=dark|light|sauber` 和 `viewport=default|compact` 可组合；产品画板分别为 1440 × 900 和 860 × 480；最小窗口助手仍由真实 pane bounds 夹取；当前侧栏224px时可用宽588px，组状态实测高336px、单pane实测高376px。当前审批占满可用transcript内容区并默认滚动定位，上方消息保留在外层滚动区供回查；实际目标、目录和完整命令初始可见，影响说明可在审批正文内部滚动。菜单正文内部滚动，批准footer、composer及停止按钮保持固定可达。评审栏位于产品画板外。首选入口为 `pty-running`。
 
 ## 共享组件与交互映射
 
@@ -88,7 +88,7 @@
 | 助手 | 复用工作区positionAssistant的600×456期望尺寸及小窗夹取、拖动与缩放规则，不单独定义补丁浮窗尺寸；会话卡片与终端尺寸由原 workspace 决定 |
 | 输入框 | 固定90 px，textarea46 + 控件行28；左侧附件→权限模式→运行模式，右侧上下文→模型/推理→输入/状态/发送或停止，左右对齐；不增删或改小控件。运行方式放折叠菜单，不把五个选项常驻输入框 |
 | 工具卡 | header32，r9；正文与对话分开滚动；footer 保留查看终端 / 记录、查看过程、接管 / 输入动作 |
-| 文字 | 助手标题13，产品正文12.5，设置选项12，步骤标题11.5，输出11；小字只用于 ID、时间与辅助元信息 |
+| 文字 | 普通标题13/700/20，正文12/18，动作12/500/18，工具summary12/500/18，辅助11/16，等宽端点10.5/16；工具详情视口上限150px，关键命令与影响可滚动回查 |
 | 终端输出与输入 | 直接复用原终端。新建 PTY 是组内普通会话卡片，仅目标只读；附加已有 PTY 仅将该卡片变只读。右下角为 AI 控制 • 只读 + 接管，其他输入位置与交互不变 |
 | 批处理 | identity / cwd / command、分离的 stdout / stderr、exit code、elapsed、结果字段完整可展开 |
 | PTY | live、附加 PTY 使用现有 `terminalPane/logMarkup`，历史使用现有历史页。不显示 AI 命令装饰，不另造底层输入组件及上层封装组件。命令 ID 留在工具卡和记录元数据；未提供退出码时显示 `exit —` |

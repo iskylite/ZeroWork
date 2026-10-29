@@ -16,6 +16,8 @@ const realtime = @import("../platform/realtime.zig");
 const CheckpointController = @import("checkpoint_controller.zig").Controller;
 const SshExecBridge = @import("../proto/ssh/exec_bridge.zig").SshExecBridge;
 const SharedTransfer = @import("../proto/ssh/shared_transfer_service.zig").Service;
+const identity = @import("../host/identity.zig");
+const manifest = @import("recording_manifest.zig");
 const ForwardService = @import("../proto/ssh/forward_service.zig").Service;
 
 pub const RuntimeOptions = struct {
@@ -113,6 +115,10 @@ pub const SshWorker = struct {
     replay: Replay,
     timeline: Timeline,
     /// Immutable cast header geometry; options may change on reconnect.
+    recording_id: identity.RecordingId = .{},
+    archive_key: identity.ArchiveKey = .{},
+    recording_generations: std.ArrayList(manifest.Generation) = .empty,
+    recording_generation_failed: bool = false,
     recording_initial_cols: u16 = 80,
     recording_initial_rows: u16 = 24,
     reconnect_backoff: [5]u8,
@@ -293,6 +299,14 @@ pub const SshWorker = struct {
         worker.read_buffer = read_buffer;
         worker.write_buffer = write_buffer;
         worker.timeline = timeline;
+        worker.recording_id = identity.RecordingId.generate();
+        worker.archive_key = identity.ArchiveKey.generate();
+        worker.recording_generations = .empty;
+        worker.recording_generation_failed = false;
+        const recording_owner: identity.SessionHandle = if (options.operation_key) |key| if (key.owner == .session) key.owner.session else .{ .session_id = @fromBackingInt(0), .generation = 0 } else .{ .session_id = @fromBackingInt(0), .generation = 0 };
+        worker.recording_generations.append(allocator, .{ .session_id = @backingInt(recording_owner.session_id), .session_generation = recording_owner.generation, .initial_cols = options.cols, .initial_rows = options.rows, .receive_time_origin = realtime.milliseconds(undefined), .raw_offset_start = 0, .event_sequence_start = 1 }) catch {
+            worker.recording_generation_failed = true;
+        };
         worker.recording_initial_cols = options.cols;
         worker.recording_initial_rows = options.rows;
         worker.startup_input = startup_input;
@@ -395,6 +409,7 @@ pub const SshWorker = struct {
         self.allocator.free(self.read_buffer);
         self.allocator.free(self.write_buffer);
         self.allocator.free(self.startup_input);
+        self.recording_generations.deinit(self.allocator);
         self.timeline.deinit();
         self.replay.deinit();
         self.input.deinit(self.allocator);
@@ -763,6 +778,12 @@ pub const SshWorker = struct {
         self.loop = replacement_loop;
         self.loop_active = true;
         self.io.resetTransport(try self.session.reader(), try self.session.writer());
+        const recording_owner: identity.SessionHandle = if (self.options.operation_key) |key| if (key.owner == .session) key.owner.session else .{ .session_id = @fromBackingInt(0), .generation = 0 } else .{ .session_id = @fromBackingInt(0), .generation = 0 };
+        if (self.recording_generations.items.len < 256) {
+            self.recording_generations.append(self.allocator, .{ .recording_generation = self.recording_generations.items.len + 1, .session_id = @backingInt(recording_owner.session_id), .session_generation = recording_owner.generation, .initial_cols = self.options.cols, .initial_rows = self.options.rows, .receive_time_origin = realtime.milliseconds(undefined), .raw_offset_start = self.io.stream_offset, .event_sequence_start = self.timeline.next_event_sequence }) catch {
+                self.recording_generation_failed = true;
+            };
+        } else self.recording_generation_failed = true;
         self.shell_eof_ns = null;
         self.shell_exit_code = null;
         self.shell_opened_ns = realtime.monotonicNs();

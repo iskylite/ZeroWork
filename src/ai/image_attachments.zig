@@ -89,11 +89,12 @@ pub const ContentRef = struct {
 };
 pub const Ticket = struct {
     owner: Owner,
+    conversation_id: ?@import("../host/identity.zig").ConversationId = null,
     draft_epoch: u64,
     id: Id,
     revision: u64 = 1,
     pub fn eql(self: Ticket, other: Ticket) bool {
-        return self.owner.eql(other.owner) and self.draft_epoch == other.draft_epoch and self.id == other.id and self.revision == other.revision;
+        return self.owner.eql(other.owner) and std.meta.eql(self.conversation_id, other.conversation_id) and self.draft_epoch == other.draft_epoch and self.id == other.id and self.revision == other.revision;
     }
 };
 pub const State = enum { processing, ready, failed };
@@ -102,6 +103,7 @@ pub const SentItem = struct { id: Id, reference: ContentRef };
 pub const Bundle = struct {
     allocator: std.mem.Allocator,
     owner: Owner,
+    conversation_id: ?@import("../host/identity.zig").ConversationId = null,
     draft_epoch: u64,
     items: []SentItem,
     pub fn deinit(self: *Bundle) void {
@@ -112,12 +114,13 @@ pub const Bundle = struct {
     pub fn retain(self: *const Bundle) !Bundle {
         const items = try self.allocator.alloc(SentItem, self.items.len);
         for (self.items, items) |item, *copy| copy.* = .{ .id = item.id, .reference = item.reference.retain() };
-        return .{ .allocator = self.allocator, .owner = self.owner, .draft_epoch = self.draft_epoch, .items = items };
+        return .{ .allocator = self.allocator, .owner = self.owner, .conversation_id = self.conversation_id, .draft_epoch = self.draft_epoch, .items = items };
     }
 };
 pub const Draft = struct {
     allocator: std.mem.Allocator,
     owner: Owner,
+    conversation_id: ?@import("../host/identity.zig").ConversationId = null,
     epoch: u64 = 1,
     next_id: Id = 1,
     items: std.ArrayList(Item) = .empty,
@@ -144,7 +147,7 @@ pub const Draft = struct {
         if (path.len == 0 or std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidAttachmentPath;
         const owned = try self.allocator.dupe(u8, path);
         errdefer self.allocator.free(owned);
-        const ticket: Ticket = .{ .owner = self.owner, .draft_epoch = self.epoch, .id = self.next_id };
+        const ticket: Ticket = .{ .owner = self.owner, .conversation_id = self.conversation_id, .draft_epoch = self.epoch, .id = self.next_id };
         try self.items.append(self.allocator, .{ .ticket = ticket, .path = owned, .limits = limits });
         self.next_id += 1;
         return ticket;
@@ -161,7 +164,7 @@ pub const Draft = struct {
         return ticket;
     }
     pub fn find(self: *Draft, ticket: Ticket) ?*Item {
-        for (self.items.items) |*item| if (item.ticket.eql(ticket) and self.owner.eql(ticket.owner) and self.epoch == ticket.draft_epoch) return item;
+        for (self.items.items) |*item| if (item.ticket.eql(ticket) and self.matchesConversation(ticket.owner, ticket.conversation_id) and self.epoch == ticket.draft_epoch) return item;
         return null;
     }
     /// Always consumes a worker reference, including cancelled/stale/OOM paths.
@@ -209,9 +212,10 @@ pub const Draft = struct {
         while (self.items.items.len != 0) _ = self.remove(self.items.items[0].ticket.id);
     }
     pub fn restore(self: *Draft, bundle: *const Bundle) !void {
-        if (!self.owner.eql(bundle.owner)) return error.StaleAttachmentBundle;
+        if (!self.matchesConversation(bundle.owner, bundle.conversation_id)) return error.StaleAttachmentBundle;
         if (self.epoch == std.math.maxInt(u64)) return error.AttachmentEpochExhausted;
         var next = try Draft.init(self.allocator, self.owner);
+        next.conversation_id = self.conversation_id;
         errdefer next.deinit();
         next.epoch = self.epoch + 1;
         next.next_id = self.next_id;
@@ -225,6 +229,14 @@ pub const Draft = struct {
         self.deinit();
         self.* = next;
     }
+    /// Explicit user history copy retains pixels and creates new tickets; no
+    /// original picker/reader authority is transferred to the new conversation.
+    pub fn restoreHistory(self: *Draft, bundle: *const Bundle) !void {
+        var selected = bundle.*;
+        selected.owner = self.owner;
+        selected.conversation_id = self.conversation_id;
+        try self.restore(&selected);
+    }
     pub fn freeze(self: *const Draft) !Bundle {
         for (self.items.items) |item| switch (item.state) {
             .processing => return error.AttachmentsProcessing,
@@ -233,15 +245,19 @@ pub const Draft = struct {
         };
         const items = try self.allocator.alloc(SentItem, self.items.items.len);
         for (self.items.items, items) |item, *copy| copy.* = .{ .id = item.ticket.id, .reference = item.reference.retain() };
-        return .{ .allocator = self.allocator, .owner = self.owner, .draft_epoch = self.epoch, .items = items };
+        return .{ .allocator = self.allocator, .owner = self.owner, .conversation_id = self.conversation_id, .draft_epoch = self.epoch, .items = items };
     }
     pub fn consumeSent(self: *Draft, bundle: *const Bundle) !usize {
-        if (!self.owner.eql(bundle.owner) or self.epoch != bundle.draft_epoch) return error.StaleAttachmentBundle;
+        if (!self.matchesConversation(bundle.owner, bundle.conversation_id) or self.epoch != bundle.draft_epoch) return error.StaleAttachmentBundle;
         var count: usize = 0;
         for (bundle.items) |item| {
             if (self.remove(item.id)) count += 1;
         }
         return count;
+    }
+    fn matchesConversation(self: *const Draft, owner: Owner, conversation: ?@import("../host/identity.zig").ConversationId) bool {
+        if (self.conversation_id) |id| return conversation != null and id.eql(conversation.?);
+        return conversation == null and self.owner.eql(owner);
     }
 };
 

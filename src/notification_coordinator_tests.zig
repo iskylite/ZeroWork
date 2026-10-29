@@ -281,3 +281,42 @@ test "notification all three saved event switches suppress real final facts with
         try std.testing.expectEqual(@as(usize, 1), platform.notifications_sent);
     }
 }
+
+test "notification incidents retain partly resolved sources under local history pressure and scope cause IDs" {
+    var value = try notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{});
+    defer value.deinit();
+    var first: notifications.NotificationEvent = .{ .definition_id = "host.reconnect", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 1, .event_revision = 1, .phase = .failed, .title = "Connection stopped", .attention = .{ .kind = .connection_stopped, .requires_action = true, .time_sensitive = true, .incident_id = 77 } };
+    const first_id = (try value.publishNotification(first, day)).fact_id;
+    var second = first;
+    second.owner.content = other;
+    second.operation_id = 2;
+    _ = try value.publishNotification(second, day);
+    // Another operation on the same source must not inflate the source count.
+    second.operation_id = 3;
+    const duplicate_source = (try value.publishNotification(second, day)).fact_id;
+    try std.testing.expectEqual(@as(usize, 2), value.incidentSourceCount(value.recordFor(first_id).?.*));
+    first.event_revision = 2;
+    first.phase = .succeeded;
+    first.attention.resolved = true;
+    _ = try value.publishNotification(first, day);
+    var local: notifications.NotificationEvent = .{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 1000, .event_revision = 1, .phase = .accepted, .title = "Local receipt" };
+    const local_id = (try value.publishNotification(local, day)).fact_id;
+    for (1..110) |index| {
+        local.operation_id = 1000 + index;
+        _ = try value.publishNotification(local, day);
+    }
+    try std.testing.expect(value.recordFor(first_id) != null);
+    try std.testing.expect(value.recordFor(duplicate_source) != null);
+    try std.testing.expectEqual(@as(usize, 2), value.incidentSourceCount(value.recordFor(first_id).?.*));
+    // A new actionable revision can promote an evicted local observation.
+    local.operation_id = 1000;
+    local.event_revision = 2;
+    local.attention = .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true, .incident_id = 77 };
+    const promoted = try value.publishNotification(local, day);
+    try std.testing.expect(!promoted.duplicate);
+    try std.testing.expectEqual(local_id, promoted.fact_id);
+    // An unrelated definition using the same number is a different incident.
+    try std.testing.expectEqual(@as(usize, 2), value.historyCount(true));
+    value.clearHistory();
+    try std.testing.expectEqual(@as(usize, 2), value.historyCount(true));
+}

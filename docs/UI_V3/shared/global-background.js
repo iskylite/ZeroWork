@@ -7,7 +7,7 @@
  const materialAlpha=(role,t)=>{const [p0,d,m]=roles[role];return Math.round(255*(1-Math.min(m,p0+d*t)))/255;};
  const clamp=(v,min,max)=>Math.max(min,Math.min(max,Number.isFinite(+v)?+v:min));
  // Surface boundaries only: component names never select an alpha percentage.
- const floatingSelector='.popover,.context-menu,.modal,.assistant,.v3-ai-model-info,.v3-hover,.design-tooltip,.toast,#tooltip,.utility-layer,#global-notice,#settings-frame,.settings-window';
+ const floatingSelector='.popover,.context-menu,.modal,.assistant,.v3-ai-model-info,.v3-hover,.design-tooltip,.toast,#tooltip,.utility-layer,#global-notice,#settings-frame,.settings-window,.mode-menu[data-execution-patch-surface],.v3-select-popover[data-execution-patch-surface],.process-panel[data-execution-patch-surface]';
  const owners=new WeakMap();
  const layerAlpha=(level,t)=>level>=3?1:level===2?Math.round(255*(1-(.01+.03*t)))/255:materialAlpha('overlay',t);
  function levelOf(surface,seen=new Set()){

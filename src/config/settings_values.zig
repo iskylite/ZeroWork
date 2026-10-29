@@ -89,6 +89,8 @@ pub fn writeConfig(value: *config.Config, section: []const u8, key: []const u8, 
         if (std.mem.eql(u8, key, "dedicated_connection")) return setBool(&value.transfer.dedicated_connection, next);
     } else if (std.mem.eql(u8, section, "ai")) {
         if (std.mem.eql(u8, key, "default_provider")) return setText(&value.ai.default_provider, next);
+        if (std.mem.eql(u8, key, "execution_mode")) return setEnum(config.ExecutionMode, &value.ai.execution_mode, next);
+        if (std.mem.eql(u8, key, "session_retention")) return setEnum(config.SessionRetention, &value.ai.session_retention, next);
         if (std.mem.eql(u8, key, "permission_mode")) {
             const text = switch (next) {
                 .text => |v| v,
@@ -215,6 +217,8 @@ pub fn read(value: config.Config, section: []const u8, key: []const u8) ?Value {
         if (std.mem.eql(u8, key, "dedicated_connection")) return .{ .boolean = value.transfer.dedicated_connection };
     } else if (std.mem.eql(u8, section, "ai")) {
         if (std.mem.eql(u8, key, "default_provider")) return .{ .text = value.ai.default_provider };
+        if (std.mem.eql(u8, key, "execution_mode")) return .{ .text = @tagName(value.ai.execution_mode) };
+        if (std.mem.eql(u8, key, "session_retention")) return .{ .text = @tagName(value.ai.session_retention) };
         if (std.mem.eql(u8, key, "permission_mode")) return .{ .text = @tagName(value.ai.permission_mode) };
         if (std.mem.eql(u8, key, "error_hint")) return .{ .boolean = value.ai.error_hint };
         if (std.mem.eql(u8, key, "redact_ip")) return .{ .boolean = value.ai.redact_ip };
@@ -307,4 +311,17 @@ test "icon background accepts only supported choices" {
     try std.testing.expectEqual(config.IconBackground.light, value.ui.icon_background);
     try std.testing.expectError(error.InvalidValue, writeConfig(&value, "ui", "icon_background", .{ .text = "auto" }));
     try std.testing.expectEqual(config.IconBackground.light, value.ui.icon_background);
+}
+
+test "execution policy settings mutate only validated fields and preserve permission" {
+    var value: config.Config = .{};
+    try writeConfig(&value, "ai", "execution_mode", .{ .text = "attached_pty" });
+    try writeConfig(&value, "ai", "session_retention", .{ .text = "keep" });
+    try std.testing.expectEqual(config.ExecutionMode.attached_pty, value.ai.execution_mode);
+    try std.testing.expectEqual(config.SessionRetention.keep, value.ai.session_retention);
+    try std.testing.expectEqual(config.PermissionMode.confirm, value.ai.permission_mode);
+    try std.testing.expectError(error.InvalidValue, writeConfig(&value, "ai", "execution_mode", .{ .text = "anything" }));
+    try std.testing.expectError(error.InvalidType, writeConfig(&value, "ai", "session_retention", .{ .boolean = true }));
+    try std.testing.expectEqualStrings("attached_pty", read(value, "ai", "execution_mode").?.text);
+    try std.testing.expectEqualStrings("keep", read(value, "ai", "session_retention").?.text);
 }

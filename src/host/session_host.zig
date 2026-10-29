@@ -224,6 +224,7 @@ const Entry = struct {
     state: Lifecycle = .creating,
     ready_accepted: bool = false,
     creation_ended: bool = false,
+    prepared_start: bool = false,
     create_cleanup: operations.Cleanup = .not_started,
     attempt: u64 = 1,
     create_operation: OperationKey,
@@ -304,6 +305,9 @@ pub const SftpDirectoryRecovery = struct {
 /// keeps factories, immutable requests, operation ordering and service bindings.
 pub const SessionHost = struct {
     allocator: std.mem.Allocator,
+    /// Scoped controller reservation: factories remain untouched until the
+    /// durable journal owner explicitly authorizes dispatchPrepared.
+    defer_create_start: bool = false,
     context_factory: ?contexts.Factory = null,
     registry: plugins.Registry,
     adapters: []Adapter,
@@ -702,10 +706,25 @@ pub const SessionHost = struct {
         // Ownership has transferred to the entry; the request can now safely
         // outlive its caller, including all tagged-union auth and route fields.
         const entry = &self.sessions.items[self.sessions.items.len - 1];
+        if (self.defer_create_start) {
+            entry.prepared_start = true;
+            return .{ .handle = handle, .operation = key };
+        }
         self.startAdapter(entry) catch |err| {
             try self.failCreate(entry, @errorName(err));
         };
         return .{ .handle = handle, .operation = key };
+    }
+
+    /// An exact reservation is consumed once. Repeating dispatch never calls
+    /// the factory twice, including after a factory failure.
+    pub fn dispatchPrepared(self: *SessionHost, accepted: Accepted) !void {
+        const entry = self.find(accepted.handle) orelse return error.StaleSession;
+        if (!entry.create_operation.eql(accepted.operation)) return error.StaleCreateOperation;
+        if (!entry.prepared_start) return error.CreateAlreadyDispatched;
+        if (entry.state != .creating or entry.close_operation != null) return error.LifecycleDoesNotAllowCreate;
+        entry.prepared_start = false;
+        self.startAdapter(entry) catch |err| try self.failCreate(entry, @errorName(err));
     }
 
     /// A failed startup keeps identity and advances generation/attempt only
@@ -742,8 +761,13 @@ pub const SessionHost = struct {
         entry.bindings.clearRetainingCapacity();
         entry.typed_bindings.clearRetainingCapacity();
         entry.capability_revision +|= 1;
-        const adapter = self.factory(entry);
-        try self.applyCreateCleanup(entry, adapter.vtable.cancel(adapter.context, key));
+        if (entry.prepared_start) {
+            entry.prepared_start = false;
+            try self.applyCreateCleanup(entry, .released);
+        } else {
+            const adapter = self.factory(entry);
+            try self.applyCreateCleanup(entry, adapter.vtable.cancel(adapter.context, key));
+        }
         return true;
     }
 
@@ -796,6 +820,7 @@ pub const SessionHost = struct {
             self.releaseStale(handle, key);
             return false;
         };
+        if (entry.prepared_start) return false;
         // Repeated delivery of the current ready receipt owns no new resource.
         // Releasing it would tear down the still-live current service bindings.
         if (entry.create_operation.eql(key) and entry.ready_accepted) return false;
@@ -1488,6 +1513,12 @@ pub const SessionHost = struct {
     pub fn shutdownOwner(self: *SessionHost, handle: SessionHandle) !CloseReceipt {
         const entry = self.find(handle) orelse return .released;
         if (entry.state == .closed or entry.shutdown_receipt == .released) return .released;
+        if (entry.prepared_start) {
+            _ = try self.cancel(entry.create_operation);
+            entry.shutdown_receipt = .released;
+            entry.state = .ended;
+            return .released;
+        }
         if (entry.shutdown_receipt == null) {
             entry.shutdown_via_cancel = entry.state == .creating or entry.creation_ended or (entry.state == .ready and entry.attachment == null);
             entry.bindings.clearRetainingCapacity();
@@ -1858,6 +1889,32 @@ test "window shutdown revokes services and stops each controller with truthful i
 }
 fn testSpec() SessionCreateSpec {
     return .{ .temporary_ssh = .{ .structured_endpoint = .{ .host = "test.invalid", .user = "test" } } };
+}
+
+test "prepared session waits for exact durable dispatch permit and cancellation never touches factory" {
+    var adapter: ControlledAdapter = .{};
+    var host = try SessionHost.init(std.testing.allocator, &.{adapter.adapter()});
+    defer host.deinit();
+    host.defer_create_start = true;
+    const reserved = try host.create(testSpec(), test_target);
+    host.defer_create_start = false;
+    try std.testing.expectEqual(@as(usize, 0), adapter.creates);
+    try std.testing.expectEqual(Lifecycle.creating, host.queryState(reserved.handle).?.lifecycle);
+    var stale = reserved;
+    stale.handle.generation += 1;
+    try std.testing.expectError(error.StaleSession, host.dispatchPrepared(stale));
+    try host.dispatchPrepared(reserved);
+    try std.testing.expectEqual(@as(usize, 1), adapter.creates);
+    try std.testing.expectError(error.CreateAlreadyDispatched, host.dispatchPrepared(reserved));
+    host.defer_create_start = true;
+    const cancelled = try host.create(testSpec(), test_target);
+    host.defer_create_start = false;
+    try std.testing.expect(try host.cancel(cancelled.operation));
+    try std.testing.expectEqual(@as(usize, 1), adapter.creates);
+    try std.testing.expectEqual(@as(usize, 0), adapter.cancels);
+    _ = try host.requestClose(cancelled.handle, .{});
+    try std.testing.expectEqual(Lifecycle.closed, host.queryState(cancelled.handle).?.lifecycle);
+    try std.testing.expectEqual(@as(usize, 0), adapter.closes);
 }
 
 test "host route snapshot owns each hop identity policy and auth" {

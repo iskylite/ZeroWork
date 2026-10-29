@@ -224,6 +224,43 @@ pub const Host = struct {
             .cancelled => "传输已取消，可在任务中查看已传输内容。",
         } });
     }
+    pub const TransferBatchState = enum { active, blocked, ended };
+    /// The transfer controller supplies the frozen source count and a real
+    /// manager state. A single-file failure never gains global authority.
+    pub fn publishTransferBatch(self: *Host, window: WindowId, owner: ContentOwner, job: u64, attempt: u64, source_count: usize, state: TransferBatchState, details: Details) !void {
+        if (state != .blocked) {
+            for (self.coordinator.notification_records.items) |record| {
+                if (!record.pending() or !std.mem.eql(u8, record.event.definition_id, "host.transfer_blocked") or !record.event.owner.content.eql(owner) or record.event.operation_id != job) continue;
+                var resolved = record.event;
+                resolved.event_revision += 1;
+                resolved.phase = .succeeded;
+                resolved.attention.resolved = true;
+                resolved.title = if (state == .active) "传输批次已恢复" else "传输批次已结束";
+                _ = try self.publish(resolved);
+            }
+            return;
+        }
+        if (source_count <= 1) return;
+        var event: notifications.NotificationEvent = .{
+            .definition_id = "host.transfer_blocked",
+            .owner = .{ .window_id = @backingInt(window), .content = owner },
+            .operation_id = job,
+            .attempt_id = attempt,
+            .event_revision = 1,
+            .phase = .failed,
+            .severity = .warning,
+            .title = "后台传输批次已停止",
+            .object_name = bounded(details.object, 1024),
+            .detail = if (details.detail.len != 0) bounded(details.detail, 4096) else "传输批次已停止，请回到原任务检查后继续。",
+            .attention = .{ .kind = .transfer_batch_stopped, .requires_action = true, .time_sensitive = true },
+            .actions = &.{.{ .kind = .locate_owner, .label = "查看传输" }},
+        };
+        if (self.coordinator.factFor(event)) |prior| {
+            if (!prior.event.attention.resolved) return;
+            event.event_revision = prior.event.event_revision + 1;
+        }
+        _ = try self.publish(event);
+    }
     pub fn publishReconnect(self: *Host, owner: ContentOwner, operation_id: u64, attempt: u64, result: ReconnectResult) !void {
         return self.publishReconnectDetails(owner, operation_id, attempt, result, .{});
     }
@@ -278,7 +315,7 @@ pub const Host = struct {
         // Legacy OS delivery must use the same confirmed incident grouping as
         // the in-app list; otherwise each shared shell submits its own alert.
         if (details.incident_id) |incident| for (self.coordinator.notification_records.items) |record| {
-            if (record.listed and record.event.attention.incident_id == incident) {
+            if (event.kind == .reconnect and record.listed and std.mem.eql(u8, record.event.definition_id, "host.reconnect") and record.event.attention.incident_id == incident) {
                 event.system_enabled = false;
                 break;
             }
@@ -340,6 +377,13 @@ pub const Host = struct {
                     .incident_id = details.incident_id orelse if (previous) |record| record.event.attention.incident_id else null,
                 },
             }, clock);
+            // One OS submission, one global history fact, and one matching
+            // asynchronous receipt. Do not resend through the typed presenter.
+            for (self.coordinator.notification_records.items) |*record| if (record.fact_id == presentation.fact_id and record.listed and record.system_event_id == null) {
+                record.system = self.coordinator.records.items[published.record_index].system;
+                record.system_event_id = event.event_id;
+                break;
+            };
             if (already_presented) self.coordinator.dismissNotification(presentation.fact_id);
             break;
         };
@@ -353,28 +397,36 @@ pub const Host = struct {
         try self.coordinator.registerDefinition(definition);
     }
     pub fn publishRecordingStatus(self: *Host, window: WindowId, owner: @import("identity.zig").SessionHandle, failure: ?[]const u8) !void {
-        var event: notifications.NotificationEvent = .{
+        const content: ContentOwner = .{ .session = owner };
+        var prior: ?notifications.NotificationEvent = null;
+        for (self.coordinator.notification_records.items) |record| {
+            if (record.event.owner.content.eql(content) and std.mem.eql(u8, record.event.definition_id, "host.recording_risk")) prior = record.event;
+        }
+        if (prior) |old| {
+            if (old.attention.resolved == (failure == null)) return;
+            if (failure == null) {
+                var resolved = old;
+                resolved.event_revision += 1;
+                resolved.phase = .succeeded;
+                resolved.attention.resolved = true;
+                resolved.title = "会话记录保存已恢复";
+                resolved.detail = "会话记录保存已恢复。";
+                _ = try self.publish(resolved);
+                return;
+            }
+        } else if (failure == null) return;
+        _ = try self.publish(.{
             .definition_id = "host.recording_risk",
-            .owner = .{ .window_id = @backingInt(window), .content = .{ .session = owner } },
-            .operation_id = @backingInt(owner.session_id),
+            .owner = .{ .window_id = @backingInt(window), .content = content },
+            .operation_id = try self.coordinator.nextOperationId("host.recording_risk", content),
             .event_revision = 1,
             .phase = .failed,
             .severity = .failure,
             .title = "无法继续保存会话记录",
-            .detail = failure orelse "会话记录保存已恢复。",
+            .detail = failure.?,
             .attention = .{ .kind = .application_risk, .requires_action = true, .time_sensitive = true },
             .actions = &.{.{ .kind = .locate_owner, .label = "查看来源" }},
-        };
-        if (self.coordinator.factFor(event)) |old| {
-            if (old.event.attention.resolved == (failure == null)) return;
-            event.event_revision = old.event.event_revision + 1;
-            if (failure == null) {
-                event.phase = .succeeded;
-                event.attention.resolved = true;
-                event.title = "会话记录保存已恢复";
-            }
-        } else if (failure == null) return;
-        _ = try self.publish(event);
+        });
     }
     /// Public plugin facade validates current window/owner on first publication.
     /// An existing fact may finish after close without reviving that owner.
@@ -416,6 +468,9 @@ pub const Host = struct {
                 .transfer_batch_stopped => .transfer_done,
                 else => .reconnect,
             }, event.owner.content);
+            if (event.attention.kind == .transfer_batch_stopped) if (registration.value.transfer_presented) |presented| {
+                gated.attention.source_visible = gated.attention.source_visible or presented(registration.value.context, event.operation_id);
+            };
             break;
         };
         return self.coordinator.publishNotification(gated, try localClock());
@@ -460,7 +515,7 @@ pub const Host = struct {
                 return error.NotificationOwnerEnded;
             }
             if (!record.owner_ended) for (self.windows.items) |window| {
-                if (window.value.activate(window.value.context, .{ .owner = record.event.owner.content, .kind = if (std.mem.eql(u8, record.event.definition_id, "host.transfer_done")) .transfer_done else if (std.mem.startsWith(u8, record.event.definition_id, "host.ai_")) .ai_ready else .reconnect, .operation_id = record.event.operation_id, .attempt_or_turn_id = record.event.attempt_id })) return;
+                if (window.value.activate(window.value.context, .{ .owner = record.event.owner.content, .kind = if (std.mem.startsWith(u8, record.event.definition_id, "host.transfer_")) .transfer_done else if (std.mem.startsWith(u8, record.event.definition_id, "host.ai_")) .ai_ready else .reconnect, .operation_id = record.event.operation_id, .attempt_or_turn_id = record.event.attempt_id })) return;
             };
             self.feedbackFor(null, "该通知所属内容已不可用");
             return error.NotificationOwnerEnded;

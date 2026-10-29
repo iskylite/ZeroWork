@@ -97,7 +97,8 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
     root.setStyleInline(cx.allocator, .{ .height = .{ .fit = .{} } });
     root.meta.ownership.meta.test_id = props.test_id;
     const header = try ui.widgets.Button(.{ .variant = .ghost, .label = "", .a11y_label = props.title, .base_style = S.ButtonStyle{ .width = .fill(), .height = .{ .px = 32 }, .padding = .{ .left = 10, .right = 12 }, .gap = 6, .background = ui.Color.TRANSPARENT, .corner_radius = 9, .flex_shrink = 0 } }).mount(scope, cx);
-    header.setStyleInline(cx.allocator, .{ .justify = .start });
+    header.setStyleInline(cx.allocator, S.header(cx.tokens));
+    header.meta.ownership.meta.test_id = "ai.step.header";
     for (header.children.items) |child| child.setDisplay(.none);
     const slot = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .flex_shrink = 0 }, .{});
     const palette = theme.current();
@@ -122,7 +123,8 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
     try slot.appendChild(cx.allocator, chevron);
     try header.appendChild(cx.allocator, slot);
     const title_node = try ui.textStyled(cx, S.title, props.title);
-    title_node.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+    title_node.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .max_width = 128, .height = .{ .px = 18 }, .flex_shrink = 0 });
+    title_node.meta.ownership.meta.test_id = "ai.step.title";
     try header.appendChild(cx.allocator, title_node);
     const projection = try ui.text(cx, props.projection, .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = palette.fg_2, .text_overflow = .ellipsis });
     projection.setStyleInline(cx.allocator, S.headerSummary(cx.tokens));
@@ -177,6 +179,7 @@ const Copy = struct {
     }
 };
 pub fn title(name: []const u8) []const u8 {
+    if (@import("ai_tool_titles.zig").title(name)) |label| return label;
     if (std.mem.eql(u8, name, "run_command")) return "执行命令";
     if (std.mem.eql(u8, name, "read_terminal")) return "读取终端";
     if (std.mem.eql(u8, name, "read_remote_file")) return "读取远程文件";

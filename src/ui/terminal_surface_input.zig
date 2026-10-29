@@ -474,11 +474,12 @@ pub fn pumpPaste(self: *Surface) !void {
             cancelPaste(self);
             return error.StaleMode;
         };
-        _ = self.service.commitPaste(paste, self.next_input, self.paste_confirmed) catch |err| {
+        const admitted = self.service.commitPaste(paste, self.next_input, self.paste_confirmed) catch |err| {
             if (err == error.WorkerBusy or err == error.InputQueueFull or err == error.ReceiptQueueFull) return;
             cancelPaste(self);
             return err;
         };
+        if (admitted.queued_bytes > 0) self.noteUserInputAccepted();
         if (self.shell_observer) |observer| observer.accepted(observer.context, self.owner, self.next_input, .{ .paste = paste.text });
         self.next_input = try std.math.add(u64, self.next_input, 1);
         cancelPaste(self);

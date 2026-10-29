@@ -15,6 +15,7 @@ const overlay_styles = @import("terminal_overlay_styles.zig");
 const history_replay = @import("history_replay.zig");
 const completion_mod = @import("completion.zig");
 const completion_controller = @import("completion_controller.zig");
+const completion_input = @import("completion_input.zig");
 const local_command_state = @import("local_command_state.zig");
 const terminal_service = @import("../host/terminal_service.zig");
 const SessionHandle = @import("../host/identity.zig").SessionHandle;
@@ -85,6 +86,8 @@ fn wallClockMs() i64 {
     return @as(i64, @intCast(ts.sec)) * std.time.ms_per_s + @divTrunc(@as(i64, @intCast(ts.nsec)), std.time.ns_per_ms);
 }
 
+pub const TakeoverHandler = TerminalSurface.TakeoverHandler;
+
 pub const TerminalViewNode = struct {
     root: *ui.Node,
     rows_box: *ui.Node,
@@ -92,10 +95,13 @@ pub const TerminalViewNode = struct {
     worker: ?*Presentation = null,
     archive_read_only: bool = false,
     history_help: ?*ui.Node = null,
+    history_title_text: ?*ui.Node = null,
+    history_title_icon: ?*ui.Node = null,
     terminal_surface: ?*TerminalSurface = null,
     legacy_document: ?*@import("terminal_document.zig").Document = null,
     terminal_theme: ?terminal_service.Theme = null,
     terminal_menu_handler: ?TerminalSurface.MenuHandler = null,
+    terminal_takeover_handler: ?TakeoverHandler = null,
     worker_menu_owner: ?SessionHandle = null,
     paste_policy: PastePolicy = .{},
     paste_confirmation_pending: bool = false,
@@ -190,6 +196,11 @@ pub const TerminalViewNode = struct {
     trusted_submit: bool = false,
     trusted_literal_token: u64 = 0,
     trusted_suppressed: ?struct { token: u64, revision: u64 } = null,
+    observed_input_revision: u64 = 0,
+    user_input_revision: u64 = 0,
+    observed_input_anchor: ?completion_input.Anchor = null,
+    observed_submission: ?struct { text: []u8, anchor: completion_input.Anchor, expires_ms: i64 } = null,
+    completion_refresh_stamp: ?struct { input: u64, projection: u64, allowed: bool } = null,
     trusted_draft: std.ArrayList(u8) = .empty,
     completion_enabled: bool = true,
     completion: completion_controller.Controller,
@@ -249,6 +260,11 @@ pub const TerminalViewNode = struct {
     /// Updated by the worker/OSC state bridge. Fullscreen input is transparent.
     remote_input_context: RemoteInputContext = .{},
     history: history_replay.Timeline,
+    history_live: ?history_replay.Timeline = null,
+    history_reading: ?@import("history_reading.zig").Model = null,
+    history_reading_height: f32 = 0,
+    history_reading_width: f32 = 0,
+    history_notice: ?*ui.Node = null,
     profile_frame: u64 = 0,
     profile_refresh_calls: u64 = 0,
     profile_refresh_us: u64 = 0,
@@ -328,7 +344,13 @@ pub const TerminalViewNode = struct {
         const c = app_theme.current();
         const bar = try ui.boxStyled(cx, @import("terminal_styles.zig").historyCard, .{});
         bar.meta.ownership.meta.test_id = "terminal.history.card";
-        try bar.appendChild(cx.allocator, try ui.text(cx, "📜 历史回溯模式 · 只读", .{ .font_size = 10.5, .color = c.warn_ink }));
+        const title = try ui.box(cx, .{ .direction = .row, .gap = 6, .align_items = .center, .flex_shrink = 0 }, .{});
+        title.meta.ownership.meta.test_id = "terminal.history.title";
+        const title_icon = try ui.iconTint(cx, ui.icons.history, c.accent, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+        const title_text = try ui.text(cx, "历史回溯 · 只读", .{ .font_size = 12, .color = c.fg_2 });
+        try title.appendChild(cx.allocator, title_icon);
+        try title.appendChild(cx.allocator, title_text);
+        try bar.appendChild(cx.allocator, title);
         const track = try ui.box(cx, .{ .height = .{ .px = 12 }, .width = .fill(), .background = c.well, .border = .{ .radius = 6 } }, .{});
         track.meta.ownership.meta.test_id = "terminal.history.track";
         const fill = try ui.box(cx, .{ .height = .{ .px = 12 }, .width = .{ .percent = 100 }, .background = c.accent, .border = .{ .radius = 6 } }, .{});
@@ -337,9 +359,13 @@ pub const TerminalViewNode = struct {
         track.behavior.events.on_event = historyEvent;
         track.behavior.events.event_context = @ptrCast(self);
         try bar.appendChild(cx.allocator, track);
-        const help = try ui.text(cx, if (self.archive_read_only) "历史归档 · 可选择复制与搜索" else "拖动回放 · 可选择复制 · ESC 返回实时流", .{ .font_size = 10.5, .color = c.fg_2 });
+        const help = try ui.text(cx, "--:-- · 100%", .{ .font_size = 11, .color = c.fg_2, .use_monospace_font = true, .text_align = .end });
+        help.setStyleInline(cx.allocator, .{ .width = .{ .px = 116 }, .flex_shrink = 0 });
+        help.meta.ownership.meta.test_id = "terminal.history.position";
         try bar.appendChild(cx.allocator, help);
         self.history_help = help;
+        self.history_title_text = title_text;
+        self.history_title_icon = title_icon;
         // Reserve a separate card above the terminal viewport. The card must
         // participate in layout rather than cover replay rows as an overlay.
         try self.root.insertChildBefore(cx.allocator, bar, self.rows_box);
@@ -351,6 +377,14 @@ pub const TerminalViewNode = struct {
     }
 
     pub fn openHistory(self: *TerminalViewNode) bool {
+        if (self.history.selected != null) return true;
+        if (self.history.frames.items.len == 0) return false;
+        if (!self.archive_read_only and self.history_live == null) self.history_live = self.history.clone() catch return false;
+        if (self.history_reading == null) self.history_reading = @import("history_reading.zig").Model.init(self.cx.allocator, &self.history) catch {
+            if (self.history_live) |*live| live.deinit();
+            self.history_live = null;
+            return false;
+        };
         if (!self.history.open()) return false;
         if (self.terminal_surface) |surface| {
             surface.root.setDisplay(.none);
@@ -371,7 +405,8 @@ pub const TerminalViewNode = struct {
         if (self.history_host) |host| host.setDisplay(.flex);
         self.rows_box.style.padding.top = self.historyContentPadding().top;
         self.rows_box.style.padding.bottom = self.historyContentPadding().bottom;
-        _ = self.renderFrame(self.cx, text_frame.decode(self.history.current().?.wire).?) catch {};
+        self.layoutHistoryReading();
+        self.renderHistoryReading() catch {};
         self.focus();
         return true;
     }
@@ -380,6 +415,13 @@ pub const TerminalViewNode = struct {
         if (self.archive_read_only) return;
         if (self.history_dragging) self.cx.releasePointerCapture();
         self.history.close();
+        if (self.history_reading) |*reading| reading.deinit();
+        self.history_reading = null;
+        if (self.history_live) |live| {
+            self.history.deinit();
+            self.history = live;
+            self.history_live = null;
+        }
         if (self.terminal_surface) |surface| {
             surface.root.setDisplay(.flex);
             self.rows_box.setDisplay(.none);
@@ -408,6 +450,10 @@ pub const TerminalViewNode = struct {
     /// rather than the live worker selection API.
     fn copyHistorySelection(self: *TerminalViewNode, selection: @import("../vt/engine.zig").Selection, allocator: std.mem.Allocator) ![]u8 {
         const entry = self.history.current() orelse return allocator.alloc(u8, 0);
+        if (self.history_reading != null and self.history_search_wire.items.len > 0 and self.history_search_top != null) {
+            const visible = text_frame.decode(self.history_search_wire.items) orelse return error.InvalidFrame;
+            return extractFrameSelection(visible, selection, allocator);
+        }
         if (entry.search) |document| if (entry.presentation.len > 0) {
             var first_row: ?usize = null;
             var last_row: ?usize = null;
@@ -446,38 +492,105 @@ pub const TerminalViewNode = struct {
         return extractFrameSelection(frame, selection, allocator);
     }
 
+    fn recordingHistory(self: *TerminalViewNode) *history_replay.Timeline {
+        return if (self.history_live) |*live| live else &self.history;
+    }
+    fn historyViewportHeight(self: *TerminalViewNode) f32 {
+        const bounds = self.rows_box.globalRect();
+        const height = if (bounds.h > 0) bounds.h else self.root.globalRect().h;
+        const padding = self.historyContentPadding();
+        return @max(self.cell_height, height - padding.top - padding.bottom);
+    }
+    fn layoutHistoryReading(self: *TerminalViewNode) void {
+        const reading = if (self.history_reading) |*value| value else return;
+        self.history_reading_height = self.historyViewportHeight();
+        self.history_reading_width = self.rows_box.globalRect().w;
+        reading.layout(&self.history, self.cell_height, self.history_reading_height);
+    }
+    fn renderHistoryReading(self: *TerminalViewNode) !void {
+        const reading = if (self.history_reading) |*value| value else return;
+        if (reading.anchors.items.len == 0) return;
+        const position = reading.position;
+        self.history.selected = position.frame_index;
+        const anchor = reading.anchors.items[position.anchor];
+        self.rows_box.style.padding.top = self.historyContentPadding().top - position.pixel;
+        self.selection.clear();
+        if (anchor.has_document) {
+            try self.renderHistoryDocumentRow(@intCast(anchor.row));
+        } else {
+            self.history_search_top = null;
+            self.history_legacy_start = self.history.legacyOffset(position.frame_index);
+            const entry = self.history.current().?;
+            const painted = try @import("history_colors.zig").frame(self.cx.allocator, entry, self.terminal_theme);
+            defer painted.deinit(self.cx.allocator);
+            _ = try self.renderFrame(self.cx, painted.frame);
+        }
+        self.updateHistoryPosition();
+        self.updateMetrics();
+        self.cx.requestRedraw();
+    }
+    fn updateHistoryPosition(self: *TerminalViewNode) void {
+        const reading = if (self.history_reading) |*value| value else return;
+        if (self.history_fill) |fill| fill.snapTransition(self.cx.allocator, .scale_x, reading.fraction());
+        if (self.history_track) |track| track.behavior.interaction.focusable = reading.maximum > 0;
+        if (self.history_help) |help| {
+            var buffer: [96]u8 = undefined;
+            const time = reading.position.time_ms;
+            const percent: u32 = @intFromFloat(@round(reading.fraction() * 100));
+            const label = if (time) |ms| blk: {
+                if (reading.position.frame_time and ms < 1_000_000_000_000) {
+                    const positive: u64 = @intCast(@max(0, ms));
+                    break :blk std.fmt.bufPrint(&buffer, "帧 {d}:{d:0>2} · {d}%", .{ positive / 60000, (positive / 1000) % 60, percent }) catch "时间未知";
+                }
+                var date: [64]u8 = undefined;
+                const local = @import("history_styles.zig").dateLabel(&date, ms);
+                if (local.len < 16) break :blk "时间未知";
+                const seconds: u64 = @intCast(@mod(@divFloor(ms, 1000), 60));
+                break :blk std.fmt.bufPrint(&buffer, "{s}:{d:0>2} · {d}%", .{ local[11..16], seconds, percent }) catch "时间未知";
+            } else "时间未知";
+            help.setTextContent(self.cx.allocator, label) catch {};
+        }
+    }
     fn seekHistory(self: *TerminalViewNode, x: f32) void {
         const track = self.history_track orelse return;
         const rect = track.globalRect();
         if (rect.w <= 0) return;
-        const fraction = std.math.clamp((x - rect.x) / rect.w, 0, 1);
-        const previous = self.history.selected;
-        const had_search_top = self.history_search_top != null;
-        self.history.seek(fraction);
-        self.history_search_top = null;
-        if (self.history_fill) |fill| {
-            // Keep layout fixed while dragging; only the painted fill changes.
-            fill.snapTransition(self.cx.allocator, .scale_x, fraction);
-        }
-        self.selection.clear();
-        // The fill follows every pointer event, but a position between two
-        // frames does not change the replayed text or its search index.
-        if (self.history.selected == previous and !had_search_top) return;
-        if (self.history.selected) |index| self.history_legacy_start = self.history.legacyOffset(index);
-        if (self.history.current()) |entry| {
-            _ = self.renderFrame(self.cx, text_frame.decode(entry.wire).?) catch {};
-            if (self.search_open) {
-                if (entry.search) |document| {
-                    self.search.setSource(document.text) catch {};
-                } else if (self.history.legacySource(self.cx.allocator)) |source| {
-                    defer self.cx.allocator.free(source);
-                    self.search.setSource(source) catch {};
-                } else |_| {}
-                if (self.search_view) |*view| view.refresh();
-                self.refreshSearchMarks() catch {};
-            }
-        }
+        const reading = if (self.history_reading) |*value| value else return;
+        if (reading.maximum <= 0) return;
+        reading.seek(std.math.clamp((x - rect.x) / rect.w, 0, 1));
+        self.renderHistoryReading() catch {};
+        if (self.search_open) self.refreshSearchMarks() catch {};
     }
+    fn scrollHistory(self: *TerminalViewNode, delta: f32) void {
+        const reading = if (self.history_reading) |*value| value else return;
+        reading.scroll(delta);
+        self.renderHistoryReading() catch {};
+    }
+    pub fn setArchiveNotice(self: *TerminalViewNode, message: []const u8) void {
+        if (self.history_notice == null) {
+            const node = ui.text(self.cx, message, .{ .font_size = 11, .line_height = 1.4, .color = app_theme.current().fg_2, .wrap = .word }) catch return;
+            node.meta.ownership.meta.test_id = "terminal.history.notice";
+            node.setStyleInline(self.cx.allocator, .{ .width = .fill(), .padding = .{ .left = 14, .right = 14, .top = 6, .bottom = 6 }, .flex_shrink = 0 });
+            self.root.insertChildBefore(self.cx.allocator, node, self.rows_box) catch return;
+            self.history_notice = node;
+        } else self.history_notice.?.setTextContent(self.cx.allocator, message) catch {};
+    }
+    const HistoryFrame = struct {
+        fn run(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+            const self: *TerminalViewNode = @ptrCast(@alignCast(raw));
+            if (self.history.selected == null or self.history_reading == null) return .done;
+            var ancestor: ?*ui.Node = self.root;
+            while (ancestor) |node| : (ancestor = node.parent) if (node.style.display == .none) return .done;
+            const height = self.historyViewportHeight();
+            const width = self.rows_box.globalRect().w;
+            if (@abs(height - self.history_reading_height) > 0.1 or @abs(width - self.history_reading_width) > 0.1 or self.history_reading.?.row_height != self.cell_height) {
+                self.layoutHistoryReading();
+                self.renderHistoryReading() catch {};
+                return .needs_layout;
+            }
+            return .done;
+        }
+    };
 
     fn historyEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
         const self: *TerminalViewNode = @ptrCast(@alignCast(raw orelse return .ignored));
@@ -501,6 +614,27 @@ pub const TerminalViewNode = struct {
                 self.cx.releasePointerCapture();
                 return .stop;
             },
+            .key_down => |key| {
+                if (key.key == .escape) {
+                    if (self.search_open) self.closeSearch() else self.closeHistory();
+                    return .stop;
+                }
+                if (key.key == .f and ui.events.primaryModifier(key.modifiers)) {
+                    self.openSearch();
+                    return .stop;
+                }
+                const reading = if (self.history_reading) |*value| value else return .ignored;
+                if (reading.maximum <= 0) return .ignored;
+                switch (key.key) {
+                    .left, .up => reading.scroll(-self.cell_height),
+                    .right, .down => reading.scroll(self.cell_height),
+                    .home => reading.seek(0),
+                    .end => reading.seek(1),
+                    else => return .ignored,
+                }
+                self.renderHistoryReading() catch {};
+                return .stop;
+            },
             else => return .ignored,
         }
     }
@@ -508,8 +642,9 @@ pub const TerminalViewNode = struct {
     pub fn openSearch(self: *TerminalViewNode) void {
         self.search_open = true;
         self.search.open = true;
-        if (self.history.current()) |entry| {
-            self.history_search_top = null;
+        if (self.history_reading) |reading| {
+            self.search.setSource(reading.text.items) catch {};
+        } else if (self.history.current()) |entry| {
             self.history_legacy_start = self.history.legacyOffset(self.history.selected.?);
             if (entry.search) |document| {
                 self.search.setSource(document.text) catch {};
@@ -546,6 +681,7 @@ pub const TerminalViewNode = struct {
     pub fn attachSearch(self: *TerminalViewNode, scope: *ui.Scope) !void {
         const child = try scope.childScope();
         self.search_scope = child;
+        try self.cx.addAfterLayoutHook(self, HistoryFrame.run);
         self.palette_panel.behavior.events.capture_context = @ptrCast(self);
         self.palette_panel.behavior.events.on_event_capture = palettePointer;
         try self.mountHistoryBar();
@@ -583,7 +719,10 @@ pub const TerminalViewNode = struct {
     fn locateSearch(self: *TerminalViewNode) void {
         if (self.search_view) |*view| view.refresh();
         if (self.search.currentIndex()) |index| if (self.search.match(index)) |hit| {
-            if (self.history.current()) |entry| {
+            if (self.history_reading) |*reading| {
+                reading.locate(hit.start);
+                self.renderHistoryReading() catch {};
+            } else if (self.history.current()) |entry| {
                 if (entry.search != null) {
                     self.locateHistorySearch(hit) catch {};
                 } else if (self.history.legacyLocation(hit.start)) |location| {
@@ -753,13 +892,17 @@ pub const TerminalViewNode = struct {
         const entry = self.history.current() orelse return;
         const document = entry.search orelse return;
         const span = document.spanAt(hit.start) orelse return;
+        try self.renderHistoryDocumentRow(span.row);
+    }
+    fn renderHistoryDocumentRow(self: *TerminalViewNode, top: u32) !void {
+        const entry = self.history.current() orelse return;
+        const document = entry.search orelse return;
         const original = text_frame.decode(entry.wire) orelse return error.InvalidFrame;
-        const top = span.row;
         var output: std.ArrayList(u8) = .empty;
         defer output.deinit(self.cx.allocator);
         var styles: std.ArrayList(text_frame.WireSpan) = .empty;
         defer styles.deinit(self.cx.allocator);
-        const display_rows = @min(original.rows, self.frame_rows);
+        const display_rows: u16 = @intFromFloat(@min(@as(f32, max_grid_rows), @ceil(self.historyViewportHeight() / @max(1, self.cell_height)) + 1));
         const end = @min(document.rows.len, @as(usize, top) + display_rows);
         var cell_index: usize = 0;
         while (cell_index < document.spans.len and document.spans[cell_index].row < top) : (cell_index += 1) {}
@@ -772,8 +915,9 @@ pub const TerminalViewNode = struct {
                 const offset = output.items.len;
                 try output.appendSlice(self.cx.allocator, document.text[cell.start..cell.end]);
                 column = cell.col + cell.width;
-                if (cell.color == 0 and cell.bg == 0 and cell.flags == 0) continue;
-                const style: text_frame.WireSpan = .{ .start = @intCast(offset), .end = @intCast(output.items.len), .color = cell.color, .bg = cell.bg, .flags = cell.flags };
+                const resolved = @import("history_colors.zig").resolve(cell, document.rows[top + index].application_kind, self.terminal_theme, entry.reverse_colors);
+                if (resolved.color == 0 and resolved.bg == 0 and resolved.flags == 0) continue;
+                const style: text_frame.WireSpan = .{ .start = @intCast(offset), .end = @intCast(output.items.len), .color = resolved.color, .bg = resolved.bg, .flags = resolved.flags };
                 if (styles.items.len > 0) {
                     const previous = &styles.items[styles.items.len - 1];
                     if (previous.end == style.start and previous.color == style.color and previous.bg == style.bg and previous.flags == style.flags) {
@@ -801,7 +945,8 @@ pub const TerminalViewNode = struct {
         @memcpy(self.history_search_wire.items[text_frame.header_bytes + style_bytes ..], output.items);
         self.history_search_top = top;
         self.selection.clear();
-        _ = try self.renderFrame(self.cx, text_frame.decode(self.history_search_wire.items).?);
+        self.history_display_skip = 0;
+        _ = try self.renderFrameContent(self.cx, text_frame.decode(self.history_search_wire.items).?);
     }
 
     fn refreshHistorySearchMarks(self: *TerminalViewNode, document: *const @import("../vt/search_snapshot.zig").Document) !void {
@@ -809,14 +954,25 @@ pub const TerminalViewNode = struct {
         const root_rect = self.root.globalRect();
         var used: usize = 0;
         for (self.search.matches.items, 0..) |hit, index| {
-            const first = document.spanAt(hit.start) orelse continue;
-            const last = document.spanAt(hit.end - 1) orelse continue;
+            var source_start: usize = hit.start;
+            var source_end: usize = hit.end;
+            if (self.history_reading) |reading| {
+                const anchor = for (reading.anchors.items) |candidate| {
+                    if (hit.start >= candidate.start and hit.start < candidate.end) break candidate;
+                } else continue;
+                if (anchor.frame_index != self.history.selected.? or !anchor.has_document) continue;
+                const source_row = document.rows[anchor.row];
+                source_start = source_row.start + hit.start - anchor.start;
+                source_end = @min(document.text.len, source_start + hit.end - hit.start);
+            }
+            const first = document.spanAt(source_start) orelse continue;
+            const last = document.spanAt(source_end -| 1) orelse continue;
             var row_index = first.row;
             while (row_index <= last.row) : (row_index += 1) {
                 if (row_index < top or row_index >= top + self.frame_rows) continue;
                 const row = document.rows[row_index];
-                const start = document.spanAt(@max(hit.start, row.start)) orelse continue;
-                const end = document.spanAt(@min(hit.end, row.end) -| 1) orelse continue;
+                const start = document.spanAt(@max(source_start, row.start)) orelse continue;
+                const end = document.spanAt(@min(source_end, row.end) -| 1) orelse continue;
                 if (start.row != row_index or end.row != row_index) continue;
                 const mark = if (used < self.search_marks.items.len) self.search_marks.items[used] else block: {
                     const node = try ui.box(self.cx, .{ .position = .absolute, .z_index = 8 }, .{});
@@ -1105,11 +1261,11 @@ pub const TerminalViewNode = struct {
             badge.children.items[0].setTextColor(overlay_styles.badgeForeground(source));
             if (row.children.items.len > 2) row.children.items[2].setTextColor(c.fg_2);
         }
-        if (self.history_bar) |bar| {
-            bar.setBackground(c.overlay);
-            bar.children.items[0].setTextColor(c.warn_ink);
-            bar.children.items[2].setTextColor(c.fg_2);
-        }
+        if (self.history_bar) |bar| bar.setBackground(c.surface_1);
+        if (self.history_title_icon) |icon| _ = icon.setTint(c.accent);
+        if (self.history_title_text) |text| text.setTextColor(c.fg_2);
+        if (self.history_help) |help| help.setTextColor(c.fg_2);
+        if (self.history_notice) |notice| notice.setTextColor(c.fg_2);
         if (self.history_track) |track| track.setBackground(c.well);
         if (self.history_fill) |fill| fill.setBackground(c.accent);
         self.local_input_node.setTextColor(c.accent_ink);
@@ -1536,17 +1692,33 @@ pub const TerminalViewNode = struct {
     }
 
     fn completionAllowed(self: *TerminalViewNode) bool {
-        return self.completion_enabled and self.commandInputAllowed();
+        if (!self.completion_enabled or !self.inputAssistContextAllowed()) return false;
+        if (self.trusted_snapshot) |snapshot| {
+            const surface = self.terminal_surface.?;
+            return snapshot.owner.eql(surface.owner) and snapshot.editable();
+        }
+        const projection = self.terminal_surface.?.snapshot.?.projection;
+        return !self.line.unknown and !projection.modes.application_cursor and projection.modes.mouse_tracking == .none and
+            completion_input.atCursor(projection, self.line.content.items);
+    }
+
+    fn inputAssistContextAllowed(self: *TerminalViewNode) bool {
+        const surface = self.terminal_surface orelse return false;
+        return self.history.selected == null and self.cx.focus_manager.getFocused() == self.root and surface.preedit.len == 0 and surface.selection == null and
+            surface.pending.items.len == 0 and surface.trusted_pending == null and self.trusted_action == null and
+            surface.snapshot != null and !surface.snapshot.?.read_only and !surface.snapshot.?.projection.modes.alternate_screen and
+            !self.local_editor.active and !self.palette.isOpen() and surface.pending_paste == null and surface.paste_requested == null;
     }
 
     fn commandInputAllowed(self: *TerminalViewNode) bool {
         const surface = self.terminal_surface orelse return false;
         const snapshot = self.trusted_snapshot orelse return false;
-        return snapshot.owner.eql(surface.owner) and snapshot.editable() and
-            self.cx.focus_manager.getFocused() == self.root and surface.preedit.len == 0 and surface.selection == null and
-            surface.pending.items.len == 0 and surface.trusted_pending == null and self.trusted_action == null and
-            surface.snapshot != null and !surface.snapshot.?.read_only and !surface.snapshot.?.projection.modes.alternate_screen and
-            !self.local_editor.active and !self.palette.isOpen() and surface.pending_paste == null and surface.paste_requested == null;
+        return snapshot.owner.eql(surface.owner) and snapshot.editable() and self.inputAssistContextAllowed();
+    }
+
+    fn completionRevision(self: *TerminalViewNode) @FieldType(TerminalViewNode, "trusted_suppressed") {
+        if (self.trusted_snapshot) |snapshot| return .{ .token = snapshot.token, .revision = snapshot.revision };
+        return .{ .token = 0, .revision = self.observed_input_revision };
     }
 
     fn clearTrustedSnapshot(self: *TerminalViewNode) void {
@@ -1641,7 +1813,12 @@ pub const TerminalViewNode = struct {
                 surface.showError(error.TrustedEditRejected);
             }
         }
-        if (changed) self.refreshCompletion();
+        self.collectObservedSubmission();
+        const stamp: @typeInfo(@FieldType(TerminalViewNode, "completion_refresh_stamp")).optional.child = .{ .input = self.observed_input_revision, .projection = if (surface.snapshot) |snapshot| snapshot.projection.version else 0, .allowed = self.completionAllowed() };
+        if (changed or self.completion_refresh_stamp == null or !std.meta.eql(self.completion_refresh_stamp.?, stamp)) {
+            self.completion_refresh_stamp = stamp;
+            self.refreshCompletion();
+        }
         self.renderCommandPalette();
         self.renderLocalInput();
         self.renderCompletion();
@@ -1735,9 +1912,6 @@ pub const TerminalViewNode = struct {
             return true;
         }
         if (self.handleCompletionKey(key, modifiers)) return true;
-        if (key == .@"return" and surface.trusted_pending == null) if (self.trusted_snapshot) |snapshot| {
-            if (snapshot.editable() and snapshot.buffer.len > 0) self.recordCompletionHistory(snapshot.buffer);
-        };
         self.completion.dismiss();
         self.renderCompletion();
         return false;
@@ -1821,6 +1995,7 @@ pub const TerminalViewNode = struct {
     }
 
     fn recordCompletionHistory(self: *TerminalViewNode, command: []const u8) void {
+        if (command.len == 0 or containsControlByte(command) or !std.unicode.utf8ValidateSlice(command)) return;
         for (self.completion.candidates.items) |*candidate| {
             if (candidate.source == .history and std.mem.eql(u8, candidate.text, command)) {
                 candidate.frequency +|= 1;
@@ -1836,15 +2011,21 @@ pub const TerminalViewNode = struct {
         if (!self.completionAllowed()) {
             self.completion.dismiss();
         } else {
-            const snapshot = self.trusted_snapshot.?;
-            const suppressed = if (self.trusted_suppressed) |value| value.token == snapshot.token and value.revision == snapshot.revision else false;
-            if (snapshot.buffer.len == 0 or suppressed) {
+            const revision = self.completionRevision().?;
+            const query = if (self.trusted_snapshot) |snapshot| snapshot.buffer else self.line.content.items;
+            const suppressed = if (self.trusted_suppressed) |value| value.token == revision.token and value.revision == revision.revision else false;
+            if (query.len == 0 or suppressed) {
                 self.completion.dismiss();
             } else {
-                self.line.content.clearRetainingCapacity();
-                self.line.content.appendSlice(self.cx.allocator, snapshot.buffer) catch return;
-                self.line.unknown = false;
-                self.completion_count = self.completion.historyMenu(snapshot.buffer, wallClockMs(), self.completion_matches[0..6]).len;
+                if (self.trusted_snapshot != null) {
+                    self.line.content.clearRetainingCapacity();
+                    self.line.content.appendSlice(self.cx.allocator, query) catch return;
+                    self.line.unknown = false;
+                }
+                self.completion_count = if (self.trusted_snapshot != null)
+                    self.completion.historyMenu(query, wallClockMs(), self.completion_matches[0..6]).len
+                else
+                    self.completion.historyPrefixMenu(query, wallClockMs(), self.completion_matches[0..6]).len;
                 self.completion.state.suggestion = null;
                 self.completion.state.menu_open = self.completion_count != 0;
                 self.completion_selected = @min(self.completion_selected, self.completion_count -| 1);
@@ -1866,7 +2047,7 @@ pub const TerminalViewNode = struct {
             return true;
         }
         if (key == .tab) {
-            if (self.trusted_snapshot) |snapshot| self.trusted_suppressed = .{ .token = snapshot.token, .revision = snapshot.revision };
+            self.trusted_suppressed = self.completionRevision();
             // Close local UI before shell changes the remote line.
             self.completion.dismiss();
             self.renderCompletion();
@@ -1874,7 +2055,7 @@ pub const TerminalViewNode = struct {
         }
         if (modifiers.ctrl or modifiers.alt or modifiers.super or modifiers.shift) return false;
         if (key == .escape and (self.completion.state.menu_open or self.completion.state.suggestion != null)) {
-            if (self.trusted_snapshot) |snapshot| self.trusted_suppressed = .{ .token = snapshot.token, .revision = snapshot.revision };
+            self.trusted_suppressed = self.completionRevision();
             self.completion.dismiss();
             self.renderCompletion();
             return true;
@@ -1897,7 +2078,14 @@ pub const TerminalViewNode = struct {
     fn acceptCompletion(self: *TerminalViewNode, command: []const u8, _: bool) void {
         if (!self.completionAllowed()) return;
         const surface = self.terminal_surface orelse return;
-        self.requestTrusted(.history, command) catch |err| surface.showError(err);
+        if (self.trusted_snapshot != null) {
+            self.requestTrusted(.history, command) catch |err| surface.showError(err);
+        } else {
+            const query = self.line.content.items;
+            if (!std.mem.startsWith(u8, command, query) or command.len <= query.len or containsControlByte(command)) return;
+            self.trusted_suppressed = self.completionRevision();
+            surface.queueText(command[query.len..]) catch |err| surface.showError(err);
+        }
         self.completion.dismiss();
         self.renderCompletion();
     }
@@ -2511,6 +2699,7 @@ pub const TerminalViewNode = struct {
         self.command_record_retry = false;
         const surface = try TerminalSurface.create(self.cx, self.root, service, self.surfaceOptions());
         surface.menu_handler = self.terminal_menu_handler;
+        surface.takeover_handler = self.terminal_takeover_handler;
         surface.shell_observer = .{ .context = self, .accepted = serviceShellAccepted, .paste_stamp = servicePasteStamp };
         surface.enhancement = .{ .context = self, .key = serviceEditKey, .text = serviceEditText, .event = serviceHistoryEvent };
         self.terminal_surface = surface;
@@ -2526,17 +2715,75 @@ pub const TerminalViewNode = struct {
     }
     fn serviceShellAccepted(raw: *anyopaque, owner: SessionHandle, event: u64, payload: @import("broadcast_event.zig").Payload) void {
         const self: *TerminalViewNode = @ptrCast(@alignCast(raw));
-        if (self.worker != null) switch (payload) {
-            .bytes, .paste => |bytes| self.line.record(self.cx.allocator, bytes),
-            .key => |key| switch (key.key) {
-                .enter => self.line.clearLine(),
-                .backspace => self.line.record(self.cx.allocator, "\x7f"),
-                .c, .u => if (key.modifiers.control) self.line.clearLine(),
-                .arrow_up, .arrow_down, .home, .end => self.line.unknown = true,
-                else => {},
+        const surface = self.terminal_surface orelse return;
+        if (!owner.eql(surface.owner)) return;
+        self.observed_input_revision +|= 1;
+        const modes = if (surface.snapshot) |snapshot| snapshot.projection.modes else terminal_service.Modes{};
+        if (modes.alternate_screen or modes.application_cursor or modes.mouse_tracking != .none) {
+            self.line.markUnknown();
+        } else switch (payload) {
+            .bytes, .paste => |bytes| self.observeShellBytes(bytes),
+            .key => |key| if (key.action != .release) {
+                switch (key.key) {
+                    .enter, .numpad_enter => {
+                        self.observeShellSubmission();
+                        self.line.clearLine();
+                        self.observed_input_anchor = null;
+                    },
+                    .backspace => if (!key.modifiers.alt and !key.modifiers.control) self.line.record(self.cx.allocator, "\x7f") else self.line.markUnknown(),
+                    .c, .u => if (key.modifiers.control) {
+                        self.line.clearLine();
+                        self.observed_input_anchor = null;
+                    } else self.line.markUnknown(),
+                    .page_up, .page_down => {},
+                    else => self.line.markUnknown(),
+                }
             },
-        };
+        }
         if (self.input_observer) |observer| if (observer.on_service_input) |callback| callback(observer.context, owner, event, payload);
+    }
+
+    fn observeShellBytes(self: *TerminalViewNode, bytes: []const u8) void {
+        for (bytes) |byte| {
+            if (self.line.atLineStart() and byte >= 0x20 and byte != 0x7f) {
+                if (self.terminal_surface.?.snapshot) |snapshot| self.observed_input_anchor = completion_input.anchor(snapshot.projection);
+            }
+            if (byte == '\r' or byte == '\n') self.observeShellSubmission();
+            self.line.record(self.cx.allocator, &.{byte});
+            if (self.line.atLineStart()) self.observed_input_anchor = null;
+        }
+    }
+
+    fn clearObservedSubmission(self: *TerminalViewNode) void {
+        if (self.observed_submission) |value| self.cx.allocator.free(value.text);
+        self.observed_submission = null;
+    }
+
+    fn observeShellSubmission(self: *TerminalViewNode) void {
+        self.collectObservedSubmission();
+        self.clearObservedSubmission();
+        if (self.line.unknown or self.line.content.items.len == 0) return;
+        const surface = self.terminal_surface orelse return;
+        const snapshot = surface.snapshot orelse return;
+        const text = self.line.content.items;
+        const trusted = if (self.trusted_snapshot) |edit| edit.owner.eql(surface.owner) and edit.editable() and std.mem.eql(u8, edit.buffer, text) else false;
+        if (trusted or completion_input.atCursor(snapshot.projection, text)) {
+            self.recordCompletionHistory(text);
+        } else if (self.observed_input_anchor) |start| {
+            // Input may be accepted before its echo arrives. Validate that
+            // exact row/column on publication; a password never becomes history.
+            self.observed_submission = .{ .text = self.cx.allocator.dupe(u8, text) catch return, .anchor = start, .expires_ms = wallClockMs() + 10000 };
+        }
+    }
+
+    fn collectObservedSubmission(self: *TerminalViewNode) void {
+        const value = self.observed_submission orelse return;
+        const surface = self.terminal_surface orelse return;
+        const snapshot = surface.snapshot orelse return;
+        if (!snapshot.projection.modes.alternate_screen and completion_input.echoed(snapshot.projection, value.anchor, value.text)) {
+            self.recordCompletionHistory(value.text);
+            self.clearObservedSubmission();
+        } else if (wallClockMs() >= value.expires_ms or snapshot.read_only) self.clearObservedSubmission();
     }
     fn servicePasteStamp(raw: *anyopaque, owner: SessionHandle) u64 {
         const self: *TerminalViewNode = @ptrCast(@alignCast(raw));
@@ -2559,6 +2806,11 @@ pub const TerminalViewNode = struct {
         self.trusted_execute = false;
         self.trusted_literal_token = 0;
         self.trusted_suppressed = null;
+        self.clearObservedSubmission();
+        self.observed_input_anchor = null;
+        self.observed_input_revision = 0;
+        self.completion_refresh_stamp = null;
+        self.line.clearLine();
         self.trusted_draft.clearRetainingCapacity();
         self.closeCommandPalette();
         self.completion.dismiss();
@@ -2568,6 +2820,11 @@ pub const TerminalViewNode = struct {
     }
     /// The handler receives the clicked service owner and window coordinates;
     /// it never has to infer its execution target from the active tab.
+    pub fn setTerminalTakeoverHandler(self: *TerminalViewNode, handler: ?TakeoverHandler) void {
+        self.terminal_takeover_handler = handler;
+        if (self.terminal_surface) |surface| surface.takeover_handler = handler;
+        self.cx.requestRedraw();
+    }
     pub fn setTerminalMenuHandler(self: *TerminalViewNode, handler: ?TerminalSurface.MenuHandler) void {
         self.terminal_menu_handler = handler;
         if (self.terminal_surface) |surface| surface.menu_handler = handler;
@@ -2592,9 +2849,9 @@ pub const TerminalViewNode = struct {
     fn captureHistoryProjection(self: *TerminalViewNode, surface: *TerminalSurface, projection: *const @import("../vt/snapshot.zig").Projection) !void {
         const started = @import("terminal_document.zig").Document.profileNow();
         defer self.profile_history_us += (@import("terminal_document.zig").Document.profileNow() -| started) / 1000;
-        if (!try self.history.appendProjectionChanged(wallClockMs(), projection)) return;
+        if (!try self.recordingHistory().appendProjectionChanged(wallClockMs(), projection)) return;
         if (!surface.composite.composed()) return;
-        if (surface.composite.cached) |document| if (!self.history.canAttachSearch(document)) return;
+        if (surface.composite.cached) |document| if (!self.recordingHistory().canAttachSearch(document)) return;
         // Immutable full-history copies can be large. Page ownership avoids
         // leaving evicted copies in malloc's high-water caches.
         const allocator = std.heap.page_allocator;
@@ -2603,7 +2860,7 @@ pub const TerminalViewNode = struct {
             captured.deinit(allocator);
             return;
         }
-        self.history.attachSearchWithAllocator(captured.document, allocator);
+        self.recordingHistory().attachSearchWithAllocator(captured.document, allocator);
     }
     pub fn refreshTerminalService(self: *TerminalViewNode, expected_owner: SessionHandle, active: bool) !bool {
         if (self.profile_frame != self.cx.frame_count) {
@@ -2718,6 +2975,17 @@ pub const TerminalViewNode = struct {
         }
         if (self.terminal_surface) |surface| try surface.setTheme(theme);
         self.terminal_theme = theme;
+        if (self.history.selected != null) {
+            self.setThemeColors(packedToColor(theme.foreground), self.idle_border_color, self.focus_border_color);
+            const selection = self.selection;
+            self.renderHistoryReading() catch |err| {
+                self.selection = selection;
+                return err;
+            };
+            self.selection = selection;
+            self.renderSelectionOverlays();
+            if (self.history.current()) |entry| if (entry.search) |*document| try self.refreshHistorySearchMarks(document);
+        }
         self.refreshOverlayTheme();
         self.cx.requestRedraw();
     }
@@ -2876,7 +3144,6 @@ pub const TerminalViewNode = struct {
     /// with no SSH worker and no text-input client.
     pub fn bindArchived(self: *TerminalViewNode) void {
         self.archive_read_only = true;
-        if (self.history_help) |help| help.setTextContent(self.cx.allocator, "历史归档 · 可选择复制与搜索") catch {};
         self.tombstone.end("历史归档 · 只读");
         self.root.behavior.events.key_context = @ptrCast(self);
         self.root.behavior.events.event_context = @ptrCast(self);
@@ -3008,6 +3275,7 @@ pub const TerminalViewNode = struct {
                 return .ignored;
             },
             .ime_preedit => |preedit| {
+                if (view.history.selected != null or view.archive_read_only) return .handled;
                 view.setPreedit(preedit.text);
                 return .handled;
             },
@@ -3018,23 +3286,10 @@ pub const TerminalViewNode = struct {
                 return pushTextFrom(view, commit.text, .ordinary);
             },
             .scroll => |wheel| {
-                if (view.history.current()) |entry| if (entry.search) |document| {
-                    var top: usize = view.history_search_top orelse 0;
-                    if (view.history_search_top == null and entry.presentation.len > view.history_display_skip) {
-                        const id = entry.presentation[view.history_display_skip].id;
-                        for (document.rows, 0..) |row, i| if (std.meta.eql(row.id, id)) {
-                            top = i;
-                            break;
-                        };
-                    }
-                    const delta: i64 = @intFromFloat(-wheel.dy / @max(1, view.cell_height));
-                    if (delta != 0 and document.rows.len > 0) {
-                        var next: usize = @intCast(std.math.clamp(@as(i64, @intCast(top)) + delta, 0, @as(i64, @intCast(document.rows.len - 1))));
-                        while (next < document.rows.len and document.rows[next].start == document.rows[next].end) : (next += 1) {}
-                        if (next < document.rows.len) view.locateHistorySearch(.{ .start = document.rows[next].start, .end = document.rows[next].start + 1 }) catch {};
-                    }
+                if (view.history.selected != null) {
+                    view.scrollHistory(-wheel.dy);
                     return .handled;
-                };
+                }
                 if (view.legacy_document) |doc| if (!doc.alternate) {
                     view.pending_pixel_scroll -= wheel.dy;
                     view.flushWorkerScroll();
@@ -3052,7 +3307,6 @@ pub const TerminalViewNode = struct {
                 if (mouse.button == .middle) {
                     const owner = view.worker_menu_owner orelse return .ignored;
                     const handler = view.terminal_menu_handler orelse return .ignored;
-                    if (view.worker == null) return .ignored;
                     handler.request(handler.context, owner, mouse.x, mouse.y);
                     return .handled;
                 }
@@ -3193,6 +3447,7 @@ pub const TerminalViewNode = struct {
         }
         if (!self.tombstone.allowsRemoteInput() and !(source == .ordinary and worker.allowsBufferedOrdinaryInput())) return error.ReadOnlyTerminal;
         try worker.pushInputFrom(bytes, source);
+        if (bytes.len > 0 and (source == .ordinary or source == .paste or source == .broadcast)) self.user_input_revision +|= 1;
         if (self.legacy_document) |doc| if (bytes.len > 0) {
             doc.follow = true;
         };
@@ -3224,6 +3479,7 @@ pub const TerminalViewNode = struct {
         const worker = self.worker orelse return error.NoTerminal;
         if (worker.reconnectState() != .connected) return error.DisconnectedTerminal;
         try worker.pushInputFrom(bytes, .broadcast);
+        if (bytes.len > 0) self.user_input_revision +|= 1;
         self.line.record(self.cx.allocator, bytes);
     }
 
@@ -3257,6 +3513,7 @@ pub const TerminalViewNode = struct {
         if (self.pending_paste_broadcast and self.local_state.broadcast) {
             if (self.input_observer) |observer| observer.on_input(observer.context, self, pending[start .. start + chunk]);
         }
+        self.user_input_revision +|= 1;
         self.pending_paste_offset += chunk;
         if (self.pending_paste_offset >= pending.len) self.clearPendingPaste();
     }
@@ -3563,6 +3820,25 @@ pub const TerminalViewNode = struct {
             }
             return .handled;
         }
+        if (view.history.selected != null) {
+            if (key == .f and ui.events.primaryModifier(modifiers)) {
+                view.openSearch();
+                return .handled;
+            }
+            if (key == .home or key == .end or key == .page_up or key == .page_down) {
+                if (view.history_reading) |*reading| {
+                    switch (key) {
+                        .home => reading.seek(0),
+                        .end => reading.seek(1),
+                        .page_up => reading.scroll(-view.historyViewportHeight()),
+                        .page_down => reading.scroll(view.historyViewportHeight()),
+                        else => {},
+                    }
+                    view.renderHistoryReading() catch {};
+                }
+                return .handled;
+            }
+        }
         if (view.worker == null) {
             if (key == .f and ui.events.primaryModifier(modifiers)) view.openSearch();
             return .handled;
@@ -3814,6 +4090,7 @@ pub const TerminalViewNode = struct {
     /// content area. Called every frame; only acts when the cell-fit dims
     /// actually changed. The first frame immediately grows the 80×24 default.
     fn syncGridSize(self: *TerminalViewNode) void {
+        if (self.history.selected != null or self.archive_read_only) return;
         if (self.terminal_surface != null) return;
         const worker = self.worker orelse return;
         if (!self.has_frame) return;
@@ -3985,6 +4262,11 @@ pub const TerminalViewNode = struct {
     /// Releases view-owned frame buffers (tab teardown).
     pub fn releaseBuffers(self: *TerminalViewNode, cx: *ui.Cx) void {
         self.setHistoryHost(null) catch {};
+        cx.removeAfterLayoutHook(self);
+        if (self.history_live) |*live| live.deinit();
+        self.history_live = null;
+        if (self.history_reading) |*reading| reading.deinit();
+        self.history_reading = null;
         cx.setNodeExternalClipRect(self.rows_box.id, null);
         cx.setNodeExternalClipRect(self.cursor_overlay.id, null);
         for (self.selection_overlays[0..self.selection_overlay_len]) |node| cx.setNodeExternalClipRect(node.id, null);
@@ -4066,7 +4348,7 @@ pub const TerminalViewNode = struct {
         };
         if (self.legacy_document) |doc| if (doc.composed()) return self.refreshLegacyDocument();
         self.cx.setNodeExternalClipRect(self.rows_box.id, null);
-        try self.history.append(wallClockMs(), payload.text);
+        try self.recordingHistory().append(wallClockMs(), payload.text);
         if (self.history.selected != null) return false;
         return self.renderFrame(cx, frame);
     }
@@ -4081,22 +4363,22 @@ pub const TerminalViewNode = struct {
         if (self.live_scrollbar == null) self.live_scrollbar = try @import("terminal_scrollbar.zig").mount(self.cx, self.root);
         const range = snapshot.projection.scrollback;
         @import("terminal_scrollbar.zig").update(self.cx, self.live_scrollbar.?, range.total_rows, range.viewport_offset, range.viewport_rows, !snapshot.projection.modes.alternate_screen);
-        const reuse_source = if (self.history.latest()) |last| self.history.selected == null and last.search != null and last.search.?.source_version == snapshot.projection.version else false;
+        const reuse_source = if (self.recordingHistory().latest()) |last| self.history.selected == null and last.search != null and last.search.?.source_version == snapshot.projection.version else false;
         if (reuse_source) {
-            try self.history.replaceLatestProjection(&snapshot.projection);
+            try self.recordingHistory().replaceLatestProjection(&snapshot.projection);
         } else {
-            try self.history.appendProjection(wallClockMs(), &snapshot.projection);
-            const retain_search = if (doc.cached) |document| self.history.canAttachSearch(document) else true;
+            try self.recordingHistory().appendProjection(wallClockMs(), &snapshot.projection);
+            const retain_search = if (doc.cached) |document| self.recordingHistory().canAttachSearch(document) else true;
             if (retain_search) {
                 if (doc.service().searchSnapshot(std.heap.page_allocator)) |captured| {
-                    self.history.attachSearchWithAllocator(captured.document, std.heap.page_allocator);
+                    self.recordingHistory().attachSearchWithAllocator(captured.document, std.heap.page_allocator);
                 } else |_| {}
             }
         }
         if (self.history.selected != null) return false;
         const foreground = ui.Color.hex(snapshot.projection.colors.foreground);
         if (!ui.Color.eql(self.base_fg, foreground)) self.setThemeColors(foreground, self.idle_border_color, self.focus_border_color);
-        var live_frame = text_frame.decode(self.history.latest().?.wire).?;
+        var live_frame = text_frame.decode(self.recordingHistory().latest().?.wire).?;
         live_frame.rows = @intCast(@min(snapshot.projection.visible_rows.len, max_grid_rows));
         // History frames deliberately omit the cursor. Live presentation must
         // restore its coordinates as well as visibility from the same snapshot.
@@ -4998,6 +5280,22 @@ test "terminal overlay global completion and replay repaint preserve retained in
     const span_end = label.getText().?.spans[0].end;
     const menu_geometry = view.completion_cache;
     const history_id = view.history_bar.?.id;
+    const HistoryNodes = struct {
+        fn byTestId(node: *ui.Node, id: []const u8) ?*ui.Node {
+            if (node.meta.ownership.meta.test_id) |value| if (std.mem.eql(u8, value, id)) return node;
+            for (node.children.items) |child| if (byTestId(child, id)) |found| return found;
+            return null;
+        }
+        fn text(node: *ui.Node) ?*ui.Node {
+            if (node.getText() != null) return node;
+            for (node.children.items) |child| if (text(child)) |found| return found;
+            return null;
+        }
+    };
+    const history_title_group = HistoryNodes.byTestId(view.history_bar.?, "terminal.history.title").?;
+    const history_title = HistoryNodes.text(history_title_group).?;
+    const history_icon = history_title_group.children.items[0];
+    const history_title_id = history_title.id;
     view.history_bar.?.setDisplay(.flex);
     view.history_fill.?.style.width = .{ .percent = 37 };
     view.history_dragging = true;
@@ -5015,11 +5313,13 @@ test "terminal overlay global completion and replay repaint preserve retained in
         try std.testing.expectEqual(theme.current().fg_1, label.getText().?.color);
         try std.testing.expectEqual(theme.current().accent_ink, label.getText().?.spans[0].color.?);
         try std.testing.expectEqual(theme.popupSelection(), row.getBackground());
-        try std.testing.expectEqual(theme.current().overlay, view.history_bar.?.getBackground());
+        try std.testing.expectEqual(theme.current().surface_1, view.history_bar.?.getBackground());
         try std.testing.expectEqual(theme.current().well, view.history_track.?.getBackground());
         try std.testing.expectEqual(theme.current().accent, view.history_fill.?.getBackground());
-        try std.testing.expectEqual(theme.current().warn_ink, view.history_bar.?.children.items[0].getText().?.color);
-        try std.testing.expectEqual(theme.current().fg_2, view.history_bar.?.children.items[2].getText().?.color);
+        try std.testing.expectEqual(theme.current().accent, history_icon.getIcon().?.tint);
+        try std.testing.expectEqual(theme.current().fg_2, history_title.getText().?.color);
+        try std.testing.expectEqual(theme.current().fg_2, view.history_help.?.getText().?.color);
+        try std.testing.expectEqual(history_title_id, HistoryNodes.text(HistoryNodes.byTestId(view.history_bar.?, "terminal.history.title").?).?.id);
         for (view.completion_rows.items, 0..) |candidate_row, i| {
             const badge = candidate_row.children.items[1];
             const expected = switch (view.completion_matches[i].candidate.source) {
@@ -5174,7 +5474,7 @@ test "trusted completion local draft renderer sleeps until text or visibility ch
     try std.testing.expect(!view.local_input_cache.placed);
 }
 
-test "untrusted terminal completion never consumes or replaces native input" {
+test "unbound terminal completion never consumes or replaces native input" {
     const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
     defer cx.deinit();
     var view = try TerminalViewNode.mount(cx);
@@ -5187,6 +5487,138 @@ test "untrusted terminal completion never consumes or replaces native input" {
     try std.testing.expect(!view.handleCompletionKey(.right, .{}));
     try std.testing.expect(!view.handleCompletionKey(.semicolon, .{ .super = true }));
     try std.testing.expectEqualStrings("git st", view.line.content.items);
+}
+
+test "observed completion records nested shell input after delayed echo and automatically appends a prefix" {
+    const fixture = @import("terminal_surface_tests.zig");
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(8, 80);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(900, 500);
+    var view = try TerminalViewNode.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    cx.setFocus(view.root);
+    const base_count = view.completion.candidates.items.len;
+    _ = cx.render();
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    _ = cx.render();
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try transport.controller.feedOutput(fixture.owner, 1, "root@container# ", 100);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    const command = "find . -name __pycache__";
+    cx.handleTextInput(command);
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expectEqualStrings(command ++ "\r", transport.written.items);
+    try std.testing.expectEqual(base_count, view.completion.candidates.items.len);
+    try transport.controller.feedOutput(fixture.owner, 2, command ++ "\r\n./src/__pycache__\r\nroot@container# ", 200);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expectEqual(base_count + 1, view.completion.candidates.items.len);
+    try std.testing.expectEqualStrings(command, view.completion.candidates.items[base_count].text);
+    try std.testing.expect(view.trusted_snapshot == null);
+    cx.handleTextInput("find");
+    try transport.controller.feedOutput(fixture.owner, 3, "find", 300);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    _ = cx.render();
+    try std.testing.expect(view.completion.state.menu_open);
+    try std.testing.expectEqual(@as(usize, 1), view.completion_count);
+    try std.testing.expectEqualStrings(command, view.completion_matches[0].candidate.text);
+    cx.handleKeyDown(.escape, .{});
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expect(!view.completion.state.menu_open);
+    cx.handleKeyDown(.semicolon, .{ .super = true });
+    try std.testing.expect(view.completion.state.menu_open);
+    cx.handleKeyDown(.right, .{});
+    try std.testing.expectEqualStrings(command ++ "\r" ++ command, transport.written.items);
+    try std.testing.expect(!view.completion.state.menu_open);
+    // The appended suffix is ordinary input, never an Enter or a DEL rewrite.
+    try std.testing.expect(view.terminal_surface.?.trusted_pending == null);
+    try transport.controller.feedOutput(fixture.owner, 4, " . -name __pycache__", 400);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expectEqual(@as(u32, 2), view.completion.candidates.items[base_count].frequency);
+    try std.testing.expectEqual(base_count + 1, view.completion.candidates.items.len);
+}
+
+test "observed completion preserves Enter and Tab and excludes hidden input and alternate screen" {
+    const fixture = @import("terminal_surface_tests.zig");
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(8, 80);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(900, 500);
+    var view = try TerminalViewNode.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    cx.setFocus(view.root);
+    const base_count = view.completion.candidates.items.len;
+    _ = cx.render();
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    _ = cx.render();
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try transport.controller.feedOutput(fixture.owner, 1, "Password: ", 100);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    cx.handleTextInput("hidden-value");
+    cx.handleKeyDown(.@"return", .{});
+    try transport.controller.feedOutput(fixture.owner, 2, "\r\nroot# ", 200);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expectEqual(base_count, view.completion.candidates.items.len);
+    view.recordCompletionHistory("find . -name __pycache__");
+    cx.handleTextInput("find");
+    try transport.controller.feedOutput(fixture.owner, 3, "find", 300);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expect(view.completion.state.menu_open);
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expect(std.mem.endsWith(u8, transport.written.items, "find\r"));
+    try std.testing.expectEqualStrings("find", view.completion.candidates.items[base_count + 1].text);
+    try transport.controller.feedOutput(fixture.owner, 4, "\r\nroot# ", 400);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    cx.handleTextInput("find");
+    try transport.controller.feedOutput(fixture.owner, 5, "find", 500);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expect(view.completion.state.menu_open);
+    cx.handleKeyDown(.tab, .{});
+    try std.testing.expect(std.mem.endsWith(u8, transport.written.items, "find\t"));
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expect(!view.completion.state.menu_open);
+    try std.testing.expect(view.line.unknown);
+    cx.handleKeyDown(.c, .{ .ctrl = true });
+    try transport.controller.feedOutput(fixture.owner, 6, "\x1b[?1049h", 600);
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    cx.handleTextInput("find other");
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expect(!view.completion.state.menu_open);
+    try std.testing.expectEqual(base_count + 2, view.completion.candidates.items.len);
+}
+
+test "observed completion echo handles Unicode soft wraps and rejects a cursor inside the line" {
+    const fixture = @import("terminal_surface_tests.zig");
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(8, 12);
+    defer transport.deinit();
+    try transport.controller.feedOutput(fixture.owner, 1, "old\r\nold\r\nold\r\nold\r\nold\r\nold\r\nold\r\nold\r\nold\r\nold\r\nroot# ", 100);
+    var before = try transport.service().snapshot(std.testing.allocator);
+    defer before.deinit(std.testing.allocator);
+    const start = completion_input.anchor(before.projection).?;
+    const command = "echo 中文é👩‍💻目录";
+    try transport.controller.feedOutput(fixture.owner, 2, command, 200);
+    var after = try transport.service().snapshot(std.testing.allocator);
+    defer after.deinit(std.testing.allocator);
+    try std.testing.expect(completion_input.echoed(after.projection, start, command));
+    try std.testing.expect(after.projection.scrollback.viewport_offset > 0);
+    try std.testing.expect(completion_input.atCursor(after.projection, command));
+    var scrolled = after.projection;
+    scrolled.scrollback.viewport_offset -= 1;
+    try std.testing.expect(!completion_input.atCursor(scrolled, command));
+    try transport.controller.feedOutput(fixture.owner, 3, "\x1b[D", 300);
+    var moved = try transport.service().snapshot(std.testing.allocator);
+    defer moved.deinit(std.testing.allocator);
+    try std.testing.expect(!completion_input.atCursor(moved.projection, command));
 }
 
 fn boldWeight(base: u16) u16 {
@@ -5908,7 +6340,7 @@ test "history track follows window pointer coordinates and captures drag outside
     try std.testing.expectApproxEqAbs(@as(f32, 0.25), view.history_fill.?.style.ext.?.scale_x, 0.01);
     cx.handleMouseMoveEx(rect.x + rect.w * 0.30, y, .{});
     try std.testing.expectEqual(@as(?usize, 1), view.history.selected);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.3), view.history_fill.?.style.ext.?.scale_x, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), view.history_fill.?.style.ext.?.scale_x, 0.01);
     cx.handleMouseMoveEx(rect.x + rect.w * 0.75, y + 50, .{});
     try std.testing.expectEqual(@as(?usize, 3), view.history.selected);
     try std.testing.expectApproxEqAbs(@as(f32, 0.75), view.history_fill.?.style.ext.?.scale_x, 0.01);
@@ -6057,4 +6489,68 @@ test "history archive Escape closes search but never exits the read-only documen
     try std.testing.expect(view.history.selected != null);
     view.closeHistory();
     try std.testing.expect(view.history.selected != null);
+}
+
+test "history active reading freezes the retained range while live output keeps recording" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 180);
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    const text = "frozen-before";
+    var wire: [text_frame.header_bytes + text.len]u8 = undefined;
+    text_frame.encodeHeader(wire[0..text_frame.header_bytes], .{}, 80, 1, 0, text.len);
+    @memcpy(wire[text_frame.header_bytes..], text);
+    try view.history.append(10, &wire);
+    try std.testing.expect(view.openHistory());
+    const frozen_count = view.history_reading.?.anchors.items.len;
+    @memcpy(wire[text_frame.header_bytes..], "live-after---");
+    try view.recordingHistory().append(20, &wire);
+    view.history_reading.?.seek(1);
+    try view.renderHistoryReading();
+    try std.testing.expectEqual(frozen_count, view.history_reading.?.anchors.items.len);
+    try std.testing.expectEqual(@as(usize, 1), view.history.frames.items.len);
+    try std.testing.expectEqualStrings(text, text_frame.decode(view.history.current().?.wire).?.text);
+    view.closeHistory();
+    try std.testing.expect(view.history_live == null and view.history_reading == null);
+    try std.testing.expectEqualStrings("live-after---", text_frame.decode(view.history.latest().?.wire).?.text);
+    try std.testing.expect(view.openHistory());
+    try std.testing.expectEqual(@as(usize, 2), view.history.frames.items.len);
+}
+
+test "history track Escape exits active reading and preserves an archive document" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 160);
+    const parent = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    cx.root = parent;
+    const slot = try ui.box(cx, .{ .width = .fill(), .direction = .column, .flex_shrink = 0 }, .{});
+    try parent.appendChild(a, slot);
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    try parent.appendChild(a, view.root);
+    try view.setHistoryHost(slot);
+    try view.mountHistoryBar();
+    const text = "recorded";
+    var wire: [text_frame.header_bytes + text.len]u8 = undefined;
+    text_frame.encodeHeader(wire[0..text_frame.header_bytes], .{}, 80, 1, 0, text.len);
+    @memcpy(wire[text_frame.header_bytes..], text);
+    try view.history.append(0, &wire);
+    try view.history.append(1, &wire);
+    try std.testing.expect(view.openHistory());
+    cx.layout();
+    cx.setFocus(view.history_track.?);
+    cx.handleKeyDown(.escape, .{});
+    try std.testing.expect(view.history.selected == null);
+    try std.testing.expect(view.history_bar.?.style.display == .none);
+    view.bindArchived();
+    try std.testing.expect(view.openHistory());
+    cx.layout();
+    cx.setFocus(view.history_track.?);
+    cx.handleKeyDown(.escape, .{});
+    try std.testing.expect(view.history.selected != null);
+    try std.testing.expect(view.history_bar.?.style.display == .flex);
 }

@@ -1,4 +1,5 @@
 /** Native AI dock: hover preview vs pinned sessions, identity and explicit close. */
+import {fixtureSessionIds} from './ai_fixture_discovery.ts';
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
 import {spawn} from 'node:child_process';
@@ -20,8 +21,8 @@ for(const theme of themes){
  const dir=join(out,theme);await mkdir(dir,{recursive:true});const iso=await mkdtemp(join(tmpdir(),'zw-r10-')),data=join(iso,'data'),rpc=join(iso,'rpc');await mkdir(data);await mkdir(rpc);
  const run:any={theme,checks:[],captures:[],requests:[],status:'running'};report.runs.push(run);let closed=0;
  const server=createServer(async(req,res)=>{let body='';for await(const chunk of req)body+=chunk;const request=JSON.parse(body);run.requests.push(request);const prompt=[...request.messages].reverse().find((x:any)=>x.role==='user')?.content??'';res.writeHead(200,{'Content-Type':'text/event-stream'});
- if(prompt.includes('TOOL_LONG')&&!request.messages.some((m:any)=>m.role==='tool')){
-  const system=request.messages.find((m:any)=>m.role==='system')?.content??'';const id=Number(system.match(/assistant_session_id=(\d+)/)?.[1]);assert(id>0);
+ if(prompt.includes('TOOL_LONG')&&!request.messages.some((m:any)=>m.role==='tool'&&m.tool_call_id==='r10-long-tool')){
+  const ids=fixtureSessionIds(request,res);if(!ids)return;const id=ids[0];
   const command="printf '%s' $$ > '"+join(iso,'tool.pid')+"'; exec sleep 30";
   res.end('data: '+JSON.stringify({choices:[{index:0,delta:{tool_calls:[{index:0,id:'r10-long-tool',type:'function',function:{name:'run_command',arguments:JSON.stringify({session_ids:[id],command})}}]}}]})+'\n\ndata: [DONE]\n\n');return;
  }

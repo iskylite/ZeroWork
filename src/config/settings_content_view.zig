@@ -1,6 +1,7 @@
 //! Live settings controls sharing one owned draft and fixed save footer.
 const std = @import("std");
 const ui = @import("ui");
+const config = @import("config.zig");
 const Controller = @import("settings_controller.zig").Controller;
 const values = @import("settings_values.zig");
 const schema = @import("settings_schema.zig");
@@ -78,6 +79,8 @@ pub const rows = [_]Row{
     .{ .label = "重命名冲突", .section = "transfer", .key = "conflict_policy" },
     .{ .label = "完成后系统通知", .section = "notify", .key = "transfer_done" },
     .{ .label = "默认权限模式", .section = "ai", .key = "permission_mode" },
+    .{ .label = "默认运行方式", .section = "ai", .key = "execution_mode" },
+    .{ .label = "任务会话处理", .section = "ai", .key = "session_retention" },
     .{ .label = "隐藏连接身份", .section = "ai", .key = "redact_ip" },
     .{ .label = "错误轻提示", .section = "ai", .key = "error_hint" },
     .{ .label = "传输完成", .section = "notify", .key = "transfer_done" },
@@ -524,6 +527,8 @@ pub const Binding = struct {
         }
         return switch (value) {
             .text => |text| blk: {
+                if (std.mem.eql(u8, key.key, "execution_mode")) break :blk config.executionModeLabel(self.controller.model.value.ai.execution_mode);
+                if (std.mem.eql(u8, key.key, "session_retention")) break :blk config.sessionRetentionLabel(self.controller.model.value.ai.session_retention);
                 if (std.mem.eql(u8, key.key, "permission_mode")) break :blk if (std.mem.eql(u8, text, "auto")) "自动执行" else "确认后执行";
                 if (std.mem.eql(u8, key.key, "cursor_style")) break :blk if (std.mem.eql(u8, text, "bar")) "▏ Bar" else if (std.mem.eql(u8, text, "underline")) "▁ Underline" else "█ Block";
                 if (std.mem.eql(u8, key.key, "conflict_policy")) break :blk "每次询问";

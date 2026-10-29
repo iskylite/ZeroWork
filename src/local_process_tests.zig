@@ -243,6 +243,39 @@ test "PTY close signals only owned foreground/background groups and preserves an
     try std.testing.expect((try second.pollExit()) == null);
 }
 
+test "PTY close reobserves a foreground group exiting after interrupt" {
+    var sandbox = try Sandbox.init();
+    defer sandbox.deinit();
+    var failure: pty.Failure = .{};
+    // The interrupt races the close ownership scan: Darwin can still find
+    // the group while its last member has become an uninspectable zombie.
+    // Each iteration creates a real session and keeps its original handle.
+    for (0..16) |iteration| {
+        const id: u64 = 200 + iteration;
+        var session = try pty.Session.start(allocator, owner(id), key(id), .{ .initial_cwd = sandbox.path }, &failure);
+        defer finishSession(&session) catch @panic("interrupted PTY cleanup incomplete");
+        try writeAll(&session, "stty -echo; sleep 60\r");
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(allocator);
+        const until = native.zw_local_monotonic_ms() + 4000;
+        while (true) {
+            _ = try drain(&session, &output);
+            if (session.foreground()) |foreground| if (foreground.process_group != try session.pid()) break;
+            if (native.zw_local_monotonic_ms() >= until) return error.ForegroundTimeout;
+            pause();
+        }
+        try std.testing.expectEqual(@as(c_int, 1), native.zw_local_interrupt_foreground(session.process.?));
+        const cleanup = try session.closeStep(session.owner);
+        if (cleanup == .unknown) {
+            var observation: native.ObservationFailure = undefined;
+            if (native.zw_local_observation_failure(session.process.?, &observation) == 1)
+                std.debug.print("interrupt-close observation stage={d} errno={d} pid={d}\n", .{ observation.stage, observation.error_number, observation.pid });
+        }
+        try std.testing.expect(cleanup != .unknown);
+        try finishSession(&session);
+    }
+}
+
 test "independent local exec captures stdout/stderr/cwd and waits for true cleanup" {
     var sandbox = try Sandbox.init();
     defer sandbox.deinit();

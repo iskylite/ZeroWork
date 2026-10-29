@@ -206,6 +206,11 @@ pub const Runtime = struct {
         if (self.torn_down) return error.SessionClosed;
         return (self.vtable.documentSource orelse return error.UnsupportedService)(self.context);
     }
+
+    pub fn terminalService(self: *Runtime) !terminal.Service {
+        if (self.torn_down) return error.SessionClosed;
+        return (self.vtable.terminalService orelse return error.UnsupportedService)(self.context);
+    }
     pub fn sourceVersion(self: *Runtime) u64 {
         return self.vtable.sourceVersion(self.context);
     }

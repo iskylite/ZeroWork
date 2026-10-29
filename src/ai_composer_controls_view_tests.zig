@@ -100,35 +100,39 @@ test "AI composer controls match the V3 compact row and retain the host send slo
     defer f.deinit();
     const row = f.view.root.globalRect();
     const chip_width = f.view.buttons[2].globalRect().w;
-    const positions = [_]f32{ 0, 32, 138, 0, 146 + chip_width };
-    const widths = [_]f32{ 24, 98, chip_width, 0, 38 };
     for (f.view.buttons, 0..) |button, index| {
         if (index == 3) {
             try std.testing.expect(button.style.display == .none);
             continue;
         }
         const r = button.globalRect();
-        try std.testing.expectApproxEqAbs(row.x + positions[index], r.x, 0.1);
-        try std.testing.expectEqual(widths[index], r.w);
         try std.testing.expectEqual(@as(f32, 24), r.h);
         try std.testing.expectApproxEqAbs(row.y + 2, r.y, 0.1);
+        try std.testing.expect(r.x >= row.x and r.x + r.w <= row.x + row.w);
     }
+    try std.testing.expectApproxEqAbs(row.x, f.view.buttons[0].globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(row.x + 32, f.view.buttons[1].globalRect().x, 0.1);
+    try std.testing.expectEqual(@as(f32, 98), f.view.buttons[1].globalRect().w);
+    try std.testing.expectApproxEqAbs(row.x + 138, f.view.buttons[5].globalRect().x, 0.1);
+    try std.testing.expect(f.view.buttons[5].globalRect().x + f.view.buttons[5].globalRect().w < f.view.buttons[4].globalRect().x);
+    try std.testing.expectApproxEqAbs(f.view.buttons[4].globalRect().x + f.view.buttons[4].globalRect().w + 8, f.view.buttons[2].globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + chip_width + 8, f.send.globalRect().x, 0.1);
     try std.testing.expectApproxEqAbs(row.x + 544, f.send.globalRect().x, 0.1);
     try std.testing.expectEqual(@as(f32, 28), f.send.globalRect().h);
     try std.testing.expectApproxEqAbs(row.x + 40, f.view.icons[1].globalRect().x, 0.1);
     try std.testing.expectApproxEqAbs(row.x + 56, f.view.labels[1].?.globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(row.x + 166, f.view.labels[2].?.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + 28, f.view.labels[2].?.globalRect().x, 0.1);
     const logo = find(f.view.buttons[2], "ai.composer.model.logo") orelse return error.MissingModelLogo;
     try std.testing.expectEqual(@as(f32, 16), logo.globalRect().w);
     try std.testing.expectEqual(@as(f32, 16), logo.globalRect().h);
-    try std.testing.expectApproxEqAbs(row.x + 146, logo.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + 8, logo.globalRect().x, 0.1);
     try std.testing.expect(hasText(logo, "A"));
     try std.testing.expectEqual(@as(f32, 12), f.view.icons[1].globalRect().w);
     try std.testing.expectEqual(@as(f32, 10), f.view.labels[2].?.getText().?.font_size);
     try std.testing.expectEqual(@as(u16, 400), f.view.labels[2].?.getText().?.font_weight);
     try std.testing.expectApproxEqAbs(row.x + 110, f.view.chevrons[0].globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(row.x + 138 + chip_width - 20, f.view.chevrons[1].globalRect().x, 0.1);
-    try std.testing.expectApproxEqAbs(row.x + 154 + chip_width, f.view.ring.globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(f.view.buttons[2].globalRect().x + chip_width - 20, f.view.chevrons[1].globalRect().x, 0.1);
+    try std.testing.expectApproxEqAbs(f.view.buttons[4].globalRect().x + 8, f.view.ring.globalRect().x, 0.1);
     try std.testing.expectApproxEqAbs(f.view.labels[2].?.globalRect().x + f.view.labels[2].?.globalRect().w + 4, f.view.labels[3].?.globalRect().x, 0.1);
     try std.testing.expect(chip_width < 190);
     try std.testing.expectEqualStrings("alpha", f.view.labels[2].?.getText().?.content);
@@ -611,5 +615,141 @@ test "AI composer model metadata columns align across supported and unsupported 
         const second = find(quiet, id).?.globalRect();
         try std.testing.expectApproxEqAbs(first.x, second.x, 0.1);
         try std.testing.expectApproxEqAbs(first.w, second.w, 0.1);
+    }
+}
+
+test "AI composer execution mode captures nullable overrides and awaits host acknowledgement" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var source = f.snapshot();
+    source.global_execution_mode = .isolated_exec;
+    source.global_session_retention = .ask;
+    try f.view.update(source);
+    f.settle();
+    try std.testing.expectEqualStrings("批处理", f.view.labels[5].?.getText().?.content);
+    f.enter(f.view.buttons[5]);
+    const menu = find(f.cx.root.?, "ai.execution.menu") orelse return error.MissingExecutionMenu;
+    try std.testing.expectEqual(@as(f32, 296), menu.globalRect().w);
+    try std.testing.expect(hasText(menu, "跟随全局 · 批处理"));
+    f.enter(find(menu, "ai.execution.new_pty").?);
+    try std.testing.expectEqual(config.ExecutionMode.new_pty, f.last.?.action.execution_mode.?);
+    try std.testing.expectEqualStrings("批处理", f.view.labels[5].?.getText().?.content);
+    try std.testing.expectEqual(config.PermissionMode.confirm, source.permission);
+    source.execution_mode_override = .new_pty;
+    try f.view.update(source);
+    f.settle();
+    try std.testing.expectEqualStrings("新建 PTY", f.view.labels[5].?.getText().?.content);
+    f.enter(f.view.buttons[5]);
+    f.enter(find(menu, "ai.execution.inherit").?);
+    try std.testing.expect(f.last.?.action.execution_mode == null);
+}
+
+test "AI composer retention selection is captured and stale execution menu cannot affect another owner" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.enter(f.view.buttons[5]);
+    f.enter(f.view.retention_select.trigger);
+    const keep = find(f.cx.root.?, "ai.retention.keep") orelse return error.MissingRetentionChoice;
+    f.enter(keep);
+    try std.testing.expectEqual(config.SessionRetention.keep, f.last.?.action.session_retention.?);
+    try std.testing.expect(f.last.?.owner.eql(.{ .session = 101 }));
+    try std.testing.expectEqualStrings("inherit", f.view.retention_value.peek().?);
+    f.enter(f.view.buttons[5]);
+    const mode = find(f.cx.root.?, "ai.execution.ask").?;
+    var other = f.snapshot();
+    other.owner = .{ .group = 9 };
+    try f.view.update(other);
+    f.enter(mode);
+    try std.testing.expectEqual(@as(usize, 1), f.calls);
+}
+
+test "AI composer longest model and execution choices remain reachable at minimum width" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.models[0].id = "provider/longest-supported-model-identifier";
+    var source = f.snapshot();
+    source.revision += 1;
+    source.current.?.model_id = f.models[0].id;
+    source.execution_mode_override = .attached_pty;
+    source.usage = .{ .used_tokens = 999, .limit_tokens = 1000 };
+    try f.view.update(source);
+    f.panel.setStyleInline(a, .{ .width = .{ .px = 520 } });
+    f.view.root.setStyleInline(a, .{ .width = .{ .px = 492 } });
+    f.settle();
+    const row = f.view.root.globalRect();
+    try std.testing.expect(f.view.execution_compact);
+    try std.testing.expectEqual(@as(f32, 24), f.view.buttons[5].globalRect().w);
+    try std.testing.expectApproxEqAbs(row.x + row.w - 28, f.send.globalRect().x, 0.1);
+    f.cx.setViewport(860, 480);
+    f.panel.setStyleInline(a, .{ .inset = .{ .left = .{ .px = 100 }, .top = .{ .px = 30 } } });
+    f.settle();
+    f.enter(f.view.buttons[5]);
+    try std.testing.expect(f.view.isOpen());
+    const menu = find(f.cx.root.?, "ai.execution.menu").?;
+    try std.testing.expectEqual(@as(f32, 220), menu.globalRect().h);
+    const selected_row = find(menu, "ai.execution.attached_pty").?.globalRect();
+    const viewport = f.view.execution_scroll.container.globalRect();
+    try std.testing.expectApproxEqAbs(@min(selected_row.y, viewport.y + viewport.h - selected_row.h), selected_row.y, 0.5);
+    try std.testing.expect(selected_row.y >= viewport.y - 0.5);
+    try std.testing.expectEqual(ui.TextWrap.word, find(menu, "ai.execution.effect").?.getText().?.wrap);
+    try std.testing.expect(menu.globalRect().x >= 0 and menu.globalRect().y >= 0);
+    try std.testing.expect(menu.globalRect().x + menu.globalRect().w <= f.cx.viewport.width);
+}
+
+test "AI composer menus keep owner based layers and title icon alignment across material settings" {
+    const theme = Styles.theme;
+    const previous = theme.currentName();
+    const materials = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(materials.transparency, materials.blur);
+    }
+    for ([_]theme.Name{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        for ([_]f32{ 0, 75, 100 }) |transparency| {
+            _ = theme.setMaterialParameters(transparency, 0);
+            var f: Fixture = undefined;
+            try f.init();
+            defer f.deinit();
+            // The real host mounts composer inside the AI L1 floating shell.
+            f.panel.setStyleInline(a, .{ .background = theme.layerBackground(1), .glass = theme.overlayGlass() });
+            try @import("ui/layer_materials.zig").Policy.mount(f.cx, f.scope);
+            f.settle();
+            for ([_]usize{ 1, 5, 4 }) |index| {
+                if (index == 4) {
+                    var source = f.snapshot();
+                    source.usage = .{ .used_tokens = 5000, .limit_tokens = 200000 };
+                    try f.view.update(source);
+                    f.settle();
+                }
+                f.enter(f.view.buttons[index]);
+                const popup = f.view.popups[index];
+                const panel = popup.widget.chrome;
+                try std.testing.expectEqual(theme.layerBackground(2), panel.getBackground());
+                try std.testing.expectEqual(@as(f32, 1), panel.getOpacity());
+                for (panel.style.border.resolvedWidths()) |edge| try std.testing.expectEqual(@as(f32, 0), edge);
+                if (panel.style.outline()) |outline| try std.testing.expectEqual(@as(f32, 0), outline.width);
+                const title = popup.title.?;
+                const header = title.parent.?;
+                const icon = header.children.items[0].globalRect();
+                const label = title.globalRect();
+                try std.testing.expectApproxEqAbs(icon.y + icon.h / 2, label.y + label.h / 2, 0.1);
+                try std.testing.expectEqual(@as(u8, 255), title.getText().?.color.a);
+                const close = header.children.items[header.children.items.len - 1];
+                try std.testing.expectEqual(@as(f32, 24), close.globalRect().w);
+                try std.testing.expectEqual(@as(f32, 24), close.globalRect().h);
+                if (index == 5) {
+                    try std.testing.expectEqual(theme.popupInset(), f.view.retention_select.trigger.getBackground());
+                    f.enter(f.view.retention_select.trigger);
+                    try std.testing.expectEqual(theme.layerBackground(3), f.view.retention_select.chrome.getBackground());
+                    try std.testing.expectEqual(@as(f32, 1), f.view.retention_select.chrome.getOpacity());
+                }
+                f.view.dismiss();
+                f.settle();
+            }
+        }
     }
 }

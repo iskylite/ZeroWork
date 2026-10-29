@@ -93,7 +93,12 @@ pub const Manager = struct {
     pub fn run(self: *Manager, p: provider.Provider, request: provider.ChatRequest) !provider.ChatStats {
         if (self.tool_run) |previous| {
             if (self.scope) |current| {
-                if (previous.turn_id == self.turn_id and tool_scope.Owner.eql(previous.scope.owner, current.owner)) {
+                const same_conversation = if (previous.tool_table) |table| if (table.host_context) |context| same: {
+                    const next = request.tool_table orelse return error.InvalidHostAuthority;
+                    const other = next.host_context orelse return error.InvalidHostAuthority;
+                    break :same context.conversation_id.eql(other.conversation_id);
+                } else tool_scope.Owner.eql(previous.scope.owner, current.owner) else tool_scope.Owner.eql(previous.scope.owner, current.owner);
+                if (previous.turn_id == self.turn_id and same_conversation) {
                     for (previous.records.items) |record| if (record.dispatched) return error.ToolTurnAlreadyDispatched;
                 }
             }
@@ -131,6 +136,7 @@ pub const Manager = struct {
             const current = if (self.tool_run) |loop| try loop.nextRequest() else request;
             self.turn.state = .streaming;
             const stats = try self.runRound(p, current);
+            if (self.tool_run) |loop| if (self.tool_host) |host| try loop.acknowledgeNotice(host);
             total.input_tokens +|= stats.input_tokens;
             total.output_tokens +|= stats.output_tokens;
             total.usage_reported = total.usage_reported and stats.usage_reported;
@@ -142,6 +148,7 @@ pub const Manager = struct {
             try self.completeTools(current.cancel, frozen_policy, frozen_policy_revision);
             if (current.cancel) |token| if (token.isCancelled()) return error.Cancelled;
             if (self.tool_run.?.uncertain) return error.ToolOutcomeUnknown;
+            if (self.tool_host) |host| try self.tool_run.?.refreshAuthority(host, current.cancel);
         }
     }
 
@@ -372,6 +379,11 @@ pub const Manager = struct {
         const execute_host = host.execute_host orelse return error.ToolNotAvailable;
         return execute_host(host.context, invocation, allocator, cancel);
     }
+    fn acceptedHostResult(raw: *anyopaque, context: @import("host_tools.zig").Context, name: []const u8, result: *const @import("host_tools.zig").Result) !void {
+        const self: *Manager = @ptrCast(@alignCast(raw));
+        const host = self.tool_host orelse return error.ToolHostUnavailable;
+        if (host.accepted_host_result) |accepted| try accepted(host.context, context, name, result);
+    }
 
     fn completeTools(self: *Manager, cancel: ?*provider.CancelToken, policy: permission.Engine, policy_revision: u64) !void {
         defer self.clearPending();
@@ -388,7 +400,7 @@ pub const Manager = struct {
         }
         const loop = self.tool_run.?;
         const records_start = loop.records.items.len;
-        try loop.complete(self.round_text.items, calls[0..count], .{ .context = self, .execute = execute, .execute_dynamic = executeDynamic, .execute_host = executeHost }, policy, policy_revision, cancel);
+        try loop.complete(self.round_text.items, calls[0..count], .{ .context = self, .execute = execute, .execute_dynamic = executeDynamic, .execute_host = executeHost, .accepted_host_result = acceptedHostResult }, policy, policy_revision, cancel);
         if (self.observer) |observer| if (observer.tool_rejected) |notify| {
             for (calls[0..count]) |call| {
                 const record = blk: {
@@ -854,6 +866,76 @@ test "empty text in a tool round produces no observer text or blank answer card 
     try std.testing.expectEqual(@as(usize, 1), fixture.text_events);
     try std.testing.expectEqual(@as(usize, 1), manager.cards.count());
     try std.testing.expectEqualStrings("DF_READONLY_DONE", manager.cards.cards.items[0].text);
+    try std.testing.expectEqual(turn_model.State.done, manager.turn.state);
+}
+
+test "turn manager forwards accepted host results only after the entire batch closes" {
+    const tools = @import("plugin_tools.zig");
+    const identity = @import("../host/identity.zig");
+    const a = std.testing.allocator;
+    const authority: tools.host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .group = 7 }, .binding_revision = 2, .grant_revision = 3 };
+    const scope: tool_scope.Scope = .{ .owner = authority.binding, .members = .{} };
+    var table = try tools.RequestTable.initWithHost(a, scope, &.{}, &.{}, authority, &.{.{ .definition = .{ .id = "host.get_current_context", .schema = "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}" }, .authority = .conversation_context }});
+    defer table.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    const Fixture = struct {
+        manager: *Manager,
+        name: []const u8,
+        authority: tools.host.Context,
+        rounds: usize = 0,
+        executions: usize = 0,
+        accepted: usize = 0,
+        fn chat(raw: *anyopaque, _: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, ctx: *anyopaque) !provider.ChatStats {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.rounds += 1;
+            switch (self.rounds) {
+                1 => {
+                    sink(ctx, .{ .tool_plan = .{ .index = 0, .call_id = "closed-a", .name = self.name, .arguments = "{}" } });
+                    sink(ctx, .{ .tool_plan = .{ .index = 1, .call_id = "closed-b", .name = self.name, .arguments = "{}" } });
+                },
+                2 => {
+                    try std.testing.expectEqual(@as(usize, 2), self.accepted);
+                    sink(ctx, .{ .text = "closed batch observed before provider continues" });
+                },
+                else => return error.UnexpectedProviderRound,
+            }
+            sink(ctx, .done);
+            return .{};
+        }
+        fn models(_: *anyopaque, allocator: std.mem.Allocator) ![]provider.ModelInfo {
+            return allocator.alloc(provider.ModelInfo, 0);
+        }
+        fn legacy(_: *anyopaque, _: tool_loop.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !tool_loop.Outcome {
+            return error.UnexpectedLegacyDispatch;
+        }
+        fn execute(raw: *anyopaque, invocation: tools.host.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !tools.host.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.executions += 1;
+            const blocks = try allocator.alloc(tools.host.Block, 1);
+            blocks[0] = .{ .structured = try allocator.dupe(u8, "{}") };
+            return .{ .status = .succeeded, .blocks = blocks, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision } };
+        }
+        fn acceptedResult(raw: *anyopaque, context: tools.host.Context, name: []const u8, result: *const tools.host.Result) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expect(context.eql(self.authority));
+            try std.testing.expectEqualStrings(self.name, name);
+            try std.testing.expectEqual(tools.Status.succeeded, result.status);
+            try std.testing.expectEqual(@as(usize, 2), self.executions);
+            const run = self.manager.tool_run.?;
+            try std.testing.expectEqual(@as(usize, 2), run.records.items.len);
+            try @import("provider_http.zig").validateToolMessages(run.request);
+            try std.testing.expectEqual(provider.Role.tool, run.messages.items[run.messages.items.len - 1].role);
+            self.accepted += 1;
+        }
+    };
+    var manager = Manager.init(a);
+    defer manager.deinit();
+    var fixture: Fixture = .{ .manager = &manager, .name = wire[0].name(), .authority = authority };
+    manager.scope = scope;
+    manager.turn_id = 1;
+    manager.tool_host = .{ .context = &fixture, .execute = Fixture.legacy, .execute_host = Fixture.execute, .accepted_host_result = Fixture.acceptedResult };
+    _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{ .model = "closed-host-batch", .system = "", .messages = &.{}, .tools = wire, .tool_table = &table });
+    try std.testing.expectEqual(@as(usize, 2), fixture.accepted);
     try std.testing.expectEqual(turn_model.State.done, manager.turn.state);
 }
 

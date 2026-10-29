@@ -24,7 +24,7 @@ test "settings snapshot projects selected page and values" {
     const view = try snapshot(std.testing.allocator, settings);
     defer std.testing.allocator.free(view.keys);
     try std.testing.expectEqualStrings("AI 辅助", view.page_name);
-    try std.testing.expectEqual(@as(usize, 4), view.keys.len);
+    try std.testing.expectEqual(@as(usize, 6), view.keys.len);
     try std.testing.expectEqualStrings("permission_mode", view.keys[1].key);
     try std.testing.expect(view.keys[1].selected);
 }

@@ -59,6 +59,7 @@ pub fn build(b: *std.Build) void {
     core.addCSourceFile(.{ .file = b.path("src/platform/data_scope_lock.c"), .flags = &.{"-std=c11"} });
     core.linkFramework("Security", .{});
     core.linkFramework("CoreFoundation", .{});
+    addUrlFetchFrameworks(core);
     core.addCSourceFile(.{ .file = b.path("src/local/trusted_edit_native.c"), .flags = &.{"-std=c11"} });
     core.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     core.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
@@ -147,6 +148,16 @@ pub fn build(b: *std.Build) void {
     zsh_bridge.addArg("-o");
     const zsh_bridge_file = zsh_bridge.addOutputFileArg("zw_ipc.so");
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(zsh_bridge_file, .bin, "zw_ipc.so").step);
+    const execution_bridge = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos14.0", "-bundle", "-undefined", "dynamic_lookup", "-O2", "-DZW_EXECUTION=1" });
+    execution_bridge.addFileArg(b.path("src/local/shell/zw_ipc.c"));
+    execution_bridge.addArg("-o");
+    const execution_bridge_file = execution_bridge.addOutputFileArg("zw_execution.so");
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(execution_bridge_file, .bin, "zw_execution.so").step);
+    const execution_guard = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos14.0", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2" });
+    execution_guard.addFileArg(b.path("src/local/shell/execution_guard.c"));
+    execution_guard.addArg("-o");
+    const execution_guard_file = execution_guard.addOutputFileArg("zw_execution_guard");
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(execution_guard_file, .bin, "zw_execution_guard").step);
 
     // ── Mockup 预览（设计稿实机比对基建） ───────────────────────────
     // Build only the selected native design preview, outside production sources.
@@ -273,7 +284,8 @@ pub fn build(b: *std.Build) void {
     run.step.dependOn(b.getInstallStep());
     b.step("run", "Run the ZeroWork bootstrap").dependOn(&run.step);
 
-    const tests = b.addTest(.{ .root_module = b.createModule(.{
+    const root_test_filter = b.option([]const u8, "test-filter", "Run only matching unit and contract tests");
+    const tests = b.addTest(.{ .filters = if (root_test_filter) |filter| &.{filter} else &.{}, .root_module = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
@@ -300,13 +312,21 @@ pub fn build(b: *std.Build) void {
     tests.step.dependOn(&verify_ssh.step);
     tests.root_module.linkSystemLibrary("mbedcrypto", .{});
     tests.root_module.linkSystemLibrary("z", .{});
+    addUrlFetchFrameworks(tests.root_module);
 
     addCoreTextBridgeForTest(zenit_dep, tests);
     tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
     tests.root_module.linkFramework("Metal", .{});
     tests.root_module.linkFramework("QuartzCore", .{});
     const root_test_step = b.step("test", "Run unit and contract tests");
-    root_test_step.dependOn(&b.addRunArtifact(tests).step);
+    const root_test_files = b.addWriteFiles();
+    const root_test_binary = root_test_files.addCopyFile(tests.getEmittedBin(), "unit-tests");
+    _ = root_test_files.addCopyFile(zsh_bridge_file, "zw_ipc.so");
+    _ = root_test_files.addCopyFile(execution_bridge_file, "zw_execution.so");
+    _ = root_test_files.addCopyFile(execution_guard_file, "zw_execution_guard");
+    const root_test_run = std.Build.Step.Run.create(b, "run unit and contract tests");
+    root_test_run.addFileArg(root_test_binary);
+    root_test_step.dependOn(&root_test_run.step);
     // Every Security entry point is mocked: this regression cannot access a
     // user's Keychain or display authentication UI.
     const native_credentials = b.addSystemCommand(&.{ "xcrun", "clang", "-Wall", "-Wextra", "-Werror" });
@@ -332,7 +352,7 @@ pub fn build(b: *std.Build) void {
     // Local process/VT integration stays headless and uses isolated test data.
     const local_tests_step = b.step("test-local", "Run real local PTY, terminal controller and adapter tests");
     const local_test_filter = b.option([]const u8, "local-test-filter", "Run only matching local terminal tests");
-    for ([_][]const u8{ "src/local_process_tests.zig", "src/terminal_controller_tests.zig", "src/local_adapter_tests.zig", "src/local_trusted_edit_tests.zig" }) |source| {
+    for ([_][]const u8{ "src/local_process_tests.zig", "src/terminal_controller_tests.zig", "src/local_adapter_tests.zig", "src/local_trusted_edit_tests.zig", "src/terminal_execution_tests.zig" }) |source| {
         const local_tests = b.addTest(.{ .filters = if (local_test_filter) |filter| &.{filter} else &.{}, .root_module = b.createModule(.{
             .root_source_file = b.path(source),
             .target = target,
@@ -346,7 +366,7 @@ pub fn build(b: *std.Build) void {
         local_tests.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
         local_tests.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
         local_tests.root_module.link_libc = true;
-        if (std.mem.eql(u8, source, "src/local_adapter_tests.zig") or std.mem.eql(u8, source, "src/local_trusted_edit_tests.zig")) {
+        if (std.mem.eql(u8, source, "src/local_adapter_tests.zig") or std.mem.eql(u8, source, "src/local_trusted_edit_tests.zig") or std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) {
             // SessionHost's registry now contains public UI/service contracts.
             // These runners need the same linked ABI while remaining headless.
             local_tests.root_module.addImport("ui", zenit_dep.module("ui"));
@@ -368,16 +388,18 @@ pub fn build(b: *std.Build) void {
             local_tests.root_module.linkFramework("Metal", .{});
             local_tests.root_module.linkFramework("QuartzCore", .{});
         }
-        if (std.mem.eql(u8, source, "src/local_trusted_edit_tests.zig")) {
+        if (std.mem.eql(u8, source, "src/local_trusted_edit_tests.zig") or std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) {
             // ZSH resolves its private module beside this isolated test binary,
             // exactly as the installed application does.
             const files = b.addWriteFiles();
-            const runner = files.addCopyFile(local_tests.getEmittedBin(), "trusted-edit-tests");
+            const runner = files.addCopyFile(local_tests.getEmittedBin(), if (std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) "terminal-execution-tests" else "trusted-edit-tests");
             _ = files.addCopyFile(zsh_bridge_file, "zw_ipc.so");
+            _ = files.addCopyFile(execution_bridge_file, "zw_execution.so");
+            _ = files.addCopyFile(execution_guard_file, "zw_execution_guard");
             const trusted_run = std.Build.Step.Run.create(b, "run trusted ZLE tests");
             trusted_run.addFileArg(runner);
             local_tests_step.dependOn(&trusted_run.step);
-            b.step("test-trusted-edit", "Run isolated real ZSH trusted editing tests").dependOn(&trusted_run.step);
+            b.step(if (std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) "test-terminal-execution" else "test-trusted-edit", "Run isolated real ZSH integration tests").dependOn(&trusted_run.step);
         } else {
             const local_run = b.addRunArtifact(local_tests);
             local_tests_step.dependOn(&local_run.step);
@@ -395,6 +417,15 @@ pub fn build(b: *std.Build) void {
     notification_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     notification_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
     b.step("test-notification-preview", "Build isolated native notification acceptance fixture").dependOn(&b.addInstallArtifact(notification_preview, .{}).step);
+    for ([_][]const u8{ "host-approval", "task-finish", "execution-result" }, [_][]const u8{ "src/host_approval_preview_runner.zig", "src/task_finish_preview_runner.zig", "src/execution_result_preview_runner.zig" }) |name, source| {
+        const preview = b.addExecutable(.{ .name = b.fmt("{s}-preview", .{name}), .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = target, .optimize = optimize }) });
+        zenit.attach(zenit_dep, preview);
+        preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
+        preview.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+        preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
+        preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+        b.step(b.fmt("{s}-preview", .{name}), b.fmt("Build isolated production {s} UI acceptance window", .{name})).dependOn(&b.addInstallArtifact(preview, .{}).step);
+    }
 
     const font_tests = b.addTest(.{ .root_module = b.createModule(.{
         .root_source_file = b.path("src/appearance_font_tests.zig"),
@@ -476,7 +507,13 @@ pub fn build(b: *std.Build) void {
     ui_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
     ui_tests.root_module.linkFramework("Metal", .{});
     ui_tests.root_module.linkFramework("QuartzCore", .{});
-    const run_ui_tests = b.addRunArtifact(ui_tests);
+    const ui_test_files = b.addWriteFiles();
+    const ui_test_binary = ui_test_files.addCopyFile(ui_tests.getEmittedBin(), "ui-tests");
+    _ = ui_test_files.addCopyFile(zsh_bridge_file, "zw_ipc.so");
+    _ = ui_test_files.addCopyFile(execution_bridge_file, "zw_execution.so");
+    _ = ui_test_files.addCopyFile(execution_guard_file, "zw_execution_guard");
+    const run_ui_tests = std.Build.Step.Run.create(b, "run transfer-panel and layout tests");
+    run_ui_tests.addFileArg(ui_test_binary);
     b.step("test-ui", "Run transfer-panel/zenit-layout tests").dependOn(&run_ui_tests.step);
 
     // API-v2 acceptance runs separately so the non-terminal fixture is never
@@ -658,7 +695,7 @@ fn addCoreTextBridgeForTest(zenit_dep: *std.Build.Dependency, exe: *std.Build.St
         .file = zenit_dep.path("native/macos/coretext_bridge.m"),
         .flags = &.{"-fobjc-arc"},
     });
-    for ([_][]const u8{ "CoreText", "CoreGraphics", "CoreFoundation", "Foundation", "ImageIO" }) |fw| {
+    for ([_][]const u8{ "CoreText", "CoreGraphics", "CoreFoundation", "CFNetwork", "Foundation", "ImageIO" }) |fw| {
         exe.root_module.linkFramework(fw, .{});
     }
     const sdk = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk";
@@ -667,4 +704,9 @@ fn addCoreTextBridgeForTest(zenit_dep: *std.Build.Dependency, exe: *std.Build.St
     // libobjc.A.tbd 的解析需要 SDK 的 usr/lib 在搜索路径（与 exe/mockup 同款）。
     exe.root_module.addLibraryPath(.{ .cwd_relative = sdk ++ "/usr/lib" });
     exe.root_module.link_libc = true;
+}
+
+fn addUrlFetchFrameworks(module: *std.Build.Module) void {
+    module.linkFramework("CoreFoundation", .{});
+    module.linkFramework("CFNetwork", .{});
 }

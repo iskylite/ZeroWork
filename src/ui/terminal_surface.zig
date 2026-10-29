@@ -48,7 +48,7 @@ const Row = struct {
     pending_glyphs: usize = 0,
     content_id: ?vt.RowId = null,
 };
-const Pending = union(enum) { bytes: []u8, key: terminal.KeyEvent, mouse: terminal.MouseRequest };
+const Pending = union(enum) { bytes: []u8, protocol: []u8, key: terminal.KeyEvent, mouse: terminal.MouseRequest };
 
 pub const Surface = struct {
     pub const MenuHandler = struct {
@@ -56,6 +56,10 @@ pub const Surface = struct {
         request: *const fn (?*anyopaque, identity.SessionHandle, f32, f32) void,
     };
 
+    pub const TakeoverHandler = struct {
+        context: *anyopaque,
+        request: *const fn (*anyopaque, identity.TaskId, identity.SessionHandle, identity.ExecutionId) anyerror!void,
+    };
     pub const Feedback = struct {
         context: ?*anyopaque = null,
         publish: *const fn (?*anyopaque, *ui.Cx, identity.SessionHandle, []const u8) anyerror!void = publishFeedback,
@@ -70,6 +74,13 @@ pub const Surface = struct {
     composite: @import("terminal_document.zig").Document,
     owner: identity.SessionHandle,
     menu_handler: ?MenuHandler = null,
+    takeover_handler: ?TakeoverHandler = null,
+    control_scope: ?*ui.Scope = null,
+    control_tag: ?*ui.Node = null,
+    control_button: ?*ui.Node = null,
+    control_grant: ?terminal.execution.Grant = null,
+    control_style: ?*ui.Signal(@FieldType(ui.widgets.ControlShellConfig, "style")) = null,
+    control_icon: ?*ui.Node = null,
     shell_observer: ?struct {
         context: *anyopaque,
         accepted: *const fn (*anyopaque, identity.SessionHandle, u64, @import("broadcast_event.zig").Payload) void,
@@ -96,6 +107,9 @@ pub const Surface = struct {
     document_version: ?u64 = null,
     slot_generation: u64 = 0,
     next_input: u64 = 1,
+    /// Ordinary UI admission only. VT replies and private execution input
+    /// bypass Surface and never advance this ownership signal.
+    user_input_revision: u64 = 0,
     next_geometry: u64 = 1,
     requested_cols: u16 = 0,
     requested_rows: u16 = 0,
@@ -220,7 +234,8 @@ pub const Surface = struct {
         self.cancelPaste();
         if (self.paste_requested) |bytes| self.cx.allocator.free(bytes);
         if (self.modal_scope) |scope| scope.dispose();
-        for (self.pending.items) |item| if (item == .bytes) self.cx.allocator.free(item.bytes);
+        if (self.control_scope) |scope| scope.dispose();
+        for (self.pending.items) |item| if (bytePayload(item)) |bytes| self.cx.allocator.free(bytes);
         self.pending.deinit(self.cx.allocator);
         self.released_anchors.deinit(self.cx.allocator);
         self.cx.allocator.free(self.preedit);
@@ -234,6 +249,74 @@ pub const Surface = struct {
         for (self.rows.items) |row| self.cx.allocator.free(row.test_id);
         self.rows.deinit(self.cx.allocator);
         self.cx.allocator.destroy(self);
+    }
+    fn liveControlGrant(self: *Surface) ?terminal.execution.Grant {
+        if (self.takeover_handler == null) return null;
+        const status = self.service.status() catch return null;
+        if (!status.owner.eql(self.owner) or status.eof_seen or !status.writable) return null;
+        const snapshot = self.service.executionSnapshot() catch return null;
+        if (!snapshot.owner.eql(self.owner) or snapshot.input_handed_off) return null;
+        const execution_id = snapshot.execution_id orelse return null;
+        const grant = snapshot.grant orelse return null;
+        if (!grant.execution_id.eql(execution_id)) return null;
+        return grant;
+    }
+    fn cancelControlPress(self: *Surface) void {
+        var pressed = self.cx.dispatcher.mouseDownNode();
+        while (pressed) |node| : (pressed = node.parent) {
+            if (node == self.control_tag) {
+                self.cx.cancelPointerInteractions(.explicit);
+                return;
+            }
+        }
+    }
+    fn refreshControl(self: *Surface) !void {
+        const grant = self.liveControlGrant();
+        if (!std.meta.eql(grant, self.control_grant)) self.cancelControlPress();
+        self.control_grant = grant;
+        if (grant != null and self.control_tag == null) {
+            const scope = try ui.Scope.init(self.cx.allocator, null, self.cx.owner);
+            errdefer scope.dispose();
+            const tag = try ui.boxStyled(self.cx, S.aiControlTag, .{});
+            errdefer self.cx.destroyDetached(tag);
+            tag.meta.ownership.meta.test_id = "terminal.ai_control";
+            const badge = try ui.boxStyled(self.cx, S.aiControlBadge, .{});
+            try tag.appendChild(self.cx.allocator, badge);
+            const icon = try ui.iconTint(self.cx, ui.icons.sparkles, @import("app_theme.zig").current().accent, .{ .width = .{ .px = 13 }, .height = .{ .px = 13 }, .flex_shrink = 0 });
+            try badge.appendChild(self.cx.allocator, icon);
+            const title = try ui.textStyled(self.cx, S.aiControlText, "AI 控制 • 只读");
+            title.meta.ownership.meta.test_id = "terminal.ai_control.title";
+            try badge.appendChild(self.cx.allocator, title);
+            const style = try scope.createSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), S.aiControlButton());
+            const button = try ui.widgets.Button(.{ .label = "接管", .variant = .secondary, .base_style = style, .on_click = self.cx.on(Surface, self, requestTakeover) }).mount(scope, self.cx);
+            controlLabelLineHeight(button);
+            button.meta.ownership.meta.test_id = "terminal.ai_control.takeover";
+            try tag.appendChild(self.cx.allocator, button);
+            try self.root.appendChild(self.cx.allocator, tag);
+            self.control_scope = scope;
+            self.control_tag = tag;
+            self.control_button = button;
+            self.control_style = style;
+            self.control_icon = icon;
+        }
+        if (self.control_style) |style| style.set(S.aiControlButton());
+        if (self.control_icon) |icon| if (ui.icons.sparkles.icon_id) |id| if (ui.icons.sparkles.pickRep(13)) |rep| icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = @import("app_theme.zig").current().accent });
+        if (self.control_tag) |tag| tag.setDisplay(if (grant != null) .flex else .none);
+    }
+    fn controlLabelLineHeight(node: *ui.Node) void {
+        if (node.getText()) |text| {
+            var next = text;
+            next.line_height = 20.0 / 11.0;
+            node.setText(next);
+        }
+        for (node.children.items) |child| controlLabelLineHeight(child);
+    }
+    fn requestTakeover(self: *Surface) void {
+        const expected = self.control_grant orelse return;
+        const live = self.liveControlGrant() orelse return;
+        if (!std.meta.eql(expected, live)) return;
+        const handler = self.takeover_handler orelse return;
+        handler.request(handler.context, live.task_id, self.owner, live.execution_id) catch |err| self.showError(err);
     }
     pub fn configure(self: *Surface, options: Options) void {
         if (self.composite.setColors(records_style.colors())) self.force_snapshot = true;
@@ -266,6 +349,7 @@ pub const Surface = struct {
     pub fn refresh(self: *Surface, expected: identity.SessionHandle, active: bool) !bool {
         if (!self.composite.flushRecording()) self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
         if (!self.owner.eql(expected)) return error.StaleOwner;
+        try self.refreshControl();
         // A retained, exited pane has no worker/clock tick to wake it. Keep
         // polling only until this request appears in an actual owned frame.
         defer if (self.requested_theme) |theme| {
@@ -381,7 +465,7 @@ pub const Surface = struct {
             if (next.read_only) {
                 self.cancelPaste();
                 self.setPreedit("");
-                for (self.pending.items) |item| if (item == .bytes) self.cx.allocator.free(item.bytes);
+                for (self.pending.items) |item| if (bytePayload(item)) |bytes| self.cx.allocator.free(bytes);
                 self.pending.clearRetainingCapacity();
                 self.pending_bytes = 0;
             }
@@ -390,13 +474,13 @@ pub const Surface = struct {
         if (!status.writable) {
             self.cancelPaste();
             if (self.preedit.len != 0) self.setPreedit("");
-            for (self.pending.items) |item| if (item == .bytes) self.cx.allocator.free(item.bytes);
+            for (self.pending.items) |item| if (bytePayload(item)) |bytes| self.cx.allocator.free(bytes);
             self.pending.clearRetainingCapacity();
             self.pending_bytes = 0;
         }
         if (self.snapshot == null) return changed;
         if (was_focused != self.focused and self.snapshot.?.projection.modes.focus_events and !self.snapshot.?.read_only) {
-            self.queueText(if (self.focused) "\x1b[I" else "\x1b[O") catch |err| self.showError(err);
+            self.queueProtocolText(if (self.focused) "\x1b[I" else "\x1b[O") catch |err| self.showError(err);
         }
         try self.pump();
         // Retain fresh input/mode/notification facts for hidden group members,
@@ -873,7 +957,16 @@ pub const Surface = struct {
         self.preedit_node.setBackground(self.options.background.withAlpha(@min(self.options.background.a, 64)));
         try absolute(self.cx, self.preedit_node, self.contentPadding().left + self.bodyX() + @as(f32, @floatFromInt(cursor.col)) * self.options.cell_width + self.command_caret_advance, self.presentationY(cursor.row), @max(self.options.cell_width, self.measured(self.preedit)), self.options.row_height);
     }
+    fn bytePayload(item: Pending) ?[]u8 {
+        return switch (item) { .bytes, .protocol => |bytes| bytes, else => null };
+    }
+    fn queueProtocolText(self: *Surface, bytes: []const u8) !void {
+        return self.queueTextFrom(bytes, false);
+    }
     pub fn queueText(self: *Surface, bytes: []const u8) !void {
+        return self.queueTextFrom(bytes, true);
+    }
+    fn queueTextFrom(self: *Surface, bytes: []const u8, human: bool) !void {
         if (bytes.len == 0) return;
         if (self.snapshot == null or self.snapshot.?.read_only) return error.ReadOnlyTerminal;
         if (self.snapshot.?.projection.modes.keyboard_disabled) return error.KeyboardDisabled;
@@ -884,7 +977,7 @@ pub const Surface = struct {
         try self.pending.ensureUnusedCapacity(self.cx.allocator, 1);
         const owned = try self.cx.allocator.dupe(u8, bytes);
         if (self.timing) |trace| trace.begin(self.next_input + self.pending.items.len);
-        self.pending.appendAssumeCapacity(.{ .bytes = owned });
+        self.pending.appendAssumeCapacity(if (human) .{ .bytes = owned } else .{ .protocol = owned });
         self.pending_bytes += bytes.len;
         self.pump() catch |err| {
             if (err != error.WorkerBusy) return err;
@@ -902,10 +995,13 @@ pub const Surface = struct {
     }
     fn recoverQueuedInput(self: *Surface) !void {
         for (self.pending.items) |item| if (item == .bytes) try self.recovered_input.appendSlice(self.cx.allocator, item.bytes);
-        for (self.pending.items) |item| if (item == .bytes) self.cx.allocator.free(item.bytes);
+        for (self.pending.items) |item| if (bytePayload(item)) |bytes| self.cx.allocator.free(bytes);
         self.pending.clearRetainingCapacity();
         self.pending_bytes = 0;
         self.cancelPaste();
+    }
+    pub fn noteUserInputAccepted(self: *Surface) void {
+        self.user_input_revision +|= 1;
     }
     pub fn pump(self: *Surface) !void {
         defer if (self.pending.items.len > 0 or self.trusted_pending != null) self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
@@ -917,6 +1013,7 @@ pub const Surface = struct {
             self.trusted_outcome = outcome;
             if (self.trusted_pending == outcome.operation) {
                 self.trusted_pending = null;
+                if (outcome.applied) self.noteUserInputAccepted();
                 if (!outcome.applied) {
                     try self.recoverQueuedInput();
                     self.showError(error.TrustedEditRejected);
@@ -945,8 +1042,8 @@ pub const Surface = struct {
         while (self.pending.items.len > 0 and self.snapshot != null and !self.snapshot.?.read_only) {
             const item = self.pending.items[0];
             const mode = self.snapshot.?.projection.mode_revision;
-            _ = switch (item) {
-                .bytes => |bytes| self.service.write(.{ .input_sequence = self.next_input, .mode_revision = mode, .bytes = bytes }),
+            const admitted = switch (item) {
+                .bytes, .protocol => |bytes| self.service.write(.{ .input_sequence = self.next_input, .mode_revision = mode, .bytes = bytes }),
                 .key => |key| self.service.writeKey(.{ .input_sequence = self.next_input, .mode_revision = mode, .event = key }),
                 .mouse => |request| value: {
                     var current = request;
@@ -962,24 +1059,25 @@ pub const Surface = struct {
                     self.force_snapshot = true;
                     return;
                 }
-                if (item == .bytes) {
-                    self.pending_bytes -= item.bytes.len;
-                    self.cx.allocator.free(item.bytes);
+                if (bytePayload(item)) |bytes| {
+                    self.pending_bytes -= bytes.len;
+                    self.cx.allocator.free(bytes);
                 }
                 _ = self.pending.orderedRemove(0);
                 self.showError(err);
                 self.force_snapshot = true;
                 continue;
             };
+            if (item != .protocol and admitted.queued_bytes > 0) self.noteUserInputAccepted();
             if (self.shell_observer) |observer| switch (item) {
                 .bytes => |bytes| observer.accepted(observer.context, self.owner, self.next_input, .{ .bytes = bytes }),
                 .key => |key| observer.accepted(observer.context, self.owner, self.next_input, .{ .key = key }),
-                .mouse => {},
+                .mouse, .protocol => {},
             };
             self.next_input = try std.math.add(u64, self.next_input, 1);
-            if (item == .bytes) {
-                self.pending_bytes -= item.bytes.len;
-                self.cx.allocator.free(item.bytes);
+            if (bytePayload(item)) |bytes| {
+                self.pending_bytes -= bytes.len;
+                self.cx.allocator.free(bytes);
             }
             _ = self.pending.orderedRemove(0);
         }
@@ -1074,8 +1172,18 @@ pub const Surface = struct {
         return input.onEvent(self, event);
     }
     fn onCanvasEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
+        const self: *Surface = @ptrCast(@alignCast(raw orelse return .ignored));
+        if (self.control_grant != null) if (self.control_tag) |tag| {
+            const point: ?ui.Point = switch (event) {
+                .mouse_down, .mouse_up => |mouse| .{ .x = mouse.x, .y = mouse.y },
+                .mouse_move => |mouse| .{ .x = mouse.x, .y = mouse.y },
+                .double_click => |mouse| .{ .x = mouse.x, .y = mouse.y },
+                else => null,
+            };
+            if (point) |p| if (tag.globalRect().contains(p.x, p.y)) return .stop;
+        };
         return switch (event) {
-            .mouse_down, .mouse_move, .mouse_up, .double_click => input.onEvent(@ptrCast(@alignCast(raw orelse return .ignored)), event),
+            .mouse_down, .mouse_move, .mouse_up, .double_click => input.onEvent(self, event),
             // The specialized callback declares the canvas as a scroll owner.
             // Deliver a wheel event exactly once after generic dispatch.
             else => .ignored,

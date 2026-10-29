@@ -132,14 +132,17 @@ pub const Coordinator = struct {
         if ((sink.notify != null or sink.ring != null) and sink.context == null) return error.MissingPlatformContext;
         var self: Coordinator = .{ .allocator = allocator, .policy = try Policy.fromSaved(saved), .sink = sink };
         errdefer self.deinit();
-        try self.registerDefinition(.{ .id = "host.transfer_done", .category = .operation_result });
-        try self.registerDefinition(.{ .id = "host.reconnect", .category = .connection_change });
-        try self.registerDefinition(.{ .id = "host.ai_ready", .category = .attention });
+        // Legacy producers submit the OS message once, then attach its receipt
+        // to this same history fact. The policy key also governs opted-in completion.
+        try self.registerDefinition(.{ .id = "host.transfer_done", .category = .operation_result, .system_policy = .transfer_done });
+        try self.registerDefinition(.{ .id = "host.reconnect", .category = .connection_change, .system_policy = .reconnect });
+        try self.registerDefinition(.{ .id = "host.ai_ready", .category = .attention, .system_policy = .ai_ready });
         try self.registerDefinition(.{ .id = "host.feedback", .category = .operation_result, .default_channels = .{ .attention = false } });
         try self.registerDefinition(.{ .id = "host.command_error", .category = .operation_result, .default_channels = .{ .in_app = false, .system = false, .attention = false } });
         try self.registerDefinition(.{ .id = "host.ai_attention", .category = .attention, .default_channels = .{ .system = true }, .system_policy = .ai_ready });
         try self.registerDefinition(.{ .id = "host.ai_unknown", .category = .attention, .default_channels = .{ .system = true }, .system_policy = .ai_ready });
         try self.registerDefinition(.{ .id = "host.recording_risk", .category = .attention, .default_channels = .{ .system = true }, .system_policy = .reconnect });
+        try self.registerDefinition(.{ .id = "host.transfer_blocked", .category = .attention, .default_channels = .{ .system = true }, .system_policy = .transfer_done });
         return self;
     }
     pub fn deinit(self: *Coordinator) void {
@@ -232,7 +235,7 @@ pub const Coordinator = struct {
         for (event.actions) |action| if (action.label.len == 0 or action.label.len > 128 or (action.kind == .safe_query and action.action_id == 0)) return error.InvalidNotificationAction;
         var consumed: ?usize = null;
         for (self.consumed_notifications.items, 0..) |entry, index| if (entry.matches(event)) {
-            if (event.event_revision <= entry.revision or self.recordFor(entry.fact_id) == null) {
+            if (event.event_revision <= entry.revision or (self.recordFor(entry.fact_id) == null and (entry.was_listed or !self.qualifies(event, definition)))) {
                 self.consumed_notifications.items[index].revision = @max(entry.revision, event.event_revision);
                 return .{ .fact_id = entry.fact_id, .duplicate = true, .updated = false };
             }
@@ -258,20 +261,24 @@ pub const Coordinator = struct {
             replacement.system_event_id = record.system_event_id;
             record.arena.deinit();
             record.* = replacement;
-            if (consumed) |index| self.consumed_notifications.items[index].revision = event.event_revision;
+            if (consumed) |index| {
+                self.consumed_notifications.items[index].revision = event.event_revision;
+                self.consumed_notifications.items[index].was_listed = record.listed;
+            }
             if (record.listed and !was_listed and definition.default_channels.attention) {
                 const state = try self.stateFor(event.owner.content);
                 state.notification_sequence +|= 1;
             }
             if (record.listed and !was_listed and !record.owner_ended) {
-                if (event.attention.app_focused and !self.policy.quiet_hours.contains(clock.local_minute) and self.open_centers == 0) self.enqueue(record.fact_id);
+                if (event.attention.app_focused and definition.default_channels.in_app and !self.policy.quiet_hours.contains(clock.local_minute) and self.open_centers == 0) self.enqueue(record.fact_id);
                 if (!event.attention.app_focused) self.deliverNotification(record, definition, clock);
             }
             if (!record.pending()) self.dismissNotification(record.fact_id);
             return .{ .fact_id = record.fact_id, .duplicate = false, .updated = true };
         };
         if (self.next_fact >= (@as(u64, 1) << 63)) return error.NotificationIdentityExhausted;
-        var record = try copyNotification(self.allocator, event, self.next_fact, clock.monotonic_ms);
+        const fact_id = if (consumed) |index| self.consumed_notifications.items[index].fact_id else self.next_fact;
+        var record = try copyNotification(self.allocator, event, fact_id, clock.monotonic_ms);
         record.listed = self.qualifies(event, definition);
         errdefer record.arena.deinit();
         try self.notification_records.ensureUnusedCapacity(self.allocator, 1);
@@ -280,16 +287,16 @@ pub const Coordinator = struct {
             definition.default_channels.in_app and !self.policy.quiet_hours.contains(clock.local_minute) and self.open_centers == 0;
         if (!show) record.presentation = .hidden;
         if (self.notification_records.items.len >= history_limit) {
-            for (self.notification_records.items, 0..) |old, index| if (!old.pending()) {
+            for (self.notification_records.items, 0..) |old, index| if (!self.incidentPending(old)) {
                 self.removeHistoryAt(index);
                 break;
             };
         }
         self.notification_records.appendAssumeCapacity(record);
-        self.consumed_notifications.appendAssumeCapacity(.{ .definition_id = definition.id, .owner = event.owner.content, .operation_id = event.operation_id, .attempt_id = event.attempt_id, .revision = event.event_revision, .fact_id = record.fact_id });
+        const watermark: ConsumedNotification = .{ .definition_id = definition.id, .owner = event.owner.content, .operation_id = event.operation_id, .attempt_id = event.attempt_id, .revision = event.event_revision, .fact_id = record.fact_id, .was_listed = record.listed };
+        if (consumed) |index| self.consumed_notifications.items[index] = watermark else self.consumed_notifications.appendAssumeCapacity(watermark);
         self.history_revision +|= 1;
-        const fact_id = self.next_fact;
-        self.next_fact += 1;
+        if (consumed == null) self.next_fact += 1;
         if (show and self.incidentSourceCount(record) == 1) self.enqueue(fact_id);
         if (record.listed and definition.default_channels.attention) {
             const state = self.stateFor(event.owner.content) catch return .{ .fact_id = fact_id, .duplicate = false, .updated = false };
@@ -312,6 +319,16 @@ pub const Coordinator = struct {
         }
         self.history_revision +|= 1;
     }
+    /// A genuinely new source episode gets a new operation even after its old
+    /// resolved history has been cleared. Old revisions still cannot replay.
+    pub fn nextOperationId(self: *const Coordinator, definition_id: []const u8, owner: Owner) !u64 {
+        var next: u64 = 1;
+        for (self.consumed_notifications.items) |entry| if (entry.owner.eql(owner) and std.mem.eql(u8, entry.definition_id, definition_id)) {
+            if (entry.operation_id == std.math.maxInt(u64)) return error.NotificationOperationIdentityExhausted;
+            next = @max(next, entry.operation_id + 1);
+        };
+        return next;
+    }
     pub fn unreadHistoryCount(self: *const Coordinator) usize {
         var count: usize = 0;
         for (self.notification_records.items) |record| if (record.listed and !record.history_read and self.isRepresentative(record)) {
@@ -332,10 +349,24 @@ pub const Coordinator = struct {
     }
     pub fn incidentSourceCount(self: *const Coordinator, record: NotificationRecord) usize {
         var count: usize = 0;
-        for (self.notification_records.items) |other| if (other.listed and sameIncident(record, other)) {
+        for (self.notification_records.items) |other| if (other.listed and sameIncident(record, other) and self.isIncidentSource(other)) {
             count += 1;
         };
         return count;
+    }
+    /// An incident can contain several operation facts from one source. Prefer
+    /// that source's pending fact; count and render the original owner only once.
+    pub fn isIncidentSource(self: *const Coordinator, record: NotificationRecord) bool {
+        var selected: u64 = record.fact_id;
+        var pending = record.pending();
+        for (self.notification_records.items) |other| {
+            if (!other.listed or !sameIncident(record, other) or !other.event.owner.content.eql(record.event.owner.content)) continue;
+            if ((other.pending() and !pending) or (other.pending() == pending and other.fact_id < selected)) {
+                selected = other.fact_id;
+                pending = other.pending();
+            }
+        }
+        return selected == record.fact_id;
     }
     pub fn incidentPending(self: *const Coordinator, record: NotificationRecord) bool {
         for (self.notification_records.items) |other| if (sameIncident(record, other) and other.pending()) return true;
@@ -577,6 +608,9 @@ pub const Coordinator = struct {
             if (!std.meta.eql(record.target(), target)) return error.EventIdentityConflict;
             if (record.system.disposition == .pending) {
                 record.system = receipt;
+                for (self.notification_records.items) |*linked| if (linked.system_event_id == event_id) {
+                    linked.system = receipt;
+                };
                 return true;
             }
             if (record.system.disposition == .scheduled or record.system.disposition == .failed) {
@@ -730,6 +764,7 @@ const ConsumedNotification = struct {
     attempt_id: ?u64,
     revision: u64,
     fact_id: u64,
+    was_listed: bool,
     fn matches(self: ConsumedNotification, event: NotificationEvent) bool {
         return std.mem.eql(u8, self.definition_id, event.definition_id) and self.owner.eql(event.owner.content) and self.operation_id == event.operation_id and self.attempt_id == event.attempt_id;
     }
@@ -746,7 +781,7 @@ pub const AttentionFacts = struct {
     incident_id: ?u64 = null,
 };
 pub fn sameIncident(a: NotificationRecord, b: NotificationRecord) bool {
-    if (a.event.attention.incident_id) |id| return b.event.attention.incident_id == id;
+    if (a.event.attention.incident_id) |id| return b.event.attention.incident_id == id and std.mem.eql(u8, a.event.definition_id, b.event.definition_id);
     return a.fact_id == b.fact_id;
 }
 fn sameNotification(a: NotificationEvent, b: NotificationEvent) bool {

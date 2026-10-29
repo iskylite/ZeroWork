@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Production host/worker sharing and reconnect against an owned loopback peer."""
-import argparse, json, os, subprocess, sys, tempfile, time
+import argparse, hashlib, json, os, shutil, subprocess, sys, tempfile, time
 from pathlib import Path
 p = argparse.ArgumentParser()
 p.add_argument('--runner', required=True)
 p.add_argument('--output', required=True)
 p.add_argument('--jump', action='store_true')
-p.add_argument('--scenario', choices=['baseline', 'details', 'reconnect-fallback', 'source-first', 'child-first', 'interleaved', 'simultaneous-live', 'simultaneous-broken', 'close-during-reconnect', 'cancel-open', 'cancel-pty', 'cancel-shell', 'timeout-open', 'timeout-pty', 'timeout-shell', 'eof-loss', 'jump-forwards'], default='baseline')
+p.add_argument('--scenario', choices=['baseline', 'owned-session', 'owned-saved', 'details', 'reconnect-fallback', 'source-first', 'child-first', 'interleaved', 'simultaneous-live', 'simultaneous-broken', 'close-during-reconnect', 'cancel-open', 'cancel-pty', 'cancel-shell', 'timeout-open', 'timeout-pty', 'timeout-shell', 'eof-loss', 'jump-forwards'], default='baseline')
 a = p.parse_args()
 out = Path(a.output).resolve(); out.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='zw-shared-acceptance-') as directory:
@@ -56,6 +56,10 @@ with tempfile.TemporaryDirectory(prefix='zw-shared-acceptance-') as directory:
             expected_connections, expected_shells = (1, 3) if a.jump else (4, 8)
         elif a.scenario == 'details':
             expected_connections, expected_shells = 1, 4
+        elif a.scenario == 'owned-session':
+            expected_connections, expected_shells = 1, 2
+        elif a.scenario == 'owned-saved':
+            expected_connections, expected_shells = 2, 3
         elif a.scenario == 'reconnect-fallback':
             expected_connections, expected_shells = 2, 3
         elif a.scenario.startswith(('cancel-', 'timeout-')):
@@ -77,6 +81,28 @@ with tempfile.TemporaryDirectory(prefix='zw-shared-acceptance-') as directory:
         if jump is not None:
             report.update(jump_calls=jump.calls, jump_errors=jump.errors, jump_transport_closed=jump.transport is not None and not jump.transport.is_active())
             report['passed'] = report['passed'] and report['jump_transport_closed'] and jump.calls.count('direct-tcpip') == (8 if a.scenario=='jump-forwards' else 1) and not jump.errors
+        recordings = []
+        artifact_root = out / 'artifacts'
+        for manifest_path in sorted((root / 'data' / 'logs' / 'history').glob('*.session.json')):
+            value = json.loads(manifest_path.read_text())
+            if value.get('source_kind') != 'ssh': continue
+            assert manifest_path.resolve().is_relative_to((root / 'data').resolve())
+            assert all((root / 'data' / item['path']).resolve().is_relative_to((root / 'data').resolve()) for item in value['files'])
+            for source in [manifest_path, *(root / 'data' / item['path'] for item in value['files'])]:
+                destination = artifact_root / source.relative_to(root / 'data')
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+            files_ok = all((root / 'data' / item['path']).is_file() and (root / 'data' / item['path']).stat().st_size == item['committed_length'] and hashlib.sha256((root / 'data' / item['path']).read_bytes()).hexdigest() == item['checksum'] for item in value['files'])
+            recordings.append(dict(recording_id=value['recording_id'], archive_key=value['archive_key'], state=value['state'], commit=value['commit']['state'], coverage=value['coverage'], replayability=value['replayability'], files_verified=files_ok, generation_count=len(value['recording']['generations']), event_count=len(value['events']), events_ordered=all(a['sequence'] < b['sequence'] and a['raw_offset'] <= b['raw_offset'] for a,b in zip(value['events'], value['events'][1:])), generations=[{key:g[key] for key in ('recording_generation','session_id','session_generation','raw_offset_start','event_sequence_start')} for g in value['recording']['generations']], total_received=value['total_received'], display=value['display']))
+        index_path = root / 'data' / 'logs' / 'history' / 'index.tsv'
+        if index_path.is_file(): shutil.copy2(index_path, artifact_root / 'logs' / 'history' / 'index.tsv')
+        report['artifact_root'] = str(artifact_root)
+        report['recordings'] = recordings
+        report['isolated_data_verified'] = 'ISOLATED_DATA_DIR_VERIFIED' in result.stderr
+        report['trusted_pty_unavailable_zero_input'] = 'TRUSTED_PTY_UNAVAILABLE_NO_INPUT' in result.stderr
+        report['recordings_verified'] = bool(recordings) and all(item['state'] == 'closed' and item['commit'] == 'indexed' and item['files_verified'] and item['events_ordered'] and len(item['recording_id']) == 32 and len(item['archive_key']) == 32 for item in recordings)
+        if a.scenario == 'details': report['passed'] = report['passed'] and any(item['generation_count'] >= 2 for item in recordings)
+        report['passed'] = report['passed'] and report['recordings_verified'] and report['trusted_pty_unavailable_zero_input'] and report['isolated_data_verified']
         (out / 'report.json').write_text(json.dumps(report, indent=2))
         print(json.dumps(report))
         if not report['passed']: sys.exit(1)

@@ -18,12 +18,14 @@ pub const Timeline = struct {
     max_events: usize,
     max_bytes: usize,
     bytes: usize = 0,
+    next_event_sequence: u64 = 1,
     /// Retained bytes alone cannot reconstruct the VT state at their start.
     evicted_events: u64 = 0,
     mutex: std.atomic.Mutex = .unlocked,
 
     pub const Event = struct {
         timestamp_ms: i64,
+        event_sequence: u64 = 0,
         stream_offset: u64,
         payload: []const u8,
         storage: *Payload,
@@ -65,6 +67,9 @@ pub const Timeline = struct {
     /// Immutable segments let export pin history without copying all bytes
     /// while the producer holds the terminal guard.
     fn appendEvent(self: *Timeline, timestamp_ms: i64, stream_offset: u64, bytes: []const u8, kind: @FieldType(Event, "kind")) !void {
+        return self.appendOrdered(timestamp_ms, stream_offset, bytes, kind, null);
+    }
+    pub fn appendOrdered(self: *Timeline, timestamp_ms: i64, stream_offset: u64, bytes: []const u8, kind: @FieldType(Event, "kind"), sequence: ?u64) !void {
         if (bytes.len > self.max_bytes) return error.EventTooLarge;
         const storage = try Payload.create(self.allocator, bytes);
         errdefer storage.release();
@@ -72,7 +77,10 @@ pub const Timeline = struct {
         defer self.mutex.unlock();
         try self.events.ensureUnusedCapacity(self.allocator, 1);
         while (self.events.items.len >= self.max_events or self.bytes + bytes.len > self.max_bytes) self.evictOldest();
-        self.events.appendAssumeCapacity(.{ .timestamp_ms = timestamp_ms, .stream_offset = stream_offset, .payload = storage.bytes, .storage = storage, .kind = kind });
+        const seq = sequence orelse self.next_event_sequence;
+        if (seq < self.next_event_sequence) return error.InvalidEventOrder;
+        self.next_event_sequence = seq +| 1;
+        self.events.appendAssumeCapacity(.{ .event_sequence = seq, .timestamp_ms = timestamp_ms, .stream_offset = stream_offset, .payload = storage.bytes, .storage = storage, .kind = kind });
         self.bytes += bytes.len;
     }
     pub fn append(self: *Timeline, timestamp_ms: i64, stream_offset: u64, payload: []const u8) !void {
@@ -126,6 +134,7 @@ pub const Timeline = struct {
         defer self.mutex.unlock();
         var copy = try Timeline.init(allocator, self.max_events, self.max_bytes);
         copy.evicted_events = self.evicted_events;
+        copy.next_event_sequence = self.next_event_sequence;
         errdefer copy.deinit();
         try copy.events.ensureTotalCapacity(allocator, self.events.items.len);
         for (self.events.items) |event| {
@@ -245,6 +254,7 @@ pub const Timeline = struct {
         var writer = atomic.file.writer(io, &atomic_buffer);
         try self.exportCast(&writer.interface, cols, rows);
         try writer.flush();
+        try atomic.file.sync(io);
         try atomic.replace(io);
     }
 
@@ -262,6 +272,7 @@ pub const Timeline = struct {
         var writer = atomic.file.writer(io, &atomic_buffer);
         try frozen.exportTextUnlocked(&writer.interface);
         try writer.flush();
+        try atomic.file.sync(io);
         try atomic.replace(io);
     }
 

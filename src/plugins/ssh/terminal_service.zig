@@ -237,5 +237,19 @@ pub const Provider = struct {
         const self = try get(raw, binding);
         return self.source.service().recordApplication(record);
     }
-    const vtable: terminal.Service.VTable = .{ .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = theme, .search_snapshot = searchSnapshot, .application_record = applicationRecord };
+    fn recordingDisplay(raw: *anyopaque, binding: Binding, display: @import("../../vt/recording_manifest.zig").Display) !void {
+        const self = try get(raw, binding);
+        try self.native.setDisplay(display);
+    }
+    fn executionSnapshot(raw: *anyopaque, binding: Binding) !terminal.execution.Snapshot {
+        const self = try get(raw, binding);
+        // SSH readiness is deliberately independent from ordinary shell ready.
+        // No compatible BootstrapV1 resource/private channel is installed.
+        return .{ .owner = self.source.owner, .failure = "IntegrationUnavailable" };
+    }
+    fn executionRequest(raw: *anyopaque, binding: Binding, _: terminal.execution.Request) !void {
+        _ = try get(raw, binding);
+        return error.IntegrationUnavailable;
+    }
+    const vtable: terminal.Service.VTable = .{ .recording_display = recordingDisplay, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = theme, .search_snapshot = searchSnapshot, .application_record = applicationRecord };
 };

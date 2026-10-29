@@ -15,9 +15,13 @@ const server=createServer(async(req,res)=>{
  let raw='';for await(const part of req)raw+=part;const body=JSON.parse(raw);requests++;
  res.writeHead(200,{'content-type':'text/event-stream'});res.flushHeaders();
  const results=body.messages.filter((m:any)=>m.role==='tool');
- if(results.length){assert(results.some((m:any)=>m.tool_call_id==='reminder-approval'&&m.content.includes('ToolApprovalRejected')));res.end(frame({content:'已取消该操作，未执行命令。'})+'data: [DONE]\n\n');return;}
+ if(results.some((m:any)=>m.tool_call_id==='reminder-approval')){assert(results.some((m:any)=>m.tool_call_id==='reminder-approval'&&m.content.includes('ToolApprovalRejected')));res.end(frame({content:'已取消该操作，未执行命令。'})+'data: [DONE]\n\n');return;}
  const system=body.messages.find((m:any)=>m.role==='system')?.content??'';
- const id=Number(system.match(/assistant_session_id=(\d+)/)?.[1]);assert(id>0);
+ assert(!/assistant_session_id=|provider=.*session_id=/.test(system));
+ const contextResult=results.find((m:any)=>m.tool_call_id==='reminder-context');
+ if(!contextResult){assert(body.tools.some((t:any)=>t.function.name==='host__get_ucurrent_ucontext'));res.end(frame({tool_calls:[{index:0,id:'reminder-context',type:'function',function:{name:'host__get_ucurrent_ucontext',arguments:'{}'}}]})+'data: [DONE]\n\n');return;}
+ const state=JSON.parse(JSON.parse(contextResult.content).content[0].text);
+ const id=Number(state.current_binding.session);assert(id>0);
  pending={res,id};
 });
 await new Promise<void>(done=>server.listen(0,'127.0.0.1',done));const port=(server.address() as any).port;
@@ -42,9 +46,14 @@ try{
  await click('notifications.history.action');await visible('ai.approval');await absent('notifications.history');await capture('02-exact-origin-approval');
  assert.notEqual((await h.inputState('ai.prompt')).buffer,'另一段对话的独立草稿');
  await click('ai.approval.reject');await absent('ai.approval');await visible('ai.turn.complete');
- await click('ai.sessions');await visible('ai.session.jump.2');await click('ai.session.jump.2');await absent('ai.sessions.menu');
+ const queryTitle=await h.waitFor(async()=>(await h.query('ai.tool.result.title')).find((n:any)=>shown(n)&&n.text==='读取对话状态')??null,10000);
+ await h.clickAt(queryTitle.rect.x+20,queryTitle.rect.y+8);
+ await h.waitFor(async()=>(await h.query('ai.tool.result.stdout')).some((n:any)=>shown(n)&&String(n.text).includes('conversation_id'))||null,10000);
+ await capture('03-query-and-rejected-results');
+ await h.clickAt(queryTitle.rect.x+20,queryTitle.rect.y+8);
+ await click('ai.sessions');await visible('ai.session.jump.2');await h.sleep(250);await click('ai.session.jump.2');await absent('ai.sessions.menu');
  assert.equal((await h.inputState('ai.prompt')).buffer,'另一段对话的独立草稿');
- assert.equal(requests,2);await assert.rejects(stat(join(iso,'should-not-be-created')),{code:'ENOENT'});
+ assert.equal(requests,3);await assert.rejects(stat(join(iso,'should-not-be-created')),{code:'ENOENT'});
  report.checks.push('Background approval reminder selects the original conversation, not the currently selected dialog','The other conversation retains its exact draft after switching back','Rejected approval returns the correlated tool result; no command is executed');
  report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);process.exitCode=1;await capture('failure').catch(()=>{});await writeFile(join(out,'failure-tree.json'),JSON.stringify(await h.tree(),null,2)).catch(()=>{});}

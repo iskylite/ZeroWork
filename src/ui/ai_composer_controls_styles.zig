@@ -2,7 +2,7 @@
 //! 1425377 / 1446740; attachment menu 414:1872239.
 const ui = @import("ui");
 pub const theme = @import("app_theme.zig");
-pub const Kind = enum { attachment, permission, model, effort, usage };
+pub const Kind = enum { attachment, permission, model, effort, usage, execution };
 pub fn width(kind: Kind) f32 {
     return switch (kind) {
         .attachment => 300,
@@ -10,6 +10,7 @@ pub fn width(kind: Kind) f32 {
         .model => 336,
         .effort => 276,
         .usage => 288,
+        .execution => 296,
     };
 }
 pub fn height(kind: Kind) f32 {
@@ -19,6 +20,7 @@ pub fn height(kind: Kind) f32 {
         .model => 321.5,
         .effort => 86,
         .usage => 156,
+        .execution => 350,
     };
 }
 pub fn row() ui.BoxStyle {
@@ -80,7 +82,8 @@ pub fn wrapper() ui.BoxStyle {
     return .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 }, .padding = .{}, .gap = 0 };
 }
 pub fn panel(kind: Kind, viewport: ui.Size) ui.BoxStyle {
-    const panel_height = @min(height(kind), @max(0, viewport.height - 16));
+    const requested_height = if (kind == .execution and viewport.height <= 480) @as(f32, 220) else height(kind);
+    const panel_height = @min(requested_height, @max(0, viewport.height - 16));
     return .{ .width = .{ .px = @min(width(kind), @max(0, viewport.width - 16)) }, .height = .{ .px = panel_height }, .min_height = panel_height, .direction = .column, .padding = if (kind == .model) ui.Padding.all(15) else if (kind == .attachment) ui.Padding.all(10) else if (kind == .usage) ui.Padding.all(14) else .{ .top = 10, .left = 12, .right = 12, .bottom = 12 }, .gap = if (kind == .attachment or kind == .model) 6 else 8, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = if (kind == .attachment or kind == .usage or kind == .model) 11 else 14 }, .shadow = .{ .offset_y = 12, .blur = 24, .color = theme.current().shadow } };
 }
 pub fn header() ui.BoxStyle {
@@ -88,8 +91,7 @@ pub fn header() ui.BoxStyle {
 }
 pub fn close() ui.BoxStyle {
     var result = iconButton(6);
-    result.width = .{ .px = 22 };
-    result.height = .{ .px = 22 };
+    result.background = ui.Color.TRANSPARENT;
     return result;
 }
 pub fn body(kind: Kind) ui.BoxStyle {
@@ -243,5 +245,29 @@ pub fn modelMarkerText() ui.TextStyle {
     var value = text(12, 600, 16, false);
     value.color = theme.current().accent;
     value.text_align = .center;
+    return value;
+}
+
+pub fn executionChip() ui.BoxStyle {
+    return naturalChip();
+}
+pub fn executionLabel() ui.BoxStyle {
+    return .{ .width = .{ .fit = .{} }, .height = .{ .px = 14 }, .min_width = 0, .flex_shrink = 0 };
+}
+pub fn policySection() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 2, .flex_shrink = 0 };
+}
+pub fn policyControl() ui.BoxStyle {
+    var value = option(28, false);
+    value.background = theme.popupInset();
+    return value;
+}
+
+pub fn executionOption(selected: bool) ui.BoxStyle {
+    var value = option(31, selected);
+    value.background = if (selected) theme.popupSelection() else ui.Color.TRANSPARENT;
+    value.padding = .{ .left = 8, .right = 8, .top = 6, .bottom = 6 };
+    value.gap = 8;
+    value.border = .{ .width = 0, .radius = 6 };
     return value;
 }

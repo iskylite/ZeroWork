@@ -10,6 +10,73 @@ const scope: scope_mod.Scope = .{ .owner = .{ .session = 101 }, .members = .{ .i
 const definitions = [_]provider.ToolDefinition{ .{ .tool = .run_command, .session_ids = &.{101} }, .{ .tool = .read_terminal, .session_ids = &.{101} } };
 const df: provider.ToolCall = .{ .id = "call-local-df", .name = "run_command", .arguments = "{\"session_ids\":[101],\"command\":\"df -h\"}" };
 
+test "round authority handoff preserves old tool pairs and refreshes only the next batch" {
+    const tools = @import("plugin_tools.zig");
+    const identity = @import("../host/identity.zig");
+    const context: tools.host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = scope.owner, .binding_revision = 1, .grant_revision = 1 };
+    const contribution: tools.host.Contribution = .{ .authority = .lifecycle, .definition = .{ .id = "host.create_group", .schema = "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}", .effect = .resource_write } };
+    var original = try tools.RequestTable.initWithHost(a, scope, &.{}, &.{}, context, &.{contribution});
+    defer original.deinit();
+    var next_context = context;
+    next_context.binding = .{ .group = 7 };
+    next_context.binding_revision = 2;
+    var successor = try tools.RequestTable.initWithHost(a, .{ .owner = next_context.binding, .members = .{} }, &.{}, &.{}, next_context, &.{.{ .authority = .conversation_context, .definition = .{ .id = "host.get_current_context", .schema = contribution.definition.schema } }});
+    defer successor.deinit();
+    const Fixture = struct {
+        successor: *tools.RequestTable,
+        refreshed: bool = false,
+        acknowledgements: usize = 0,
+        fn old(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedLegacyDispatch;
+        }
+        fn invoke(_: *anyopaque, invocation: tools.host.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !tools.host.Result {
+            return .{ .status = .succeeded, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision } };
+        }
+        fn refresh(raw: *anyopaque, _: *const tools.RequestTable, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !?loop_mod.AuthorityRefresh {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.refreshed) return null;
+            self.refreshed = true;
+            return .{ .table = try tools.cloneTable(self.successor, allocator), .notice = try allocator.dupe(u8, "ZeroWork context notice: original conversation now belongs to group 7; binding revision 2."), .notice_revision = 1 };
+        }
+        fn ack(raw: *anyopaque, revision: u64) !void {
+            try std.testing.expectEqual(@as(u64, 1), revision);
+            @as(*@This(), @ptrCast(@alignCast(raw))).acknowledgements += 1;
+        }
+    };
+    var fixture: Fixture = .{ .successor = &successor };
+    const callbacks: loop_mod.Host = .{ .context = &fixture, .execute = Fixture.old, .execute_host = Fixture.invoke, .refresh_authority = Fixture.refresh, .acknowledge_notice = Fixture.ack };
+    const wire = try tools.providerDefinitions(&original, original.arena.allocator());
+    var run = loop_mod.Loop.init(a, scope, 4, .{ .context_window = 100_000 });
+    defer run.deinit();
+    try run.start(.{ .model = "test", .system = "stable rules", .messages = &.{}, .tools = wire, .tool_table = &original });
+    try run.complete("", &.{.{ .id = "create-original", .name = wire[0].name(), .arguments = "{}" }}, callbacks, .{}, 1, null);
+    try run.refreshAuthority(callbacks, null);
+    try std.testing.expect(run.scope.owner.eql(next_context.binding));
+    try std.testing.expect(run.records.items[0].key.owner.eql(context.binding));
+    const request = try run.nextRequest();
+    try http.validateToolMessages(request);
+    try std.testing.expectEqualStrings("create-original", request.messages[1].tool_call_id.?);
+    try std.testing.expectEqual(provider.Role.user, request.messages[2].role);
+    try run.acknowledgeNotice(callbacks);
+    try run.acknowledgeNotice(callbacks);
+    try std.testing.expectEqual(@as(usize, 1), fixture.acknowledgements);
+    try run.complete("", &.{.{ .id = "query-successor", .name = request.tools[0].name(), .arguments = "{}" }}, callbacks, .{}, 1, null);
+    try std.testing.expect(run.records.items[1].key.owner.eql(next_context.binding));
+    try http.validateToolMessages(try run.nextRequest());
+    // A changed UI owner cannot bypass the same conversation/turn ledger.
+    var manager = manager_mod.Manager.init(a);
+    defer manager.deinit();
+    manager.tool_run = try a.create(loop_mod.Loop);
+    manager.tool_run.?.* = loop_mod.Loop.init(a, scope, 4, .{});
+    try manager.tool_run.?.start(.{ .model = "test", .system = "", .messages = &.{}, .tools = wire, .tool_table = &original });
+    try manager.tool_run.?.records.append(manager.tool_run.?.arena.allocator(), .{ .key = .{ .owner = context.binding, .turn_id = 4, .call_id = "already-dispatched" }, .name = "host.create_group", .arguments = "{}", .arguments_hash = @splat(0), .dispatched = true });
+    manager.turn_id = 4;
+    manager.scope = successor.captured_scope;
+    var script: Script = .{ .rounds = &.{} };
+    defer script.deinit();
+    try std.testing.expectError(error.ToolTurnAlreadyDispatched, manager.run(script.interface(), .{ .model = "test", .system = "", .messages = &.{}, .tool_table = &successor }));
+}
+
 test "host tools retain real call pairs and conversation receipts without session targets" {
     const tools = @import("plugin_tools.zig");
     const identity = @import("../host/identity.zig");
@@ -618,4 +685,46 @@ test "failed request snapshot construction leaves no resumable uninitialized led
     try std.testing.expect(manager.tool_run == null);
     try std.testing.expectError(error.NoToolTurnToResume, manager.resumeAnswer(script.interface(), null));
     try std.testing.expectEqual(@as(usize, 0), script.index);
+}
+
+test "host uncertain execution blocks a fresh command while preserving exact read and stop receipts" {
+    const tools = @import("plugin_tools.zig");
+    const identity = @import("../host/identity.zig");
+    const context: tools.host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = scope.owner, .binding_revision = 1, .grant_revision = 1 };
+    var table = try tools.RequestTable.initWithHost(a, scope, &.{}, &.{}, context, &@import("host_execution.zig").contributions);
+    defer table.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    const Gateway = struct {
+        calls: usize = 0,
+        writes: usize = 0,
+        stops: usize = 0,
+        fn legacy(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedLegacyDispatch;
+        }
+        fn invoke(raw: *anyopaque, invocation: tools.host.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !tools.host.Result {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            const writing = std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal");
+            self.writes += @intFromBool(writing);
+            self.stops += @intFromBool(std.mem.eql(u8, invocation.tool_id, "host.stop_execution"));
+            return .{ .status = if (writing) .outcome_unknown else .succeeded, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision, .side_effect_started = writing, .remote_effect_unknown = writing } };
+        }
+    };
+    var gateway: Gateway = .{};
+    var run = loop_mod.Loop.init(a, scope, 17, .{ .context_window = 100_000 });
+    defer run.deinit();
+    try run.start(.{ .model = "test", .system = "", .messages = &.{}, .tools = wire, .tool_table = &table });
+    try run.complete("", &.{
+        .{ .id = "original", .name = wire[0].name(), .arguments = "{\"session_ref\":\"s1:opaque\",\"command\":\"printf ok\",\"request_key\":\"original\"}" },
+        .{ .id = "new-key", .name = wire[0].name(), .arguments = "{\"session_ref\":\"s1:opaque\",\"command\":\"printf again\",\"request_key\":\"different\"}" },
+        .{ .id = "observe", .name = wire[1].name(), .arguments = "{\"execution_ref\":\"x1:opaque\"}" },
+        .{ .id = "stop", .name = wire[4].name(), .arguments = "{\"execution_ref\":\"x1:opaque\",\"request_key\":\"stop\"}" },
+    }, .{ .context = &gateway, .execute = Gateway.legacy, .execute_host = Gateway.invoke }, .{}, 1, null);
+    try std.testing.expect(run.uncertain);
+    try std.testing.expectEqual(@as(usize, 1), gateway.writes);
+    try std.testing.expectEqual(@as(usize, 1), gateway.stops);
+    try std.testing.expectEqual(@as(usize, 3), gateway.calls);
+    try std.testing.expect(!run.records.items[1].dispatched);
+    try std.testing.expect(std.mem.indexOf(u8, run.records.items[1].result_body.?, "EarlierToolOutcomeUnknown") != null);
+    try http.validateToolMessages(.{ .model = "test", .system = "", .messages = run.messages.items });
 }

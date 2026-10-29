@@ -16,6 +16,46 @@ const ui = @import("ui");
 const background = @import("../host/socks_background_runtime.zig");
 const group_close = @import("group_close_controller.zig");
 const connection_envelope = @import("../config/connection_envelope.zig");
+pub const lifecycle = @import("../host/lifecycle_supervisor.zig");
+pub const OwnedLifecycleHooks = struct {
+    context: *anyopaque,
+    idle_evidence: ?*const fn (*anyopaque, identity.SessionHandle, identity.TaskId) anyerror!lifecycle.IdleEvidence = null,
+};
+pub const OwnedInputReason = enum { ordinary_input, keep_choice, execution_takeover };
+pub const OwnedInputEvent = struct {
+    context: @import("../ai/host_tools.zig").Context,
+    handle: identity.SessionHandle,
+    execution_id: ?identity.ExecutionId,
+    reason: OwnedInputReason,
+    phase: enum { requested, released },
+};
+const PendingOwnedSource = struct {
+    operation_ref: identity.HostOperationId,
+    connection: ?WindowConnection = null,
+    cwd: ?[]u8 = null,
+    dispatched: bool = false,
+    fn deinit(self: *PendingOwnedSource, allocator: std.mem.Allocator) void {
+        if (self.connection) |*connection| connection.deinit();
+        if (self.cwd) |cwd| allocator.free(cwd);
+        self.connection = null;
+        self.cwd = null;
+    }
+};
+pub const DeferredCloseSnapshot = struct {
+    operation_ref: identity.HostOperationId,
+    state: enum { accepted, closing, closed, cleanup_pending, cancelled_unsent } = .accepted,
+    local_released: bool = true,
+    remote_effect_unknown: bool = false,
+    error_code: ?[]const u8 = null,
+};
+const DeferredClose = struct {
+    context: @import("../ai/host_tools.zig").Context,
+    handle: identity.SessionHandle,
+    snapshot: DeferredCloseSnapshot,
+    result_acknowledged: bool = false,
+    impact: group_close.Impact,
+    ownership_revision: ?u64 = null,
+};
 
 pub const CloseStep = session.CloseStep;
 pub const CloseReceipt = session.CloseReceipt;
@@ -82,6 +122,14 @@ const HistoryClose = struct {
     state: enum { pending, closed, unknown } = .pending,
 };
 const ReconnectPolicy = struct { automatic: bool, max: u8, backoff: [5]u8 };
+const CloseDisplay = struct {
+    arena: std.heap.ArenaAllocator,
+    service: terminal.Service,
+    display: @import("../vt/recording_manifest.zig").Display,
+    fn deinit(self: *CloseDisplay) void {
+        self.arena.deinit();
+    }
+};
 // Only the scrollback policy follows the saved asset; endpoint, authentication
 // and the rest of an active connection keep their immutable source snapshot.
 fn currentScrollbackLimit(registry: *const hosts.Registry, source: hosts.HostConfig, global: u32) u32 {
@@ -117,6 +165,7 @@ const Mapping = struct {
     reconnect_ticket: ?@import("../vt/reconnect.zig").Ticket = null,
     reconnect_count: u8 = 0,
     runtime_loss_received: bool = false,
+    close_display: ?CloseDisplay = null,
 
     pub fn recordFailure(self: *Mapping, text: []const u8) void {
         var len = @min(text.len, self.failure.len);
@@ -363,6 +412,14 @@ pub const ApplicationHost = struct {
     } = null,
     plugin_attempts: std.ArrayList(session.Accepted) = .empty,
     background_previous_auth: ?workspace_mod.ExternalAuthentication = null,
+    lifecycle_supervisor: lifecycle.Supervisor,
+    owned_sources: std.ArrayList(PendingOwnedSource) = .empty,
+    owned_lifecycle_hooks: ?OwnedLifecycleHooks = null,
+    deferred_closes: std.ArrayList(DeferredClose) = .empty,
+    // At most one ownership transition per Supervisor entry (limit 512).
+    // Fixed storage keeps accepted user input safe even under allocator OOM.
+    owned_input_events: [512]OwnedInputEvent = undefined,
+    owned_input_event_count: usize = 0,
 
     pub fn init(allocator: std.mem.Allocator, workspace: *workspace_mod.Workspace) !*ApplicationHost {
         return initWithFilePlugin(allocator, workspace, null);
@@ -399,6 +456,7 @@ pub const ApplicationHost = struct {
             .file_plugin = file_plugin,
             .dispatcher = &domain.dispatcher,
             .overlay = overlay_model.OverlayHost.init(domain.allocator, window.id),
+            .lifecycle_supervisor = lifecycle.Supervisor.init(domain.allocator),
         };
         domain.attachments.appendAssumeCapacity(self);
         workspace.plugins = self.sessions.registry;
@@ -450,12 +508,19 @@ pub const ApplicationHost = struct {
         const domain = self.domain;
         const owns_domain = self.owns_domain;
         domain.detach(self);
-        for (self.mappings.items) |*mapping| if (mapping.source) |*source| source.deinit();
+        for (self.mappings.items) |*mapping| {
+            if (mapping.source) |*source| source.deinit();
+            if (mapping.close_display) |*display| display.deinit();
+        }
         self.mappings.deinit(self.allocator);
         self.history_closes.deinit(self.allocator);
         for (self.file_sources.items) |*source| source.source.deinit();
         self.file_sources.deinit(self.allocator);
         self.plugin_attempts.deinit(self.allocator);
+        for (self.owned_sources.items) |*source| source.deinit(self.allocator);
+        self.owned_sources.deinit(self.allocator);
+        self.lifecycle_supervisor.deinit();
+        self.deferred_closes.deinit(self.allocator);
         self.allocator.destroy(self);
         if (owns_domain) domain.deinit();
     }
@@ -587,6 +652,512 @@ pub const ApplicationHost = struct {
     pub fn ownerForLegacy(self: *const ApplicationHost, id: LegacySessionId) ?identity.SessionHandle {
         for (self.mappings.items) |mapping| if (mapping.legacy_id == id) return mapping.handle;
         return null;
+    }
+
+    /// Short controller handler: capture the authorized source and enqueue.
+    /// Real creation occurs only after the Bridge handler has returned.
+    pub fn queueOwnedSession(self: *ApplicationHost, request: lifecycle.OpenRequest) !lifecycle.Snapshot {
+        if (self.lifecycle_supervisor.find(request.operation_ref)) |entry| {
+            if (!std.meta.eql(entry.request, request)) return error.IdempotencyConflict;
+            return entry.snapshot;
+        }
+        if (self.workspace.shutting_down or self.windowClosePending()) return error.WorkspaceClosed;
+        try self.validateOwnedGroup(request.group);
+        if (request.membership_revision) |revision| {
+            const group = self.workspace.group_roster.?.findById(@intCast(@backingInt(request.group.id))).?;
+            if (group.membership_revision != revision) return error.ScopeChanged;
+        }
+        if ((request.source == null) == (request.saved_source == null)) return error.InvalidSource;
+        try self.owned_sources.ensureUnusedCapacity(self.allocator, 1);
+        var source: PendingOwnedSource = .{ .operation_ref = request.operation_ref };
+        errdefer source.deinit(self.allocator);
+        if (request.source) |handle| {
+            const mapping = self.findHandle(handle) orelse return error.StaleReference;
+            const state = self.sessions.queryState(handle) orelse return error.StaleReference;
+            if (state.lifecycle != .ready and state.lifecycle != .attached) return error.SourceChanged;
+            const roster = self.workspace.group_roster orelse return error.UnknownGroup;
+            const group = roster.findById(@intCast(@backingInt(request.group.id))).?;
+            if (!group.contains(mapping.legacy_id)) return error.TargetOutsideScope;
+            if (mapping.process != null) {
+                if (request.connection_policy != .new_only) return error.UnsupportedSource;
+                source.cwd = try mapping.process.?.copyCwd(handle, self.allocator);
+            } else {
+                if (mapping.source == null) return error.UnsupportedSource;
+                source.connection = try self.freezeTabWindowConnection(mapping.legacy_id);
+            }
+        } else {
+            const index = try self.validateSavedOwnedSource(request.saved_source.?);
+            if (request.connection_policy == .reuse_only) return error.ReuseUnavailable;
+            if (request.connection_policy == .prefer_reuse and !request.allow_new_fallback) return error.FallbackAuthorizationRequired;
+            const host_id = self.workspace.hostId(index) orelse return error.StaleReference;
+            source.connection = try self.freezeWindowConnection(host_id);
+            if (source.connection.?.remote == null) {
+                var arena = std.heap.ArenaAllocator.init(self.allocator);
+                defer arena.deinit();
+                const decoded = try connection_envelope.decodeLegacy(arena.allocator(), source.connection.?.envelope.value);
+                source.connection.?.remote = try freezeSource(self.allocator, decoded, self.workspace.app_config.*, self.workspace.registry.hosts, host_id, index, "");
+            }
+        }
+        const snapshot = try self.lifecycle_supervisor.enqueue(request);
+        self.owned_sources.appendAssumeCapacity(source);
+        self.workspace.cx.requestRedraw();
+        return snapshot;
+    }
+
+    fn validateSavedOwnedSource(self: *ApplicationHost, source: identity.AssetOwner) !usize {
+        const index = self.workspace.registry.indexOf(source.id) orelse return error.StaleReference;
+        const host = self.workspace.registry.hosts[index];
+        if (host.revision != source.revision) return error.SourceChanged;
+        // Saved SSH uses the same envelope/factory/auth UI as an ordinary user
+        // connection. Other providers need their own explicit capability.
+        if (!std.mem.eql(u8, host.protocolId(), "ssh")) return error.UnsupportedSource;
+        return index;
+    }
+
+    fn validateOwnedGroup(self: *ApplicationHost, owner: identity.GroupOwner) !void {
+        const id = std.math.cast(u32, @backingInt(owner.id)) orelse return error.StaleReference;
+        if (self.workspace.groupClosing(id)) return error.GroupClosing;
+        const tab = self.workspace.groupTabId(id) orelse return error.StaleReference;
+        const index = self.workspace.model.indexOf(tab) orelse return error.StaleReference;
+        if (!self.workspace.model.tabs.items[index].owner.eql(.{ .group = owner })) return error.StaleReference;
+        const roster = self.workspace.group_roster orelse return error.StaleReference;
+        _ = roster.findById(id) orelse return error.StaleReference;
+    }
+
+    pub fn queryOwnedSession(self: *ApplicationHost, operation: identity.HostOperationId, context: @import("../ai/host_tools.zig").Context) !lifecycle.Snapshot {
+        return self.lifecycle_supervisor.query(operation, context);
+    }
+    pub fn resolveOwnedSession(self: *ApplicationHost, handle: identity.SessionHandle, context: @import("../ai/host_tools.zig").Context) !lifecycle.Snapshot {
+        const entry = self.lifecycle_supervisor.resource(handle) orelse return error.NotFound;
+        return self.lifecycle_supervisor.query(entry.request.operation_ref, context);
+    }
+    pub fn cancelOwnedSession(self: *ApplicationHost, operation: identity.HostOperationId, context: @import("../ai/host_tools.zig").Context) !lifecycle.Snapshot {
+        _ = try self.lifecycle_supervisor.query(operation, context);
+        const entry = self.lifecycle_supervisor.find(operation).?;
+        if (entry.snapshot.state == .ready) return error.AlreadyReady;
+        entry.cancel_requested = true;
+        self.workspace.cx.requestRedraw();
+        return entry.snapshot;
+    }
+    pub fn cancelOwnedTask(self: *ApplicationHost, task: identity.TaskId) void {
+        for (self.lifecycle_supervisor.entries.items) |*entry| if (entry.request.context.task_id.eql(task)) switch (entry.snapshot.state) {
+            .queued, .prepared, .opening => entry.cancel_requested = true,
+            else => {},
+        };
+        for (self.deferred_closes.items) |*close| if (close.context.task_id.eql(task) and close.snapshot.state == .accepted) {
+            close.snapshot.state = .cancelled_unsent;
+            close.snapshot.error_code = "CancelledBeforeDispatch";
+            close.result_acknowledged = false;
+        };
+        for (self.lifecycle_supervisor.entries.items) |*entry| if (entry.request.context.task_id.eql(task) and entry.snapshot.state == .ready and entry.close_requested and !entry.close_requires_idle) {
+            entry.close_requested = false;
+            entry.close_result_acknowledged = false;
+        };
+        self.workspace.cx.requestRedraw();
+    }
+    pub fn handedToUser(self: *ApplicationHost, handle: identity.SessionHandle) !void {
+        return self.handedToUserFor(handle, .execution_takeover);
+    }
+    pub fn handedToUserFor(self: *ApplicationHost, handle: identity.SessionHandle, reason: OwnedInputReason) !void {
+        const entry = self.lifecycle_supervisor.resource(handle) orelse return;
+        if (entry.snapshot.ownership != .created_task) return;
+        const context = entry.request.context;
+        var execution_id: ?identity.ExecutionId = null;
+        for (self.domain.attachments.items) |host_app| {
+            const mapping = host_app.findHandle(handle) orelse continue;
+            const tab = host_app.workspace.sessionTab(mapping.legacy_id) orelse break;
+            const binding = switch (host_app.sessions.queryService(handle, .terminal)) {
+                .available => |value| value,
+                else => break,
+            };
+            const service = if (mapping.process) |process| process.terminalService(binding) catch break else if (tab.runtime) |runtime| runtime.terminalService() catch break else break;
+            if (service.executionSnapshot()) |snapshot| execution_id = snapshot.execution_id else |_| {}
+            break;
+        }
+        _ = try self.lifecycle_supervisor.setRetention(handle, context.task_id, .keep);
+        try self.lifecycle_supervisor.handedToUser(handle);
+        std.debug.assert(self.owned_input_event_count < self.owned_input_events.len);
+        self.owned_input_events[self.owned_input_event_count] = .{ .context = context, .handle = handle, .execution_id = execution_id, .reason = reason, .phase = if (reason == .execution_takeover) .requested else .released };
+        self.owned_input_event_count += 1;
+    }
+    pub fn drainOwnedInputEvents(self: *ApplicationHost, buffer: []OwnedInputEvent) []OwnedInputEvent {
+        const count = @min(buffer.len, self.owned_input_event_count);
+        @memcpy(buffer[0..count], self.owned_input_events[0..count]);
+        std.mem.copyForwards(OwnedInputEvent, self.owned_input_events[0 .. self.owned_input_event_count - count], self.owned_input_events[count..self.owned_input_event_count]);
+        self.owned_input_event_count -= count;
+        return buffer[0..count];
+    }
+    pub fn syncOwnedUserInput(self: *ApplicationHost, task: ?identity.TaskId) !void {
+        for (self.lifecycle_supervisor.entries.items) |*entry| {
+            if (task) |id| if (!entry.request.context.task_id.eql(id)) continue;
+            if (entry.snapshot.ownership != .created_task or entry.snapshot.state != .ready) continue;
+            const handle = entry.snapshot.session orelse continue;
+            const accepted = for (self.domain.attachments.items) |host| {
+                if ((host.workspace.userInputRevision(handle) orelse 0) > 0) break true;
+            } else false;
+            if (accepted) try self.handedToUserFor(handle, .ordinary_input);
+        }
+    }
+    pub fn setOwnedLifecycleHooks(self: *ApplicationHost, hooks: OwnedLifecycleHooks) void {
+        self.owned_lifecycle_hooks = hooks;
+    }
+    pub fn setOwnedSessionRetention(self: *ApplicationHost, handle: identity.SessionHandle, task: identity.TaskId, retention: lifecycle.Retention) !lifecycle.Snapshot {
+        return self.lifecycle_supervisor.setRetention(handle, task, retention);
+    }
+    /// The worker must first receive its accepted management result. A separate
+    /// acknowledgement permits the safe point to enter ordinary close hooks.
+    pub fn queueOwnedSessionClose(self: *ApplicationHost, handle: identity.SessionHandle, task: identity.TaskId, explicit_user_close: bool, evidence: lifecycle.IdleEvidence) !lifecycle.Snapshot {
+        const entry = self.lifecycle_supervisor.resource(handle) orelse return error.OwnershipChanged;
+        if (!entry.request.context.task_id.eql(task)) return error.OwnershipChanged;
+        if (!explicit_user_close) {
+            try self.lifecycle_supervisor.requestCleanup(handle, task, evidence);
+        } else {
+            if (entry.snapshot.state == .closed) return entry.snapshot;
+            entry.close_requested = true;
+            entry.close_ownership_revision = entry.snapshot.ownership_revision;
+            entry.close_result_acknowledged = false;
+            entry.close_requires_idle = false;
+        }
+        return entry.snapshot;
+    }
+    pub fn acknowledgeSessionCloseResult(self: *ApplicationHost, operation: identity.HostOperationId) !void {
+        for (self.deferred_closes.items) |*close| if (close.snapshot.operation_ref.eql(operation)) {
+            if (close.snapshot.state == .cancelled_unsent) return error.CancelledBeforeDispatch;
+            close.result_acknowledged = true;
+            self.workspace.cx.requestRedraw();
+            return;
+        };
+        const entry = self.lifecycle_supervisor.find(operation) orelse return error.NotFound;
+        if (!entry.close_requested) return error.NoCloseRequested;
+        entry.close_result_acknowledged = true;
+        self.workspace.cx.requestRedraw();
+    }
+    pub fn finishOwnedTask(self: *ApplicationHost, task: identity.TaskId, evidence: lifecycle.FinishEvidence) !lifecycle.TaskFinishReceipt {
+        try self.syncOwnedUserInput(task);
+        return self.lifecycle_supervisor.finishTask(task, evidence);
+    }
+
+    /// Live eligibility probe. Saving a same-PTY interval cannot establish
+    /// idle: output ownership is unverified even after a real foreground exit.
+    /// Local also verifies the current foreground group and independent execs.
+    pub fn ownedIdleEvidence(self: *ApplicationHost, handle: identity.SessionHandle, task: identity.TaskId) !lifecycle.IdleEvidence {
+        const entry = self.lifecycle_supervisor.resource(handle) orelse return error.OwnershipChanged;
+        if (!entry.request.context.task_id.eql(task) or entry.snapshot.ownership != .created_task) return error.OwnershipChanged;
+        const mapping = self.findHandle(handle) orelse return error.StaleReference;
+        const tab = self.workspace.sessionTab(mapping.legacy_id) orelse return error.StaleReference;
+        const binding = switch (self.sessions.queryService(handle, .terminal)) {
+            .available => |binding| binding,
+            else => return .{},
+        };
+        var service = if (mapping.process) |process| try process.terminalService(binding) else if (tab.runtime) |runtime| try runtime.terminalService() else return .{};
+        const execution = service.executionSnapshot() catch return .{};
+        const process = execution.process orelse return .{};
+        const recording_settled = execution.state == .sealed or (execution.state == .interval_recorded and execution.interval_saved and execution.recording_settled) or (execution.state == .recording_degraded and execution.recording_settled);
+        const impact = bridgeImpact(self, mapping.legacy_id);
+        var result: lifecycle.IdleEvidence = .{
+            .confirmed = recording_settled and process.foreground_finished and !process.background_jobs_unknown and execution.output_scope == .exact,
+            .foreground_active = !process.foreground_finished,
+            .background_jobs = process.background_jobs,
+            .pending_input = !execution.input_ready or execution.grant != null or !execution.local_released,
+            .active_references = impact.transfer != 0 or impact.socks != 0 or impact.unknown != 0 or impact.ai != 0,
+            .recording_settled = recording_settled and (execution.manifest_revision > 0 or execution.recording_settled),
+        };
+        if (mapping.process) |local| {
+            var risk = try local.closeRiskSnapshot(handle, self.allocator);
+            defer risk.deinit(self.allocator);
+            result.confirmed = result.confirmed and !risk.unknown and risk.foreground_state == .idle_shell;
+            result.active_references = result.active_references or risk.active_exec.len != 0;
+        }
+        for (self.lifecycle_supervisor.entries.items) |other| if (other.request.source) |source| {
+            if (source.eql(handle)) switch (other.snapshot.state) {
+                .queued, .prepared, .opening => result.active_references = true,
+                else => {},
+            };
+        };
+        return result;
+    }
+
+    /// Explicit host-confirmed close can also target borrowed user resources.
+    /// It has no automatic cleanup variant; that path uses owned eligibility.
+    pub fn queueSessionClose(self: *ApplicationHost, operation: identity.HostOperationId, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle, user_authorized: bool) !DeferredCloseSnapshot {
+        try context.validate();
+        if (!user_authorized) return error.CloseApprovalRequired;
+        if (!operation.valid()) return error.InvalidOperation;
+        for (self.deferred_closes.items) |close| if (close.snapshot.operation_ref.eql(operation)) {
+            if (!close.context.eql(context) or !close.handle.eql(handle)) return error.IdempotencyConflict;
+            return close.snapshot;
+        };
+        const mapping = self.findHandle(handle) orelse return error.StaleReference;
+        _ = self.sessions.queryState(handle) orelse return error.StaleReference;
+        if (self.deferred_closes.items.len >= 512) return error.ResourceLimit;
+        const snapshot: DeferredCloseSnapshot = .{ .operation_ref = operation };
+        try self.deferred_closes.append(self.allocator, .{ .context = context, .handle = handle, .snapshot = snapshot, .impact = bridgeImpact(self, mapping.legacy_id), .ownership_revision = if (self.lifecycle_supervisor.resource(handle)) |entry| entry.snapshot.ownership_revision else null });
+        return snapshot;
+    }
+
+    pub fn querySessionClose(self: *ApplicationHost, operation: identity.HostOperationId, context: @import("../ai/host_tools.zig").Context) !DeferredCloseSnapshot {
+        for (self.deferred_closes.items) |close| if (close.snapshot.operation_ref.eql(operation)) {
+            if (!close.context.conversation_id.eql(context.conversation_id) or !close.context.task_id.eql(context.task_id)) return error.PermissionDenied;
+            return close.snapshot;
+        };
+        return error.NotFound;
+    }
+
+    /// Group close remains the existing frozen all-member preflight/dialog.
+    /// Task cleanup has no path to this entry point.
+    pub fn requestExplicitGroupClose(self: *ApplicationHost, owner: identity.GroupOwner, user_authorized: bool) !void {
+        if (!user_authorized) return error.CloseApprovalRequired;
+        try self.validateOwnedGroup(owner);
+        self.workspace.requestCloseGroup(@intCast(@backingInt(owner.id)));
+    }
+
+    fn tickDeferredCloses(self: *ApplicationHost) !bool {
+        var pending = false;
+        for (self.deferred_closes.items) |*close| {
+            if (!close.result_acknowledged) continue;
+            if (close.snapshot.state == .cancelled_unsent) continue;
+            const state = self.sessions.queryState(close.handle) orelse {
+                close.snapshot.state = .cleanup_pending;
+                close.snapshot.remote_effect_unknown = true;
+                continue;
+            };
+            if (state.lifecycle == .closed) {
+                close.snapshot.state = .closed;
+                close.snapshot.local_released = true;
+            } else if (state.lifecycle == .cleanup_unknown) {
+                close.snapshot.state = .cleanup_pending;
+                close.snapshot.remote_effect_unknown = true;
+            } else {
+                if (state.close_operation == null) {
+                    const mapping = self.findHandle(close.handle) orelse return error.StaleReference;
+                    const ownership_revision = if (self.lifecycle_supervisor.resource(close.handle)) |entry| entry.snapshot.ownership_revision else null;
+                    if (ownership_revision != close.ownership_revision or !close.impact.eql(bridgeImpact(self, mapping.legacy_id))) {
+                        close.snapshot.state = .cancelled_unsent;
+                        close.snapshot.error_code = "ScopeChanged";
+                        continue;
+                    }
+                    _ = try self.requestCloseLegacy(mapping.legacy_id);
+                }
+                close.snapshot.state = .closing;
+                close.snapshot.local_released = false;
+                pending = true;
+            }
+        }
+        return pending;
+    }
+
+    fn prepareOwnedSession(self: *ApplicationHost, entry: *lifecycle.Entry, frozen: *PendingOwnedSource) !session.Accepted {
+        try self.validateOwnedGroup(entry.request.group);
+        if (self.sessions.defer_create_start) return error.ReentrantCreate;
+        self.sessions.defer_create_start = true;
+        defer self.sessions.defer_create_start = false;
+        if (frozen.connection) |*connection| return self.createWindowConnection(connection);
+        return self.sessions.openQuickAction("session.local.create", frozen.cwd, .{ .request_key = try self.dispatcher.issue(), .target = self.target() });
+    }
+
+    /// Called only after the off-UI journal owner durably wrote the exact
+    /// provisional handle and dispatch intent. No IO runs in this method.
+    pub fn authorizeOwnedSessionDispatch(self: *ApplicationHost, operation: identity.HostOperationId, context: @import("../ai/host_tools.zig").Context, expected_revision: u64, handle: identity.SessionHandle) !lifecycle.Snapshot {
+        _ = try self.lifecycle_supervisor.query(operation, context);
+        const entry = self.lifecycle_supervisor.find(operation).?;
+        if (!entry.request.context.eql(context)) return error.ScopeChanged;
+        if (entry.snapshot.state != .prepared or entry.cancel_requested or entry.snapshot.revision != expected_revision or entry.snapshot.session == null or !entry.snapshot.session.?.eql(handle)) return error.ScopeChanged;
+        entry.dispatch_permitted = true;
+        self.workspace.cx.requestRedraw();
+        return entry.snapshot;
+    }
+
+    fn dispatchOwnedSession(self: *ApplicationHost, entry: *lifecycle.Entry, frozen: *PendingOwnedSource) !void {
+        try self.validateOwnedGroup(entry.request.group);
+        if (entry.request.membership_revision) |revision| {
+            const group = self.workspace.group_roster.?.findById(@intCast(@backingInt(entry.request.group.id))).?;
+            if (group.membership_revision != revision) return error.ScopeChanged;
+        }
+        const source: ?*Mapping = if (entry.request.source) |handle| blk: {
+            const mapping = self.findHandle(handle) orelse return error.SourceChanged;
+            const source_state = self.sessions.queryState(handle) orelse return error.SourceChanged;
+            if (source_state.lifecycle != .attached and source_state.lifecycle != .ready) return error.SourceChanged;
+            const roster = self.workspace.group_roster orelse return error.ScopeChanged;
+            const group = roster.findById(@intCast(@backingInt(entry.request.group.id))) orelse return error.ScopeChanged;
+            if (!group.contains(mapping.legacy_id)) return error.ScopeChanged;
+            break :blk mapping;
+        } else blk: {
+            _ = try self.validateSavedOwnedSource(entry.request.saved_source orelse return error.InvalidSource);
+            break :blk null;
+        };
+        const ambient_group = self.workspace.creation_group;
+        const ambient_pending = self.workspace.owned_creation_pending;
+        self.workspace.creation_group = null;
+        self.workspace.owned_creation_pending = true;
+        defer self.workspace.creation_group = ambient_group;
+        defer self.workspace.owned_creation_pending = ambient_pending;
+        const handle = entry.snapshot.session orelse return error.MissingSessionReservation;
+        const state = self.sessions.queryState(handle) orelse return error.StaleReference;
+        const accepted: session.Accepted = .{ .handle = handle, .operation = state.create_operation };
+        if (frozen.connection) |*connection| {
+            var lease: ?@import("../host/runtime_service.zig").SharedLease = null;
+            defer if (lease) |held| held.release();
+            if (entry.request.connection_policy != .new_only) {
+                if (source) |mapping| {
+                    const tab = self.workspace.sessionTab(mapping.legacy_id) orelse return error.SourceChanged;
+                    if (tab.runtime) |runtime| lease = runtime.reuseConnection() catch null;
+                }
+                if (lease == null) {
+                    if (entry.request.connection_policy == .reuse_only) return error.ReuseUnavailable;
+                    if (!entry.request.allow_new_fallback) return error.FallbackAuthorizationRequired;
+                }
+            }
+            if (self.pending_shared_connection != null) return error.ReentrantCreate;
+            self.pending_shared_connection = lease;
+            defer self.pending_shared_connection = null;
+            if (self.pending_source != null) return error.ReentrantCreate;
+            self.pending_source = if (connection.remote) |*remote| remote else null;
+            defer self.pending_source = null;
+            return self.sessions.dispatchPrepared(accepted);
+        }
+        if (source == null or source.?.process == null or entry.request.connection_policy != .new_only) return error.UnsupportedSource;
+        return self.sessions.dispatchPrepared(accepted);
+    }
+
+    /// Advance only outside Bridge/native/storage locks. No operation retries
+    /// creation. Failure cleanup owns exactly the provisional SessionHandle.
+    fn tickOwnedSessions(self: *ApplicationHost) !bool {
+        var pending = false;
+        for (self.lifecycle_supervisor.entries.items) |*entry| {
+            if (entry.snapshot.state == .queued) {
+                const frozen = for (self.owned_sources.items) |*source| {
+                    if (source.operation_ref.eql(entry.request.operation_ref)) break source;
+                } else return error.MissingCreateSource;
+                if (entry.cancel_requested) {
+                    frozen.deinit(self.allocator);
+                    lifecycle.Supervisor.transition(entry, .cancelled, null);
+                    continue;
+                }
+                const accepted = self.prepareOwnedSession(entry, frozen) catch |err| {
+                    frozen.deinit(self.allocator);
+                    lifecycle.Supervisor.transition(entry, .failed, @errorName(err));
+                    continue;
+                };
+                entry.snapshot.session = accepted.handle;
+                lifecycle.Supervisor.transition(entry, .prepared, null);
+            }
+            const handle = entry.snapshot.session orelse continue;
+            const state = self.sessions.queryState(handle) orelse {
+                lifecycle.Supervisor.transition(entry, .cleanup_pending, "StaleReference");
+                entry.snapshot.remote_effect_unknown = true;
+                continue;
+            };
+            if (entry.snapshot.state == .cleanup_pending and state.lifecycle == .closed) {
+                entry.snapshot.local_released = true;
+                lifecycle.Supervisor.transition(entry, if (entry.cancel_requested) .cancelled else if (entry.snapshot.membership_committed) .closed else .failed, entry.snapshot.error_code);
+            }
+            if (entry.snapshot.state == .ready) switch (state.lifecycle) {
+                .closed => {
+                    entry.snapshot.local_released = true;
+                    lifecycle.Supervisor.transition(entry, .closed, null);
+                },
+                .closing => {
+                    entry.snapshot.local_released = false;
+                    lifecycle.Supervisor.transition(entry, .closing, null);
+                },
+                .cleanup_unknown, .failed => {
+                    entry.snapshot.local_released = state.create_cleanup == .released;
+                    entry.snapshot.remote_effect_unknown = true;
+                    lifecycle.Supervisor.transition(entry, .cleanup_pending, "ConnectionLost");
+                },
+                .ended => {
+                    entry.snapshot.local_released = state.create_cleanup == .released;
+                    lifecycle.Supervisor.transition(entry, .cleanup_pending, "ShellEnded");
+                },
+                else => {},
+            };
+            if (entry.snapshot.state == .prepared) {
+                const frozen = for (self.owned_sources.items) |*source| {
+                    if (source.operation_ref.eql(entry.request.operation_ref)) break source;
+                } else return error.MissingCreateSource;
+                if (entry.cancel_requested) {
+                    _ = try self.sessions.cancel(state.create_operation);
+                    frozen.deinit(self.allocator);
+                    lifecycle.Supervisor.transition(entry, .failed_cleanup_pending, "CancelledBeforeDispatch");
+                } else if (entry.dispatch_permitted) {
+                    entry.dispatch_permitted = false;
+                    frozen.dispatched = true;
+                    self.dispatchOwnedSession(entry, frozen) catch |err| {
+                        _ = try self.sessions.cancel(state.create_operation);
+                        frozen.deinit(self.allocator);
+                        lifecycle.Supervisor.transition(entry, .failed_cleanup_pending, @errorName(err));
+                        continue;
+                    };
+                    frozen.deinit(self.allocator);
+                    entry.snapshot.local_released = false;
+                    lifecycle.Supervisor.transition(entry, .opening, null);
+                }
+            }
+            if (entry.snapshot.state == .opening) {
+                if (entry.cancel_requested or state.lifecycle == .failed or state.lifecycle == .ended) {
+                    if (state.lifecycle == .creating) _ = try self.sessions.cancel(state.create_operation);
+                    lifecycle.Supervisor.transition(entry, .failed_cleanup_pending, if (entry.cancel_requested) "CancelledBeforeReady" else "SessionCreateFailed");
+                } else if (state.lifecycle == .ready or state.lifecycle == .attached) {
+                    const mapping = self.findHandle(handle) orelse {
+                        lifecycle.Supervisor.transition(entry, .failed_cleanup_pending, "MissingSessionMapping");
+                        continue;
+                    };
+                    _ = self.workspace.commitOwnedSession(entry.request.group, handle, mapping.legacy_id) catch |err| {
+                        lifecycle.Supervisor.transition(entry, .failed_cleanup_pending, @errorName(err));
+                        continue;
+                    };
+                    entry.snapshot.membership_committed = true;
+                    entry.snapshot.local_released = true;
+                    lifecycle.Supervisor.transition(entry, .ready, null);
+                }
+            }
+            if (entry.snapshot.state == .ready and entry.task_finished and !entry.close_requested and entry.snapshot.ownership == .created_task and entry.snapshot.retention == .auto_idle) {
+                const evidence = self.ownedIdleEvidence(handle, entry.request.context.task_id) catch lifecycle.IdleEvidence{};
+                if (evidence.canClose()) {
+                    try self.lifecycle_supervisor.requestCleanup(handle, entry.request.context.task_id, evidence);
+                    if (entry.snapshot.retention_blocked_reason != null) entry.snapshot.revision +|= 1;
+                    entry.snapshot.retention_blocked_reason = null;
+                } else {
+                    const reason: []const u8 = if (!evidence.confirmed) "IdleUnconfirmed" else "ActiveReference";
+                    if (!std.meta.eql(entry.snapshot.retention_blocked_reason, @as(?[]const u8, reason))) entry.snapshot.revision +|= 1;
+                    entry.snapshot.retention_blocked_reason = reason;
+                }
+            }
+            if (entry.close_requested and entry.close_result_acknowledged and entry.close_ownership_revision == entry.snapshot.ownership_revision and entry.snapshot.state == .ready) {
+                if (entry.close_requires_idle) {
+                    const evidence = if (self.owned_lifecycle_hooks) |hooks| if (hooks.idle_evidence) |probe| probe(hooks.context, handle, entry.request.context.task_id) catch continue else self.ownedIdleEvidence(handle, entry.request.context.task_id) catch continue else self.ownedIdleEvidence(handle, entry.request.context.task_id) catch continue;
+                    if (entry.snapshot.ownership != .created_task or !entry.task_finished or !evidence.canClose()) continue;
+                }
+                const mapping = self.findHandle(handle) orelse return error.StaleReference;
+                _ = try self.requestCloseLegacy(mapping.legacy_id);
+                entry.snapshot.local_released = false;
+                lifecycle.Supervisor.transition(entry, .closing, null);
+            }
+            if (entry.snapshot.state == .failed_cleanup_pending or entry.snapshot.state == .closing) {
+                const current = self.sessions.queryState(handle).?;
+                if (current.lifecycle == .closed) {
+                    entry.snapshot.local_released = true;
+                    lifecycle.Supervisor.transition(entry, if (entry.cancel_requested) .cancelled else if (entry.snapshot.membership_committed) .closed else .failed, entry.snapshot.error_code);
+                } else if (current.lifecycle == .cleanup_unknown) {
+                    entry.snapshot.remote_effect_unknown = true;
+                    lifecycle.Supervisor.transition(entry, .cleanup_pending, entry.snapshot.error_code orelse "CleanupUnknown");
+                } else if (current.close_operation == null) {
+                    if (self.findHandle(handle)) |mapping| {
+                        _ = try self.requestCloseLegacy(mapping.legacy_id);
+                    } else if (current.create_cleanup == .released) {
+                        _ = try self.sessions.requestClose(handle, .{});
+                    } else {
+                        lifecycle.Supervisor.transition(entry, .cleanup_pending, "MissingSessionMapping");
+                    }
+                }
+            }
+            switch (entry.snapshot.state) {
+                .queued, .opening, .failed_cleanup_pending, .closing => pending = true,
+                .prepared => pending = entry.dispatch_permitted or entry.cancel_requested or pending,
+                else => {},
+            }
+        }
+        return pending;
     }
 
     /// A facade for the real IO-owner mailbox, scoped to the host's current
@@ -870,16 +1441,54 @@ pub const ApplicationHost = struct {
     /// Domain API used by the command handler; no second journal is created.
     pub fn requestCloseLegacy(self: *ApplicationHost, id: LegacySessionId) !OperationKey {
         const handle = self.ownerForLegacy(id) orelse return error.UnknownSession;
+        if (self.findHandle(handle)) |mapping| {
+            const state = self.sessions.queryState(handle) orelse return error.StaleSession;
+            if (state.close_operation == null and mapping.close_display == null) try self.freezeCloseDisplay(mapping);
+        }
         if (self.findHandle(handle)) |mapping| if (mapping.reconnect_ticket) |*ticket| ticket.invalidate();
         return self.sessions.requestClose(handle, self.closeHooks()) catch |err| {
             // Once the domain has accepted a close, a later publication OOM
             // must not turn its real operation into a rejected UI command.
             const state = self.sessions.queryState(handle) orelse return err;
-            const key = state.close_operation orelse return err;
+            const key = state.close_operation orelse {
+                if (self.findHandle(handle)) |mapping| if (mapping.close_display) |*display| {
+                    display.deinit();
+                    mapping.close_display = null;
+                };
+                return err;
+            };
             const mapping = self.findHandle(handle).?;
             if (mapping.waiting == null) mapping.waiting = .{ .key = key, .step = .release_content };
             return key;
         };
+    }
+
+    /// Freeze appearance while the exact live pane still owns it. The first
+    /// asynchronous close hook hands this owned snapshot to the recording owner
+    /// before protocol teardown; WorkerBusy merely requests another safe tick.
+    fn freezeCloseDisplay(self: *ApplicationHost, mapping: *Mapping) !void {
+        const tab = self.workspace.sessionTab(mapping.legacy_id) orelse return;
+        const view = if (tab.terminal) |*value| value else return;
+        const runtime_service = if (tab.runtime) |runtime| runtime.terminalService() catch null else null;
+        const service = runtime_service orelse if (view.terminal_surface) |surface| surface.service else return;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        const a = arena.allocator();
+        var display: @import("../vt/recording_manifest.zig").Display = .{
+            .title = try a.dupe(u8, tab.titleSlice()),
+            .host = try a.dupe(u8, if (tab.host_snapshot) |saved| saved.value.host else "localhost"),
+            .user = try a.dupe(u8, if (tab.host_snapshot) |saved| saved.value.user else ""),
+            .timestamps = view.local_state.timestamp_gutter,
+            .grouped = view.terminal_grouped,
+            .final_cols = view.frame_cols,
+            .final_rows = view.frame_rows,
+            .font_family = try a.dupe(u8, view.terminal_font_family orelse "system"),
+            .font_size_px = view.terminal_font_size,
+            .line_height = view.terminal_line_height,
+        };
+        display.endpoint = if (tab.host_snapshot) |saved| try std.fmt.allocPrint(a, "{s}@{s}:{d}", .{ saved.value.user, saved.value.host, saved.value.port }) else "localhost";
+        display.cwd = if (mapping.process) |process| process.copyCwd(mapping.handle, a) catch null else if (tab.runtime) |runtime| runtime.copyCwd(a) catch null else null;
+        mapping.close_display = .{ .arena = arena, .service = service, .display = display };
     }
 
     pub fn closeForInput(self: *ApplicationHost, command_id: u64, tab_id: identity.TabId, owner: identity.ContentOwner) !commands.Decision {
@@ -941,6 +1550,9 @@ pub const ApplicationHost = struct {
     }
 
     pub fn safeTick(self: *ApplicationHost) !bool {
+        try self.syncOwnedUserInput(null);
+        const lifecycle_pending = try self.tickOwnedSessions();
+        const deferred_close_pending = try self.tickDeferredCloses();
         // Domain-only hosts have no Cx. Render-cache policy starts only after
         // the application installs the window's presentation callbacks.
         if (self.installed) {
@@ -1009,7 +1621,7 @@ pub const ApplicationHost = struct {
             self.workspace.pollConnectionResults();
             break;
         };
-        var pending = try self.local_adapter.drain(self.sessions) or controller_pending or file_pending or background_pending or shared_pending;
+        var pending = try self.local_adapter.drain(self.sessions) or controller_pending or file_pending or background_pending or shared_pending or lifecycle_pending or deferred_close_pending;
         // Exactly one consumer drains the bounded raw stream, including before
         // ready and after cancellation. VT/TextSlot is consumed only by views.
         var output: [16 * 1024]u8 = undefined;
@@ -1283,7 +1895,7 @@ pub const ApplicationHost = struct {
             self.workspace.finishSshReconnect(mapping.legacy_id, mapping.create_operation, notice.failure orelse error.ConnectionClosed);
             if (mapping.reconnect_policy == null) {
                 const policy = self.workspace.app_config.ssh;
-                mapping.reconnect_policy = .{ .automatic = policy.auto_reconnect and (notice.failure orelse error.ConnectionClosed) != error.Cancelled, .max = policy.reconnect_max, .backoff = policy.reconnect_backoff };
+                mapping.reconnect_policy = .{ .automatic = self.lifecycle_supervisor.resource(mapping.handle) == null and policy.auto_reconnect and (notice.failure orelse error.ConnectionClosed) != error.Cancelled, .max = policy.reconnect_max, .backoff = policy.reconnect_backoff };
             }
             const policy = mapping.reconnect_policy.?;
             const delay: ?i128 = if (policy.automatic and mapping.reconnect_count < policy.max and mapping.reconnect_count < policy.backoff.len)
@@ -1461,6 +2073,17 @@ pub const ApplicationHost = struct {
     }
 
     pub fn runCloseStep(self: *ApplicationHost, mapping: *Mapping, key: OperationKey, step: CloseStep, safe: bool) CloseReceipt {
+        if (step == .pause_transfers) if (mapping.close_display) |*display| {
+            display.service.setRecordingDisplay(display.display) catch |err| {
+                if (err == error.WorkerBusy) {
+                    mapping.waiting = .{ .key = key, .step = step };
+                    return .awaiting;
+                }
+                if (err != error.RecordingUnavailable) std.log.warn("recording display snapshot unavailable: {s}", .{@errorName(err)});
+            };
+            display.deinit();
+            mapping.close_display = null;
+        };
         if (step == .release_content and !safe) {
             mapping.waiting = .{ .key = key, .step = step };
             return .awaiting;
@@ -1939,6 +2562,699 @@ test "application source rejects invalid numeric routes before a factory can sta
 
 test "application host adapter and callback signatures compile" {
     std.testing.refAllDecls(ApplicationHost);
+}
+test "task finish controller native imports" {
+    _ = @import("ai_task_finish.zig");
+}
+
+const OwnedSessionFixture = struct {
+    cx: *ui.Cx,
+    scope: *ui.Scope,
+    app: *ApplicationHost,
+    workspace: *workspace_mod.Workspace,
+    fn tick(self: *@This()) !void {
+        _ = try self.app.safeTick();
+        self.cx.advanceFrameClock();
+        self.cx.layout();
+        _ = self.cx.render();
+        var empty: [1]std.c.pollfd = undefined;
+        _ = std.c.poll(&empty, 0, 2);
+    }
+    /// C needs completed controlled shell startup, not D's editing/input
+    /// capability. The shell itself writes its PID marker from precmd, and
+    /// independent process/cwd observations must identify that same shell.
+    fn waitShellStartup(self: *@This(), handle: identity.SessionHandle, directory: std.Io.Dir, expected_cwd: []const u8, deadline: i128) !void {
+        var marker_ready = false;
+        var foreground_ready = false;
+        var cwd_ready = false;
+        var observed_pid: ?i32 = null;
+        while (@import("../platform/realtime.zig").monotonicNs() <= deadline) {
+            try self.tick();
+            const process = self.app.local_adapter.processSnapshot(handle) catch |err| switch (err) {
+                error.WorkerBusy => continue,
+                else => return err,
+            };
+            observed_pid = process.pid;
+            const pid = process.pid orelse continue;
+            foreground_ready = process.state == .running and if (process.foreground) |foreground| foreground.pid == pid and foreground.process_group == pid and foreground.session_id == pid else false;
+            var marker_name: [64]u8 = undefined;
+            var marker_buffer: [64]u8 = undefined;
+            const marker = directory.readFile(std.testing.io, try std.fmt.bufPrint(&marker_name, "owned-startup-{d}", .{pid}), &marker_buffer) catch |err| switch (err) {
+                error.FileNotFound => continue,
+                else => return err,
+            };
+            var expected_marker: [64]u8 = undefined;
+            marker_ready = std.mem.eql(u8, marker, try std.fmt.bufPrint(&expected_marker, "{d}\n", .{pid}));
+            var cwd = self.app.local_adapter.cwdSnapshot(handle, self.app.allocator) catch |err| switch (err) {
+                error.WorkerBusy => continue,
+                else => return err,
+            };
+            defer cwd.deinit(self.app.allocator);
+            cwd_ready = cwd.source == .process and cwd.value != null and std.mem.eql(u8, cwd.value.?, expected_cwd);
+            if (marker_ready and foreground_ready and cwd_ready) return;
+        }
+        std.debug.print("owned shell startup id={d} pid={any} marker={any} foreground={any} cwd={any}\n", .{ @backingInt(handle.session_id), observed_pid, marker_ready, foreground_ready, cwd_ready });
+        return error.ControlledShellStartupNotReady;
+    }
+    fn finish(self: *@This()) void {
+        for (self.app.sessions.sessions.items) |entry| {
+            if (self.app.findHandle(entry.handle)) |mapping| {
+                _ = self.app.requestCloseLegacy(mapping.legacy_id) catch {};
+            } else _ = self.app.sessions.requestClose(entry.handle, .{}) catch {};
+        }
+        const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+        while (self.workspace.tabs.items.len != 0 or self.app.local_adapter.shutdownStep() != .released) {
+            self.tick() catch |err| std.debug.panic("owned session cleanup: {s}", .{@errorName(err)});
+            if (@import("../platform/realtime.zig").monotonicNs() > deadline) {
+                for (self.app.mappings.items) |mapping| std.debug.print("owned cleanup id={d} lifecycle={any} waiting={any} pending={any} tab={any}\n", .{ mapping.legacy_id, self.app.sessions.queryState(mapping.handle).?.lifecycle, mapping.waiting, mapping.content_pending, self.workspace.sessionTab(mapping.legacy_id) != null });
+                @panic("owned session cleanup timed out");
+            }
+        }
+        self.cx.clearFocus();
+        self.scope.dispose();
+        self.cx.deinit();
+    }
+};
+
+test "owned Local session reserves before dispatch commits once and rolls back failed membership" {
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "hosts.toml", .data = "" });
+    // This fixture tests owned creation/rollback, so its real login shell must
+    // not run the developer's startup scripts and their unrelated children.
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = ".zshenv", .data = "PROMPT=''\nRPROMPT=''\n" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = ".zshrc", .data = "bindkey -e\n_owned_fixture_started() { print -r -- \"$$\" > \"$ZDOTDIR/owned-startup-$$\"; }\nprecmd_functions+=(_owned_fixture_started)\n" });
+    const path = try temporary.dir.realPathFileAlloc(std.testing.io, "hosts.toml", a);
+    defer a.free(path);
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    const Env = struct {
+        extern "c" fn setenv([*:0]const u8, [*:0]const u8, c_int) c_int;
+        extern "c" fn unsetenv([*:0]const u8) c_int;
+    };
+    const previous_shell = if (std.c.getenv("ZDOTDIR")) |old| try a.dupeSentinel(u8, std.mem.span(old), 0) else null;
+    defer {
+        if (previous_shell) |old| {
+            _ = Env.setenv("ZDOTDIR", old.ptr, 1);
+            a.free(old);
+        } else _ = Env.unsetenv("ZDOTDIR");
+    }
+    if (Env.setenv("ZDOTDIR", directory.ptr, 1) != 0) return error.EnvironmentFailed;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    cx.setViewport(1100, 720);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    var nodes: [4]*ui.Node = undefined;
+    for (&nodes) |*node| {
+        node.* = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 100 } }, .{});
+        try cx.root.?.appendChild(a, node.*);
+    }
+    var saved: config.Config = .{};
+    const workspace = try workspace_mod.Workspace.init(a, cx, scope, std.testing.io, &saved, path, nodes[0], nodes[1], nodes[2], nodes[3]);
+    const app = try ApplicationHost.init(a, workspace);
+    try scope.onCleanup(ApplicationHost, app, ApplicationHost.deinit);
+    app.install();
+    var fixture: OwnedSessionFixture = .{ .cx = cx, .scope = scope, .workspace = workspace, .app = app };
+    var roster = @import("group_model.zig").Roster.init(a);
+    defer roster.deinit();
+    defer fixture.finish();
+    const source = try app.createLocal(directory);
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    while (app.sessions.queryState(source.handle).?.lifecycle != .attached) {
+        try fixture.tick();
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.LocalSessionNotReady;
+    }
+    try fixture.waitShellStartup(source.handle, temporary.dir, directory, deadline);
+    const original = app.legacyForHandle(source.handle).?;
+    var prepared_group = try roster.prepareNew("owned-test", 0xff00ffff, original);
+    defer prepared_group.deinit();
+    var prepared_view = try workspace.prepareGroupView(prepared_group.id, "owned-test", original);
+    defer prepared_view.deinit();
+    try prepared_view.validate();
+    const group_id = try prepared_group.commit();
+    var fail_commit = std.testing.FailingAllocator.init(a, .{ .fail_index = 0 });
+    workspace.allocator = fail_commit.allocator();
+    prepared_view.commit(&roster) catch |err| {
+        workspace.allocator = a;
+        return err;
+    };
+    workspace.allocator = a;
+    const group_owner: identity.GroupOwner = .{ .id = @fromBackingInt(group_id) };
+    var request: lifecycle.OpenRequest = .{ .operation_ref = identity.HostOperationId.generate(), .context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .group = group_id }, .binding_revision = 2, .grant_revision = 1 }, .group = group_owner, .source = source.handle, .connection_policy = .new_only, .retention = .auto_idle };
+    _ = try app.queueOwnedSession(request);
+    try fixture.tick();
+    var snapshot = try app.queryOwnedSession(request.operation_ref, request.context);
+    try std.testing.expectEqual(lifecycle.State.prepared, snapshot.state);
+    try std.testing.expectEqual(@as(usize, 1), workspace.tabs.items.len);
+    try std.testing.expect(app.findHandle(snapshot.session.?) == null);
+    try std.testing.expectEqual(@as(usize, 1), roster.findById(group_id).?.members.items.len);
+    _ = try app.queueOwnedSession(request);
+    try std.testing.expectEqual(@as(usize, 1), app.lifecycle_supervisor.entries.items.len);
+    try std.testing.expectError(error.ScopeChanged, app.authorizeOwnedSessionDispatch(request.operation_ref, request.context, snapshot.revision + 1, snapshot.session.?));
+    _ = try app.authorizeOwnedSessionDispatch(request.operation_ref, request.context, snapshot.revision, snapshot.session.?);
+    while (snapshot.state != .ready) {
+        try fixture.tick();
+        snapshot = try app.queryOwnedSession(request.operation_ref, request.context);
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.OwnedSessionNotReady;
+    }
+    const owned = snapshot.session.?;
+    try fixture.waitShellStartup(owned, temporary.dir, directory, deadline);
+    try std.testing.expectError(error.CloseApprovalRequired, app.queueSessionClose(identity.HostOperationId.generate(), request.context, source.handle, false));
+    _ = try app.finishOwnedTask(request.context.task_id, .{ .provider_finished = true, .pending_tool_slots = false, .pending_approval = false, .pending_dispatch = false, .executions_settled = true, .input_grants_released = true, .cleanup_transferred = true, .model_done = true });
+    try std.testing.expectError(error.BusyUnknown, app.queueOwnedSessionClose(owned, request.context.task_id, false, .{}));
+    try std.testing.expectError(error.OwnershipChanged, app.queueOwnedSessionClose(source.handle, request.context.task_id, false, .{}));
+    try std.testing.expect(snapshot.membership_committed);
+    try std.testing.expectEqual(@as(usize, 2), roster.findById(group_id).?.members.items.len);
+    try fixture.tick();
+    try std.testing.expectEqual(@as(usize, 2), roster.findById(group_id).?.members.items.len);
+    request.operation_ref = identity.HostOperationId.generate();
+    _ = try app.queueOwnedSession(request);
+    try fixture.tick();
+    const cancelled = try app.queryOwnedSession(request.operation_ref, request.context);
+    _ = try app.cancelOwnedSession(request.operation_ref, request.context);
+    for (0..3) |_| try fixture.tick();
+    try std.testing.expectEqual(lifecycle.State.cancelled, (try app.queryOwnedSession(request.operation_ref, request.context)).state);
+    try std.testing.expect(app.findHandle(cancelled.session.?) == null);
+    request.operation_ref = identity.HostOperationId.generate();
+    _ = try app.queueOwnedSession(request);
+    try fixture.tick();
+    const failed = try app.queryOwnedSession(request.operation_ref, request.context);
+    _ = try app.authorizeOwnedSessionDispatch(request.operation_ref, request.context, failed.revision, failed.session.?);
+    try fixture.tick();
+    const group_at = workspace.model.indexOf(workspace.groupTabId(group_id).?).?;
+    workspace.model.tabs.items[group_at].owner.group.revision += 1;
+    defer workspace.model.tabs.items[workspace.model.indexOf(workspace.groupTabId(group_id).?).?].owner.group.revision = 1;
+    var failed_snapshot = try app.queryOwnedSession(request.operation_ref, request.context);
+    while (failed_snapshot.state != .failed) {
+        try fixture.tick();
+        failed_snapshot = try app.queryOwnedSession(request.operation_ref, request.context);
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.OwnedRollbackNotReleased;
+    }
+    try std.testing.expectEqual(@as(usize, 2), workspace.tabs.items.len);
+    try std.testing.expectEqual(@as(usize, 2), roster.findById(group_id).?.members.items.len);
+    try std.testing.expectEqual(session.Lifecycle.attached, app.sessions.queryState(source.handle).?.lifecycle);
+    workspace.model.tabs.items[workspace.model.indexOf(workspace.groupTabId(group_id).?).?].owner.group.revision = 1;
+    const saved_index = try workspace.appendHost(.{ .connection_id = @fromBackingInt(7001), .revision = 3, .name = "owned-saved-test", .host = "127.0.0.1", .port = 1, .user = "fixture", .auth_mode = .password, .password = "unused-no-network" });
+    request.operation_ref = identity.HostOperationId.generate();
+    request.source = null;
+    request.saved_source = .{ .id = workspace.registry.hosts[saved_index].connection_id, .revision = 3 };
+    request.connection_policy = .reuse_only;
+    try std.testing.expectError(error.ReuseUnavailable, app.queueOwnedSession(request));
+    request.connection_policy = .prefer_reuse;
+    try std.testing.expectError(error.FallbackAuthorizationRequired, app.queueOwnedSession(request));
+    request.connection_policy = .new_only;
+    _ = try app.queueOwnedSession(request);
+    try fixture.tick();
+    const saved_reservation = try app.queryOwnedSession(request.operation_ref, request.context);
+    try std.testing.expectEqual(lifecycle.State.prepared, saved_reservation.state);
+    try std.testing.expect(saved_reservation.source == null);
+    try std.testing.expectEqual(@as(u64, 3), saved_reservation.saved_source.?.revision);
+    _ = try app.authorizeOwnedSessionDispatch(request.operation_ref, request.context, saved_reservation.revision, saved_reservation.session.?);
+    workspace.registry.hosts[saved_index].revision += 1;
+    for (0..3) |_| try fixture.tick();
+    const saved_failed = try app.queryOwnedSession(request.operation_ref, request.context);
+    try std.testing.expectEqual(lifecycle.State.failed, saved_failed.state);
+    try std.testing.expectEqualStrings("SourceChanged", saved_failed.error_code.?);
+    try std.testing.expect(app.findHandle(saved_failed.session.?) == null);
+    try std.testing.expectEqual(@as(usize, 2), workspace.tabs.items.len);
+    const owned_surface = workspace.sessionTab(app.legacyForHandle(owned).?).?.terminal.?.terminal_surface.?;
+    _ = try owned_surface.refresh(owned, true);
+    try owned_surface.queueText("owned-user-input");
+    while (owned_surface.user_input_revision == 0) {
+        try owned_surface.pump();
+        try fixture.tick();
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.UserInputNotAccepted;
+    }
+    // No intervening safe tick: the finish entry must synchronize accepted
+    // user admission before evaluating an auto-idle candidate in this frame.
+    _ = try app.finishOwnedTask(request.context.task_id, .{ .provider_finished = true, .pending_tool_slots = false, .pending_approval = false, .pending_dispatch = false, .executions_settled = true, .input_grants_released = true, .cleanup_transferred = true, .model_done = true });
+    try std.testing.expectEqual(lifecycle.Ownership.handed_to_user, app.lifecycle_supervisor.resource(owned).?.snapshot.ownership);
+    try std.testing.expectEqual(lifecycle.Retention.keep, app.lifecycle_supervisor.resource(owned).?.snapshot.retention);
+    var input_events: [4]OwnedInputEvent = undefined;
+    const observed_input = app.drainOwnedInputEvents(&input_events);
+    try std.testing.expectEqual(@as(usize, 1), observed_input.len);
+    try std.testing.expectEqual(OwnedInputReason.ordinary_input, observed_input[0].reason);
+    try std.testing.expectEqual(.released, observed_input[0].phase);
+    try std.testing.expect(observed_input[0].context.task_id.eql(request.context.task_id));
+    try std.testing.expect(observed_input[0].context.conversation_id.eql(request.context.conversation_id));
+    try std.testing.expect(observed_input[0].handle.eql(owned));
+    try app.syncOwnedUserInput(request.context.task_id);
+    try std.testing.expectEqual(@as(usize, 0), app.drainOwnedInputEvents(&input_events).len);
+    try fixture.tick();
+    try std.testing.expectEqual(session.Lifecycle.attached, app.sessions.queryState(owned).?.lifecycle);
+    try std.testing.expectEqual(session.Lifecycle.attached, app.sessions.queryState(source.handle).?.lifecycle);
+}
+
+test "task finish takeover keeps round live and accepts a later fresh grant" {
+    const finish = @import("ai_task_finish.zig");
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "hosts.toml", .data = "" });
+    const path = try temporary.dir.realPathFileAlloc(std.testing.io, "hosts.toml", a);
+    defer a.free(path);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    cx.setViewport(1100, 720);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    var nodes: [4]*ui.Node = undefined;
+    for (&nodes) |*node| {
+        node.* = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 100 } }, .{});
+        try cx.root.?.appendChild(a, node.*);
+    }
+    var saved: config.Config = .{};
+    const workspace = try workspace_mod.Workspace.init(a, cx, scope, std.testing.io, &saved, path, nodes[0], nodes[1], nodes[2], nodes[3]);
+    const app = try ApplicationHost.init(a, workspace);
+    try scope.onCleanup(ApplicationHost, app, ApplicationHost.deinit);
+    app.install();
+    var fixture: OwnedSessionFixture = .{ .cx = cx, .scope = scope, .workspace = workspace, .app = app };
+    defer fixture.finish();
+    const context: @import("../ai/host_tools.zig").Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    const Source = struct {
+        fact: finish.ExecutionEvidence,
+        finishes: usize = 0,
+        stops: usize = 0,
+        takeovers: usize = 0,
+        target: finish.InputTarget,
+        other: finish.InputTarget,
+        target_released: bool = false,
+        input: ?finish.InputEvidence = null,
+        input_busy: bool = false,
+        fn targets(raw: *anyopaque, _: @import("../ai/host_tools.zig").Context, buffer: []finish.InputTarget) ![]finish.InputTarget {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            buffer[0] = self.other;
+            if (self.target_released) return buffer[0..1];
+            buffer[1] = self.target;
+            return buffer[0..2];
+        }
+        fn inputEvidence(raw: *anyopaque, _: @import("../ai/host_tools.zig").Context, id: identity.ExecutionId) ?finish.InputEvidence {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.input_busy) return null;
+            if (self.input) |fact| return if (fact.execution_id.eql(id)) fact else null;
+            if (!self.target.execution_id.eql(id)) return null;
+            return .{ .execution_id = id, .target = self.target.handle, .revision = self.fact.revision, .state = .running, .terminal = false, .input_handed_off = self.target_released, .local_released = self.target_released, .input_ready = self.target_released, .has_grant = !self.target_released };
+        }
+        fn finishModel(raw: *anyopaque, _: @import("../ai/host_tools.zig").Context) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.finishes += 1;
+            self.fact.model_done = true;
+        }
+        fn stop(raw: *anyopaque, _: @import("../ai/host_tools.zig").Context) !void {
+            (@as(*@This(), @ptrCast(@alignCast(raw)))).stops += 1;
+        }
+        fn takeover(raw: *anyopaque, _: @import("../ai/host_tools.zig").Context, id: identity.ExecutionId) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!self.target.execution_id.eql(id)) return error.UnexpectedTarget;
+            self.takeovers += 1;
+        }
+        fn evidence(raw: *anyopaque, _: identity.TaskId) ?finish.ExecutionEvidence {
+            return (@as(*@This(), @ptrCast(@alignCast(raw)))).fact;
+        }
+        fn gates(_: *anyopaque, _: @import("../ai/host_tools.zig").Context) ?finish.Gates {
+            return .{ .resource_references_transferred = true };
+        }
+    };
+    // Controlled owner facts test routing; no native execution/exit is claimed.
+    var source: Source = .{ .fact = .{ .conversation_id = context.conversation_id, .task_id = context.task_id, .active_executions = 2 }, .target = .{ .handle = .{ .session_id = @fromBackingInt(1) }, .execution_id = .generate() }, .other = .{ .handle = .{ .session_id = @fromBackingInt(2) }, .execution_id = .generate() } };
+    const callbacks: finish.ExecutionSource = .{ .context = &source, .finish_model = Source.finishModel, .stop = Source.stop, .takeover_execution = Source.takeover, .input_targets = Source.targets, .input_evidence = Source.inputEvidence, .evidence = Source.evidence };
+    const gates: finish.GatesProvider = .{ .context = &source, .read = Source.gates };
+    var controller = finish.Controller.init(a);
+    defer controller.deinit();
+    try controller.registerTask(context);
+    _ = try controller.tick(app, callbacks, gates);
+    for (0..2) |_| {
+        try std.testing.expectError(error.TargetSelectionRequired, controller.control(context.task_id, controller.snapshotFor(context).?.revision, .takeover));
+        try controller.controlCurrentTarget(context.task_id, source.target.handle, source.target.execution_id);
+        _ = try controller.tick(app, callbacks, gates);
+        try std.testing.expect(controller.snapshotFor(context).?.control_pending);
+        try std.testing.expectEqual(@as(usize, 0), source.finishes);
+        try std.testing.expectEqual(@as(usize, 0), source.stops);
+        try std.testing.expect(!controller.snapshotFor(context).?.model_done);
+        source.target_released = true;
+        _ = try controller.tick(app, callbacks, gates);
+        try std.testing.expect(!source.fact.input_grants_released); // B still holds its AI input
+        try std.testing.expect(!controller.snapshotFor(context).?.control_pending);
+        // A later fresh grant can become active in the same live AI round.
+        source.target_released = false;
+        const old_execution = source.target.execution_id;
+        source.target.execution_id = .generate();
+        source.fact.revision += 1;
+        _ = try controller.tick(app, callbacks, gates);
+        try std.testing.expectError(error.ScopeChanged, controller.controlTarget(context.task_id, controller.snapshotFor(context).?.revision, source.target.handle, old_execution));
+    }
+    var notices: [4]finish.ControlEvent = undefined;
+    try std.testing.expectEqual(@as(usize, 4), controller.drainControlEvents(&notices).len);
+    for (notices, 0..) |event, i| {
+        try std.testing.expect(event.handle.eql(source.target.handle));
+        try std.testing.expect(event.context.task_id.eql(context.task_id));
+        try std.testing.expect(event.context.conversation_id.eql(context.conversation_id));
+        try std.testing.expectEqual(@as(@FieldType(finish.ControlEvent, "phase"), if (i % 2 == 0) .requested else .released), event.phase);
+    }
+    try std.testing.expectEqual(@as(usize, 2), source.takeovers);
+    // Enqueued old x1 loses the race to natural completion and a fresh lease.
+    // No cache/busy observation may be guessed from the new native epoch.
+    const ended_without_handoff = source.target.execution_id;
+    try controller.controlCurrentTarget(context.task_id, source.target.handle, ended_without_handoff);
+    _ = try controller.tick(app, callbacks, gates);
+    source.target.execution_id = .generate();
+    source.target.input_epoch += 10;
+    source.input_busy = true;
+    _ = try controller.tick(app, callbacks, gates);
+    try std.testing.expect(controller.snapshotFor(context).?.control_pending);
+    source.input_busy = false;
+    source.input = .{ .execution_id = ended_without_handoff, .target = source.target.handle, .revision = 9, .state = .sealed, .terminal = true, .input_handed_off = false, .local_released = true, .input_ready = true, .has_grant = false };
+    _ = try controller.tick(app, callbacks, gates);
+    try std.testing.expect(!controller.snapshotFor(context).?.control_pending);
+    try std.testing.expect(std.mem.indexOf(u8, controller.snapshotFor(context).?.feedback.?, "接管未生效") != null);
+    const expired_events = controller.drainControlEvents(&notices);
+    try std.testing.expectEqual(@as(usize, 1), expired_events.len);
+    try std.testing.expectEqual(.requested, expired_events[0].phase);
+    try std.testing.expect(expired_events[0].execution_id.eql(ended_without_handoff));
+    // Conversely, the retained original receipt confirms a real handoff even
+    // after that execution seals and the same Session has a different grant.
+    source.input = null;
+    const handed_before_fresh = source.target.execution_id;
+    try controller.controlCurrentTarget(context.task_id, source.target.handle, handed_before_fresh);
+    _ = try controller.tick(app, callbacks, gates);
+    source.target.execution_id = .generate();
+    source.target.input_epoch += 10;
+    source.input = .{ .execution_id = handed_before_fresh, .target = source.target.handle, .revision = 11, .state = .sealed, .terminal = true, .input_handed_off = true, .local_released = true, .input_ready = true, .has_grant = false };
+    _ = try controller.tick(app, callbacks, gates);
+    try std.testing.expect(!controller.snapshotFor(context).?.control_pending);
+    const handed_events = controller.drainControlEvents(&notices);
+    try std.testing.expectEqual(@as(usize, 2), handed_events.len);
+    try std.testing.expectEqual(.requested, handed_events[0].phase);
+    try std.testing.expectEqual(.released, handed_events[1].phase);
+    for (handed_events) |event| try std.testing.expect(event.execution_id.eql(handed_before_fresh));
+    try std.testing.expect(!source.fact.input_grants_released); // fresh A/B grants unchanged
+    try std.testing.expectEqual(@as(usize, 4), source.takeovers);
+    try std.testing.expectEqual(@as(usize, 0), source.stops);
+    try std.testing.expectEqual(@as(usize, 0), source.finishes);
+    try std.testing.expect(controller.receiptFor(context) == null);
+    try controller.control(context.task_id, controller.snapshotFor(context).?.revision, .stop);
+    _ = try controller.tick(app, callbacks, gates);
+    try std.testing.expectEqual(@as(usize, 1), source.stops);
+    try std.testing.expectEqual(@as(usize, 0), source.finishes);
+    source.fact.active_executions = 0;
+    source.fact.input_grants_released = true;
+    source.fact.executions_settled = true;
+    source.fact.recordings_settled = true;
+    try controller.modelEnded(context, .cancelled);
+    _ = try controller.tick(app, callbacks, gates);
+    try std.testing.expectEqual(@as(usize, 1), source.finishes);
+    try std.testing.expectEqual(@as(usize, 1), source.stops);
+    try std.testing.expect(controller.receiptFor(context) != null);
+}
+
+test "task finish real Local records observed intervals and retains unverified auto idle sessions" {
+    const finish = @import("ai_task_finish.zig");
+    const execution = @import("../host/terminal_execution.zig");
+    const a = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = "hosts.toml", .data = "" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = ".zshenv", .data = "PROMPT=''\nRPROMPT=''\n" });
+    try temporary.dir.writeFile(std.testing.io, .{ .sub_path = ".zshrc", .data = "bindkey -e\nzmodload zsh/zselect\n" });
+    const path = try temporary.dir.realPathFileAlloc(std.testing.io, "hosts.toml", a);
+    defer a.free(path);
+    const directory = try temporary.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(directory);
+    const Env = struct {
+        extern "c" fn setenv([*:0]const u8, [*:0]const u8, c_int) c_int;
+        extern "c" fn unsetenv([*:0]const u8) c_int;
+    };
+    const previous_shell = if (std.c.getenv("ZDOTDIR")) |old| try a.dupeSentinel(u8, std.mem.span(old), 0) else null;
+    const previous_data = if (std.c.getenv("ZEROWORK_DATA_DIR")) |old| try a.dupeSentinel(u8, std.mem.span(old), 0) else null;
+    defer {
+        if (previous_shell) |old| {
+            _ = Env.setenv("ZDOTDIR", old.ptr, 1);
+            a.free(old);
+        } else _ = Env.unsetenv("ZDOTDIR");
+        if (previous_data) |old| {
+            _ = Env.setenv("ZEROWORK_DATA_DIR", old.ptr, 1);
+            a.free(old);
+        } else _ = Env.unsetenv("ZEROWORK_DATA_DIR");
+    }
+    if (Env.setenv("ZDOTDIR", directory.ptr, 1) != 0 or Env.setenv("ZEROWORK_DATA_DIR", directory.ptr, 1) != 0) return error.EnvironmentFailed;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    cx.setViewport(1100, 720);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    var nodes: [4]*ui.Node = undefined;
+    for (&nodes) |*node| {
+        node.* = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 100 } }, .{});
+        try cx.root.?.appendChild(a, node.*);
+    }
+    var saved: config.Config = .{};
+    const workspace = try workspace_mod.Workspace.init(a, cx, scope, std.testing.io, &saved, path, nodes[0], nodes[1], nodes[2], nodes[3]);
+    const app = try ApplicationHost.init(a, workspace);
+    try scope.onCleanup(ApplicationHost, app, ApplicationHost.deinit);
+    app.install();
+    var fixture: OwnedSessionFixture = .{ .cx = cx, .scope = scope, .workspace = workspace, .app = app };
+    var roster = @import("group_model.zig").Roster.init(a);
+    defer roster.deinit();
+    defer fixture.finish();
+    const source = try app.createLocal(directory);
+    const first_deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    while (app.sessions.queryState(source.handle).?.lifecycle != .attached) {
+        try fixture.tick();
+        if (@import("../platform/realtime.zig").monotonicNs() > first_deadline) return error.LocalSessionNotReady;
+    }
+    var group_plan = try roster.prepareNew("retention-test", 0xff00ffff, app.legacyForHandle(source.handle).?);
+    defer group_plan.deinit();
+    const group_id = try group_plan.commit();
+    try workspace.openGroup(&roster, group_id);
+    var controller = finish.Controller.init(a);
+    defer controller.deinit();
+    const Gates = struct {
+        approvals: usize = 0,
+        fn read(raw: *anyopaque, _: @import("../ai/host_tools.zig").Context) ?finish.Gates {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .pending_approvals = self.approvals, .resource_references_transferred = true };
+        }
+    };
+    var gates: Gates = .{};
+    const gate_source: finish.GatesProvider = .{ .context = &gates, .read = Gates.read };
+    const Facts = struct {
+        context: @import("../ai/host_tools.zig").Context,
+        service: terminal.Service,
+        app: *ApplicationHost,
+        target: identity.SessionHandle,
+        model_done: bool = false,
+        stops: usize = 0,
+        takeovers: usize = 0,
+        fn finishModel(raw: *anyopaque, _: @import("../ai/host_tools.zig").Context) !void {
+            (@as(*@This(), @ptrCast(@alignCast(raw)))).model_done = true;
+        }
+        fn stop(raw: *anyopaque, _: @import("../ai/host_tools.zig").Context) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const snapshot = try self.service.executionSnapshot();
+            if (snapshot.grant) |grant| try self.service.executionRevoke(grant, false);
+            self.stops += 1;
+        }
+        fn takeover(raw: *anyopaque, _: @import("../ai/host_tools.zig").Context, execution_id: identity.ExecutionId) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const snapshot = try self.service.executionSnapshot();
+            const grant = snapshot.grant orelse return error.NoExecutionGrant;
+            if (!grant.execution_id.eql(execution_id)) return error.ScopeChanged;
+            try self.service.executionRevoke(grant, true);
+            try self.app.handedToUser(self.target);
+            self.takeovers += 1;
+        }
+        fn read(raw: *anyopaque, task: identity.TaskId) ?finish.ExecutionEvidence {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!task.eql(self.context.task_id)) return null;
+            const snapshot = self.service.executionSnapshot() catch return null;
+            const settled = (snapshot.state == .sealed or snapshot.state == .interval_recorded or snapshot.state == .handed_off or snapshot.state == .outcome_unknown or snapshot.state == .recording_degraded) and snapshot.recording_settled;
+            return .{ .conversation_id = self.context.conversation_id, .task_id = task, .revision = snapshot.revision, .model_done = self.model_done, .execution_count = 1, .active_executions = if (settled) 0 else 1, .executions_settled = settled, .input_grants_released = snapshot.grant == null and snapshot.local_released and snapshot.input_ready, .recordings_settled = settled, .remote_effect_unknown = snapshot.remote_effect_unknown, .output_attribution_unverified = snapshot.output_scope == .session_interval and snapshot.command_accepted };
+        }
+    };
+    const cases = [_]struct { retention: lifecycle.Retention, choice: ?finish.Decision = null, control: ?finish.Control = null, user_input: bool = false }{ .{ .retention = .auto_idle }, .{ .retention = .keep }, .{ .retention = .ask, .choice = .keep }, .{ .retention = .ask, .choice = .close }, .{ .retention = .auto_idle, .user_input = true }, .{ .retention = .auto_idle, .control = .takeover }, .{ .retention = .keep, .control = .stop } };
+    for (cases, 0..) |case, case_index| {
+        const context: @import("../ai/host_tools.zig").Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .group = group_id }, .binding_revision = 1, .grant_revision = 1 };
+        const request: lifecycle.OpenRequest = .{ .operation_ref = .generate(), .context = context, .group = .{ .id = @fromBackingInt(group_id) }, .source = source.handle, .connection_policy = .new_only, .retention = case.retention };
+        _ = try app.queueOwnedSession(request);
+        try fixture.tick();
+        var opened = try app.queryOwnedSession(request.operation_ref, context);
+        _ = try app.authorizeOwnedSessionDispatch(request.operation_ref, context, opened.revision, opened.session.?);
+        const until = @import("../platform/realtime.zig").monotonicNs() + 12 * std.time.ns_per_s;
+        while (opened.state != .ready) {
+            try fixture.tick();
+            opened = try app.queryOwnedSession(request.operation_ref, context);
+            if (@import("../platform/realtime.zig").monotonicNs() >= until) return error.OwnedSessionNotReady;
+        }
+        const owner = opened.session.?;
+        const binding = app.sessions.queryService(owner, .terminal).available;
+        const service = try app.local_adapter.terminalService(binding);
+        var starting: execution.Snapshot = undefined;
+        while (true) {
+            try fixture.tick();
+            starting = service.executionSnapshot() catch {
+                continue;
+            };
+            if (starting.interactive_execution) {
+                if (service.trustedSnapshot(a) catch null) |value| {
+                    var edit = value;
+                    defer edit.deinit(a);
+                    if (edit.editable() and edit.buffer.len == 0) break;
+                }
+            }
+            if (@import("../platform/realtime.zig").monotonicNs() >= until) return error.IntegrationUnavailable;
+        }
+        // Keep the real foreground execution alive until the UI has actually
+        // observed START/running. A short sleep can complete between frames
+        // under the full-suite load and falsely report ExecutionNeverRan.
+        const release_name = try std.fmt.allocPrint(a, "retention-release-{d}", .{case_index});
+        defer a.free(release_name);
+        defer temporary.dir.writeFile(std.testing.io, .{ .sub_path = release_name, .data = "release\n" }) catch {};
+        const command = try std.fmt.allocPrint(a, "while [[ ! -f '{s}/{s}' ]]; do zselect -t 2; done; printf 'TASK_RETENTION_OK\\n'", .{ directory, release_name });
+        defer a.free(command);
+        const execution_request: execution.Request = .{ .execution_id = .generate(), .task_id = context.task_id, .expected_input_epoch = starting.input_epoch, .ownership_revision = opened.ownership_revision, .command = command, .command_hash = execution.digest(command) };
+        while (true) {
+            service.executionRequest(execution_request) catch |err| {
+                if (err != error.WorkerBusy) return err;
+                try fixture.tick();
+                continue;
+            };
+            break;
+        }
+        var current: execution.Snapshot = undefined;
+        while (true) {
+            try fixture.tick();
+            current = service.executionSnapshot() catch {
+                continue;
+            };
+            if (current.state == .running) break;
+            if (@import("../platform/realtime.zig").monotonicNs() >= until) {
+                std.debug.print("task finish execution case={d} never running: state={s} failure={?s} input_ready={any} local_released={any}\n", .{ case_index, @tagName(current.state), current.failure, current.input_ready, current.local_released });
+                return error.ExecutionNeverRan;
+            }
+        }
+        const surface = workspace.sessionTab(app.legacyForHandle(owner).?).?.terminal.?.terminal_surface.?;
+        _ = try surface.refresh(owner, true);
+        try surface.queueText("x");
+        for (0..3) |_| {
+            try surface.pump();
+            try fixture.tick();
+        }
+        try std.testing.expectEqual(@as(u64, 0), surface.user_input_revision); // real lease rejects ordinary admission
+        try app.syncOwnedUserInput(context.task_id);
+        try std.testing.expectEqual(lifecycle.Ownership.created_task, app.lifecycle_supervisor.resource(owner).?.snapshot.ownership);
+        var facts: Facts = .{ .context = context, .service = service, .app = app, .target = owner };
+        const execution_source: finish.ExecutionSource = .{ .context = &facts, .finish_model = Facts.finishModel, .stop = Facts.stop, .takeover_execution = Facts.takeover, .evidence = Facts.read };
+        gates.approvals = 1;
+        try controller.registerTask(context);
+        _ = try controller.tick(app, execution_source, gate_source);
+        try std.testing.expect(!facts.model_done);
+        try std.testing.expect(!controller.snapshotFor(context).?.model_done);
+        if (case.control == .takeover) {
+            try controller.control(context.task_id, controller.snapshotFor(context).?.revision, .takeover);
+            _ = try controller.tick(app, execution_source, gate_source);
+            try std.testing.expect(!facts.model_done); // user takeover does not end AI admission
+            try std.testing.expect(!controller.snapshotFor(context).?.model_done); // provider still alive
+            try std.testing.expect(controller.receiptFor(context) == null);
+        } else try controller.modelEnded(context, .completed);
+        _ = try controller.tick(app, execution_source, gate_source);
+        if (case.control != .takeover) try std.testing.expectEqual(finish.Phase.working, controller.snapshotFor(context).?.phase);
+        try std.testing.expect(controller.receiptFor(context) == null);
+        if (case.control) |action| if (action != .takeover) {
+            try controller.control(context.task_id, controller.snapshotFor(context).?.revision, action);
+            _ = try controller.tick(app, execution_source, gate_source);
+        };
+        try temporary.dir.writeFile(std.testing.io, .{ .sub_path = release_name, .data = "release\n" });
+        while (true) {
+            if (Facts.read(&facts, context.task_id)) |evidence| if (evidence.executions_settled) break;
+            try fixture.tick();
+            _ = try controller.tick(app, execution_source, gate_source);
+            current = service.executionSnapshot() catch {
+                continue;
+            };
+            if (@import("../platform/realtime.zig").monotonicNs() >= until) return error.ExecutionIntervalNeverSettled;
+        }
+        if (case.control != .stop) {
+            current = try service.executionSnapshot();
+            try std.testing.expectEqual(execution.State.interval_recorded, current.state);
+            try std.testing.expectEqual(execution.OutputScope.session_interval, current.output_scope);
+            try std.testing.expect(current.interval_saved and current.recording_settled and !current.recording_failed);
+            try std.testing.expect(current.process != null and current.process.?.foreground_finished);
+            try std.testing.expect(!current.remote_effect_unknown);
+            if (case.control != .takeover) {
+                const idle = try app.ownedIdleEvidence(owner, context.task_id);
+                try std.testing.expect(!idle.confirmed and idle.recording_settled and !idle.foreground_active);
+            }
+        }
+        try std.testing.expectEqual(@as(usize, if (case.control == .stop) 1 else 0), facts.stops);
+        try std.testing.expectEqual(@as(usize, if (case.control == .takeover) 1 else 0), facts.takeovers);
+        try std.testing.expect(controller.receiptFor(context) == null); // real pending approval still fences finish
+        if (case.user_input) {
+            _ = try surface.refresh(owner, true);
+            try surface.queueText("x");
+            while (surface.user_input_revision == 0) {
+                try surface.pump();
+                try fixture.tick();
+                if (@import("../platform/realtime.zig").monotonicNs() >= until) return error.UserInputNotAccepted;
+            }
+        }
+        if (case.control == .takeover) {
+            try std.testing.expect(!facts.model_done);
+            try controller.modelEnded(context, .completed);
+        }
+        gates.approvals = 0;
+        _ = try controller.tick(app, execution_source, gate_source);
+        try std.testing.expect(controller.receiptFor(context) != null);
+        if (case.choice) |choice| {
+            const snapshot = controller.snapshotFor(context).?;
+            try std.testing.expectEqual(finish.Phase.choice, snapshot.phase);
+            for (0..3) |_| {
+                try fixture.tick();
+                _ = try controller.tick(app, execution_source, gate_source);
+            }
+            try std.testing.expectEqual(session.Lifecycle.attached, app.sessions.queryState(owner).?.lifecycle);
+            try controller.decide(context.task_id, controller.snapshotFor(context).?.revision, choice);
+        }
+        while (true) {
+            try fixture.tick();
+            _ = try controller.tick(app, execution_source, gate_source);
+            if (workspace.confirming_id) |confirmed| {
+                const legacy = app.legacyForHandle(owner).?;
+                try std.testing.expectEqual(workspace.sessionTab(legacy).?.tab_id, confirmed);
+                workspace.resolveLocalCloseConfirmation(legacy, true);
+            }
+            const snapshot = controller.snapshotFor(context).?;
+            if (case.retention == .keep or case.retention == .auto_idle or case.choice == .keep or case.user_input or case.control == .takeover) {
+                if (snapshot.phase == .kept or snapshot.phase == .retained) {
+                    try std.testing.expectEqual(session.Lifecycle.attached, app.sessions.queryState(owner).?.lifecycle);
+                    try std.testing.expect(app.sessions.queryState(owner).?.close_operation == null);
+                    if (case.choice == .keep or case.user_input or case.control == .takeover) {
+                        try std.testing.expectEqual(lifecycle.Ownership.handed_to_user, app.lifecycle_supervisor.resource(owner).?.snapshot.ownership);
+                        try std.testing.expectEqual(lifecycle.Retention.keep, app.lifecycle_supervisor.resource(owner).?.snapshot.retention);
+                    }
+                    break;
+                }
+            } else if (snapshot.phase == .closed) {
+                try std.testing.expectEqual(session.Lifecycle.closed, app.sessions.queryState(owner).?.lifecycle);
+                break;
+            }
+            if (@import("../platform/realtime.zig").monotonicNs() >= until) {
+                std.debug.print("task retention case={d} phase={s} lifecycle={s} resource={any} execution={any}\n", .{ case_index, @tagName(snapshot.phase), @tagName(app.sessions.queryState(owner).?.lifecycle), app.lifecycle_supervisor.resource(owner).?.snapshot, service.executionSnapshot() catch null });
+                return error.TaskRetentionNeverSettled;
+            }
+        }
+        try std.testing.expectEqual(session.Lifecycle.attached, app.sessions.queryState(source.handle).?.lifecycle);
+        try std.testing.expect(workspace.groupTabId(group_id) != null);
+    }
+    const cancelled_context: @import("../ai/host_tools.zig").Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .group = group_id }, .binding_revision = 1, .grant_revision = 1 };
+    const close_operation = identity.HostOperationId.generate();
+    _ = try app.queueSessionClose(close_operation, cancelled_context, source.handle, true);
+    try controller.modelEnded(cancelled_context, .cancelled);
+    _ = try controller.tick(app, null, gate_source);
+    try std.testing.expectEqual(@TypeOf((try app.querySessionClose(close_operation, cancelled_context)).state).cancelled_unsent, (try app.querySessionClose(close_operation, cancelled_context)).state);
+    try std.testing.expectError(error.CancelledBeforeDispatch, app.acknowledgeSessionCloseResult(close_operation));
+    try fixture.tick();
+    try std.testing.expectEqual(session.Lifecycle.attached, app.sessions.queryState(source.handle).?.lifecycle);
+    const driver_adapter = finish.ExecutionSource.fromDriver(@as(*@import("../ai/host_execution_driver.zig").Driver, @ptrFromInt(8)));
+    _ = driver_adapter; // instantiate the production Driver adapter without calling an invalid pointer
 }
 
 test "background application entry keeps Tabs and connect jobs empty through actual queued cancellation" {

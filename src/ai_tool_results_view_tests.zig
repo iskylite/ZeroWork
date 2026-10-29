@@ -217,3 +217,432 @@ test "tool result view fits short and empty results and scrolls long output in o
     }
     try std.testing.expectApproxEqAbs(@as(f32, 32), state.root.globalRect().h, 0.1);
 }
+
+test "tool result headers preserve status title projection and elapsed across themes and sizes" {
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    inline for (.{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        for ([_]f32{ 572, 332 }) |width| {
+            inline for (.{ .succeeded, .failed, .rejected, .cancelled, .timed_out, .unknown }) |status| {
+                var target = [_]facts.Target{.{ .result = .{ .session_id = 101, .status = status, .stdout = "first line\nlast output line", .cwd = "/srv/long/target/directory" }, .label = "original@long-production-target.example.net:2222" }};
+                var record: facts.Record = .{ .arena = .init(a), .owner = .{ .session = 101 }, .turn_id = 1, .call_id = "header-status", .name = "host.run_in_terminal", .arguments = "{}", .command = "printf a-long-command-with-full-parameters", .arguments_hash = @splat(0), .targets = &target, .dispatched = true, .expanded = true };
+                defer record.arena.deinit();
+                const cx = try ui.Cx.init(a, std.testing.io);
+                defer cx.deinit();
+                cx.setTheme(theme.widgetTheme(name));
+                cx.setViewport(width, 480);
+                const scope = try ui.Scope.init(a, null, cx.owner);
+                defer scope.dispose();
+                cx.root = try ui.box(cx, .{ .width = .{ .px = width }, .height = .fill(), .direction = .column }, .{});
+                const state = try View.State.mount(cx, scope, &record);
+                try cx.root.?.appendChild(a, state.root);
+                for (0..4) |_| {
+                    cx.layout();
+                    _ = cx.render();
+                }
+                const title = find(state.root, "ai.tool.result.title").?.globalRect();
+                const icon = find(state.root, "ai.tool.result.icon").?.globalRect();
+                const projection = find(state.root, "ai.tool.result.status").?.globalRect();
+                const elapsed = find(state.root, "ai.tool.result.elapsed").?.globalRect();
+                try std.testing.expectEqualStrings("执行命令", find(state.root, "ai.tool.result.title").?.getText().?.content);
+                try std.testing.expect(icon.x + icon.w <= title.x);
+                try std.testing.expect(@abs(icon.y + icon.h / 2 - title.y - title.h / 2) < 1);
+                try std.testing.expect(projection.w > 0 and projection.x >= title.x + title.w);
+                try std.testing.expect(elapsed.x >= projection.x + projection.w and elapsed.x + elapsed.w <= width);
+                try std.testing.expect(state.body.globalRect().h <= 150);
+                try std.testing.expect(state.footer.globalRect().y >= state.body.globalRect().y + state.body.globalRect().h);
+                if (status == .unknown) try std.testing.expectEqual(ui.icons.get("circle-help").?.icon_id.?, state.status_icon.?.getIcon().?.icon_id);
+                if (status == .succeeded) try std.testing.expectEqual(ui.icons.check.icon_id.?, state.status_icon.?.getIcon().?.icon_id);
+            }
+        }
+    }
+}
+
+test "tool result unknown cleanup takes precedence over a successful process icon" {
+    var target = [_]facts.Target{.{ .result = .{ .session_id = 101, .status = .succeeded, .local_released = false } }};
+    var record: facts.Record = .{ .arena = .init(a), .owner = .{ .session = 101 }, .turn_id = 1, .call_id = "cleanup-unknown", .name = "run_command", .arguments = "{}", .command = "true", .arguments_hash = @splat(0), .targets = &target, .dispatched = true };
+    defer record.arena.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const state = try View.State.mount(cx, scope, &record);
+    cx.root = state.root;
+    try std.testing.expectEqual(ui.icons.get("circle-help").?.icon_id.?, state.status_icon.?.getIcon().?.icon_id);
+    try std.testing.expectEqualStrings("清理待核实", state.feedback.getText().?.content);
+}
+
+test "tool step phases keep icon and title on one header line at narrow width" {
+    const Step = @import("ui/ai_step_view.zig");
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    inline for (.{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        inline for (.{ .assembling, .running, .approval, .approved, .rejected, .succeeded, .failed, .cancelled }) |phase| {
+            const cx = try ui.Cx.init(a, std.testing.io);
+            defer cx.deinit();
+            cx.setTheme(theme.widgetTheme(name));
+            cx.setViewport(332, 480);
+            const scope = try ui.Scope.init(a, null, cx.owner);
+            defer scope.dispose();
+            var expanded = false;
+            cx.root = try Step.mount(cx, scope, .{ .title = "创建会话组", .projection = "生产环境 · long-target.example.net", .detail = "完整执行详情", .phase = phase, .elapsed_ms = 42, .expanded = &expanded });
+            cx.root.?.setStyleInline(a, .{ .width = .{ .px = 332 } });
+            for (0..4) |_| {
+                cx.layout();
+                _ = cx.render();
+            }
+            const title = find(cx.root.?, "ai.step.title").?.globalRect();
+            const icon = (find(cx.root.?, "ai.step.status") orelse find(cx.root.?, "ai.step.spinner")).?.globalRect();
+            const projection = find(cx.root.?, "ai.step.projection").?.globalRect();
+            try std.testing.expect(icon.x + icon.w <= title.x);
+            try std.testing.expect(@abs(icon.y + icon.h / 2 - title.y - title.h / 2) < 1);
+            try std.testing.expect(projection.w > 0 and projection.x >= title.x + title.w);
+            try std.testing.expectEqual(@as(f32, 32), cx.root.?.globalRect().h);
+        }
+    }
+}
+
+test "tool titles cover all registered host discovery lifecycle and execution actions" {
+    const titles = @import("ui/ai_tool_titles.zig");
+    for (@import("ai/host_queries.zig").contributions) |item| try std.testing.expect(titles.title(item.definition.id) != null);
+    for (@import("ai/host_lifecycle.zig").contributions) |item| try std.testing.expect(titles.title(item.definition.id) != null);
+    for (@import("ai/host_execution.zig").contributions) |item| try std.testing.expect(titles.title(item.definition.id) != null);
+    try std.testing.expectEqualStrings("新建会话", titles.title("host.open_session").?);
+    try std.testing.expectEqualStrings("停止执行", titles.title("host.stop_execution").?);
+}
+
+test "tool result multiline command remains reachable in the bounded details viewport" {
+    var record: facts.Record = .{ .arena = .init(a), .owner = .{ .session = 101 }, .turn_id = 1, .call_id = "multiline-command", .name = "run_command", .arguments = "{}", .command = "printf first-line\nprintf second-line\nprintf final-line", .arguments_hash = @splat(0), .targets = &.{}, .dispatched = false, .expanded = true };
+    defer record.arena.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const state = try View.State.mount(cx, scope, &record);
+    cx.root = state.root;
+    state.root.setStyleInline(a, .{ .width = .{ .px = 332 } });
+    for (0..4) |_| {
+        cx.layout();
+        _ = cx.render();
+    }
+    const command = find(state.root, "ai.tool.result.command").?;
+    try std.testing.expectEqualStrings(record.command, command.getText().?.content);
+    try std.testing.expect(command.globalRect().h >= 48);
+    try std.testing.expect(command.parent.?.parent.?.globalRect().h >= command.globalRect().h);
+    try std.testing.expect(state.body.globalRect().h <= 150);
+    try std.testing.expect(state.footer.globalRect().y >= state.body.globalRect().y + state.body.globalRect().h);
+}
+
+test "tool result undispatched cancellation rejection and unknown never show success or generic execution feedback" {
+    inline for (.{ .rejected, .cancelled, .unknown }) |status| {
+        var record: facts.Record = .{ .arena = .init(a), .owner = .{ .session = 101 }, .turn_id = 1, .call_id = "no-dispatch", .name = "host.open_session", .arguments = "{}", .command = "request arguments", .arguments_hash = @splat(0), .targets = &.{}, .dispatched = false, .error_status = status };
+        defer record.arena.deinit();
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        const scope = try ui.Scope.init(a, null, cx.owner);
+        defer scope.dispose();
+        const state = try View.State.mount(cx, scope, &record);
+        cx.root = state.root;
+        const label = switch (@as(loop.Status, status)) {
+            .rejected => "已拒绝",
+            .cancelled => "已取消",
+            .unknown => "结果待核实",
+            else => unreachable,
+        };
+        try std.testing.expectEqualStrings(label, state.feedback.getText().?.content);
+        const icon = switch (@as(loop.Status, status)) {
+            .rejected => ui.icons.get("circle-alert").?,
+            .cancelled => ui.icons.get("square").?,
+            .unknown => ui.icons.get("circle-help").?,
+            else => unreachable,
+        };
+        try std.testing.expectEqual(icon.icon_id.?, state.status_icon.?.getIcon().?.icon_id);
+    }
+}
+
+test "host notice keeps source icon and title together while long takeover text wraps across themes" {
+    const Notice = @import("ui/ai_host_notice_view.zig");
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    inline for (.{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        for ([_]f32{ 572, 332 }) |width| {
+            const cx = try ui.Cx.init(a, std.testing.io);
+            defer cx.deinit();
+            cx.setTheme(theme.widgetTheme(name));
+            cx.setViewport(width, 480);
+            const scope = try ui.Scope.init(a, null, cx.owner);
+            defer scope.dispose();
+            cx.root = try ui.box(cx, .{ .width = .{ .px = width }, .height = .fill(), .direction = .column }, .{});
+            const text = "已接管 original@production-long-target.example.net:2222 · " ++ Notice.takeover_text;
+            const root = try Notice.mount(cx, cx.root.?, text);
+            for (0..4) |_| {
+                cx.layout();
+                _ = cx.render();
+            }
+            const title = find(root, "ai.host_notice.title").?.globalRect();
+            const icon = find(root, "ai.host_notice.icon").?.globalRect();
+            const body = find(root, "ai.host_notice.body").?;
+            try std.testing.expectEqual(@as(f32, 16), icon.w);
+            try std.testing.expect(@abs(icon.y + icon.h / 2 - title.y - title.h / 2) < 0.1);
+            try std.testing.expect(icon.x + icon.w < title.x);
+            try std.testing.expectEqualStrings(text, body.getText().?.content);
+            try std.testing.expect(body.globalRect().h > 18);
+            try std.testing.expect(body.globalRect().x >= title.x);
+            try std.testing.expect(body.globalRect().x + body.globalRect().w <= width + 0.1);
+            try std.testing.expect(body.globalRect().y + body.globalRect().h <= root.globalRect().y + root.globalRect().h);
+            try std.testing.expectEqual(@as(u8, 0), root.getBackground().a);
+            try std.testing.expectEqual(@as(f32, 0), root.style.border.width);
+        }
+    }
+}
+
+const ExecutionRecorder = struct {
+    calls: usize = 0,
+    action: ?@import("ui/ai_execution_result_view.zig").Action = null,
+    target: ?facts.ExecutionActionTarget = null,
+    fn perform(raw: *anyopaque, action: @import("ui/ai_execution_result_view.zig").Action, target: facts.ExecutionActionTarget) !void {
+        const self: *ExecutionRecorder = @ptrCast(@alignCast(raw));
+        self.calls += 1;
+        self.action = action;
+        self.target = target;
+    }
+};
+fn executionFixture(state: @import("host/terminal_execution.zig").State, output: []const u8) facts.Record {
+    const identity = @import("host/identity.zig");
+    return .{ .arena = .init(a), .owner = .{ .group = 7 }, .turn_id = 1, .call_id = "execution-card", .name = "host.run_in_terminal", .arguments = "{}", .command = "{}", .arguments_hash = @splat(0), .targets = &.{}, .dispatched = true, .expanded = true, .execution = .{ .conversation_id = .generate(), .task_id = .generate(), .call_status = .succeeded, .execution_id = .generate(), .target = .{ .session_id = @fromBackingInt(101), .generation = 9 }, .target_label = "original@long-production-target.example.net:2222", .command = "printf ACTUAL_EXECUTION_COMMAND", .state = state, .recording_id = identity.RecordingId.generate(), .terminal_output = output, .output_available = true, .has_input_grant = state == .running, .elapsed_ms = 1234 } };
+}
+fn labelNode(node: *ui.Node, label: []const u8) ?*ui.Node {
+    if (node.getText()) |text| if (std.mem.eql(u8, text.content, label)) return node;
+    for (node.children.items) |child| if (labelNode(child, label)) |found| return found;
+    return null;
+}
+
+test "execution result native card preserves real target recording output and reachable actions across themes and sizes" {
+    const Execution = @import("ui/ai_execution_result_view.zig");
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    const long_output = try std.mem.join(a, "\n", &@as([30][]const u8, @splat("ACTUAL_LONG_TERMINAL_OUTPUT with original spacing and a very long line for horizontal scrolling")));
+    defer a.free(long_output);
+    inline for (.{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        for ([_]f32{ 572, 332 }) |width| {
+            var record = executionFixture(.running, long_output);
+            defer record.arena.deinit();
+            var store = facts.Store.init(a);
+            defer store.records.deinit(a);
+            try store.records.append(a, &record);
+            var recorder: ExecutionRecorder = .{};
+            const cx = try ui.Cx.init(a, std.testing.io);
+            defer cx.deinit();
+            cx.setTheme(theme.widgetTheme(name));
+            cx.setViewport(width, 480);
+            const scope = try ui.Scope.init(a, null, cx.owner);
+            defer scope.dispose();
+            cx.root = try ui.box(cx, .{ .width = .{ .px = width }, .height = .fill(), .direction = .column }, .{});
+            const root = try Execution.mount(cx, scope, &store, &record, .{ .context = &recorder, .perform = ExecutionRecorder.perform }, null);
+            try cx.root.?.appendChild(a, root);
+            for (0..4) |_| {
+                cx.layout();
+                _ = cx.render();
+            }
+            const title = find(root, "ai.execution.result.title").?.globalRect();
+            const icon = find(root, "ai.execution.result.icon").?.globalRect();
+            const body = find(root, "ai.execution.result.details").?.globalRect();
+            const footer = find(root, "ai.execution.result.footer").?.globalRect();
+            try std.testing.expect(@abs(icon.y + icon.h / 2 - title.y - title.h / 2) < 0.1);
+            try std.testing.expect(icon.x + icon.w < title.x);
+            try std.testing.expectEqual(@as(f32, 150), body.h);
+            try std.testing.expect(footer.y >= body.y + body.h and footer.y + footer.h <= 480);
+            try std.testing.expectEqualStrings("最近观测 · 运行中", find(root, "ai.execution.result.summary").?.getText().?.content);
+            try std.testing.expect(std.mem.indexOf(u8, find(root, "ai.execution.result.target").?.getText().?.content, record.execution.?.target_label) != null);
+            try std.testing.expectEqualStrings(long_output, find(root, "ai.execution.result.terminal_output").?.getText().?.content);
+            try std.testing.expect(find(root, "ai.execution.result.process") == null);
+            inline for (.{ .{ "ai.execution.result.view_terminal", "查看终端" }, .{ "ai.execution.result.stop", "停止执行" }, .{ "ai.execution.result.takeover", "接管输入" } }) |action| {
+                const button = find(root, action[0]).?;
+                const rect = button.globalRect();
+                const label = labelNode(button, action[1]).?.globalRect();
+                try std.testing.expect(rect.x >= footer.x and rect.x + rect.w <= footer.x + footer.w + 0.1);
+                try std.testing.expect(label.x >= rect.x and label.x + label.w <= rect.x + rect.w + 0.1);
+            }
+            const recording_before = find(root, "ai.execution.result.recording_id").?.globalRect();
+            cx.handleScroll(.{ .x = body.x + body.w / 2, .y = body.y + body.h / 2, .dy = -100000, .dx = 0 });
+            cx.layout();
+            const recording = find(root, "ai.execution.result.recording_id").?.globalRect();
+            try std.testing.expect(recording.y < recording_before.y);
+            try std.testing.expect(recording.y >= body.y and recording.y + recording.h <= body.y + body.h + 0.1);
+            try std.testing.expectEqual(footer, find(root, "ai.execution.result.footer").?.globalRect());
+            find(root, "ai.execution.result.view_terminal").?.behavior.events.on_click.?.invoke();
+            try std.testing.expectEqual(@as(usize, 1), recorder.calls);
+            try std.testing.expect(recorder.target.?.session.eql(record.execution.?.target.?));
+            try std.testing.expect(recorder.target.?.execution_id.eql(record.execution.?.execution_id.?));
+            try std.testing.expect(recorder.target.?.conversation_id.eql(record.execution.?.conversation_id));
+            try std.testing.expect(recorder.target.?.task_id.eql(record.execution.?.task_id));
+        }
+    }
+}
+
+test "execution result queued controls recheck same execution latest receipt and never stop a completed or handed off command" {
+    const Execution = @import("ui/ai_execution_result_view.zig");
+    var record = executionFixture(.running, "partial output");
+    defer record.arena.deinit();
+    var store = facts.Store.init(a);
+    defer store.records.deinit(a);
+    try store.records.append(a, &record);
+    var recorder: ExecutionRecorder = .{};
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try Execution.mount(cx, scope, &store, &record, .{ .context = &recorder, .perform = ExecutionRecorder.perform }, null);
+    const old_stop = find(cx.root.?, "ai.execution.result.stop").?;
+    const old_takeover = find(cx.root.?, "ai.execution.result.takeover").?;
+    var latest = record;
+    latest.execution.?.input_handed_off = true;
+    latest.execution.?.has_input_grant = false;
+    latest.execution.?.terminal_output = "continued after takeover";
+    try store.records.append(a, &latest);
+    old_stop.behavior.events.on_click.?.invoke();
+    old_takeover.behavior.events.on_click.?.invoke();
+    try std.testing.expectEqual(@as(usize, 0), recorder.calls);
+    latest.execution.?.state = .sealed;
+    latest.execution.?.process = .{ .exit_code = 3, .foreground_finished = true };
+    latest.execution.?.recording_settled = true;
+    old_stop.behavior.events.on_click.?.invoke();
+    try std.testing.expectEqual(@as(usize, 0), recorder.calls);
+    const completed = try Execution.mount(cx, scope, &store, &record, .{ .context = &recorder, .perform = ExecutionRecorder.perform }, null);
+    try cx.root.?.appendChild(a, completed);
+    try std.testing.expectEqualStrings("退出码 3", find(completed, "ai.execution.result.process").?.getText().?.content);
+    try std.testing.expectEqualStrings("continued after takeover", find(completed, "ai.execution.result.terminal_output").?.getText().?.content);
+    try std.testing.expect(find(completed, "ai.execution.result.stop") == null and find(completed, "ai.execution.result.takeover") == null);
+}
+
+test "execution result active stop and takeover callbacks receive original full authority without claiming success" {
+    const Execution = @import("ui/ai_execution_result_view.zig");
+    inline for (.{ .{ "ai.execution.result.stop", Execution.Action.stop }, .{ "ai.execution.result.takeover", Execution.Action.takeover } }) |action| {
+        var record = executionFixture(.running, "actual output");
+        defer record.arena.deinit();
+        var store = facts.Store.init(a);
+        defer store.records.deinit(a);
+        try store.records.append(a, &record);
+        var recorder: ExecutionRecorder = .{};
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        const scope = try ui.Scope.init(a, null, cx.owner);
+        defer scope.dispose();
+        cx.root = try Execution.mount(cx, scope, &store, &record, .{ .context = &recorder, .perform = ExecutionRecorder.perform }, null);
+        find(cx.root.?, action[0]).?.behavior.events.on_click.?.invoke();
+        try std.testing.expectEqual(@as(usize, 1), recorder.calls);
+        try std.testing.expectEqual(action[1], recorder.action.?);
+        try std.testing.expect(recorder.target.?.session.eql(record.execution.?.target.?));
+        try std.testing.expect(recorder.target.?.execution_id.eql(record.execution.?.execution_id.?));
+        try std.testing.expectEqual(.running, record.execution.?.state.?);
+        try std.testing.expectEqual(.none, find(cx.root.?, "ai.execution.result.action_feedback").?.style.display);
+        find(cx.root.?, action[0]).?.behavior.events.on_click.?.invoke();
+        try std.testing.expectEqual(@as(usize, 1), recorder.calls);
+    }
+}
+
+test "execution result preflight refusal shows user readable reason without raw host metadata or fabricated execution" {
+    const Execution = @import("ui/ai_execution_result_view.zig");
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const receipt: @import("ai/host_tools.zig").Receipt = .{ .conversation_id = .generate(), .task_id = .generate(), .operation_id = 42, .binding_revision = 2 };
+    var record = executionFixture(.running, "");
+    defer record.arena.deinit();
+    record.execution = try facts.execution_projection.parse(arena.allocator(), "host.run_in_terminal", "{\"command\":\"not-sent\"}", .rejected, receipt, "{\"error_code\":\"IntegrationUnavailable\",\"side_effect_started\":false,\"local_released\":true,\"remote_effect_unknown\":false}");
+    var store = facts.Store.init(a);
+    defer store.records.deinit(a);
+    try store.records.append(a, &record);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(332, 358);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try Execution.mount(cx, scope, &store, &record, null, null);
+    cx.root.?.setStyleInline(a, .{ .width = .{ .px = 332 } });
+    for (0..4) |_| {
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expectEqualStrings("最近观测 · 未执行 · 已拒绝", find(cx.root.?, "ai.execution.result.summary").?.getText().?.content);
+    try std.testing.expectEqualStrings("当前终端的执行能力不可用。", find(cx.root.?, "ai.execution.result.failure").?.getText().?.content);
+    try std.testing.expect(find(cx.root.?, "ai.execution.result.target").?.globalRect().w > 0);
+    try std.testing.expect(find(cx.root.?, "ai.execution.result.execution_id") == null);
+    try std.testing.expect(find(cx.root.?, "ai.execution.result.process") == null);
+    try std.testing.expect(find(cx.root.?, "ai.execution.result.view_terminal") == null);
+    try std.testing.expect(find(cx.root.?, "ai.execution.result.stop") == null);
+    try std.testing.expect(find(cx.root.?, "ai.execution.result.takeover") == null);
+}
+
+test "execution interval native result separates saved observation foreground failure attribution and handed off running state" {
+    const Execution = @import("ui/ai_execution_result_view.zig");
+    const terminal = @import("host/terminal_execution.zig");
+    const Case = struct { state: terminal.State = .interval_recorded, attribution: terminal.OutputAttribution, exit: ?u8 = 0, saved: bool = true, failed: bool = false, handed_off: bool = false };
+    for ([_]Case{
+        .{ .attribution = .unverified },
+        .{ .attribution = .no_concurrent_owner_observed },
+        .{ .attribution = .concurrent_observed },
+        .{ .attribution = .unverified, .exit = 7 },
+        .{ .state = .recording_degraded, .attribution = .unverified, .exit = 7, .saved = false, .failed = true },
+        .{ .state = .running, .attribution = .unverified, .exit = null, .saved = false, .handed_off = true },
+    }) |case| {
+        var record = executionFixture(case.state, "ACTUAL_OBSERVED_BYTES\n");
+        defer record.arena.deinit();
+        const projection = &record.execution.?;
+        projection.output_scope = .session_interval;
+        projection.output_attribution = case.attribution;
+        projection.output_attribution_reason = if (case.attribution == .concurrent_observed) "BackgroundJobsObserved" else null;
+        projection.interval_saved = case.saved;
+        projection.recording_settled = case.saved;
+        projection.recording_failed = case.failed;
+        projection.input_handed_off = case.handed_off;
+        projection.process = if (case.exit) |code| .{ .foreground_finished = true, .exit_code = code } else null;
+        var store = facts.Store.init(a);
+        defer store.records.deinit(a);
+        try store.records.append(a, &record);
+        var recorder: ExecutionRecorder = .{};
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        cx.setViewport(332, 358);
+        const scope = try ui.Scope.init(a, null, cx.owner);
+        defer scope.dispose();
+        const root = try Execution.mount(cx, scope, &store, &record, .{ .context = &recorder, .perform = ExecutionRecorder.perform }, null);
+        cx.root = root;
+        root.setStyleInline(a, .{ .width = .{ .px = 332 } });
+        for (0..4) |_| {
+            cx.layout();
+            _ = cx.render();
+        }
+        try std.testing.expectEqualStrings("同一终端观测片段", find(root, "ai.execution.result.output_label").?.getText().?.content);
+        try std.testing.expectEqualStrings(projection.attributionLabel(), find(root, "ai.execution.result.output_attribution").?.getText().?.content);
+        try std.testing.expectEqualStrings(if (case.saved) "同一终端观测片段 · 已保存" else if (case.failed) "同一终端观测片段 · 保存失败" else "同一终端观测片段 · 保存待确认", find(root, "ai.execution.result.output_scope").?.getText().?.content);
+        try std.testing.expect(std.mem.indexOf(u8, find(root, "ai.execution.result.output_limit").?.getText().?.content, "后台输出可能在前台结束后继续") != null);
+        try std.testing.expect(std.mem.indexOf(u8, find(root, "ai.execution.result.summary").?.getText().?.content, "封存") == null);
+        if (case.exit) |code| {
+            const expected = try std.fmt.allocPrint(a, "前台已结束 · 退出码 {d}", .{code});
+            defer a.free(expected);
+            try std.testing.expectEqualStrings(expected, find(root, "ai.execution.result.process").?.getText().?.content);
+            if (code != 0 and !case.failed) try std.testing.expect(std.mem.indexOf(u8, find(root, "ai.execution.result.summary").?.getText().?.content, "执行失败") != null);
+        } else {
+            try std.testing.expect(find(root, "ai.execution.result.process") == null);
+            try std.testing.expectEqualStrings("最近观测 · 用户已接管 · 命令继续运行", find(root, "ai.execution.result.summary").?.getText().?.content);
+        }
+        try std.testing.expect(find(root, "ai.execution.result.stop") == null and find(root, "ai.execution.result.takeover") == null);
+        find(root, "ai.execution.result.view_terminal").?.behavior.events.on_click.?.invoke();
+        try std.testing.expectEqual(@as(usize, 1), recorder.calls);
+        try std.testing.expect(recorder.target.?.session.eql(projection.target.?));
+        try std.testing.expect(recorder.target.?.conversation_id.eql(projection.conversation_id) and recorder.target.?.task_id.eql(projection.task_id));
+        try std.testing.expect(recorder.target.?.execution_id.eql(projection.execution_id.?));
+        try std.testing.expect(find(root, "ai.execution.result.details").?.globalRect().h <= 150);
+        const title = find(root, "ai.execution.result.title").?.globalRect();
+        const icon = find(root, "ai.execution.result.icon").?.globalRect();
+        try std.testing.expect(@abs(icon.y + icon.h / 2 - title.y - title.h / 2) < 0.1);
+    }
+}

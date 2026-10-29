@@ -100,7 +100,11 @@ pub const Host = struct {
     /// A separate host gateway must revalidate conversation/task, binding and
     /// grants before dispatch. It never receives a fabricated SessionHandle.
     execute_host: ?*const fn (*anyopaque, dynamic.host.Invocation, std.mem.Allocator, ?*provider.CancelToken) anyerror!dynamic.host.Result = null,
+    refresh_authority: ?*const fn (*anyopaque, *const dynamic.RequestTable, std.mem.Allocator, ?*provider.CancelToken) anyerror!?AuthorityRefresh = null,
+    acknowledge_notice: ?*const fn (*anyopaque, u64) anyerror!void = null,
+    accepted_host_result: ?*const fn (*anyopaque, dynamic.host.Context, []const u8, *const dynamic.host.Result) anyerror!void = null,
 };
+pub const AuthorityRefresh = struct { table: dynamic.RequestTable, notice: []const u8 = "", notice_revision: u64 = 0 };
 
 pub const Record = struct {
     key: Key,
@@ -126,6 +130,8 @@ pub const Loop = struct {
     uncertain: bool = false,
     retained_output_bytes: usize = 0,
     tool_table: ?dynamic.RequestTable = null,
+    notice_revision: u64 = 0,
+    wire_notice_revision: u64 = 0,
 
     pub fn init(allocator: std.mem.Allocator, scope: scope_mod.Scope, turn_id: u64, limits: Limits) Loop {
         return .{ .allocator = allocator, .arena = .init(allocator), .scope = scope, .turn_id = turn_id, .limits = limits, .request = undefined };
@@ -156,6 +162,7 @@ pub const Loop = struct {
         }
         if (initial_bytes > self.limits.max_transcript_bytes) return error.ToolTranscriptLimit;
         const a = self.arena.allocator();
+        self.scope = try self.scope.clone(a);
         self.request = input;
         self.request.model = try a.dupe(u8, input.model);
         self.request.system = try a.dupe(u8, input.system);
@@ -164,7 +171,7 @@ pub const Loop = struct {
         for (input.tools, definitions, 0..) |definition, *owned, definition_index| {
             for (input.tools[0..definition_index]) |previous| if (std.mem.eql(u8, previous.name(), definition.name())) return error.InvalidToolDefinition;
             if (definition.authority == .session_targets) {
-                _ = try self.scope.validate(definition.session_ids);
+                if (definition.dynamic != null) try self.scope.validateDirectory(definition.session_ids) else _ = try self.scope.validate(definition.session_ids);
             } else {
                 const table = input.tool_table orelse return error.InvalidHostAuthority;
                 const context = table.host_context orelse return error.InvalidHostAuthority;
@@ -203,6 +210,56 @@ pub const Loop = struct {
         self.round_index += 1;
         return self.request;
     }
+    /// Called only after every call/result pair in the old provider batch is
+    /// complete. Historical keys keep their original owner and call IDs.
+    pub fn refreshAuthority(self: *Loop, host: Host, cancel: ?*provider.CancelToken) !void {
+        const refresh = host.refresh_authority orelse return;
+        const previous = if (self.tool_table) |*table| table else return;
+        var next = (try refresh(host.context, previous, self.allocator, cancel)) orelse return;
+        var accepted = false;
+        defer if (!accepted) next.table.deinit();
+        defer self.allocator.free(next.notice);
+        const old_context = previous.host_context orelse return error.InvalidHostAuthority;
+        const context = next.table.host_context orelse return error.InvalidHostAuthority;
+        try context.validate();
+        if (!context.conversation_id.eql(old_context.conversation_id) or !context.task_id.eql(old_context.task_id) or context.grant_revision != old_context.grant_revision or context.binding_revision < old_context.binding_revision or !context.binding.eql(next.table.captured_scope.owner)) return error.InvalidHostAuthority;
+        if (!context.binding.eql(old_context.binding) and (old_context.binding != .session or context.binding != .group or context.binding_revision != old_context.binding_revision +| 1)) return error.InvalidBindingHandoff;
+        if (context.binding_revision == old_context.binding_revision and !context.binding.eql(old_context.binding)) return error.InvalidBindingHandoff;
+        if (next.notice.len != 0 and (next.notice_revision == 0 or next.notice_revision <= self.notice_revision)) return error.StaleNotice;
+        const a = self.arena.allocator();
+        const next_scope = try next.table.captured_scope.clone(a);
+        const definitions = try dynamic.providerDefinitions(&next.table, a);
+        _ = try provider.catalogTextBytes(definitions);
+        var candidate = self.request;
+        candidate.tools = definitions;
+        candidate.tool_table = &next.table;
+        const notice = if (next.notice.len != 0) try a.dupe(u8, next.notice) else null;
+        if (notice) |text| {
+            try self.messages.ensureUnusedCapacity(a, 1);
+            const messages = try a.alloc(provider.Message, self.messages.items.len + 1);
+            @memcpy(messages[0..self.messages.items.len], self.messages.items);
+            messages[self.messages.items.len] = .{ .role = .user, .content = text };
+            candidate.messages = messages;
+        } else candidate.messages = self.messages.items;
+        try @import("provider_http.zig").validateToolMessages(candidate);
+        self.tool_table.?.deinit();
+        self.tool_table = next.table;
+        accepted = true;
+        self.scope = next_scope;
+        self.request.tools = definitions;
+        self.request.tool_table = &self.tool_table.?;
+        if (notice) |text| {
+            self.messages.appendAssumeCapacity(.{ .role = .user, .content = text });
+            self.notice_revision = next.notice_revision;
+        }
+        self.request.messages = self.messages.items;
+        try self.checkBudget();
+    }
+    pub fn acknowledgeNotice(self: *Loop, host: Host) !void {
+        if (self.notice_revision <= self.wire_notice_revision) return;
+        if (host.acknowledge_notice) |acknowledge| try acknowledge(host.context, self.notice_revision);
+        self.wire_notice_revision = self.notice_revision;
+    }
     pub fn checkRequestBudget(self: *const Loop) !void {
         try self.checkBudget();
     }
@@ -228,6 +285,15 @@ pub const Loop = struct {
             for (captured_images) |reference| _ = reference.retain();
         }
         self.request.messages = self.messages.items;
+        if (host.accepted_host_result) |accepted| if (!(if (cancel) |token| token.isCancelled() else false)) {
+            const context = if (self.tool_table) |table| table.host_context else null;
+            if (context) |captured| for (owned_calls) |call| {
+                for (self.records.items) |record| if (std.mem.eql(u8, record.key.call_id, call.id)) {
+                    if (record.host_result) |*result| try accepted(host.context, captured, record.name, result);
+                    break;
+                };
+            };
+        };
     }
     fn copyCalls(self: *Loop, calls: []const provider.ToolCall) ![]provider.ToolCall {
         if (calls.len > provider.max_tool_calls) return error.InvalidToolCall;
@@ -322,7 +388,7 @@ pub const Loop = struct {
             return record.result_body.?;
         };
         const affecting = parsed.entry.definition.effect == .remote_input or parsed.entry.definition.effect == .resource_write;
-        if (self.uncertain and affecting) {
+        if (self.uncertain and affecting and !std.mem.eql(u8, parsed.entry.definition.id, "host.stop_execution")) {
             record.result_body = try self.errorBody("EarlierToolOutcomeUnknown", null);
             return record.result_body.?;
         }
@@ -333,11 +399,11 @@ pub const Loop = struct {
         const operation_id = next_dynamic_operation.fetchAdd(1, .monotonic);
         if (operation_id == 0 or operation_id == std.math.maxInt(u64)) return error.IdentityExhausted;
         record.dispatched = true;
-        const result = execute(host.context, .{ .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash }, self.allocator, cancel) catch |err| {
+        const result = execute(host.context, .{ .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash, .canonical_arguments_hash = parsed.canonical_arguments_hash orelse return error.InvalidHostAuthority }, self.allocator, cancel) catch |err| {
             const preflight = err == error.InvalidHostAuthority or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ScopeChanged or err == error.PermissionDenied or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ToolNotAvailable or err == error.TargetOutsideScope;
             record.dispatched = !preflight;
-            if (!preflight) self.uncertain = true;
-            record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = if (preflight) dynamic.Status.rejected else dynamic.Status.outcome_unknown, .error_code = @errorName(err), .conversation_id = context.conversation_id, .task_id = context.task_id, .operation_id = operation_id, .local_released = preflight, .remote_effect_unknown = !preflight }, .{});
+            if (!preflight and affecting) self.uncertain = true;
+            record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = if (preflight) dynamic.Status.rejected else if (!affecting) dynamic.Status.failed else dynamic.Status.outcome_unknown, .error_code = @errorName(err), .conversation_id = context.conversation_id, .task_id = context.task_id, .operation_id = operation_id, .side_effect_started = !preflight and affecting, .request_sent = if (parsed.entry.authority == .local_network_read and preflight) @as(?bool, false) else null, .local_released = preflight or !affecting, .remote_effect_unknown = !preflight and affecting }, .{});
             return record.result_body.?;
         };
         record.host_result = result;
@@ -391,7 +457,7 @@ pub const Loop = struct {
         const results = execute(host.context, .{ .table = table, .parsed = parsed, .turn_id = self.turn_id, .call_id = call.id, .arguments = call.arguments, .operation_id = operation_id }, self.allocator, cancel) catch |err| {
             // Policy and approval rejection happen before any dispatch. Other
             // failures are conservatively unknown and never automatically replay.
-            const preflight = err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ToolOperationAlreadyRecorded;
+            const preflight = err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ToolOperationAlreadyRecorded or err == error.ModeConflict;
             if (!preflight) self.uncertain = true;
             record.dispatched = !preflight;
             @import("tool_trace.zig").emit(.{ .event = "dynamic_rejected", .call_id = call.id, .tool_id = call.name, .owner = self.scope.owner, .reason = @errorName(err), .dispatched = !preflight });

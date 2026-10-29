@@ -159,11 +159,12 @@ pub const ContentRef = struct {
 
 pub const Ticket = struct {
     owner: Owner,
+    conversation_id: ?@import("../host/identity.zig").ConversationId = null,
     draft_epoch: u64,
     id: Id,
     terminal_owner: ?SessionHandle = null,
     pub fn eql(self: Ticket, other: Ticket) bool {
-        return self.owner.eql(other.owner) and self.draft_epoch == other.draft_epoch and self.id == other.id and std.meta.eql(self.terminal_owner, other.terminal_owner);
+        return self.owner.eql(other.owner) and std.meta.eql(self.conversation_id, other.conversation_id) and self.draft_epoch == other.draft_epoch and self.id == other.id and std.meta.eql(self.terminal_owner, other.terminal_owner);
     }
 };
 pub const Item = struct { id: Id, reference: ContentRef };
@@ -172,6 +173,7 @@ pub const Candidate = struct { id: Id, reference: ContentRef, replaces: ?Id = nu
 pub const Bundle = struct {
     allocator: std.mem.Allocator,
     owner: Owner,
+    conversation_id: ?@import("../host/identity.zig").ConversationId = null,
     draft_epoch: u64,
     items: []Item,
     pub fn deinit(self: *Bundle) void {
@@ -182,7 +184,7 @@ pub const Bundle = struct {
     pub fn retain(self: *const Bundle) !Bundle {
         const items = try self.allocator.alloc(Item, self.items.len);
         for (self.items, items) |item, *copy| copy.* = .{ .id = item.id, .reference = item.reference.retain() };
-        return .{ .allocator = self.allocator, .owner = self.owner, .draft_epoch = self.draft_epoch, .items = items };
+        return .{ .allocator = self.allocator, .owner = self.owner, .conversation_id = self.conversation_id, .draft_epoch = self.draft_epoch, .items = items };
     }
 };
 
@@ -191,6 +193,7 @@ pub const Bundle = struct {
 pub const Draft = struct {
     allocator: std.mem.Allocator,
     owner: Owner,
+    conversation_id: ?@import("../host/identity.zig").ConversationId = null,
     epoch: u64 = 1,
     next_id: Id = 1,
     pending: std.ArrayList(Ticket) = .empty,
@@ -226,7 +229,7 @@ pub const Draft = struct {
     }
     fn beginForTerminal(self: *Draft, terminal_owner: ?SessionHandle) !Ticket {
         if (self.next_id == std.math.maxInt(Id)) return error.AttachmentIdExhausted;
-        const ticket: Ticket = .{ .owner = self.owner, .draft_epoch = self.epoch, .id = self.next_id, .terminal_owner = terminal_owner };
+        const ticket: Ticket = .{ .owner = self.owner, .conversation_id = self.conversation_id, .draft_epoch = self.epoch, .id = self.next_id, .terminal_owner = terminal_owner };
         try self.pending.append(self.allocator, ticket);
         self.next_id += 1;
         return ticket;
@@ -258,7 +261,7 @@ pub const Draft = struct {
         var replaces: ?Id = null;
         var old_candidate: ?Ticket = null;
         if (replacement) |old| {
-            if (!self.owner.eql(old.owner) or old.draft_epoch != self.epoch or old.id == ticket.id) return error.StaleAttachment;
+            if (!self.matchesConversation(old.owner, old.conversation_id) or old.draft_epoch != self.epoch or old.id == ticket.id) return error.StaleAttachment;
             if (self.candidate(old)) |previous| {
                 replaces = previous.replaces;
                 old_candidate = old;
@@ -325,9 +328,10 @@ pub const Draft = struct {
         self.candidates.clearRetainingCapacity();
     }
     pub fn restore(self: *Draft, bundle: *const Bundle) !void {
-        if (!self.owner.eql(bundle.owner)) return error.StaleAttachmentBundle;
+        if (!self.matchesConversation(bundle.owner, bundle.conversation_id) and !(bundle.conversation_id == null and bundle.items.len == 0 and self.owner.eql(bundle.owner))) return error.StaleAttachmentBundle;
         if (self.epoch == std.math.maxInt(u64)) return error.AttachmentEpochExhausted;
         var next = try Draft.init(self.allocator, self.owner);
+        next.conversation_id = self.conversation_id;
         errdefer next.deinit();
         next.epoch = self.epoch + 1;
         next.next_id = self.next_id;
@@ -340,16 +344,25 @@ pub const Draft = struct {
         self.deinit();
         self.* = next;
     }
+    /// Explicit user rewind/fork copies already-owned immutable content. It
+    /// creates fresh tickets; the original conversation's pending jobs cannot
+    /// complete into this draft. This never reads the original source again.
+    pub fn restoreHistory(self: *Draft, bundle: *const Bundle) !void {
+        var selected = bundle.*;
+        selected.owner = self.owner;
+        selected.conversation_id = self.conversation_id;
+        try self.restore(&selected);
+    }
     pub fn freeze(self: *const Draft) !Bundle {
         if (self.pending.items.len != 0) return error.AttachmentsProcessing;
         const items = try self.allocator.alloc(Item, self.items.items.len);
         for (self.items.items, items) |item, *copy| copy.* = .{ .id = item.id, .reference = item.reference.retain() };
-        return .{ .allocator = self.allocator, .owner = self.owner, .draft_epoch = self.epoch, .items = items };
+        return .{ .allocator = self.allocator, .owner = self.owner, .conversation_id = self.conversation_id, .draft_epoch = self.epoch, .items = items };
     }
     /// Call only after the host accepts the frozen request. Do not clear a
     /// later selection or picker created while submission was in progress.
     pub fn consumeSent(self: *Draft, bundle: *const Bundle) !usize {
-        if (!self.owner.eql(bundle.owner) or self.epoch != bundle.draft_epoch) return error.StaleAttachmentBundle;
+        if (!self.matchesConversation(bundle.owner, bundle.conversation_id) or self.epoch != bundle.draft_epoch) return error.StaleAttachmentBundle;
         var removed: usize = 0;
         for (bundle.items) |item| if (self.remove(item.id)) {
             removed += 1;
@@ -357,9 +370,13 @@ pub const Draft = struct {
         return removed;
     }
     fn pendingIndex(self: *const Draft, ticket: Ticket) ?usize {
-        if (!self.owner.eql(ticket.owner) or self.epoch != ticket.draft_epoch) return null;
+        if (!self.matchesConversation(ticket.owner, ticket.conversation_id) or self.epoch != ticket.draft_epoch) return null;
         for (self.pending.items, 0..) |current, index| if (current.eql(ticket)) return index;
         return null;
+    }
+    fn matchesConversation(self: *const Draft, owner: Owner, conversation: ?@import("../host/identity.zig").ConversationId) bool {
+        if (self.conversation_id) |id| return conversation != null and id.eql(conversation.?);
+        return conversation == null and self.owner.eql(owner);
     }
     fn removeCandidate(self: *Draft, id: Id) void {
         for (self.candidates.items, 0..) |item, index| if (item.id == id) {

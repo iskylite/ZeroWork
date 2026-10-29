@@ -128,7 +128,7 @@ pub const Config = struct {
         try writer.print("[completion]\nenabled = {}\n\n", .{self.completion.enabled});
         try writer.print("[transfer]\ndedicated_connection = {}\nwindow_chunks = {d}\nchunk_kb = {d}\ndownload_dir = \"{s}\"\nverify_md5 = {}\nshared_pacing_kbps = {d}\nresume = {}\nmax_tasks = {d}\nconflict_policy = \"{s}\"\n\n", .{ self.transfer.dedicated_connection, self.transfer.window_chunks, self.transfer.chunk_kb, self.transfer.download_dir, self.transfer.verify_md5, self.transfer.shared_pacing_kbps, self.transfer.@"resume", self.transfer.max_tasks, self.transfer.conflict_policy });
         try writer.print("[ssh]\nkeepalive_sec = {d}\nreconnect_max = {d}\nreconnect_backoff = [{d},{d},{d},{d},{d}]\nconnect_timeout_sec = {d}\nterm = \"{s}\"\ncompression = {}\nauto_reconnect = {}\nbuffer_input = {}\nsocks_port = {d}\nsocks_bind = \"{s}\"\notp_modal = {}\ntotp_autofill = {}\n\n", .{ self.ssh.keepalive_sec, self.ssh.reconnect_max, self.ssh.reconnect_backoff[0], self.ssh.reconnect_backoff[1], self.ssh.reconnect_backoff[2], self.ssh.reconnect_backoff[3], self.ssh.reconnect_backoff[4], self.ssh.connect_timeout_sec, self.ssh.term, self.ssh.compression, self.ssh.auto_reconnect, self.ssh.buffer_input, self.ssh.socks_port, self.ssh.socks_bind, self.ssh.otp_modal, self.ssh.totp_autofill });
-        try writer.print("[ai]\ndefault_provider = \"{s}\"\npermission_mode = \"{s}\"\nredact_ip = {}\nerror_hint = {}\nprovider_count = {d}\n", .{ self.ai.default_provider, @tagName(self.ai.permission_mode), self.ai.redact_ip, self.ai.error_hint, self.ai.provider_count });
+        try writer.print("[ai]\ndefault_provider = \"{s}\"\npermission_mode = \"{s}\"\nexecution_mode = \"{s}\"\nsession_retention = \"{s}\"\nredact_ip = {}\nerror_hint = {}\nprovider_count = {d}\n", .{ self.ai.default_provider, @tagName(self.ai.permission_mode), @tagName(self.ai.execution_mode), @tagName(self.ai.session_retention), self.ai.redact_ip, self.ai.error_hint, self.ai.provider_count });
         var has_provider = false;
         for (self.ai.providers) |p| if (p.endpoint.len > 0 or p.api_key.len > 0 or p.api_key_ref != null or p.name.len > 0 or p.model_count > 0 or p.enabled) {
             has_provider = true;
@@ -219,7 +219,7 @@ pub const Config = struct {
                 if (eq(key, "keepalive_sec")) self.ssh.keepalive_sec = try parseInt(u16, value) else if (eq(key, "reconnect_max")) self.ssh.reconnect_max = try parseInt(u8, value) else if (eq(key, "reconnect_backoff")) self.ssh.reconnect_backoff = try parseBackoff(value) else if (eq(key, "connect_timeout_sec")) self.ssh.connect_timeout_sec = try parseInt(u16, value) else if (eq(key, "term")) self.ssh.term = try parseString(value) else if (eq(key, "compression")) self.ssh.compression = try parseBool(value) else if (eq(key, "auto_reconnect")) self.ssh.auto_reconnect = try parseBool(value) else if (eq(key, "buffer_input")) self.ssh.buffer_input = try parseBool(value) else if (eq(key, "socks_port")) self.ssh.socks_port = try parseInt(u16, value) else if (eq(key, "socks_bind")) self.ssh.socks_bind = try parseString(value) else if (eq(key, "otp_modal")) self.ssh.otp_modal = try parseBool(value) else if (eq(key, "totp_autofill")) self.ssh.totp_autofill = try parseBool(value) else return error.UnknownKey;
             },
             .ai => {
-                if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
+                if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = std.meta.stringToEnum(ExecutionMode, try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
             },
             .log => {
                 if (eq(key, "ring_mb")) self.log.ring_mb = try parseInt(u16, value) else if (eq(key, "checkpoint_sec")) self.log.checkpoint_sec = try parseInt(u16, value) else if (eq(key, "retention_days")) self.log.retention_days = try parseInt(u16, value) else if (eq(key, "export_format")) self.log.export_format = try parseString(value) else return error.UnknownKey;
@@ -353,6 +353,32 @@ pub const Completion = struct { enabled: bool = true };
 pub const Transfer = struct { dedicated_connection: bool = true, window_chunks: u8 = 16, chunk_kb: u16 = 64, download_dir: []const u8 = "~/Downloads", verify_md5: bool = false, shared_pacing_kbps: u32 = 2048, @"resume": bool = true, max_tasks: u8 = 3, conflict_policy: []const u8 = "ask" };
 pub const Ssh = struct { keepalive_sec: u16 = 30, reconnect_max: u8 = 5, reconnect_backoff: [5]u8 = .{ 1, 2, 4, 8, 16 }, connect_timeout_sec: u16 = 15, term: []const u8 = "xterm-256color", compression: bool = false, auto_reconnect: bool = true, buffer_input: bool = true, socks_port: u16 = 1080, socks_bind: []const u8 = "127.0.0.1", otp_modal: bool = true, totp_autofill: bool = false };
 pub const PermissionMode = enum { confirm, auto };
+/// Command routing is independent of the existing permission approval policy.
+pub const ExecutionMode = enum { auto, ask, isolated_exec, attached_pty, new_pty };
+pub const SessionRetention = enum { auto_idle, ask, keep };
+pub const ExecutionPolicy = struct { execution_mode: ExecutionMode, session_retention: SessionRetention };
+
+/// Resolve only when preparing a new execution/resource. Existing executions and
+/// resources keep their captured policy; changing a default never closes them.
+pub fn resolveExecutionPolicy(ai: Ai, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention) ExecutionPolicy {
+    return .{ .execution_mode = execution_mode_override orelse ai.execution_mode, .session_retention = session_retention_override orelse ai.session_retention };
+}
+pub fn executionModeLabel(mode: ExecutionMode) []const u8 {
+    return switch (mode) {
+        .auto => "自行判断",
+        .ask => "每次询问",
+        .isolated_exec => "批处理",
+        .attached_pty => "附加现有 PTY",
+        .new_pty => "新建 PTY",
+    };
+}
+pub fn sessionRetentionLabel(retention: SessionRetention) []const u8 {
+    return switch (retention) {
+        .auto_idle => "空闲后关闭",
+        .ask => "每次询问",
+        .keep => "保留任务会话",
+    };
+}
 pub const ProviderKind = @import("../ai/registry.zig").Kind;
 pub const AiProvider = struct {
     name: []const u8 = "",
@@ -386,6 +412,8 @@ pub const default_providers = [_]AiProvider{ .{ .kind = .anthropic }, .{ .kind =
 pub const Ai = struct {
     default_provider: []const u8 = "anthropic",
     permission_mode: PermissionMode = .confirm,
+    execution_mode: ExecutionMode = .auto,
+    session_retention: SessionRetention = .auto_idle,
     redact_ip: bool = false,
     error_hint: bool = true,
     /// Legacy backing slots retain protocol identities for flat-key migration.
@@ -398,7 +426,7 @@ pub const Log = struct { ring_mb: u16 = 64, checkpoint_sec: u16 = 30, retention_
 pub const Notify = struct { transfer_done: bool = false, reconnect: bool = true, ai_ready: bool = false, bell: bool = false, tab_dot: bool = true, quiet_hours: []const u8 = "22:00-08:00" };
 
 const Section = enum { plugin_preferences, none, meta, ui, @"ui.materials", @"ui.materials.background", completion, transfer, ssh, ai, log, notify, keys };
-pub const ParseError = error{ InvalidSection, InvalidAssignment, InvalidValue, UnknownKey, MissingSection, OutOfRange, Overflow, RequiresAllocator, OutOfMemory };
+pub const ParseError = error{ InvalidSection, InvalidAssignment, InvalidValue, InvalidExecutionMode, InvalidSessionRetention, UnknownKey, MissingSection, OutOfRange, Overflow, RequiresAllocator, OutOfMemory };
 
 fn parseSection(line: []const u8) ParseError!Section {
     if (line.len < 3 or line[line.len - 1] != ']') return error.InvalidSection;
@@ -668,4 +696,33 @@ test "terminal scrollback default and unlimited survive config serialization" {
         const decoded = try Config.parseWithAllocator(arena.allocator(), encoded);
         try std.testing.expectEqual(limit, decoded.ui.scrollback_limit);
     }
+}
+
+test "execution policy defaults migrate legacy config and invalid values fail explicitly" {
+    const legacy = try Config.parse("[ai]\npermission_mode = \"auto\"\n");
+    try std.testing.expectEqual(PermissionMode.auto, legacy.ai.permission_mode);
+    try std.testing.expectEqual(ExecutionMode.auto, legacy.ai.execution_mode);
+    try std.testing.expectEqual(SessionRetention.auto_idle, legacy.ai.session_retention);
+    try std.testing.expectError(error.InvalidExecutionMode, Config.parse("[ai]\nexecution_mode = \"unsafe\"\n"));
+    try std.testing.expectError(error.InvalidSessionRetention, Config.parse("[ai]\nsession_retention = \"always_close\"\n"));
+}
+
+test "execution policy five modes and retention round trip separately from permissions" {
+    inline for (@typeInfo(ExecutionMode).@"enum".field_names) |name| {
+        var value: Config = .{};
+        value.ai.execution_mode = @field(ExecutionMode, name);
+        value.ai.session_retention = .keep;
+        var buffer: [16384]u8 = undefined;
+        const encoded = try value.format(&buffer);
+        const decoded = try Config.parse(encoded);
+        try std.testing.expectEqual(value.ai.execution_mode, decoded.ai.execution_mode);
+        try std.testing.expectEqual(SessionRetention.keep, decoded.ai.session_retention);
+        try std.testing.expectEqual(PermissionMode.confirm, decoded.ai.permission_mode);
+    }
+    const defaults: Ai = .{ .execution_mode = .isolated_exec, .session_retention = .ask };
+    const frozen = resolveExecutionPolicy(defaults, null, .keep);
+    try std.testing.expectEqual(ExecutionMode.isolated_exec, frozen.execution_mode);
+    try std.testing.expectEqual(SessionRetention.keep, frozen.session_retention);
+    try std.testing.expectEqual(ExecutionMode.new_pty, resolveExecutionPolicy(.{}, .new_pty, null).execution_mode);
+    try std.testing.expectEqual(ExecutionMode.isolated_exec, frozen.execution_mode);
 }

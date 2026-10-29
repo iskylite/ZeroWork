@@ -15,6 +15,8 @@ const identity = @import("../host/identity.zig");
 const OperationKey = @import("../host/operation.zig").OperationKey;
 const Paths = @import("../config/paths.zig").Paths;
 const session_archive = @import("../vt/session_archive.zig");
+const ssh_recording = @import("../vt/ssh_recording_manifest.zig");
+const manifest = @import("../vt/recording_manifest.zig");
 const Timeline = @import("../vt/timeline.zig").Timeline;
 var next_log_id: std.atomic.Value(u64) = .init(0);
 
@@ -181,7 +183,29 @@ pub const SessionRuntime = struct {
     release: DeferredRelease = .{},
     resource_ledger: ?*ResourceLedger = null,
     archive_request: ?ArchiveRequest = null,
+    recording_display_arena: ?std.heap.ArenaAllocator = null,
+    recording_display: manifest.Display = .{},
+    recording_cast_path: ?[]u8 = null,
+    recording_manifest_failure: ?[]const u8 = null,
+    recording_config_revision: ?u64 = null,
 
+    pub fn setDisplay(self: *SessionRuntime, display: manifest.Display) !void {
+        if (self.torn_down) return error.SessionClosed;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
+        const allocator = arena.allocator();
+        var owned = display;
+        owned.title = try allocator.dupe(u8, display.title);
+        owned.host = try allocator.dupe(u8, display.host);
+        owned.user = try allocator.dupe(u8, display.user);
+        owned.endpoint = try allocator.dupe(u8, display.endpoint);
+        owned.cwd = if (display.cwd) |cwd| try allocator.dupe(u8, cwd) else null;
+        owned.font_family = if (display.font_family) |value| try allocator.dupe(u8, value) else null;
+        owned.theme_reference = if (display.theme_reference) |value| try allocator.dupe(u8, value) else null;
+        if (self.recording_display_arena) |*old| old.deinit();
+        self.recording_display_arena = arena;
+        self.recording_display = owned;
+    }
     fn keyboardAnswer(ctx: *anyopaque, prompt: []const u8, answer: []u8) ?[]const u8 {
         const bridge: *InteractiveBridge = @ptrCast(@alignCast(ctx));
         const generation = bridge.offer(prompt) catch return null;
@@ -271,6 +295,21 @@ pub const SessionRuntime = struct {
         } else null;
         errdefer if (checkpoint_writer) |writer| writer.deinit();
         worker.io.checkpoint_writer = checkpoint_writer;
+        const cast_path = try std.fmt.allocPrint(allocator, "logs/history/session-ssh-{s}.cast", .{std.fmt.bytesToHex(worker.archive_key.bytes, .lower)});
+        errdefer allocator.free(cast_path);
+        var manifest_failure: ?[]const u8 = if (log_directory == null) "LogDirectoryUnavailable" else null;
+        if (log_directory) |dir| ssh_recording.reserve(allocator, io, dir, .{
+            .recording_id = worker.recording_id,
+            .archive_key = worker.archive_key,
+            .generations = worker.recording_generations.items,
+            .cast_path = cast_path,
+            .started_ms = now_ms,
+            .connection_id = if (target.source_owner) |owner| @backingInt(owner.id) else null,
+            .config_revision = if (target.source_owner) |owner| owner.revision else null,
+            .display = .{ .title = target.display_name, .host = host, .user = user, .final_cols = worker.options.cols, .final_rows = worker.options.rows, .timestamps = app_config.ui.timestamp_gutter, .font_family = app_config.ui.font_family, .font_size_px = @floatFromInt(app_config.ui.font_size), .line_height = app_config.ui.line_height },
+        }) catch |err| {
+            manifest_failure = @errorName(err);
+        };
         const thread = try WorkerThread.start(allocator, worker);
         errdefer thread.deinit();
         applog.info(.ssh, "worker thread started", .{});
@@ -297,7 +336,11 @@ pub const SessionRuntime = struct {
             .cancel_token = target.cancel_token,
             .route_arena = route_arena,
             .resource_ledger = target.resource_ledger,
+            .recording_cast_path = cast_path,
+            .recording_manifest_failure = manifest_failure,
+            .recording_config_revision = if (target.source_owner) |owner| owner.revision else null,
         };
+        try runtime.setDisplay(.{ .title = target.display_name, .host = host, .user = user, .final_cols = worker.options.cols, .final_rows = worker.options.rows, .timestamps = app_config.ui.timestamp_gutter, .font_family = app_config.ui.font_family, .font_size_px = @floatFromInt(app_config.ui.font_size), .line_height = app_config.ui.line_height });
         return runtime;
     }
 
@@ -341,6 +384,8 @@ pub const SessionRuntime = struct {
         self.thread.stopAndJoin();
         const receipt = self.worker.releaseConnection();
         if (receipt != .released) return receipt;
+        if (self.checkpoint_writer) |writer| writer.deinit();
+        self.checkpoint_writer = null;
         if (self.archive_request) |request| self.persistClosedArchive(request.session_id, request.retention_days) catch |err| {
             applog.warn(.workspace, "session {d} archive failed: {s}", .{ request.session_id, @errorName(err) });
         };
@@ -352,6 +397,7 @@ pub const SessionRuntime = struct {
         if (self.log_directory) |dir| dir.close(log_io);
         self.allocator.free(self.checkpoint_path);
         self.allocator.free(self.raw_path);
+        if (self.recording_cast_path) |path| self.allocator.free(path);
         self.allocator.destroy(self.checkpoint);
         self.library.deinit();
         self.allocator.destroy(self.library);
@@ -361,6 +407,7 @@ pub const SessionRuntime = struct {
         if (self.password) |value| self.allocator.free(value);
         if (self.identity_file) |value| self.allocator.free(value);
         if (self.key_passphrase) |value| self.allocator.free(value);
+        if (self.recording_display_arena) |*arena| arena.deinit();
         if (self.route_arena) |*arena| arena.deinit();
         return .released;
     }
@@ -428,15 +475,61 @@ pub const SessionRuntime = struct {
 
     fn persistClosedArchive(self: *SessionRuntime, session_id: u64, retention_days: u16) !void {
         if (self.archive_written) return;
-        const dir = self.log_directory orelse return error.LogDirectoryUnavailable;
-        try archiveTimeline(self.allocator, self.checkpoint.io, dir, self.worker.timelinePtr(), .{
-            .id = session_id,
-            .saved_connection_id = self.saved_connection_id,
+        if (self.log_directory == null) {
+            var paths = try Paths.forApplication(self.allocator);
+            defer paths.deinit();
+            const directory = try std.Io.Dir.cwd().createDirPathOpen(self.checkpoint.io, paths.directory, .{});
+            defer directory.close(self.checkpoint.io);
+            const key = self.worker.options.operation_key orelse return error.MissingSessionIdentity;
+            if (key.owner != .session) return error.MissingSessionIdentity;
+            var display = self.recording_display;
+            const grid = self.worker.vt.snapshot();
+            display.final_cols = grid.cols;
+            display.final_rows = grid.rows;
+            const cwd = self.worker.copyCwd(self.allocator) catch null;
+            defer if (cwd) |value| self.allocator.free(value);
+            if (cwd) |value| display.cwd = value;
+            var archive: session_archive.Archive = .{ .allocator = self.allocator, .io = self.checkpoint.io, .dir = directory };
+            _ = try archive.publishMetadata(.{ .identity = .{ .recording_id = self.worker.recording_id, .archive_key = self.worker.archive_key }, .owner = key.owner.session, .source_kind = .ssh, .recording_generation = @max(1, self.worker.recording_generations.items.len), .started_ms = self.started_ms, .ended_ms = realtime.milliseconds(undefined), .initial_cols = self.worker.recording_initial_cols, .initial_rows = self.worker.recording_initial_rows, .display = display, .connection_id = self.saved_connection_id, .config_revision = self.recording_config_revision, .reason = .RecordingUnavailable, .failure = self.recording_manifest_failure orelse "LogDirectoryUnavailable", .exit_code = self.worker.shell_exit_code, .end_reason = "session_closed", .retention_days = retention_days });
+            self.archive_written = true;
+            return;
+        }
+        const dir = self.log_directory.?;
+        _ = session_id; // Persist the worker's original SessionHandle identity.
+        const cast_path = self.recording_cast_path orelse return error.RecordingUnavailable;
+        if (self.checkpoint.raw_file) |file| try file.sync(self.checkpoint.io);
+        const Extra = std.meta.Child(@FieldType(ssh_recording.Options, "extra_files"));
+        var extra: [2]Extra = undefined;
+        var count: usize = 0;
+        for ([_]Extra{ .{ .path = self.raw_path, .kind = .raw }, .{ .path = self.checkpoint_path, .kind = .checkpoint } }) |item| {
+            dir.access(self.checkpoint.io, item.path, .{}) catch continue;
+            extra[count] = item;
+            count += 1;
+        }
+        var display = self.recording_display;
+        const grid = self.worker.vt.snapshot();
+        display.final_cols = grid.cols;
+        display.final_rows = grid.rows;
+        const cwd = self.worker.copyCwd(self.allocator) catch null;
+        defer if (cwd) |value| self.allocator.free(value);
+        if (cwd) |value| display.cwd = value;
+        _ = try ssh_recording.publish(self.allocator, self.checkpoint.io, dir, .{
+            .recording_id = self.worker.recording_id,
+            .archive_key = self.worker.archive_key,
+            .generations = self.worker.recording_generations.items,
+            .cast_path = cast_path,
             .started_ms = self.started_ms,
             .ended_ms = realtime.milliseconds(undefined),
-            .host = self.host,
-            .user = self.user,
-        }, self.worker.recording_initial_cols, self.worker.recording_initial_rows, retention_days);
+            .display = display,
+            .timeline = self.worker.timelinePtr(),
+            .total_received = self.worker.io.stream_offset,
+            .connection_id = self.saved_connection_id,
+            .config_revision = self.recording_config_revision,
+            .exit_code = self.worker.shell_exit_code,
+            .retention_days = retention_days,
+            .failure = self.recording_manifest_failure orelse if (self.worker.recording_generation_failed or self.worker.io.timeline == null) "RecordingDegraded" else null,
+            .extra_files = extra[0..count],
+        });
         self.archive_written = true;
     }
 };
