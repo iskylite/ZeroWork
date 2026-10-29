@@ -8,7 +8,6 @@
 #include <pwd.h>
 #include <signal.h>
 #include <spawn.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
@@ -65,8 +64,6 @@ static int still_owned(const ZW_LOCAL_PROCESS *p, const Member *member) {
 static int observation_failed(ZW_LOCAL_PROCESS *p, int stage, int error_number, pid_t pid) {
     if (!error_number) error_number = EIO;
     p->observation_failure = (ZW_LOCAL_OBSERVATION_FAILURE){stage, error_number, pid};
-    if (getenv("ZEROWORK_LOCAL_CLOSE_DIAGNOSTICS"))
-        fprintf(stderr, "local observation failure owner_pid=%d stage=%d errno=%d pid=%d\n", p->pid, stage, error_number, pid);
     errno = error_number;
     return -1;
 }
