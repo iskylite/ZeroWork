@@ -95,6 +95,25 @@ _zw_exec_request() {
         # host protocol wake byte; no user's key binding is changed.
         zle -K _zw_exec_wake
         zle .accept-line
+    elif [[ $kind == input ]]; then
+        local wait_sequence=$5 input_sequence=$6 input_kind=$7 input_text=$8
+        local LC_ALL=C
+        if [[ $_zw_exec_stage != running || $id != $_zw_exec_id || $fence != $_zw_exec_fence || $epoch != $_zw_exec_epoch || $_zw_read_active != 1 || $wait_sequence != $_zw_read_sequence || $input_sequence != <-> ]] || (( input_sequence <= _zw_read_input_sequence )); then
+            _zw_exec_emit revoked stale_input; return 0
+        fi
+        if [[ $input_kind == text ]] && (( ${#input_text} > 0 && ${#_zw_read_buffer} + ${#input_text} <= 4096 )); then
+            _zw_read_buffer+=$input_text
+        elif [[ $input_kind == enter && -z $input_text ]]; then
+            _zw_read_done=1
+        else
+            _zw_exec_emit revoked invalid_input; return 0
+        fi
+        _zw_read_input_sequence=$input_sequence
+        _zw_exec_emit input_consumed "$id" "$fence" "$epoch" "$wait_sequence" "$input_sequence" "$input_kind" "${#input_text}"
+    elif [[ $kind == input_release ]]; then
+        if [[ $_zw_exec_stage == running && $id == $_zw_exec_id && $fence == $_zw_exec_fence && $epoch == $_zw_exec_epoch ]]; then
+            _zw_read_released=1
+        fi
     elif [[ $kind == revoke ]]; then
         # Never clear a user's line or submit an accepted buffer on revocation.
         _zw_exec_emit revoked host_revoke
@@ -139,7 +158,7 @@ _zw_exec_control() {
                 values+=("$field")
                 body=${body[size+2,-1]}
             done
-            (( ${#values} >= 6 && ${#values} <= 12 )) || return 1
+            (( ${#values} >= 6 && ${#values} <= 14 )) || return 1
             [[ $values[1] == 1 && $values[2] == $_zw_session && $values[3] == $_zw_generation && $values[4] == $_zw_nonce ]] || return 1
             (( values[5] > _zw_exec_received )) || return 1
             _zw_exec_received=$values[5]
@@ -187,6 +206,7 @@ _zw_exec_install() {
     # A user precmd function executes before the hook array. Its return value
     # cannot be promoted to the command's exit status.
     (( $+functions[precmd] )) && return 0
+    zmodload zsh/zselect || return 0
     [[ -o rcs && -n $_zw_exec_socket && -x "$_zw_module_dir/zw_execution_guard" ]] || return 0
     zsocket "$_zw_exec_socket" || return 0
     _zw_exec_fd=$REPLY
@@ -207,9 +227,70 @@ _zw_exec_install() {
     _zw_exec_stage=idle
     preexec_functions=(_zw_exec_preexec ${preexec_functions:#_zw_exec_preexec})
     precmd_functions=(_zw_exec_precmd ${precmd_functions:#_zw_exec_precmd})
-    _zw_exec_emit hello "$ZSH_VERSION" independent_cloexec_boundary_interval_v2
+    local capability=independent_cloexec_boundary_interval_input_v3
+    [[ -r "$_zw_module_dir/zw_secret_consume.so" ]] && capability=independent_cloexec_boundary_interval_input_secret_v4
+    _zw_exec_emit hello "$ZSH_VERSION" "$capability"
     return 0
 }
+# Explicit declared runner for one ordinary non-secret line. It consumes only
+# private input frames; no prompt/echo/termios heuristic grants this capability.
+# REPLY is the complete line after a separate Enter receipt. On user handoff,
+# an ordinary builtin read accepts the user's terminal input without a signal.
+zerowork_read() {
+    emulate -L zsh
+    (( $# == 0 && _zw_exec_fd >= 3 && _zw_read_active == 0 )) || return 64
+    [[ $_zw_exec_stage == running && -n $_zw_exec_id && -t 0 ]] || return 64
+    local LC_ALL=C
+    _zw_read_active=1 _zw_read_done=0 _zw_read_released=0 _zw_read_buffer=''
+    (( ++_zw_read_sequence ))
+    _zw_exec_emit input_wait "$_zw_exec_id" "$_zw_exec_fence" "$_zw_exec_epoch" "$_zw_read_sequence" controlled_line 4096 || { _zw_read_active=0; return 74; }
+    while (( !_zw_read_done && !_zw_read_released )); do
+        [[ $_zw_exec_stage == running ]] && (( _zw_exec_fd >= 3 )) || { _zw_read_active=0 _zw_read_buffer=''; return 74; }
+        _zw_exec_flush || { _zw_read_active=0 _zw_read_buffer=''; return 74; }
+        if zselect -r $_zw_exec_fd -t 10; then
+            _zw_exec_control
+        fi
+    done
+    _zw_read_active=0
+    if (( _zw_read_released )); then
+        _zw_read_buffer=''
+        builtin read -r REPLY
+        return $?
+    fi
+    REPLY=$_zw_read_buffer
+    _zw_read_buffer=''
+    return 0
+}
+# The native fixed consumer alone reads and erases secrets. The shell helper
+# only loads its public lifecycle ABI and receives a boolean completion code.
+zerowork_secret_consume() {
+    emulate -L zsh
+    (( $# == 0 && _zw_exec_fd >= 3 && _zw_read_active == 0 )) || return 64
+    [[ $_zw_exec_stage == running && -n $_zw_exec_id && -t 0 && -r "$_zw_module_dir/zw_secret_consume.so" ]] || return 64
+    # Native events share the same stream/sequence. Drain prior public frames
+    # before native boot_ takes exclusive ownership of the control descriptor.
+    local attempt
+    for attempt in {1..100}; do
+        [[ -z $_zw_exec_tx ]] && break
+        _zw_exec_flush || return 74
+        zselect -w $_zw_exec_fd -t 1
+    done
+    [[ -z $_zw_exec_tx && -z $_zw_exec_rx ]] || return 74
+    _zw_read_active=1 _zw_secret_result=1
+    (( ++_zw_read_sequence ))
+    local -a original_module_path=("${module_path[@]}")
+    module_path=("$_zw_module_dir" "${module_path[@]}")
+    zmodload zw_secret_consume
+    local loaded=$?
+    module_path=("${original_module_path[@]}")
+    zmodload -u zw_secret_consume 2>/dev/null
+    _zw_read_active=0
+    (( loaded == 0 )) || return 74
+    return $_zw_secret_result
+}
+typeset -gi _zw_secret_result=1
+typeset -gi _zw_read_active=0 _zw_read_done=0 _zw_read_released=0 _zw_read_sequence=0 _zw_read_input_sequence=0
+typeset -g _zw_read_buffer=''
 typeset -gi _zw_exec_fd=-1 _zw_exec_sequence=0 _zw_exec_received=0 _zw_exec_fence=0 _zw_exec_epoch=0
 typeset -g _zw_exec_tx='' _zw_exec_rx='' _zw_exec_id='' _zw_exec_stage=unavailable _zw_exec_buffer='' _zw_exec_hash='' _zw_exec_start='' _zw_exec_end='' _zw_exec_scope=exact
 typeset -ga _zw_exec_message=()

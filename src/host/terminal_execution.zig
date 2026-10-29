@@ -18,6 +18,35 @@ pub const Grant = struct {
     input_epoch: u64,
     ownership_revision: u64,
 };
+/// Only the explicitly installed shell helper can attest this wait. Ordinary
+/// prompt text, termios and a running child never create an input capability.
+pub const InputKind = enum { text, enter, host_secret };
+pub const InputWait = struct {
+    sequence: u64,
+    kind: enum { controlled_line, host_secret } = .controlled_line,
+    max_bytes: u16 = 4096,
+};
+pub const InputRequest = struct {
+    grant: Grant,
+    wait_sequence: u64,
+    input_sequence: u64,
+    kind: InputKind,
+    text: []const u8 = "",
+};
+/// Host-only boundary: bytes are obtained from a temporary secure reference,
+/// never from a model tool argument or an ordinary terminal input queue.
+pub const SecretAction = union(enum) {
+    begin: InputRequest,
+    submit: struct { request: InputRequest, bytes: []const u8 },
+    cancel: InputRequest,
+};
+pub const InputReceipt = struct {
+    input_sequence: u64,
+    wait_sequence: u64,
+    kind: InputKind,
+    stage: enum { awaiting_host_secret, queued, consumed, cancelled_unsent, outcome_unknown },
+    accepted_bytes: usize = 0,
+};
 pub const Request = struct {
     execution_id: identity.ExecutionId,
     task_id: identity.TaskId,
@@ -58,6 +87,8 @@ pub const Snapshot = struct {
     elapsed_ms: u64 = 0,
     output_received: u64 = 0,
     interactive_execution: bool = false,
+    input_wait: ?InputWait = null,
+    input_receipt: ?InputReceipt = null,
     input_epoch: u64 = 0,
     lease_expires_at: i64 = 0,
     grant: ?Grant = null,
@@ -89,6 +120,7 @@ pub const Snapshot = struct {
 pub const PublicReceipt = struct {
     execution_id: identity.ExecutionId,
     command_hash: [32]u8,
+    input_receipt: ?InputReceipt = null,
     input_fence: u64,
     input_epoch: u64,
     accepted_sequence: u64 = 0,
@@ -115,10 +147,13 @@ pub const PublicReceipt = struct {
     pub fn fromSnapshot(value: Snapshot) ?PublicReceipt {
         const id = value.execution_id orelse return null;
         if (value.execution_fence == 0) return null;
-        return .{ .execution_id = id, .command_hash = value.command_hash, .input_fence = value.execution_fence, .input_epoch = value.execution_input_epoch, .accepted_sequence = value.accepted_sequence, .submit_sequence = value.submit_sequence, .submit_ack_sequence = value.submit_ack_sequence, .submit_native_bytes = value.submit_native_bytes, .native_wake_written = value.native_wake_written, .recording_id = value.recording_id, .recording_generation = value.recording_generation, .start = value.start, .end = value.end, .manifest_revision = value.manifest_revision, .process = value.process, .recording_settled = value.recording_settled, .recording_failed = value.recording_failed, .sealed = value.state == .sealed, .output_scope = value.output_scope, .output_attribution = value.output_attribution, .output_attribution_reason = value.output_attribution_reason, .interval_saved = value.interval_saved, .local_released = value.local_released, .input_handed_off = value.input_handed_off, .remote_effect_unknown = value.remote_effect_unknown };
+        return .{ .execution_id = id, .command_hash = value.command_hash, .input_receipt = value.input_receipt, .input_fence = value.execution_fence, .input_epoch = value.execution_input_epoch, .accepted_sequence = value.accepted_sequence, .submit_sequence = value.submit_sequence, .submit_ack_sequence = value.submit_ack_sequence, .submit_native_bytes = value.submit_native_bytes, .native_wake_written = value.native_wake_written, .recording_id = value.recording_id, .recording_generation = value.recording_generation, .start = value.start, .end = value.end, .manifest_revision = value.manifest_revision, .process = value.process, .recording_settled = value.recording_settled, .recording_failed = value.recording_failed, .sealed = value.state == .sealed, .output_scope = value.output_scope, .output_attribution = value.output_attribution, .output_attribution_reason = value.output_attribution_reason, .interval_saved = value.interval_saved, .local_released = value.local_released, .input_handed_off = value.input_handed_off, .remote_effect_unknown = value.remote_effect_unknown };
     }
     pub fn validate(self: PublicReceipt) !void {
         if (!self.execution_id.valid() or self.input_fence == 0) return error.InvalidExecutionReceipt;
+        if (self.input_receipt) |receipt| {
+            if (receipt.input_sequence == 0 or receipt.wait_sequence == 0 or receipt.accepted_bytes > 4096 or ((receipt.kind == .enter or receipt.kind == .host_secret) and receipt.accepted_bytes != 0) or ((receipt.stage == .awaiting_host_secret or receipt.stage == .queued or receipt.stage == .cancelled_unsent) and receipt.accepted_bytes != 0)) return error.InvalidExecutionReceipt;
+        }
         if (self.output_attribution_reason) |reason| if (reason.len > 96 or !std.unicode.utf8ValidateSlice(reason)) return error.InvalidExecutionReceipt;
         if (self.submit_native_bytes > 0 and (self.accepted_sequence == 0 or self.submit_sequence == 0)) return error.InvalidExecutionReceipt;
         if (self.native_wake_written and (self.submit_native_bytes == 0 or self.submit_ack_sequence == 0)) return error.InvalidExecutionReceipt;
@@ -137,6 +172,11 @@ pub const PublicReceipt = struct {
     }
     pub fn validateTransition(self: PublicReceipt, prior: PublicReceipt) !void {
         try self.validate();
+        if (prior.input_receipt) |old| {
+            const next = self.input_receipt orelse return error.ExecutionReceiptRegression;
+            if (next.input_sequence < old.input_sequence or next.wait_sequence < old.wait_sequence) return error.ExecutionReceiptRegression;
+            if (next.input_sequence == old.input_sequence and (next.kind != old.kind or next.wait_sequence != old.wait_sequence or ((old.stage == .consumed or old.stage == .cancelled_unsent or old.stage == .outcome_unknown) and !std.meta.eql(next, old)))) return error.ExecutionReceiptRegression;
+        }
         if (self.output_scope != prior.output_scope or (prior.interval_saved and !self.interval_saved)) return error.ExecutionReceiptRegression;
         if (prior.output_attribution == .concurrent_observed and self.output_attribution != .concurrent_observed) return error.ExecutionReceiptRegression;
         if (prior.interval_saved and (self.output_attribution != prior.output_attribution or !sameReason(self.output_attribution_reason, prior.output_attribution_reason))) return error.ExecutionReceiptRegression;

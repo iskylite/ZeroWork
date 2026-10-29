@@ -690,13 +690,13 @@ pub fn syncSubtree(
     pass.sync(node, parent_a11y_id, sibling_counter, ancestor_hidden, false, pass.modal.modal == null, null);
 }
 
-/// Modal scope: visible modal dialog (role dialog/alertdialog, modal=true) latest in document
+/// Modal scope: visible modal dialog (role dialog/alertdialog, modal=true) highest in paint
 /// order. While open, nodes outside its subtree and outside ancestors are inert, VoiceOver
 /// cannot "exit" dialog reading background.
 ///
-/// Precondition: when multiple modals open, later one also later in doc order. zenit floats
-/// append to portal root in order, satisfies this; if future allows inserting float mid-portal,
-/// must instead take highest by layer, else topmost dialog inerts itself.
+/// OverlayStack updates modal content z-index on each activation. A retained modal may reopen
+/// before a later-mounted portal sibling, so document order alone can inert the top dialog.
+/// Equal z-index keeps the later document node, matching the paint-order tiebreaker.
 ///
 /// Done in two passes during projection (find modal, project with scope), not post-modify tree:
 /// post would flip hidden true/false each frame, notification storm.
@@ -709,7 +709,7 @@ pub const ModalScope = struct {
 
     pub fn find(root: *const Node) ModalScope {
         var scope = ModalScope{};
-        scope.modal = lastVisibleModal(root);
+        scope.modal = topmostVisibleModal(root);
         const modal = scope.modal orelse return scope;
         var cursor: ?*const Node = modal;
         while (cursor) |n| : (cursor = n.parent) {
@@ -728,14 +728,16 @@ pub const ModalScope = struct {
         return false;
     }
 
-    fn lastVisibleModal(node: *const Node) ?*const Node {
+    fn topmostVisibleModal(node: *const Node) ?*const Node {
         if (isSubtreeHiddenSelf(node)) return null;
         var found: ?*const Node = null;
         if (node.behavior.interaction.a11y) |props| {
             if (props.modal and (props.role == .dialog or props.role == .alertdialog)) found = node;
         }
         for (node.children.items) |child| {
-            if (lastVisibleModal(child)) |m| found = m;
+            if (topmostVisibleModal(child)) |m| {
+                if (found == null or m.style.z_index() >= found.?.style.z_index()) found = m;
+            }
         }
         return found;
     }
@@ -895,6 +897,37 @@ fn makeNode(tag: types.ElementTag) !*Node {
 
 fn makeBox() !*Node {
     return makeNode(.box);
+}
+
+test "ModalScope selects highest visible modal and keeps document order for equal z-index" {
+    const root = try makeBox();
+    defer destroyTree(root);
+    const earlier_parent = try makeBox();
+    try root.appendChild(testing.allocator, earlier_parent);
+    const earlier = try makeBox();
+    earlier.behavior.interaction.a11y = .{ .role = .dialog, .modal = true };
+    (try earlier.style.ensureExtFallible(testing.allocator)).z_index = 303;
+    try earlier_parent.appendChild(testing.allocator, earlier);
+    const later = try makeBox();
+    later.behavior.interaction.a11y = .{ .role = .alertdialog, .modal = true };
+    (try later.style.ensureExtFallible(testing.allocator)).z_index = 301;
+    try root.appendChild(testing.allocator, later);
+    try testing.expect(ModalScope.find(root).modal == earlier);
+
+    later.style.ext.?.z_index = 303;
+    try testing.expect(ModalScope.find(root).modal == later);
+    earlier.style.ext.?.z_index = 305;
+    earlier_parent.setDisplay(.none);
+    try testing.expect(ModalScope.find(root).modal == later);
+    earlier_parent.setDisplay(.flex);
+    earlier_parent.behavior.interaction.a11y = .{ .hidden = true };
+    try testing.expect(ModalScope.find(root).modal == later);
+    earlier_parent.behavior.interaction.a11y = null;
+    earlier_parent.style.overflow_hidden = true;
+    earlier_parent.setLayoutRect(.{ .x = 0, .y = 0, .w = 0, .h = 0 });
+    try testing.expect(ModalScope.find(root).modal == later);
+    earlier_parent.style.overflow_hidden = false;
+    try testing.expect(ModalScope.find(root).modal == earlier);
 }
 
 fn makeText(content: []const u8) !*Node {

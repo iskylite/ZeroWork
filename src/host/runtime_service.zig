@@ -34,6 +34,8 @@ pub const Runtime = struct {
         cleanupReleased: *const fn (*anyopaque) bool,
         reconnectSnapshot: *const fn (*anyopaque) ?@import("../vt/reconnect.zig").Control.Snapshot,
         requestReconnect: *const fn (*anyopaque, OperationKey, OperationKey) anyerror!void,
+        preflightExplicitDisconnect: ?*const fn (*anyopaque, OperationKey) anyerror!u64 = null,
+        requestExplicitDisconnect: ?*const fn (*anyopaque, OperationKey) anyerror!ReleaseReceipt = null,
         acknowledgeAttached: *const fn (*anyopaque, OperationKey) bool,
         isAttached: *const fn (*anyopaque) bool,
         isConnected: *const fn (*anyopaque) bool,
@@ -81,6 +83,17 @@ pub const Runtime = struct {
         if (self.torn_down) return .{};
         return if (self.vtable.osDetection) |invoke| invoke(self.context) else .{};
     }
+    pub fn supportsExplicitDisconnect(self: *const Runtime) bool {
+        return !self.torn_down and self.vtable.preflightExplicitDisconnect != null and self.vtable.requestExplicitDisconnect != null;
+    }
+    pub fn preflightExplicitDisconnect(self: *Runtime, key: OperationKey) !u64 {
+        if (self.torn_down) return error.SessionClosed;
+        return (self.vtable.preflightExplicitDisconnect orelse return error.NotSupported)(self.context, key);
+    }
+    pub fn requestExplicitDisconnect(self: *Runtime, key: OperationKey) !ReleaseReceipt {
+        if (self.torn_down) return error.SessionClosed;
+        return (self.vtable.requestExplicitDisconnect orelse return error.NotSupported)(self.context, key);
+    }
     pub fn releaseStep(self: *Runtime, archive: ?ArchiveRequest) ReleaseReceipt {
         if (self.released) return .released;
         self.torn_down = true;
@@ -120,7 +133,7 @@ pub const Runtime = struct {
         const seen = try cx.allocator.create(u64);
         errdefer cx.allocator.destroy(seen);
         seen.* = 0;
-        try view.addWorkerFrameHook(cx, self, self, status, seen, scratch);
+        try view.addOwnedWorkerFrameHook(cx, self, self, status, seen, scratch);
     }
     pub fn reconnectSnapshot(self: *Runtime) ?@import("../vt/reconnect.zig").Control.Snapshot {
         if (self.torn_down) return null;
@@ -291,4 +304,42 @@ test "released runtime rejects retained consumers before dereferencing provider 
     try std.testing.expectError(error.SessionClosed, runtime.copyCwd(std.testing.allocator));
     try std.testing.expectError(error.SessionClosed, runtime.readLines(.{}, std.testing.allocator));
     try std.testing.expectError(error.SessionClosed, runtime.readonlyProvider());
+}
+
+test "bootstrap product terminal mounts release owned frame buffers and preserve borrowed buffers" {
+    const ui = @import("ui");
+    const View = @import("../ui/terminal_view.zig").TerminalViewNode;
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 400);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    const Fake = struct {
+        fn reconnect(_: *anyopaque) ?@import("../vt/reconnect.zig").Control.Snapshot {
+            return null;
+        }
+    };
+    var table: Runtime.VTable = undefined;
+    table.documentSource = null;
+    table.terminalService = null;
+    table.reconnectSnapshot = Fake.reconnect;
+    var token: u8 = 0;
+    var runtime: Runtime = .{ .context = &token, .vtable = &table };
+    for (0..3) |_| {
+        try runtime.mountTerminal(&view, view.root);
+        try std.testing.expect(view.frame_hook != null);
+        // A duplicate mount fails before ownership transfer; the caller's
+        // errdefers release its own newly allocated buffers exactly once.
+        try std.testing.expectError(error.FrameHookAlreadyMounted, runtime.mountTerminal(&view, view.root));
+        view.removeFrameHook(cx);
+        view.removeFrameHook(cx);
+        try std.testing.expect(view.frame_hook == null);
+    }
+    var seen: u64 = 3;
+    var borrowed: [4]u8 = .{ 1, 2, 3, 4 };
+    try view.addWorkerFrameHook(cx, &runtime, &runtime, view.root, &seen, &borrowed);
+    view.removeFrameHook(cx);
+    try std.testing.expectEqual(@as(u64, 3), seen);
+    try std.testing.expectEqualSlices(u8, &.{ 1, 2, 3, 4 }, &borrowed);
 }

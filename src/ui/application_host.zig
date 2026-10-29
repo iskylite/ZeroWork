@@ -16,6 +16,10 @@ const ui = @import("ui");
 const background = @import("../host/socks_background_runtime.zig");
 const group_close = @import("group_close_controller.zig");
 const connection_envelope = @import("../config/connection_envelope.zig");
+const disconnect = @import("ai_disconnect_backend.zig");
+pub const BootstrapProduct = @import("../ai/ssh_bootstrap_product.zig");
+pub const DisconnectSnapshot = disconnect.Snapshot;
+pub const DisconnectPreflight = struct { create_operation: OperationKey, binding: session.ServiceHandle, impact_revision: u64 };
 pub const lifecycle = @import("../host/lifecycle_supervisor.zig");
 pub const OwnedLifecycleHooks = struct {
     context: *anyopaque,
@@ -34,11 +38,24 @@ const PendingOwnedSource = struct {
     connection: ?WindowConnection = null,
     cwd: ?[]u8 = null,
     dispatched: bool = false,
+    bootstrap_required: bool = false,
+    bootstrap: ?*BootstrapProduct.Prepared = null,
+    bootstrap_probed: ?BootstrapProduct.Probed = null,
+    probe: ?struct {
+        source: identity.SessionHandle,
+        handle: @import("../ai/execbridge.zig").ExecHandle,
+        key: OperationKey,
+        binding: session.ServiceHandle,
+        facts: ?BootstrapProduct.Facts = null,
+        failure: ?anyerror = null,
+    } = null,
     fn deinit(self: *PendingOwnedSource, allocator: std.mem.Allocator) void {
         if (self.connection) |*connection| connection.deinit();
         if (self.cwd) |cwd| allocator.free(cwd);
         self.connection = null;
         self.cwd = null;
+        if (self.bootstrap) |prepared| prepared.release();
+        self.bootstrap = null;
     }
 };
 pub const DeferredCloseSnapshot = struct {
@@ -47,6 +64,9 @@ pub const DeferredCloseSnapshot = struct {
     local_released: bool = true,
     remote_effect_unknown: bool = false,
     error_code: ?[]const u8 = null,
+    recording_id: ?[32]u8 = null,
+    recording_generation: u64 = 0,
+    recording_unavailable_reason: ?[]const u8 = "RecordingUnavailable",
 };
 const DeferredClose = struct {
     context: @import("../ai/host_tools.zig").Context,
@@ -55,6 +75,7 @@ const DeferredClose = struct {
     result_acknowledged: bool = false,
     impact: group_close.Impact,
     ownership_revision: ?u64 = null,
+    retained_metadata: lifecycle.SessionMetadata,
 };
 
 pub const CloseStep = session.CloseStep;
@@ -164,6 +185,7 @@ const Mapping = struct {
     reconnect_policy: ?ReconnectPolicy = null,
     reconnect_ticket: ?@import("../vt/reconnect.zig").Ticket = null,
     reconnect_count: u8 = 0,
+    explicit_disconnect: bool = false,
     runtime_loss_received: bool = false,
     close_display: ?CloseDisplay = null,
 
@@ -396,6 +418,7 @@ pub const ApplicationHost = struct {
     history_closes: std.ArrayList(HistoryClose) = .empty,
     pending_source: ?*const SourceSnapshot = null,
     pending_shared_connection: ?@import("../host/runtime_service.zig").SharedLease = null,
+    pending_bootstrap: ?*BootstrapProduct.Prepared = null,
     previous_sessions: workspace_mod.SessionBridge = .{},
     previous_close: workspace_mod.CloseBridge = .{},
     previous_window_close: workspace_mod.WindowCloseBridge = .{},
@@ -416,6 +439,7 @@ pub const ApplicationHost = struct {
     owned_sources: std.ArrayList(PendingOwnedSource) = .empty,
     owned_lifecycle_hooks: ?OwnedLifecycleHooks = null,
     deferred_closes: std.ArrayList(DeferredClose) = .empty,
+    disconnects: disconnect.Ledger = .{},
     // At most one ownership transition per Supervisor entry (limit 512).
     // Fixed storage keeps accepted user input safe even under allocator OOM.
     owned_input_events: [512]OwnedInputEvent = undefined,
@@ -521,6 +545,7 @@ pub const ApplicationHost = struct {
         self.owned_sources.deinit(self.allocator);
         self.lifecycle_supervisor.deinit();
         self.deferred_closes.deinit(self.allocator);
+        self.disconnects.deinit(self.allocator);
         self.allocator.destroy(self);
         if (owns_domain) domain.deinit();
     }
@@ -702,6 +727,99 @@ pub const ApplicationHost = struct {
         self.owned_sources.appendAssumeCapacity(source);
         self.workspace.cx.requestRedraw();
         return snapshot;
+    }
+
+    fn ownedSource(self: *ApplicationHost, operation: identity.HostOperationId) !*PendingOwnedSource {
+        for (self.owned_sources.items) |*source| if (source.operation_ref.eql(operation)) return source;
+        return error.MissingCreateSource;
+    }
+    pub fn requireOwnedBootstrap(self: *ApplicationHost, operation: identity.HostOperationId, context: @import("../ai/host_tools.zig").Context) !void {
+        _ = try self.lifecycle_supervisor.query(operation, context);
+        const entry = self.lifecycle_supervisor.find(operation).?;
+        if (!entry.request.context.eql(context) or entry.snapshot.state != .queued or entry.request.source == null or entry.request.connection_policy != .reuse_only) return error.BootstrapRequiresSharedSource;
+        (try self.ownedSource(operation)).bootstrap_required = true;
+    }
+    /// Starts only a fixed read-only metadata exec on the authorized source's
+    /// existing IO owner. It never creates a connection or writes to its PTY.
+    pub fn probeOwnedBootstrap(self: *ApplicationHost, operation: identity.HostOperationId, context: @import("../ai/host_tools.zig").Context) !?BootstrapProduct.Probed {
+        _ = try self.lifecycle_supervisor.query(operation, context);
+        const entry = self.lifecycle_supervisor.find(operation).?;
+        if (!entry.request.context.eql(context) or entry.snapshot.state != .prepared or entry.cancel_requested or entry.request.source == null or entry.request.connection_policy != .reuse_only) return error.ScopeChanged;
+        const frozen = try self.ownedSource(operation);
+        if (!frozen.bootstrap_required) return error.BootstrapNotRequested;
+        if (frozen.bootstrap_probed) |probed| return probed;
+        const source = entry.request.source.?;
+        const mapping = self.findHandle(source) orelse return error.SourceChanged;
+        if (mapping.process != null) return error.UnsupportedSource;
+        const service = self.sshExecService(source) catch |err| switch (err) {
+            error.WorkerBusy => return null,
+            else => return err,
+        };
+        if (frozen.probe == null) {
+            const binding = switch (self.sessions.queryService(source, .exec)) {
+                .available => |value| value,
+                else => return error.ServiceUnavailable,
+            };
+            const probe_handle = service.exec(BootstrapProduct.probe_command, .{ .key = mapping.create_operation, .service_binding = binding, .timeout_ms = 5000, .capture_cap = 512 }) catch |err| switch (err) {
+                error.WorkerBusy => return null,
+                else => return err,
+            };
+            frozen.probe = .{ .source = source, .key = mapping.create_operation, .binding = binding, .handle = probe_handle };
+        }
+        const probe = &frozen.probe.?;
+        if (!probe.source.eql(source)) return error.ScopeChanged;
+        if (probe.facts == null and probe.failure == null) {
+            const result = service.poll(probe.handle) orelse return null;
+            if (result.key == null or !result.key.?.eql(probe.key) or result.service_binding == null or !result.service_binding.?.eql(probe.binding)) probe.failure = error.StaleBootstrapProbe else if (result.status != .completed) probe.failure = error.BootstrapProbeFailed else probe.facts = BootstrapProduct.Facts.parse(result.stdout, result.stderr, result.exit_code, result.truncated) catch |err| blk: {
+                probe.failure = err;
+                break :blk null;
+            };
+        }
+        const closed = service.closeCall(probe.handle) catch |err| switch (err) {
+            error.WorkerBusy => return null,
+            else => return err,
+        };
+        if (closed == .releasing or closed == .not_started) return null;
+        const facts = probe.facts;
+        const failure = probe.failure;
+        frozen.probe = null;
+        if (closed != .released) return error.BootstrapProbeCleanupUnknown;
+        if (failure) |err| return err;
+        const remote = frozen.connection.?.remote orelse return error.MissingCreateSource;
+        const remote_host = remote.value.host;
+        frozen.bootstrap_probed = try BootstrapProduct.Probed.init(facts orelse return error.BootstrapProbeFailed, remote_host.user, remote_host.host, remote_host.port);
+        return frozen.bootstrap_probed;
+    }
+    pub fn installOwnedBootstrap(self: *ApplicationHost, prepared: *BootstrapProduct.Prepared, context: @import("../ai/host_tools.zig").Context) !void {
+        _ = try self.lifecycle_supervisor.query(prepared.operation, context);
+        const entry = self.lifecycle_supervisor.find(prepared.operation).?;
+        if (entry.snapshot.state != .prepared or entry.cancel_requested or entry.snapshot.session == null or entry.request.source == null or !prepared.matches(context, entry.request.operation_ref, entry.snapshot.session.?, entry.request.source.?)) return error.ScopeChanged;
+        const frozen = try self.ownedSource(prepared.operation);
+        if (!frozen.bootstrap_required or frozen.probe != null or frozen.bootstrap != null or frozen.bootstrap_probed == null) return error.ScopeChanged;
+        const probed = frozen.bootstrap_probed.?;
+        if (!std.mem.eql(u8, probed.target(), prepared.target[0..prepared.target_len]) or !std.mem.eql(u8, probed.facts.platformName(), prepared.package.platform) or !std.mem.eql(u8, @tagName(probed.facts.shell_path), @tagName(prepared.plan.shell_path))) return error.ScopeChanged;
+        try prepared.plan.validate(entry.snapshot.session.?, @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)));
+        frozen.bootstrap = prepared.retain();
+    }
+    /// Cancellation retires only our diagnostic exec. Never closes the source
+    /// runtime or its shell; the IO owner continues drain/close asynchronously.
+    fn tickBootstrapProbeCleanup(self: *ApplicationHost) bool {
+        var pending = false;
+        for (self.owned_sources.items) |*frozen| if (frozen.probe) |probe| {
+            const entry = self.lifecycle_supervisor.find(frozen.operation_ref) orelse continue;
+            if (!entry.cancel_requested and entry.snapshot.state == .prepared) continue;
+            const service = self.sshExecService(probe.source) catch |err| {
+                if (err == error.WorkerBusy) pending = true else frozen.probe = null;
+                continue;
+            };
+            service.abort(probe.handle);
+            const receipt = service.closeCall(probe.handle) catch {
+                pending = true;
+                continue;
+            };
+            if (receipt == .released or receipt == .unknown) frozen.probe = null else pending = true;
+        };
+        return pending;
     }
 
     fn validateSavedOwnedSource(self: *ApplicationHost, source: identity.AssetOwner) !usize {
@@ -890,8 +1008,9 @@ pub const ApplicationHost = struct {
         const mapping = self.findHandle(handle) orelse return error.StaleReference;
         _ = self.sessions.queryState(handle) orelse return error.StaleReference;
         if (self.deferred_closes.items.len >= 512) return error.ResourceLimit;
-        const snapshot: DeferredCloseSnapshot = .{ .operation_ref = operation };
-        try self.deferred_closes.append(self.allocator, .{ .context = context, .handle = handle, .snapshot = snapshot, .impact = bridgeImpact(self, mapping.legacy_id), .ownership_revision = if (self.lifecycle_supervisor.resource(handle)) |entry| entry.snapshot.ownership_revision else null });
+        const metadata = self.captureSessionMetadata(handle);
+        const snapshot: DeferredCloseSnapshot = .{ .operation_ref = operation, .recording_id = metadata.recording_id, .recording_generation = metadata.recording_generation, .recording_unavailable_reason = metadata.recording_unavailable_reason };
+        try self.deferred_closes.append(self.allocator, .{ .context = context, .handle = handle, .snapshot = snapshot, .impact = bridgeImpact(self, mapping.legacy_id), .ownership_revision = if (self.lifecycle_supervisor.resource(handle)) |entry| entry.snapshot.ownership_revision else null, .retained_metadata = metadata });
         return snapshot;
     }
 
@@ -962,6 +1081,12 @@ pub const ApplicationHost = struct {
         const entry = self.lifecycle_supervisor.find(operation).?;
         if (!entry.request.context.eql(context)) return error.ScopeChanged;
         if (entry.snapshot.state != .prepared or entry.cancel_requested or entry.snapshot.revision != expected_revision or entry.snapshot.session == null or !entry.snapshot.session.?.eql(handle)) return error.ScopeChanged;
+        const frozen = try self.ownedSource(operation);
+        if (frozen.bootstrap_required) {
+            const prepared = frozen.bootstrap orelse return error.BootstrapDeploymentAuthorizationRequired;
+            if (entry.request.source == null or !prepared.matches(context, operation, handle, entry.request.source.?)) return error.ScopeChanged;
+            try prepared.plan.validate(handle, @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)));
+        }
         entry.dispatch_permitted = true;
         self.workspace.cx.requestRedraw();
         return entry.snapshot;
@@ -1010,6 +1135,14 @@ pub const ApplicationHost = struct {
             if (self.pending_shared_connection != null) return error.ReentrantCreate;
             self.pending_shared_connection = lease;
             defer self.pending_shared_connection = null;
+            if (self.pending_bootstrap != null) return error.ReentrantCreate;
+            if (frozen.bootstrap_required) {
+                const prepared = frozen.bootstrap orelse return error.BootstrapDeploymentAuthorizationRequired;
+                try prepared.plan.validate(handle, @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)));
+                if (lease == null) return error.BootstrapRequiresSharedSource;
+                self.pending_bootstrap = prepared;
+            }
+            defer self.pending_bootstrap = null;
             if (self.pending_source != null) return error.ReentrantCreate;
             self.pending_source = if (connection.remote) |*remote| remote else null;
             defer self.pending_source = null;
@@ -1022,7 +1155,7 @@ pub const ApplicationHost = struct {
     /// Advance only outside Bridge/native/storage locks. No operation retries
     /// creation. Failure cleanup owns exactly the provisional SessionHandle.
     fn tickOwnedSessions(self: *ApplicationHost) !bool {
-        var pending = false;
+        var pending = self.tickBootstrapProbeCleanup();
         for (self.lifecycle_supervisor.entries.items) |*entry| {
             if (entry.snapshot.state == .queued) {
                 const frozen = for (self.owned_sources.items) |*source| {
@@ -1051,6 +1184,13 @@ pub const ApplicationHost = struct {
                 entry.snapshot.local_released = true;
                 lifecycle.Supervisor.transition(entry, if (entry.cancel_requested) .cancelled else if (entry.snapshot.membership_committed) .closed else .failed, entry.snapshot.error_code);
             }
+            if (entry.snapshot.state == .cleanup_pending) if (self.findHandle(handle)) |mapping| if (mapping.explicit_disconnect) {
+                const released = state.create_cleanup == .released;
+                const unknown = state.create_cleanup == .unknown;
+                if (entry.snapshot.local_released != released or entry.snapshot.remote_effect_unknown != unknown) entry.snapshot.revision +|= 1;
+                entry.snapshot.local_released = released;
+                entry.snapshot.remote_effect_unknown = unknown;
+            };
             if (entry.snapshot.state == .ready) switch (state.lifecycle) {
                 .closed => {
                     entry.snapshot.local_released = true;
@@ -1061,9 +1201,10 @@ pub const ApplicationHost = struct {
                     lifecycle.Supervisor.transition(entry, .closing, null);
                 },
                 .cleanup_unknown, .failed => {
+                    const explicitly_disconnected = if (self.findHandle(handle)) |mapping| mapping.explicit_disconnect else false;
                     entry.snapshot.local_released = state.create_cleanup == .released;
-                    entry.snapshot.remote_effect_unknown = true;
-                    lifecycle.Supervisor.transition(entry, .cleanup_pending, "ConnectionLost");
+                    entry.snapshot.remote_effect_unknown = !explicitly_disconnected or state.create_cleanup == .unknown;
+                    lifecycle.Supervisor.transition(entry, .cleanup_pending, if (explicitly_disconnected) "ExplicitDisconnect" else "ConnectionLost");
                 },
                 .ended => {
                     entry.snapshot.local_released = state.create_cleanup == .released;
@@ -1215,6 +1356,92 @@ pub const ApplicationHost = struct {
         try store.cancel(mapping.create_operation, request_id);
     }
 
+    pub fn supportsSessionDisconnect(self: *ApplicationHost, handle: identity.SessionHandle) bool {
+        if (!self.supportsIntegration(handle, "transport_loss")) return false;
+        const mapping = self.findHandle(handle) orelse return false;
+        const tab = self.workspace.sessionTab(mapping.legacy_id) orelse return false;
+        const runtime = tab.runtime orelse return false;
+        return !runtime.torn_down and runtime.supportsExplicitDisconnect();
+    }
+    pub fn preflightSessionDisconnect(self: *ApplicationHost, handle: identity.SessionHandle) !DisconnectPreflight {
+        if (self.workspace.shutting_down or self.windowClosePending()) return error.WorkspaceClosed;
+        const mapping = self.findHandle(handle) orelse return error.StaleReference;
+        const tab = self.workspace.sessionTab(mapping.legacy_id) orelse return error.StaleReference;
+        if (tab.generation != mapping.legacy_generation or tab.tab_id != mapping.tab_id or !tab.content_owner.eql(mapping.owner) or tab.closing or tab.archived) return error.StaleReference;
+        const runtime = tab.runtime orelse return error.NotSupported;
+        if (!self.supportsIntegration(handle, "transport_loss") or !runtime.supportsExplicitDisconnect()) return error.NotSupported;
+        const state = self.sessions.queryState(handle) orelse return error.StaleReference;
+        if (!state.create_operation.eql(mapping.create_operation)) return error.StaleCreateOperation;
+        if (state.lifecycle != .attached) return error.AlreadyDisconnected;
+        const binding = switch (self.sessions.queryService(handle, .terminal)) {
+            .available => |value| value,
+            else => return error.NotSupported,
+        };
+        if (!self.sessions.bindingIsLive(binding)) return error.StaleBinding;
+        const close = self.workspace.close_bridge;
+        const risk = if (close.risk) |probe| probe(close.context, mapping.legacy_id) else workspace_mod.CloseRisk{};
+        if (risk.any()) return error.ActiveReference;
+        const impact = if (close.impact) |probe| probe(close.context, mapping.legacy_id) else group_close.Impact{};
+        // impact.ai also includes the current lifecycle tool's own provider
+        // request. Concrete active execution is independently gated by risk
+        // and the runtime; the count itself is not permission to stop it.
+        if (impact.command != 0 or impact.transfer != 0 or impact.socks != 0 or impact.unknown != 0 or impact.remote_effect_unknown) return error.ActiveReference;
+        const native_revision = try runtime.preflightExplicitDisconnect(mapping.create_operation);
+        var hash = std.hash.Wyhash.init(0);
+        std.hash.autoHash(&hash, .{ risk, impact.command, impact.transfer, impact.ai, impact.socks, impact.unknown, impact.remote_effect_unknown, native_revision });
+        return .{ .create_operation = mapping.create_operation, .binding = binding, .impact_revision = hash.final() };
+    }
+    /// Enqueue only. The existing IO owner releases this channel/lease; the
+    /// runtime, pane, recording and exact SessionHost owner stay allocated.
+    pub fn requestSessionDisconnect(self: *ApplicationHost, operation: identity.HostOperationId, context: @import("../ai/host_tools.zig").Context, handle: identity.SessionHandle, create_operation: OperationKey, binding: session.ServiceHandle, impact_revision: u64) !DisconnectSnapshot {
+        if (self.disconnects.find(operation, context)) |prior| {
+            if (!prior.request.session.eql(handle) or !prior.request.create_operation.eql(create_operation) or !prior.request.binding.eql(binding) or prior.request.impact_revision != impact_revision) return error.ScopeChanged;
+            return prior.snapshot;
+        } else |err| if (err != error.NotFound) return err;
+        const checked = try self.preflightSessionDisconnect(handle);
+        if (!checked.create_operation.eql(create_operation) or !checked.binding.eql(binding) or checked.impact_revision != impact_revision) return error.ScopeChanged;
+        const mapping = self.findHandle(handle).?;
+        const runtime = self.workspace.sessionTab(mapping.legacy_id).?.runtime.?;
+        const prepared = try self.disconnects.prepare(self.allocator, .{ .operation_ref = operation, .context = context, .session = handle, .create_operation = create_operation, .binding = binding, .impact_revision = impact_revision }, @import("../platform/realtime.zig").monotonicNs());
+        const receipt = runtime.requestExplicitDisconnect(create_operation) catch |err| {
+            self.disconnects.rejectPrepared(operation);
+            return err;
+        };
+        mapping.explicit_disconnect = true;
+        if (mapping.reconnect_ticket) |*ticket| ticket.invalidate();
+        mapping.reconnect_ticket = null;
+        mapping.reconnect_policy = .{ .automatic = false, .max = 0, .backoff = @splat(0) };
+        _ = self.sessions.transportLost(handle, create_operation, .{ .domain = .host, .code = "ExplicitDisconnect", .cleanup = switch (receipt) {
+            .released => .released,
+            .awaiting => .releasing,
+            .unknown => .unknown,
+        }, .safe_message = "会话已明确断开，不自动重连" }) catch {
+            try prepared.entry.observe(create_operation, .unknown, @import("../platform/realtime.zig").monotonicNs());
+            return prepared.entry.snapshot;
+        };
+        mapping.runtime_loss_received = true;
+        mapping.failed_published = true;
+        mapping.recordFailure("会话已明确断开，不自动重连");
+        self.workspace.finishSshReconnect(mapping.legacy_id, create_operation, error.ExplicitDisconnect);
+        try prepared.entry.observe(create_operation, receipt, @import("../platform/realtime.zig").monotonicNs());
+        self.workspace.cx.requestRedraw();
+        return prepared.entry.snapshot;
+    }
+    pub fn querySessionDisconnect(self: *ApplicationHost, operation: identity.HostOperationId, context: @import("../ai/host_tools.zig").Context) !DisconnectSnapshot {
+        const entry = try self.disconnects.find(operation, context);
+        if (entry.snapshot.state == .disconnected) return entry.snapshot;
+        try entry.observe(entry.request.create_operation, .awaiting, @import("../platform/realtime.zig").monotonicNs());
+        const mapping = self.findHandle(entry.request.session) orelse return entry.snapshot;
+        if (!mapping.create_operation.eql(entry.request.create_operation)) return entry.snapshot;
+        const tab = self.workspace.sessionTab(mapping.legacy_id) orelse return entry.snapshot;
+        const runtime = tab.runtime orelse return entry.snapshot;
+        const notice = runtime.reconnectSnapshot() orelse return entry.snapshot;
+        if (notice.key == null or !notice.key.?.eql(entry.request.create_operation)) return error.StaleCreateOperation;
+        const receipt: disconnect.Receipt = if (notice.phase == .waiting or notice.phase == .releasing) notice.cleanup else .awaiting;
+        try entry.observe(entry.request.create_operation, receipt, @import("../platform/realtime.zig").monotonicNs());
+        return entry.snapshot;
+    }
+
     /// Manual and timer retries reserve the same ticket. Native IO starts only
     /// in safeTick, after the old attempt's real release receipt.
     pub fn requestSshReconnect(self: *ApplicationHost, id: LegacySessionId) !void {
@@ -1226,6 +1453,7 @@ pub const ApplicationHost = struct {
         if (state.lifecycle != .failed and state.lifecycle != .ended) return error.LifecycleDoesNotAllowRetry;
         if (mapping.reconnect_ticket == null) mapping.reconnect_ticket = .{ .key = mapping.create_operation, .deadline_ns = null };
         if (!mapping.reconnect_ticket.?.claim(mapping.create_operation, @import("../platform/realtime.zig").monotonicNs(), true)) return error.ReconnectAlreadyRequested;
+        mapping.explicit_disconnect = false;
         self.workspace.cx.requestRedraw();
     }
 
@@ -1441,6 +1669,9 @@ pub const ApplicationHost = struct {
     /// Domain API used by the command handler; no second journal is created.
     pub fn requestCloseLegacy(self: *ApplicationHost, id: LegacySessionId) !OperationKey {
         const handle = self.ownerForLegacy(id) orelse return error.UnknownSession;
+        if (self.lifecycle_supervisor.resource(handle)) |entry| {
+            if (entry.retained_metadata == null) entry.retained_metadata = self.captureSessionMetadata(handle);
+        }
         if (self.findHandle(handle)) |mapping| {
             const state = self.sessions.queryState(handle) orelse return error.StaleSession;
             if (state.close_operation == null and mapping.close_display == null) try self.freezeCloseDisplay(mapping);
@@ -1461,6 +1692,51 @@ pub const ApplicationHost = struct {
             if (mapping.waiting == null) mapping.waiting = .{ .key = key, .step = .release_content };
             return key;
         };
+    }
+
+    /// No archive IO or identity inference: only the live SessionHost binding
+    /// and its exact Service may supply recording identity before teardown.
+    fn captureSessionMetadata(self: *ApplicationHost, handle: identity.SessionHandle) lifecycle.SessionMetadata {
+        const mapping = self.findHandle(handle) orelse return .{};
+        const tab = self.workspace.sessionTab(mapping.legacy_id) orelse return .{};
+        if (tab.content_owner != .session or !tab.content_owner.session.eql(handle)) return .{};
+        const state = self.sessions.queryState(handle) orelse return .{};
+        var metadata = lifecycle.SessionMetadata.init(tab.titleSlice(), state.protocol_id);
+        const binding = switch (self.sessions.queryService(handle, .terminal)) {
+            .available => |binding| binding,
+            else => {
+                metadata.recording_unavailable_reason = "ServiceUnavailable";
+                return metadata;
+            },
+        };
+        const service = if (mapping.process) |process| process.terminalService(binding) catch return metadata else if (tab.runtime) |runtime| runtime.terminalService() catch return metadata else return metadata;
+        if (!service.binding.eql(binding) or service.binding.kind != .terminal or service.binding.resource_owner != .session or !service.binding.resource_owner.session.eql(handle) or !self.sessions.bindingIsLive(service.binding)) return metadata;
+        if (service.vtable.recording_identity != null) {
+            const facts = service.recordingIdentity() catch {
+                metadata.recording_unavailable_reason = "SnapshotUnavailable";
+                return metadata;
+            };
+            metadata.recording_id = facts.recording_id;
+            metadata.recording_generation = facts.recording_generation;
+            metadata.recording_unavailable_reason = if (facts.available) null else facts.failure orelse "RecordingUnavailable";
+            return metadata;
+        }
+        if (service.vtable.execution_snapshot == null) return metadata;
+        const facts = service.executionSnapshot() catch {
+            metadata.recording_unavailable_reason = "SnapshotUnavailable";
+            return metadata;
+        };
+        if (!facts.owner.eql(handle)) return metadata;
+        if (facts.recording_id) |id| {
+            _ = identity.RecordingId.parse(&id) catch return metadata;
+            if (facts.recording_generation == 0) return metadata;
+            metadata.recording_id = id;
+            metadata.recording_generation = facts.recording_generation;
+            metadata.recording_unavailable_reason = null;
+        } else if (facts.failure) |failure| {
+            if (std.mem.eql(u8, failure, "RecordingDisabled")) metadata.recording_unavailable_reason = "RecordingDisabled";
+        }
+        return metadata;
     }
 
     /// Freeze appearance while the exact live pane still owns it. The first
@@ -1688,7 +1964,7 @@ pub const ApplicationHost = struct {
                     _ = try self.sessions.createCleanupReceipt(mapping.handle, mapping.create_operation, .unknown);
                 };
             }
-            if (!self.windowClosePending()) if (self.workspace.initialConnectionRetryDeadline(mapping.create_operation)) |deadline| {
+            if (!mapping.explicit_disconnect and !self.windowClosePending()) if (self.workspace.initialConnectionRetryDeadline(mapping.create_operation)) |deadline| {
                 const state = self.sessions.queryState(mapping.handle) orelse continue;
                 if (state.lifecycle == .failed and state.create_cleanup == .released) {
                     if (@import("../platform/realtime.zig").monotonicNs() >= deadline) _ = try self.sessions.retry(mapping.handle);
@@ -1895,7 +2171,7 @@ pub const ApplicationHost = struct {
             self.workspace.finishSshReconnect(mapping.legacy_id, mapping.create_operation, notice.failure orelse error.ConnectionClosed);
             if (mapping.reconnect_policy == null) {
                 const policy = self.workspace.app_config.ssh;
-                mapping.reconnect_policy = .{ .automatic = self.lifecycle_supervisor.resource(mapping.handle) == null and policy.auto_reconnect and (notice.failure orelse error.ConnectionClosed) != error.Cancelled, .max = policy.reconnect_max, .backoff = policy.reconnect_backoff };
+                mapping.reconnect_policy = .{ .automatic = !mapping.explicit_disconnect and self.lifecycle_supervisor.resource(mapping.handle) == null and policy.auto_reconnect and (notice.failure orelse error.ConnectionClosed) != error.Cancelled, .max = policy.reconnect_max, .backoff = policy.reconnect_backoff };
             }
             const policy = mapping.reconnect_policy.?;
             const delay: ?i128 = if (policy.automatic and mapping.reconnect_count < policy.max and mapping.reconnect_count < policy.backoff.len)
@@ -3869,4 +4145,9 @@ test "tab new window freezes source after its saved host is removed" {
     try std.testing.expectEqualStrings("tester", frozen.remote.?.value.host.user);
     try std.testing.expectEqual(@as(u64, 17), frozen.remote.?.value.host_id);
     try std.testing.expectError(error.StaleSession, app.freezeTabWindowConnection(42));
+}
+
+test {
+    _ = @import("../ai/ssh_bootstrap_product.zig");
+    _ = @import("../host/runtime_service.zig");
 }

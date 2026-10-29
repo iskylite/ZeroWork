@@ -3,6 +3,8 @@
 //! exe 依赖的模块上会传播成重复链接（zenit build.zig 同款警告）。
 // Load the nested host UI contract even under a narrow test filter.
 comptime {
+    _ = @import("ai_inventory_grant_view_tests.zig");
+    _ = @import("host_secret_store_tests.zig");
     _ = @import("ui/ai_tools.zig");
     _ = @import("ui/terminal_document.zig");
     _ = @import("ui/layout_motion.zig");
@@ -13,6 +15,7 @@ comptime {
     _ = @import("file_application_host_tests.zig");
 }
 test {
+    _ = @import("ui/ai_host_terminal_queries.zig");
     _ = @import("terminal_search_service_tests.zig");
     _ = @import("ui/history_replay.zig");
     _ = @import("platform/snapshot_scratch.zig");

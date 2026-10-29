@@ -10,6 +10,8 @@ pub const Thread = struct {
     stop_requested: std.atomic.Value(bool) = .init(false),
     failed: std.atomic.Value(bool) = .init(false),
     joined: bool = false,
+    explicit_disconnect_requested: std.atomic.Value(bool) = .init(false),
+    explicit_disconnect_active: std.atomic.Value(bool) = .init(false),
     reconnect_control: reconnect.Control = reconnect.Control.init(null),
 
     pub fn start(allocator: std.mem.Allocator, worker: *SshWorker) !*Thread {
@@ -51,6 +53,73 @@ pub const Thread = struct {
     pub fn requestReconnect(self: *Thread, previous: OperationKey, next: OperationKey) !void {
         if (self.stop_requested.load(.acquire)) return error.WorkerStopped;
         try self.reconnect_control.request(previous, next);
+        self.explicit_disconnect_active.store(false, .release);
+    }
+
+    pub fn preflightExplicitDisconnect(self: *Thread, expected: OperationKey) !u64 {
+        return self.checkExplicitDisconnect(expected, false);
+    }
+    pub fn requestExplicitDisconnect(self: *Thread, expected: OperationKey) !void {
+        _ = try self.checkExplicitDisconnect(expected, true);
+    }
+    /// Bounded controller-side fence. It performs no native IO, no join and no
+    /// cancellation of another owner. The IO thread does the actual release.
+    fn checkExplicitDisconnect(self: *Thread, expected: OperationKey, accept: bool) !u64 {
+        if (self.stop_requested.load(.acquire) or self.explicit_disconnect_requested.load(.acquire)) return error.AlreadyDisconnected;
+        const notice = self.reconnect_control.snapshot();
+        if (notice.key == null or !notice.key.?.eql(expected)) return error.StaleCreateOperation;
+        if (notice.phase != .active) return error.AlreadyDisconnected;
+        const worker = self.worker;
+        if (!worker.native_mutex.tryLock()) return error.WorkerBusy;
+        defer worker.native_mutex.unlock();
+        if (!worker.execution_mutex.tryLock()) return error.WorkerBusy;
+        defer worker.execution_mutex.unlock();
+        if (worker.rebuilding.load(.acquire) or worker.options.operation_key == null or !worker.options.operation_key.?.eql(expected)) return error.StaleCreateOperation;
+        if (!worker.loop_active or worker.session.state != .active or worker.io.closed) return error.AlreadyDisconnected;
+        if (worker.input.pending() != 0 or worker.io.write_len != 0 or worker.io.repliesPending() or worker.startup_pending.load(.acquire)) return error.ActiveReference;
+        var hash = std.hash.Wyhash.init(0);
+        if (worker.execution) |*bridge| {
+            const snapshot = bridge.snapshot;
+            if (bridge.lease.holder != null or snapshot.grant != null or !snapshot.local_released or snapshot.remote_effect_unknown) return error.ActiveExecutionConflict;
+            switch (snapshot.state) {
+                .unavailable, .idle, .sealed, .interval_recorded, .cancelled_unsent => {},
+                else => return error.ActiveExecutionConflict,
+            }
+            std.hash.autoHash(&hash, .{ snapshot.execution_id, snapshot.revision, snapshot.input_epoch });
+        }
+        // Close the admission gate under the same mailbox lock as submit.
+        // Completed results may remain queryable; active queued/native calls
+        // must first obtain their own truthful terminal and release receipts.
+        if (worker.exec_bridge.mutex.swap(true, .acquire)) return error.WorkerBusy;
+        defer worker.exec_bridge.mutex.store(false, .release);
+        for (worker.exec_bridge.commands) |slot| if (slot) |item| {
+            if (item.state != .finished or item.cleanup != .released) return error.ActiveExecutionConflict;
+        };
+        if (worker.shared_transfer) |shared| {
+            if (shared.hasPending() or !shared.routing_released.load(.acquire)) return error.ActiveReference;
+        }
+        for (worker.forward_services[0..worker.forward_count], 0..) |service, index| if (service) |value| {
+            // A shared upstream service belongs to the transport, whose
+            // siblings retain it. Releasing this shell never closes it.
+            if (worker.shared_connection) |group| if (index < group.upstream.len and group.upstream[index] == value) continue;
+            if (value.mutex.swap(true, .acquire)) return error.WorkerBusy;
+            const snapshot = value.published;
+            const pending = value.pending != null;
+            value.mutex.store(false, .release);
+            if (pending or snapshot.cleanup != .released or (snapshot.phase != .off and snapshot.phase != .failed)) return error.ActiveReference;
+            std.hash.autoHash(&hash, .{ snapshot.key, snapshot.phase, snapshot.cleanup });
+        };
+        if (accept) {
+            worker.exec_bridge.close_requested.store(true, .release);
+            worker.replay.setEnabled(false);
+            worker.replay.ended(&worker.input);
+            worker.presentation_attached.store(false, .release);
+            self.explicit_disconnect_active.store(true, .release);
+            self.reconnect_control.lost(expected, .awaiting, error.ExplicitDisconnect);
+            self.explicit_disconnect_requested.store(true, .release);
+            worker.wakeup.notify();
+        }
+        return hash.final();
     }
 
     pub fn markAttached(self: *Thread, key: OperationKey) bool {
@@ -68,8 +137,12 @@ pub const Thread = struct {
         var failure: ?anyerror = null;
         while (!self.stop_requested.load(.acquire)) {
             if (failure == null) {
+                if (self.explicit_disconnect_requested.swap(false, .acq_rel)) {
+                    failure = error.ExplicitDisconnect;
+                    self.worker.auto_reconnect = false;
+                }
                 const timeout: u32 = if (self.worker.io.feed.republish_pending) 8 else 50;
-                self.worker.step(timeout) catch |err| {
+                if (failure == null) self.worker.step(timeout) catch |err| {
                     failure = err;
                 };
                 if (failure == null) {
@@ -79,14 +152,16 @@ pub const Thread = struct {
                     continue;
                 }
                 self.worker.presentation_attached.store(false, .release);
-                if (failure.? != error.ShellEnded and failure.? != error.ForwardParentClosing) {
+                if (failure.? != error.ShellEnded and failure.? != error.ForwardParentClosing and failure.? != error.ExplicitDisconnect) {
                     self.worker.transportFailed();
                     self.worker.reconnect.suspect(null);
                     self.failed.store(true, .release);
                 }
+                if (failure.? == error.ExplicitDisconnect) self.worker.reconnect.suspect(null);
             }
             const shell_ended = failure.? == error.ShellEnded;
             if (!shell_ended) self.worker.disconnectInput();
+            if (failure.? == error.ExplicitDisconnect) self.worker.replay.ended(&self.worker.input);
             // This remains the sole native IO owner. An unknown release never
             // grants a replacement, and no controller callback closes a socket.
             var receipt = self.worker.releaseConnection();
@@ -161,6 +236,11 @@ test "worker thread notifies shell end and cleanup changes without repeated idle
     defer _ = wake.take();
     const key: OperationKey = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(7) } }, .operation_id = 1, .attempt_id = 1 };
     var worker: SshWorker = undefined;
+    worker.execution = null;
+    worker.execution_mutex = .unlocked;
+    worker.execution_recording = null;
+    worker.execution_control = null;
+    worker.execution_deployment = null;
     worker.options = .{ .host = "fixture", .user = "fixture", .auth = .agent, .operation_key = key };
     worker.shell_exit_code = 7;
     var thread: Thread = undefined;
@@ -183,6 +263,11 @@ test "worker thread notifies transport loss without any terminal text" {
     defer _ = wake.take();
     const key: OperationKey = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(7) } }, .operation_id = 1, .attempt_id = 1 };
     var worker: SshWorker = undefined;
+    worker.execution = null;
+    worker.execution_mutex = .unlocked;
+    worker.execution_recording = null;
+    worker.execution_control = null;
+    worker.execution_deployment = null;
     worker.options = .{ .host = "fixture", .user = "fixture", .auth = .agent, .operation_key = key };
     var thread: Thread = undefined;
     thread.worker = &worker;

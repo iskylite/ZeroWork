@@ -810,3 +810,302 @@ test "production Local precise user input handoff keeps builtin foreground and a
     const fresh = try f.wait(.interval_recorded);
     try std.testing.expect(fresh.execution_fence > grant.fence and !fresh.input_handed_off);
 }
+
+test "production Local controlled helper privately consumes bounded text and Enter without guessing child input" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.run("zerowork_read; print -r -- \"received:$REPLY\"");
+    const deadline = native.zw_local_monotonic_ms() + 5000;
+    var waiting: execution.Snapshot = undefined;
+    while (true) {
+        try f.tick();
+        waiting = try f.awaitSnapshot();
+        if (waiting.input_wait != null) break;
+        if (waiting.failure != null or native.zw_local_monotonic_ms() >= deadline) return error.InputWaitTimeout;
+        pause();
+    }
+    try std.testing.expect(waiting.state == .running and waiting.input_wait.?.kind == .controlled_line);
+    const text = "private-line-界😀";
+    const request: execution.InputRequest = .{ .grant = waiting.grant.?, .wait_sequence = waiting.input_wait.?.sequence, .input_sequence = 19, .kind = .text, .text = text };
+    var queued: execution.InputReceipt = undefined;
+    while (true) {
+        queued = f.service.?.executionInput(request) catch |err| {
+            if (err == error.WorkerBusy) {
+                try f.tick();
+                pause();
+                continue;
+            }
+            return err;
+        };
+        break;
+    }
+    try std.testing.expect(queued.stage == .queued);
+    while (true) {
+        try f.tick();
+        waiting = try f.awaitSnapshot();
+        if (waiting.input_receipt != null and waiting.input_receipt.?.stage == .consumed) break;
+        if (waiting.failure != null or native.zw_local_monotonic_ms() >= deadline) return error.InputConsumedTimeout;
+        pause();
+    }
+    try std.testing.expectEqual(text.len, waiting.input_receipt.?.accepted_bytes);
+    try std.testing.expect(waiting.input_wait != null);
+    try std.testing.expect(std.mem.indexOf(u8, f.output.items, text) == null);
+    // Exact replay returns its original consumed receipt without another frame.
+    while (true) {
+        const repeated = f.service.?.executionInput(request) catch |err| {
+            if (err == error.WorkerBusy) {
+                try f.tick();
+                pause();
+                continue;
+            }
+            return err;
+        };
+        try std.testing.expect(repeated.stage == .consumed and repeated.input_sequence == 19);
+        break;
+    }
+    var conflict = request;
+    conflict.text = "different";
+    try f.expectFailure(@TypeOf(f.service.?).executionInput, .{ f.service.?, conflict }, error.InputConflict);
+    const enter: execution.InputRequest = .{ .grant = waiting.grant.?, .wait_sequence = waiting.input_wait.?.sequence, .input_sequence = 20, .kind = .enter };
+    while (true) {
+        _ = f.service.?.executionInput(enter) catch |err| {
+            if (err == error.WorkerBusy) {
+                try f.tick();
+                pause();
+                continue;
+            }
+            return err;
+        };
+        break;
+    }
+    const finished = try f.wait(.interval_recorded);
+    try std.testing.expect(finished.input_wait == null and finished.input_receipt.?.stage == .consumed and finished.input_receipt.?.kind == .enter);
+    try std.testing.expectEqual(@as(?u8, 0), finished.process.?.exit_code);
+    try std.testing.expect(std.mem.indexOf(u8, f.output.items, "received:" ++ text) != null);
+}
+
+test "production Local controlled helper hands input to user and ordinary child read never attests a wait" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.run("zerowork_read; print -r -- \"user:$REPLY\"");
+    const deadline = native.zw_local_monotonic_ms() + 5000;
+    var waiting: execution.Snapshot = undefined;
+    while (true) {
+        try f.tick();
+        waiting = try f.awaitSnapshot();
+        if (waiting.input_wait != null) break;
+        if (waiting.failure != null or native.zw_local_monotonic_ms() >= deadline) return error.InputWaitTimeout;
+        pause();
+    }
+    const grant = waiting.grant.?;
+    const stale: execution.InputRequest = .{ .grant = grant, .wait_sequence = waiting.input_wait.?.sequence, .input_sequence = 31, .kind = .text, .text = "never-replayed" };
+    while (true) {
+        f.service.?.executionRevoke(grant, true) catch |err| {
+            if (err == error.WorkerBusy) {
+                try f.tick();
+                pause();
+                continue;
+            }
+            return err;
+        };
+        break;
+    }
+    try f.expectFailure(terminal.Service.executionInput, .{ f.service.?, stale }, error.StaleFence);
+    while (true) {
+        const current = f.service.?.status() catch |err| {
+            if (err == error.WorkerBusy) {
+                try f.tick();
+                pause();
+                continue;
+            }
+            return err;
+        };
+        _ = f.service.?.write(.{ .input_sequence = 1, .mode_revision = current.mode_revision, .bytes = "human-line\r" }) catch |err| {
+            if (err == error.WorkerBusy) {
+                try f.tick();
+                pause();
+                continue;
+            }
+            return err;
+        };
+        break;
+    }
+    const finished = try f.wait(.interval_recorded);
+    try std.testing.expect(finished.input_handed_off and finished.process.?.exit_code == 0 and !finished.remote_effect_unknown);
+    try std.testing.expect(std.mem.indexOf(u8, f.output.items, "user:human-line") != null);
+    try std.testing.expect(std.mem.indexOf(u8, f.output.items, "never-replayed") == null);
+    try f.run("builtin read -r REPLY; print -r -- \"ordinary:$REPLY\"");
+    const running = try f.wait(.running);
+    try std.testing.expect(running.input_wait == null);
+    const unsupported: execution.InputRequest = .{ .grant = running.grant.?, .wait_sequence = 99, .input_sequence = 32, .kind = .text, .text = "never-child-input" };
+    try f.expectFailure(terminal.Service.executionInput, .{ f.service.?, unsupported }, error.InputNotExpected);
+    while (true) {
+        f.service.?.executionRevoke(running.grant.?, true) catch |err| {
+            if (err == error.WorkerBusy) {
+                try f.tick();
+                pause();
+                continue;
+            }
+            return err;
+        };
+        break;
+    }
+    while (true) {
+        const current = f.service.?.status() catch |err| {
+            if (err == error.WorkerBusy) {
+                try f.tick();
+                pause();
+                continue;
+            }
+            return err;
+        };
+        _ = f.service.?.write(.{ .input_sequence = 2, .mode_revision = current.mode_revision, .bytes = "manual-only\r" }) catch |err| {
+            if (err == error.WorkerBusy) {
+                try f.tick();
+                pause();
+                continue;
+            }
+            return err;
+        };
+        break;
+    }
+    _ = try f.wait(.interval_recorded);
+    try std.testing.expect(std.mem.indexOf(u8, f.output.items, "ordinary:manual-only") != null);
+    try std.testing.expect(std.mem.indexOf(u8, f.output.items, "never-child-input") == null);
+}
+
+test "production Local native secret consumer uses private bytes and reports only erased consumption" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    // A forked builtin child inherits the old control descriptor before the
+    // consumer opens its new socket. It must never receive secret bytes.
+    try f.run("(if zselect -r $_zw_exec_fd -t 10; then sysread -i $_zw_exec_fd stolen; print -r -- 'OLD-FD-'\"READ:$stolen\"; fi) & zerowork_secret_consume; wait; print -r -- 'native-secret-consumer-finished'");
+    const deadline = native.zw_local_monotonic_ms() + 5000;
+    var waiting: execution.Snapshot = undefined;
+    while (true) {
+        try f.tick();
+        waiting = try f.awaitSnapshot();
+        if (waiting.input_wait != null) break;
+        if (waiting.failure != null or native.zw_local_monotonic_ms() >= deadline) return error.SecretWaitTimeout;
+        pause();
+    }
+    try std.testing.expect(waiting.input_wait.?.kind == .host_secret);
+    const request: execution.InputRequest = .{ .grant = waiting.grant.?, .wait_sequence = waiting.input_wait.?.sequence, .input_sequence = 52, .kind = .host_secret };
+    var forbidden = request;
+    forbidden.kind = .text;
+    forbidden.text = "not-a-password";
+    try f.expectFailure(terminal.Service.executionInput, .{ f.service.?, forbidden }, error.SecretMustUseHost);
+    while (true) {
+        const receipt = f.service.?.executionSecret(.{ .begin = request }) catch |err| {
+            if (err == error.WorkerBusy) {
+                try f.tick();
+                pause();
+                continue;
+            }
+            return err;
+        };
+        try std.testing.expect(receipt.stage == .awaiting_host_secret and receipt.kind == .host_secret);
+        break;
+    }
+    // Includes NUL/control/non-UTF8 bytes to prove counted private framing. They
+    // must never be mistaken for a terminal key, echo, shell value or command.
+    var secret = "TEST-PRIVATE-SECRET-946c\x00\xff\n".*;
+    defer std.crypto.secureZero(u8, &secret);
+    while (true) {
+        const receipt = f.service.?.executionSecret(.{ .submit = .{ .request = request, .bytes = &secret } }) catch |err| {
+            if (err == error.WorkerBusy) {
+                try f.tick();
+                pause();
+                continue;
+            }
+            return err;
+        };
+        try std.testing.expect(receipt.stage == .queued);
+        break;
+    }
+    const finished = try f.wait(.interval_recorded);
+    try std.testing.expect(finished.input_wait == null and finished.input_receipt.?.kind == .host_secret and finished.input_receipt.?.stage == .consumed and finished.input_receipt.?.accepted_bytes == 0);
+    try std.testing.expectEqual(@as(?u8, 0), finished.process.?.exit_code);
+    try std.testing.expect(std.mem.indexOf(u8, f.output.items, "TEST-PRIVATE-SECRET-946c") == null);
+    var observed = try f.service.?.executionOutput(finished.execution_id.?, a, 0, 8192);
+    defer observed.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, observed.bytes, "TEST-PRIVATE-SECRET-946c") == null);
+    try std.testing.expect(std.mem.indexOf(u8, observed.bytes, "OLD-FD-READ:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, observed.bytes, "native-secret-consumer-finished") != null);
+    for ([_]terminal.RecordingKind{ .txt, .cast }) |kind| {
+        const path = if (kind == .txt) "secret-safe.txt" else "secret-safe.cast";
+        while (true) {
+            f.service.?.exportRecording(kind, std.testing.io, f.tmp.dir, path) catch |err| {
+                if (err == error.WorkerBusy) {
+                    try f.tick();
+                    pause();
+                    continue;
+                }
+                return err;
+            };
+            break;
+        }
+        const recording = try f.tmp.dir.readFileAlloc(std.testing.io, path, a, .limited(1024 * 1024));
+        defer a.free(recording);
+        try std.testing.expect(std.mem.indexOf(u8, recording, "TEST-PRIVATE-SECRET-946c") == null);
+        try std.testing.expect(std.mem.indexOf(u8, recording, "native-secret-consumer-finished") != null);
+    }
+}
+
+test "production Local native secret request cancels and loses its exact grant without replay or terminal bytes" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    for ([_]bool{ false, true }) |takeover| {
+        try f.run("zerowork_secret_consume");
+        const deadline = native.zw_local_monotonic_ms() + 5000;
+        var waiting: execution.Snapshot = undefined;
+        while (true) {
+            try f.tick();
+            waiting = try f.awaitSnapshot();
+            if (waiting.input_wait != null) break;
+            if (waiting.failure != null or native.zw_local_monotonic_ms() >= deadline) return error.SecretWaitTimeout;
+            pause();
+        }
+        const request: execution.InputRequest = .{ .grant = waiting.grant.?, .wait_sequence = waiting.input_wait.?.sequence, .input_sequence = 1, .kind = .host_secret };
+        while (true) {
+            _ = f.service.?.executionSecret(.{ .begin = request }) catch |err| {
+                if (err == error.WorkerBusy) {
+                    try f.tick();
+                    pause();
+                    continue;
+                }
+                return err;
+            };
+            break;
+        }
+        while (true) {
+            if (takeover) {
+                f.service.?.executionRevoke(request.grant, true) catch |err| {
+                    if (err == error.WorkerBusy) {
+                        try f.tick();
+                        pause();
+                        continue;
+                    }
+                    return err;
+                };
+            } else {
+                const receipt = f.service.?.executionSecret(.{ .cancel = request }) catch |err| {
+                    if (err == error.WorkerBusy) {
+                        try f.tick();
+                        pause();
+                        continue;
+                    }
+                    return err;
+                };
+                try std.testing.expect(receipt.stage == .cancelled_unsent);
+            }
+            break;
+        }
+        const finished = try f.wait(.interval_recorded);
+        try std.testing.expectEqual(@as(?u8, 1), finished.process.?.exit_code);
+        try std.testing.expect(finished.input_receipt.?.stage == .cancelled_unsent and finished.input_wait == null and finished.local_released and !finished.remote_effect_unknown);
+        try std.testing.expectEqual(takeover, finished.input_handed_off);
+        try f.expectFailure(terminal.Service.executionSecret, .{ f.service.?, execution.SecretAction{ .submit = .{ .request = request, .bytes = "CANCELLED-SECRET-NEVER-SENT" } } }, error.StaleFence);
+        try std.testing.expect(std.mem.indexOf(u8, f.output.items, "CANCELLED-SECRET-NEVER-SENT") == null);
+    }
+}

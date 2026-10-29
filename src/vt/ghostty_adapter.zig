@@ -493,6 +493,11 @@ pub const Adapter = struct {
         self.row_metadata.annotateSearch(self.terminal, document.rows);
         return document;
     }
+    pub fn contentQuery(self: *Adapter, owner: @import("../host/identity.zig").SessionHandle, request: @import("../host/terminal_service.zig").ContentRequest, allocator: std.mem.Allocator) !@import("../host/terminal_service.zig").ContentCapture {
+        if (!self.mutex.tryLock()) return error.WorkerBusy;
+        defer self.mutex.unlock();
+        return @import("content_query.zig").capture(self, owner, request, allocator);
+    }
     pub fn searchTail(self: *Adapter, allocator: std.mem.Allocator, start: u32, max_rows: u16, version: u64) !@import("search_snapshot.zig").Document {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
         defer self.mutex.unlock();

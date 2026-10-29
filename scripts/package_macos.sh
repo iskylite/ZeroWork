@@ -21,16 +21,19 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$OUT"
 cp "$STAGING/build/bin/zerowork" "$APP/Contents/MacOS/ZeroWork"
 cp "$STAGING/build/bin/zw_ipc.so" "$APP/Contents/MacOS/zw_ipc.so"
 cp "$STAGING/build/bin/zw_execution.so" "$APP/Contents/MacOS/zw_execution.so"
+cp "$STAGING/build/bin/zw_secret_consume.so" "$APP/Contents/MacOS/zw_secret_consume.so"
 cp "$STAGING/build/bin/zw_execution_guard" "$APP/Contents/MacOS/zw_execution_guard"
+cp -R "$STAGING/build/share/zerowork/ssh-bootstrap" "$APP/Contents/Resources/ssh-bootstrap"
 cp assets/macos/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 cp LICENSE "$APP/Contents/Resources/LICENSE"
 cp vendor/DEPENDENCIES.md "$APP/Contents/Resources/DEPENDENCIES.md"
 cp docs/UI_V3/assets/fonts/Inter-OFL.txt "$APP/Contents/Resources/Inter-OFL.txt"
 cp docs/UI_V3/assets/fonts/JetBrainsMono-OFL.txt "$APP/Contents/Resources/JetBrainsMono-OFL.txt"
-xcrun strip -S "$APP/Contents/MacOS/ZeroWork" "$APP/Contents/MacOS/zw_ipc.so" "$APP/Contents/MacOS/zw_execution.so" "$APP/Contents/MacOS/zw_execution_guard"
+xcrun strip -S "$APP/Contents/MacOS/ZeroWork" "$APP/Contents/MacOS/zw_ipc.so" "$APP/Contents/MacOS/zw_execution.so" "$APP/Contents/MacOS/zw_secret_consume.so" "$APP/Contents/MacOS/zw_execution_guard"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/ZeroWork"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_ipc.so"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_execution.so"
+python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_secret_consume.so"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_execution_guard"
 python3 - "$APP" "$VERSION" <<'PY'
 import pathlib,plistlib,sys
@@ -44,6 +47,7 @@ PY
 # Always resolve a persistent identity before the build; never fall back to ad-hoc.
 codesign --force --deep --sign "$SIGNING_IDENTITY" --identifier com.zerowork.app "$APP"
 codesign --verify --deep --strict "$APP"
+python3 scripts/build_ssh_bootstrap.py --output "$APP/Contents/Resources/ssh-bootstrap/v1" --verify-only
 SIGNING_NOTICE="应用已使用固定代码签名证书签名；本打包流程未执行 Apple 公证。"
 ln -s /Applications "$STAGING/image/Applications"
 cat > "$STAGING/image/安装说明.txt" <<TXT

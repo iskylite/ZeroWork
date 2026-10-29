@@ -219,6 +219,112 @@ test "AI composer permission labels preserve real confirm and auto modes and onl
     try std.testing.expectEqualStrings("自动执行", f.view.buttons[1].behavior.interaction.a11y.?.label.?);
 }
 
+test "AI composer inventory revocation exists only for a continuous current conversation grant" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    try std.testing.expectEqual(.none, f.view.inventory_revoke.style.display);
+    var granted = f.snapshot();
+    granted.inventory_authorized = true;
+    granted.inventory_conversation_id = .{ .bytes = @splat(7) };
+    try f.view.update(granted);
+    f.settle();
+    f.enter(f.view.buttons[1]);
+    const menu = find(f.cx.root.?, "ai.permission.menu").?;
+    try std.testing.expectEqual(@as(f32, 232), menu.globalRect().h);
+    try std.testing.expect(hasText(f.view.inventory_revoke, "撤销会话列表授权"));
+    const row = f.view.inventory_revoke.globalRect();
+    const bounds = menu.globalRect();
+    try std.testing.expect(row.y >= bounds.y and row.y + row.h <= bounds.y + bounds.h);
+    f.enter(f.view.inventory_revoke);
+    try std.testing.expectEqual(@as(usize, 1), f.calls);
+    try std.testing.expect(f.last.?.action == .revoke_inventory);
+    try std.testing.expect(f.last.?.action.revoke_inventory.eql(granted.inventory_conversation_id.?));
+    try std.testing.expectEqual(Controls.PermissionMode.confirm, f.view.source.?.value.permission);
+    try f.view.update(f.snapshot());
+    f.settle();
+    try std.testing.expectEqual(.none, f.view.inventory_revoke.style.display);
+    f.enter(f.view.buttons[1]);
+    try std.testing.expectEqual(@as(f32, 194), menu.globalRect().h);
+}
+
+test "AI composer running conversation permits only inventory revocation without enabling configuration changes" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var running = f.snapshot();
+    running.editable = false;
+    running.inventory_authorized = true;
+    running.inventory_conversation_id = .{ .bytes = @splat(7) };
+    try f.view.update(running);
+    f.settle();
+    try std.testing.expect(!f.view.disabled[1].peek());
+    try std.testing.expect(f.view.permission_disabled.peek());
+    try std.testing.expect(f.view.disabled[2].peek());
+    try std.testing.expect(f.view.disabled[5].peek());
+    f.enter(f.view.buttons[1]);
+    try std.testing.expect(f.cx.focus_manager.current_focus == f.view.inventory_revoke);
+    f.click(f.view.permission_rows[1]);
+    try std.testing.expectEqual(@as(usize, 0), f.calls);
+    f.enter(f.view.inventory_revoke);
+    try std.testing.expectEqual(@as(usize, 1), f.calls);
+    try std.testing.expect(f.last.?.action == .revoke_inventory);
+    running.inventory_authorized = false;
+    try f.view.update(running);
+    f.settle();
+    try std.testing.expect(f.view.disabled[1].peek());
+    try std.testing.expectEqual(.none, f.view.inventory_revoke.style.display);
+    try std.testing.expect(!f.view.isOpen());
+}
+
+test "AI composer pending revocation removal and rebinding reject stale permission actions" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var granted = f.snapshot();
+    granted.inventory_authorized = true;
+    granted.inventory_conversation_id = .{ .bytes = @splat(7) };
+    try f.view.update(granted);
+    f.settle();
+    f.enter(f.view.buttons[1]);
+    try f.view.update(f.snapshot());
+    f.enter(f.view.inventory_revoke);
+    try std.testing.expectEqual(@as(usize, 0), f.calls);
+    granted.owner = .{ .session = 202 };
+    try f.view.update(granted);
+    f.settle();
+    try std.testing.expect(!f.view.isOpen());
+    f.enter(f.view.inventory_revoke);
+    try std.testing.expectEqual(@as(usize, 0), f.calls);
+}
+
+test "AI composer inventory menu keeps its captured conversation when the binding projection changes" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var granted = f.snapshot();
+    granted.inventory_authorized = true;
+    // A missing exact conversation identity cannot expose a revoke action.
+    try f.view.update(granted);
+    f.settle();
+    try std.testing.expectEqual(.none, f.view.inventory_revoke.style.display);
+    granted.inventory_conversation_id = .{ .bytes = @splat(7) };
+    try f.view.update(granted);
+    f.settle();
+    f.enter(f.view.buttons[1]);
+    granted.inventory_conversation_id = .{ .bytes = @splat(8) };
+    try f.view.update(granted);
+    f.settle();
+    // Owner and config revision deliberately stay equal across conversations.
+    f.enter(f.view.inventory_revoke);
+    try std.testing.expectEqual(@as(usize, 0), f.calls);
+    f.enter(f.view.buttons[1]);
+    f.enter(f.view.buttons[1]);
+    f.enter(f.view.inventory_revoke);
+    try std.testing.expectEqual(@as(usize, 1), f.calls);
+    try std.testing.expect(f.last.?.action.revoke_inventory.eql(granted.inventory_conversation_id.?));
+}
+
 test "AI composer effort is a real slider whose keyboard skips unsupported model steps" {
     var f: Fixture = undefined;
     try f.init();

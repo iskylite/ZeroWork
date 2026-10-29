@@ -25,9 +25,17 @@ test "exec bound service rejects stale generation and preserves original call id
     try std.testing.expectEqual(binding, snapshot.value.service_binding.?);
     try std.testing.expectEqualStrings("/tmp/a'b\nc", snapshot.value.cwd.?);
     try std.testing.expectEqual(types.Status.queued, snapshot.value.status);
+    try std.testing.expectEqual(types.Phase.queued, snapshot.value.diagnostics.phase);
+    try std.testing.expectEqual(@as(?bool, false), snapshot.value.diagnostics.request_started);
     service.close();
     try service.step();
     try std.testing.expectEqual(ssh.ReleaseReceipt.released, service.closeReceipt());
+    // The owned snapshot retains its actual observation, independent of the
+    // later cancellation/cleanup state of that same original call.
+    try std.testing.expectEqual(types.Phase.queued, snapshot.value.diagnostics.phase);
+    const cancelled = exec.SshExecBridge.pollHandle(handle).?;
+    try std.testing.expectEqual(@as(?types.Phase, .queued), cancelled.diagnostics.stopped_phase);
+    try std.testing.expectEqual(@as(?bool, false), cancelled.diagnostics.request_started);
 }
 
 test "exec native step cannot move to a second live IO thread" {

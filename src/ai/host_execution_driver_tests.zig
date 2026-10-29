@@ -114,6 +114,7 @@ const Backend = struct {
         try self.check();
         const target: *Target = @ptrCast(@alignCast(facade.context));
         switch (action) {
+            .input => return error.UnsupportedInteraction,
             .snapshot => {
                 if (target.revoked and self.permit_drain and !target.snapshot.local_released) {
                     target.snapshot.local_released = true;
@@ -569,4 +570,31 @@ test "execution driver exact stop rejects stale handed-off and foreign cards wit
     try std.testing.expect(std.meta.eql(original, preserved_natural) and std.meta.eql(old_handoff, preserved_handoff));
     for ([_]usize{ 0, 2, 3 }) |index| try std.testing.expect(backend.targets[index].interrupt_calls == 0 and backend.targets[index].snapshot.state == .running);
     try std.testing.expect(!driver.taskEvidenceFor(context).?.model_done and !driver.taskEvidenceFor(other_task).?.model_done);
+}
+
+test "execution command index copies only exact conversation generation and host submitted facts" {
+    const cid = identity.ConversationId.generate();
+    const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(7), .generation = 3 };
+    const id = identity.ExecutionId.generate();
+    var driver: driver_mod.Driver = .{ .allocator = a, .journal_owner = undefined, .scheduler = undefined, .backend = undefined, .controller = undefined, .wake = undefined };
+    driver.command_records[0] = .{ .conversation_id = cid, .target = target, .execution_id = id, .command = "printf approved", .submitted_at_ms = 20, .revision = 9, .verified = true, .exit_code = 0, .complete = false };
+    driver.command_records[1] = .{ .conversation_id = .generate(), .target = target, .execution_id = .generate(), .command = "other conversation", .submitted_at_ms = 21, .revision = 10, .verified = false, .exit_code = null, .complete = false };
+    var next_generation = target;
+    next_generation.generation += 1;
+    driver.command_records[2] = .{ .conversation_id = cid, .target = next_generation, .execution_id = .generate(), .command = "replacement session", .submitted_at_ms = 22, .revision = 11, .verified = false, .exit_code = null, .complete = false };
+    var snapshot = try driver.commandIndex(a, cid, target);
+    defer snapshot.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.records.len);
+    try std.testing.expectEqualStrings("printf approved", snapshot.records[0].submitted_command);
+    try std.testing.expect(snapshot.records[0].verified and !snapshot.records[0].complete and snapshot.records[0].start_line == null and snapshot.records[0].end_line == null);
+    try std.testing.expect(snapshot.records[0].execution_id.?.eql(id));
+    try std.testing.expect(std.mem.indexOf(u8, snapshot.records[0].reference, &std.fmt.bytesToHex(cid.bytes, .lower)) != null);
+    @constCast(snapshot.records[0].submitted_command)[0] = 'X';
+    var independent = try driver.commandIndex(a, cid, target);
+    defer independent.deinit(a);
+    try std.testing.expectEqualStrings("printf approved", independent.records[0].submitted_command);
+    try std.testing.expectEqual(snapshot.revision, independent.revision);
+    var empty = try driver.commandIndex(a, cid, .{ .session_id = target.session_id, .generation = 99 });
+    defer empty.deinit(a);
+    try std.testing.expectEqual(@as(usize, 0), empty.records.len);
 }

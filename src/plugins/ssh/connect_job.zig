@@ -46,6 +46,7 @@ pub const ConnectJob = struct {
     host_key_store: host_key_policy.HostKeyStore,
     initial_input: ?[]u8 = null,
     shared_connection: ?@import("../../host/runtime_service.zig").SharedLease = null,
+    bootstrap: ?*@import("../../ai/ssh_bootstrap_product.zig").Prepared = null,
     deferred_shared_destroy: bool = false,
     shared_graph_refs: usize = 0,
     destroy_mutex: std.atomic.Mutex = .unlocked,
@@ -119,6 +120,7 @@ pub const ConnectJob = struct {
             return;
         }
         if (job.shared_connection) |lease| lease.release();
+        if (job.bootstrap) |prepared| prepared.release();
         if (job.initial_input) |input| std.heap.c_allocator.free(input);
         job.host_key_store.deinit();
         job.io_instance.deinit();
@@ -198,6 +200,7 @@ fn sharedGraphReleased(raw: *anyopaque) void {
 pub fn runtimeTarget(job: *ConnectJob) @import("../../ui/session_runtime.zig").HostTarget {
     var target = @import("../../ui/session_runtime.zig").targetFromHost(job.host_snapshot.value, job.jump_snapshot.value);
     target.shared_connection = job.shared_connection;
+    target.bootstrap = if (job.bootstrap) |prepared| &prepared.plan else null;
     target.connection_lifetime = .{ .context = job, .retain = sharedGraphRetained, .call = sharedGraphReleased };
     target.operation_key = job.operation_key;
     target.resource_ledger = &job.resource_ledger;

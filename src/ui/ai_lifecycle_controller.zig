@@ -79,7 +79,10 @@ pub const Controller = struct {
         return switch (kind) {
             .create_group => self.authority.binding == .session,
             .open_session, .rename_group, .add_group_member, .remove_group_member => self.authority.binding == .group,
-            .disconnect_session => false,
+            .disconnect_session => blk: {
+                for (self.app.mappings.items) |mapping| if (self.inBinding(mapping.handle) and self.app.supportsSessionDisconnect(mapping.handle)) break :blk true;
+                break :blk false;
+            },
             .reconnect_session => blk: {
                 for (self.app.mappings.items) |mapping| if (self.inBinding(mapping.handle) and self.app.supportsIntegration(mapping.handle, "transport_loss")) break :blk true;
                 break :blk false;
@@ -96,7 +99,7 @@ pub const Controller = struct {
         try authority.validate();
         if (!authority.conversation_id.eql(self.authority.conversation_id) or !authority.task_id.eql(self.authority.task_id)) return error.ScopeChanged;
         const state = self.store.findConversation(authority.conversation_id) orelse return error.ConversationNotFound;
-        if (state.closed or !state.owner.eql(authority.binding) or state.binding_revision != authority.binding_revision or self.bridge.policy_revision != authority.grant_revision or authority.grant_revision != self.authority.grant_revision or self.app.workspace.app_config.config_revision != self.config_revision) return error.ScopeChanged;
+        if (state.closed or !state.owner.eql(authority.binding) or state.binding_revision != authority.binding_revision or self.bridge.policy_revision != self.config_revision or authority.grant_revision != self.authority.grant_revision or self.app.workspace.app_config.config_revision != self.config_revision) return error.ScopeChanged;
         self.authority = authority;
     }
     /// Called on the controller thread only after its worker joined. This is
@@ -111,7 +114,7 @@ pub const Controller = struct {
         self.* = undefined;
     }
     fn validateAuthority(self: *Controller, context: host.Context) !void {
-        if (!self.authority.eql(context) or self.bridge.policy_revision != context.grant_revision or self.app.workspace.app_config.config_revision != self.config_revision) return error.ScopeChanged;
+        if (!self.authority.eql(context) or self.bridge.policy_revision != self.config_revision or self.app.workspace.app_config.config_revision != self.config_revision) return error.ScopeChanged;
         const state = self.store.findConversation(context.conversation_id) orelse return error.ConversationNotFound;
         if (state.closed or !state.owner.eql(context.binding) or state.binding_revision != context.binding_revision) return error.BindingConflict;
         if (self.app.workspace.shutting_down or self.app.windowClosePending()) return error.WorkspaceClosed;
@@ -214,6 +217,15 @@ pub const Controller = struct {
                     try self.authorizeAsset(request.saved_source.?);
                     if (request.connection_policy == .reuse_only) return error.ReuseUnavailable;
                 }
+                const wants_trusted = request.interactive_execution or self.execution_policy.execution_mode == .new_pty or if (self.bridge.route_broker) |broker| broker.execution_route.requiresPtyCreate(context, if (request.source) |source| .{ .session = source } else .{ .saved = request.saved_source.? }) else false;
+                if (request.source) |source| {
+                    result.bootstrap_required = wants_trusted and self.app.findHandle(source).?.process == null;
+                } else if (wants_trusted) return error.BootstrapRequiresSharedSource;
+                if (result.bootstrap_required) {
+                    if (request.connection_policy != .reuse_only) return error.BootstrapRequiresSharedSource;
+                    const source_mapping = self.app.findHandle(request.source.?).?;
+                    if (source_mapping.source) |saved| if (saved.value.host.startup_commands.len != 0) return error.BootstrapStartupInputConflict;
+                }
                 // Exact approval explicitly includes any new transport fallback.
                 result.allow_new_fallback = request.connection_policy == .prefer_reuse;
             },
@@ -253,7 +265,17 @@ pub const Controller = struct {
                 result.ownership_revision = owned.ownership_revision;
                 if (owned.state == .closing or owned.state == .closed) return error.AlreadyClosing;
             },
-            .disconnect_session => return error.ToolNotAvailable, // no bounded disconnect controller exists
+            .disconnect_session => {
+                const target = request.session orelse return error.InvalidArguments;
+                _ = try self.validateIdentity(target, false);
+                if (!self.inBinding(target) and !self.selected(target) and !self.taskOwned(target)) return error.TargetOutsideScope;
+                if (self.bridge.writeRisk(target)) return error.ActiveExecutionConflict;
+                const preflight = try self.app.preflightSessionDisconnect(target);
+                result.create_operation = preflight.create_operation;
+                result.disconnect_binding = preflight.binding;
+                result.impact_revision = preflight.impact_revision;
+                if (self.app.lifecycle_supervisor.resource(target)) |entry| result.ownership_revision = entry.snapshot.ownership_revision;
+            },
             .reconnect_session => {
                 const target = request.session orelse return error.InvalidArguments;
                 _ = try self.validateIdentity(target, false);
@@ -310,8 +332,24 @@ pub const Controller = struct {
         self.store.commitHandoff(plan.handoff) catch unreachable;
         plan.view.commit(self.roster) catch unreachable;
         plan.published = true;
+        if (self.bridge.route_broker) |broker| {
+            var next = context;
+            next.binding = plan.handoff.to;
+            next.binding_revision = plan.handoff.next_revision;
+            broker.execution_route.handoff(context, next, plan.source) catch {};
+        }
         self.bridge.bindingChanged(plan.handoff.to);
         if (self.callbacks.on_handoff) |notify| notify(self.callbacks.context.?, context.conversation_id, plan.handoff.to, plan.handoff.next_revision, plan.notice_revision);
+    }
+    fn routeCreate(request: @import("../host/lifecycle_supervisor.zig").OpenRequest) @import("../ai/execution_routing.zig").Create {
+        const route = @import("../ai/execution_routing.zig");
+        return .{ .operation_id = request.operation_ref, .request_hash = route.digest(&request.operation_ref.bytes), .source = if (request.source) |source| .{ .session = source } else .{ .saved = request.saved_source.? }, .retention = request.retention, .policy = @fromBackingInt(@intCast(@backingInt(request.connection_policy))) };
+    }
+    pub fn adoptRouteSession(self: *Controller, context: host.Context, operation: identity.HostOperationId, snapshot: @import("../host/lifecycle_supervisor.zig").Snapshot) void {
+        const broker = self.bridge.route_broker orelse return;
+        const entry = self.app.lifecycle_supervisor.find(operation) orelse return;
+        if (!entry.request.context.eql(context) or !snapshot.context.eql(context) or snapshot.state != .ready or !snapshot.membership_committed or snapshot.ownership != .created_task or snapshot.session == null or entry.snapshot.session == null or !entry.snapshot.session.?.eql(snapshot.session.?)) return;
+        broker.execution_route.created(context, routeCreate(entry.request), snapshot.session.?) catch {};
     }
     fn destroyPlan(self: *Controller, plan: *Prepared) void {
         plan.view.deinit();
@@ -334,7 +372,7 @@ pub const Controller = struct {
             .closed => .closed,
             .cleanup_pending => .cleanup_pending,
             .cancelled_unsent => .cancelled_unsent,
-        }, .local_released = receipt.local_released, .remote_effect_unknown = receipt.remote_effect_unknown, .error_code = receipt.error_code };
+        }, .local_released = receipt.local_released, .remote_effect_unknown = receipt.remote_effect_unknown, .error_code = receipt.error_code, .recording_id = receipt.recording_id, .recording_generation = receipt.recording_generation, .recording_unavailable_reason = receipt.recording_unavailable_reason };
     }
     fn closeTarget(self: *Controller, operation: identity.HostOperationId) !CloseTarget {
         for (self.close_targets.items) |target| if (target.operation.eql(operation)) return target;
@@ -344,6 +382,13 @@ pub const Controller = struct {
         const checked = try self.authorize(context, input.request);
         if (!std.meta.eql(checked, input.authorized)) return error.ScopeChanged;
         const request = input.request;
+        if (request.kind == .disconnect_session) {
+            const snapshot = try self.app.requestSessionDisconnect(input.operation, context, request.session.?, checked.create_operation.?, checked.disconnect_binding.?, checked.impact_revision.?);
+            // Exact SessionHost service revocation fences all old exec/input
+            // handles. A route grant for this attempt must also be consumed.
+            if (self.bridge.route_broker) |broker| broker.execution_route.revoke();
+            return disconnectReceipt(snapshot);
+        }
         if (request.kind == .reconnect_session) {
             try self.app.requestSshReconnect(try self.validateIdentity(request.session.?, false));
             return .{ .state = .pending, .source_revision = self.config_revision, .session = request.session };
@@ -394,6 +439,13 @@ pub const Controller = struct {
             else => return error.ToolNotAvailable,
         }
     }
+    fn disconnectReceipt(snapshot: Application.DisconnectSnapshot) runtime.MutationReceipt {
+        return .{ .state = switch (snapshot.state) {
+            .pending => .pending,
+            .disconnected => .disconnected,
+            .outcome_unknown => .outcome_unknown,
+        }, .operation_ref = snapshot.operation_ref, .session = snapshot.session, .source_revision = snapshot.revision, .local_released = snapshot.local_released, .remote_effect_unknown = snapshot.remote_effect_unknown, .error_code = snapshot.error_code };
+    }
     pub fn invoke(raw: *anyopaque, call: *runtime.Call) !void {
         const self: *Controller = @ptrCast(@alignCast(raw));
         // Exact cleanup tokens remain valid after a successful handoff changed
@@ -417,20 +469,37 @@ pub const Controller = struct {
             .queue_open => |request| {
                 if (!request.context.eql(call.context)) return error.ScopeChanged;
                 // Validate exact sources again at the actual enqueue boundary.
-                const proposal: tools.Request = .{ .kind = .open_session, .group = request.group, .source = request.source, .saved_source = request.saved_source, .connection_policy = request.connection_policy, .retention = request.retention };
+                const previous = self.last_authorization orelse return error.ScopeChanged;
+                const proposal: tools.Request = .{ .kind = .open_session, .group = request.group, .source = request.source, .saved_source = request.saved_source, .connection_policy = request.connection_policy, .retention = request.retention, .interactive_execution = previous.value.bootstrap_required };
                 const authorized = try self.authorize(call.context, proposal);
                 if (request.allow_new_fallback != authorized.allow_new_fallback or request.membership_revision != authorized.membership_revision) return error.ScopeChanged;
                 try self.checkLastAuthorization(.open_session, authorized);
                 try self.open_authorizations.ensureUnusedCapacity(self.allocator, 1);
                 call.result = .{ .session = try self.app.queueOwnedSession(request) };
+                if (authorized.bootstrap_required) try self.app.requireOwnedBootstrap(request.operation_ref, call.context);
                 self.open_authorizations.appendAssumeCapacity(.{ .operation = request.operation_ref, .authorized = authorized });
+                if (self.bridge.route_broker) |broker| broker.execution_route.bindCreate(call.context, routeCreate(request)) catch {};
             },
-            .query_open => |operation| call.result = .{ .session = try self.app.queryOwnedSession(operation, call.context) },
-            .resolve_owned => |handle_| call.result = .{ .session = try self.app.resolveOwnedSession(handle_, call.context) },
+            .probe_bootstrap => |operation| call.result = .{ .bootstrap_probe = try self.app.probeOwnedBootstrap(operation, call.context) },
+            .install_bootstrap => |prepared| try self.app.installOwnedBootstrap(prepared, call.context),
+            .query_open => |operation| {
+                const snapshot = try self.app.queryOwnedSession(operation, call.context);
+                self.adoptRouteSession(call.context, operation, snapshot);
+                call.result = .{ .session = snapshot };
+            },
+            .resolve_owned => |handle_| {
+                const snapshot = try self.app.resolveOwnedSession(handle_, call.context);
+                self.adoptRouteSession(call.context, snapshot.operation_ref, snapshot);
+                call.result = .{ .session = snapshot };
+            },
+            .query_disconnect => |operation| call.result = .{ .mutation = disconnectReceipt(try self.app.querySessionDisconnect(operation, call.context)) },
             .authorize_open => |request| {
                 const entry = self.app.lifecycle_supervisor.find(request.operation) orelse return error.NotFound;
                 const open_request = entry.request;
-                const checked = try self.authorize(call.context, .{ .kind = .open_session, .group = open_request.group, .source = open_request.source, .saved_source = open_request.saved_source, .connection_policy = open_request.connection_policy, .retention = open_request.retention });
+                const wants_bootstrap = for (self.open_authorizations.items) |frozen| {
+                    if (frozen.operation.eql(request.operation)) break frozen.authorized.bootstrap_required;
+                } else return error.ScopeChanged;
+                const checked = try self.authorize(call.context, .{ .kind = .open_session, .group = open_request.group, .source = open_request.source, .saved_source = open_request.saved_source, .connection_policy = open_request.connection_policy, .retention = open_request.retention, .interactive_execution = wants_bootstrap });
                 var found = false;
                 for (self.open_authorizations.items) |frozen| if (frozen.operation.eql(request.operation)) {
                     if (!std.meta.eql(frozen.authorized, checked)) return error.ScopeChanged;
@@ -481,6 +550,9 @@ const TestFixture = struct {
     path: [:0]u8,
     directory: [:0]u8,
     previous_zdotdir: ?[:0]u8 = null,
+    previous_data_dir: ?[:0]u8 = null,
+    reject_bootstrap_deployment: bool = false,
+    bootstrap_approvals_seen: usize = 0,
     extern "c" fn setenv([*:0]const u8, [*:0]const u8, c_int) c_int;
     extern "c" fn unsetenv([*:0]const u8) c_int;
     fn init(self: *@This()) !void {
@@ -499,7 +571,9 @@ const TestFixture = struct {
         self.path = try self.tmp.dir.realPathFileAlloc(std.testing.io, "hosts.toml", a);
         self.directory = try self.tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
         self.previous_zdotdir = if (std.c.getenv("ZDOTDIR")) |value| try a.dupeSentinel(u8, std.mem.span(value), 0) else null;
+        self.previous_data_dir = if (std.c.getenv("ZEROWORK_DATA_DIR")) |value| try a.dupeSentinel(u8, std.mem.span(value), 0) else null;
         if (setenv("ZDOTDIR", self.directory.ptr, 1) != 0) return error.EnvironmentFailed;
+        if (setenv("ZEROWORK_DATA_DIR", self.directory.ptr, 1) != 0) return error.EnvironmentFailed;
         self.workspace = try Workspace.init(a, self.cx, self.scope_, std.testing.io, &self.config_, self.path, nodes[0], nodes[1], nodes[2], nodes[3]);
         self.app = try Application.ApplicationHost.init(a, self.workspace);
         try self.scope_.onCleanup(Application.ApplicationHost, self.app, Application.ApplicationHost.deinit);
@@ -538,6 +612,10 @@ const TestFixture = struct {
             if (setenv("ZDOTDIR", previous.ptr, 1) != 0) @panic("cannot restore fixture environment");
             a.free(previous);
         } else if (unsetenv("ZDOTDIR") != 0) @panic("cannot restore fixture environment");
+        if (self.previous_data_dir) |previous| {
+            if (setenv("ZEROWORK_DATA_DIR", previous.ptr, 1) != 0) @panic("cannot restore fixture environment");
+            a.free(previous);
+        } else if (unsetenv("ZEROWORK_DATA_DIR") != 0) @panic("cannot restore fixture environment");
         a.free(self.path);
         a.free(self.directory);
         self.tmp.cleanup();
@@ -581,7 +659,11 @@ fn testInvoke(fixture: *TestFixture, controller: *Controller, backend: *runtime.
     }
     const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
     while (!worker.done.load(.acquire)) {
-        if (broker.snapshot()) |approval| try broker.decide(approval.sequence, approval.arguments_hash, true);
+        if (broker.snapshot()) |approval| {
+            const deployment = std.mem.eql(u8, approval.target.text(), "SSH BootstrapV1：本次临时 helper 部署");
+            if (deployment) fixture.bootstrap_approvals_seen += 1;
+            try broker.decide(approval.sequence, approval.arguments_hash, !deployment or !fixture.reject_bootstrap_deployment);
+        }
         try fixture.tick(controller.bridge);
         if (@import("../platform/realtime.zig").monotonicNs() > deadline) {
             broker.stop();
@@ -591,6 +673,14 @@ fn testInvoke(fixture: *TestFixture, controller: *Controller, backend: *runtime.
     }
     if (worker.failure) |err| return err;
     return worker.result orelse error.MissingHostResult;
+}
+fn testMetadata(fixture: *TestFixture, roster: *groups.Roster, context: host.Context, tool: []const u8, arguments: []const u8) !host.Result {
+    const a = std.testing.allocator;
+    const json = try std.json.parseFromSlice(std.json.Value, a, arguments, .{});
+    defer json.deinit();
+    var hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(arguments, &hash, .{});
+    return @import("ai_host_queries.zig").execute(fixture.app, roster, context.binding, .{ .execution_policy = .{ .execution_mode = .auto, .session_retention = .keep }, .permission_mode = .confirm, .host_contributions = &tools.contributions }, @splat(17), .{ .context = context, .authority = .conversation_context, .operation_id = 1, .turn_id = 1, .call_id = "closed-metadata-fixture", .tool_id = tool, .arguments = json.value, .arguments_json = arguments, .arguments_hash = hash, .canonical_arguments_hash = hash }, a);
 }
 
 test "lifecycle controller real Local group open and close preserve conversation and source" {
@@ -653,6 +743,26 @@ test "lifecycle controller real Local group open and close preserve conversation
     try std.testing.expectEqual(@as(usize, 1), fixture.app.lifecycle_supervisor.entries.items.len);
     const owned_ref = try @import("../ai/host_queries.zig").sessionRef(a, next, owned);
     defer a.free(owned_ref);
+    const query_args = try std.json.Stringify.valueAlloc(a, .{ .session_ref = owned_ref }, .{});
+    defer a.free(query_args);
+    const live_binding = switch (fixture.app.sessions.queryService(owned, .terminal)) {
+        .available => |binding| binding,
+        else => return error.TerminalServiceUnavailable,
+    };
+    const live_service = try fixture.app.findHandle(owned).?.process.?.terminalService(live_binding);
+    var live_recording: @import("../host/terminal_service.zig").RecordingIdentity = undefined;
+    while (true) {
+        live_recording = live_service.recordingIdentity() catch |err| {
+            if (err != error.WorkerBusy) return err;
+            try fixture.tick(&bridge);
+            if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.RecordingIdentityTimeout;
+            continue;
+        };
+        break;
+    }
+    try std.testing.expect(live_recording.available and live_recording.recording_id != null);
+    // A normal recorded terminal has an identity before any AI execution.
+    try std.testing.expect((try live_service.executionSnapshot()).recording_id == null);
     const close_args = try std.json.Stringify.valueAlloc(a, .{ .session_ref = owned_ref, .request_key = "controller-close" }, .{});
     defer a.free(close_args);
     var accepted = try testInvoke(&fixture, &controller, &backend, &broker, "host.close_session", close_args);
@@ -660,10 +770,20 @@ test "lifecycle controller real Local group open and close preserve conversation
     try accepted.validate(next, 1);
     const close_body = try std.json.parseFromSlice(std.json.Value, a, accepted.blocks[0].structured, .{});
     defer close_body.deinit();
+    try std.testing.expectEqualStrings("closing", close_body.value.object.get("state").?.string);
+    const recording_ref = close_body.value.object.get("recording_ref").?.string;
+    const recording = try @import("../ai/host_terminal_queries.zig").resolveRecording(next, recording_ref);
+    try std.testing.expectEqualStrings(&live_recording.recording_id.?, &recording.id);
+    try std.testing.expectEqual(live_recording.recording_generation, recording.generation);
     const close_op = try tools.operationId(next, close_body.value.object.get("operation_ref").?.string);
     try fixture.tick(&bridge);
     try std.testing.expect((try fixture.app.querySessionClose(close_op, next)).state == .accepted);
     try std.testing.expectEqual(@as(usize, 2), fixture.workspace.tabs.items.len);
+    var before_close = try testMetadata(&fixture, &roster, next, "host.list_sessions", "{\"state_filter\":\"closed\"}");
+    defer before_close.deinit(a);
+    const before_rows = try std.json.parseFromSlice(std.json.Value, a, before_close.blocks[0].structured, .{});
+    defer before_rows.deinit();
+    try std.testing.expectEqual(@as(usize, 0), before_rows.value.object.get("sessions").?.array.items.len);
     const Ack = struct {
         backend: *runtime.Runtime,
         bridge: *Bridge,
@@ -687,9 +807,94 @@ test "lifecycle controller real Local group open and close preserve conversation
         try fixture.tick(&bridge);
         if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.OwnedSessionCloseTimeout;
     }
+    var closed = try testMetadata(&fixture, &roster, next, "host.get_session", query_args);
+    defer closed.deinit(a);
+    const closed_body = try std.json.parseFromSlice(std.json.Value, a, closed.blocks[0].structured, .{});
+    defer closed_body.deinit();
+    const closed_row = closed_body.value.object.get("session").?.object;
+    try std.testing.expectEqualStrings("closed", closed_row.get("state").?.string);
+    try std.testing.expectEqualStrings(recording_ref, closed_row.get("recording_ref").?.string);
+    try std.testing.expect(closed_row.get("source_ref").? == .null and !closed_row.get("current_member").?.bool);
+    const caps = closed_row.get("capabilities").?.object;
+    try std.testing.expect(!caps.get("read_terminal").?.bool and !caps.get("batch_execution").?.bool and !caps.get("trusted_pty_execution").?.bool);
+    var closed_list = try testMetadata(&fixture, &roster, next, "host.list_sessions", "{\"state_filter\":\"closed\"}");
+    defer closed_list.deinit(a);
+    const closed_rows = try std.json.parseFromSlice(std.json.Value, a, closed_list.blocks[0].structured, .{});
+    defer closed_rows.deinit();
+    try std.testing.expectEqual(@as(usize, 1), closed_rows.value.object.get("sessions").?.array.items.len);
+    var repeated_close = try testInvoke(&fixture, &controller, &backend, &broker, "host.close_session", close_args);
+    defer repeated_close.deinit(a);
+    const repeated_body = try std.json.parseFromSlice(std.json.Value, a, repeated_close.blocks[0].structured, .{});
+    defer repeated_body.deinit();
+    try std.testing.expectEqualStrings("closed", repeated_body.value.object.get("state").?.string);
+    try std.testing.expect(repeated_body.value.object.get("idempotent_reuse").?.bool);
+    try std.testing.expectEqualStrings(recording_ref, repeated_body.value.object.get("recording_ref").?.string);
+    try std.testing.expectEqual(@as(usize, 1), fixture.app.deferred_closes.items.len);
+    var other_task = next;
+    other_task.task_id.bytes[0] ^= 1;
+    try std.testing.expectError(error.TargetOutsideScope, testMetadata(&fixture, &roster, other_task, "host.get_session", query_args));
+    var wrong_generation = owned;
+    wrong_generation.generation += 1;
+    const stale_ref = try @import("../ai/host_queries.zig").sessionRef(a, next, wrong_generation);
+    defer a.free(stale_ref);
+    const stale_args = try std.json.Stringify.valueAlloc(a, .{ .session_ref = stale_ref }, .{});
+    defer a.free(stale_args);
+    try std.testing.expectError(error.StaleReference, testMetadata(&fixture, &roster, next, "host.get_session", stale_args));
     try std.testing.expect(fixture.app.sessions.queryState(source).?.lifecycle == .attached);
     try std.testing.expect(store.findConversation(context.conversation_id).?.owner == .group);
     try std.testing.expect(fixture.workspace.groupTabId(@intCast(next.binding.group)) != null);
+}
+
+test "lifecycle controller Local disconnect is NotSupported and preserves the real process and tab" {
+    const a = std.testing.allocator;
+    var fixture: TestFixture = undefined;
+    try fixture.init();
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const source = try fixture.local();
+    const legacy = fixture.app.legacyForHandle(source).?;
+    const tab_id = fixture.workspace.sessionTab(legacy).?.tab_id;
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    const context = try testContext(&store, source);
+    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .auto, .session_retention = .auto_idle } });
+    defer controller.deinitAfterWorker();
+    try std.testing.expect(!controller.available("host.disconnect_session"));
+    var request: runtime.Call = .{ .context = context, .action = .{ .authorize = .{ .kind = .disconnect_session, .session = source, .request_key = "local-is-not-network" } } };
+    try std.testing.expectError(error.NotSupported, Controller.invoke(&controller, &request));
+    try std.testing.expectEqual(@as(usize, 0), fixture.app.disconnects.entries.items.len);
+    try std.testing.expectEqual(tab_id, fixture.workspace.sessionTab(legacy).?.tab_id);
+    try std.testing.expectEqual(@import("../host/session_host.zig").Lifecycle.attached, fixture.app.sessions.queryState(source).?.lifecycle);
+    try std.testing.expect(fixture.app.findHandle(source).?.process != null);
+}
+
+test "lifecycle controller keeps exact metadata grant distinct from configuration revision" {
+    const a = std.testing.allocator;
+    var fixture: TestFixture = undefined;
+    try fixture.init();
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const source = try fixture.local();
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    bridge.policy_revision = fixture.workspace.app_config.config_revision;
+    var context = try testContext(&store, source);
+    context.grant_revision = bridge.policy_revision + 5;
+    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .auto, .session_retention = .auto_idle } });
+    defer controller.deinitAfterWorker();
+    try controller.refreshAuthority(context);
+    var authorize_call: runtime.Call = .{ .context = context, .action = .{ .authorize = .{ .kind = .create_group, .session = source, .request_key = "separate-grant" } } };
+    try Controller.invoke(&controller, &authorize_call);
+    authorize_call.context.grant_revision += 1;
+    try std.testing.expectError(error.ScopeChanged, Controller.invoke(&controller, &authorize_call));
+    bridge.policy_revision += 1;
+    try std.testing.expectError(error.ScopeChanged, controller.refreshAuthority(context));
 }
 
 test "lifecycle controller invalidated group plan publishes no ghost and releases after grant change" {
@@ -784,4 +989,106 @@ test "lifecycle controller group publication is allocation free after validated 
     try std.testing.expectEqualStrings("已预分配工作组", roster.groups.items[0].name);
     fixture.config_.config_revision += 1;
     try std.testing.expectError(error.ScopeChanged, controller.refreshAuthority(next));
+}
+
+test "lifecycle bootstrap product real SSH source opens an approved new trusted work terminal" {
+    const raw_port = std.c.getenv("ZW_TEST_BOOTSTRAP_PRODUCT_PORT") orelse return error.SkipZigTest;
+    const isolated = std.c.getenv("ZEROWORK_DATA_DIR") orelse return error.IsolatedBootstrapTestDirectoryRequired;
+    if (!std.mem.startsWith(u8, std.mem.span(isolated), "/tmp/zw-bootstrap-product")) return error.IsolatedBootstrapTestDirectoryRequired;
+    const port = try std.fmt.parseInt(u16, std.mem.span(raw_port), 10);
+    const a = std.testing.allocator;
+    var fixture: TestFixture = undefined;
+    try fixture.init();
+    fixture.reject_bootstrap_deployment = if (std.c.getenv("ZW_TEST_BOOTSTRAP_PRODUCT_MODE")) |mode| std.mem.eql(u8, std.mem.span(mode), "deny") else false;
+    fixture.config_.ssh.auto_reconnect = false;
+    fixture.config_.ssh.reconnect_max = 0;
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const index = try fixture.workspace.appendHost(.{ .connection_id = @fromBackingInt(88001), .revision = 1, .name = "controlled-bootstrap-product", .host = "127.0.0.1", .port = port, .user = "bootstrap-fixture", .auth_mode = .password, .password = "fixture-only", .strict_host_key_checking = false });
+    const accepted = try fixture.app.create(fixture.workspace.registry.hosts[index], fixture.workspace.hostId(index).?, index, "");
+    const source = accepted.handle;
+    const source_deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    while (fixture.app.sessions.queryState(source).?.lifecycle != .attached) {
+        for (fixture.workspace.connect_jobs.items) |job| if (job.host_key_bridge.snapshot()) |challenge| {
+            try std.testing.expectEqualStrings("127.0.0.1", challenge.hostSlice());
+            try std.testing.expectEqual(port, challenge.port);
+            const key = challenge.operation_key orelse return error.MissingOperation;
+            try std.testing.expect(key.owner == .session and key.owner.session.eql(source));
+            try std.testing.expect(job.host_key_bridge.decideScoped(.{ .key = key, .hop_index = challenge.hop_index, .request_id = challenge.generation }, .trust_once));
+        };
+        try fixture.tick(null);
+        if (@import("../platform/realtime.zig").monotonicNs() > source_deadline) return error.BootstrapSourceNotReady;
+    }
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    const context = try testContext(&store, source);
+    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .new_pty, .session_retention = .keep } });
+    defer controller.deinitAfterWorker();
+    const journal_owner = try runtime.ProcessJournal.acquire(.{ .data_root = fixture.directory, .path = "ssh-bootstrap-product.json" });
+    defer journal_owner.release();
+    var broker: @import("../ai/host_approval.zig").Broker = .{};
+    var backend: runtime.Runtime = .{ .journal_owner = journal_owner, .controller = controller.handle(), .approval = &broker };
+    const source_ref = try @import("../ai/host_queries.zig").sessionRef(a, context, source);
+    defer a.free(source_ref);
+    const group_args = try std.json.Stringify.valueAlloc(a, .{ .initial_session_ref = source_ref, .name = "bootstrap-product-group", .request_key = "product-group" }, .{});
+    defer a.free(group_args);
+    var grouped = try testInvoke(&fixture, &controller, &backend, &broker, "host.create_group", group_args);
+    defer grouped.deinit(a);
+    try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.succeeded, grouped.status);
+    const moved = store.findConversation(context.conversation_id).?;
+    var next = context;
+    next.binding = moved.owner;
+    next.binding_revision = moved.binding_revision;
+    try controller.refreshAuthority(next);
+    const group_ref = try @import("../ai/host_queries.zig").groupRef(a, next, next.binding.group);
+    defer a.free(group_ref);
+    const args = try std.json.Stringify.valueAlloc(a, .{ .group_ref = group_ref, .source_ref = source_ref, .connection_policy = "reuse_only", .interactive_execution = true, .request_key = "product-open" }, .{});
+    defer a.free(args);
+    var opened = try testInvoke(&fixture, &controller, &backend, &broker, "host.open_session", args);
+    defer opened.deinit(a);
+    if (fixture.reject_bootstrap_deployment) {
+        try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.rejected, opened.status);
+        try std.testing.expectEqual(@as(usize, 1), fixture.bootstrap_approvals_seen);
+        for (0..5) |_| try fixture.tick(&bridge);
+        const cancelled = fixture.app.lifecycle_supervisor.entries.items[0].snapshot;
+        try std.testing.expectEqual(@import("../host/lifecycle_supervisor.zig").State.cancelled, cancelled.state);
+        try std.testing.expect(fixture.app.findHandle(cancelled.session.?) == null);
+        try std.testing.expectEqual(@as(usize, 1), fixture.workspace.tabs.items.len);
+        return;
+    }
+    if (opened.status != .succeeded) std.debug.print("bootstrap product open receipt: {s}\n", .{opened.blocks[0].structured});
+    try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.succeeded, opened.status);
+    const operation = fixture.app.lifecycle_supervisor.entries.items[0].request.operation_ref;
+    const owned = fixture.app.lifecycle_supervisor.entries.items[0].snapshot.session.?;
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    while (true) {
+        try fixture.tick(&bridge);
+        const snapshot = try fixture.app.queryOwnedSession(operation, next);
+        if (snapshot.state == .failed or snapshot.state == .cleanup_pending) {
+            std.debug.print("bootstrap product session error: {s}\n", .{snapshot.error_code orelse "unknown"});
+            return error.BootstrapProductSessionFailed;
+        }
+        const mapping = fixture.app.findHandle(owned);
+        if (snapshot.state == .ready and mapping != null) {
+            const tab = fixture.workspace.sessionTab(mapping.?.legacy_id).?;
+            const service = try tab.runtime.?.terminalService();
+            const execution = service.executionSnapshot() catch |err| switch (err) {
+                error.WorkerBusy => continue,
+                else => return err,
+            };
+            if (execution.interactive_execution) break;
+        }
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.BootstrapTrustedSessionNotReady;
+    }
+    try std.testing.expectEqual(@as(usize, 1), fixture.bootstrap_approvals_seen);
+    try std.testing.expectEqual(@as(usize, 2), roster.findById(@intCast(next.binding.group)).?.members.items.len);
+    const source_mapping = fixture.app.findHandle(source).?;
+    const source_runtime = fixture.workspace.sessionTab(source_mapping.legacy_id).?.runtime.?;
+    const source_terminal = try source_runtime.terminalService();
+    try std.testing.expect(!(try source_terminal.executionSnapshot()).interactive_execution);
+    try std.testing.expectEqual(@import("../host/session_host.zig").Lifecycle.attached, fixture.app.sessions.queryState(source).?.lifecycle);
+    try std.testing.expect(!source.eql(owned));
 }

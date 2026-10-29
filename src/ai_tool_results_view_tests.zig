@@ -426,6 +426,132 @@ fn labelNode(node: *ui.Node, label: []const u8) ?*ui.Node {
     return null;
 }
 
+fn appendInputProjectionFixture(run: *loop.Loop, receipt: @import("ai/host_tools.zig").Receipt, call_id: []const u8, name: []const u8, arguments: []const u8, content: []const u8, status: @import("ai/plugin_tools.zig").Status) !void {
+    const blocks = try run.allocator.alloc(@import("ai/host_tools.zig").Block, 1);
+    blocks[0] = .{ .structured = try run.allocator.dupe(u8, content) };
+    try run.records.append(run.arena.allocator(), .{ .key = .{ .owner = .{ .group = 7 }, .turn_id = 42, .call_id = call_id }, .name = name, .arguments = arguments, .arguments_hash = @splat(1), .dispatched = true, .host_result = .{ .status = status, .blocks = blocks, .receipt = receipt } });
+}
+fn expectNoInputSecret(node: *ui.Node) !void {
+    if (node.getText()) |text| try std.testing.expect(std.mem.indexOf(u8, text.content, "PRIVATE_INPUT_SENTINEL") == null);
+    for (node.children.items) |child| try expectNoInputSecret(child);
+}
+
+test "execution input Store to view keeps saved execution facts after later receipt without rewriting immutable calls" {
+    const terminal = @import("host/terminal_execution.zig");
+    const identity = @import("host/identity.zig");
+    const receipt: @import("ai/host_tools.zig").Receipt = .{ .conversation_id = .generate(), .task_id = .generate(), .operation_id = 1, .binding_revision = 1 };
+    const execution_id: identity.ExecutionId = .generate();
+    const recording_id: identity.RecordingId = .generate();
+    const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(101), .generation = 9 };
+    const reference = try std.fmt.allocPrint(a, "x1:{s}", .{std.fmt.bytesToHex(execution_id.bytes, .lower)});
+    defer a.free(reference);
+    var snapshot: terminal.Snapshot = .{ .owner = target, .execution_id = execution_id, .state = .running, .recording_id = std.fmt.bytesToHex(recording_id.bytes, .lower), .output_scope = .session_interval };
+    const initial = try std.json.Stringify.valueAlloc(a, .{ .execution_ref = reference, .snapshot = snapshot, .output = "INITIAL_OUTPUT", .output_available = true }, .{});
+    defer a.free(initial);
+    snapshot.state = .interval_recorded;
+    snapshot.process = .{ .exit_code = 0, .foreground_finished = true, .background_jobs_unknown = true };
+    snapshot.recording_settled = true;
+    snapshot.interval_saved = true;
+    snapshot.output_attribution_reason = "OutputProcessIdentityUnknown";
+    const complete = try std.json.Stringify.valueAlloc(a, .{ .execution_ref = reference, .snapshot = snapshot, .output = "RECORDED_EXECUTION_END\n", .output_available = true }, .{});
+    defer a.free(complete);
+    const input = try std.json.Stringify.valueAlloc(a, .{ .execution_ref = reference, .input_receipt = terminal.InputReceipt{ .input_sequence = 5, .wait_sequence = 3, .kind = .host_secret, .stage = .consumed }, .host_secret_status = "secret_submitted" }, .{});
+    defer a.free(input);
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    inline for (.{ .dark, .light, .sauber }) |name| {
+        theme.select(name);
+        for ([_]f32{ 572, 332 }) |width| {
+            var store = facts.Store.init(a);
+            defer store.deinit();
+            var run = loop.Loop.init(a, .{ .owner = .{ .group = 7 }, .members = .{} }, 42, .{});
+            try appendInputProjectionFixture(&run, receipt, "input-original-run", "host.run_in_terminal", "{\"command\":\"printf original-command\"}", initial, .succeeded);
+            try appendInputProjectionFixture(&run, receipt, "input-finished", "host.get_execution", "{}", complete, .succeeded);
+            try appendInputProjectionFixture(&run, receipt, "input-same-key", "host__send_uexecution_uinput", "{\"text\":\"PRIVATE_INPUT_SENTINEL\"}", input, .succeeded);
+            _ = try store.capture(&run, &.{.{ .owner = target, .label = "本机 · zsh" }});
+            run.deinit();
+            // A later receipt for a different task/execution must remain separate.
+            var alien = receipt;
+            alien.task_id = .generate();
+            var later = loop.Loop.init(a, .{ .owner = .{ .group = 7 }, .members = .{} }, 42, .{});
+            try appendInputProjectionFixture(&later, alien, "input-other-task", "host.get_execution", "{}", initial, .succeeded);
+            _ = try store.capture(&later, &.{});
+            later.deinit();
+            store.records.items[2].expanded = true;
+            const cx = try ui.Cx.init(a, std.testing.io);
+            defer cx.deinit();
+            cx.setTheme(theme.widgetTheme(name));
+            cx.reduced_motion = true;
+            cx.setViewport(width, 800);
+            const scope = try ui.Scope.init(a, null, cx.owner);
+            defer scope.dispose();
+            cx.root = try ui.box(cx, .{ .width = .{ .px = width }, .height = .fill(), .direction = .column }, .{});
+            try View.appendForOwner(cx, scope, cx.root.?, &store, .{ .group = 7 });
+            settleCard(cx);
+            const original = find(cx.root.?, store.records.items[0].testId()).?;
+            try std.testing.expectEqualStrings("最近观测 · 前台已结束 · 观测片段已保存", find(original, "ai.execution.result.summary").?.getText().?.content);
+            try std.testing.expectEqualStrings("前台已结束 · 退出码 0 · 后台任务仍需核实", find(original, "ai.execution.result.process").?.getText().?.content);
+            try std.testing.expectEqualStrings("RECORDED_EXECUTION_END\n", find(original, "ai.execution.result.terminal_output").?.getText().?.content);
+            try std.testing.expectEqualStrings("同一终端观测片段 · 已保存", find(original, "ai.execution.result.output_scope").?.getText().?.content);
+            try std.testing.expectEqualStrings("printf original-command", find(original, "ai.execution.result.command").?.getText().?.content);
+            try std.testing.expectEqualStrings(initial, store.records.items[0].host.?.content);
+            try std.testing.expectEqualStrings(complete, store.records.items[1].host.?.content);
+            try std.testing.expectEqualStrings("INITIAL_OUTPUT", store.records.items[0].execution.?.terminal_output);
+            const input_card = find(cx.root.?, store.records.items[2].testId()).?;
+            try std.testing.expectEqualStrings("输入结果 · 输入已消费", find(input_card, "ai.execution.result.summary").?.getText().?.content);
+            try std.testing.expectEqualStrings("输入类型 · 宿主安全输入", find(input_card, "ai.execution.result.input_type").?.getText().?.content);
+            try std.testing.expectEqualStrings("输入序号 5 · 等待序号 3", find(input_card, "ai.execution.result.input_sequence").?.getText().?.content);
+            inline for (.{ "process", "terminal_output", "output_label", "copy_output", "copy_command", "stop", "takeover", "view_terminal" }) |suffix| try std.testing.expect(find(input_card, "ai.execution.result." ++ suffix) == null);
+            const title = find(input_card, "ai.execution.result.title").?.globalRect();
+            const icon = find(input_card, "ai.execution.result.icon").?.globalRect();
+            try std.testing.expect(@abs(icon.y + icon.h / 2 - title.y - title.h / 2) < 0.1 and icon.x + icon.w < title.x);
+            try std.testing.expectEqual(@as(f32, 0), input_card.style.border.width);
+            try std.testing.expectEqual(@as(u8, 255), find(input_card, "ai.execution.result.summary").?.getText().?.color.a);
+            try expectNoInputSecret(cx.root.?);
+            var clone = try store.cloneTurns(&.{.{ .user = false, .text = @constCast(""), .turn = .{ .id = 42 } }});
+            defer clone.deinit();
+            try std.testing.expect(clone.executionProjection(clone.records.items[0]).?.intervalRecorded());
+            try std.testing.expectEqualStrings("输入已消费", clone.executionProjection(clone.records.items[2]).?.statusLabel());
+        }
+    }
+}
+
+test "execution input Store to view preserves queued pending cancelled failed and unknown outcomes" {
+    const terminal = @import("host/terminal_execution.zig");
+    const Stage = @FieldType(terminal.InputReceipt, "stage");
+    const Status = @import("ai/plugin_tools.zig").Status;
+    for ([_]struct { stage: ?Stage, status: Status = .succeeded, label: []const u8, failure: bool = false }{
+        .{ .stage = .queued, .label = "输入结果 · 输入已排队" },
+        .{ .stage = .awaiting_host_secret, .label = "输入结果 · 等待宿主安全输入" },
+        .{ .stage = .cancelled_unsent, .label = "输入结果 · 输入未提交 · 已取消" },
+        .{ .stage = .outcome_unknown, .label = "输入结果 · 输入结果待核实", .failure = true },
+        .{ .stage = .consumed, .status = .outcome_unknown, .label = "输入结果 · 输入结果待核实", .failure = true },
+        .{ .stage = null, .status = .failed, .label = "输入结果 · 输入提交失败", .failure = true },
+    }) |case| {
+        var store = facts.Store.init(a);
+        defer store.deinit();
+        const input = try std.json.Stringify.valueAlloc(a, .{ .execution_ref = "x1:0123456789abcdef0123456789abcdef", .input_receipt = if (case.stage) |stage| terminal.InputReceipt{ .input_sequence = 5, .wait_sequence = 3, .kind = .host_secret, .stage = stage } else null, .error_code = if (case.failure) @as(?[]const u8, "InputAcknowledgementUnknown") else null, .text = "PRIVATE_INPUT_SENTINEL", .output = "PRIVATE_INPUT_SENTINEL" }, .{});
+        defer a.free(input);
+        const receipt: @import("ai/host_tools.zig").Receipt = .{ .conversation_id = .generate(), .task_id = .generate(), .operation_id = 1, .binding_revision = 1 };
+        var run = loop.Loop.init(a, .{ .owner = .{ .group = 7 }, .members = .{} }, 42, .{});
+        try appendInputProjectionFixture(&run, receipt, "input-outcome", "host.send_execution_input", "{\"text\":\"PRIVATE_INPUT_SENTINEL\"}", input, case.status);
+        _ = try store.capture(&run, &.{});
+        run.deinit();
+        store.records.items[0].expanded = true;
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        const scope = try ui.Scope.init(a, null, cx.owner);
+        defer scope.dispose();
+        cx.root = try @import("ui/ai_execution_result_view.zig").mount(cx, scope, &store, store.records.items[0], null, null);
+        try std.testing.expectEqualStrings(case.label, find(cx.root.?, "ai.execution.result.summary").?.getText().?.content);
+        try std.testing.expectEqual(case.failure, find(cx.root.?, "ai.execution.result.failure") != null);
+        if (case.failure) try std.testing.expectEqualStrings("InputAcknowledgementUnknown", store.records.items[0].execution.?.failure.?);
+        try std.testing.expect(find(cx.root.?, "ai.execution.result.output_label") == null);
+        try expectNoInputSecret(cx.root.?);
+    }
+}
+
 test "execution result native card preserves real target recording output and reachable actions across themes and sizes" {
     const Execution = @import("ui/ai_execution_result_view.zig");
     const theme = @import("ui/app_theme.zig");

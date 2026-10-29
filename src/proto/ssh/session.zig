@@ -63,7 +63,7 @@ pub const HostKeyObserver = struct {
     callback: *const fn (ctx: *anyopaque, host: []const u8, port: u16, info: HostKeyInfo) HostKeyDecision,
 };
 
-pub const ResourceKind = enum { transport, session, shell, tunnel, relay_socket, relay_worker, rtt_channel };
+pub const ResourceKind = enum { transport, session, shell, tunnel, relay_socket, relay_worker, rtt_channel, execution_control, bootstrap };
 pub const ResourceState = enum { absent, owned, releasing, released, transferred, unknown };
 pub const ResourceEntry = struct {
     state: ResourceState = .absent,
@@ -685,6 +685,13 @@ pub const SftpReadonlyHandle = struct {
         if (rc < 0) return self.session.sftpReadonlyError(rc);
         return @intCast(rc);
     }
+    /// Bootstrap uploads use this same IO-owner handle and exact EAGAIN retry.
+    pub fn writePrivate(self: *SftpReadonlyHandle, bytes: []const u8) !usize {
+        if (self.file.consumed != null) return error.SftpHandleClosed;
+        const rc = c.zw_libssh2_sftp_write(self.file.handle, bytes.ptr, bytes.len);
+        if (rc < 0) return self.session.sftpReadonlyError(rc);
+        return @intCast(rc);
+    }
     pub fn stat(self: *SftpReadonlyHandle) !SftpAttributes {
         if (self.file.consumed != null) return error.SftpHandleClosed;
         var raw: c.ZW_SFTP_ATTRIBUTES = undefined;
@@ -1240,6 +1247,50 @@ pub const Session = struct {
         if (self.state != .active or self.sftp == null) return error.SessionNotActive;
         const rc = c.zw_libssh2_sftp_mkdir(self.sftp.?, path.ptr);
         if (rc != 0) return self.sftpReadonlyError(rc);
+    }
+    pub fn sftpMkdirPrivate(self: *Session, path: [:0]const u8) !void {
+        if (self.state != .active or self.sftp == null) return error.SessionNotActive;
+        const rc = c.zw_libssh2_sftp_mkdir_private(self.sftp.?, path.ptr);
+        if (rc != 0) return self.sftpReadonlyError(rc);
+    }
+    pub fn sftpOpenPrivate(self: *Session, path: [:0]const u8, mode: u32) !SftpReadonlyHandle {
+        if (self.state != .active or self.sftp == null) return error.SessionNotActive;
+        if (mode != 0o600 and mode != 0o700) return error.InvalidBootstrapMode;
+        const raw = c.zw_libssh2_sftp_open_private(self.sftp.?, path.ptr, mode) orelse return self.sftpReadonlyError(c.zw_libssh2_session_last_error(self.handle.?));
+        return .{ .file = .{ .handle = raw }, .session = self };
+    }
+    pub fn sftpUnlinkOwned(self: *Session, path: [:0]const u8) !void {
+        if (self.state != .active or self.sftp == null) return error.SessionNotActive;
+        const rc = c.zw_libssh2_sftp_unlink_owned(self.sftp.?, path.ptr);
+        if (rc != 0) return self.sftpReadonlyError(rc);
+    }
+    pub fn sftpRmdirOwned(self: *Session, path: [:0]const u8) !void {
+        if (self.state != .active or self.sftp == null) return error.SessionNotActive;
+        const rc = c.zw_libssh2_sftp_rmdir_owned(self.sftp.?, path.ptr);
+        if (rc != 0) return self.sftpReadonlyError(rc);
+    }
+
+    /// IO-owner startup of a new, explicitly authorized BootstrapV1 channel.
+    /// A term requests a fresh PTY; null is the independent private relay.
+    pub fn openBootstrap(self: *Session, command: [:0]const u8, term: ?[:0]const u8, options: Options) !Channel {
+        if (self.state != .active or self.handle == null) return error.SessionNotActive;
+        if (term != null and self.channel != null) return error.BootstrapRequiresNewPty;
+        const ticket: OpenTicket = .{ .kind = .shell, .id = std.hash.Wyhash.hash(1, command) };
+        if (!self.claimChannelOpen(ticket)) return error.ChannelOpenBusy;
+        defer self.finishChannelOpen(ticket);
+        var raw: ?*c.LIBSSH2_CHANNEL = null;
+        const drive = nativeDrive(options, self.socket_fd);
+        const rc = c.zw_libssh2_open_bootstrap_driven(self.handle.?, command.ptr, if (term) |t| t.ptr else null, options.cols, options.rows, &raw, &drive);
+        if (raw) |value| {
+            var channel: Channel = .{ .handle = @ptrCast(value) };
+            if (rc != 0) {
+                // A failed bootstrap owns the whole fresh Session; native
+                // session_free retains responsibility for a pending child.
+                _ = self.closeChannelReceipt(&channel);
+            } else return channel;
+        }
+        try checkDriveResult(rc);
+        return error.BootstrapChannelFailed;
     }
 
     pub fn sftpOpenReadonly(self: *Session, path: [:0]const u8, directory: bool) !SftpReadonlyHandle {

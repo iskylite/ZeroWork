@@ -214,9 +214,11 @@ pub const SshExecBridge = struct {
                 if (!self.session.claimChannelOpen(.{ .kind = .exec, .id = item.call_id })) continue;
                 item.state = .opening;
                 item.status = .opening;
+                item.diagnostics.phase = .opening;
                 opening = item;
             }
             item.step();
+            item.logReceipt();
             if (opening == item and item.state != .opening) opening = null;
         };
     }
@@ -240,6 +242,9 @@ pub const SshExecBridge = struct {
             item.channel = null;
             item.cleanup = .released;
             item.state = .finished;
+            item.diagnostics.phase = .finished;
+            item.diagnostics.release = .released;
+            item.logReceipt();
         };
     }
     pub fn transportReplaced(self: *SshExecBridge, replacement: Session) !void {
@@ -294,6 +299,9 @@ pub const SshExecBridge = struct {
         exit_code: ?i32 = null,
         request_started: bool = false,
         truncated: bool = false,
+        diagnostics: bridge.Diagnostics = .{ .request_started = false },
+        logged_unknown: bool = false,
+        logged_finished: bool = false,
 
         fn init(owner: *SshExecBridge, call_id: u64, key: ?operation.OperationKey, binding: ?ServiceHandle, text: []const u8, opts: bridge.ExecOpts) !Command {
             const allocator = owner.allocator;
@@ -323,6 +331,7 @@ pub const SshExecBridge = struct {
             };
         }
         fn stop(self: *Command, status: bridge.Status, failure: ?[]const u8) void {
+            if (self.diagnostics.stopped_phase == null) self.diagnostics.stopped_phase = self.diagnostics.phase;
             self.status = status;
             self.failure = failure;
             self.effect = if (self.request_started) .unknown else .none;
@@ -330,12 +339,17 @@ pub const SshExecBridge = struct {
                 self.state = .finished;
                 self.cleanup = .released;
                 self.finished_ms = nowMs();
+                self.diagnostics.phase = .finished;
+                self.diagnostics.release = .released;
             } else {
                 self.cleanup = .releasing;
                 if (self.closing_ms == null) self.closing_ms = nowMs();
                 // A Session-level open must first settle before another call
                 // can open. Never send exec after cancellation during open.
-                if (self.state != .opening) self.state = .closing;
+                if (self.state != .opening) {
+                    self.state = .closing;
+                    self.diagnostics.phase = .closing;
+                }
             }
         }
         fn checkStop(self: *Command) void {
@@ -359,29 +373,37 @@ pub const SshExecBridge = struct {
                     return;
                 }
                 if (result < 0) {
+                    self.diagnostics.channel_open_error = result;
                     session.finishChannelOpen(.{ .kind = .exec, .id = self.call_id });
                     if (!self.terminal()) self.stop(if (result == -21 or result == -22) .channel_rejected else .failed, if (result == -21 or result == -22) "ChannelRejected" else "ChannelOpenFailed");
                     self.state = .finished;
                     self.cleanup = .released; // Native open error frees its unpublished channel.
                     self.finished_ms = nowMs();
+                    self.diagnostics.phase = .finished;
+                    self.diagnostics.release = .released;
                     return;
                 }
                 self.channel = .{ .handle = @ptrCast(raw.?) };
                 session.finishChannelOpen(.{ .kind = .exec, .id = self.call_id });
                 self.cleanup = .not_started;
                 self.state = if (self.terminal()) .closing else .requesting;
+                self.diagnostics.phase = if (self.terminal()) .closing else .requesting;
             }
             if (self.state == .requesting) {
                 self.request_started = true;
+                self.diagnostics.request_started = true;
                 self.effect = .unknown;
                 const result = sc.zw_libssh2_exec_request_step(@ptrCast(self.channel.?.handle), self.wire_command.ptr);
                 if (result == 1) return;
                 if (result < 0) {
+                    self.diagnostics.request_error = result;
                     self.stop(if (result == -22) .channel_rejected else .failed, if (result == -22) "ExecRejected" else "ExecRequestFailed");
                     if (result == -22) self.effect = .none;
                 } else {
                     self.state = .running;
                     self.status = .running;
+                    self.diagnostics.phase = .running;
+                    self.diagnostics.request_accepted = true;
                     self.effect = .partial; // The remote explicitly accepted execution.
                 }
             }
@@ -392,8 +414,8 @@ pub const SshExecBridge = struct {
                 self.captureExit();
                 if (self.state == .running and c.zw_libssh2_channel_eof(self.channel.?.handle) != 0) {
                     self.state = .closing;
-                    self.closing_ms = nowMs();
-                    self.cleanup = .releasing;
+                    self.diagnostics.eof_received = true;
+                    self.diagnostics.phase = .peer_close;
                 }
                 if (self.state == .closing) self.finishClose();
             }
@@ -407,7 +429,10 @@ pub const SshExecBridge = struct {
             for (0..2) |stream| {
                 for (0..8) |_| {
                     const count = if (stream == 0) c.zw_libssh2_channel_read(self.channel.?.handle, &buffer, buffer.len) else c.zw_libssh2_channel_read_stderr(self.channel.?.handle, &buffer, buffer.len);
-                    if (count < 0) return error.ChannelReadFailed;
+                    if (count < 0) {
+                        self.diagnostics.read_error = @intCast(count);
+                        return error.ChannelReadFailed;
+                    }
                     if (count == 0) break;
                     const size: usize = @intCast(count);
                     if (stream == 0) self.stdout_bytes +|= size else self.stderr_bytes +|= size;
@@ -425,14 +450,41 @@ pub const SshExecBridge = struct {
         }
         fn finishClose(self: *Command) void {
             const raw = self.channel.?.handle;
+            if (!self.terminal() and self.diagnostics.eof_received) {
+                // EOF ends output, not the SSH request stream. The server may
+                // still send exit-status before CLOSE; closing here can make
+                // the peer discard that final result. Timeout/cancel bypass
+                // this wait and retain their original cleanup ownership.
+                self.diagnostics.phase = .peer_close;
+                const wait_result = c.zw_libssh2_channel_wait_closed_step(raw);
+                self.captureExit();
+                if (wait_result == 1) return;
+                if (wait_result < 0) {
+                    self.diagnostics.wait_close_error = wait_result;
+                    self.stop(.failed, "ChannelWaitCloseFailed");
+                }
+            }
+            self.diagnostics.phase = .closing;
+            self.cleanup = .releasing;
+            if (self.closing_ms == null) self.closing_ms = nowMs();
             const close_result = c.zw_libssh2_channel_close_step(raw);
             self.captureExit();
             if (close_result == 1) {
                 self.cleanupDelay();
                 return;
             }
-            if (close_result < 0 and !self.terminal()) self.stop(.failed, "ChannelCloseFailed");
-            switch (self.owner.session.closeChannelReceipt(&self.channel.?)) {
+            if (close_result < 0) {
+                self.diagnostics.close_error = close_result;
+                if (!self.terminal()) self.stop(.failed, "ChannelCloseFailed");
+            }
+            self.diagnostics.phase = .releasing;
+            const release = self.owner.session.closeChannelReceipt(&self.channel.?);
+            self.diagnostics.release = switch (release) {
+                .awaiting => .releasing,
+                .unknown => .unknown,
+                .released => .released,
+            };
+            switch (release) {
                 .awaiting => {
                     self.cleanupDelay();
                     return;
@@ -445,6 +497,7 @@ pub const SshExecBridge = struct {
                     self.channel = null;
                     self.cleanup = .released;
                     self.state = .finished;
+                    self.diagnostics.phase = .finished;
                     self.finished_ms = nowMs();
                     if (!self.terminal()) {
                         self.status = .completed;
@@ -457,7 +510,19 @@ pub const SshExecBridge = struct {
             }
         }
         fn resultValue(self: *const Command) bridge.ExecResult {
-            return .{ .stdout = self.stdout.items, .stderr = self.stderr.items, .exit_code = self.exit_code, .elapsed_ms = @intCast(@max(@as(i64, 0), (self.finished_ms orelse nowMs()) - self.started_ms)), .key = self.key, .call_id = self.call_id, .service_binding = self.binding, .command = self.command, .cwd = self.cwd, .timeout_ms = self.timeout_ms, .capture_cap = self.cap, .status = self.status, .truncated = self.truncated, .stdout_bytes = self.stdout_bytes, .stderr_bytes = self.stderr_bytes, .effect = self.effect, .cleanup = self.cleanup, .failure = self.failure };
+            return .{ .stdout = self.stdout.items, .stderr = self.stderr.items, .exit_code = self.exit_code, .elapsed_ms = @intCast(@max(@as(i64, 0), (self.finished_ms orelse nowMs()) - self.started_ms)), .key = self.key, .call_id = self.call_id, .service_binding = self.binding, .command = self.command, .cwd = self.cwd, .timeout_ms = self.timeout_ms, .capture_cap = self.cap, .status = self.status, .truncated = self.truncated, .stdout_bytes = self.stdout_bytes, .stderr_bytes = self.stderr_bytes, .effect = self.effect, .cleanup = self.cleanup, .failure = self.failure, .diagnostics = self.diagnostics };
+        }
+        fn logReceipt(self: *Command) void {
+            const unknown = self.cleanup == .unknown and !self.logged_unknown;
+            const finished = self.state == .finished and !self.logged_finished;
+            if (!unknown and !finished) return;
+            self.logged_unknown = self.logged_unknown or unknown;
+            self.logged_finished = self.logged_finished or finished;
+            const value = self.resultValue();
+            const owner = if (self.key) |key| if (key.owner == .session) key.owner.session else null else null;
+            // At most one unknown and one final receipt per call. All fields
+            // are fixed enums/numbers; payloads and endpoint text stay out.
+            @import("../../platform/applog.zig").info(.ssh, "exec receipt call={d} operation={any} attempt={any} session={any} generation={any} binding={any} binding_generation={any} phase={s} stopped={any} request_started={any} accepted={any} eof={any} status={s} exit={any} effect={s} cleanup={s} elapsed_ms={d} stdout_bytes={d} stderr_bytes={d} captured={d} truncated={any} open_error={any} request_error={any} read_error={any} close_error={any} wait_close_error={any} release={s}", .{ self.call_id, if (self.key) |key| key.operation_id else null, if (self.key) |key| key.attempt_id else null, if (owner) |id| @backingInt(id.session_id) else null, if (owner) |id| id.generation else null, if (self.binding) |binding| binding.binding_id else null, if (self.binding) |binding| binding.binding_generation else null, @tagName(self.diagnostics.phase), self.diagnostics.stopped_phase, self.diagnostics.request_started, self.diagnostics.request_accepted, self.diagnostics.eof_received, @tagName(self.status), self.exit_code, @tagName(self.effect), @tagName(self.cleanup), value.elapsed_ms, self.stdout_bytes, self.stderr_bytes, self.stdout.items.len + self.stderr.items.len, self.truncated, self.diagnostics.channel_open_error, self.diagnostics.request_error, self.diagnostics.read_error, self.diagnostics.close_error, self.diagnostics.wait_close_error, @tagName(self.diagnostics.release) });
         }
         fn deinit(self: *Command) void {
             const allocator = self.owner.allocator;
@@ -511,6 +576,10 @@ test "ssh exec bridge rejects empty command and freezes bounded capture before n
     try std.testing.expect(result.exit_code == null);
     try std.testing.expectEqual(operation.Effect.none, result.effect);
     try std.testing.expectEqual(operation.Cleanup.released, result.cleanup);
+    try std.testing.expectEqual(bridge.Phase.finished, result.diagnostics.phase);
+    try std.testing.expectEqual(@as(?bridge.Phase, .queued), result.diagnostics.stopped_phase);
+    try std.testing.expectEqual(@as(?bool, false), result.diagnostics.request_started);
+    try std.testing.expect(!result.diagnostics.request_accepted);
     try std.testing.expectEqual(ssh.ReleaseReceipt.released, try sb.closeCall(h));
     try std.testing.expectError(error.StaleCallId, sb.exec("printf ok", .{ .call_id = 1 }));
 }

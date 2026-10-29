@@ -5,6 +5,14 @@ const host = @import("host_tools.zig");
 const provider = @import("provider.zig");
 const fetch = @import("fetch_url.zig");
 pub const lifetime_ms: i64 = 120_000;
+pub const routing = @import("execution_routing.zig");
+pub const RouteSelection = struct {
+    proposed: routing.Route,
+    choice: routing.Choice,
+    target: @import("../host/identity.zig").SessionHandle,
+    selectable: bool = false,
+    reason: []const u8 = "按本次任务选择运行方式；只覆盖此命令。",
+};
 pub const SubjectKind = enum { network_url, lifecycle, terminal_command };
 /// Display data comes from a trusted preflight, never an authorization decision.
 /// The owner still checks lifecycle grants, execution modes and live targets.
@@ -13,6 +21,7 @@ pub const Subject = struct {
     target: []const u8,
     detail: []const u8,
     impact: []const u8 = "",
+    route: ?RouteSelection = null,
 };
 fn Fixed(comptime capacity: usize) type {
     return struct {
@@ -32,6 +41,7 @@ fn Fixed(comptime capacity: usize) type {
 /// A value snapshot owns all its text. Safe to copy while the worker cancels.
 pub const Snapshot = struct {
     kind: SubjectKind,
+    route: ?struct { proposed: routing.Route, choice: routing.Choice, target: @import("../host/identity.zig").SessionHandle, selectable: bool, reason: Fixed(1024) } = null,
     target: Fixed(8192),
     detail: Fixed(65534),
     impact: Fixed(2048),
@@ -55,6 +65,7 @@ const State = enum { pending, approved, rejected };
 const Entry = struct { snapshot: Snapshot, state: State = .pending };
 pub const Broker = struct {
     mutex: std.atomic.Mutex = .unlocked,
+    execution_route: routing.State = .{},
     live_context: ?host.Context = null,
     network_policy_revision: u64 = 0,
     sequence: u64 = 0,
@@ -72,6 +83,7 @@ pub const Broker = struct {
     }
     pub fn configure(self: *Broker, context: host.Context, network_policy_revision: u64) !void {
         try context.validate();
+        try self.execution_route.configure(context);
         if (network_policy_revision == 0) return error.InvalidHostAuthority;
         self.lock();
         defer self.mutex.unlock();
@@ -87,6 +99,7 @@ pub const Broker = struct {
         defer self.mutex.unlock();
         self.stopped = true;
         self.entry = null;
+        self.execution_route.clear();
     }
     /// Publish one precise URL approval. Exposed for cooperative schedulers;
     /// ordinary worker users should call request() below.
@@ -100,6 +113,7 @@ pub const Broker = struct {
             .lifecycle => if (invocation.authority != .lifecycle) return error.InvalidHostApproval,
             .terminal_command => if (invocation.authority != .execution_control) return error.InvalidHostApproval,
         }
+        if (subject.route != null and subject.kind != .terminal_command) return error.InvalidHostApproval;
         const args = invocation.arguments;
         if (args != .object) return error.InvalidHostApproval;
         if (subject.kind == .network_url) {
@@ -117,6 +131,7 @@ pub const Broker = struct {
         defer allocator.free(canonical);
         var frozen: Snapshot = .{
             .kind = subject.kind,
+            .route = if (subject.route) |route| .{ .proposed = route.proposed, .choice = route.choice, .target = route.target, .selectable = route.selectable, .reason = try Fixed(1024).init(route.reason) } else null,
             .target = try Fixed(8192).init(subject.target),
             .detail = try Fixed(65534).init(subject.detail),
             .impact = try Fixed(2048).init(subject.impact),
@@ -189,7 +204,45 @@ pub const Broker = struct {
         defer self.mutex.unlock();
         const entry = if (self.entry) |*item| item else return error.StaleApproval;
         if (self.stopped or entry.state != .pending or entry.snapshot.sequence != sequence or !std.mem.eql(u8, &entry.snapshot.arguments_hash, &hash) or self.now() >= entry.snapshot.expires_at_ms) return error.StaleApproval;
+        if (approved) {
+            if (entry.snapshot.route) |route| try self.execution_route.select(entry.snapshot.context, route.choice, entry.snapshot.detail.text(), true);
+        }
+        if (!approved and entry.snapshot.route != null) self.execution_route.revoke();
         entry.state = if (approved) .approved else .rejected;
+    }
+    /// Selection changes the pending card only. One subsequent approve action
+    /// binds it to this command; cancel never mints a selection grant.
+    pub fn chooseRoute(self: *Broker, sequence: u64, hash: [32]u8, route: routing.Route) !void {
+        self.lock();
+        defer self.mutex.unlock();
+        const entry = if (self.entry) |*value| value else return error.StaleApproval;
+        if (self.stopped or entry.state != .pending or entry.snapshot.sequence != sequence or !std.mem.eql(u8, &entry.snapshot.arguments_hash, &hash) or self.now() >= entry.snapshot.expires_at_ms) return error.StaleApproval;
+        const selection = if (entry.snapshot.route) |*value| value else return error.RouteSelectionUnavailable;
+        if (!selection.selectable) return error.RouteSelectionUnavailable;
+        selection.choice.route = route;
+    }
+    pub fn selectedRoute(self: *Broker, permit: Permit) !routing.Choice {
+        self.lock();
+        defer self.mutex.unlock();
+        const entry = self.entry orelse return error.StaleApproval;
+        if (self.stopped or !matches(entry.snapshot, permit) or entry.state != .approved or self.now() >= entry.snapshot.expires_at_ms) return error.StaleApproval;
+        return if (entry.snapshot.route) |route| route.choice else error.RouteSelectionUnavailable;
+    }
+    /// A later real tool call can reuse a prior exact route+command approval.
+    /// All ordinary backend preflights and forbidden rules still run first.
+    pub fn beginGrantedSubject(self: *Broker, invocation: host.Invocation, subject: Subject, policy_revision: u64, allocator: std.mem.Allocator) !?Permit {
+        const route = subject.route orelse return null;
+        const target = route.target;
+        const resolution = self.execution_route.resolve(invocation.context, target, subject.detail, route.proposed);
+        if (!resolution.trusted or !resolution.approved or resolution.route != route.proposed or resolution.choice == null or !std.meta.eql(resolution.choice.?, route.choice)) return null;
+        const permit = try self.beginSubject(invocation, subject, policy_revision, allocator);
+        self.lock();
+        defer self.mutex.unlock();
+        if (self.entry) |*entry| if (matches(entry.snapshot, permit)) {
+            entry.state = .approved;
+            return permit;
+        };
+        return error.ScopeChanged;
     }
     pub fn finish(self: *Broker, permit: Permit) void {
         self.lock();
@@ -206,13 +259,24 @@ pub const Broker = struct {
     pub fn authorizeSubject(self: *Broker, permit: Permit, invocation: host.Invocation, subject: Subject, policy_revision: u64) fetch.Decision {
         return self.authorizeInner(permit, invocation, subject.kind, subject.target, subject.detail, subject.impact, policy_revision);
     }
+    /// Preserve the exact approval deadline across an asynchronous deployment.
+    pub fn authorizedSubjectExpiry(self: *Broker, permit: Permit, invocation: host.Invocation, subject: Subject, policy_revision: u64) ?i64 {
+        self.lock();
+        defer self.mutex.unlock();
+        if (self.authorizeInnerLocked(permit, invocation, subject.kind, subject.target, subject.detail, subject.impact, policy_revision) != .allow) return null;
+        return self.entry.?.snapshot.expires_at_ms;
+    }
     fn authorizeInner(self: *Broker, permit: Permit, invocation: host.Invocation, kind: SubjectKind, target: []const u8, detail: ?[]const u8, impact: ?[]const u8, network_revision: u64) fetch.Decision {
         self.lock();
         defer self.mutex.unlock();
+        return self.authorizeInnerLocked(permit, invocation, kind, target, detail, impact, network_revision);
+    }
+    fn authorizeInnerLocked(self: *Broker, permit: Permit, invocation: host.Invocation, kind: SubjectKind, target: []const u8, detail: ?[]const u8, impact: ?[]const u8, network_revision: u64) fetch.Decision {
         if (self.stopped or self.live_context == null or !self.live_context.?.eql(invocation.context) or self.network_policy_revision != network_revision) return .scope_changed;
         const entry = self.entry orelse return .approval_required;
         const saved = entry.snapshot;
         if (saved.kind != kind) return .scope_changed;
+        if (saved.route) |route| if (route.choice.route != route.proposed) return .scope_changed;
         if (!matches(saved, permit) or !saved.context.eql(invocation.context) or saved.authority != invocation.authority or saved.operation_id != invocation.operation_id or saved.turn_id != invocation.turn_id or saved.network_policy_revision != network_revision or !std.mem.eql(u8, saved.tool.text(), invocation.tool_id) or !std.mem.eql(u8, saved.call.text(), invocation.call_id) or !std.mem.eql(u8, &saved.arguments_hash, &invocation.arguments_hash) or !std.mem.eql(u8, &saved.canonical_arguments_hash, &invocation.canonical_arguments_hash)) return .scope_changed;
         if (self.now() >= saved.expires_at_ms) return .approval_required;
         var raw_hash: [32]u8 = undefined;
@@ -237,5 +301,6 @@ fn monotonicMs(_: ?*anyopaque) i64 {
     return @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
 }
 test {
+    _ = routing;
     _ = @import("host_approval_tests.zig");
 }

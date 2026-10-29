@@ -90,6 +90,8 @@ int zw_libssh2_auth_agent_driven(LIBSSH2_SESSION *session, const char *user, con
 int zw_libssh2_auth_keyboard_interactive_batch_driven(LIBSSH2_SESSION *session, const char *user, zw_ssh_auth_prompts_cb callback, void *ctx, const ZW_SSH_DRIVE *drive);
 /* A partially created channel remains owned by its Session on failure. */
 int zw_libssh2_open_shell_driven(LIBSSH2_SESSION *session, const char *term, int cols, int rows, LIBSSH2_CHANNEL **channel, const ZW_SSH_DRIVE *drive);
+/* New owned channel startup, never an exec request on an existing shell. */
+int zw_libssh2_open_bootstrap_driven(LIBSSH2_SESSION *session, const char *command, const char *term, int cols, int rows, LIBSSH2_CHANNEL **channel, const ZW_SSH_DRIVE *drive);
 int zw_ssh_private_key_readable(const char *path);
 LIBSSH2_CHANNEL *zw_libssh2_open_shell(LIBSSH2_SESSION *session, const char *term, int cols, int rows);
 int zw_libssh2_open_direct_tcpip_driven(LIBSSH2_SESSION *session, const char *host, unsigned short port, LIBSSH2_CHANNEL **output, const ZW_SSH_DRIVE *drive);
@@ -171,9 +173,14 @@ LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_opendir(LIBSSH2_SFTP *sftp, const char *pat
 long zw_libssh2_sftp_readdir(LIBSSH2_SFTP_HANDLE *handle, char *name, size_t capacity, ZW_SFTP_ATTRIBUTES *attrs);
 int zw_libssh2_sftp_stat_attributes(LIBSSH2_SFTP *sftp, const char *path, int follow, ZW_SFTP_ATTRIBUTES *attrs);
 int zw_libssh2_sftp_mkdir(LIBSSH2_SFTP *sftp, const char *path);
+int zw_libssh2_sftp_mkdir_private(LIBSSH2_SFTP *sftp, const char *path);
+LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_private(LIBSSH2_SFTP *sftp, const char *path, unsigned int mode);
+int zw_libssh2_sftp_unlink_owned(LIBSSH2_SFTP *sftp, const char *path);
+int zw_libssh2_sftp_rmdir_owned(LIBSSH2_SFTP *sftp, const char *path);
 int zw_libssh2_sftp_fstat_attributes(LIBSSH2_SFTP_HANDLE *handle, ZW_SFTP_ATTRIBUTES *attrs);
 unsigned long zw_libssh2_sftp_status(LIBSSH2_SFTP *sftp);
 #endif
 
 int zw_libssh2_shared_shell_step(LIBSSH2_SESSION *session, const char *term, int cols, int rows, LIBSSH2_CHANNEL **channel, int *phase);
+int zw_libssh2_shared_bootstrap_step(LIBSSH2_SESSION *session, const char *command, const char *term, int cols, int rows, LIBSSH2_CHANNEL **channel, int *phase);
 int zw_libssh2_shared_shell_cancel_step(LIBSSH2_SESSION *session, LIBSSH2_CHANNEL **channel, int *phase);

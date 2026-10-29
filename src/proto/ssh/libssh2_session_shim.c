@@ -785,6 +785,33 @@ LIBSSH2_CHANNEL *zw_libssh2_open_shell(LIBSSH2_SESSION *session, const char *ter
     }
     return channel;
 }
+int zw_libssh2_open_bootstrap_driven(LIBSSH2_SESSION *session, const char *command, const char *term,
+    int cols, int rows, LIBSSH2_CHANNEL **output, const ZW_SSH_DRIVE *options) {
+    *output = NULL;
+    if (!session || !command || !*command) return LIBSSH2_ERROR_INVAL;
+    struct zw_drive_wait wait = drive_begin(options);
+    LIBSSH2_CHANNEL *channel = NULL;
+    int rc;
+    for (;;) {
+        rc = drive_check(&wait);
+        if (rc) return rc;
+        channel = libssh2_channel_open_session(session);
+        if (channel) break;
+        rc = libssh2_session_last_errno(session);
+        if (rc != LIBSSH2_ERROR_EAGAIN) return rc ? rc : LIBSSH2_ERROR_CHANNEL_FAILURE;
+        rc = drive_again(session, &wait);
+        if (rc) return rc;
+    }
+    /* Preserve ownership even if startup fails. The caller must release this
+       exact child before permitting another attempt; shared transport lives. */
+    *output = channel;
+    if (term) {
+        DRIVE_STEP(rc, libssh2_channel_request_pty_ex(channel, term, (unsigned int)strlen(term), NULL, 0, cols, rows, 0, 0), session, &wait);
+        if (rc) return rc;
+    }
+    DRIVE_STEP(rc, libssh2_channel_exec(channel, command), session, &wait);
+    return rc;
+}
 int zw_libssh2_open_direct_tcpip_driven(LIBSSH2_SESSION *session,
     const char *host, unsigned short port, LIBSSH2_CHANNEL **output,
     const ZW_SSH_DRIVE *options) {
@@ -986,6 +1013,19 @@ unsigned long zw_libssh2_sftp_status(LIBSSH2_SFTP *sftp) { return libssh2_sftp_l
 int zw_libssh2_sftp_mkdir(LIBSSH2_SFTP *sftp, const char *path) {
     return libssh2_sftp_mkdir_ex(sftp, path, (unsigned int)strlen(path), 0755);
 }
+int zw_libssh2_sftp_mkdir_private(LIBSSH2_SFTP *sftp, const char *path) {
+    return libssh2_sftp_mkdir_ex(sftp, path, (unsigned int)strlen(path), 0700);
+}
+LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_private(LIBSSH2_SFTP *sftp, const char *path, unsigned int mode) {
+    if (mode != 0600 && mode != 0700) return NULL;
+    return libssh2_sftp_open(sftp, path, LIBSSH2_FXF_READ | LIBSSH2_FXF_WRITE | LIBSSH2_FXF_CREAT | LIBSSH2_FXF_EXCL, mode);
+}
+int zw_libssh2_sftp_unlink_owned(LIBSSH2_SFTP *sftp, const char *path) {
+    return libssh2_sftp_unlink_ex(sftp, path, (unsigned int)strlen(path));
+}
+int zw_libssh2_sftp_rmdir_owned(LIBSSH2_SFTP *sftp, const char *path) {
+    return libssh2_sftp_rmdir_ex(sftp, path, (unsigned int)strlen(path));
+}
 
 void zw_libssh2_session_disconnect_free(LIBSSH2_SESSION *session) {
     if (!session) return;
@@ -1066,6 +1106,31 @@ int zw_libssh2_shared_shell_step(LIBSSH2_SESSION *session, const char *term, int
     }
     if (*phase == 2) {
         rc = libssh2_channel_shell(*channel);
+        if (rc) return rc == LIBSSH2_ERROR_EAGAIN ? 1 : -1;
+        *phase = 3;
+    }
+    return 0;
+}
+/* Bootstrap startup has the same persistent native open/PTY state as an
+   ordinary shared shell, but sends exec only on that fresh child. */
+int zw_libssh2_shared_bootstrap_step(LIBSSH2_SESSION *session, const char *command, const char *term,
+    int cols, int rows, LIBSSH2_CHANNEL **channel, int *phase) {
+    int rc;
+    if (!command || !*command) return -1;
+    if (*phase == 0) {
+        *channel = libssh2_channel_open_session(session);
+        if (!*channel) { rc = libssh2_session_last_errno(session); return rc == LIBSSH2_ERROR_EAGAIN ? 1 : -1; }
+        *phase = 1;
+    }
+    if (*phase == 1) {
+        if (term) {
+            rc = libssh2_channel_request_pty_ex(*channel, term, (unsigned int)strlen(term), NULL, 0, cols, rows, 0, 0);
+            if (rc) return rc == LIBSSH2_ERROR_EAGAIN ? 1 : -1;
+        }
+        *phase = 2;
+    }
+    if (*phase == 2) {
+        rc = libssh2_channel_exec(*channel, command);
         if (rc) return rc == LIBSSH2_ERROR_EAGAIN ? 1 : -1;
         *phase = 3;
     }

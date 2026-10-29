@@ -347,7 +347,11 @@ pub const View = struct {
         metadata.setStyleInline(self.cx.allocator, S.metadataSlot());
         metadata.meta.ownership.meta.test_id = "ai.attachment.metadata";
         try card.appendChild(self.cx.allocator, metadata);
-        const remove = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = if (content.source == .terminal) "移除终端文本附件" else "移除本地文本附件", .base_style = state.remove_style, .hover_style = state.hover_style, .disabled = state.removing, .on_click = self.cx.on(Card, state, Card.remove) }).mount(scope, self.cx);
+        const remove = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = switch (content.source) {
+            .terminal => "移除终端文本附件",
+            .local_file => "移除本地文本附件",
+            .remote_file => "移除远程文件附件",
+        }, .base_style = state.remove_style, .hover_style = state.hover_style, .disabled = state.removing, .on_click = self.cx.on(Card, state, Card.remove) }).mount(scope, self.cx);
         remove.setStyleInline(self.cx.allocator, S.removeSlot());
         remove.meta.ownership.meta.test_id = "ai.attachment.remove";
         remove.setDisplay(if (self.readonly or self.callbacks.remove == null) .none else .flex);

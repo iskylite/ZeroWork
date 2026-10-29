@@ -4,6 +4,7 @@ const std = @import("std");
 const ui = @import("ui");
 const config = @import("../config/config.zig");
 const provider = @import("../ai/provider.zig");
+const identity = @import("../host/identity.zig");
 pub const Owner = @import("../ai/tool_scope.zig").Owner;
 const S = @import("ai_composer_controls_styles.zig");
 pub const Effort = provider.Effort;
@@ -49,8 +50,11 @@ pub const Snapshot = struct {
     attachments: AttachmentState = .{},
     usage: ?Usage = null,
     editable: bool = true,
+    inventory_authorized: bool = false,
+    inventory_conversation_id: ?identity.ConversationId = null,
 };
 pub const Action = union(enum) {
+    revoke_inventory: identity.ConversationId,
     compact_context,
     cancel_compaction,
     model: ModelKey,
@@ -81,7 +85,7 @@ pub fn effortLabel(value: Effort) []const u8 {
     };
 }
 const Model = struct { key: ModelKey, enabled: bool, context_window: u32, context_discovered: bool, reasoning: bool, toggle: bool, thinking_default: ?bool, vision: bool, efforts: [7]bool };
-const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, permission: PermissionMode, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, thinking: ?bool, attachments: AttachmentState, usage: ?Usage, editable: bool, config_hash: u64 };
+const Projection = struct { owner: Owner, revision: u64, models: []const Model, current: ?ModelKey, permission: PermissionMode, global_execution_mode: ExecutionMode, global_session_retention: SessionRetention, execution_mode_override: ?ExecutionMode, session_retention_override: ?SessionRetention, effort: ?Effort, thinking: ?bool, attachments: AttachmentState, usage: ?Usage, editable: bool, inventory_authorized: bool, inventory_conversation_id: ?identity.ConversationId, config_hash: u64 };
 const Owned = struct {
     arena: std.heap.ArenaAllocator,
     value: Projection,
@@ -111,7 +115,7 @@ const Owned = struct {
             value.parts = parts;
         }
         const current = if (snapshot.current) |key| try cloneKey(a, key) else null;
-        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .permission = snapshot.permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .usage = usage, .editable = snapshot.editable, .config_hash = hash.final() } };
+        return .{ .arena = arena, .value = .{ .owner = snapshot.owner, .revision = snapshot.revision, .models = try models.toOwnedSlice(a), .current = current, .permission = snapshot.permission, .global_execution_mode = snapshot.global_execution_mode, .global_session_retention = snapshot.global_session_retention, .execution_mode_override = snapshot.execution_mode_override, .session_retention_override = snapshot.session_retention_override, .effort = snapshot.effort, .thinking = snapshot.thinking, .attachments = snapshot.attachments, .usage = usage, .editable = snapshot.editable, .inventory_authorized = snapshot.inventory_authorized, .inventory_conversation_id = snapshot.inventory_conversation_id, .config_hash = hash.final() } };
     }
     fn appendModel(a: std.mem.Allocator, models: *std.ArrayList(Model), hash: *std.hash.Wyhash, id: []const u8, kind: config.ProviderKind, endpoint: []const u8, enabled: bool, value: config.AiModel) !void {
         const key: ModelKey = .{ .provider_id = id, .model_id = value.id };
@@ -135,7 +139,7 @@ fn cloneKey(a: std.mem.Allocator, key: ModelKey) !ModelKey {
     return .{ .provider_id = try a.dupe(u8, key.provider_id), .model_id = try a.dupe(u8, key.model_id) };
 }
 const ReasoningChoice = union(enum) { off, on, effort: Effort };
-const Capture = struct { owner: Owner, revision: u64 };
+const Capture = struct { owner: Owner, revision: u64, inventory_conversation_id: ?identity.ConversationId };
 const Popup = struct { widget: ui.widgets.popover.PopoverResult, body: *ui.Node, title: ?*ui.Node = null, capture: ?Capture = null };
 const Choice = struct {
     view: *View,
@@ -196,6 +200,9 @@ pub const View = struct {
     model_empty: *ui.Node = undefined,
     model_settings: *ui.Node = undefined,
     model_list: *ui.Node = undefined,
+    permission_disabled: *ui.Signal(bool),
+    inventory_revoke_disabled: *ui.Signal(bool),
+    inventory_revoke: *ui.Node = undefined,
     permission_rows: [2]*ui.Node = undefined,
     permission_styles: [2]*ui.Signal(ui.BoxStyle) = undefined,
     permission_checks: [2]*ui.Node = undefined,
@@ -234,7 +241,7 @@ pub const View = struct {
     viewport: ui.Size = .ZERO,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
-        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .callbacks = callbacks, .hover_style = try scope.createSignal(?ui.BoxStyle, S.hover()), .model_count = try scope.createSignal(usize, 0), .model_version = try scope.createSignal(u64, 0), .slider_value = try scope.createSignal(f32, 0), .retention_value = try scope.createSignal(?[]const u8, "inherit"), .colors = S.theme.current() });
+        const self = try scope.createState(View, .{ .cx = cx, .scope = scope, .callbacks = callbacks, .hover_style = try scope.createSignal(?ui.BoxStyle, S.hover()), .model_count = try scope.createSignal(usize, 0), .model_version = try scope.createSignal(u64, 0), .slider_value = try scope.createSignal(f32, 0), .retention_value = try scope.createSignal(?[]const u8, "inherit"), .permission_disabled = try scope.createSignal(bool, true), .inventory_revoke_disabled = try scope.createSignal(bool, true), .colors = S.theme.current() });
         try scope.onCleanup(View, self, release);
         self.root = try ui.box(cx, S.row(), .{});
         self.root.meta.ownership.meta.test_id = "ai.composer.controls";
@@ -339,7 +346,7 @@ pub const View = struct {
     fn mountPopup(self: *View, kind: S.Kind) !Popup {
         const anchor = try self.scope.createState(Anchor, .{ .view = self, .kind = kind });
         const open = try self.scope.createSignal(bool, false);
-        const result = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .position = .top_start, .anchor = .{ .virtual = .{ .ctx = anchor, .getRect = Anchor.get } }, .offset = .{ .static = 6 }, .width = S.width(kind), .max_height = if (kind == .usage) 600 else S.height(kind), .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .viewport_padding = 8, .on_open_change = self.cx.on(Anchor, anchor, Anchor.openChanged) }).mount(self.scope, self.cx);
+        const result = try ui.widgets.Popover(.{ .open = open, .trigger = .manual, .position = .top_start, .anchor = .{ .virtual = .{ .ctx = anchor, .getRect = Anchor.get } }, .offset = .{ .static = 6 }, .width = S.width(kind), .max_height = if (kind == .usage) 600 else if (kind == .permission) S.height(kind) + 38 else S.height(kind), .close_on_escape = true, .close_on_outside_click = true, .constrain_width_to_viewport = true, .flip = true, .shift_main_axis = true, .viewport_padding = 8, .on_open_change = self.cx.on(Anchor, anchor, Anchor.openChanged) }).mount(self.scope, self.cx);
         result.wrapper.setStyleInline(self.cx.allocator, S.wrapper());
         try self.root.appendChild(self.cx.allocator, result.wrapper);
         result.chrome.setStyleInline(self.cx.allocator, S.panel(kind, self.cx.viewport));
@@ -405,7 +412,7 @@ pub const View = struct {
             const mode: PermissionMode = @fromBackingInt(@intCast(index));
             self.permission_styles[index] = try self.scope.createSignal(ui.BoxStyle, S.option(32, false));
             const choice = try self.scope.createState(Choice, .{ .view = self, .kind = .permission, .action = .{ .permission = mode } });
-            const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = permissionLabel(mode), .disabled = self.disabled[1], .base_style = self.permission_styles[index], .hover_style = self.hover_style, .on_click = self.cx.on(Choice, choice, Choice.choose) }).mount(self.scope, self.cx);
+            const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = permissionLabel(mode), .disabled = self.permission_disabled, .base_style = self.permission_styles[index], .hover_style = self.hover_style, .on_click = self.cx.on(Choice, choice, Choice.choose) }).mount(self.scope, self.cx);
             prepareCustomButton(button, .start, self.cx.allocator);
             button.meta.ownership.meta.test_id = if (mode == .confirm) "ai.permission.confirm" else "ai.permission.auto";
             self.permission_rows[index] = button;
@@ -417,6 +424,10 @@ pub const View = struct {
             _ = try self.label(parent, if (mode == .confirm) "只读检查自动进行，修改前由你确认。" else "允许当前会话内自主操作；组写调用仍需确认。", S.text(10.5, 400, 16, true), S.flexibleLabel(16));
         }
         _ = try self.label(parent, "仅作用于当前助手范围；禁止项始终不可执行。", S.text(10.5, 400, 16, true), S.flexibleLabel(16));
+        self.inventory_revoke = try ui.widgets.Button(.{ .variant = .ghost, .label = "撤销会话列表授权", .a11y_label = "撤销当前对话的会话列表授权", .disabled = self.inventory_revoke_disabled, .base_style = S.option(32, false), .hover_style = self.hover_style, .on_click = self.cx.on(View, self, revokeInventory) }).mount(self.scope, self.cx);
+        self.inventory_revoke.meta.ownership.meta.test_id = "ai.permission.revoke_inventory";
+        self.inventory_revoke.setDisplay(.none);
+        try parent.appendChild(self.cx.allocator, self.inventory_revoke);
     }
     fn mountExecution(self: *View) !void {
         const popup = &self.popups[@backingInt(S.Kind.execution)];
@@ -733,6 +744,13 @@ pub const View = struct {
             for (0..6) |index| {
                 const kind: S.Kind = @fromBackingInt(@intCast(index));
                 var style = S.panel(kind, self.cx.viewport);
+                if (kind == .permission) {
+                    const authorized = if (self.source) |source| source.value.inventory_authorized and source.value.inventory_conversation_id != null else false;
+                    const panel_height = @min(S.height(.permission) + @as(f32, if (authorized) 38 else 0), @max(0, self.cx.viewport.height - 16));
+                    style.height = .{ .px = panel_height };
+                    style.min_height = panel_height;
+                    style.max_height = panel_height;
+                }
                 if (kind == .model) {
                     const middle: f32 = 180;
                     const reason_height: f32 = if (self.disabled[3].peek()) 32.5 else 67.5;
@@ -774,7 +792,7 @@ pub const View = struct {
         self.dismiss();
         const source = &self.source.?.value;
         self.last_error = null;
-        self.popups[index].capture = .{ .owner = source.owner, .revision = source.revision };
+        self.popups[index].capture = .{ .owner = source.owner, .revision = source.revision, .inventory_conversation_id = source.inventory_conversation_id };
         self.popups[index].widget.open.?.set(true);
         self.focus_pending = kind;
         self.execution_focus_pending = kind == .execution;
@@ -825,11 +843,20 @@ pub const View = struct {
         // host preserves the image and explains why sending is blocked.
         return true;
     }
+    fn revokeInventory(self: *View) void {
+        const captured = self.capture(.permission) orelse return;
+        const conversation_id = captured.inventory_conversation_id orelse return;
+        self.emit(.permission, .{ .revoke_inventory = conversation_id });
+    }
     fn emit(self: *View, kind: S.Kind, action: Action) void {
         const captured = self.capture(kind) orelse return;
         const source = &self.source.?.value;
-        if (!source.editable) return;
+        if (!source.editable and action != .revoke_inventory) return;
         switch (action) {
+            .revoke_inventory => |conversation_id| {
+                if (!source.inventory_authorized or source.inventory_conversation_id == null or !source.inventory_conversation_id.?.eql(conversation_id)) return;
+                if (self.pending) |pending| if (!pending.value.inventory_authorized or pending.value.inventory_conversation_id == null or !pending.value.inventory_conversation_id.?.eql(conversation_id)) return;
+            },
             .model => |key| {
                 const selected = self.findModel(key) orelse return;
                 if (!selected.enabled) return;
@@ -974,7 +1001,11 @@ pub const View = struct {
             any_effort = any_effort or enabled;
         };
         self.disabled[0].set(!any_attachment);
-        self.disabled[1].set(!editable);
+        const inventory_authorized = if (source) |value| value.inventory_authorized and value.inventory_conversation_id != null else false;
+        self.disabled[1].set(!editable and !inventory_authorized);
+        self.permission_disabled.set(!editable);
+        self.inventory_revoke_disabled.set(!inventory_authorized);
+        self.inventory_revoke.setDisplay(if (inventory_authorized) .flex else .none);
         self.disabled[5].set(!editable);
         self.disabled[2].set(!editable or (!any_model and self.callbacks.open_settings == null));
         self.reasoning_count = 0;
@@ -1198,7 +1229,7 @@ pub const View = struct {
             self.focus_pending = null;
             const node = switch (kind) {
                 .model => self.model_close,
-                .permission => self.permission_rows[if (self.source) |source| @backingInt(source.value.permission) else 0],
+                .permission => if (self.source != null and !self.source.?.value.editable and self.source.?.value.inventory_authorized and self.source.?.value.inventory_conversation_id != null) self.inventory_revoke else self.permission_rows[if (self.source) |source| @backingInt(source.value.permission) else 0],
                 .effort => self.slider.wrapper,
                 .attachment => self.attachment_rows[firstEnabled(self.attachment_disabled) orelse 0],
                 .usage => self.buttons[4],
@@ -1291,7 +1322,7 @@ fn optionalKeyEql(first: ?ModelKey, second: ?ModelKey) bool {
     return second == null;
 }
 fn projectionEql(first: Projection, second: Projection) bool {
-    return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.permission == second.permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and first.editable == second.editable and usageEql(first.usage, second.usage);
+    return first.owner.eql(second.owner) and first.revision == second.revision and first.config_hash == second.config_hash and optionalKeyEql(first.current, second.current) and first.permission == second.permission and first.global_execution_mode == second.global_execution_mode and first.global_session_retention == second.global_session_retention and first.execution_mode_override == second.execution_mode_override and first.session_retention_override == second.session_retention_override and first.effort == second.effort and first.thinking == second.thinking and std.meta.eql(first.attachments, second.attachments) and first.editable == second.editable and first.inventory_authorized == second.inventory_authorized and std.meta.eql(first.inventory_conversation_id, second.inventory_conversation_id) and usageEql(first.usage, second.usage);
 }
 fn usageEql(first: ?Usage, second: ?Usage) bool {
     const one = first orelse return second == null;

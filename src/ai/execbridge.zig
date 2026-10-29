@@ -12,6 +12,24 @@ pub const ExecOpts = struct {
     group: ?*anyopaque = null,
 };
 pub const Status = enum { queued, opening, running, completed, cancelled, timed_out, channel_rejected, failed };
+/// Fixed-size protocol facts. No command, address, credentials or output is
+/// included, so the native owner can record a bounded diagnostic on failure.
+pub const Phase = enum { queued, opening, requesting, running, peer_close, closing, releasing, finished };
+pub const Diagnostics = struct {
+    phase: Phase = .queued,
+    stopped_phase: ?Phase = null,
+    // true means native exec was entered, not proof of packet delivery or
+    // server acceptance. null means this bridge supplied no start evidence.
+    request_started: ?bool = null,
+    request_accepted: bool = false,
+    eof_received: bool = false,
+    channel_open_error: ?i32 = null,
+    request_error: ?i32 = null,
+    read_error: ?i32 = null,
+    close_error: ?i32 = null,
+    wait_close_error: ?i32 = null,
+    release: operation.Cleanup = .not_started,
+};
 pub const ExecResult = struct {
     stdout: []const u8,
     stderr: []const u8,
@@ -31,6 +49,7 @@ pub const ExecResult = struct {
     effect: operation.Effect = .unknown,
     cleanup: operation.Cleanup = .not_started,
     failure: ?[]const u8 = null,
+    diagnostics: Diagnostics = .{},
 };
 /// Snapshot copies can be read while the IO owner continues draining. Ordinary
 /// poll results borrow buffers that stay stable until the call is retired.

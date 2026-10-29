@@ -11,6 +11,12 @@ pub const plugin_tools = @import("ai/plugin_tools.zig");
 pub const lifecycle_journal = @import("ai/lifecycle_journal.zig");
 pub const canonical_arguments = @import("ai/canonical_arguments.zig");
 pub const host_queries = @import("ai/host_queries.zig");
+comptime {
+    _ = @import("host_recording_queries_tests.zig");
+    _ = @import("ai_inventory_grant_tests.zig");
+    _ = @import("host_secret_store_tests.zig");
+    _ = @import("ui/ai_recording_query_access.zig");
+}
 test {
     _ = canonical_arguments;
     _ = lifecycle_journal;
@@ -22,6 +28,8 @@ test {
     _ = @import("ai/fetch_url.zig");
     _ = @import("ui/ai_execution_backend.zig");
     _ = @import("ui/ai_host_queries.zig");
+    _ = @import("ai/host_terminal_queries.zig");
+    _ = @import("host_terminal_queries_tests.zig");
 }
 pub const plugin_content_context = @import("host/content_context.zig");
 pub const plugin_challenge_host = @import("host/challenge_host.zig");

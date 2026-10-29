@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZeroWork · 终端输入回执</title>
+<link rel="stylesheet" href="../theme-tokens.css">
+<style>
+*{box-sizing:border-box}body{margin:0;background:var(--overlay-base);color:var(--fg-1);font:12px/18px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+main{display:flex;flex-direction:column;gap:8px;padding:48px 14px 14px}
+.result{display:flex;flex-direction:column;flex:none;min-width:0;border:0;outline:none;border-radius:9px;background:var(--popup-action);overflow:hidden}
+summary{list-style:none;display:flex;align-items:center;gap:6px;height:32px;flex:none;padding:0 12px 0 10px;cursor:pointer;outline:none}
+summary::-webkit-details-marker{display:none}summary:focus-visible{background:var(--popup-selected)}
+.icon-slot{display:flex;align-items:center;justify-content:center;width:22px;height:22px;flex:none;color:var(--ok-ink)}
+svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round;flex:none}
+strong{width:84px;flex:none;font-size:12px;line-height:18px;font-weight:500;white-space:nowrap}
+.summary{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--fg-2);font-size:10.5px;line-height:16px}
+.elapsed{width:44px;flex:none;color:var(--fg-2);font:10.5px/16px var(--mono)}
+.body{display:flex;flex-direction:column;gap:6px;padding:4px 12px 8px;max-height:150px;overflow:auto;color:var(--fg-2)}
+.body>*{flex:none}.metadata{font-size:10.5px;line-height:16px}.identity{font:10.5px/16px var(--mono)}
+.output{margin:0;padding:4px;border-radius:7px;background:var(--control-bg);color:var(--fg-1);font:11px/16px var(--mono);white-space:pre;overflow:auto}
+.actions{display:flex;align-items:center;min-height:34px;padding:3px 8px;gap:6px}
+button{border:0;outline:none;border-radius:7px;background:transparent;color:var(--accent-ink);height:28px;padding:4px 8px;font:500 12px/18px inherit}
+.input-unknown .icon-slot{color:var(--warn-ink)}[hidden]{display:none!important}
+</style>
+<body data-theme="dark">
+<main>
+  <details class="result" id="execution" open>
+    <summary><span class="icon-slot"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span><strong>执行命令</strong><span class="summary">最近观测 · 前台已结束 · 观测片段已保存</span><span class="elapsed">6.8s</span></summary>
+    <div class="body">
+      <span>目标 · deploy@app-prod-01.example.net:2222 · 会话 #101</span>
+      <span class="metadata">前台已结束 · 退出码 0</span>
+      <span class="metadata">同一终端观测片段 · 已保存</span>
+      <span class="metadata">输出归属未确认</span>
+      <span class="metadata">该片段仅覆盖本次观测区间；其他程序可写入同一终端，后台输出可能在前台结束后继续。</span>
+      <pre class="output">./deploy/check-release.sh --interactive</pre>
+      <span class="identity">执行 · x1:0123456789abcdef0123456789abcdef</span>
+      <span class="metadata">同一终端观测片段</span>
+      <pre class="output">Checking release…
+ACTUAL_TERMINAL_OUTPUT
+Output boundary retained.</pre>
+    </div>
+    <div class="actions"><button type="button">查看终端</button></div>
+  </details>
+  <details class="result" id="input" open>
+    <summary><span class="icon-slot"><svg viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></svg></span><strong>提交终端输入</strong><span class="summary" id="input-summary">输入结果 · 输入已消费</span><span class="elapsed">—</span></summary>
+    <div class="body">
+      <span>输入类型 · 宿主安全输入</span>
+      <span class="metadata">输入序号 5 · 等待序号 3</span>
+      <span class="metadata">此处仅确认本次输入的处理状态；命令执行结果请查看执行记录。</span>
+      <span id="input-failure" hidden>本次调用未能完成，请核实原终端状态。</span>
+      <span class="identity">执行 · x1:0123456789abcdef0123456789abcdef</span>
+    </div>
+  </details>
+</main>
+<script>
+const params=new URLSearchParams(location.search);document.body.dataset.theme=params.get('theme')||'dark';
+if(params.get('state')==='input_unknown'){
+  document.querySelector('#input').classList.add('input-unknown');
+  document.querySelector('#input-summary').textContent='输入结果 · 输入结果待核实';
+  document.querySelector('#input-failure').hidden=false;
+  document.querySelector('#input .icon-slot').innerHTML='<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.2 9a3 3 0 0 1 5.8 1c0 2-3 2-3 4m0 3h.01"/></svg>';
+}
+</script>
+</body>
+</html>

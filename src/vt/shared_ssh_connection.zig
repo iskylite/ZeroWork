@@ -4,6 +4,7 @@ const ssh = @import("../proto/ssh/session.zig");
 const Forward = @import("../proto/ssh/forward_service.zig").Service;
 pub const Lifetime = struct { context: *anyopaque, retain: *const fn (*anyopaque) void, call: *const fn (*anyopaque) void };
 const c = @import("generated_ssh_session");
+const Bootstrap = @import("../proto/ssh/bootstrap.zig");
 const Lease = @import("../host/runtime_service.zig").SharedLease;
 var pending_mutex: std.atomic.Mutex = .unlocked;
 var pending_head: ?*Connection = null;
@@ -15,6 +16,8 @@ pub fn reserveNotificationId() u64 {
 pub const Connection = struct {
     const ShellCleanup = struct {
         term: [:0]u8,
+        command: ?[:0]u8 = null,
+        pty: bool = true,
         raw: ?*c.LIBSSH2_CHANNEL = null,
         phase: c_int = 0,
         owns_open: bool = false,
@@ -23,6 +26,14 @@ pub const Connection = struct {
             return .{ .kind = .shell, .id = @intFromPtr(self.term.ptr) };
         }
     };
+    pub const BootstrapFailure = struct {
+        session: ssh.Session = .{},
+        control: ?@import("../proto/ssh/channel.zig").Channel = null,
+        deployment: ?Bootstrap.Deployment = null,
+        next: ?*BootstrapFailure = null,
+    };
+    bootstrap_cleanup: ?*BootstrapFailure = null,
+    bootstrap_cleanup_running: std.atomic.Value(bool) = .init(false),
     allocator: std.mem.Allocator,
     notification_id: u64 = 0,
     mutex: std.atomic.Mutex = .unlocked,
@@ -192,6 +203,64 @@ pub const Connection = struct {
         if (session.connection_details) |store| if (session.resource_key) |key| store.status(key, session.resource_hop, .released);
         session.* = .{ .state = .closed };
     }
+    /// The caller preallocates this owner before any deployment/native startup.
+    /// Transfer requires no allocation while handling an OOM/cancelled open.
+    pub fn adoptBootstrapFailure(self: *Connection, pending: *BootstrapFailure, session: *ssh.Session, control: *?@import("../proto/ssh/channel.zig").Channel, deployment: *?Bootstrap.Deployment) void {
+        pending.* = .{ .session = session.*, .control = control.*, .deployment = deployment.*, .next = self.bootstrap_cleanup };
+        self.bootstrap_cleanup = pending;
+        retain(self);
+        self.startBootstrapCleanup();
+        session.* = .{ .state = .closed };
+        control.* = null;
+        deployment.* = null;
+    }
+    fn startBootstrapCleanup(self: *Connection) void {
+        if (self.bootstrap_cleanup_running.swap(true, .acq_rel)) return;
+        retain(self);
+        const thread = std.Thread.spawn(.{}, runBootstrapCleanup, .{self}) catch {
+            self.bootstrap_cleanup_running.store(false, .release);
+            release(self);
+            return;
+        };
+        thread.detach();
+    }
+    fn runBootstrapCleanup(self: *Connection) void {
+        defer release(self);
+        const deadline = @import("../platform/realtime.zig").monotonicNs() + 5 * std.time.ns_per_s;
+        while (@import("../platform/realtime.zig").monotonicNs() < deadline) {
+            self.lock();
+            self.stepBootstrapCleanup();
+            const done = self.bootstrap_cleanup == null;
+            self.unlock();
+            if (done) break;
+            var delay: std.c.timespec = .{ .sec = 0, .nsec = 25 * std.time.ns_per_ms };
+            _ = std.c.nanosleep(&delay, null);
+        }
+        self.bootstrap_cleanup_running.store(false, .release);
+    }
+    fn stepBootstrapCleanup(self: *Connection) void {
+        var link = &self.bootstrap_cleanup;
+        while (link.*) |pending| {
+            if (self.native.handle == null) {
+                pending.session.recordResource(.shell, .released);
+                pending.session.recordResource(.execution_control, .released);
+                if (pending.deployment != null) pending.session.recordResource(.bootstrap, .unknown);
+            } else {
+                const options: ssh.Options = .{ .host = "", .user = "", .auth = .agent };
+                if (Bootstrap.closeResources(&pending.session, &pending.control, &pending.deployment, options) != .released) {
+                    link = &pending.next;
+                    continue;
+                }
+                if (pending.session.closeReceipt() != .released) {
+                    link = &pending.next;
+                    continue;
+                }
+            }
+            link.* = pending.next;
+            self.allocator.destroy(pending);
+            release(self);
+        }
+    }
     /// Native retry arguments outlive a cancelled caller. Existing workers
     /// drain this list under the shared native guard; final parent release is
     /// the fallback owner when a peer never acknowledges an abandoned open.
@@ -204,8 +273,12 @@ pub const Connection = struct {
         self.shell_cleanup = pending;
     }
     fn freeShellCleanup(self: *Connection, pending: *ShellCleanup) void {
-        self.allocator.free(pending.term);
+        self.freeStartupTexts(pending);
         self.allocator.destroy(pending);
+    }
+    fn freeStartupTexts(self: *Connection, pending: *ShellCleanup) void {
+        self.allocator.free(pending.term);
+        if (pending.command) |command| self.allocator.free(command);
     }
     fn discardShellCleanup(self: *Connection) void {
         while (self.shell_cleanup) |pending| {
@@ -215,6 +288,7 @@ pub const Connection = struct {
     }
     /// Caller holds the native mutex. No cleanup of one shell aborts siblings.
     pub fn stepShellCleanup(self: *Connection) void {
+        self.stepBootstrapCleanup();
         if (self.native.handle == null) {
             self.discardShellCleanup();
             return;
@@ -233,11 +307,34 @@ pub const Connection = struct {
         }
     }
     pub fn openShell(self: *Connection, options: ssh.Options) !ssh.Session {
-        try options.prepareDetails();
+        return self.openStartup(options, null, true);
+    }
+    pub fn openBootstrapShell(self: *Connection, options: ssh.Options, command: [:0]const u8) !ssh.Session {
+        return self.openStartup(options, command, true);
+    }
+    pub fn openBootstrapControl(self: *Connection, options: ssh.Options, command: [:0]const u8) !@import("../proto/ssh/channel.zig").Channel {
+        const child = try self.openStartup(options, command, false);
+        return child.channel orelse error.BootstrapChannelFailed;
+    }
+    /// A fresh child SFTP context for the explicitly approved deployment.
+    /// Each operation is serialized by the caller's NativeGuard; no shell is
+    /// opened or touched by borrowing this authenticated transport.
+    pub fn borrowBootstrap(self: *Connection, options: ssh.Options) !ssh.Session {
+        self.lock();
+        defer self.unlock();
+        if (self.broken or self.native.state != .active or self.native.handle == null) return error.SessionClosed;
+        return .{ .state = .active, .handle = self.native.handle, .socket_fd = self.native.socket_fd, .borrowed_transport = true, .shared_gate = &self.native, .resource_ledger = options.resource_ledger, .resource_key = options.operation_key, .resource_hop = options.hop_index, .source_owner = options.source_owner, .connection_details = options.connection_details, .negotiated_metadata = self.native.negotiated_metadata };
+    }
+    fn openStartup(self: *Connection, options: ssh.Options, command: ?[:0]const u8, pty: bool) !ssh.Session {
+        if (pty) try options.prepareDetails();
         const pending = try self.allocator.create(ShellCleanup);
         var graph_owned = false;
         defer if (!graph_owned) self.allocator.destroy(pending);
-        pending.* = .{ .term = try self.allocator.dupeSentinel(u8, options.term, 0) };
+        pending.* = .{ .term = try self.allocator.dupeSentinel(u8, options.term, 0), .pty = pty };
+        if (command) |text| pending.command = self.allocator.dupeSentinel(u8, text, 0) catch |err| {
+            self.freeStartupTexts(pending);
+            return err;
+        };
         const deadline = @import("../platform/realtime.zig").monotonicNs() + @as(i128, options.connect_timeout_ms) * std.time.ns_per_ms;
         while (true) {
             self.lock();
@@ -245,7 +342,7 @@ pub const Connection = struct {
                 if (pending.owns_open and self.native.handle != null) {
                     self.queueShellCleanup(pending);
                     graph_owned = true;
-                } else self.allocator.free(pending.term);
+                } else self.freeStartupTexts(pending);
                 self.unlock();
                 return error.SessionClosed;
             }
@@ -258,13 +355,13 @@ pub const Connection = struct {
                     self.unlock();
                     return if (cancelled) error.Cancelled else error.ConnectionTimedOut;
                 }
-                self.allocator.free(pending.term);
+                self.freeStartupTexts(pending);
                 self.unlock();
                 return if (cancelled) error.Cancelled else error.ConnectionTimedOut;
             }
             const acquired = self.native.claimChannelOpen(pending.ticket());
             pending.owns_open = pending.owns_open or acquired;
-            const rc = if (acquired) c.zw_libssh2_shared_shell_step(self.native.handle.?, pending.term.ptr, options.cols, options.rows, &pending.raw, &pending.phase) else 1;
+            const rc = if (!acquired) @as(c_int, 1) else if (pending.command) |text| c.zw_libssh2_shared_bootstrap_step(self.native.handle.?, text.ptr, if (pending.pty) pending.term.ptr else null, options.cols, options.rows, &pending.raw, &pending.phase) else c.zw_libssh2_shared_shell_step(self.native.handle.?, pending.term.ptr, options.cols, options.rows, &pending.raw, &pending.phase);
             if (rc <= 0) {
                 self.native.finishChannelOpen(pending.ticket());
                 pending.owns_open = false;
@@ -279,18 +376,18 @@ pub const Connection = struct {
                         self.unlock();
                         return error.ShellOpenFailed;
                     }
-                    self.allocator.free(pending.term);
+                    self.freeStartupTexts(pending);
                     self.unlock();
                     return error.ShellOpenFailed;
                 }
                 var child: ssh.Session = .{ .state = .active, .handle = self.native.handle, .socket_fd = self.native.socket_fd, .channel = .{ .handle = @ptrCast(pending.raw.?) }, .borrowed_transport = true, .shared_gate = &self.native, .resource_ledger = options.resource_ledger, .resource_key = options.operation_key, .resource_hop = options.hop_index, .source_owner = options.source_owner, .connection_details = options.connection_details, .negotiated_metadata = self.native.negotiated_metadata };
-                child.recordResource(.shell, .owned);
-                if (options.connection_details) |store| if (options.operation_key) |key| {
+                if (pty) child.recordResource(.shell, .owned);
+                if (pty) if (options.connection_details) |store| if (options.operation_key) |key| {
                     if (self.route) |route| for (route.hops[0 .. route.hops.len - 1], 0..) |hop, index| store.negotiated(key, index, hop.session.negotiated_metadata);
                     store.negotiated(key, options.hop_index, child.negotiated_metadata);
                 };
                 self.unlock();
-                self.allocator.free(pending.term);
+                self.freeStartupTexts(pending);
                 return child;
             }
             self.unlock();

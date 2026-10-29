@@ -18,6 +18,8 @@
 #include "pooled_present.inc"
 #include "missing_pools_cursor.h"
 
+#include "native_event_window.inc"
+
 // RPC acceptance runs keep native windows renderable without taking over the desktop.
 static BOOL zenitBackgroundE2E(void) {
     const char *value = zenitAutomationEnvironment("ZENIT_E2E_BACKGROUND");
@@ -4765,6 +4767,8 @@ int macos_poll_events(void* window_ptr) {
                                                   dequeue:YES];
             if (!event) break;
 
+            if (zenitDispatchNativePanelEvent(event)) continue;
+
             // determine event belongs to which window
             WindowWrapper *target = targetWrapperForEvent(event, wrapper);
 
@@ -6086,6 +6090,7 @@ static void pumpAppEventsWithTimeout(uint32_t timeout_ms) {
             }
             if (!event) break;
             shouldBlockForFirstEvent = NO;
+            if (zenitDispatchNativePanelEvent(event)) continue;
             if (event.type == NSEventTypeApplicationDefined) {
                 atomic_store(&g_display_link_wake_pending, false);
             }

@@ -28,10 +28,59 @@ pub const SearchSnapshot = struct {
 pub const SearchTask = @import("../vt/search_task.zig").Task;
 pub const SearchTail = struct { start_row: u32, version: u64, max_rows: u16 };
 
+/// Bounded retained logical-line query. Line indices are revision-bound and
+/// count soft-wrapped physical rows as a single logical line.
+pub const ContentRequest = struct {
+    range_kind: enum { tail, lines, time } = .tail,
+    expected_version: ?u64 = null,
+    start_line: ?u64 = null,
+    end_line: ?u64 = null,
+    start_ms: ?i64 = null,
+    end_ms: ?i64 = null,
+    after_line: ?u64 = null,
+    max_lines: u16 = 100,
+    max_bytes: usize = 8192,
+};
+pub const ContentLine = struct {
+    line: u64,
+    first_row: u32,
+    last_row: u32,
+    received_at_ms: ?i64 = null,
+    text: []u8,
+};
+pub const ContentCapture = struct {
+    owner: identity.SessionHandle,
+    source_revision: u64,
+    alternate_screen: bool,
+    total_lines: u64,
+    lines: []ContentLine,
+    truncated: bool = false,
+    next_line: ?u64 = null,
+    /// A retained VT screen cannot assert durable recording completeness.
+    retained_only: bool = true,
+    unknown_timestamps: bool = false,
+    range_incomplete: bool = false,
+    first_line_partial: bool = false,
+    pub fn deinit(self: *ContentCapture, allocator: std.mem.Allocator) void {
+        for (self.lines) |line| allocator.free(line.text);
+        allocator.free(self.lines);
+        self.* = undefined;
+    }
+};
+
 pub const Read = union(enum) { bytes: usize, would_block, eof };
 pub const Write = union(enum) { bytes: usize, would_block };
 pub const Geometry = struct { revision: u64, cols: u16, rows: u16 };
 pub const RecordingKind = enum { txt, cast };
+/// Exact provider-owned recording metadata. This carries no file path,
+/// terminal text, archive lease, or authority to read a returned identity.
+pub const RecordingIdentity = struct {
+    owner: identity.SessionHandle,
+    recording_id: ?[32]u8 = null,
+    recording_generation: u64 = 0,
+    available: bool = false,
+    failure: ?[]const u8 = null,
+};
 /// Separate application record event; never a transport/VT output segment.
 pub const ApplicationRecord = struct {
     id: u64,
@@ -143,7 +192,11 @@ pub const Service = struct {
     context: *anyopaque,
     vtable: *const VTable,
     pub const VTable = struct {
+        recording_identity: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!RecordingIdentity = null,
+        content_query: ?*const fn (*anyopaque, session.ServiceHandle, ContentRequest, std.mem.Allocator) anyerror!ContentCapture = null,
         recording_display: ?*const fn (*anyopaque, session.ServiceHandle, @import("../vt/recording_manifest.zig").Display) anyerror!void = null,
+        execution_secret: ?*const fn (*anyopaque, session.ServiceHandle, execution.SecretAction) anyerror!execution.InputReceipt = null,
+        execution_input: ?*const fn (*anyopaque, session.ServiceHandle, execution.InputRequest) anyerror!execution.InputReceipt = null,
         execution_output: ?*const fn (*anyopaque, session.ServiceHandle, identity.ExecutionId, std.mem.Allocator, u64, usize) anyerror!execution.Output = null,
         execution_snapshot: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!execution.Snapshot = null,
         execution_request: ?*const fn (*anyopaque, session.ServiceHandle, execution.Request) anyerror!void = null,
@@ -178,9 +231,22 @@ pub const Service = struct {
         search_async: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!*SearchTask = null,
         search_tail: ?*const fn (*anyopaque, session.ServiceHandle, SearchTail, std.mem.Allocator) anyerror!SearchSnapshot = null,
     };
+    pub fn contentQuery(self: Service, request: ContentRequest, allocator: std.mem.Allocator) !ContentCapture {
+        if (request.max_lines == 0 or request.max_lines > 500 or request.max_bytes == 0 or request.max_bytes > 65536) return error.InvalidArguments;
+        const call = self.vtable.content_query orelse return error.RangeUnavailable;
+        return call(self.context, self.binding, request, allocator);
+    }
     pub fn setRecordingDisplay(self: Service, display: @import("../vt/recording_manifest.zig").Display) !void {
         const call = self.vtable.recording_display orelse return error.RecordingUnavailable;
         return call(self.context, self.binding, display);
+    }
+    pub fn executionSecret(self: Service, action: execution.SecretAction) !execution.InputReceipt {
+        const call = self.vtable.execution_secret orelse return error.HostSecretUnavailable;
+        return call(self.context, self.binding, action);
+    }
+    pub fn executionInput(self: Service, request: execution.InputRequest) !execution.InputReceipt {
+        const call = self.vtable.execution_input orelse return error.UnsupportedInteraction;
+        return call(self.context, self.binding, request);
     }
     pub fn executionOutput(self: Service, id: identity.ExecutionId, allocator: std.mem.Allocator, cursor: u64, max_bytes: usize) !execution.Output {
         const call = self.vtable.execution_output orelse return error.IntegrationUnavailable;
@@ -197,6 +263,21 @@ pub const Service = struct {
     pub fn executionRequest(self: Service, request: execution.Request) !void {
         const call = self.vtable.execution_request orelse return error.IntegrationUnavailable;
         return call(self.context, self.binding, request);
+    }
+    pub fn recordingIdentity(self: Service) !RecordingIdentity {
+        const call = self.vtable.recording_identity orelse return error.RecordingIdentityUnavailable;
+        const owner = switch (self.binding.resource_owner) {
+            .session => |value| value,
+            else => return error.InvalidOwner,
+        };
+        const value = try call(self.context, self.binding);
+        if (!value.owner.eql(owner)) return error.StaleOwner;
+        if (value.recording_id) |id| {
+            _ = identity.RecordingId.parse(&id) catch return error.InvalidRecordingIdentity;
+            if (value.recording_generation == 0) return error.InvalidRecordingIdentity;
+        } else if (value.available or value.recording_generation != 0) return error.InvalidRecordingIdentity;
+        if (value.available and value.failure != null) return error.InvalidRecordingIdentity;
+        return value;
     }
     pub fn executionRenew(self: Service, grant: execution.Grant) !void {
         const call = self.vtable.execution_renew orelse return error.IntegrationUnavailable;
@@ -304,3 +385,35 @@ pub const Service = struct {
         return call(self.context, self.binding);
     }
 };
+
+test "recording identity validates owner generation and availability without content access" {
+    const Fixture = struct {
+        value: RecordingIdentity,
+        fn snapshot(raw: *anyopaque, _: session.ServiceHandle) !RecordingIdentity {
+            return (@as(*@This(), @ptrCast(@alignCast(raw)))).value;
+        }
+    };
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(17), .generation = 2 };
+    var fixture: Fixture = .{ .value = .{ .owner = owner, .failure = "RecordingDisabled" } };
+    var hooks: Service.VTable = undefined;
+    hooks.recording_identity = Fixture.snapshot;
+    const service: Service = .{ .binding = .{ .resource_owner = .{ .session = owner }, .kind = .terminal, .binding_id = 1, .binding_generation = 1 }, .context = &fixture, .vtable = &hooks };
+    const absent = try service.recordingIdentity();
+    try std.testing.expect(!absent.available and absent.recording_id == null);
+    try std.testing.expectEqualStrings("RecordingDisabled", absent.failure.?);
+    fixture.value = .{ .owner = owner, .recording_id = "0123456789abcdef0123456789abcdef".*, .recording_generation = 4, .available = true };
+    const live = try service.recordingIdentity();
+    try std.testing.expect(live.available and live.recording_generation == 4);
+    fixture.value.recording_generation = 0;
+    try std.testing.expectError(error.InvalidRecordingIdentity, service.recordingIdentity());
+    fixture.value.recording_generation = 4;
+    fixture.value.owner.generation += 1;
+    try std.testing.expectError(error.StaleOwner, service.recordingIdentity());
+    fixture.value.owner = owner;
+    fixture.value.failure = "RecordingUnavailable";
+    try std.testing.expectError(error.InvalidRecordingIdentity, service.recordingIdentity());
+    fixture.value.available = false;
+    try std.testing.expect(!(try service.recordingIdentity()).available);
+    hooks.recording_identity = null;
+    try std.testing.expectError(error.RecordingIdentityUnavailable, service.recordingIdentity());
+}

@@ -8,6 +8,29 @@ pub const Retention = config.SessionRetention;
 pub const Ownership = @import("../ai/lifecycle_journal.zig").Ownership;
 pub const ConnectionPolicy = enum { reuse_only, new_only, prefer_reuse };
 pub const State = enum { queued, prepared, opening, ready, failed, failed_cleanup_pending, cancelled, closing, cleanup_pending, closed };
+/// Bounded facts captured from the exact live owner before close tears down
+/// its Service. This is metadata, never a terminal-content or source grant.
+pub const SessionMetadata = struct {
+    title: [256]u8 = @splat(0),
+    title_len: u16 = 0,
+    protocol: [64]u8 = @splat(0),
+    protocol_len: u8 = 0,
+    recording_id: ?[32]u8 = null,
+    recording_generation: u64 = 0,
+    recording_unavailable_reason: ?[]const u8 = "RecordingUnavailable",
+
+    pub fn init(title: []const u8, protocol: []const u8) SessionMetadata {
+        var value: SessionMetadata = .{};
+        var len = @min(title.len, value.title.len);
+        while (len > 0 and !std.unicode.utf8ValidateSlice(title[0..len])) len -= 1;
+        @memcpy(value.title[0..len], title[0..len]);
+        value.title_len = @intCast(len);
+        const protocol_len = @min(protocol.len, value.protocol.len);
+        @memcpy(value.protocol[0..protocol_len], protocol[0..protocol_len]);
+        value.protocol_len = @intCast(protocol_len);
+        return value;
+    }
+};
 pub const OpenRequest = struct {
     operation_ref: identity.HostOperationId,
     context: host_tools.Context,
@@ -48,6 +71,7 @@ pub const Entry = struct {
     close_requires_idle: bool = true,
     task_finished: bool = false,
     dispatch_permitted: bool = false,
+    retained_metadata: ?SessionMetadata = null,
 };
 /// Unknown is deliberately the default. Model completion/output silence do
 /// not constitute shell idleness or a durable recording seal.

@@ -47,6 +47,26 @@ const Active = struct {
     cleanup_unknown: bool = false,
     stale: bool = false,
 };
+/// TargetResult owns raw bytes. Match ToolLoop's existing per-stream wire
+/// encoding when instrumentation writes those facts as JSON strings too.
+const TraceResult = struct {
+    value: loop.TargetResult,
+    pub fn jsonStringify(self: TraceResult, writer: anytype) !void {
+        const value = self.value;
+        const stdout_utf8 = std.unicode.utf8ValidateSlice(value.stdout);
+        const stderr_utf8 = std.unicode.utf8ValidateSlice(value.stderr);
+        const stdout = if (stdout_utf8) value.stdout else try encodeOutput(value.stdout);
+        defer if (!stdout_utf8) std.heap.c_allocator.free(stdout);
+        const stderr = if (stderr_utf8) value.stderr else try encodeOutput(value.stderr);
+        defer if (!stderr_utf8) std.heap.c_allocator.free(stderr);
+        try writer.write(.{ .session_id = value.session_id, .status = value.status, .transport = value.transport, .stdout = stdout, .stderr = stderr, .stdout_encoding = if (stdout_utf8) "utf-8" else "base64", .stderr_encoding = if (stderr_utf8) "utf-8" else "base64", .exit = value.exit, .signal = value.signal, .cwd = value.cwd, .elapsed_ms = value.elapsed_ms, .truncated = value.truncated, .local_released = value.local_released, .remote_effect_unknown = value.remote_effect_unknown, .error_code = value.error_code });
+    }
+    fn encodeOutput(bytes: []const u8) error{WriteFailed}![]const u8 {
+        const encoder = std.base64.standard.Encoder;
+        const encoded = std.heap.c_allocator.alloc(u8, encoder.calcSize(bytes.len)) catch return error.WriteFailed;
+        return encoder.encode(encoded, bytes);
+    }
+};
 
 pub const Bridge = struct {
     allocator: std.mem.Allocator,
@@ -257,7 +277,7 @@ pub const Bridge = struct {
                 _ = journal.failReleased(key, .{ .domain = .host, .code = result.error_code orelse @tagName(result.status), .cleanup = .released, .safe_message = "SSH tool finished" }) catch {};
             }
         };
-        trace.emit(.{ .event = "host_result", .sequence = current.sequence, .turn_id = current.invocation.key.turn_id, .call_id = current.invocation.key.call_id, .result = result });
+        trace.emit(.{ .event = "host_result", .sequence = current.sequence, .turn_id = current.invocation.key.turn_id, .call_id = current.invocation.key.call_id, .result = TraceResult{ .value = result } });
         current.outcome = loop.Outcome.copy(current.allocator, &.{result}) catch |err| {
             current.failure = err;
             current.ready.store(true, .release);
@@ -268,9 +288,15 @@ pub const Bridge = struct {
     fn failure(current: *Exchange, status: loop.Status, err: anyerror) void {
         finish(current, .{ .session_id = current.invocation.call.targets.ids[0], .status = status, .transport = if (current.invocation.call.tool == .list_remote_files or current.invocation.call.tool == .read_remote_file) .sftp else .ssh, .error_code = @errorName(err) });
     }
-    fn uncertain(self: *Bridge, err: anyerror) void {
+    fn uncertain(self: *Bridge, err: anyerror, value: ?exec.ExecResult) void {
         if (self.active) |*active| active.cleanup_unknown = true;
-        if (self.exchange) |current| finish(current, .{ .session_id = @backingInt(self.capture.?.owner.session_id), .status = .unknown, .transport = .ssh, .local_released = false, .remote_effect_unknown = self.active != null, .error_code = @errorName(err) });
+        if (self.exchange) |current| {
+            const stale = if (self.active) |active| active.stale else false;
+            // Unknown cleanup does not invalidate already observed output or
+            // exit-status. A missing/untrusted snapshot supplies no evidence
+            // that exec was never started, so its remote effect stays unknown.
+            finish(current, .{ .session_id = @backingInt(self.capture.?.owner.session_id), .status = .unknown, .transport = .ssh, .stdout = if (value != null and !stale) value.?.stdout else "", .stderr = if (value != null and !stale) value.?.stderr else "", .exit = if (value) |known| known.exit_code else null, .cwd = if (value) |known| known.cwd else self.capture.?.cwd, .elapsed_ms = if (value) |known| known.elapsed_ms else 0, .truncated = if (value) |known| known.truncated else false, .local_released = false, .remote_effect_unknown = if (value) |known| remoteEffectUnknown(known) else true, .error_code = @errorName(err) });
+        }
     }
     /// Read only copied snapshots; neither cancellation nor retirement calls
     /// libssh2. The original worker retains native ownership throughout.
@@ -278,7 +304,7 @@ pub const Bridge = struct {
         const active = self.active orelse return;
         var snapshot = active.facade.snapshot(active.handle, self.allocator) catch |err| {
             if (err == error.WorkerBusy) return;
-            self.uncertain(err);
+            self.uncertain(err, null);
             return;
         };
         defer snapshot.deinit();
@@ -286,21 +312,21 @@ pub const Bridge = struct {
         const capture = self.capture.?;
         if (value.key == null or !value.key.?.eql(active.key) or value.call_id != active.key.operation_id or value.service_binding == null or !value.service_binding.?.eql(capture.exec_binding)) {
             active.facade.cancel(active.handle);
-            self.uncertain(error.ExecIdentityMismatch);
+            self.uncertain(error.ExecIdentityMismatch, null);
             return;
         }
         if (value.cleanup == .unknown) {
-            self.uncertain(error.SshCleanupUnknown);
+            self.uncertain(error.SshCleanupUnknown, value);
             return;
         }
         if (!terminal(value.status) or value.cleanup != .released) return;
         const receipt = active.facade.closeCall(active.handle) catch |err| {
             if (err == error.WorkerBusy) return;
-            self.uncertain(err);
+            self.uncertain(err, value);
             return;
         };
         if (receipt != .released) {
-            if (receipt == .unknown) self.uncertain(error.SshCleanupUnknown);
+            if (receipt == .unknown) self.uncertain(error.SshCleanupUnknown, value);
             return;
         }
         self.active = null;
@@ -310,7 +336,7 @@ pub const Bridge = struct {
         if (self.exchange) |current| {
             const text_output = std.unicode.utf8ValidateSlice(value.stdout) and std.unicode.utf8ValidateSlice(value.stderr);
             const status: loop.Status = if (active.stale) .rejected else if (value.status == .cancelled) .cancelled else if (value.status == .timed_out) .timed_out else if (!text_output) .failed else if (value.status == .completed and value.exit_code != null and value.exit_code.? == 0) .succeeded else .failed;
-            finish(current, .{ .session_id = @backingInt(capture.owner.session_id), .status = status, .transport = .ssh, .stdout = if (text_output and !active.stale) value.stdout else "", .stderr = if (text_output and !active.stale) value.stderr else "", .exit = value.exit_code, .cwd = capture.cwd, .elapsed_ms = value.elapsed_ms, .truncated = value.truncated, .remote_effect_unknown = active.stale or value.status == .cancelled or value.status == .timed_out, .error_code = if (active.stale) "StaleBinding" else if (!text_output) "NonTextToolOutput" else value.failure });
+            finish(current, .{ .session_id = @backingInt(capture.owner.session_id), .status = status, .transport = .ssh, .stdout = if (text_output and !active.stale) value.stdout else "", .stderr = if (text_output and !active.stale) value.stderr else "", .exit = value.exit_code, .cwd = value.cwd, .elapsed_ms = value.elapsed_ms, .truncated = value.truncated, .remote_effect_unknown = active.stale or remoteEffectUnknown(value), .error_code = if (active.stale) "StaleBinding" else if (!text_output) "NonTextToolOutput" else value.failure });
         }
     }
     /// Controller only. The close hook must hold the original runtime until
@@ -506,6 +532,10 @@ fn validateTarget(capture: Capture, invocation: loop.Invocation, delegated_owner
 fn terminal(status: exec.Status) bool {
     return status != .queued and status != .opening and status != .running;
 }
+fn remoteEffectUnknown(value: exec.ExecResult) bool {
+    if (value.diagnostics.request_started == false or value.effect == .none) return false;
+    return value.exit_code == null;
+}
 fn flattenLines(lines: viewport.Lines, cap: usize, allocator: std.mem.Allocator) ![]u8 {
     var bytes: std.ArrayList(u8) = .empty;
     defer bytes.deinit(allocator);
@@ -524,6 +554,14 @@ const TestPeer = struct {
     binding: sessions.ServiceHandle,
     cleanup: operation.Cleanup = .releasing,
     status: exec.Status = .cancelled,
+    exit_code: ?i32 = null,
+    stdout: []const u8 = "SSH_REAL_RECEIPT_FIXTURE",
+    stderr: []const u8 = "",
+    cwd: ?[]const u8 = null,
+    elapsed_ms: u64 = 5,
+    truncated: bool = false,
+    effect: operation.Effect = .unknown,
+    request_started: ?bool = true,
     snapshot_busy: bool = false,
     close_busy: bool = false,
     cancel_count: usize = 0,
@@ -553,8 +591,10 @@ const TestPeer = struct {
         if (self.snapshot_busy) return error.WorkerBusy;
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
-        const stdout = try arena.allocator().dupe(u8, "SSH_REAL_RECEIPT_FIXTURE");
-        return .{ .arena = arena, .value = .{ .stdout = stdout, .stderr = "", .exit_code = if (self.status == .completed) 0 else null, .elapsed_ms = 5, .key = self.key, .call_id = self.key.operation_id, .service_binding = self.binding, .status = self.status, .cleanup = self.cleanup } };
+        const stdout = try arena.allocator().dupe(u8, self.stdout);
+        const stderr = try arena.allocator().dupe(u8, self.stderr);
+        const cwd = if (self.cwd) |text| try arena.allocator().dupe(u8, text) else null;
+        return .{ .arena = arena, .value = .{ .stdout = stdout, .stderr = stderr, .exit_code = self.exit_code orelse if (self.status == .completed) @as(?i32, 0) else null, .elapsed_ms = self.elapsed_ms, .key = self.key, .call_id = self.key.operation_id, .service_binding = self.binding, .cwd = cwd, .status = self.status, .cleanup = self.cleanup, .effect = self.effect, .truncated = self.truncated, .diagnostics = .{ .request_started = self.request_started } } };
     }
     fn closeCall(handle: exec.ExecHandle) !operation.Cleanup {
         const self = from(handle);
@@ -626,7 +666,7 @@ test "SSH AI tools retain unknown cleanup and refuse to call it released" {
     var bridge = Bridge.init(a);
     defer bridge.deinit();
     bridge.capture = try testCapture(a, owner, key);
-    var peer: TestPeer = .{ .key = key, .binding = bridge.capture.?.exec_binding, .cleanup = .unknown };
+    var peer: TestPeer = .{ .key = key, .binding = bridge.capture.?.exec_binding, .cleanup = .unknown, .status = .running, .stdout = "observed stdout\n", .stderr = "observed stderr\n", .exit_code = 7, .cwd = "/tmp/original", .elapsed_ms = 60_004, .truncated = true, .effect = .partial };
     bridge.active = .{ .facade = peer.facade(), .handle = .{ .ptr = &peer }, .key = key, .journal = &journal };
     var current: Exchange = .{ .invocation = testInvocation(41), .allocator = a, .sequence = 5 };
     bridge.exchange = &current;
@@ -637,14 +677,193 @@ test "SSH AI tools retain unknown cleanup and refuse to call it released" {
     try std.testing.expectEqual(sessions.CloseReceipt.unknown, bridge.stopOwner(owner));
     try std.testing.expectEqual(loop.Status.unknown, current.outcome.?.targets[0].status);
     try std.testing.expect(!current.outcome.?.targets[0].local_released);
+    const result = current.outcome.?.targets[0];
+    try std.testing.expectEqualStrings("observed stdout\n", result.stdout);
+    try std.testing.expectEqualStrings("observed stderr\n", result.stderr);
+    try std.testing.expectEqual(@as(?i32, 7), result.exit);
+    try std.testing.expectEqualStrings("/tmp/original", result.cwd.?);
+    try std.testing.expectEqual(@as(u64, 60_004), result.elapsed_ms);
+    try std.testing.expect(result.truncated and !result.remote_effect_unknown);
+    try std.testing.expectEqualStrings("SshCleanupUnknown", result.error_code.?);
     try std.testing.expect(bridge.active != null and !peer.retired);
     try std.testing.expectError(error.ToolCleanupPending, bridge.clear());
     try std.testing.expect(!journal.isTerminal(key));
     // A later real parent receipt can converge the same original child.
     peer.cleanup = .released;
+    peer.status = .completed;
     try std.testing.expectEqual(sessions.CloseReceipt.released, bridge.stopOwner(owner));
     try std.testing.expect(bridge.active == null and peer.retired);
     try std.testing.expect(!current.outcome.?.targets[0].local_released);
+    try std.testing.expectEqualStrings("observed stdout\n", current.outcome.?.targets[0].stdout);
+    try std.testing.expectEqual(@as(?i32, 7), current.outcome.?.targets[0].exit);
+}
+
+test "SSH AI tools unknown cleanup distinguishes unsent exec from unresolved remote effect and preserves bytes" {
+    const a = std.testing.allocator;
+    for ([_]?bool{ false, true, null }) |request_started| {
+        const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(41), .generation = 2 };
+        var journal = operation.Journal.init(a);
+        defer journal.deinit();
+        const key = try journal.begin(.{ .session = owner }, null);
+        var bridge = Bridge.init(a);
+        defer bridge.deinit();
+        bridge.capture = try testCapture(a, owner, key);
+        var peer: TestPeer = .{ .key = key, .binding = bridge.capture.?.exec_binding, .cleanup = .unknown, .stdout = "\xffobserved", .stderr = "\xfeerror", .request_started = request_started };
+        bridge.active = .{ .facade = peer.facade(), .handle = .{ .ptr = &peer }, .key = key, .journal = &journal };
+        var current: Exchange = .{ .invocation = testInvocation(41), .allocator = a, .sequence = 6 };
+        bridge.exchange = &current;
+        defer {
+            bridge.exchange = null;
+            if (current.outcome) |*result| result.deinit(a);
+        }
+        bridge.pollActive();
+        const result = current.outcome.?.targets[0];
+        try std.testing.expectEqual(loop.Status.unknown, result.status);
+        try std.testing.expectEqual(request_started != false, result.remote_effect_unknown);
+        try std.testing.expectEqualStrings(peer.stdout, result.stdout);
+        try std.testing.expectEqualStrings(peer.stderr, result.stderr);
+        try std.testing.expect(!result.local_released and bridge.active != null and !peer.retired);
+        try std.testing.expectEqual(@as(usize, 0), peer.close_count);
+        try std.testing.expectError(error.ToolCleanupPending, bridge.clear());
+        peer.cleanup = .released;
+        try std.testing.expectEqual(sessions.CloseReceipt.released, bridge.stopOwner(owner));
+    }
+}
+
+test "SSH AI tools unknown binary output survives real ToolLoop JSON trace and result rendering" {
+    const a = std.testing.allocator;
+    const Case = struct { stdout: []const u8, stderr: []const u8, stdout_encoding: []const u8, stderr_encoding: []const u8, stdout_wire: []const u8, stderr_wire: []const u8, stdout_display: []const u8, stderr_display: []const u8 };
+    const cases = [_]Case{
+        .{ .stdout = "\xff\x00O", .stderr = "可信 stderr\n", .stdout_encoding = "base64", .stderr_encoding = "utf-8", .stdout_wire = "/wBP", .stderr_wire = "可信 stderr\n", .stdout_display = "base64: /wBP", .stderr_display = "可信 stderr\n" },
+        .{ .stdout = "可信 stdout\n", .stderr = "\xfe\x00E", .stdout_encoding = "utf-8", .stderr_encoding = "base64", .stdout_wire = "可信 stdout\n", .stderr_wire = "/gBF", .stdout_display = "可信 stdout\n", .stderr_display = "base64: /gBF" },
+        .{ .stdout = "\xff\x00O", .stderr = "\xfe\x00E", .stdout_encoding = "base64", .stderr_encoding = "base64", .stdout_wire = "/wBP", .stderr_wire = "/gBF", .stdout_display = "base64: /wBP", .stderr_display = "base64: /gBF" },
+    };
+    const Host = struct {
+        outcome: *const loop.Outcome,
+        calls: usize = 0,
+        fn execute(raw: *anyopaque, _: loop.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !loop.Outcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            return loop.Outcome.copy(allocator, self.outcome.targets);
+        }
+    };
+    for (cases, 0..) |case, index| {
+        const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(41), .generation = 2 };
+        var journal = operation.Journal.init(a);
+        defer journal.deinit();
+        const key = try journal.begin(.{ .session = owner }, null);
+        var bridge = Bridge.init(a);
+        defer bridge.deinit();
+        bridge.capture = try testCapture(a, owner, key);
+        var peer: TestPeer = .{ .key = key, .binding = bridge.capture.?.exec_binding, .cleanup = .unknown, .status = .running, .stdout = case.stdout, .stderr = case.stderr, .exit_code = 7, .cwd = "/tmp/original", .elapsed_ms = 60_004, .truncated = index == 2, .effect = .partial };
+        bridge.active = .{ .facade = peer.facade(), .handle = .{ .ptr = &peer }, .key = key, .journal = &journal };
+        var current: Exchange = .{ .invocation = testInvocation(41), .allocator = a, .sequence = 8 };
+        bridge.exchange = &current;
+        defer {
+            bridge.exchange = null;
+            if (current.outcome) |*result| result.deinit(a);
+            bridge.active = null; // This fixture owns no native resource.
+        }
+        bridge.pollActive();
+        try std.testing.expect(current.ready.load(.acquire) and current.failure == null);
+        const result = current.outcome.?.targets[0];
+        try std.testing.expectEqualSlices(u8, case.stdout, result.stdout);
+        try std.testing.expectEqualSlices(u8, case.stderr, result.stderr);
+
+        var host: Host = .{ .outcome = &current.outcome.? };
+        var run = loop.Loop.init(a, current.invocation.scope, 3, .{ .context_window = 100_000 });
+        defer run.deinit();
+        try run.start(.{ .model = "binary-regression", .system = "", .messages = &.{}, .tools = &.{.{ .tool = .run_command, .session_ids = &.{41} }} });
+        _ = try run.nextRequest();
+        const arguments = "{\"session_ids\":[41],\"command\":\"df -h\"}";
+        try run.complete("", &.{ .{ .id = "unknown-binary", .name = "run_command", .arguments = arguments }, .{ .id = "must-not-replay", .name = "run_command", .arguments = arguments } }, .{ .context = &host, .execute = Host.execute }, .{}, 1, null);
+        try std.testing.expectEqual(@as(usize, 1), host.calls);
+        try std.testing.expect(run.uncertain and !run.records.items[1].dispatched);
+        try std.testing.expectError(error.ToolOutcomeUnknown, run.nextRequest());
+        const body = run.records.items[0].result_body.?;
+        try std.testing.expect(std.unicode.utf8ValidateSlice(body));
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, body, .{});
+        defer parsed.deinit();
+        const target = parsed.value.object.get("targets").?.array.items[0];
+        try std.testing.expectEqualStrings(case.stdout_encoding, target.object.get("stdout_encoding").?.string);
+        try std.testing.expectEqualStrings(case.stderr_encoding, target.object.get("stderr_encoding").?.string);
+        try std.testing.expectEqualStrings(case.stdout_wire, target.object.get("stdout").?.string);
+        try std.testing.expectEqualStrings(case.stderr_wire, target.object.get("stderr").?.string);
+        try std.testing.expectEqualStrings("unknown", target.object.get("status").?.string);
+        try std.testing.expectEqual(@as(i64, 7), target.object.get("exit").?.integer);
+        try std.testing.expectEqualStrings("/tmp/original", target.object.get("cwd").?.string);
+        try std.testing.expectEqual(@as(i64, 60_004), target.object.get("elapsed_ms").?.integer);
+        try std.testing.expectEqual(index == 2, target.object.get("truncated").?.bool);
+        try std.testing.expect(!target.object.get("local_released").?.bool and !target.object.get("remote_effect_unknown").?.bool);
+        try std.testing.expectEqualStrings("SshCleanupUnknown", target.object.get("error_code").?.string);
+        // The actual trace projection must be the same valid JSON as the
+        // existing ToolLoop encoding, including each stream's encoding tag.
+        const trace_json = try std.json.Stringify.valueAlloc(a, TraceResult{ .value = result }, .{});
+        defer a.free(trace_json);
+        const wire_json = try std.json.Stringify.valueAlloc(a, target, .{});
+        defer a.free(wire_json);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(trace_json));
+        try std.testing.expectEqualStrings(wire_json, trace_json);
+
+        var store = @import("../ai/tool_results.zig").Store.init(a);
+        defer store.deinit();
+        try std.testing.expect(try store.capture(&run, &.{}));
+        const saved = store.records.items[0];
+        try std.testing.expectEqualSlices(u8, case.stdout, saved.targets[0].result.stdout);
+        try std.testing.expectEqualSlices(u8, case.stderr, saved.targets[0].result.stderr);
+        const ui = @import("ui");
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        cx.setViewport(860, 480);
+        const scope = try ui.Scope.init(a, null, cx.owner);
+        defer scope.dispose();
+        const root = try ui.box(cx, .{ .width = .{ .px = 572 }, .height = .fill(), .direction = .column }, .{});
+        cx.root = root;
+        saved.expanded = true;
+        const view = try @import("ai_tool_results_view.zig").State.mount(cx, scope, saved);
+        try root.appendChild(a, view.root);
+        cx.layout();
+        _ = cx.render();
+        try std.testing.expectEqualStrings(case.stdout_display, view.stdout.getText().?.content);
+        try std.testing.expectEqualStrings(case.stderr_display, view.stderr.getText().?.content);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(view.stdout.getText().?.content));
+        try std.testing.expect(std.unicode.utf8ValidateSlice(view.stderr.getText().?.content));
+        try std.testing.expectEqualStrings("清理待核实", view.feedback.getText().?.content);
+        try std.testing.expect(bridge.active != null and !peer.retired);
+        peer.cleanup = .released;
+        peer.status = .completed;
+        try std.testing.expectEqual(sessions.CloseReceipt.released, bridge.stopOwner(owner));
+    }
+}
+
+test "SSH AI tools untrusted exec snapshot does not expose another call output or infer an unsent request" {
+    const a = std.testing.allocator;
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(41), .generation = 2 };
+    var journal = operation.Journal.init(a);
+    defer journal.deinit();
+    const key = try journal.begin(.{ .session = owner }, null);
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    bridge.capture = try testCapture(a, owner, key);
+    var wrong_key = key;
+    wrong_key.operation_id += 1;
+    var peer: TestPeer = .{ .key = wrong_key, .binding = bridge.capture.?.exec_binding, .cleanup = .unknown, .stdout = "other call output", .exit_code = 0, .request_started = false, .effect = .none };
+    bridge.active = .{ .facade = peer.facade(), .handle = .{ .ptr = &peer }, .key = key, .journal = &journal };
+    var current: Exchange = .{ .invocation = testInvocation(41), .allocator = a, .sequence = 7 };
+    bridge.exchange = &current;
+    defer {
+        bridge.exchange = null;
+        if (current.outcome) |*result| result.deinit(a);
+        bridge.active = null;
+    }
+    bridge.pollActive();
+    const result = current.outcome.?.targets[0];
+    try std.testing.expectEqual(loop.Status.unknown, result.status);
+    try std.testing.expectEqualStrings("", result.stdout);
+    try std.testing.expect(result.exit == null and result.remote_effect_unknown and !result.local_released);
+    try std.testing.expectEqualStrings("ExecIdentityMismatch", result.error_code.?);
+    try std.testing.expectEqual(@as(usize, 1), peer.cancel_count);
+    try std.testing.expect(bridge.active != null and !peer.retired);
 }
 
 test "SSH AI tools approval stays on the captured endpoint and exact sequence hash" {

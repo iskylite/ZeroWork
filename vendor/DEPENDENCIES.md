@@ -5,17 +5,19 @@
 - Upstream: https://github.com/version-next/zenit
 - Revision: `9c1ba9bfea58210404e447b04b6ff25b6442f0ff`
 - Package: `zenit` (`dev/zig-0.17.0`, complete source snapshot tracked by ZeroWork)
-- Local patch revision: `2026-10-29-select-dropdown-layout` (upstream revision and license unchanged)
+- Local patch revision: `2026-10-30-native-panel-input-modal-ax` (upstream revision and license unchanged)
 - Minimum Zig: `0.17.0`
 - License: GPL-3.0-only (commercial alternative documented upstream)
-- Canonical source files: `3505` (tracked sources plus declared working-tree additions)
-- Canonical tracked-tree SHA-256: `8dd1b08b074e85b4084ca5937849e6dc1df346466c4caf4e6f58c4f17a44c31b`
+- Canonical source files: `3506` (tracked sources plus declared working-tree additions)
+- Canonical tracked-tree SHA-256: `2156b84ac08ffc1ab3571aab8b81eba6275b744905f1a7db8e5031c7953cb0c8`
 - Hash algorithm: sort and deduplicate `git ls-files --cached --others --exclude-standard vendor/zenit`; for each path hash big-endian u64 path length, path relative to `vendor/zenit`, big-endian u64 content length, then raw content bytes
 - Project decision: GPL-3.0-only use authorized for current development; distribution obligations remain active.
 
 The upstream `LICENSE`, `LICENSING.md`, source, and package metadata are retained under `vendor/zenit/`. Do not update this tree without recording a new fixed revision and reviewing its license and build contract.
 
-Latest local patch adds `Cx.trimIdleRenderCapacity` for idle windows: it releases spare display-item capacity, defers arena shrinking until the normal frame boundary, and preserves live replay payloads and reusable font/GPU caches. Frame and display-list scratch use page-backed allocation. Opt-in frame profiling also attributes after-layout callbacks and renderer setup/text warming; formal builds retain the existing automation boundary.
+Latest local patch gives an explicitly registered native panel ownership of this application's keyboard events until submit, cancel or expiry. Only the opt-in panel receives AppKit responder delivery; other windows retain the existing Metal dispatcher. The panel is weakly held, a second live claimant is rejected, and releasing an old panel cannot clear another owner. The real secure collector keeps SecureEventInput and NSWindowSharingNone. No toolchain or license changes.
+
+The preceding local patch adds `Cx.trimIdleRenderCapacity` for idle windows: it releases spare display-item capacity, defers arena shrinking until the normal frame boundary, and preserves live replay payloads and reusable font/GPU caches. Frame and display-list scratch use page-backed allocation. Opt-in frame profiling also attributes after-layout callbacks and renderer setup/text warming; formal builds retain the existing automation boundary.
 
 The preceding local patch drains continuous native mouse-drag motion in the same bounded event batch as hover motion, preventing one rendered frame per queued drag position. Button, key and text boundaries retain native order. No API, toolchain or license changes.
 

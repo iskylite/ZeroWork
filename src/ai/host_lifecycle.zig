@@ -18,6 +18,7 @@ pub const Request = struct {
     operation: ?identity.HostOperationId = null,
     after_revision: ?u64 = null,
     wait_ms: u32 = 1000,
+    interactive_execution: bool = false,
 };
 const session = "\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
 const group = "\"group_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
@@ -30,12 +31,12 @@ fn contribution(comptime id: []const u8, description: []const u8, comptime field
 }
 pub const contributions = [_]host.Contribution{
     contribution("create_group", "Create a real group from this conversation's exact initial_session_ref and move this same conversation to it. Requires a precise host grant/approval. Refresh context after success before opening a work session. Same request_key returns the original receipt; never retry unknown effects with another key.", "\"initial_session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}," ++ name ++ "," ++ key, "\"initial_session_ref\",\"request_key\""),
-    contribution("open_session", "Create one task-owned work session in the current group without executing a command. Use an authorized source_ref; single sessions must first create_group and refresh context. reuse_only never opens a new connection; prefer_reuse needs explicit fallback authorization. Returns opening/ready and stable refs; use wait_session_ready. Same request_key never creates twice.", group ++ ",\"source_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}," ++ policy ++ "," ++ retention ++ "," ++ key, "\"group_ref\",\"source_ref\",\"connection_policy\",\"request_key\""),
+    contribution("open_session", "Create one task-owned work session in the current group without executing a command. Use an authorized source_ref; single sessions must first create_group and refresh context. reuse_only never opens a new connection; prefer_reuse needs explicit fallback authorization. Returns opening/ready and stable refs; use wait_session_ready. Set interactive_execution=true when this new SSH terminal must support trusted PTY execution: only a validated existing SSH source with reuse_only is currently supported; a separate concrete temporary-helper approval is mandatory. Same request_key never creates twice.", group ++ ",\"source_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}," ++ policy ++ "," ++ retention ++ ",\"interactive_execution\":{\"type\":\"boolean\"}," ++ key, "\"group_ref\",\"source_ref\",\"connection_policy\",\"request_key\""),
     contribution("rename_group", "Rename this conversation's exact group after host authorization. Identity and membership remain stable. Same request_key returns the original operation receipt.", group ++ "," ++ name ++ "," ++ key, "\"group_ref\",\"name\",\"request_key\""),
     contribution("add_group_member", "Add an exact authorized session to the current group. Discovery alone does not grant membership mutation. Does not connect or send input. Same request_key reuses the original relation receipt.", group ++ "," ++ session ++ "," ++ key, "\"group_ref\",\"session_ref\",\"request_key\""),
     contribution("remove_group_member", "Remove only the exact group membership after host dependency checks. Never closes the session or converts a small group back to a single-session conversation. Active executions require explicit resolution.", group ++ "," ++ session ++ "," ++ key, "\"group_ref\",\"session_ref\",\"request_key\""),
     contribution("close_session", "Request a two-phase close of an exact authorized session after impact preflight/approval. Borrowed/user resources require explicit user close authorization. Returns closing/cleanup_pending; unknown outcomes must be inspected, never replayed against a newer generation.", session ++ "," ++ key, "\"session_ref\",\"request_key\""),
-    contribution("disconnect_session", "Disconnect an exact session only with explicit host authorization and impact preflight. Preserves its history; does not reconnect or close a group. Same request_key never redispatches.", session ++ "," ++ key, "\"session_ref\",\"request_key\""),
+    contribution("disconnect_session", "Disconnect only an exact supported session after explicit user approval and impact preflight. Returns pending/disconnected/outcome_unknown from the original IO owner; preserves its tab, context and records, disables automatic reconnect, and revokes old execution/input grants. Active execution/transfer/forward references block it. Same request_key queries the original receipt and never redispatches; Local sessions return NotSupported.", session ++ "," ++ key, "\"session_ref\",\"request_key\""),
     contribution("reconnect_session", "Explicitly request a new connection generation for an authorized session using the specified connection policy. Old execution/session refs do not revive. Requires user connection authorization; no automatic replay after unknown outcomes.", session ++ "," ++ policy ++ "," ++ key, "\"session_ref\",\"connection_policy\",\"request_key\""),
     contribution("set_session_retention", "Set retention only for this task's owned session or a host-authorized selection. Cannot acquire borrowed resources or undo user takeover. keep revokes old automatic cleanup plans. Same request_key returns the original decision receipt.", session ++ "," ++ retention ++ "," ++ key, "\"session_ref\",\"retention\",\"request_key\""),
     contribution("wait_session_ready", "Observe only this task's owned opening operation or session. Exactly one of operation_ref/session_ref is required. Bounded wait returns the current state and timed_out, never reconnects, creates, dispatches a command, or treats timeout as completion.", session ++ ",\"operation_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"after_revision\":{\"type\":\"integer\",\"minimum\":1},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}", ""),
@@ -108,7 +109,7 @@ pub fn parse(invocation: host.Invocation) !Request {
     var allowed: []const []const u8 = undefined;
     switch (operation) {
         .create_group => allowed = &.{ "initial_session_ref", "name", "request_key" },
-        .open_session => allowed = &.{ "group_ref", "source_ref", "connection_policy", "retention", "request_key" },
+        .open_session => allowed = &.{ "group_ref", "source_ref", "connection_policy", "retention", "interactive_execution", "request_key" },
         .rename_group => allowed = &.{ "group_ref", "name", "request_key" },
         .add_group_member, .remove_group_member => allowed = &.{ "group_ref", "session_ref", "request_key" },
         .close_session, .disconnect_session => allowed = &.{ "session_ref", "request_key" },
@@ -132,6 +133,10 @@ pub fn parse(invocation: host.Invocation) !Request {
         if (invocation.context.binding != .group or invocation.context.binding.group != @backingInt(request.group.?.id)) return error.TargetOutsideScope;
     }
     if (operation == .open_session) {
+        if (args.object.get("interactive_execution")) |value| {
+            if (value != .bool) return error.InvalidArguments;
+            request.interactive_execution = value.bool;
+        }
         const reference = try text(args, "source_ref");
         if (std.mem.startsWith(u8, reference, "s1:")) request.source = try sessionHandle(invocation.context, reference) else if (std.mem.startsWith(u8, reference, "c1:")) request.saved_source = try connectionOwner(invocation.context, reference) else return error.UnsupportedSource;
     }

@@ -3577,7 +3577,9 @@ pub const TerminalViewNode = struct {
     }
 
     pub fn addWorkerFrameHook(self: *TerminalViewNode, cx: *ui.Cx, worker: *Presentation, thread: *Presentation, status: *ui.Node, seen_generation: *u64, scratch: []u8) !void {
+        if (self.frame_hook != null) return error.FrameHookAlreadyMounted;
         const hook = try cx.allocator.create(FrameHook);
+        errdefer cx.allocator.destroy(hook);
         hook.* = .{ .view = self, .cx = cx, .worker = worker, .thread = thread, .status = status, .seen_generation = seen_generation, .scratch = scratch };
         try cx.addAfterLayoutHook(hook, FrameHook.run);
         // Deliberately NO scope registration: the hook's lifetime is owned by
@@ -3592,6 +3594,13 @@ pub const TerminalViewNode = struct {
         self.status_publication_cutoff = 0;
     }
 
+    /// Ownership transfers only after successful hook registration. The
+    /// borrowed variant above remains valid for stack buffers and fixtures.
+    pub fn addOwnedWorkerFrameHook(self: *TerminalViewNode, cx: *ui.Cx, worker: *Presentation, thread: *Presentation, status: *ui.Node, seen_generation: *u64, scratch: []u8) !void {
+        try self.addWorkerFrameHook(cx, worker, thread, status, seen_generation, scratch);
+        self.frame_hook.?.owns_buffers = true;
+    }
+
     /// Detaches and frees the per-frame hook. The view (tab) owns the hook
     /// memory; safe because the caller keeps the tab alive. Idempotent.
     pub fn removeFrameHook(self: *TerminalViewNode, cx: *ui.Cx) void {
@@ -3600,6 +3609,10 @@ pub const TerminalViewNode = struct {
         self.status_publication = null;
         self.status_operation = null;
         cx.removeAfterLayoutHook(hook);
+        if (hook.owns_buffers) {
+            cx.allocator.free(hook.scratch);
+            cx.allocator.destroy(hook.seen_generation);
+        }
         cx.allocator.destroy(hook);
     }
 
@@ -3615,6 +3628,7 @@ pub const TerminalViewNode = struct {
         last_blink_ms: i64 = 0,
         seen_generation: *u64,
         scratch: []u8,
+        owns_buffers: bool = false,
         // Smoothness diagnostics: hook cost + wall-clock gap between
         // consecutive runs, bucketed at 120Hz-vsync granularity. On a 120Hz
         // display, any gap > 8.3ms is a dropped vsync (visible jank that the
@@ -5689,6 +5703,11 @@ test "SSH middle click uses the installed owner and never writes terminal input"
     // Only bindWorker's UI handler installation and the input queue are used.
     // No socket, VT or IO worker is started or read by this test.
     var worker: @import("../vt/ssh_worker.zig").SshWorker = undefined;
+    worker.execution = null;
+    worker.execution_mutex = .unlocked;
+    worker.execution_recording = null;
+    worker.execution_control = null;
+    worker.execution_deployment = null;
     worker.input = try @import("../vt/input_queue.zig").InputQueue.init(allocator, 128);
     defer worker.input.deinit(allocator);
     worker.replay = try @import("../vt/reconnect_replay.zig").Replay.init(allocator, 128);
@@ -5745,6 +5764,11 @@ const ClipboardTestWorker = struct {
         return &self.presentation_storage;
     }
     fn init(self: *@This()) !void {
+        self.worker.execution = null;
+        self.worker.execution_mutex = .unlocked;
+        self.worker.execution_recording = null;
+        self.worker.execution_control = null;
+        self.worker.execution_deployment = null;
         self.worker.input = try @import("../vt/input_queue.zig").InputQueue.init(std.testing.allocator, 16);
         errdefer self.worker.input.deinit(std.testing.allocator);
         self.worker.replay = try @import("../vt/reconnect_replay.zig").Replay.init(std.testing.allocator, 8192);

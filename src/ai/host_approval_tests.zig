@@ -128,3 +128,60 @@ test "host approval worker cancellation releases pending storage without holding
     try std.testing.expectEqual(error.CancelledBeforeDispatch, worker.failure.?);
     try std.testing.expect(broker.snapshot() == null);
 }
+
+test "routing approval combines selection and permission and cross tool stays zero dispatch" {
+    const a = std.testing.allocator;
+    const ctx = context();
+    const json = "{\"command\":\"pwd\"}";
+    const args = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer args.deinit();
+    var call = try invocation(ctx, args.value, json);
+    call.authority = .execution_control;
+    call.tool_id = "run_command";
+    const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(1), .generation = 4 };
+    var broker: approval.Broker = .{};
+    try broker.configure(ctx, 9);
+    const subject: approval.Subject = .{ .kind = .terminal_command, .target = "session 1 g4", .detail = "pwd", .route = .{ .proposed = .batch, .choice = .{ .route = .batch, .source = .{ .session = target } }, .target = target, .selectable = true } };
+    const permit = try broker.beginSubject(call, subject, 9, a);
+    try broker.chooseRoute(permit.sequence, permit.arguments_hash, .current_terminal);
+    try std.testing.expect(!broker.execution_route.resolve(ctx, target, "pwd", .batch).trusted);
+    try broker.decide(permit.sequence, permit.arguments_hash, true);
+    try std.testing.expectEqual(approval.routing.Route.current_terminal, (try broker.selectedRoute(permit)).route);
+    try std.testing.expectEqual(@import("fetch_url.zig").Decision.scope_changed, broker.authorizeSubject(permit, call, subject, 9));
+    broker.finish(permit);
+    call.tool_id = "host.run_in_terminal";
+    call.call_id = "correct-next-round";
+    call.operation_id += 1;
+    var correct = subject;
+    correct.route.?.proposed = .current_terminal;
+    correct.route.?.choice.route = .current_terminal;
+    correct.route.?.selectable = false;
+    const carried = (try broker.beginGrantedSubject(call, correct, 9, a)).?;
+    try std.testing.expectEqual(@import("fetch_url.zig").Decision.allow, broker.authorizeSubject(carried, call, correct, 9));
+    broker.finish(carried);
+    broker.execution_route.consume(ctx, target, "pwd");
+    try std.testing.expect(try broker.beginGrantedSubject(call, correct, 9, a) == null);
+}
+test "routing rejected pending choice and changed command cannot mint successor permission" {
+    const a = std.testing.allocator;
+    const ctx = context();
+    const json = "{\"command\":\"pwd\"}";
+    const args = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer args.deinit();
+    var call = try invocation(ctx, args.value, json);
+    call.authority = .execution_control;
+    call.tool_id = "host.run_in_terminal";
+    const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(1), .generation = 4 };
+    var broker: approval.Broker = .{};
+    try broker.configure(ctx, 9);
+    const subject: approval.Subject = .{ .kind = .terminal_command, .target = "session 1 g4", .detail = "pwd", .route = .{ .proposed = .current_terminal, .choice = .{ .route = .current_terminal, .source = .{ .session = target } }, .target = target, .selectable = true } };
+    const permit = try broker.beginSubject(call, subject, 9, a);
+    try broker.chooseRoute(permit.sequence, permit.arguments_hash, .batch);
+    try broker.decide(permit.sequence, permit.arguments_hash, false);
+    broker.finish(permit);
+    try std.testing.expect(!broker.execution_route.resolve(ctx, target, "pwd", .current_terminal).trusted);
+    try broker.execution_route.select(ctx, .{ .route = .batch, .source = .{ .session = target } }, "pwd", true);
+    var changed = subject;
+    changed.detail = "pwd; touch x";
+    try std.testing.expect(try broker.beginGrantedSubject(call, changed, 9, a) == null);
+}

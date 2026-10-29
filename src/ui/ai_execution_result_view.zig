@@ -85,8 +85,8 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
     for (header.children.items) |child| child.setDisplay(.none);
     try root.appendChild(cx.allocator, header);
     const slot = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .direction = .row, .align_items = .center, .justify = .center, .flex_shrink = 0 }, .{});
-    const uncertain = projection.remote_effect_unknown or projection.state == .outcome_unknown or projection.call_status == .outcome_unknown or (projection.state == null and projection.call_status == .succeeded);
-    const finished = (projection.sealed() or projection.intervalRecorded()) and projection.process.?.exit_code == 0 and projection.process.?.signal == null;
+    const uncertain = projection.remote_effect_unknown or projection.state == .outcome_unknown or projection.call_status == .outcome_unknown or (projection.input_result and projection.input_receipt != null and projection.input_receipt.?.stage == .outcome_unknown) or (projection.state == null and projection.call_status == .succeeded and (!projection.input_result or projection.input_receipt == null));
+    const finished = if (projection.input_result) projection.call_status == .succeeded and !uncertain and projection.input_receipt != null and projection.input_receipt.?.stage == .consumed else (projection.sealed() or projection.intervalRecorded()) and projection.process.?.exit_code == 0 and projection.process.?.signal == null;
     const process_failed = projection.process != null and (projection.process.?.signal != null or (projection.process.?.exit_code != null and projection.process.?.exit_code.? != 0));
     const icon = try ui.iconTint(cx, if (uncertain) ui.icons.get("circle-help").? else if (finished) ui.icons.check else if (projection.call_status == .rejected or projection.call_status == .failed or projection.recording_failed or process_failed) ui.icons.get("circle-alert").? else if (projection.state == .cancelled_unsent or projection.call_status == .cancelled_unsent) ui.icons.get("square").? else ui.icons.terminal, if (process_failed) theme.current().danger_ink else if (uncertain or projection.recording_failed) theme.current().warn_ink else if (finished) theme.current().ok_ink else theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
     icon.meta.ownership.meta.test_id = "ai.execution.result.icon";
@@ -96,7 +96,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
     title.meta.ownership.meta.test_id = "ai.execution.result.title";
     title.setStyleInline(cx.allocator, .{ .width = .{ .px = 84 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
     try header.appendChild(cx.allocator, title);
-    const observed_status = try std.fmt.allocPrint(cx.allocator, "最近观测 · {s}", .{projection.statusLabel()});
+    const observed_status = try std.fmt.allocPrint(cx.allocator, "{s} · {s}", .{ if (projection.input_result) "输入结果" else "最近观测", projection.statusLabel() });
     defer cx.allocator.free(observed_status);
     const summary = try ui.textStyled(cx, S.summary, observed_status);
     if (header.behavior.interaction.a11y) |*attrs| attrs.label = (try scope.createText(observed_status, .{})).peek();
@@ -117,12 +117,33 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
     scroll.content.setStyleInline(cx.allocator, S.content(cx.tokens));
     const body_disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, scroll.container, record.expanded);
     try root.appendChild(cx.allocator, body_disclosure.root);
-    const target = if (projection.target) |owner| try std.fmt.allocPrint(cx.allocator, "目标 · {s}{s}会话 #{d}", .{ projection.target_label, if (projection.target_label.len == 0) "" else " · ", @backingInt(owner.session_id) }) else try cx.allocator.dupe(u8, "目标身份未返回");
-    defer cx.allocator.free(target);
-    const target_node = try ui.textStyled(cx, S.text, target);
-    target_node.meta.ownership.meta.test_id = "ai.execution.result.target";
-    target_node.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
-    try scroll.content.appendChild(cx.allocator, target_node);
+    if (projection.input_result) {
+        if (projection.input_receipt) |receipt| {
+            const input_type = try ui.textStyled(cx, S.text, switch (receipt.kind) {
+                .text => "输入类型 · 文本",
+                .enter => "输入类型 · Enter",
+                .host_secret => "输入类型 · 宿主安全输入",
+            });
+            input_type.meta.ownership.meta.test_id = "ai.execution.result.input_type";
+            try scroll.content.appendChild(cx.allocator, input_type);
+            const sequence = try std.fmt.allocPrint(cx.allocator, "输入序号 {d} · 等待序号 {d}", .{ receipt.input_sequence, receipt.wait_sequence });
+            defer cx.allocator.free(sequence);
+            const input_sequence = try ui.textStyled(cx, S.metadata, sequence);
+            input_sequence.meta.ownership.meta.test_id = "ai.execution.result.input_sequence";
+            try scroll.content.appendChild(cx.allocator, input_sequence);
+        }
+        const input_limit = try ui.textStyled(cx, S.metadata, "此处仅确认本次输入的处理状态；命令执行结果请查看执行记录。");
+        input_limit.meta.ownership.meta.test_id = "ai.execution.result.input_limit";
+        input_limit.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
+        try scroll.content.appendChild(cx.allocator, input_limit);
+    } else {
+        const target = if (projection.target) |owner| try std.fmt.allocPrint(cx.allocator, "目标 · {s}{s}会话 #{d}", .{ projection.target_label, if (projection.target_label.len == 0) "" else " · ", @backingInt(owner.session_id) }) else try cx.allocator.dupe(u8, "目标身份未返回");
+        defer cx.allocator.free(target);
+        const target_node = try ui.textStyled(cx, S.text, target);
+        target_node.meta.ownership.meta.test_id = "ai.execution.result.target";
+        target_node.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
+        try scroll.content.appendChild(cx.allocator, target_node);
+    }
     if (projection.failure) |code| {
         const reason = try ui.textStyled(cx, S.text, failureLabel(code));
         reason.meta.ownership.meta.test_id = "ai.execution.result.failure";
@@ -178,9 +199,11 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
         identity_node.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         try scroll.content.appendChild(cx.allocator, identity_node);
     }
-    const output_label = try ui.textStyled(cx, S.metadata, if (projection.output_scope == .session_interval) if (projection.terminal_output.len != 0) "同一终端观测片段" else if (projection.output_available) "观测区间暂无输出" else "暂未取得观测片段" else if (projection.terminal_output.len != 0) "终端输出" else if (projection.output_available) "终端暂无输出" else "暂未取得终端输出");
-    output_label.meta.ownership.meta.test_id = "ai.execution.result.output_label";
-    try scroll.content.appendChild(cx.allocator, output_label);
+    if (!projection.input_result) {
+        const output_label = try ui.textStyled(cx, S.metadata, if (projection.output_scope == .session_interval) if (projection.terminal_output.len != 0) "同一终端观测片段" else if (projection.output_available) "观测区间暂无输出" else "暂未取得观测片段" else if (projection.terminal_output.len != 0) "终端输出" else if (projection.output_available) "终端暂无输出" else "暂未取得终端输出");
+        output_label.meta.ownership.meta.test_id = "ai.execution.result.output_label";
+        try scroll.content.appendChild(cx.allocator, output_label);
+    }
     if (projection.terminal_output.len != 0) _ = try appendOutput(cx, scope, scroll.content, projection.terminal_output, "ai.execution.result.terminal_output", positions);
     if (projection.output_gap or projection.output_truncated) {
         const note = try ui.textStyled(cx, S.metadata, if (projection.output_gap) "部分输出不在本次返回范围内；可查看原终端记录。" else if (projection.output_scope == .session_interval) "本次返回的观测片段已截断；可查看原终端记录。" else "本次输出已截断；完整内容请查看原终端记录。");

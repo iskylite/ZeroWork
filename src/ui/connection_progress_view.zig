@@ -1156,6 +1156,8 @@ fn resourceName(kind: ssh.ResourceKind) []const u8 {
         .relay_socket => "转发连接",
         .relay_worker => "转发任务",
         .rtt_channel => "延迟检测通道",
+        .execution_control => "SSH 执行控制通道",
+        .bootstrap => "SSH 临时集成资源",
     };
 }
 

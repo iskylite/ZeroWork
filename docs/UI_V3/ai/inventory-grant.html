@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>查看其他会话 · 按需授权</title><link rel="stylesheet" href="../theme-tokens.css">
+<style>
+*{box-sizing:border-box}body{margin:0;background:var(--bg-app);font:12px/18px Inter,-apple-system,BlinkMacSystemFont,sans-serif;color:var(--fg)}
+.assistant{width:min(600px,100%);padding:9px 14px;margin:40px auto 0;background:var(--layer-background,var(--overlay));backdrop-filter:blur(var(--overlay-blur));border-radius:11px}
+.inventory{display:flex;flex-direction:column;gap:8px;min-width:0;padding:11px;background:var(--popup-action);border:0;border-radius:9px}
+header{display:flex;align-items:center;gap:6px;height:22.5px;flex:none}header svg{width:16px;height:16px;flex:none;color:var(--muted)}strong{font-size:13px;line-height:20px;font-weight:700;white-space:nowrap}
+p{margin:0;color:var(--muted);font-size:12px;line-height:18px}.scope,.hint,.feedback{font-size:11px;line-height:16px}.actions{display:flex;justify-content:flex-end;align-items:center;gap:6px;min-height:26.5px;flex-wrap:wrap}
+button{height:26.5px;min-width:76px;flex:none;padding:4px 8px;border:0;border-radius:8px;background:var(--popup-action);color:var(--fg);font:500 12px/18px Inter,-apple-system,BlinkMacSystemFont,sans-serif;cursor:pointer}button.primary{background:linear-gradient(135deg,var(--action-accent),var(--action-accent-2));color:var(--accent-fg)}button:hover,button:focus-visible{outline:0;background:var(--popup-selected)}button:disabled{cursor:default;color:var(--muted);background:var(--popup-action)}[hidden]{display:none!important}
+.review{width:min(600px,100%);margin:16px auto;padding:0 14px;font-size:11px;color:var(--muted)}.review button{min-width:0;margin:4px 4px 0 0}.review output{display:block;margin-top:8px}
+</style>
+<body data-theme="dark">
+<div id="app"><main class="assistant"><section class="inventory" id="inventory" data-testid="ai.inventory_grant" hidden>
+<header><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><strong>查看其他会话</strong></header>
+<p class="scope" id="target">工作区中打开的会话与会话组</p>
+<p id="detail">AI需要查看已打开会话和会话组的名称、连接状态与分组。不会读取终端内容或执行命令。</p>
+<p class="hint">仅此一次用于本次调用；持续允许仅当前对话，可随时撤销。</p>
+<p class="feedback" id="feedback" role="status" hidden></p>
+<div class="actions"><button id="deny">拒绝</button><button id="allow-once" class="primary">仅此一次</button><button id="allow-conversation">持续允许</button></div>
+</section></main>
+<aside class="review" aria-label="原型评审控制"><span>原型评审</span><div><button id="request">触发读取请求</button><button id="disable">切换不可用</button><button id="expire">使本次请求失效</button><button id="revoke">撤销持续允许</button></div><output id="result">尚无读取请求</output></aside></div>
+<script>
+const p=new URLSearchParams(location.search);document.body.dataset.theme=['dark','light','sauber'].includes(p.get('theme'))?p.get('theme'):'dark';
+const card=document.querySelector('#inventory'),result=document.querySelector('#result'),feedback=document.querySelector('#feedback'),buttons=[...card.querySelectorAll('button')];let pending=false,enabled=true,expired=false,persistent=false;
+function sync(){card.hidden=!pending;document.querySelector('.assistant').hidden=!pending;buttons.forEach(b=>b.disabled=!enabled);feedback.hidden=true}
+function request(){pending=!persistent;enabled=true;expired=false;result.textContent=persistent?'当前对话已持续允许，无需再次审批':'AI 已请求查看其他会话';sync()}
+for(const [id,decision] of [['deny','拒绝'],['allow-once','仅此一次'],['allow-conversation','持续允许']])document.getElementById(id).onclick=()=>{if(expired){feedback.textContent='请求已失效，请等待新的请求';feedback.hidden=false;buttons.forEach(b=>b.disabled=true);return}persistent=decision==='持续允许';pending=false;result.textContent=decision==='拒绝'?'已拒绝本次读取，AI 可继续处理当前任务':decision==='仅此一次'?'已允许本次调用':'已持续允许当前对话';sync()};
+document.querySelector('#request').onclick=request;document.querySelector('#disable').onclick=()=>{enabled=!enabled;sync()};document.querySelector('#expire').onclick=()=>{expired=true;result.textContent='本次请求已失效'};document.querySelector('#revoke').onclick=()=>{persistent=false;result.textContent='已撤销当前对话的持续允许'};if(p.get('state')==='pending')request();else sync();
+</script><script src="../shared/global-background.js"></script>
+</body></html>

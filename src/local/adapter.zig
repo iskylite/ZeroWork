@@ -655,7 +655,20 @@ pub const LocalAdapter = struct {
         return .{ .handle = handle, .stdout = stdout, .stderr = try allocator.dupe(u8, job.stderr.items), .exit = job.exit, .cancelled = job.cancelled, .timed_out = job.timed_out, .truncated = job.truncated, .cleanup = job.cleanup, .done = job.done };
     }
 
-    const service_vtable: terminal.Service.VTable = .{ .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .search_async = serviceSearchAsync, .search_tail = serviceSearchTail, .export_recording = serviceExportRecording, .recording_lease = serviceRecordingLease, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel, .recording_display = serviceRecordingDisplay, .execution_output = serviceExecutionOutput, .execution_snapshot = serviceExecutionSnapshot, .execution_request = serviceExecutionRequest, .execution_renew = serviceExecutionRenew, .execution_revoke = serviceExecutionRevoke };
+    const service_vtable: terminal.Service.VTable = .{ .recording_identity = serviceRecordingIdentity, .content_query = serviceContentQuery, .execution_input = serviceExecutionInput, .execution_secret = serviceExecutionSecret, .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .search_async = serviceSearchAsync, .search_tail = serviceSearchTail, .export_recording = serviceExportRecording, .recording_lease = serviceRecordingLease, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel, .recording_display = serviceRecordingDisplay, .execution_output = serviceExecutionOutput, .execution_snapshot = serviceExecutionSnapshot, .execution_request = serviceExecutionRequest, .execution_renew = serviceExecutionRenew, .execution_revoke = serviceExecutionRevoke };
+    fn serviceRecordingIdentity(raw: *anyopaque, binding: host.ServiceHandle) !terminal.RecordingIdentity {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, false);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        const recording = entry.recording orelse return .{ .owner = entry.handle, .failure = entry.recording_error orelse "RecordingDisabled" };
+        // The entry lock retains the recording owner; the recording lock
+        // freezes availability without waiting on its IO thread.
+        if (!recording.mutex.tryLock()) return error.WorkerBusy;
+        defer recording.mutex.unlock();
+        if (!recording.owner.eql(entry.handle)) return error.StaleOwner;
+        return .{ .owner = entry.handle, .recording_id = recording.recording_id, .recording_generation = recording.recording_generation, .available = recording.failure == null and !recording.storage_failed and !recording.closed, .failure = recording.failure orelse if (recording.storage_failed) "RecordingUnavailable" else if (recording.closed) "RecordingClosed" else null };
+    }
     fn serviceRecordingDisplay(raw: *anyopaque, binding: host.ServiceHandle, display: @import("../vt/recording_manifest.zig").Display) !void {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));
         const entry = try self.resolve(binding, .terminal, false);
@@ -664,6 +677,30 @@ pub const LocalAdapter = struct {
         if (entry.recording) |recording| return recording.setDisplay(entry.handle, display);
         if (entry.options.metadata == null and entry.options.recording == null) return error.RecordingUnavailable;
         entry.metadata_display = try copyMetadataDisplay(entry.metadata_display_arena.allocator(), display);
+    }
+    fn serviceExecutionInput(raw: *anyopaque, binding: host.ServiceHandle, request: terminal.execution.InputRequest) !terminal.execution.InputReceipt {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, true);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        if (entry.close_requested.load(.acquire) or entry.process_state != .running or entry.eof or entry.terminal_error != null) return error.SessionNotWritable;
+        if (entry.writes.items.len != 0 or entry.pending_bytes != 0 or entry.reply_offset != entry.reply_len) return error.InputConflict;
+        const execution = if (entry.execution) |*value| value else return error.UnsupportedInteraction;
+        const receipt = try execution.sendInput(request, nowMs());
+        entry.wakeup.notify();
+        return receipt;
+    }
+    fn serviceExecutionSecret(raw: *anyopaque, binding: host.ServiceHandle, action: terminal.execution.SecretAction) !terminal.execution.InputReceipt {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, true);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        if (entry.close_requested.load(.acquire) or entry.process_state != .running or entry.eof or entry.terminal_error != null) return error.SessionNotWritable;
+        if (entry.writes.items.len != 0 or entry.pending_bytes != 0 or entry.reply_offset != entry.reply_len) return error.InputConflict;
+        const execution = if (entry.execution) |*value| value else return error.UnsupportedInteraction;
+        const receipt = try execution.secret(action, nowMs());
+        entry.wakeup.notify();
+        return receipt;
     }
     fn serviceExecutionOutput(raw: *anyopaque, binding: host.ServiceHandle, id: identity.ExecutionId, allocator: std.mem.Allocator, cursor: u64, max_bytes: usize) !terminal.execution.Output {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));
@@ -1049,6 +1086,13 @@ pub const LocalAdapter = struct {
         if (!entry.mutex.tryLock()) return error.WorkerBusy;
         defer entry.mutex.unlock();
         return .{ .owner = entry.handle, .document = try entry.controller.?.searchSnapshot(entry.handle, allocator) };
+    }
+    fn serviceContentQuery(raw: *anyopaque, binding: host.ServiceHandle, request: terminal.ContentRequest, allocator: std.mem.Allocator) !terminal.ContentCapture {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, false);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        return entry.vt.?.contentQuery(entry.handle, request, allocator);
     }
     fn serviceSearchTail(raw: *anyopaque, binding: host.ServiceHandle, request: terminal.SearchTail, allocator: std.mem.Allocator) !terminal.SearchSnapshot {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));

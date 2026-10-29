@@ -86,6 +86,20 @@ pub const Timeline = struct {
     pub fn append(self: *Timeline, timestamp_ms: i64, stream_offset: u64, payload: []const u8) !void {
         try self.appendEvent(timestamp_ms, stream_offset, payload, .output);
     }
+    /// A zero-byte event in the existing ordered stream. Its own sequence
+    /// distinguishes START/END even when a command produces no output.
+    pub fn markBoundary(self: *Timeline, timestamp_ms: i64, stream_offset: u64) !u64 {
+        const storage = try Payload.create(self.allocator, "");
+        errdefer storage.release();
+        self.lock();
+        defer self.mutex.unlock();
+        try self.events.ensureUnusedCapacity(self.allocator, 1);
+        while (self.events.items.len >= self.max_events) self.evictOldest();
+        const sequence = self.next_event_sequence;
+        self.next_event_sequence = try std.math.add(u64, sequence, 1);
+        self.events.appendAssumeCapacity(.{ .timestamp_ms = timestamp_ms, .stream_offset = stream_offset, .event_sequence = sequence, .payload = storage.bytes, .storage = storage });
+        return sequence;
+    }
     pub fn appendApplication(self: *Timeline, record: @import("../host/terminal_service.zig").ApplicationRecord, stream_offset: u64) !void {
         return self.appendApplicationAt(record, stream_offset, record.timestamp_ms);
     }

@@ -14,7 +14,7 @@ pub const contributions = [_]host.Contribution{
     tool("run_in_terminal", "Execute the exact approved command in an authorized, ready terminal using its private shell protocol. Saves the same-PTY START/END observation interval; output_scope=session_interval and output_attribution describe its limits, never complete exclusive command output. Requires a durable recording barrier and empty trusted input boundary. Fixed modes and write approvals still apply. Returns an execution_ref and current asynchronous state; use get_execution/wait_execution. IntegrationUnavailable writes no command. Never replay an unknown outcome with a new request_key.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":65534}," ++ key_field ++ "},\"required\":[\"session_ref\",\"command\",\"request_key\"]}"),
     tool("get_execution", "Read one execution in this conversation/task, its true process/output/recording stages, recording range and bounded incremental output. An ordinary prompt or printed marker never proves completion.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "},\"required\":[\"execution_ref\"]}"),
     tool("wait_execution", "Wait up to wait_ms for this authorized execution revision to change, then return the same bounded snapshot/output as get_execution. Timeout is not completion and never replays a command.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ ",\"after_revision\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}},\"required\":[\"execution_ref\"]}"),
-    tool("send_execution_input", "Send only an explicitly supported foreground interaction, with a current fence and fresh permission check. Text is single line UTF-8, at most 4096 bytes; Enter is a separate key request. Passwords/OTP use host_secret_request, never text. Unknown readline/raw/TUI interaction returns UnsupportedInteraction and offers user takeover.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ ",\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"key\":{\"type\":\"string\",\"enum\":[\"enter\"]},\"host_secret_request\":{\"type\":\"boolean\"}},\"required\":[\"execution_ref\",\"request_key\"]}"),
+    tool("send_execution_input", "Send an ordinary non-secret line only to the explicitly installed Local zerowork_read helper after its private input_wait attestation, with a current fence and fresh per-input approval. Arbitrary child readline, builtin read, raw/TUI and SSH input are unsupported. Text is single line UTF-8, at most 4096 bytes; Enter is a separate key request. host_secret_request is supported only by the explicit Local native zerowork_secret_consume sink, which consumes and erases a secret without delivering it to arbitrary programs. Unknown password/OTP consumers require user takeover; never send secrets as text. Unknown readline/raw/TUI interaction returns UnsupportedInteraction and offers user takeover.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ ",\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"key\":{\"type\":\"string\",\"enum\":[\"enter\"]},\"host_secret_request\":{\"type\":\"boolean\"}},\"required\":[\"execution_ref\",\"request_key\"]}"),
     tool("stop_execution", "Revoke future AI input for this exact execution and request only its supported foreground interrupt. Release is distinct from process exit; unknown effects stay unknown. This never aborts a shared SSH transport or closes a borrowed terminal.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ "},\"required\":[\"execution_ref\",\"request_key\"]}"),
 };
 fn tool(comptime name: []const u8, description: []const u8, schema: []const u8) host.Contribution {
@@ -56,11 +56,12 @@ pub const JournalAccess = struct {
         return self.update_fn(self.context, handle, revision, change);
     }
 };
-pub const TerminalAction = union(enum) { snapshot, request: execution.Request, renew: execution.Grant, revoke: struct { grant: execution.Grant, takeover: bool }, output: struct { id: identity.ExecutionId, allocator: std.mem.Allocator, cursor: u64, max_bytes: usize } };
-pub const TerminalResult = union(enum) { done, snapshot: execution.Snapshot, output: execution.Output };
+pub const TerminalAction = union(enum) { snapshot, input: execution.InputRequest, request: execution.Request, renew: execution.Grant, revoke: struct { grant: execution.Grant, takeover: bool }, output: struct { id: identity.ExecutionId, allocator: std.mem.Allocator, cursor: u64, max_bytes: usize } };
+pub const TerminalResult = union(enum) { done, input: execution.InputReceipt, snapshot: execution.Snapshot, output: execution.Output };
 pub fn performTerminal(service: terminal.Service, action: TerminalAction) !TerminalResult {
     return switch (action) {
         .snapshot => .{ .snapshot = try service.executionSnapshot() },
+        .input => |request| .{ .input = try service.executionInput(request) },
         .request => |request| blk: {
             try service.executionRequest(request);
             break :blk .done;
@@ -86,6 +87,8 @@ pub const Backend = struct {
     /// permission/mode/capability revisions at every dispatch/renewal. Returning
     /// a terminal by ID alone is insufficient authority.
     resolve: *const fn (*anyopaque, host.Context, identity.SessionHandle) anyerror!terminal.Service,
+    request_secret: ?*const fn (*anyopaque, host.Invocation, identity.SessionHandle, identity.ExecutionId, execution.InputRequest) anyerror!execution.InputReceipt = null,
+    authorize_input: ?*const fn (*anyopaque, host.Invocation, identity.SessionHandle, identity.ExecutionId, execution.InputRequest) anyerror!void = null,
     should_cancel: ?*const fn (*anyopaque) bool = null,
     terminal_call: ?*const fn (*anyopaque, terminal.Service, TerminalAction) anyerror!TerminalResult = null,
     handed_to_user: ?*const fn (*anyopaque, identity.SessionHandle) anyerror!void = null,
@@ -100,17 +103,28 @@ const Entry = struct {
     snapshot: execution.Snapshot,
     next_renew_at: i64,
     final_output: ?execution.Output = null,
+    submitted_command: ?[]const u8 = null,
     dispatch_pending: ?execution.Request = null,
     stop_intent: enum { none, stop, takeover } = .none,
 };
 /// Wait owns only copied metadata, never an invocation's JSON arena or strings.
 pub const Wait = struct { context: host.Context, operation_id: u64, index: usize, after_revision: u64, deadline: i64, output_cursor: u64, max_bytes: usize };
 pub const Response = union(enum) { result: host.Result, wait: Wait };
+const InputOperation = struct {
+    operation: journal_mod.Handle,
+    entry_index: usize,
+    journal_revision: u64,
+    input_sequence: u64,
+    receipt: ?execution.InputReceipt = null,
+    failure: ?anyerror = null,
+};
 pub const Controller = struct {
     allocator: std.mem.Allocator,
     journal: JournalAccess,
     backend: Backend,
     entries: std.ArrayList(Entry) = .empty,
+    inputs: std.ArrayList(InputOperation) = .empty,
+    next_input_sequence: u64 = 1,
     finished_tasks: [128]?host.Context = @splat(null),
     pub fn init(allocator: std.mem.Allocator, journal: *journal_mod.Journal, backend: Backend) Controller {
         return initWithJournal(allocator, JournalAccess.from(journal_mod.Journal, journal), backend);
@@ -135,6 +149,7 @@ pub const Controller = struct {
     }
     pub fn deinit(self: *Controller) void {
         for (self.entries.items) |*entry| {
+            if (entry.submitted_command) |command| self.allocator.free(command);
             if (entry.final_output) |*output| output.deinit(self.allocator);
             if (entry.dispatch_pending) |request| self.allocator.free(request.command) else {
                 if (self.backend.resolve(self.backend.context, entry.context, entry.target)) |service| {
@@ -145,6 +160,7 @@ pub const Controller = struct {
             }
         }
         self.entries.deinit(self.allocator);
+        self.inputs.deinit(self.allocator);
     }
     pub fn execute(self: *Controller, invocation: host.Invocation, now: i64) !Response {
         try invocation.context.validate();
@@ -182,11 +198,8 @@ pub const Controller = struct {
             if (key) |value| if (value != .string or !std.mem.eql(u8, value.string, "enter")) return error.InvalidArguments;
             if (secret) |value| {
                 if (value != .bool or !value.bool) return error.InvalidArguments;
-                return error.HostSecretUnavailable;
             }
-            // Shell hooks prove execution association, but do not attest an
-            // arbitrary child's readline identity or echo mode. No guessing.
-            return error.UnsupportedInteraction;
+            return .{ .result = try self.sendInput(invocation, index, if (secret != null) .{ .kind = .host_secret } else if (text) |value| .{ .kind = .text, .text = value.string } else .{ .kind = .enter }, now) };
         }
         const output_cursor = try cursor(invocation.arguments, "output_cursor");
         const max_bytes: usize = @intCast(try integer(invocation.arguments, "max_bytes", 8192, 1, 65536));
@@ -331,16 +344,101 @@ pub const Controller = struct {
             return error.CancelledBeforeDispatch;
         };
         const id = identity.ExecutionId.generate();
-        const frozen_command = try self.allocator.dupe(u8, command);
-        self.journal.update(operation, record.revision, .{ .stage = .dispatch_started, .execution = id }) catch |err| {
-            self.allocator.free(frozen_command);
+        const index_command = try self.allocator.dupe(u8, command);
+        const frozen_command = self.allocator.dupe(u8, command) catch |err| {
+            self.allocator.free(index_command);
             return err;
         };
-        self.entries.appendAssumeCapacity(.{ .context = invocation.context, .id = id, .target = target.handle, .journal = operation, .journal_revision = record.revision + 1, .journal_stage = .dispatch_started, .snapshot = .{ .owner = target.handle, .state = .preparing, .interactive_execution = true, .input_ready = true, .local_released = true, .output_scope = .session_interval }, .next_renew_at = now + execution.renew_ms, .dispatch_pending = .{ .execution_id = id, .task_id = invocation.context.task_id, .expected_input_epoch = snapshot.input_epoch, .ownership_revision = target.ownership_revision, .command = frozen_command, .command_hash = hash } });
+        self.journal.update(operation, record.revision, .{ .stage = .dispatch_started, .execution = id }) catch |err| {
+            self.allocator.free(frozen_command);
+            self.allocator.free(index_command);
+            return err;
+        };
+        self.entries.appendAssumeCapacity(.{ .context = invocation.context, .id = id, .target = target.handle, .journal = operation, .journal_revision = record.revision + 1, .journal_stage = .dispatch_started, .snapshot = .{ .owner = target.handle, .state = .preparing, .interactive_execution = true, .input_ready = true, .local_released = true, .output_scope = .session_interval }, .next_renew_at = now + execution.renew_ms, .submitted_command = index_command, .dispatch_pending = .{ .execution_id = id, .task_id = invocation.context.task_id, .expected_input_epoch = snapshot.input_epoch, .ownership_revision = target.ownership_revision, .command = frozen_command, .command_hash = hash } });
         // Retry only a mailbox's explicit WorkerBusy/zero-admission response.
         // Any accepted, partial or unknown dispatch permanently clears pending.
         self.dispatchPending(self.entries.items.len - 1) catch {};
         return self.result(invocation.context, invocation.operation_id, self.entries.items.len - 1, 0, 8192, false);
+    }
+    fn inputResult(self: *Controller, invocation: host.Invocation, input: InputOperation) !host.Result {
+        if (input.failure) |failure| return failure;
+        const entry = self.entries.items[input.entry_index];
+        const body = try std.json.Stringify.valueAlloc(self.allocator, .{ .execution_ref = try string(invocation.arguments, "execution_ref"), .input_receipt = input.receipt, .host_secret_status = if (input.receipt != null and input.receipt.?.kind == .host_secret) @as(?[]const u8, switch (input.receipt.?.stage) {
+            .awaiting_host_secret => "awaiting_host_secret",
+            .queued => "queued",
+            .consumed => "secret_submitted",
+            .cancelled_unsent => "cancelled",
+            .outcome_unknown => "outcome_unknown",
+        }) else null, .source_revision = entry.snapshot.revision, .replayed = false }, .{});
+        errdefer self.allocator.free(body);
+        return ownedResult(self.allocator, invocation.context, invocation.operation_id, body, input.receipt != null and input.receipt.?.stage != .cancelled_unsent and input.receipt.?.stage != .awaiting_host_secret, input.receipt != null and input.receipt.?.stage == .outcome_unknown);
+    }
+    fn sendInput(self: *Controller, invocation: host.Invocation, index: usize, payload: struct { kind: execution.InputKind, text: []const u8 = "" }, now: i64) !host.Result {
+        const operation = try self.beginJournal(invocation);
+        var record = try self.journal.snapshot(self.allocator, operation);
+        defer record.deinit(self.allocator);
+        var retry_input: ?usize = null;
+        if (operation.reused) {
+            for (self.inputs.items, 0..) |prior, input_index| if (prior.operation.operation_ref.eql(operation.operation_ref)) {
+                // WorkerBusy is explicitly zero admission. Retry the same
+                // sequence only, with all authority and wait checks repeated.
+                if (prior.receipt == null and prior.failure != null and prior.failure.? == error.WorkerBusy) {
+                    retry_input = input_index;
+                    break;
+                }
+                return self.inputResult(invocation, prior);
+            };
+            if (retry_input == null and record.stage != .prepared) return self.recoveredResult(invocation, record);
+        }
+        const entry = self.entries.items[index];
+        if (self.taskFinishing(invocation.context) or entry.stop_intent != .none) return error.CancelledBeforeDispatch;
+        if (entry.snapshot.state != .running or entry.snapshot.input_handed_off or entry.snapshot.remote_effect_unknown) return error.InputNotExpected;
+        const wait = entry.snapshot.input_wait orelse return if (payload.kind == .host_secret) error.HostSecretUnavailable else error.UnsupportedInteraction;
+        if (payload.kind == .host_secret and wait.kind != .host_secret) return error.HostSecretUnavailable;
+        if (payload.kind != .host_secret and wait.kind != .controlled_line) return error.SecretMustUseHost;
+        const grant = entry.snapshot.grant orelse return error.StaleFence;
+        if (!grant.execution_id.eql(entry.id) or !grant.task_id.eql(invocation.context.task_id) or !entry.snapshot.owner.eql(entry.target)) return error.StaleFence;
+        if (payload.kind == .text and payload.text.len > wait.max_bytes) return error.InputLimit;
+        const authorize = self.backend.authorize_input orelse return error.PermissionDenied;
+        if (retry_input == null) {
+            if (self.inputs.items.len >= 128) return error.InputLimit;
+            try self.inputs.ensureUnusedCapacity(self.allocator, 1);
+        }
+        const sequence = if (retry_input) |input_index| self.inputs.items[input_index].input_sequence else try identity.advance(self.next_input_sequence);
+        const request: execution.InputRequest = .{ .grant = grant, .wait_sequence = wait.sequence, .input_sequence = sequence, .kind = payload.kind, .text = payload.text };
+        try authorize(self.backend.context, invocation, entry.target, entry.id, request);
+        const service = try self.backend.resolve(self.backend.context, entry.context, entry.target);
+        const current = try self.terminalSnapshot(service);
+        if (!current.owner.eql(entry.target) or current.execution_id == null or !current.execution_id.?.eql(entry.id) or current.grant == null or !std.meta.eql(current.grant.?, grant) or current.input_wait == null or !std.meta.eql(current.input_wait.?, wait)) return error.InputConflict;
+        if (self.backend.should_cancel) |check| if (check(self.backend.context)) return error.CancelledBeforeDispatch;
+        // Persist the no-replay fence before any private byte can be queued.
+        try self.journal.update(operation, record.revision, .{ .stage = .dispatch_started, .execution = entry.id });
+        self.next_input_sequence = sequence;
+        if (retry_input) |input_index| self.inputs.items[input_index].journal_revision = record.revision + 1 else self.inputs.appendAssumeCapacity(.{ .operation = operation, .entry_index = index, .journal_revision = record.revision + 1, .input_sequence = sequence });
+        const input_index = retry_input orelse self.inputs.items.len - 1;
+        const response = (if (payload.kind == .host_secret) blk: {
+            const callback = self.backend.request_secret orelse break :blk error.HostSecretUnavailable;
+            const receipt = callback(self.backend.context, invocation, entry.target, entry.id, request) catch |err| break :blk err;
+            break :blk @as(TerminalResult, .{ .input = receipt });
+        } else self.terminalCall(service, .{ .input = request })) catch |err| {
+            self.inputs.items[input_index].failure = err;
+            if (err == error.WorkerBusy) return err;
+            try self.journal.update(operation, record.revision + 1, .{ .stage = .outcome_unknown, .execution = entry.id, .remote_effect_unknown = true });
+            return err;
+        };
+        if (response != .input or response.input.input_sequence != sequence or response.input.wait_sequence != wait.sequence or response.input.kind != payload.kind) {
+            self.inputs.items[input_index].failure = error.InvalidControllerReceipt;
+            try self.journal.update(operation, record.revision + 1, .{ .stage = .outcome_unknown, .execution = entry.id, .remote_effect_unknown = true });
+            return error.InvalidControllerReceipt;
+        }
+        self.inputs.items[input_index].failure = null;
+        self.inputs.items[input_index].receipt = response.input;
+        var input_snapshot = current;
+        input_snapshot.input_receipt = response.input;
+        try self.journal.update(operation, record.revision + 1, .{ .stage = inputStage(response.input), .execution = entry.id, .execution_receipt = execution.PublicReceipt.fromSnapshot(input_snapshot) });
+        self.inputs.items[input_index].journal_revision += 1;
+        _ = now;
+        return self.inputResult(invocation, self.inputs.items[input_index]);
     }
     fn beginJournal(self: *Controller, invocation: host.Invocation) !journal_mod.Handle {
         return self.journal.begin(.{ .context = invocation.context, .tool_id = invocation.tool_id, .request_key = try string(invocation.arguments, "request_key"), .canonical_hash = invocation.canonical_arguments_hash, .turn_id = invocation.turn_id, .call_id = invocation.call_id });
@@ -464,6 +562,13 @@ pub const Controller = struct {
         // Driver evidence may release the retained Service only after these
         // exact process/record/input facts are durable. Keep the prior snapshot
         // on publication failure so the next refresh retries the transaction.
+        if (current.input_receipt) |receipt| for (self.inputs.items) |*input| {
+            if (input.entry_index == index and input.receipt != null and input.receipt.?.input_sequence == receipt.input_sequence and input.receipt.?.wait_sequence == receipt.wait_sequence and !std.meta.eql(input.receipt.?, receipt)) {
+                try self.journal.update(input.operation, input.journal_revision, .{ .stage = inputStage(receipt), .execution = entry.id, .execution_receipt = execution.PublicReceipt.fromSnapshot(current), .remote_effect_unknown = receipt.stage == .outcome_unknown });
+                input.journal_revision += 1;
+                input.receipt = receipt;
+            }
+        };
         entry.snapshot = current;
     }
     fn find(self: *Controller, context: host.Context, reference: []const u8) !usize {
@@ -502,6 +607,14 @@ pub const Controller = struct {
         return ownedResult(self.allocator, invocation.context, invocation.operation_id, body, record.dispatch_started, record.remote_effect_unknown or record.stage == .outcome_unknown);
     }
 };
+fn inputStage(receipt: execution.InputReceipt) journal_mod.Stage {
+    return switch (receipt.stage) {
+        .awaiting_host_secret, .queued => .running,
+        .consumed => .succeeded,
+        .cancelled_unsent => .failed,
+        .outcome_unknown => .outcome_unknown,
+    };
+}
 fn sameReceipt(a: ?execution.PublicReceipt, b: ?execution.PublicReceipt) bool {
     var left = a orelse return b == null;
     var right = b orelse return false;
@@ -655,4 +768,135 @@ test "execution interval publication failure retains prior evidence and retries 
     var saved = try journal.snapshot(a, operation);
     defer saved.deinit(a);
     try std.testing.expect(saved.stage == .succeeded and saved.execution_receipt.?.interval_saved and !saved.execution_receipt.?.sealed);
+}
+
+test "execution input request key preserves exact receipt through consumption revocation and recovery without replay" {
+    const Mock = struct {
+        snapshot: execution.Snapshot,
+        input_calls: usize = 0,
+        secret_prompts: usize = 0,
+        busy_once: bool = true,
+        allowed: bool = true,
+        fn authorize(_: *anyopaque, _: host.Invocation, _: []const u8, _: []const u8, _: [32]u8) !Target {
+            return error.NotAuthorized;
+        }
+        fn resolve(raw: *anyopaque, _: host.Context, _: identity.SessionHandle) !terminal.Service {
+            return .{ .context = raw, .binding = undefined, .vtable = undefined };
+        }
+        fn inputAuthorize(raw: *anyopaque, _: host.Invocation, _: identity.SessionHandle, _: identity.ExecutionId, _: execution.InputRequest) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!self.allowed) return error.PermissionDenied;
+        }
+        fn secretRequest(raw: *anyopaque, _: host.Invocation, _: identity.SessionHandle, _: identity.ExecutionId, request: execution.InputRequest) !execution.InputReceipt {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.secret_prompts += 1;
+            const receipt: execution.InputReceipt = .{ .input_sequence = request.input_sequence, .wait_sequence = request.wait_sequence, .kind = .host_secret, .stage = .awaiting_host_secret };
+            self.snapshot.input_receipt = receipt;
+            self.snapshot.revision += 1;
+            return receipt;
+        }
+        fn call(raw: *anyopaque, _: terminal.Service, action: TerminalAction) !TerminalResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return switch (action) {
+                .snapshot => .{ .snapshot = self.snapshot },
+                .input => |request| blk: {
+                    if (self.busy_once) {
+                        self.busy_once = false;
+                        return error.WorkerBusy;
+                    }
+                    self.input_calls += 1;
+                    const receipt: execution.InputReceipt = .{ .input_sequence = request.input_sequence, .wait_sequence = request.wait_sequence, .kind = request.kind, .stage = .queued };
+                    self.snapshot.input_receipt = receipt;
+                    self.snapshot.revision += 1;
+                    break :blk .{ .input = receipt };
+                },
+                .output => |request| .{ .output = .{ .bytes = try request.allocator.alloc(u8, 0), .start_cursor = 0, .next_cursor = 0, .gap = false, .truncated = false } },
+                .revoke => blk: {
+                    self.snapshot.grant = null;
+                    break :blk .done;
+                },
+                else => .done,
+            };
+        }
+    };
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var journal = try journal_mod.Journal.open(a, std.testing.io, tmp.dir, "inputs.json");
+    defer journal.deinit();
+    const context: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(1), .generation = 1 };
+    const id = identity.ExecutionId.generate();
+    const grant: execution.Grant = .{ .execution_id = id, .task_id = context.task_id, .fence = 2, .input_epoch = 1, .ownership_revision = 1 };
+    const original = try journal.begin(.{ .context = context, .tool_id = "host.run_in_terminal", .request_key = "run", .canonical_hash = @splat(1), .turn_id = 1, .call_id = "run" });
+    try journal.update(original, 1, .{ .stage = .dispatch_started, .execution = id });
+    var mock: Mock = .{ .snapshot = .{ .owner = target, .execution_id = id, .execution_fence = 2, .execution_input_epoch = 1, .state = .running, .grant = grant, .input_wait = .{ .sequence = 7 }, .submit_sent = true } };
+    var controller = Controller.init(a, &journal, .{ .context = &mock, .authorize = Mock.authorize, .resolve = Mock.resolve, .terminal_call = Mock.call, .authorize_input = Mock.inputAuthorize, .request_secret = Mock.secretRequest });
+    defer controller.deinit();
+    try controller.entries.append(a, .{ .context = context, .id = id, .target = target, .journal = original, .journal_revision = 2, .journal_stage = .dispatch_started, .snapshot = mock.snapshot, .next_renew_at = std.math.maxInt(i64) });
+    const reference = try std.fmt.allocPrint(a, "x1:{s}", .{std.fmt.bytesToHex(id.bytes, .lower)});
+    defer a.free(reference);
+    const json = try std.fmt.allocPrint(a, "{{\"execution_ref\":\"{s}\",\"request_key\":\"line-1\",\"text\":\"ordinary line\"}}", .{reference});
+    defer a.free(json);
+    var args = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer args.deinit();
+    const invocation: host.Invocation = .{ .context = context, .authority = .execution_control, .operation_id = 9, .turn_id = 1, .call_id = "input", .tool_id = "host.send_execution_input", .arguments = args.value, .arguments_json = json, .arguments_hash = execution.digest(json), .canonical_arguments_hash = try @import("canonical_arguments.zig").digest(a, args.value) };
+    try std.testing.expectError(error.WorkerBusy, controller.execute(invocation, 9));
+    var response = try controller.execute(invocation, 10);
+    defer response.result.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), mock.input_calls);
+    mock.snapshot.input_receipt.?.stage = .consumed;
+    mock.snapshot.input_receipt.?.accepted_bytes = 13;
+    mock.snapshot.revision += 1;
+    var repeated = try controller.execute(invocation, 11);
+    defer repeated.result.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), mock.input_calls);
+    try std.testing.expect(std.mem.indexOf(u8, repeated.result.blocks[0].structured, "consumed") != null);
+    mock.snapshot.input_wait = .{ .sequence = 8, .kind = .host_secret };
+    mock.snapshot.revision += 1;
+    const secret_json = try std.fmt.allocPrint(a, "{{\"execution_ref\":\"{s}\",\"request_key\":\"host-secret-1\",\"host_secret_request\":true}}", .{reference});
+    defer a.free(secret_json);
+    var secret_args = try std.json.parseFromSlice(std.json.Value, a, secret_json, .{});
+    defer secret_args.deinit();
+    var secret_invocation = invocation;
+    secret_invocation.operation_id = 10;
+    secret_invocation.arguments = secret_args.value;
+    secret_invocation.arguments_json = secret_json;
+    secret_invocation.arguments_hash = execution.digest(secret_json);
+    secret_invocation.canonical_arguments_hash = try @import("canonical_arguments.zig").digest(a, secret_args.value);
+    var prompt = try controller.execute(secret_invocation, 11);
+    defer prompt.result.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, prompt.result.blocks[0].structured, "awaiting_host_secret") != null);
+    try std.testing.expect(!prompt.result.receipt.side_effect_started);
+    var same_prompt = try controller.execute(secret_invocation, 11);
+    defer same_prompt.result.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), mock.secret_prompts);
+    mock.snapshot.input_receipt.?.stage = .consumed;
+    mock.snapshot.input_wait = null;
+    mock.snapshot.revision += 1;
+    var secret_submitted = try controller.execute(secret_invocation, 12);
+    defer secret_submitted.result.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, secret_submitted.result.blocks[0].structured, "secret_submitted") != null);
+    try std.testing.expectEqual(@as(usize, 1), mock.secret_prompts);
+    mock.allowed = false;
+    mock.snapshot.grant = null;
+    mock.snapshot.input_wait = null;
+    mock.snapshot.input_handed_off = true;
+    mock.snapshot.revision += 1;
+    var after_revoke = try controller.execute(invocation, 12);
+    defer after_revoke.result.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), mock.input_calls);
+    try std.testing.expect(std.mem.indexOf(u8, after_revoke.result.blocks[0].structured, "consumed") != null);
+    const stored = try tmp.dir.readFileAlloc(std.testing.io, "inputs.json", a, .limited(journal_mod.max_file_bytes));
+    defer a.free(stored);
+    try std.testing.expect(std.mem.indexOf(u8, stored, "ordinary line") == null);
+    var recovered = Controller.init(a, &journal, .{ .context = &mock, .authorize = Mock.authorize, .resolve = Mock.resolve, .terminal_call = Mock.call });
+    defer recovered.deinit();
+    const operation = try recovered.beginJournal(invocation);
+    var record = try journal.snapshot(a, operation);
+    defer record.deinit(a);
+    try std.testing.expect(operation.reused and record.execution_receipt.?.input_receipt.?.stage == .consumed);
+    var recovery_result = try recovered.recoveredResult(invocation, record);
+    defer recovery_result.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), mock.input_calls);
 }

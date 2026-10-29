@@ -61,6 +61,7 @@ pub fn build(b: *std.Build) void {
     core.linkFramework("CoreFoundation", .{});
     addUrlFetchFrameworks(core);
     core.addCSourceFile(.{ .file = b.path("src/local/trusted_edit_native.c"), .flags = &.{"-std=c11"} });
+    core.addCSourceFile(.{ .file = b.path("src/local/secret_native.c"), .flags = &.{"-std=c11"} });
     core.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     core.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
     const ssh_channel_translate = b.addTranslateC(.{ .root_source_file = b.path("src/proto/ssh/libssh2_channel_shim.h"), .target = target, .optimize = optimize });
@@ -134,6 +135,8 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/ui_fonts.m"), .flags = &.{} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_file_promises.m"), .flags = &.{"-fobjc-arc"} });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_host_secret.m"), .flags = &.{"-fobjc-arc"} });
+    exe.root_module.linkFramework("Carbon", .{});
     exe.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
     zenit.installHarnessClient(b, zenit_dep);
     exe.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
@@ -153,11 +156,24 @@ pub fn build(b: *std.Build) void {
     execution_bridge.addArg("-o");
     const execution_bridge_file = execution_bridge.addOutputFileArg("zw_execution.so");
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(execution_bridge_file, .bin, "zw_execution.so").step);
+    const secret_consumer = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos14.0", "-bundle", "-undefined", "dynamic_lookup", "-std=c11", "-O2" });
+    secret_consumer.addFileArg(b.path("src/local/shell/secret_consume.c"));
+    secret_consumer.addArg("-o");
+    const secret_consumer_file = secret_consumer.addOutputFileArg("zw_secret_consume.so");
+    b.getInstallStep().dependOn(&b.addInstallFileWithDir(secret_consumer_file, .bin, "zw_secret_consume.so").step);
     const execution_guard = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos14.0", "-std=c11", "-Wall", "-Wextra", "-Werror", "-O2" });
     execution_guard.addFileArg(b.path("src/local/shell/execution_guard.c"));
     execution_guard.addArg("-o");
     const execution_guard_file = execution_guard.addOutputFileArg("zw_execution_guard");
     b.getInstallStep().dependOn(&b.addInstallFileWithDir(execution_guard_file, .bin, "zw_execution_guard").step);
+    // Versioned remote resources are bundled, never fetched by a target host.
+    // Building Linux candidates does not grant runtime compatibility/ready.
+    const ssh_bootstrap = b.addSystemCommand(&.{ "python3", "scripts/build_ssh_bootstrap.py", "--output" });
+    const ssh_bootstrap_directory = ssh_bootstrap.addOutputDirectoryArg("ssh-bootstrap-v1");
+    for ([_][]const u8{ "scripts/build_ssh_bootstrap.py", "src/proto/ssh/bootstrap/v1/launcher.c", "src/proto/ssh/bootstrap/v1/zw_ssh_execution.c", "src/proto/ssh/bootstrap/v1/execution.zsh" }) |source| ssh_bootstrap.addFileInput(b.path(source));
+    const install_ssh_bootstrap = b.addInstallDirectory(.{ .source_dir = ssh_bootstrap_directory, .install_dir = .prefix, .install_subdir = "share/zerowork/ssh-bootstrap/v1" });
+    b.getInstallStep().dependOn(&install_ssh_bootstrap.step);
+    b.step("ssh-bootstrap-resources", "Build hash-manifested BootstrapV1 remote candidates without deployment").dependOn(&install_ssh_bootstrap.step);
 
     // ── Mockup 预览（设计稿实机比对基建） ───────────────────────────
     // Build only the selected native design preview, outside production sources.
@@ -304,7 +320,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.linkSystemLibrary("ghostty-vt", .{});
     tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
     tests.root_module.addIncludePath(b.path("src/proto/ssh"));
-    tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c" }, .flags = &.{"-std=c11"} });
+    tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
     tests.root_module.addCSourceFile(.{ .file = b.path("src/platform/data_scope_lock.c"), .flags = &.{"-std=c11"} });
     tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
@@ -323,6 +339,7 @@ pub fn build(b: *std.Build) void {
     const root_test_binary = root_test_files.addCopyFile(tests.getEmittedBin(), "unit-tests");
     _ = root_test_files.addCopyFile(zsh_bridge_file, "zw_ipc.so");
     _ = root_test_files.addCopyFile(execution_bridge_file, "zw_execution.so");
+    _ = root_test_files.addCopyFile(secret_consumer_file, "zw_secret_consume.so");
     _ = root_test_files.addCopyFile(execution_guard_file, "zw_execution_guard");
     const root_test_run = std.Build.Step.Run.create(b, "run unit and contract tests");
     root_test_run.addFileArg(root_test_binary);
@@ -337,6 +354,14 @@ pub fn build(b: *std.Build) void {
     native_credentials_run.addFileArg(native_credentials_binary);
     root_test_step.dependOn(&native_credentials_run.step);
     b.step("test-credentials-native", "Run credential cache and no-UI regressions with mocked Security APIs").dependOn(&native_credentials_run.step);
+    const secret_transport = b.addSystemCommand(&.{ "xcrun", "clang", "-target", "arm64-apple-macos14.0", "-std=c11", "-Wall", "-Wextra", "-Werror" });
+    secret_transport.addFileArg(b.path("src/local/secret_native.c"));
+    secret_transport.addFileArg(b.path("src/local/secret_native_tests.c"));
+    secret_transport.addArg("-o");
+    const secret_transport_binary = secret_transport.addOutputFileArg("secret-native-transport-tests");
+    const secret_transport_run = std.Build.Step.Run.create(b, "secret-native-transport-tests");
+    secret_transport_run.addFileArg(secret_transport_binary);
+    b.step("test-secret-transport", "Run isolated fresh-connection secret transport and child-PID rejection tests").dependOn(&secret_transport_run.step);
 
     // Real child processes exercise runtime flock ownership without launching
     // ZeroWork, touching application data, or calling Security APIs.
@@ -363,6 +388,7 @@ pub fn build(b: *std.Build) void {
         local_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
         local_tests.root_module.addCSourceFile(.{ .file = b.path("src/local/darwin_process.c"), .flags = &.{"-std=c11"} });
         local_tests.root_module.addCSourceFile(.{ .file = b.path("src/local/trusted_edit_native.c"), .flags = &.{"-std=c11"} });
+        local_tests.root_module.addCSourceFile(.{ .file = b.path("src/local/secret_native.c"), .flags = &.{"-std=c11"} });
         local_tests.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
         local_tests.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
         local_tests.root_module.link_libc = true;
@@ -395,6 +421,7 @@ pub fn build(b: *std.Build) void {
             const runner = files.addCopyFile(local_tests.getEmittedBin(), if (std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) "terminal-execution-tests" else "trusted-edit-tests");
             _ = files.addCopyFile(zsh_bridge_file, "zw_ipc.so");
             _ = files.addCopyFile(execution_bridge_file, "zw_execution.so");
+            _ = files.addCopyFile(secret_consumer_file, "zw_secret_consume.so");
             _ = files.addCopyFile(execution_guard_file, "zw_execution_guard");
             const trusted_run = std.Build.Step.Run.create(b, "run trusted ZLE tests");
             trusted_run.addFileArg(runner);
@@ -417,7 +444,7 @@ pub fn build(b: *std.Build) void {
     notification_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     notification_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
     b.step("test-notification-preview", "Build isolated native notification acceptance fixture").dependOn(&b.addInstallArtifact(notification_preview, .{}).step);
-    for ([_][]const u8{ "host-approval", "task-finish", "execution-result" }, [_][]const u8{ "src/host_approval_preview_runner.zig", "src/task_finish_preview_runner.zig", "src/execution_result_preview_runner.zig" }) |name, source| {
+    for ([_][]const u8{ "host-approval", "task-finish", "execution-result", "inventory-grant" }, [_][]const u8{ "src/host_approval_preview_runner.zig", "src/task_finish_preview_runner.zig", "src/execution_result_preview_runner.zig", "src/inventory_grant_preview_runner.zig" }) |name, source| {
         const preview = b.addExecutable(.{ .name = b.fmt("{s}-preview", .{name}), .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = target, .optimize = optimize }) });
         zenit.attach(zenit_dep, preview);
         preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
@@ -453,7 +480,7 @@ pub fn build(b: *std.Build) void {
     appearance_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
     appearance_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
     appearance_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
-    appearance_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c" }, .flags = &.{"-std=c11"} });
+    appearance_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
     appearance_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     appearance_tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
     appearance_tests.root_module.linkSystemLibrary("ssh2", .{});
@@ -495,7 +522,7 @@ pub fn build(b: *std.Build) void {
     ui_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
     ui_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
     ui_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
-    ui_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c" }, .flags = &.{"-std=c11"} });
+    ui_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
     ui_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     ui_tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
     ui_tests.root_module.linkSystemLibrary("ssh2", .{});
@@ -511,6 +538,7 @@ pub fn build(b: *std.Build) void {
     const ui_test_binary = ui_test_files.addCopyFile(ui_tests.getEmittedBin(), "ui-tests");
     _ = ui_test_files.addCopyFile(zsh_bridge_file, "zw_ipc.so");
     _ = ui_test_files.addCopyFile(execution_bridge_file, "zw_execution.so");
+    _ = ui_test_files.addCopyFile(secret_consumer_file, "zw_secret_consume.so");
     _ = ui_test_files.addCopyFile(execution_guard_file, "zw_execution_guard");
     const run_ui_tests = std.Build.Step.Run.create(b, "run transfer-panel and layout tests");
     run_ui_tests.addFileArg(ui_test_binary);
@@ -533,7 +561,7 @@ pub fn build(b: *std.Build) void {
     plugin_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
     plugin_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
     plugin_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
-    plugin_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c" }, .flags = &.{"-std=c11"} });
+    plugin_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
     plugin_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
     plugin_tests.root_module.addLibraryPath(b.path("vendor/mbedtls/library"));
     plugin_tests.root_module.linkSystemLibrary("ssh2", .{});
@@ -594,10 +622,14 @@ pub fn build(b: *std.Build) void {
         hardening.dependOn(&b.addInstallArtifact(runner, .{}).step);
     }
 
+    const disconnect_acceptance = b.step("ssh-disconnect-acceptance", "Build headless explicit SSH disconnect lifecycle acceptance runner");
+    const bootstrap_acceptance = b.step("ssh-bootstrap-acceptance", "Build headless production BootstrapV1 loopback acceptance runner");
     const forward_acceptance = b.step("forward-acceptance", "Build real forwarding and production Worker/Relay lifecycle acceptance runners");
     const shared_acceptance = b.step("shared-connection-acceptance", "Build independent SSH channel and reconnect acceptance runner");
     const reconnect_acceptance = b.step("reconnect-acceptance", "Build original-terminal reconnect acceptance runner");
     for ([_]struct { name: []const u8, source: []const u8 }{
+        .{ .name = "ssh-disconnect-runner", .source = "src/ssh_disconnect_runner.zig" },
+        .{ .name = "ssh-bootstrap-runner", .source = "src/ssh_bootstrap_runner.zig" },
         .{ .name = "fixed-forward-runner", .source = "src/fixed_forward_runner.zig" },
         .{ .name = "socks-worker-host-runner", .source = "src/socks_worker_host_runner.zig" },
         .{ .name = "forward-load-runner", .source = "src/forward_load_runner.zig" },
@@ -629,13 +661,15 @@ pub fn build(b: *std.Build) void {
         fixed_forward_runner.root_module.linkSystemLibrary("mbedcrypto", .{});
         fixed_forward_runner.root_module.linkSystemLibrary("z", .{});
         addCoreTextBridgeForTest(zenit_dep, fixed_forward_runner);
-        if (std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner") or std.mem.eql(u8, runner.name, "ssh-shared-connection-runner")) {
-            fixed_forward_runner.root_module.addCSourceFiles(.{ .files = &.{ "src/local/darwin_process.c", "src/local/trusted_edit_native.c" }, .flags = &.{"-std=c11"} });
+        if (std.mem.eql(u8, runner.name, "ssh-disconnect-runner") or std.mem.eql(u8, runner.name, "ssh-bootstrap-runner") or std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner") or std.mem.eql(u8, runner.name, "ssh-shared-connection-runner")) {
+            fixed_forward_runner.root_module.addCSourceFiles(.{ .files = &.{ "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
             fixed_forward_runner.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_credentials.m"), .flags = &.{} });
             fixed_forward_runner.root_module.linkFramework("Security", .{});
         }
         const runner_install = b.addInstallArtifact(fixed_forward_runner, .{});
         forward_acceptance.dependOn(&runner_install.step);
+        if (std.mem.eql(u8, runner.name, "ssh-disconnect-runner")) disconnect_acceptance.dependOn(&runner_install.step);
+        if (std.mem.eql(u8, runner.name, "ssh-bootstrap-runner")) bootstrap_acceptance.dependOn(&runner_install.step);
         if (std.mem.eql(u8, runner.name, "ssh-shared-connection-runner")) shared_acceptance.dependOn(&runner_install.step);
         if (std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner")) reconnect_acceptance.dependOn(&runner_install.step);
     }

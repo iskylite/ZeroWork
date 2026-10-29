@@ -85,6 +85,11 @@ test "real worker reconnect releases the previous descriptor before attempting a
     defer native.zw_ssh_socket_close(pair.relay_fd);
     const library: ssh.Library = .{ .active = false };
     var worker: Worker = undefined;
+    worker.execution = null;
+    worker.execution_mutex = .unlocked;
+    worker.execution_recording = null;
+    worker.execution_control = null;
+    worker.execution_deployment = null;
     worker.native_mutex = .unlocked;
     worker.shared_connection = null;
     worker.options = .{ .host = "unused", .user = "unused", .auth = .agent, .operation_key = key(), .resource_ledger = &ledger };
@@ -129,6 +134,11 @@ test "real worker reconnect cannot pass an unknown resource receipt" {
     _ = ledger.record(key(), 0, .transport, .unknown);
     const library: ssh.Library = .{ .active = false };
     var worker: Worker = undefined;
+    worker.execution = null;
+    worker.execution_mutex = .unlocked;
+    worker.execution_recording = null;
+    worker.execution_control = null;
+    worker.execution_deployment = null;
     worker.native_mutex = .unlocked;
     worker.shared_connection = null;
     worker.options = .{ .host = "unused", .user = "unused", .auth = .agent, .operation_key = key(), .resource_ledger = &ledger };

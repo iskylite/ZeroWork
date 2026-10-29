@@ -4,10 +4,12 @@ const std = @import("std");
 const ui = @import("ui");
 const approval = @import("../ai/host_approval.zig");
 const S = @import("ai_tool_approval_styles.zig");
+const R = @import("ai_host_approval_route_styles.zig");
 const theme = @import("app_theme.zig");
 pub const Callbacks = struct {
     context: *anyopaque,
     on_decision: *const fn (*anyopaque, u64, [32]u8, bool) anyerror!void,
+    on_route: ?*const fn (*anyopaque, u64, [32]u8, approval.routing.Route) anyerror!void = null,
 };
 pub const View = struct {
     cx: *ui.Cx,
@@ -22,6 +24,10 @@ pub const View = struct {
     summary_row: *ui.Node,
     feedback: *ui.Node,
     source: *ui.Node,
+    route_row: *ui.Node = undefined,
+    route_reason: *ui.Node = undefined,
+    route_buttons: [3]*ui.Signal(S.ButtonStyle) = undefined,
+    route_selected: approval.routing.Route = .batch,
     accept: *ui.Node,
     reject: *ui.Node,
     copy: *ui.Node,
@@ -84,6 +90,21 @@ pub const View = struct {
         source.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 20.625 }, .flex_shrink = 0 });
         source.meta.ownership.meta.test_id = "ai.host_approval.source";
         try scroll.content.appendChild(cx.allocator, source);
+        self.route_row = try ui.boxStyled(cx, R.row, .{});
+        self.route_row.meta.ownership.meta.test_id = "ai.host_approval.routes";
+        self.route_row.setDisplay(.none);
+        try scroll.content.appendChild(cx.allocator, self.route_row);
+        inline for (.{ .{ "批处理", "ai.host_approval.route.batch", chooseBatch }, .{ "当前终端", "ai.host_approval.route.current", chooseCurrent }, .{ "新工作终端", "ai.host_approval.route.new", chooseNew } }, 0..) |item, index| {
+            self.route_buttons[index] = try scope.createSignal(S.ButtonStyle, R.button(index == 0));
+            const button = try ui.widgets.Button(.{ .variant = .secondary, .label = item[0], .a11y_label = item[0], .base_style = self.route_buttons[index], .disabled = self.decision_pending, .on_click = cx.on(View, self, item[2]) }).mount(scope, cx);
+            button.meta.ownership.meta.test_id = item[1];
+            try self.route_row.appendChild(cx.allocator, button);
+        }
+        self.route_reason = try ui.textStyled(cx, R.reason, "");
+        self.route_reason.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 20 }, .margin = .{ .bottom = 6 }, .flex_shrink = 0 });
+        self.route_reason.meta.ownership.meta.test_id = "ai.host_approval.route.reason";
+        self.route_reason.setDisplay(.none);
+        try scroll.content.appendChild(cx.allocator, self.route_reason);
         // URLs are addresses, with a single-line horizontal viewport. The copy
         // action remains at the right edge while the full URL can scroll.
         self.network_row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 38 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 10, .right = 8 }, .background = theme.popupInset(), .corner_radius = 7, .flex_shrink = 0, .margin = .{ .bottom = 8 } }, .{});
@@ -161,9 +182,9 @@ pub const View = struct {
             errdefer self.cx.allocator.free(url);
             if (pending.kind == .network_url) try self.url.setTextContent(self.cx.allocator, url) else try self.summary.setTextContent(self.cx.allocator, url);
             const network = pending.kind == .network_url;
-            self.current_height = if (network) network_card_height else card_height;
+            self.current_height = if (network) network_card_height else card_height + @as(f32, if (pending.route != null and pending.route.?.selectable) 58 else 0);
             self.card.setStyleInline(self.cx.allocator, .{ .height = .{ .px = self.current_height } });
-            self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (network) 90.625 else 154.625 } });
+            self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (network) 90.625 else self.current_height - 77 } });
             self.network_row.setDisplay(if (network) .flex else .none);
             self.summary_row.setDisplay(if (network) .none else .flex);
             self.source.setDisplay(if (network) .none else .flex);
@@ -175,10 +196,11 @@ pub const View = struct {
                 } else "本机网络";
             }
             try self.target.setTextContent(self.cx.allocator, target);
+            const interaction = std.mem.eql(u8, pending.tool.text(), "host.send_execution_input");
             try self.title.setTextContent(self.cx.allocator, switch (pending.kind) {
                 .network_url => "获取网页",
                 .lifecycle => "管理会话",
-                .terminal_command => "执行命令",
+                .terminal_command => if (interaction) "发送交互输入" else "执行命令",
             });
             self.network_icon.setDisplay(if (pending.kind == .network_url) .flex else .none);
             self.lifecycle_icon.setDisplay(if (pending.kind == .lifecycle) .flex else .none);
@@ -186,18 +208,18 @@ pub const View = struct {
             if (self.accept.behavior.interaction.a11y) |*attrs| attrs.label = switch (pending.kind) {
                 .network_url => "批准这次本机网络读取",
                 .lifecycle => "批准这次会话管理操作",
-                .terminal_command => "批准这次终端命令",
+                .terminal_command => if (interaction) "批准这次受控输入" else "批准这次终端命令",
             };
             if (self.reject.behavior.interaction.a11y) |*attrs| attrs.label = switch (pending.kind) {
                 .network_url => "拒绝这次本机网络读取",
                 .lifecycle => "拒绝这次会话管理操作",
-                .terminal_command => "拒绝这次终端命令",
+                .terminal_command => if (interaction) "拒绝这次受控输入" else "拒绝这次终端命令",
             };
             if (self.copy.behavior.interaction.a11y) |*attrs| attrs.label = if (pending.kind == .network_url) "复制完整请求 URL" else "复制完整操作详情";
             try self.source.setTextContent(self.cx.allocator, switch (pending.kind) {
                 .network_url => "来源 · 本机网络 · HTTP/HTTPS GET",
                 .lifecycle => "来源 · 当前对话 · 宿主管理操作",
-                .terminal_command => "来源 · 当前对话 · 交互式终端命令",
+                .terminal_command => if (interaction) "来源 · 已授权执行 · 受控交互输入" else "来源 · 当前对话 · 交互式终端命令",
             });
             try self.feedback.setTextContent(self.cx.allocator, if (pending.impact.len != 0) pending.impact.text() else switch (pending.kind) {
                 .network_url => impact_copy,
@@ -211,6 +233,14 @@ pub const View = struct {
             self.operation_id = pending.operation_id;
             self.arguments_hash = pending.arguments_hash;
             self.decision_pending.set(false);
+        }
+        const has_routes = pending.route != null and pending.route.?.selectable;
+        self.route_row.setDisplay(if (has_routes) .flex else .none);
+        self.route_reason.setDisplay(if (has_routes) .flex else .none);
+        if (pending.route) |route| {
+            self.route_selected = route.choice.route;
+            try self.route_reason.setTextContent(self.cx.allocator, route.reason.text());
+            for (self.route_buttons, 0..) |signal, index| signal.set(R.button(index == @backingInt(route.choice.route)));
         }
         self.root.setDisplay(.flex);
     }
@@ -230,6 +260,28 @@ pub const View = struct {
         // The containing subtree remains alive until its next controller tick.
         self.decision_pending.set(true);
         self.cx.requestRedraw();
+    }
+    fn choose(self: *View, route: approval.routing.Route) void {
+        const sequence = self.sequence orelse return;
+        if (self.decision_pending.peek()) return;
+        const callback = self.callbacks.on_route orelse return;
+        callback(self.callbacks.context, sequence, self.arguments_hash, route) catch |err| {
+            self.feedback.setTextContent(self.cx.allocator, @errorName(err)) catch {};
+            return;
+        };
+        self.route_selected = route;
+        for (self.route_buttons, 0..) |signal, index| signal.set(R.button(index == @backingInt(route)));
+        self.feedback.setTextContent(self.cx.allocator, if (route == .new_terminal) "以卡片列明的实际会话为来源新建工作终端；创建步骤另行精确确认。只批准这一条命令。" else "只批准上述完整命令、实际目标及所选运行方式；派发前复验权限。") catch {};
+        self.cx.requestRedraw();
+    }
+    fn chooseBatch(self: *View) void {
+        self.choose(.batch);
+    }
+    fn chooseCurrent(self: *View) void {
+        self.choose(.current_terminal);
+    }
+    fn chooseNew(self: *View) void {
+        self.choose(.new_terminal);
     }
     fn acceptCall(self: *View) void {
         self.decision(true);

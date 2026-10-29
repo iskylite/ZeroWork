@@ -1004,6 +1004,10 @@ pub const Document = struct {
         errdefer allocator.free(rows);
         return .{ .owner = self.owner, .document = .{ .source_version = self.revision, .alternate_screen = false, .text = text, .rows = rows, .spans = try allocator.dupe(search.Span, doc.spans) } };
     }
+    fn contentQuery(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), request: terminal.ContentRequest, allocator: std.mem.Allocator) !terminal.ContentCapture {
+        const self = try checked(raw, binding);
+        return self.raw.contentQuery(request, allocator);
+    }
     fn readLines(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), limits: terminal.LineLimits, allocator: std.mem.Allocator) !terminal.Lines {
         const self = try checked(raw, binding);
         if (!self.composed() or self.alternate) return self.raw.readLines(limits, allocator);
@@ -1102,6 +1106,9 @@ pub const Document = struct {
     fn executionSnapshot(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding)) !terminal.execution.Snapshot {
         return (try checked(raw, binding)).raw.executionSnapshot();
     }
+    fn recordingIdentity(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding)) !terminal.RecordingIdentity {
+        return (try checked(raw, binding)).raw.recordingIdentity();
+    }
     fn executionRequest(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), request: terminal.execution.Request) !void {
         return (try checked(raw, binding)).raw.executionRequest(request);
     }
@@ -1111,13 +1118,21 @@ pub const Document = struct {
     fn executionRevoke(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), grant: terminal.execution.Grant, takeover: bool) !void {
         return (try checked(raw, binding)).raw.executionRevoke(grant, takeover);
     }
+    fn executionInput(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), request: terminal.execution.InputRequest) !terminal.execution.InputReceipt {
+        const self = try checked(raw, binding);
+        return self.raw.executionInput(request);
+    }
+    fn executionSecret(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), action: terminal.execution.SecretAction) !terminal.execution.InputReceipt {
+        const self = try checked(raw, binding);
+        return self.raw.executionSecret(action);
+    }
     fn executionOutput(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), id: identity.ExecutionId, allocator: std.mem.Allocator, cursor: u64, max_bytes: usize) !terminal.execution.Output {
         return (try checked(raw, binding)).raw.executionOutput(id, allocator, cursor, max_bytes);
     }
     fn recordingDisplay(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), display: @import("../vt/recording_manifest.zig").Display) !void {
         return (try checked(raw, binding)).raw.setRecordingDisplay(display);
     }
-    const vtable: terminal.Service.VTable = .{ .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = readLines, .theme = theme, .export_recording = exportRecording, .recording_lease = recordingLease, .trusted_snapshot = trustedSnapshot, .trusted_request = trustedRequest, .trusted_outcome = trustedOutcome, .trusted_cancel = trustedCancel, .search_snapshot = searchSnapshot, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .recording_display = recordingDisplay };
+    const vtable: terminal.Service.VTable = .{ .recording_identity = recordingIdentity, .content_query = contentQuery, .execution_input = executionInput, .execution_secret = executionSecret, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = readLines, .theme = theme, .export_recording = exportRecording, .recording_lease = recordingLease, .trusted_snapshot = trustedSnapshot, .trusted_request = trustedRequest, .trusted_outcome = trustedOutcome, .trusted_cancel = trustedCancel, .search_snapshot = searchSnapshot, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .recording_display = recordingDisplay };
 };
 
 test "builtin_records native rows and app rows share ordered search selection and scroll" {
@@ -1390,6 +1405,10 @@ test "history composite preserves checked protocol execution and display capabil
             const self = try get(raw, binding);
             return .{ .owner = self.owner, .state = .idle, .input_epoch = 44, .revision = 9 };
         }
+        fn recording(raw: *anyopaque, binding: Binding) !terminal.RecordingIdentity {
+            const self = try get(raw, binding);
+            return .{ .owner = self.owner, .recording_id = "0123456789abcdef0123456789abcdef".*, .recording_generation = 3, .available = true };
+        }
         fn request(raw: *anyopaque, binding: Binding, value: terminal.execution.Request) !void {
             const self = try get(raw, binding);
             try std.testing.expect(self.grant.execution_id.eql(value.execution_id));
@@ -1423,6 +1442,7 @@ test "history composite preserves checked protocol execution and display capabil
     var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = owner };
     var hooks = source.service().vtable.*;
     hooks.execution_snapshot = Fixture.snapshot;
+    hooks.recording_identity = Fixture.recording;
     hooks.execution_request = Fixture.request;
     hooks.execution_renew = Fixture.renew;
     hooks.execution_revoke = Fixture.revoke;
@@ -1446,13 +1466,16 @@ test "history composite preserves checked protocol execution and display capabil
     defer output.deinit(a);
     try std.testing.expectEqualStrings("raw protocol output", output.bytes);
     try service.setRecordingDisplay(.{ .title = "original title", .grouped = true });
-    try std.testing.expectEqual(@as(u8, 6), fixture.calls);
+    const recording = try service.recordingIdentity();
+    try std.testing.expect(recording.available and recording.owner.eql(owner) and recording.recording_generation == 3);
+    try std.testing.expectEqual(@as(u8, 7), fixture.calls);
     try std.testing.expectEqual(@as(usize, 15), document.top);
     try std.testing.expect(!document.follow);
     var stale = service;
     stale.binding.binding_generation +%= 1;
     try std.testing.expectError(error.StaleOwner, stale.executionSnapshot());
-    try std.testing.expectEqual(@as(u8, 6), fixture.calls);
+    try std.testing.expectError(error.StaleOwner, stale.recordingIdentity());
+    try std.testing.expectEqual(@as(u8, 7), fixture.calls);
 }
 
 test "history composite archived source cannot create a protocol execution capability" {
@@ -1465,6 +1488,7 @@ test "history composite archived source cannot create a protocol execution capab
     const service = document.service();
     const grant: terminal.execution.Grant = .{ .execution_id = identity.ExecutionId.generate(), .task_id = identity.TaskId.generate(), .fence = 1, .input_epoch = 0, .ownership_revision = 1 };
     try std.testing.expectEqual(terminal.execution.State.unavailable, (try service.executionSnapshot()).state);
+    try std.testing.expectError(error.RecordingIdentityUnavailable, service.recordingIdentity());
     try std.testing.expectError(error.IntegrationUnavailable, service.executionRequest(.{ .execution_id = grant.execution_id, .task_id = grant.task_id, .expected_input_epoch = 0, .ownership_revision = 1, .command = "true", .command_hash = terminal.execution.digest("true") }));
     try std.testing.expectError(error.IntegrationUnavailable, service.executionRenew(grant));
     try std.testing.expectError(error.IntegrationUnavailable, service.executionRevoke(grant, false));

@@ -8,7 +8,7 @@ const facts = @import("ai/tool_results.zig");
 const terminal = @import("host/terminal_execution.zig");
 const identity = @import("host/identity.zig");
 const Execution = @import("ui/ai_execution_result_view.zig");
-const Fixture = enum { running, sealed, failed, interval_recorded, interval_unverified, interval_concurrent, interval_failed, recording_failed, unknown, handed_off, sealing, cancelled, missing, refused };
+const Fixture = enum { running, sealed, failed, interval_recorded, interval_unverified, interval_concurrent, interval_failed, input_consumed, input_unknown, recording_failed, unknown, handed_off, sealing, cancelled, missing, refused };
 var fixture: Fixture = .running;
 var preview_theme: theme.Name = .dark;
 var transparency: f32 = 0;
@@ -47,11 +47,12 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     const recording: identity.RecordingId = .generate();
     const reference = try std.fmt.allocPrint(cx.allocator, "x1:{s}", .{std.fmt.bytesToHex(exec.bytes, .lower)});
     defer cx.allocator.free(reference);
-    const saved_interval = fixture == .interval_recorded or fixture == .interval_unverified or fixture == .interval_concurrent or fixture == .interval_failed;
+    const input_fixture = fixture == .input_consumed or fixture == .input_unknown;
+    const saved_interval = fixture == .interval_recorded or fixture == .interval_unverified or fixture == .interval_concurrent or fixture == .interval_failed or input_fixture;
     var snapshot: terminal.Snapshot = .{ .owner = target, .execution_id = exec, .state = switch (fixture) {
         .running, .handed_off => .running,
         .sealed, .failed => .sealed,
-        .interval_recorded, .interval_unverified, .interval_concurrent, .interval_failed => .interval_recorded,
+        .interval_recorded, .interval_unverified, .interval_concurrent, .interval_failed, .input_consumed, .input_unknown => .interval_recorded,
         .recording_failed => .recording_degraded,
         .unknown, .missing, .refused => .outcome_unknown,
         .sealing => .recording_sealing,
@@ -74,11 +75,24 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     }
     try run.records.append(run.arena.allocator(), .{ .key = .{ .owner = context.binding, .turn_id = 42, .call_id = "execution-result-preview" }, .name = "host.run_in_terminal", .arguments = "{\"command\":\"./deploy/check-release.sh --interactive\"}", .arguments_hash = @splat(1), .dispatched = fixture != .missing and fixture != .cancelled and fixture != .refused, .host_result = host_result, .result_body = if (fixture == .missing) try run.arena.allocator().dupe(u8, content) else null });
     _ = try preview.store.capture(&run, &.{.{ .owner = target, .label = "deploy@app-prod-01.example.net:2222" }});
+    if (input_fixture) {
+        const blocks = try cx.allocator.alloc(@import("ai/host_tools.zig").Block, 1);
+        blocks[0] = .{ .structured = try std.json.Stringify.valueAlloc(cx.allocator, .{ .execution_ref = reference, .input_receipt = terminal.InputReceipt{ .input_sequence = 5, .wait_sequence = 3, .kind = .host_secret, .stage = if (fixture == .input_unknown) .outcome_unknown else .consumed }, .host_secret_status = "secret_submitted", .error_code = if (fixture == .input_unknown) @as(?[]const u8, "InputAcknowledgementUnknown") else null }, .{}) };
+        try run.records.append(run.arena.allocator(), .{ .key = .{ .owner = context.binding, .turn_id = 42, .call_id = "execution-input-preview" }, .name = "host.send_execution_input", .arguments = "{}", .arguments_hash = @splat(2), .dispatched = true, .host_result = .{ .status = if (fixture == .input_unknown) .outcome_unknown else .succeeded, .blocks = blocks, .receipt = .{ .conversation_id = context.conversation_id, .task_id = context.task_id, .operation_id = 6, .binding_revision = 2, .remote_effect_unknown = fixture == .input_unknown } } });
+        _ = try preview.store.capture(&run, &.{});
+    }
     const record = preview.store.records.items[0];
     record.expanded = true;
     const card = try Execution.mount(cx, scope, &preview.store, record, .{ .context = preview, .perform = Preview.perform }, null);
     card.meta.ownership.meta.test_id = "execution_result.preview.card";
     try root.appendChild(cx.allocator, card);
+    if (input_fixture) {
+        const input = preview.store.records.items[1];
+        input.expanded = true;
+        const input_card = try Execution.mount(cx, scope, &preview.store, input, null, null);
+        input_card.meta.ownership.meta.test_id = "execution_result.preview.input_card";
+        try root.appendChild(cx.allocator, input_card);
+    }
     try root.appendChild(cx.allocator, action);
     const expected = try ui.text(cx, if (fixture == .missing or fixture == .refused) "未取得执行引用" else reference, .{ .font_size = 10.5, .color = theme.current().fg_2 });
     expected.meta.ownership.meta.test_id = "execution_result.preview.execution_ref";

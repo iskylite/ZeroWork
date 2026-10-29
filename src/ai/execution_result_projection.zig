@@ -22,6 +22,8 @@ pub const Projection = struct {
     conversation_id: identity.ConversationId,
     task_id: identity.TaskId,
     call_status: plugin.Status,
+    input_result: bool = false,
+    input_receipt: ?terminal.InputReceipt = null,
     not_dispatched: bool = false,
     execution_id: ?identity.ExecutionId = null,
     target: ?identity.SessionHandle = null,
@@ -82,6 +84,19 @@ pub const Projection = struct {
         };
     }
     pub fn statusLabel(self: Projection) []const u8 {
+        if (self.input_result) {
+            if (self.call_status == .rejected) return "输入未提交 · 已拒绝";
+            if (self.call_status == .cancelled_unsent) return "输入未提交 · 已取消";
+            if (self.remote_effect_unknown or self.call_status == .outcome_unknown) return "输入结果待核实";
+            if (self.call_status == .failed) return "输入提交失败";
+            return switch ((self.input_receipt orelse return "输入状态待核实").stage) {
+                .awaiting_host_secret => "等待宿主安全输入",
+                .queued => "输入已排队",
+                .consumed => "输入已消费",
+                .cancelled_unsent => "输入未提交 · 已取消",
+                .outcome_unknown => "输入结果待核实",
+            };
+        }
         if (self.call_status == .rejected) return "未执行 · 已拒绝";
         if (self.call_status == .cancelled_unsent) return "未派发 · 已取消";
         if (self.remote_effect_unknown or self.state == .outcome_unknown) return "结果待核实";
@@ -124,6 +139,11 @@ pub fn isRun(name: []const u8) bool {
     const logical = plugin.decodeName(&decoded, name) catch name;
     return std.mem.eql(u8, logical, "host.run_in_terminal");
 }
+pub fn isInput(name: []const u8) bool {
+    var decoded: [64]u8 = undefined;
+    const logical = plugin.decodeName(&decoded, name) catch name;
+    return std.mem.eql(u8, logical, "host.send_execution_input");
+}
 pub fn supports(name: []const u8) bool {
     var decoded: [64]u8 = undefined;
     const logical = plugin.decodeName(&decoded, name) catch name;
@@ -155,6 +175,7 @@ const Wire = struct {
     execution_id: ?identity.ExecutionId = null,
     snapshot: ?Snapshot = null,
     execution_receipt: ?std.json.Value = null,
+    input_receipt: ?terminal.InputReceipt = null,
     recording_ref: ?[]const u8 = null,
     output: ?[]const u8 = null,
     output_available: bool = false,
@@ -165,13 +186,22 @@ const Wire = struct {
 
 pub fn parse(allocator: std.mem.Allocator, name: []const u8, arguments: []const u8, status: plugin.Status, receipt: host.Receipt, content: []const u8) !?Projection {
     if (!supports(name)) return null;
-    var result: Projection = .{ .conversation_id = receipt.conversation_id, .task_id = receipt.task_id, .call_status = status, .remote_effect_unknown = receipt.remote_effect_unknown };
-    const args = std.json.parseFromSliceLeaky(struct { command: ?[]const u8 = null }, allocator, arguments, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch null;
-    if (args) |value| result.command = value.command;
+    var result: Projection = .{ .conversation_id = receipt.conversation_id, .task_id = receipt.task_id, .call_status = status, .input_result = isInput(name), .remote_effect_unknown = receipt.remote_effect_unknown };
+    if (!result.input_result) {
+        const args = std.json.parseFromSliceLeaky(struct { command: ?[]const u8 = null }, allocator, arguments, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch null;
+        if (args) |value| result.command = value.command;
+    }
     const wire = std.json.parseFromSliceLeaky(Wire, allocator, content, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return result;
     if (wire.execution_ref) |reference| if (std.mem.startsWith(u8, reference, "x1:")) {
         result.execution_id = identity.ExecutionId.parse(reference[3..]) catch null;
     };
+    if (result.input_result) {
+        // An input operation attests only its own receipt. It does not observe
+        // process completion, terminal output, or current execution authority.
+        result.input_receipt = wire.input_receipt;
+        result.failure = wire.error_code;
+        return result;
+    }
     if (wire.snapshot) |snapshot| {
         if (snapshot.execution_id) |id| {
             if (result.execution_id) |ref_id| {
@@ -254,9 +284,11 @@ pub fn parseFailure(allocator: std.mem.Allocator, name: []const u8, arguments: [
     const source = if (body) |bytes| std.json.parseFromSliceLeaky(ErrorBody, allocator, bytes, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch ErrorBody{} else ErrorBody{};
     const cancelled = source.error_code != null and std.mem.eql(u8, source.error_code.?, "CancelledBeforeDispatch");
     const status: plugin.Status = if (cancelled) .cancelled_unsent else if (source.status) |text| if (std.mem.eql(u8, text, "cancelled")) .cancelled_unsent else if (std.mem.eql(u8, text, "unknown")) .outcome_unknown else std.meta.stringToEnum(plugin.Status, text) orelse .failed else .failed;
-    var result: Projection = .{ .conversation_id = source.conversation_id, .task_id = source.task_id, .call_status = status, .not_dispatched = !dispatched, .remote_effect_unknown = source.remote_effect_unknown or status == .outcome_unknown, .failure = source.error_code };
-    const args = std.json.parseFromSliceLeaky(struct { command: ?[]const u8 = null }, allocator, arguments, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch null;
-    if (args) |value| result.command = value.command;
+    var result: Projection = .{ .conversation_id = source.conversation_id, .task_id = source.task_id, .call_status = status, .input_result = isInput(name), .not_dispatched = !dispatched, .remote_effect_unknown = source.remote_effect_unknown or status == .outcome_unknown, .failure = source.error_code };
+    if (!result.input_result) {
+        const args = std.json.parseFromSliceLeaky(struct { command: ?[]const u8 = null }, allocator, arguments, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch null;
+        if (args) |value| result.command = value.command;
+    }
     return result;
 }
 
@@ -311,6 +343,38 @@ test "execution interval projection preserves saved observation attribution and 
     const legacy = (try parse(aa, "host.get_execution", "{}", .succeeded, receipt, "{\"snapshot\":{\"state\":\"running\"}}")).?;
     try std.testing.expectEqual(.exact, legacy.output_scope);
     try std.testing.expect(!legacy.interval_saved);
+}
+
+test "execution input projection keeps typed receipt separate from execution and private input bytes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const call: host.Receipt = .{ .conversation_id = .generate(), .task_id = .generate(), .operation_id = 1, .binding_revision = 1 };
+    const reference = "x1:0123456789abcdef0123456789abcdef";
+    const receipt: terminal.InputReceipt = .{ .input_sequence = 5, .wait_sequence = 3, .kind = .host_secret, .stage = .consumed };
+    const content = try std.json.Stringify.valueAlloc(a, .{
+        .execution_ref = reference,
+        .input_receipt = receipt,
+        .host_secret_status = "secret_submitted",
+        .snapshot = .{ .state = "sealed", .process = terminal.ProcessReceipt{ .exit_code = 0, .foreground_finished = true } },
+        .output = "PRIVATE_INPUT_SENTINEL",
+        .output_available = true,
+    }, .{});
+    const parsed = (try parse(a, "host__send_uexecution_uinput", "{\"text\":\"PRIVATE_INPUT_SENTINEL\",\"command\":\"PRIVATE_INPUT_SENTINEL\"}", .succeeded, call, content)).?;
+    try std.testing.expect(parsed.input_result);
+    try std.testing.expectEqualDeep(receipt, parsed.input_receipt.?);
+    try std.testing.expectEqualStrings("输入已消费", parsed.statusLabel());
+    try std.testing.expect(parsed.command == null and parsed.process == null and parsed.state == null and parsed.target == null);
+    try std.testing.expect(parsed.actionTarget() == null and !parsed.sealed() and !parsed.intervalRecorded());
+    try std.testing.expectEqualStrings("", parsed.terminal_output);
+    try std.testing.expect(!parsed.output_available);
+    const copy = try parsed.clone(a);
+    try std.testing.expectEqualDeep(receipt, copy.input_receipt.?);
+    var unknown = parsed;
+    unknown.call_status = .outcome_unknown;
+    unknown.failure = "InputAcknowledgementUnknown";
+    try std.testing.expectEqualStrings("输入结果待核实", unknown.statusLabel());
+    try std.testing.expectEqualStrings("InputAcknowledgementUnknown", unknown.failure.?);
 }
 
 test "execution interval projection never upgrades missing saved evidence or user takeover into completion" {

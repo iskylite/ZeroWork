@@ -139,6 +139,9 @@ pub const HostTarget = struct {
     cancel_token: ?*std.atomic.Value(bool) = null,
     /// Borrowed only during init; enqueued before the worker starts, so no
     /// second producer races the UI's SPSC input queue.
+    /// Exact host-approved plan for a new owned BootstrapV1 PTY. The caller
+    /// retains its Package only until initForHost returns.
+    bootstrap: ?*const @import("../proto/ssh/bootstrap.zig").Plan = null,
     initial_input: []const u8 = "",
     /// Plain startup commands copied from the host profile. Expect/send
     /// semantics intentionally remain unsupported until a dedicated protocol
@@ -241,6 +244,7 @@ pub const SessionRuntime = struct {
         applog.info(.ssh, "session init: {s}@{s}:{d} auth={s}", .{ user, host, target.port, @tagName(target.auth_mode) });
         var worker_options = workerRuntimeOptions(app_config);
         worker_options.shared_connection = target.shared_connection;
+        worker_options.bootstrap = target.bootstrap;
         worker_options.scrollback = target.scrollback orelse app_config.ui.scrollback_limit;
         // Per-host values override global SSH policy when present; absent host
         // fields inherit the persisted application settings.
@@ -310,6 +314,21 @@ pub const SessionRuntime = struct {
         }) catch |err| {
             manifest_failure = @errorName(err);
         };
+        if (target.bootstrap != null and log_directory != null and manifest_failure == null) {
+            worker.configureExecutionRecording(io, log_directory.?, .{
+                .recording_id = worker.recording_id,
+                .archive_key = worker.archive_key,
+                .generations = worker.recording_generations.items,
+                .cast_path = cast_path,
+                .started_ms = now_ms,
+                .timeline = &worker.timeline,
+                .connection_id = if (target.source_owner) |owner| @backingInt(owner.id) else null,
+                .config_revision = if (target.source_owner) |owner| owner.revision else null,
+                .display = .{ .title = target.display_name, .host = host, .user = user, .final_cols = worker.options.cols, .final_rows = worker.options.rows, .timestamps = app_config.ui.timestamp_gutter, .font_family = app_config.ui.font_family, .font_size_px = @floatFromInt(app_config.ui.font_size), .line_height = app_config.ui.line_height },
+            }) catch |err| {
+                manifest_failure = @errorName(err);
+            };
+        }
         const thread = try WorkerThread.start(allocator, worker);
         errdefer thread.deinit();
         applog.info(.ssh, "worker thread started", .{});
@@ -445,6 +464,15 @@ pub const SessionRuntime = struct {
         if (self.torn_down) return error.SessionClosed;
         try self.thread.requestReconnect(previous, next);
     }
+    pub fn preflightExplicitDisconnect(self: *SessionRuntime, key: OperationKey) !u64 {
+        if (self.torn_down) return error.SessionClosed;
+        return self.thread.preflightExplicitDisconnect(key);
+    }
+    pub fn requestExplicitDisconnect(self: *SessionRuntime, key: OperationKey) !ReleaseReceipt {
+        if (self.torn_down) return error.SessionClosed;
+        try self.thread.requestExplicitDisconnect(key);
+        return .awaiting;
+    }
 
     pub fn acknowledgeAttached(self: *SessionRuntime, key: OperationKey) bool {
         if (self.torn_down) return false;
@@ -513,6 +541,15 @@ pub const SessionRuntime = struct {
         const cwd = self.worker.copyCwd(self.allocator) catch null;
         defer if (cwd) |value| self.allocator.free(value);
         if (cwd) |value| display.cwd = value;
+        var execution_ranges: [128]manifest.ExecutionRange = undefined;
+        var boundary_sequences: [256]u64 = undefined;
+        var ranges: []const manifest.ExecutionRange = &.{};
+        var boundaries: []const u64 = &.{};
+        if (self.worker.execution_recording) |*recording| {
+            ranges = recording.rangeValues(&execution_ranges);
+            for (recording.boundaries.items, 0..) |marker, i| boundary_sequences[i] = marker.position.event_sequence;
+            boundaries = boundary_sequences[0..recording.boundaries.items.len];
+        }
         _ = try ssh_recording.publish(self.allocator, self.checkpoint.io, dir, .{
             .recording_id = self.worker.recording_id,
             .archive_key = self.worker.archive_key,
@@ -529,6 +566,8 @@ pub const SessionRuntime = struct {
             .retention_days = retention_days,
             .failure = self.recording_manifest_failure orelse if (self.worker.recording_generation_failed or self.worker.io.timeline == null) "RecordingDegraded" else null,
             .extra_files = extra[0..count],
+            .execution_ranges = ranges,
+            .boundary_sequences = boundaries,
         });
         self.archive_written = true;
     }
@@ -770,6 +809,11 @@ test "runtime cancellation invalidates typed authentication and original worker 
     thread.stop_requested = .init(false);
     thread.reconnect_control = @import("../vt/reconnect.zig").Control.init(null);
     var worker: SshWorker = undefined;
+    worker.execution = null;
+    worker.execution_mutex = .unlocked;
+    worker.execution_recording = null;
+    worker.execution_control = null;
+    worker.execution_deployment = null;
     worker.replay = try @import("../vt/reconnect_replay.zig").Replay.init(std.testing.allocator, 16);
     defer worker.replay.deinit();
     var runtime: SessionRuntime = undefined;

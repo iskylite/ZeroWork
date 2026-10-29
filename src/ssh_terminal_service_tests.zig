@@ -5,6 +5,11 @@ const Native = @import("ui/session_runtime.zig").SessionRuntime;
 const Worker = @import("vt/ssh_worker.zig").SshWorker;
 const Thread = @import("vt/ssh_worker_thread.zig").Thread;
 const a = std.testing.allocator;
+test {
+    _ = @import("proto/ssh/bootstrap.zig");
+    _ = @import("ssh_bootstrap_protocol_tests.zig");
+    _ = @import("ssh_execution_recording_tests.zig");
+}
 const owner: @import("host/identity.zig").SessionHandle = .{ .session_id = @fromBackingInt(17) };
 const operation: @import("host/operation.zig").OperationKey = .{ .owner = .{ .session = owner }, .operation_id = 1, .attempt_id = 1 };
 const Fixture = struct {
@@ -14,6 +19,9 @@ const Fixture = struct {
     provider: Provider = undefined,
     fn init(self: *@This()) !void {
         self.worker.allocator = a;
+        self.worker.execution_mutex = .unlocked;
+        self.worker.execution = null;
+        self.worker.options = .{ .host = "fixture", .user = "fixture", .auth = .{ .password = "unused" }, .operation_key = operation };
         self.worker.vt = try @import("vt/ghostty_adapter.zig").Adapter.init(a, 4, 80);
         self.worker.text = try @import("vt/text_slot.zig").TextSlot.init(a, 4096);
         self.worker.input = try @import("vt/input_queue.zig").InputQueue.init(a, 256);
@@ -265,6 +273,7 @@ test "SSH trusted execution fails before input without BootstrapV1 and preserves
     defer f.deinit();
     const service = f.provider.service();
     const snapshot = try service.executionSnapshot();
+    try std.testing.expect(snapshot.owner.eql(owner));
     try std.testing.expect(!snapshot.interactive_execution and snapshot.state == .unavailable);
     try std.testing.expectEqualStrings("IntegrationUnavailable", snapshot.failure.?);
     try std.testing.expectError(error.IntegrationUnavailable, service.executionRequest(.{ .execution_id = .generate(), .task_id = .generate(), .expected_input_epoch = 0, .ownership_revision = 1, .command = "touch never", .command_hash = terminal.execution.digest("touch never") }));
@@ -273,4 +282,39 @@ test "SSH trusted execution fails before input without BootstrapV1 and preserves
     var stale = service;
     stale.binding.binding_generation += 1;
     try std.testing.expectError(error.StaleOwner, stale.executionSnapshot());
+}
+
+test "SSH recording identity uses exact ordinary recording generation without execution capability" {
+    var f: Fixture = .{};
+    try f.init();
+    defer f.deinit();
+    f.worker.native_mutex = .unlocked;
+    f.worker.execution_recording = null;
+    f.worker.recording_id = @import("host/identity.zig").RecordingId.generate();
+    f.worker.recording_generations = .empty;
+    defer f.worker.recording_generations.deinit(a);
+    try f.worker.recording_generations.append(a, .{ .recording_generation = 4, .session_id = @backingInt(owner.session_id), .session_generation = owner.generation, .initial_cols = 80, .initial_rows = 4, .receive_time_origin = 1, .raw_offset_start = 0, .event_sequence_start = 1 });
+    f.worker.recording_generation_failed = false;
+    f.worker.io.timeline = &f.worker.timeline;
+    f.native.recording_manifest_failure = null;
+    const service = f.provider.service();
+    const metadata = try service.recordingIdentity();
+    try std.testing.expect(metadata.available and metadata.owner.eql(owner));
+    try std.testing.expectEqualStrings(&std.fmt.bytesToHex(f.worker.recording_id.bytes, .lower), &metadata.recording_id.?);
+    try std.testing.expectEqual(@as(u64, 4), metadata.recording_generation);
+    try std.testing.expect(f.worker.execution == null);
+    try std.testing.expect(f.worker.native_mutex.tryLock());
+    try std.testing.expectError(error.WorkerBusy, service.recordingIdentity());
+    f.worker.native_mutex.unlock();
+    f.worker.recording_generations.items[0].session_generation += 1;
+    try std.testing.expectError(error.StaleOwner, service.recordingIdentity());
+    f.worker.recording_generations.items[0].session_generation = owner.generation;
+    f.worker.io.timeline = null;
+    const absent = try service.recordingIdentity();
+    try std.testing.expect(!absent.available and absent.recording_id == null);
+    try std.testing.expectEqualStrings("RecordingDisabled", absent.failure.?);
+    f.native.recording_manifest_failure = "RecordingUnavailable";
+    const failed = try service.recordingIdentity();
+    try std.testing.expect(!failed.available and failed.recording_id == null);
+    try std.testing.expectEqualStrings("RecordingUnavailable", failed.failure.?);
 }

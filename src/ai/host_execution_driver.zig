@@ -8,6 +8,7 @@ const terminal = @import("../host/terminal_service.zig");
 const identity = @import("../host/identity.zig");
 const lifecycle = @import("lifecycle_runtime.zig");
 const provider = @import("provider.zig");
+const queries = @import("host_terminal_queries.zig");
 const Wakeup = @import("../platform/wakeup.zig").Wakeup;
 const capacity = 32;
 /// Cached owner-thread facts. A missing/busy snapshot is never an idle proof.
@@ -66,6 +67,17 @@ const ExecutionInputRecord = struct {
     task_id: identity.TaskId,
     value: ExecutionInputEvidence,
 };
+const CommandRecord = struct {
+    conversation_id: identity.ConversationId,
+    target: identity.SessionHandle,
+    execution_id: identity.ExecutionId,
+    command: []const u8,
+    submitted_at_ms: i64,
+    revision: u64,
+    verified: bool,
+    exit_code: ?i32,
+    complete: bool,
+};
 const Request = struct {
     kind: union(enum) { execute: host.Invocation, stop_task: host.Context, finish_task: host.Context, takeover_task: host.Context, stop_target: struct { context: host.Context, target: identity.SessionHandle }, stop_execution: struct { context: host.Context, reference: [128]u8, length: usize }, takeover: struct { context: host.Context, reference: [128]u8, length: usize } },
     completed: std.atomic.Value(bool) = .init(false),
@@ -104,6 +116,7 @@ pub const Driver = struct {
     target_evidence: [128]?TargetEvidence = @splat(null),
     execution_input_evidence: [128]?ExecutionInputRecord = @splat(null),
     closing_targets: [128]?identity.SessionHandle = @splat(null),
+    command_records: [128]?CommandRecord = @splat(null),
 
     /// Configuration/acquisition itself performs no journal IO. The caller's
     /// allocator must support calls from the owner and UI scheduler threads;
@@ -115,7 +128,7 @@ pub const Driver = struct {
         errdefer allocator.destroy(self);
         self.* = .{ .allocator = allocator, .journal_owner = retained, .scheduler = scheduler, .backend = backend, .controller = undefined, .wake = try Wakeup.init() };
         errdefer self.wake.deinit();
-        self.controller = execution.Controller.initWithJournal(allocator, execution.JournalAccess.from(lifecycle.ProcessJournal, retained), .{ .context = self, .authorize = authorize, .resolve = resolve, .handed_to_user = handedToUser, .terminal_call = terminalCall, .should_cancel = shouldCancel });
+        self.controller = execution.Controller.initWithJournal(allocator, execution.JournalAccess.from(lifecycle.ProcessJournal, retained), .{ .context = self, .authorize = authorize, .resolve = resolve, .handed_to_user = handedToUser, .terminal_call = terminalCall, .should_cancel = shouldCancel, .authorize_input = authorizeInput, .request_secret = requestSecret });
         self.thread = try std.Thread.spawn(.{}, run, .{self});
         return self;
     }
@@ -189,6 +202,34 @@ pub const Driver = struct {
         errdefer self.allocator.destroy(request);
         request.* = .{ .kind = .{ .stop_target = .{ .context = context, .target = target } }, .detached = true };
         try self.enqueue(request);
+    }
+    /// Immutable bounded deep copy of actual submitted command facts. Command
+    /// strings belong to the Controller and are never expanded with input text.
+    pub fn commandIndex(self: *Driver, allocator: std.mem.Allocator, conversation_id: identity.ConversationId, target: identity.SessionHandle) !queries.CommandSnapshot {
+        _ = self.callers.fetchAdd(1, .acq_rel);
+        defer _ = self.callers.fetchSub(1, .release);
+        if (!self.evidence_mutex.tryLock()) return error.WorkerBusy;
+        defer self.evidence_mutex.unlock();
+        var records: std.ArrayList(queries.Command) = .empty;
+        errdefer {
+            for (records.items) |record| {
+                allocator.free(record.reference);
+                allocator.free(record.submitted_command);
+            }
+            records.deinit(allocator);
+        }
+        var hash = std.hash.Wyhash.init(0);
+        for (self.command_records) |item| if (item) |record| {
+            if (!record.conversation_id.eql(conversation_id) or !record.target.eql(target)) continue;
+            const reference = try std.fmt.allocPrint(allocator, "c1:{s}:{d}:{d}:{s}", .{ std.fmt.bytesToHex(conversation_id.bytes, .lower), @backingInt(target.session_id), target.generation, std.fmt.bytesToHex(record.execution_id.bytes, .lower) });
+            errdefer allocator.free(reference);
+            const command = try allocator.dupe(u8, record.command);
+            errdefer allocator.free(command);
+            try records.append(allocator, .{ .reference = reference, .submitted_command = command, .execution_id = record.execution_id, .submitted_at_ms = if (record.submitted_at_ms > 0) record.submitted_at_ms else null, .verified = record.verified, .exit_code = record.exit_code, .complete = record.complete });
+            hash.update(reference);
+            hash.update(std.mem.asBytes(&record.revision));
+        };
+        return .{ .records = try records.toOwnedSlice(allocator), .revision = @max(1, hash.final()) };
     }
     pub fn targetEvidence(self: *Driver, target: identity.SessionHandle) ?TargetEvidence {
         if (!self.evidence_mutex.tryLock()) return null;
@@ -437,6 +478,9 @@ pub const Driver = struct {
             self.complete(request, error.ExecutionDriverStopped);
             slot.* = null;
         };
+        while (!self.evidence_mutex.tryLock()) std.atomic.spinLoopHint();
+        self.command_records = @splat(null);
+        self.evidence_mutex.unlock();
         self.controller.deinit();
         self.journal_owner.release();
         self.work.store(0, .release);
@@ -447,6 +491,8 @@ pub const Driver = struct {
         var targets: [128]?TargetEvidence = @splat(null);
         var inputs: [128]?ExecutionInputRecord = @splat(null);
         var input_count: usize = 0;
+        var commands: [128]?CommandRecord = @splat(null);
+        var command_count: usize = 0;
         for (self.closing_targets) |target| if (target) |value| {
             _ = targetIndex(&targets, value);
         };
@@ -456,6 +502,11 @@ pub const Driver = struct {
         };
         for (self.controller.entries.items) |entry| {
             const snapshot = entry.snapshot;
+            if (entry.submitted_command) |command| if (snapshot.submit_sent and snapshot.execution_id != null and snapshot.execution_id.?.eql(entry.id) and snapshot.owner.eql(entry.target) and command_count < commands.len) {
+                commands[command_count] = .{ .conversation_id = entry.context.conversation_id, .target = entry.target, .execution_id = entry.id, .command = command, .submitted_at_ms = snapshot.started_at, .revision = snapshot.revision, .verified = snapshot.command_accepted and snapshot.submit_ack_sequence != 0 and snapshot.native_wake_written, .exit_code = if (snapshot.process) |process_receipt| if (process_receipt.exit_code) |code| @as(i32, code) else null else null, .complete = snapshot.state == .sealed and snapshot.output_scope == .exact };
+                command_count += 1;
+            };
+
             const terminal_state = switch (snapshot.state) {
                 .sealed, .interval_recorded, .cancelled_unsent, .handed_off, .outcome_unknown, .recording_degraded => true,
                 else => false,
@@ -470,6 +521,7 @@ pub const Driver = struct {
             const target_fact = &targets[target_index].?;
             target_fact.execution_count += 1;
             fact.execution_count += 1;
+            fact.awaiting_input = fact.awaiting_input or snapshot.input_wait != null;
             const pending = entry.dispatch_pending != null;
             const active = pending or !terminal_state;
             if (pending) {
@@ -534,6 +586,7 @@ pub const Driver = struct {
         self.evidence = next;
         self.target_evidence = targets;
         self.execution_input_evidence = inputs;
+        self.command_records = commands;
         self.evidence_mutex.unlock();
         if (changed) @import("../platform/presentation_wakeup.zig").notify();
     }
@@ -555,6 +608,42 @@ pub const Driver = struct {
             }
         };
         var exchange: Exchange = .{ .driver = self, .invocation = invocation, .reference = reference, .command = command, .hash = hash };
+        try self.scheduled(&exchange, Exchange.invoke);
+        return exchange.result orelse error.InvalidControllerReceipt;
+    }
+    fn authorizeInput(raw: *anyopaque, invocation: host.Invocation, owner: identity.SessionHandle, id: identity.ExecutionId, request: terminal.execution.InputRequest) !void {
+        const self: *Driver = @ptrCast(@alignCast(raw));
+        const Exchange = struct {
+            driver: *Driver,
+            invocation: host.Invocation,
+            owner: identity.SessionHandle,
+            id: identity.ExecutionId,
+            request: terminal.execution.InputRequest,
+            fn invoke(context: *anyopaque) !void {
+                const value: *@This() = @ptrCast(@alignCast(context));
+                const input_authorize = value.driver.backend.authorize_input orelse return error.PermissionDenied;
+                try input_authorize(value.driver.backend.context, value.invocation, value.owner, value.id, value.request);
+            }
+        };
+        var exchange: Exchange = .{ .driver = self, .invocation = invocation, .owner = owner, .id = id, .request = request };
+        try self.scheduled(&exchange, Exchange.invoke);
+    }
+    fn requestSecret(raw: *anyopaque, invocation: host.Invocation, owner: identity.SessionHandle, id: identity.ExecutionId, request: terminal.execution.InputRequest) !terminal.execution.InputReceipt {
+        const self: *Driver = @ptrCast(@alignCast(raw));
+        const Exchange = struct {
+            driver: *Driver,
+            result: ?terminal.execution.InputReceipt = null,
+            invocation: host.Invocation,
+            owner: identity.SessionHandle,
+            id: identity.ExecutionId,
+            request: terminal.execution.InputRequest,
+            fn invoke(context: *anyopaque) !void {
+                const value: *@This() = @ptrCast(@alignCast(context));
+                const callback = value.driver.backend.request_secret orelse return error.HostSecretUnavailable;
+                value.result = try callback(value.driver.backend.context, value.invocation, value.owner, value.id, value.request);
+            }
+        };
+        var exchange: Exchange = .{ .driver = self, .invocation = invocation, .owner = owner, .id = id, .request = request };
         try self.scheduled(&exchange, Exchange.invoke);
         return exchange.result orelse error.InvalidControllerReceipt;
     }

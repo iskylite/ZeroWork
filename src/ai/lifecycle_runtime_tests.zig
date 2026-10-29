@@ -22,18 +22,26 @@ const Fixture = struct {
     dispatch_count: usize = 0,
     close_count: usize = 0,
     ack_count: usize = 0,
+    disconnect_count: usize = 0,
+    disconnect_state: @FieldType(backend.MutationReceipt, "state") = .pending,
+    disconnect_session: ?identity.SessionHandle = null,
     fail_after_publish: bool = false,
     fail_before_dispatch: bool = false,
     approval_required: bool = false,
+    bootstrap_required: bool = false,
+    bootstrap_installed: ?*backend.bootstrap_product.Prepared = null,
+    bootstrap_install_count: usize = 0,
+    cancel_open_count: usize = 0,
     close_authorized: bool = true,
     last_operation: ?identity.HostOperationId = null,
     snapshot: ?tools.lifecycle.Snapshot = null,
+    close_snapshot: ?backend.CloseSnapshot = null,
     fn invoke(raw: *anyopaque, call: *backend.Call) !void {
         const self: *@This() = @ptrCast(@alignCast(raw));
         switch (call.action) {
             .authorize => |request| {
                 if (!self.close_authorized and request.kind == .close_session) return error.CloseApprovalRequired;
-                call.result = .{ .authorized = .{ .source = request.source, .saved_source = request.saved_source, .session = request.session, .group = request.group, .retention = request.retention orelse .auto_idle, .approval_required = self.approval_required, .explicit_user_close = self.close_authorized } };
+                call.result = .{ .authorized = .{ .source = request.source, .saved_source = request.saved_source, .session = request.session, .group = request.group, .retention = request.retention orelse .auto_idle, .approval_required = self.approval_required, .explicit_user_close = self.close_authorized, .bootstrap_required = self.bootstrap_required } };
             },
             .prepare_group => |request| {
                 self.prepare_count += 1;
@@ -53,7 +61,15 @@ const Fixture = struct {
                 self.snapshot = .{ .operation_ref = request.operation_ref, .context = request.context, .group = request.group, .source = request.source, .saved_source = request.saved_source, .session = .{ .session_id = @fromBackingInt(102), .generation = 3 }, .state = .prepared, .retention = request.retention, .revision = 2 };
                 call.result = .{ .session = self.snapshot.? };
             },
+            .probe_bootstrap => call.result = .{ .bootstrap_probe = try backend.bootstrap_product.Probed.init(.{ .platform = .darwin_aarch64, .shell_path = .bin }, "fixture", "controlled.test", 2222) },
+            .install_bootstrap => |prepared| {
+                try std.testing.expect(prepared.matches(call.context, self.snapshot.?.operation_ref, self.snapshot.?.session.?, self.snapshot.?.source.?));
+                try prepared.plan.validate(self.snapshot.?.session.?, @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)));
+                self.bootstrap_installed = prepared.retain();
+                self.bootstrap_install_count += 1;
+            },
             .authorize_open => |request| {
+                if (self.bootstrap_required) try std.testing.expect(self.bootstrap_installed != null);
                 self.dispatch_count += 1;
                 const fact = self.owner.store.?.records.items[0];
                 try std.testing.expectEqual(journal.Stage.dispatch_started, fact.stage);
@@ -66,7 +82,13 @@ const Fixture = struct {
             .queue_close => |request| {
                 self.close_count += 1;
                 self.last_operation = request.operation;
-                call.result = .{ .close = .{ .operation_ref = request.operation, .session = request.session, .state = .awaiting_result } };
+                self.close_snapshot = .{ .operation_ref = request.operation, .session = request.session, .state = .awaiting_result, .recording_unavailable_reason = "RecordingDisabled" };
+                call.result = .{ .close = self.close_snapshot.? };
+            },
+            .query_close => |operation| {
+                const snapshot = self.close_snapshot orelse return error.NotFound;
+                if (!snapshot.operation_ref.eql(operation)) return error.NotFound;
+                call.result = .{ .close = snapshot };
             },
             .acknowledge_close => self.ack_count += 1,
             .set_retention => |request| {
@@ -75,9 +97,22 @@ const Fixture = struct {
                 self.snapshot.?.revision += 1;
                 call.result = .{ .session = self.snapshot.? };
             },
-            .cancel_open => {},
-            else => return error.UnsupportedFixtureAction,
+            .cancel_open => self.cancel_open_count += 1,
+            .mutate => |request| {
+                if (request.request.kind != .disconnect_session) return error.UnsupportedFixtureAction;
+                self.disconnect_count += 1;
+                self.last_operation = request.operation;
+                self.disconnect_session = request.request.session;
+                call.result = .{ .mutation = self.disconnectReceipt() };
+            },
+            .query_disconnect => |operation| {
+                if (self.last_operation == null or !self.last_operation.?.eql(operation)) return error.NotFound;
+                call.result = .{ .mutation = self.disconnectReceipt() };
+            },
         }
+    }
+    fn disconnectReceipt(self: *@This()) backend.MutationReceipt {
+        return .{ .state = self.disconnect_state, .operation_ref = self.last_operation, .session = self.disconnect_session, .source_revision = 2, .local_released = self.disconnect_state == .disconnected, .remote_effect_unknown = self.disconnect_state == .outcome_unknown };
     }
     fn runtime(self: *@This()) backend.Runtime {
         return .{ .journal_owner = self.owner, .controller = .{ .context = self, .invoke = invoke } };
@@ -112,6 +147,56 @@ test "lifecycle runtime shares one process IO owner across window registrations"
     const started = try first.begin(request);
     const repeated = try second.begin(request);
     try std.testing.expect(repeated.reused and repeated.operation_ref.eql(started.operation_ref));
+}
+
+test "lifecycle runtime disconnect returns actual pending unknown and released receipts without redispatch" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const owner = try backend.ProcessJournal.acquire(.{ .data_root = "/test/disconnect-lifecycle", .dir = tmp.dir, .io = io });
+    defer owner.release();
+    var fixture: Fixture = .{ .owner = owner, .ctx = context() };
+    const args = try std.fmt.allocPrint(a, "{{\"session_ref\":\"s1:{s}:101:1\",\"request_key\":\"disconnect-one\"}}", .{std.fmt.bytesToHex(fixture.ctx.conversation_id.bytes, .lower)});
+    defer a.free(args);
+    var pending = try execute(&fixture, "host.disconnect_session", args);
+    defer pending.deinit(a);
+    try pending.validate(fixture.ctx, 1);
+    try std.testing.expect(std.mem.indexOf(u8, pending.blocks[0].structured, "\"state\":\"pending\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pending.blocks[0].structured, "\"local_released\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pending.blocks[0].structured, "\"automatic_reconnect\":false") != null);
+    fixture.disconnect_state = .outcome_unknown;
+    var unknown = try execute(&fixture, "host.disconnect_session", args);
+    defer unknown.deinit(a);
+    try unknown.validate(fixture.ctx, 1);
+    try std.testing.expectEqual(@import("plugin_tools.zig").Status.outcome_unknown, unknown.status);
+    fixture.disconnect_state = .disconnected;
+    var released = try execute(&fixture, "host.disconnect_session", args);
+    defer released.deinit(a);
+    try released.validate(fixture.ctx, 1);
+    try std.testing.expect(std.mem.indexOf(u8, released.blocks[0].structured, "\"state\":\"disconnected\"") != null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.disconnect_count);
+    try std.testing.expectEqual(@as(usize, 0), fixture.close_count);
+    // After process/receipt loss, a durable accepted operation remains fenced.
+    fixture.last_operation = null;
+    var missing = try execute(&fixture, "host.disconnect_session", args);
+    defer missing.deinit(a);
+    try std.testing.expectEqual(@import("plugin_tools.zig").Status.outcome_unknown, missing.status);
+    try std.testing.expect(std.mem.indexOf(u8, missing.blocks[0].structured, "DisconnectReceiptUnavailable") != null);
+    try std.testing.expectEqual(@as(usize, 1), fixture.disconnect_count);
+}
+
+test "lifecycle runtime disconnect without exact user approval dispatches nothing" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const owner = try backend.ProcessJournal.acquire(.{ .data_root = "/test/disconnect-approval", .dir = tmp.dir, .io = io });
+    defer owner.release();
+    var fixture: Fixture = .{ .owner = owner, .ctx = context(), .approval_required = true };
+    const args = try std.fmt.allocPrint(a, "{{\"session_ref\":\"s1:{s}:101:1\",\"request_key\":\"unapproved-disconnect\"}}", .{std.fmt.bytesToHex(fixture.ctx.conversation_id.bytes, .lower)});
+    defer a.free(args);
+    var denied = try execute(&fixture, "host.disconnect_session", args);
+    defer denied.deinit(a);
+    try std.testing.expect(std.mem.indexOf(u8, denied.blocks[0].structured, "ApprovalRequired") != null);
+    try std.testing.expect(!denied.receipt.side_effect_started);
+    try std.testing.expectEqual(@as(usize, 0), fixture.disconnect_count);
 }
 
 test "lifecycle runtime publishes group only after durable intent and never republishes a repeated key" {
@@ -201,9 +286,23 @@ test "lifecycle runtime close waits for accepted-result acknowledgement and reje
     defer accepted.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), fixture.close_count);
     try std.testing.expectEqual(@as(usize, 0), fixture.ack_count);
+    const receipt = try std.json.parseFromSlice(std.json.Value, a, accepted.blocks[0].structured, .{});
+    defer receipt.deinit();
+    try std.testing.expectEqualStrings("closing", receipt.value.object.get("state").?.string);
+    try std.testing.expect(receipt.value.object.get("recording_ref").? == .null);
+    try std.testing.expectEqualStrings("RecordingDisabled", receipt.value.object.get("recording_unavailable_reason").?.string);
     var runtime = fixture.runtime();
     try runtime.acknowledgeResult(fixture.scheduler(), fixture.ctx, fixture.last_operation.?);
     try std.testing.expectEqual(@as(usize, 1), fixture.ack_count);
+    fixture.close_snapshot.?.state = .closed;
+    var repeated = try execute(&fixture, "host.close_session", allowed_args);
+    defer repeated.deinit(a);
+    const repeated_receipt = try std.json.parseFromSlice(std.json.Value, a, repeated.blocks[0].structured, .{});
+    defer repeated_receipt.deinit();
+    try std.testing.expectEqualStrings("closed", repeated_receipt.value.object.get("state").?.string);
+    try std.testing.expect(repeated_receipt.value.object.get("recording_ref").? == .null);
+    try std.testing.expect(repeated_receipt.value.object.get("idempotent_reuse").?.bool);
+    try std.testing.expectEqual(@as(usize, 1), fixture.close_count);
 }
 
 test "lifecycle runtime journal failure before dispatch publishes nothing and releases preparation" {
@@ -324,4 +423,76 @@ test "lifecycle runtime accepts saved connection sources without inventing a ses
     try std.testing.expect(!waiting.receipt.side_effect_started);
     try std.testing.expectEqual(@as(usize, 1), fixture.open_count);
     try std.testing.expectEqual(@as(usize, 1), fixture.dispatch_count);
+}
+
+fn bootstrapApprovalCase(approve_deployment: bool) !void {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const owner = try backend.ProcessJournal.acquire(.{ .data_root = if (approve_deployment) "/test/bootstrap-product-allow" else "/test/bootstrap-product-deny", .dir = tmp.dir, .io = io });
+    defer owner.release();
+    var ctx = context();
+    ctx.binding = .{ .group = 77 };
+    var fixture: Fixture = .{ .owner = owner, .ctx = ctx, .approval_required = true, .bootstrap_required = true };
+    defer if (fixture.bootstrap_installed) |prepared| prepared.release();
+    var broker: @import("host_approval.zig").Broker = .{};
+    try broker.configure(ctx, 1);
+    const args = try std.fmt.allocPrint(a, "{{\"group_ref\":\"g1:{s}:77\",\"source_ref\":\"s1:{s}:101:1\",\"connection_policy\":\"reuse_only\",\"interactive_execution\":true,\"request_key\":\"bootstrap-product\"}}", .{ std.fmt.bytesToHex(ctx.conversation_id.bytes, .lower), std.fmt.bytesToHex(ctx.conversation_id.bytes, .lower) });
+    defer a.free(args);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, args, .{});
+    defer parsed.deinit();
+    var raw_hash: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(args, &raw_hash, .{});
+    const Worker = struct {
+        fixture: *Fixture,
+        runtime: backend.Runtime,
+        invocation: host.Invocation,
+        done: std.atomic.Value(bool) = .init(false),
+        result: ?host.Result = null,
+        failure: ?anyerror = null,
+        fn run(self: *@This()) void {
+            self.result = self.runtime.execute(self.fixture.scheduler(), self.invocation, a, null) catch |err| blk: {
+                self.failure = err;
+                break :blk null;
+            };
+            self.done.store(true, .release);
+        }
+    };
+    var worker: Worker = .{ .fixture = &fixture, .runtime = fixture.runtime(), .invocation = .{ .context = ctx, .authority = .lifecycle, .operation_id = 1, .turn_id = 1, .call_id = "bootstrap-product", .tool_id = "host.open_session", .arguments = parsed.value, .arguments_json = args, .arguments_hash = raw_hash, .canonical_arguments_hash = try @import("canonical_arguments.zig").digest(a, parsed.value) } };
+    worker.runtime.approval = &broker;
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    defer thread.join();
+    errdefer broker.stop();
+    var approvals_seen: usize = 0;
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    while (!worker.done.load(.acquire)) {
+        if (broker.snapshot()) |snapshot| {
+            approvals_seen += 1;
+            if (approvals_seen == 2) {
+                try std.testing.expect(std.mem.indexOf(u8, snapshot.detail.text(), "fixture@controlled.test:2222") != null);
+                try std.testing.expect(std.mem.indexOf(u8, snapshot.detail.text(), "/tmp/zw-bootstrap-v1-") != null);
+                try std.testing.expect(std.mem.indexOf(u8, snapshot.detail.text(), "manifest SHA-256=") != null);
+                try std.testing.expect(std.mem.indexOf(u8, snapshot.detail.text(), "新目标 SID=102, generation=3") != null);
+            }
+            try broker.decide(snapshot.sequence, snapshot.arguments_hash, approvals_seen == 1 or approve_deployment);
+        }
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.BootstrapProductTestTimeout;
+        @import("retry.zig").wait(2, null) catch unreachable;
+    }
+    if (worker.failure) |err| return err;
+    var result = worker.result orelse return error.MissingHostResult;
+    defer result.deinit(a);
+    try std.testing.expectEqual(@as(usize, 2), approvals_seen);
+    try std.testing.expectEqual(@as(usize, 1), fixture.open_count);
+    try std.testing.expectEqual(@as(usize, if (approve_deployment) 1 else 0), fixture.bootstrap_install_count);
+    try std.testing.expectEqual(@as(usize, if (approve_deployment) 1 else 0), fixture.dispatch_count);
+    try std.testing.expectEqual(@as(usize, if (approve_deployment) 0 else 1), fixture.cancel_open_count);
+    try std.testing.expectEqual(if (approve_deployment) @import("plugin_tools.zig").Status.succeeded else .rejected, result.status);
+}
+
+test "lifecycle bootstrap product second approval gates dispatch and rejection cancels reserved session" {
+    // Run this opt-in case from a test binary beside the installed signed
+    // payload tree. The controller is a store fixture; no SSH writes occur.
+    if (std.c.getenv("ZW_TEST_BOOTSTRAP_PRODUCT_BUNDLED") == null) return error.SkipZigTest;
+    try bootstrapApprovalCase(true);
+    try bootstrapApprovalCase(false);
 }

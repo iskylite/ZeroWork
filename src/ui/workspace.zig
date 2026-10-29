@@ -443,6 +443,7 @@ pub const Workspace = struct {
     notification_attention_bridge: NotificationAttentionBridge = .{},
     session_bridge: SessionBridge = .{},
     pending_shared_connection: ?@import("../host/runtime_service.zig").SharedLease = null,
+    pending_bootstrap: ?*@import("../ai/ssh_bootstrap_product.zig").Prepared = null,
     external_auth: ?ExternalAuthentication = null,
     close_others_keep: ?SessionId = null,
     // ── Close-confirmation card (see requestCloseTab) ─────────────────
@@ -4452,6 +4453,7 @@ pub const Workspace = struct {
         const job = try ConnectJob.create(ticket, host, self.registry.hosts, self.app_config.*, self.io);
         errdefer job.destroy();
         if (self.pending_shared_connection) |lease| job.shared_connection = lease.retain();
+        if (self.pending_bootstrap) |prepared| job.bootstrap = prepared.retain();
         job.operation_key = operation;
         job.resource_ledger.key = operation;
         job.progress.begin(if (operation) |key| key.attempt_id orelse 0 else 0);
@@ -5208,6 +5210,7 @@ test "connection job resolves only persistent route IDs including same named hop
 test "connection job runtime target retains the actual host operation and frozen identity" {
     const key: OperationKey = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(99), .generation = 4 } }, .operation_id = 81, .attempt_id = 3 };
     var job: Workspace.ConnectJob = undefined;
+    job.bootstrap = null;
     job.ticket = .{ .session_id = 7, .generation = 1 };
     job.operation_key = key;
     job.initial_input = null;
@@ -5251,6 +5254,11 @@ test "SSH attachment gate rejects stale operation generation and cancelled jobs"
     const handle: identity.SessionHandle = .{ .session_id = @fromBackingInt(99), .generation = 4 };
     const key: OperationKey = .{ .owner = .{ .session = handle }, .operation_id = 81, .attempt_id = 3 };
     var worker: @import("../vt/ssh_worker.zig").SshWorker = undefined;
+    worker.execution = null;
+    worker.execution_mutex = .unlocked;
+    worker.execution_recording = null;
+    worker.execution_control = null;
+    worker.execution_deployment = null;
     worker.presentation_attached = .init(false);
     var native_runtime: @import("session_runtime.zig").SessionRuntime = undefined;
     native_runtime.torn_down = false;
@@ -5266,6 +5274,7 @@ test "SSH attachment gate rejects stale operation generation and cancelled jobs"
     tab.content_owner = .{ .session = handle };
     tab.runtime = &runtime;
     var job: Workspace.ConnectJob = undefined;
+    job.bootstrap = null;
     job.ticket = tab.ticket();
     job.operation_key = key;
     job.cancelled = .init(false);
@@ -5300,6 +5309,7 @@ test "SSH attachment gate rejects stale operation generation and cancelled jobs"
 test "SSH cancellation reopens an installed jobs cleanup drain only once" {
     var runtime: SessionRuntime = undefined;
     var job: Workspace.ConnectJob = undefined;
+    job.bootstrap = null;
     job.ticket = .{ .session_id = 7, .generation = 1 };
     job.cancelled = .init(false);
     job.drained = true;
@@ -5337,6 +5347,7 @@ test "cancelled initial connection retires placeholder after cleanup without rep
     tab.terminal = terminal;
     defer tab.terminal.?.releaseBuffers(cx);
     var job: Workspace.ConnectJob = undefined;
+    job.bootstrap = null;
     job.ticket = tab.ticket();
     job.cancelled = .init(true);
     job.ready = .init(false);
@@ -5490,6 +5501,7 @@ test "authentication routes frozen requests despite tab changes and rejects late
     tab.id = 17;
     tab.generation = 4;
     var job: Workspace.ConnectJob = undefined;
+    job.bootstrap = null;
     job.ticket = tab.ticket();
     job.operation_key = key;
     job.cancelled = .init(false);
@@ -5654,6 +5666,7 @@ test "connection progress keeps protocol readiness separate from host attachment
     tab.failed = false;
     tab.runtime = null;
     var job: Workspace.ConnectJob = undefined;
+    job.bootstrap = null;
     job.ticket = tab.ticket();
     job.operation_key = key;
     job.ready = .init(true);

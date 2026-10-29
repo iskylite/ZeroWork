@@ -1054,3 +1054,39 @@ test "local display progresses without a raw output consumer" {
     try std.testing.expectEqual(terminal.Read.eof, try service.readOutput(&raw));
     try rig.close(accepted.handle);
 }
+
+test "Local recording identity returns real pre-execution identity and null for unrecorded process" {
+    var sandbox = try Sandbox.init();
+    defer sandbox.deinit();
+    for ([_]bool{ false, true }) |recorded| {
+        var rig = try Rig.initWithOptions(.{ .recording = if (recorded) .{ .io = std.testing.io, .directory = sandbox.path, .log = .{ .ring_mb = 1 } } else null });
+        defer rig.deinit();
+        const accepted = try rig.sessions.create(.{ .local = .{ .initial_cwd = sandbox.path } }, target);
+        const service = try rig.ready(accepted);
+        const until = native.zw_local_monotonic_ms() + 5000;
+        var metadata: terminal.RecordingIdentity = undefined;
+        while (true) {
+            metadata = service.recordingIdentity() catch |err| {
+                if (err != error.WorkerBusy) return err;
+                if (native.zw_local_monotonic_ms() >= until) return error.WorkerTimeout;
+                pause();
+                continue;
+            };
+            break;
+        }
+        try std.testing.expect(metadata.owner.eql(accepted.handle));
+        try std.testing.expectEqual(recorded, metadata.available);
+        if (recorded) {
+            try std.testing.expect(metadata.recording_id != null and metadata.recording_generation == 1);
+            _ = try @import("host/identity.zig").RecordingId.parse(&metadata.recording_id.?);
+            try std.testing.expect(metadata.failure == null);
+        } else {
+            try std.testing.expect(metadata.recording_id == null and metadata.recording_generation == 0);
+            try std.testing.expectEqualStrings("RecordingDisabled", metadata.failure.?);
+        }
+        var stale = service;
+        stale.binding.resource_owner.session.generation += 1;
+        try std.testing.expectError(error.StaleSession, stale.recordingIdentity());
+        try rig.close(accepted.handle);
+    }
+}

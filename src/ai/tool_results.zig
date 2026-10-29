@@ -189,10 +189,13 @@ pub const Store = struct {
     /// immutable call facts. Never correlate by active pane or small session ID.
     pub fn executionProjection(self: *const Store, record: *const Record) ?ExecutionProjection {
         const original = record.execution orelse return null;
+        // Input receipts retain their own operation outcome. They neither
+        // replace execution observations nor inherit another call's completion.
+        if (original.input_result) return original;
         const id = original.execution_id orelse return original;
         var result = original;
         for (self.records.items) |other| if (other.execution) |candidate| {
-            if (candidate.execution_id != null and candidate.execution_id.?.eql(id) and candidate.conversation_id.eql(original.conversation_id) and candidate.task_id.eql(original.task_id)) result = candidate;
+            if (!candidate.input_result and candidate.execution_id != null and candidate.execution_id.?.eql(id) and candidate.conversation_id.eql(original.conversation_id) and candidate.task_id.eql(original.task_id)) result = candidate;
         };
         if (result.command == null) {
             for (self.records.items) |other| if (other.execution) |candidate| {
@@ -366,7 +369,7 @@ pub const Store = struct {
         const call_id = try a.dupe(u8, record.key.call_id);
         const name = try a.dupe(u8, record.name);
         const captured_images = try result_images.toOwnedSlice(a);
-        saved.* = .{ .arena = arena, .images = captured_images, .owner = record.key.owner, .turn_id = record.key.turn_id, .call_id = call_id, .name = name, .arguments = arguments, .command = command, .arguments_hash = record.arguments_hash, .targets = targets, .host = host_fact, .error_code = error_code, .error_status = error_status, .dispatched = record.dispatched };
+        saved.* = .{ .arena = undefined, .images = captured_images, .owner = record.key.owner, .turn_id = record.key.turn_id, .call_id = call_id, .name = name, .arguments = arguments, .command = command, .arguments_hash = record.arguments_hash, .targets = targets, .host = host_fact, .error_code = error_code, .error_status = error_status, .dispatched = record.dispatched };
         const tag = try std.fmt.bufPrint(&saved.test_id, "ai.tool.result.{d}.{x}", .{ saved.turn_id, std.hash.Wyhash.hash(0, saved.call_id) });
         saved.test_id_len = tag.len;
         if (host_fact) |fact| {
@@ -395,6 +398,9 @@ pub const Store = struct {
         }
         if (saved.execution == null and record.host_result == null and record.generic_results == null and record.outcome == null) saved.execution = try execution_projection.parseFailure(a, name, arguments, record.result_body, record.dispatched);
         for (captured_images) |reference| _ = reference.retain();
+        // Parsing can grow the arena. Transfer its final page chain only after
+        // every projection allocation; a premature copy loses later pages.
+        saved.arena = arena;
         return saved;
     }
 };

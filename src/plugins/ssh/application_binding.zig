@@ -56,6 +56,9 @@ pub fn Binding(comptime Host: type) type {
             const original_shared = self.workspace.pending_shared_connection;
             self.workspace.pending_shared_connection = self.pending_shared_connection;
             defer self.workspace.pending_shared_connection = original_shared;
+            const original_bootstrap = self.workspace.pending_bootstrap;
+            self.workspace.pending_bootstrap = self.pending_bootstrap;
+            defer self.workspace.pending_bootstrap = original_bootstrap;
             const id = try self.workspace.createSessionDirectForOperation(frozen.value.host, frozen.value.host_id, frozen.value.source_index, frozen.value.initial_input, request.key);
             const tab = self.workspace.sessionTab(id) orelse unreachable;
             self.mappings.appendAssumeCapacity(.{ .handle = request.handle, .create_operation = request.key, .legacy_id = id, .legacy_generation = tab.generation, .tab_id = tab.tab_id, .owner = tab.content_owner, .source = frozen });

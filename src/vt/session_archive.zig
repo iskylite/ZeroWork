@@ -72,6 +72,21 @@ pub const RecordLease = struct {
         if (current.inode != self.stat.inode or current.size < self.stat.size or !std.meta.eql(current.mtime, self.stat.mtime)) return error.RecordingChanged;
         return bytes;
     }
+    /// Bounded positional reads from the captured inode. Callers own their
+    /// scan/checksum progress; no whole-record allocation is performed here.
+    pub fn readRange(self: *const RecordLease, offset: u64, buffer: []u8) !usize {
+        try self.validateFrozen();
+        if (offset > self.stat.size) return error.InvalidRecordingRange;
+        const count: usize = @intCast(@min(buffer.len, self.stat.size - offset));
+        if (try self.file.readPositionalAll(self.io, buffer[0..count], offset) != count) return error.RecordingTruncated;
+        try self.validateFrozen();
+        return count;
+    }
+    pub fn validateFrozen(self: *const RecordLease) !void {
+        if (!self.active) return error.LeaseReleased;
+        const current = try self.file.stat(self.io);
+        if (current.inode != self.stat.inode or current.size != self.stat.size or !std.meta.eql(current.mtime, self.stat.mtime)) return error.RecordingChanged;
+    }
     pub fn deinit(self: *RecordLease) void {
         if (!self.active) return;
         self.file.close(self.io);
@@ -655,6 +670,49 @@ pub const RecordGroupLease = struct {
         self.leases = .empty;
     }
 };
+
+/// One explicitly authorized manifest, opened without scanning the archive
+/// catalog. Dependencies are pinned together before a query incrementally
+/// validates their checksums. Unverified bytes must never be returned as text.
+pub const QueryRecord = struct {
+    document: std.json.Parsed(manifest.Manifest),
+    lease: RecordGroupLease,
+    pub fn deinit(self: *QueryRecord) void {
+        self.lease.deinit();
+        self.document.deinit();
+    }
+};
+pub fn acquireQueryRecord(archive: Archive, allocator: std.mem.Allocator, manifest_path: []const u8) !QueryRecord {
+    var leases: RecordGroupLease = .{ .allocator = allocator };
+    errdefer leases.deinit();
+    try leases.leases.ensureTotalCapacity(allocator, 9);
+    leases.leases.appendAssumeCapacity(try acquireLease(allocator, archive.io, archive.dir, manifest_path));
+    const bytes = try leases.leases.items[0].readAll(allocator, 1024 * 1024);
+    defer allocator.free(bytes);
+    const parsed = try std.json.parseFromSlice(manifest.Manifest, allocator, bytes, .{ .allocate = .alloc_always, .ignore_unknown_fields = true });
+    errdefer parsed.deinit();
+    try manifest.validate(parsed.value);
+    if (parsed.value.state == .tombstone) return error.RecordRemoved;
+    if (parsed.value.state != .closed) return error.RecordingNotClosed;
+    if (parsed.value.files.len > 8) return error.RecordingDependencyBudgetExceeded;
+    if (parsed.value.coverage == .unavailable or parsed.value.replayability == .unsupported) return error.RecordingUnavailable;
+    if (parsed.value.replayability == .baseline_unavailable) return error.RecordingBaselineUnavailable;
+    var found_cast = false;
+    for (parsed.value.files) |file| {
+        var lease = try acquireLease(allocator, archive.io, archive.dir, file.path);
+        errdefer lease.deinit();
+        if (lease.stat.size != file.committed_length) return error.RecordingChanged;
+        if (lease.stat.size > 128 * 1024 * 1024) return error.RecordingTooLarge;
+        if (file.kind == .cast) {
+            if (found_cast) return error.UnsupportedRecordingSegments;
+            found_cast = true;
+            leases.cast_index = leases.leases.items.len;
+        }
+        leases.leases.appendAssumeCapacity(lease);
+    }
+    if (!found_cast) return error.RecordingUnavailable;
+    return .{ .document = parsed, .lease = leases };
+}
 
 fn legacyKey(allocator: std.mem.Allocator, archive: *Archive, entry: Entry) ![]const u8 {
     var root_buffer: [std.fs.max_path_bytes]u8 = undefined;

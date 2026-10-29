@@ -9,6 +9,7 @@ const provider = @import("provider.zig");
 const approvals = @import("host_approval.zig");
 const queries = @import("host_queries.zig");
 const lifecycle = tools.lifecycle;
+pub const bootstrap_product = @import("ssh_bootstrap_product.zig");
 
 /// Configuration is acquired without disk IO. Every window with the same
 /// absolute data-root/path receives this same owner, journal and IO mutex.
@@ -132,6 +133,9 @@ pub const Authorized = struct {
     membership_revision: ?u64 = null,
     ownership_revision: ?u64 = null,
     impact_revision: ?u64 = null,
+    create_operation: ?@import("../host/operation.zig").OperationKey = null,
+    disconnect_binding: ?@import("../host/session_host.zig").ServiceHandle = null,
+    bootstrap_required: bool = false,
 };
 pub const GroupPlan = struct { id: u64, token: *anyopaque, binding_revision: u64, notice_revision: u64 };
 pub const CloseSnapshot = struct {
@@ -142,9 +146,12 @@ pub const CloseSnapshot = struct {
     local_released: bool = true,
     remote_effect_unknown: bool = false,
     error_code: ?[]const u8 = null,
+    recording_id: ?[32]u8 = null,
+    recording_generation: u64 = 0,
+    recording_unavailable_reason: ?[]const u8 = "RecordingUnavailable",
 };
 pub const MutationReceipt = struct {
-    state: enum { committed, pending, disconnected, ready },
+    state: enum { committed, pending, disconnected, ready, outcome_unknown },
     source_revision: u64,
     session: ?identity.SessionHandle = null,
     group: ?identity.GroupOwner = null,
@@ -153,6 +160,9 @@ pub const MutationReceipt = struct {
     notice_revision: ?u64 = null,
     local_released: bool = true,
     remote_effect_unknown: bool = false,
+    operation_ref: ?identity.HostOperationId = null,
+    error_code: ?[]const u8 = null,
+    operation_accepted: ?bool = true,
 };
 pub const Action = union(enum) {
     authorize: tools.Request,
@@ -164,16 +174,19 @@ pub const Action = union(enum) {
     resolve_owned: identity.SessionHandle,
     authorize_open: struct { operation: identity.HostOperationId, revision: u64, session: identity.SessionHandle },
     cancel_open: identity.HostOperationId,
+    probe_bootstrap: identity.HostOperationId,
+    install_bootstrap: *bootstrap_product.Prepared,
     queue_close: struct { operation: identity.HostOperationId, session: identity.SessionHandle, explicit_user_close: bool },
     query_close: identity.HostOperationId,
     acknowledge_close: identity.HostOperationId,
     set_retention: struct { session: identity.SessionHandle, retention: lifecycle.Retention },
+    query_disconnect: identity.HostOperationId,
     mutate: struct { operation: identity.HostOperationId, request: tools.Request, authorized: Authorized },
 };
 pub const Call = struct {
     context: host.Context,
     action: Action,
-    result: union(enum) { none, authorized: Authorized, group_plan: GroupPlan, session: lifecycle.Snapshot, close: CloseSnapshot, mutation: MutationReceipt } = .none,
+    result: union(enum) { none, authorized: Authorized, group_plan: GroupPlan, session: lifecycle.Snapshot, close: CloseSnapshot, mutation: MutationReceipt, bootstrap_probe: ?bootstrap_product.Probed } = .none,
 };
 pub const Controller = struct { context: *anyopaque, invoke: *const fn (*anyopaque, *Call) anyerror!void };
 /// Bridge adapter: call(context, task_context, task_fn, cancel) invokes the
@@ -234,6 +247,18 @@ pub const Runtime = struct {
                 const observed = self.controllerCall(scheduler, invocation.context, .{ .query_open = handle.operation_ref }, cancel) catch null;
                 if (observed) |value| if (value.result == .session and value.result.session.session != null and value.result.session.session.?.eql(prior.created_session.?)) return sessionResult(allocator, invocation, handle.operation_ref, value.result.session, false, true);
             }
+            if (request.kind == .close_session and prior.dispatch_started and prior.created_session != null) {
+                const observed = self.controllerCall(scheduler, invocation.context, .{ .query_close = handle.operation_ref }, cancel) catch null;
+                if (observed) |value| if (value.result == .close and value.result.close.session.eql(prior.created_session.?)) return closeResult(allocator, invocation, handle.operation_ref, value.result.close, true);
+            }
+            if (request.kind == .disconnect_session and prior.dispatch_started and prior.created_session != null) {
+                // Query the original receipt only. Neither a new request key
+                // nor a lost reply is permission to enqueue cleanup again.
+                const observed = self.controllerCall(scheduler, invocation.context, .{ .query_disconnect = handle.operation_ref }, cancel) catch null;
+                if (observed) |value| if (value.result == .mutation) return disconnectResult(allocator, invocation, handle.operation_ref, prior.created_session.?, value.result.mutation, true);
+                if (prior.stage == .succeeded) return disconnectResult(allocator, invocation, handle.operation_ref, prior.created_session.?, .{ .state = .disconnected, .source_revision = prior.revision, .session = prior.created_session, .operation_ref = handle.operation_ref }, true);
+                return disconnectResult(allocator, invocation, handle.operation_ref, prior.created_session.?, .{ .state = .outcome_unknown, .source_revision = prior.revision, .session = prior.created_session, .operation_ref = handle.operation_ref, .local_released = false, .remote_effect_unknown = true, .error_code = "DisconnectReceiptUnavailable", .operation_accepted = if (prior.stage == .committed) true else null }, true);
+            }
             return recordResult(allocator, invocation, prior, true);
         }
         return self.fresh(scheduler, invocation, request, handle, allocator, cancel) catch |err| {
@@ -265,6 +290,15 @@ pub const Runtime = struct {
             .create_group => return self.createGroup(scheduler, invocation, request, authorized, handle, a, cancel, permit),
             .open_session => return self.open(scheduler, invocation, request, authorized, handle, a, cancel, permit),
             .close_session => return self.close(scheduler, invocation, request, authorized, handle, a, cancel, permit),
+            .disconnect_session => {
+                try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_session = request.session });
+                try self.validatePermit(permit, invocation, authorized);
+                const applied = try self.controllerCall(scheduler, invocation.context, .{ .mutate = .{ .operation = handle.operation_ref, .request = request, .authorized = authorized } }, cancel);
+                if (applied.result != .mutation) return error.InvalidControllerReceipt;
+                const receipt = applied.result.mutation;
+                try self.journal_owner.update(handle, 2, .{ .stage = if (receipt.state == .disconnected and receipt.local_released and !receipt.remote_effect_unknown) .succeeded else if (receipt.state == .outcome_unknown or receipt.remote_effect_unknown) .outcome_unknown else .committed, .local_released = receipt.local_released, .remote_effect_unknown = receipt.remote_effect_unknown });
+                return disconnectResult(a, invocation, handle.operation_ref, request.session.?, receipt, false);
+            },
             .set_session_retention => {
                 try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_session = request.session });
                 try self.validatePermit(permit, invocation, authorized);
@@ -319,13 +353,44 @@ pub const Runtime = struct {
             snapshot = queried.result.session;
         }
         if (snapshot.state != .prepared or snapshot.session == null) return error.SessionPrepareFailed;
-        try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_session = snapshot.session, .ownership = .created_task });
         try self.validatePermit(permit, invocation, authorized);
+        if (authorized.bootstrap_required) try self.prepareBootstrap(scheduler, invocation, handle.operation_ref, snapshot.session.?, authorized, a, cancel, permit);
+        try cancelled(cancel);
+        try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_session = snapshot.session, .ownership = .created_task });
+        if (!authorized.bootstrap_required) try self.validatePermit(permit, invocation, authorized);
         const dispatched = try self.controllerCall(scheduler, invocation.context, .{ .authorize_open = .{ .operation = handle.operation_ref, .revision = snapshot.revision, .session = snapshot.session.? } }, cancel);
         if (dispatched.result != .session or dispatched.result.session.session == null or !dispatched.result.session.session.?.eql(snapshot.session.?)) return error.InvalidControllerReceipt;
         snapshot = dispatched.result.session;
         try self.journal_owner.update(handle, 2, .{ .stage = .committed, .created_session = snapshot.session, .ownership = .created_task });
         return sessionResult(a, invocation, handle.operation_ref, snapshot, false, false);
+    }
+    fn prepareBootstrap(self: *Runtime, scheduler: Scheduler, invocation: host.Invocation, operation: identity.HostOperationId, owner: identity.SessionHandle, authorized: Authorized, a: std.mem.Allocator, cancel: ?*provider.CancelToken, opening_permit: ?approvals.Permit) !void {
+        const source = authorized.source orelse return error.BootstrapRequiresSharedSource;
+        const deadline = now() + 10_000;
+        var probed: bootstrap_product.Probed = undefined;
+        while (true) {
+            try cancelled(cancel);
+            if (now() >= deadline) return error.BootstrapProbeTimedOut;
+            const response = try self.controllerCall(scheduler, invocation.context, .{ .probe_bootstrap = operation }, cancel);
+            if (response.result != .bootstrap_probe) return error.InvalidControllerReceipt;
+            if (response.result.bootstrap_probe) |value| {
+                probed = value;
+                break;
+            }
+            @import("retry.zig").wait(10, cancel) catch return error.CancelledBeforeDispatch;
+        }
+        const prepared = try bootstrap_product.Prepared.create(std.heap.c_allocator, self.journal_owner.io, invocation.context, operation, source, owner, probed);
+        defer prepared.release();
+        const subject = try prepared.subject(a);
+        const broker = self.approval orelse return error.BootstrapDeploymentAuthorizationRequired;
+        // Creation approval and route choice are insufficient for deployment.
+        // Complete the first card before presenting this concrete manifest.
+        if (opening_permit) |value| broker.finish(value);
+        const permit = try broker.requestSubject(invocation, subject, authorized.policy_revision, a, cancel);
+        defer broker.finish(permit);
+        try cancelled(cancel);
+        try prepared.approve(broker, permit, invocation, authorized.policy_revision, now(), a);
+        _ = try self.controllerCall(scheduler, invocation.context, .{ .install_bootstrap = prepared }, cancel);
     }
     fn close(self: *Runtime, scheduler: Scheduler, invocation: host.Invocation, request: tools.Request, authorized: Authorized, handle: journal.Handle, a: std.mem.Allocator, cancel: ?*provider.CancelToken, permit: ?approvals.Permit) !host.Result {
         try self.journal_owner.update(handle, 1, .{ .stage = .dispatch_started, .created_session = request.session });
@@ -337,7 +402,7 @@ pub const Runtime = struct {
         try self.journal_owner.update(handle, 2, .{ .stage = .committed });
         // Ack happens only through acknowledgeResult() after Loop accepted and
         // copied this immutable tool result. This handler never closes/joins.
-        return jsonResult(a, invocation, .succeeded, .{ .operation_ref = try tools.operationRef(a, invocation.context, handle.operation_ref), .session_ref = try queries.sessionRef(a, invocation.context, snapshot.session), .state = "closing", .result_acknowledgement_required = true, .source_revision = snapshot.revision }, true, false);
+        return closeResult(a, invocation, handle.operation_ref, snapshot, false);
     }
     fn validatePermit(self: *Runtime, permit: ?approvals.Permit, invocation: host.Invocation, authorized: Authorized) !void {
         if (permit) |value| {
@@ -377,7 +442,7 @@ fn lifecycleSubject(invocation: host.Invocation, authorized: Authorized, buffer:
         .open_session => blk: {
             const policy = invocation.arguments.object.get("connection_policy").?.string;
             const connection = if (std.mem.eql(u8, policy, "prefer_reuse")) "先复用来源连接；不可复用时明确允许建立新连接" else if (std.mem.eql(u8, policy, "reuse_only")) "仅复用来源连接并新开 shell；不可复用则停止，不新建连接" else "始终新建独立工作终端，不复用原连接";
-            break :blk std.fmt.bufPrint(buffer, "{s}。不执行命令。冻结保留方式：{s}。", .{ connection, retention }) catch "创建独立工作会话；不执行命令。";
+            break :blk std.fmt.bufPrint(buffer, "{s}。不执行用户命令。{s}冻结保留方式：{s}。", .{ connection, if (authorized.bootstrap_required) "将先只读探测平台/zsh，再另行审批本次临时 helper 的精确目录与资源 hash。" else "", retention }) catch "创建独立工作会话；不执行命令。";
         },
         .create_group => "创建真实终端组，原会话加入；同一 AI 对话、历史和草稿迁移到该组。",
         .close_session => "明确关闭本次精确会话及其进程/连接；真实关闭会在工具结果受理后再次核查影响。",
@@ -404,6 +469,51 @@ fn jsonResult(a: std.mem.Allocator, invocation: host.Invocation, status: @import
     const blocks = try a.alloc(host.Block, 1);
     blocks[0] = .{ .structured = encoded };
     return .{ .status = status, .blocks = blocks, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision, .side_effect_started = started, .local_released = !unknown, .remote_effect_unknown = unknown } };
+}
+fn closeResult(a: std.mem.Allocator, invocation: host.Invocation, operation: identity.HostOperationId, snapshot: CloseSnapshot, reused: bool) !host.Result {
+    if (!snapshot.operation_ref.eql(operation)) return error.InvalidControllerReceipt;
+    const recording_ref = if (snapshot.recording_id) |id| blk: {
+        _ = identity.RecordingId.parse(&id) catch return error.InvalidControllerReceipt;
+        if (snapshot.recording_generation == 0) return error.InvalidControllerReceipt;
+        break :blk try @import("host_terminal_queries.zig").recordingRef(a, invocation.context, id, snapshot.recording_generation);
+    } else null;
+    const unknown = snapshot.state == .outcome_unknown or snapshot.remote_effect_unknown;
+    return jsonResult(a, invocation, if (unknown) .outcome_unknown else .succeeded, .{
+        .operation_ref = try tools.operationRef(a, invocation.context, operation),
+        .session_ref = try queries.sessionRef(a, invocation.context, snapshot.session),
+        .state = if (snapshot.state == .awaiting_result) "closing" else @tagName(snapshot.state),
+        .recording_ref = recording_ref,
+        .recording_unavailable_reason = snapshot.recording_unavailable_reason,
+        .idempotent_reuse = reused,
+        .result_acknowledgement_required = snapshot.state == .awaiting_result,
+        .source_revision = snapshot.revision,
+        .local_released = snapshot.local_released,
+        .remote_effect_unknown = snapshot.remote_effect_unknown,
+        .error_code = snapshot.error_code,
+    }, true, unknown);
+}
+fn disconnectResult(a: std.mem.Allocator, invocation: host.Invocation, operation: identity.HostOperationId, session: identity.SessionHandle, receipt: MutationReceipt, reused: bool) !host.Result {
+    if (receipt.operation_ref == null or !receipt.operation_ref.?.eql(operation) or receipt.session == null or !receipt.session.?.eql(session)) return error.InvalidControllerReceipt;
+    if (receipt.state != .pending and receipt.state != .disconnected and receipt.state != .outcome_unknown) return error.InvalidControllerReceipt;
+    if (receipt.state == .disconnected and (!receipt.local_released or receipt.remote_effect_unknown)) return error.InvalidControllerReceipt;
+    const unknown = receipt.state == .outcome_unknown or receipt.remote_effect_unknown;
+    // A succeeded pending result acknowledges enqueue only. The structured
+    // protocol receipt below separately reports the runtime's actual ownership.
+    return jsonResult(a, invocation, if (unknown) .outcome_unknown else .succeeded, .{
+        .operation_ref = try tools.operationRef(a, invocation.context, operation),
+        .session_ref = try queries.sessionRef(a, invocation.context, session),
+        .state = @tagName(receipt.state),
+        .operation_accepted = receipt.operation_accepted,
+        .session_preserved = if (receipt.operation_accepted == true) @as(?bool, true) else null,
+        .records_preserved = if (receipt.operation_accepted == true) @as(?bool, true) else null,
+        .automatic_reconnect = if (receipt.operation_accepted == true) @as(?bool, false) else null,
+        .affected_execution_state = if (receipt.operation_accepted == true) "authorization_revoked" else "unknown",
+        .source_revision = receipt.source_revision,
+        .local_released = receipt.local_released,
+        .remote_effect_unknown = receipt.remote_effect_unknown,
+        .error_code = receipt.error_code,
+        .idempotent_reuse = reused,
+    }, true, unknown);
 }
 fn recordResult(a: std.mem.Allocator, invocation: host.Invocation, record: journal.Record, reused: bool) !host.Result {
     const unknown = record.stage == .dispatch_started or record.stage == .running or record.stage == .outcome_unknown or !record.local_released or record.remote_effect_unknown;

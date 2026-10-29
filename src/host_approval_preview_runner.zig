@@ -10,6 +10,7 @@ const theme = @import("ui/app_theme.zig");
 const Card = @import("ui/ai_host_approval_view.zig");
 var preview_kind: approval.SubjectKind = .network_url;
 var long_url = false;
+var preview_route = false;
 var preview_theme: theme.Name = .dark;
 var preview_transparency: f32 = 0;
 const Preview = struct {
@@ -22,6 +23,12 @@ const Preview = struct {
         const self: *Preview = @ptrCast(@alignCast(raw));
         try self.broker.decide(sequence, hash, approved);
         try self.result.setTextContent(self.cx.allocator, if (approved) "已批准此调用 · 独立宿主审批" else "已拒绝 · 零派发");
+        self.pending_refresh = true;
+        self.cx.requestRedraw();
+    }
+    fn chooseRoute(raw: *anyopaque, sequence: u64, hash: [32]u8, route: approval.routing.Route) !void {
+        const self: *Preview = @ptrCast(@alignCast(raw));
+        try self.broker.chooseRoute(sequence, hash, route);
         self.pending_refresh = true;
         self.cx.requestRedraw();
     }
@@ -74,9 +81,9 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     _ = try state.broker.beginSubject(invocation, switch (preview_kind) {
         .network_url => .{ .kind = .network_url, .target = url, .detail = url },
         .lifecycle => .{ .kind = .lifecycle, .target = "当前组 · 排障", .detail = "从现有 SSH 会话复用连接，新建工作终端；reuse_only；空闲后关闭。", .impact = "将创建本任务的工作终端并加入当前组；不执行命令，不关闭来源会话。" },
-        .terminal_command => .{ .kind = .terminal_command, .target = "工作终端 · app-prod-01", .detail = "pwd; git status --short", .impact = "在当前工作终端提交此命令，输出保留在终端记录中。" },
+        .terminal_command => .{ .kind = .terminal_command, .target = "工作终端 · app-prod-01", .detail = "pwd; git status --short", .impact = "在当前工作终端提交此命令，输出保留在终端记录中。", .route = if (preview_route) .{ .proposed = .batch, .choice = .{ .route = .batch, .source = .{ .session = .{ .session_id = @fromBackingInt(1), .generation = 1 } } }, .target = .{ .session_id = @fromBackingInt(1), .generation = 1 }, .selectable = true } else null },
     }, 3, cx.allocator);
-    const view = try Card.View.mount(cx, scope, .{ .context = state, .on_decision = Preview.decide });
+    const view = try Card.View.mount(cx, scope, .{ .context = state, .on_decision = Preview.decide, .on_route = Preview.chooseRoute });
     state.view = view;
     try view.update(state.broker.snapshot());
     try root.appendChild(cx.allocator, view.root);
@@ -88,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--long-url")) long_url = true else if (std.mem.startsWith(u8, arg, "--kind=")) preview_kind = std.meta.stringToEnum(approval.SubjectKind, arg[7..]) orelse return error.InvalidPreviewKind else if (std.mem.startsWith(u8, arg, "--theme=")) preview_theme = std.meta.stringToEnum(theme.Name, arg[8..]) orelse return error.InvalidPreviewTheme else if (std.mem.startsWith(u8, arg, "--transparency=")) {
+        if (std.mem.eql(u8, arg, "--route=ask")) preview_route = true else if (std.mem.eql(u8, arg, "--long-url")) long_url = true else if (std.mem.startsWith(u8, arg, "--kind=")) preview_kind = std.meta.stringToEnum(approval.SubjectKind, arg[7..]) orelse return error.InvalidPreviewKind else if (std.mem.startsWith(u8, arg, "--theme=")) preview_theme = std.meta.stringToEnum(theme.Name, arg[8..]) orelse return error.InvalidPreviewTheme else if (std.mem.startsWith(u8, arg, "--transparency=")) {
             preview_transparency = try std.fmt.parseFloat(f32, arg[15..]);
             if (!std.math.isFinite(preview_transparency) or preview_transparency < 0 or preview_transparency > 100) return error.InvalidPreviewTransparency;
         } else return error.InvalidOption;

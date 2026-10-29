@@ -95,6 +95,8 @@ pub const Provider = struct {
         if (!self.native.worker.vt.mutex.tryLock()) return error.WorkerBusy;
     }
     fn submit(self: *Provider, sequence: u64, bytes: []const u8) !terminal.Submission {
+        const execution_locked = try self.native.worker.lockOrdinaryExecutionInput();
+        defer if (execution_locked) self.native.worker.execution_mutex.unlock();
         self.native.worker.text.timing.accepted(sequence, self.native.worker.input.write_index.load(.acquire) + bytes.len);
         if (bytes.len != 0) self.native.worker.replay.submit(&self.native.worker.input, bytes, if (self.writable()) .application else .ordinary, @import("../../vt/reconnect_replay.zig").InputMode.from(self.native.worker.vt.modes)) catch |err| return if (err == error.Full) error.InputFull else err;
         self.input_sequence = sequence;
@@ -168,6 +170,8 @@ pub const Provider = struct {
             if (count > 0) {
                 try self.lock();
                 defer self.native.worker.vt.mutex.unlock();
+                const execution_locked = try self.native.worker.lockOrdinaryExecutionInput();
+                defer if (execution_locked) self.native.worker.execution_mutex.unlock();
                 if (p.mode != self.native.worker.vt.mode_revision) return error.WorkerBusy;
                 self.native.worker.replay.submit(&self.native.worker.input, p.bytes[p.offset..][0..count], .application, .{}) catch |err| return if (err == error.Full) error.WorkerBusy else err;
                 p.offset += count;
@@ -208,6 +212,10 @@ pub const Provider = struct {
         const self = try get(raw, binding);
         return self.source.service().searchSnapshot(allocator);
     }
+    fn contentQuery(raw: *anyopaque, binding: Binding, request: terminal.ContentRequest, allocator: std.mem.Allocator) !terminal.ContentCapture {
+        const self = try get(raw, binding);
+        return self.source.adapter.contentQuery(self.source.owner, request, allocator);
+    }
     fn createAnchor(raw: *anyopaque, binding: Binding, point: terminal.Point) !terminal.Anchor {
         const self = try get(raw, binding);
         return self.source.service().createAnchor(point);
@@ -243,13 +251,42 @@ pub const Provider = struct {
     }
     fn executionSnapshot(raw: *anyopaque, binding: Binding) !terminal.execution.Snapshot {
         const self = try get(raw, binding);
-        // SSH readiness is deliberately independent from ordinary shell ready.
-        // No compatible BootstrapV1 resource/private channel is installed.
-        return .{ .owner = self.source.owner, .failure = "IntegrationUnavailable" };
+        if (self.native.worker.execution == null) return .{ .owner = self.source.owner, .failure = "IntegrationUnavailable" };
+        return self.native.worker.executionSnapshot();
     }
-    fn executionRequest(raw: *anyopaque, binding: Binding, _: terminal.execution.Request) !void {
-        _ = try get(raw, binding);
-        return error.IntegrationUnavailable;
+    fn recordingIdentity(raw: *anyopaque, binding: Binding) !terminal.RecordingIdentity {
+        const self = try get(raw, binding);
+        const worker = self.native.worker;
+        // Same order as the IO owner: native lock, then execution mailbox.
+        // The runtime and Service teardown remain on this controller thread.
+        if (!worker.native_mutex.tryLock()) return error.WorkerBusy;
+        defer worker.native_mutex.unlock();
+        if (!worker.execution_mutex.tryLock()) return error.WorkerBusy;
+        defer worker.execution_mutex.unlock();
+        if (self.native.recording_manifest_failure) |failure| return .{ .owner = self.source.owner, .failure = failure };
+        if (worker.recording_generations.items.len == 0 or worker.recording_generation_failed or !worker.recording_id.valid()) return .{ .owner = self.source.owner, .failure = "RecordingUnavailable" };
+        const generation = worker.recording_generations.items[worker.recording_generations.items.len - 1];
+        if (generation.session_id != @backingInt(self.source.owner.session_id) or generation.session_generation != self.source.owner.generation) return error.StaleOwner;
+        if (worker.io.timeline == null) return .{ .owner = self.source.owner, .failure = "RecordingDisabled" };
+        const failure = if (worker.execution_recording) |recording| recording.failure else null;
+        return .{ .owner = self.source.owner, .recording_id = std.fmt.bytesToHex(worker.recording_id.bytes, .lower), .recording_generation = generation.recording_generation, .available = failure == null, .failure = failure };
     }
-    const vtable: terminal.Service.VTable = .{ .recording_display = recordingDisplay, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = theme, .search_snapshot = searchSnapshot, .application_record = applicationRecord };
+    fn executionRequest(raw: *anyopaque, binding: Binding, request: terminal.execution.Request) !void {
+        const self = try get(raw, binding);
+        if (self.pending_paste != null) return error.InputConflict;
+        return self.native.worker.executionRequest(request);
+    }
+    fn executionRenew(raw: *anyopaque, binding: Binding, grant: terminal.execution.Grant) !void {
+        const self = try get(raw, binding);
+        return self.native.worker.executionRenew(grant);
+    }
+    fn executionRevoke(raw: *anyopaque, binding: Binding, grant: terminal.execution.Grant, takeover: bool) !void {
+        const self = try get(raw, binding);
+        return self.native.worker.executionRevoke(grant, takeover);
+    }
+    fn executionOutput(raw: *anyopaque, binding: Binding, id: @import("../../host/identity.zig").ExecutionId, allocator: std.mem.Allocator, cursor: u64, max_bytes: usize) !terminal.execution.Output {
+        const self = try get(raw, binding);
+        return self.native.worker.readExecutionOutput(id, allocator, cursor, max_bytes);
+    }
+    const vtable: terminal.Service.VTable = .{ .recording_identity = recordingIdentity, .content_query = contentQuery, .recording_display = recordingDisplay, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = theme, .search_snapshot = searchSnapshot, .application_record = applicationRecord };
 };

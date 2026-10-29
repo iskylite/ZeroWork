@@ -165,6 +165,18 @@ const Fixture = struct {
             if (self.app.local_adapter.processSnapshot(handle)) |process| {
                 std.debug.print("backend cleanup original process id={d}/{d} state={s} cleanup={s} pid={any} exit={any} eof={any}\n", .{ @backingInt(handle.session_id), handle.generation, @tagName(process.state), @tagName(process.cleanup), process.pid, process.exit, process.eof_seen });
             } else |err| std.debug.print("backend cleanup original process error={s}\n", .{@errorName(err)});
+            // Read the existing native observation receipt while the owning
+            // entry guard pins its original (possibly unknown) process.
+            const local_adapter: *@import("../local/adapter.zig").LocalAdapter = @ptrCast(@alignCast(self.app.local_adapter.context));
+            for (local_adapter.entries.items) |entry| if (entry.handle.eql(handle)) {
+                if (!entry.mutex.state.tryLock()) break;
+                defer entry.mutex.state.unlock();
+                if (entry.process) |process| if (process.process) |native_process| {
+                    var observation: @import("../local/native.zig").ObservationFailure = undefined;
+                    if (@import("../local/native.zig").zw_local_observation_failure(native_process, &observation) == 1) std.debug.print("backend cleanup native observation stage={d} errno={d} pid={d} worker_done={}\n", .{ observation.stage, observation.error_number, observation.pid, entry.worker_done });
+                };
+                break;
+            };
         }
         if (self.diagnostic_last_execution) |snapshot| self.dumpExecution("last_observed", snapshot);
         if (self.diagnostic_service) |service| {
@@ -557,6 +569,21 @@ fn revokeWithdrawnAuthorityBody(fixture: *Fixture, roster: *groups.Roster, kind:
         if (observed.grant == null and observed.input_ready and observed.local_released and observed.recording_settled) break;
         if (@import("../platform/realtime.zig").monotonicNs() >= deadline) return error.InputGrantNotReleased;
     }
+    // Releasing AI input/recording is distinct from the interrupted child
+    // returning to the shell. This authority test does not exercise force
+    // closing a foreground process: wait for a fresh, typed observation of
+    // this original shell before the fixture requests ordinary close.
+    const observe_after = @import("../local/native.zig").zw_local_monotonic_ms();
+    while (true) {
+        try fixture.tick();
+        var risk = fixture.app.local_adapter.closeRiskSnapshot(target, a) catch |err| {
+            if (err == error.WorkerBusy and @import("../platform/realtime.zig").monotonicNs() < deadline) continue;
+            return err;
+        };
+        defer risk.deinit(a);
+        if (risk.owner.eql(target) and !risk.unknown and risk.foreground_state == .idle_shell and risk.observed_monotonic_ms >= observe_after and risk.shell_pid != null and risk.foreground != null and risk.foreground.?.pid == risk.shell_pid.? and risk.foreground.?.process_group == risk.shell_pid.?) break;
+        if (@import("../platform/realtime.zig").monotonicNs() >= deadline) return error.OriginalShellNotObservedIdle;
+    }
     // Restoring UI/config metadata never revives the old input grant.
     fixture.config_.config_revision = 1;
     store.findConversation(owner.conversation_id).?.closed = false;
@@ -623,4 +650,168 @@ test "execution backend retains adapter service through Surface removal and the 
     }
     try std.testing.expectError(error.TargetNotAuthorized, api.terminal_call.?(api.context, retained, .{ .request = .{ .execution_id = .generate(), .task_id = controller.authority.task_id, .expected_input_epoch = 0, .ownership_revision = 1, .command = prepared.command, .command_hash = prepared.command_hash } }));
     hold.released = true;
+}
+
+test "execution backend controlled input requires separate exact approval and rejects changed authority before private dispatch" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const target = try fixture.local();
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    var controller = try makeController(&fixture, &store, &roster, &bridge, target, .auto);
+    defer controller.deinitAfterWorker();
+    var lookup: Lookup = .{ .controller = &controller };
+    var broker: approvals.Broker = .{};
+    var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    try ctx.captureTask(&controller);
+    var call = try Call.init(controller.authority, target, "zerowork_read", 71);
+    defer call.deinit();
+    var prepared = try backend.prepare(call.value, a);
+    defer prepared.deinit();
+    const run_permit = try approve(&ctx, &broker, &prepared);
+    const accepted = try authorize(&ctx, prepared);
+    const api = ctx.backend();
+    const initial = try accepted.service.executionSnapshot();
+    const id = identity.ExecutionId.generate();
+    const request: execution.Request = .{ .execution_id = id, .task_id = controller.authority.task_id, .expected_input_epoch = initial.input_epoch, .ownership_revision = accepted.ownership_revision, .command = prepared.command, .command_hash = prepared.command_hash };
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    while (true) {
+        _ = api.terminal_call.?(api.context, accepted.service, .{ .request = request }) catch |err| {
+            if (err == error.WorkerBusy) {
+                try fixture.tick();
+                continue;
+            }
+            return err;
+        };
+        break;
+    }
+    broker.finish(run_permit);
+    var waiting: execution.Snapshot = undefined;
+    while (true) {
+        try fixture.tick();
+        waiting = accepted.service.executionSnapshot() catch |err| {
+            if (err == error.WorkerBusy) continue;
+            return err;
+        };
+        if (waiting.input_wait != null) break;
+        if (waiting.failure != null or @import("../platform/realtime.zig").monotonicNs() >= deadline) return error.InputWaitTimeout;
+    }
+    const raw = try std.fmt.allocPrint(a, "{{\"execution_ref\":\"x1:{s}\",\"request_key\":\"backend-input\",\"text\":\"normal answer\"}}", .{std.fmt.bytesToHex(id.bytes, .lower)});
+    defer a.free(raw);
+    var args = try std.json.parseFromSlice(std.json.Value, a, raw, .{});
+    defer args.deinit();
+    var invocation: host.Invocation = .{ .context = controller.authority, .authority = .execution_control, .operation_id = 72, .turn_id = 1, .call_id = "backend-input", .tool_id = "host.send_execution_input", .arguments = args.value, .arguments_json = raw, .arguments_hash = execution.digest(raw), .canonical_arguments_hash = try @import("../ai/canonical_arguments.zig").digest(a, args.value) };
+    const input: execution.InputRequest = .{ .grant = waiting.grant.?, .wait_sequence = waiting.input_wait.?.sequence, .input_sequence = 1, .kind = .text, .text = "normal answer" };
+    var input_prepared = try ctx.preflightInput(invocation, a);
+    defer input_prepared.deinit();
+    try std.testing.expect(input_prepared.subject.route == null);
+    try std.testing.expectError(error.ApprovalRequired, api.authorize_input.?(api.context, invocation, target, id, input));
+    const permit = try broker.beginSubject(invocation, input_prepared.subject, 1, a);
+    defer broker.finish(permit);
+    try broker.decide(permit.sequence, permit.arguments_hash, true);
+    invocation.approval_sequence = permit.sequence;
+    try api.authorize_input.?(api.context, invocation, target, id, input);
+    // A different wait cannot reuse the same approved bytes or terminal.
+    var changed_wait = input;
+    changed_wait.wait_sequence += 1;
+    try std.testing.expectError(error.InputConflict, api.authorize_input.?(api.context, invocation, target, id, changed_wait));
+    var intervening = input;
+    intervening.input_sequence = 99;
+    intervening.text = "another approved line";
+    while (true) {
+        _ = api.terminal_call.?(api.context, accepted.service, .{ .input = intervening }) catch |err| {
+            if (err == error.WorkerBusy) {
+                try fixture.tick();
+                continue;
+            }
+            return err;
+        };
+        break;
+    }
+    // A new accepted line changes the input impact even though this is still
+    // the same foreground helper and wait/fence. The earlier permit is stale.
+    try expectBusyError(&fixture, api.authorize_input.?, .{ api.context, invocation, target, id, input }, error.ScopeChanged);
+    var secret_observation = input;
+    secret_observation.kind = .host_secret;
+    secret_observation.text = "";
+    const observed = observed: while (true) {
+        break :observed ctx.observeSecret(invocation.context, target, secret_observation) catch |err| {
+            if (err == error.WorkerBusy and @import("../platform/realtime.zig").monotonicNs() < deadline) {
+                try fixture.tick();
+                continue;
+            }
+            return err;
+        };
+    };
+    try std.testing.expect(observed.execution_id.?.eql(id) and observed.execution_fence == input.grant.fence);
+    var wrong_fence = secret_observation;
+    wrong_fence.grant.fence += 1;
+    try expectBusyError(&fixture, backend.Context.observeSecret, .{ &ctx, invocation.context, target, wrong_fence }, error.StaleFence);
+    fixture.config_.config_revision += 1;
+    try std.testing.expectError(error.ScopeChanged, ctx.observeSecret(invocation.context, target, secret_observation));
+    try std.testing.expectError(error.ScopeChanged, api.authorize_input.?(api.context, invocation, target, id, input));
+    try std.testing.expectError(error.PermissionDenied, api.terminal_call.?(api.context, accepted.service, .{ .input = input }));
+    fixture.config_.config_revision -= 1;
+}
+
+test "execution backend keeps config policy revision distinct from exact metadata input grant" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const target = try fixture.local();
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    var controller = try makeController(&fixture, &store, &roster, &bridge, target, .auto);
+    defer controller.deinitAfterWorker();
+    controller.authority.grant_revision = 7;
+    bind(&bridge, controller.authority);
+    bridge.policy_revision = fixture.config_.config_revision;
+    var lookup: Lookup = .{ .controller = &controller };
+    var broker: approvals.Broker = .{};
+    var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    try ctx.captureTask(&controller);
+    var call = try Call.init(controller.authority, target, "true", 81);
+    defer call.deinit();
+    var prepared = try backend.prepare(call.value, a);
+    defer prepared.deinit();
+    const permit = try approve(&ctx, &broker, &prepared);
+    defer broker.finish(permit);
+    _ = try authorize(&ctx, prepared);
+    bridge.policy_revision += 1;
+    try std.testing.expectError(error.ScopeChanged, authorize(&ctx, prepared));
+    bridge.policy_revision -= 1;
+    controller.authority.grant_revision += 1;
+    try std.testing.expectError(error.ScopeChanged, authorize(&ctx, prepared));
+    controller.authority.grant_revision -= 1;
+}
+
+fn expectBusyError(fixture: *Fixture, function: anytype, args: anytype, expected: anyerror) !void {
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 3 * std.time.ns_per_s;
+    while (true) {
+        if (@call(.auto, function, args)) |_| return error.UnexpectedSuccess else |err| {
+            if (err == error.WorkerBusy and @import("../platform/realtime.zig").monotonicNs() < deadline) {
+                try fixture.tick();
+                continue;
+            }
+            return std.testing.expectEqual(expected, err);
+        }
+    }
+}
+
+test "execution backend withdrawn member observes original idle shell before fixture close" {
+    // The original failure appeared on the eighth isolated membership close.
+    // Exercise that short sequence plus one, without changing close budgets.
+    for (0..9) |iteration| {
+        std.debug.print("withdrawal cleanup regression iteration={d}\n", .{iteration});
+        try revokeWithdrawnAuthority(.membership);
+    }
 }
