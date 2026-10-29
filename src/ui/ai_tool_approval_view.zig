@@ -64,6 +64,7 @@ pub const View = struct {
         self.target_copy.setDisplay(.none);
         try header.appendChild(cx.allocator, self.target_copy);
         const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
+        @import("ai_card_scroll.zig").containVertical(scroll);
         self.body = scroll.container;
         self.body.setStyleInline(cx.allocator, S.body(cx.tokens));
         self.body.meta.ownership.meta.test_id = "ai.approval.details";
@@ -76,6 +77,7 @@ pub const View = struct {
         const command_row = try ui.boxStyled(cx, S.commandRow, .{});
         try scroll.content.appendChild(cx.allocator, command_row);
         const command_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .height = 27 }).mount(scope, cx);
+        @import("ai_card_scroll.zig").containVertical(command_scroll);
         command_scroll.container.setStyleInline(cx.allocator, S.commandViewport(cx.tokens));
         command_scroll.container.meta.ownership.meta.test_id = "ai.approval.command_scroll";
         command_scroll.content.setStyleInline(cx.allocator, S.commandContent(cx.tokens));

@@ -554,15 +554,39 @@ fn validateValue(schema: std.json.Value, value: std.json.Value, depth: usize) an
 }
 
 /// Generates wire definitions from the same captured table used for execution.
-/// The returned slices live in the caller allocator; schemas/IDs live in table.
+/// Target IDs and narrowed terminal-read schemas live in the caller allocator;
+/// other definitions retain the captured table's lifetime.
 pub fn providerDefinitions(table: *const RequestTable, allocator: std.mem.Allocator) ![]@import("provider.zig").ToolDefinition {
     const output = try allocator.alloc(@import("provider.zig").ToolDefinition, table.entries.len);
     for (table.entries, output) |entry, *definition| {
         const ids = try allocator.alloc(u64, entry.targets.len);
         for (entry.targets, ids) |target, *id| id.* = @backingInt(target.owner.session_id);
-        definition.* = .{ .session_ids = ids, .authority = entry.authority, .dynamic = .{ .id = entry.definition.id, .name = entry.provider_name, .schema = entry.definition.schema, .description = entry.definition.description } };
+        definition.* = .{ .session_ids = ids, .authority = entry.authority, .dynamic = .{ .id = entry.definition.id, .name = entry.provider_name, .schema = try terminalReadSchema(allocator, entry, ids), .description = entry.definition.description } };
     }
     return output;
+}
+
+/// Expose the already captured read targets so an unambiguous current-terminal
+/// read does not need a discovery round just to learn its ID. Dispatch still
+/// validates the original schema, target binding, generation and live scope.
+fn terminalReadSchema(allocator: std.mem.Allocator, entry: Entry, ids: []const u64) ![]const u8 {
+    if (entry.authority != .session_targets or !std.mem.eql(u8, entry.definition.id, "read_terminal")) return entry.definition.schema;
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, entry.definition.schema, .{});
+    defer parsed.deinit();
+    var schema = parsed.value;
+    const properties = schema.object.getPtr("properties") orelse return entry.definition.schema;
+    const targets = properties.object.getPtr("session_ids") orelse return entry.definition.schema;
+    const items = targets.object.getPtr("items") orelse return entry.definition.schema;
+    // Do not replace a plugin's own enum or remove any declared constraints.
+    if (items.object.contains("enum")) return entry.definition.schema;
+    const a = parsed.arena.allocator();
+    var allowed: std.array_list.Managed(std.json.Value) = .init(a);
+    for (ids) |id| try allowed.append(if (std.math.cast(i64, id)) |value| .{ .integer = value } else .{ .number_string = try std.fmt.allocPrint(a, "{d}", .{id}) });
+    try items.object.put(a, "enum", .{ .array = allowed });
+    if (targets.object.getPtr("maxItems")) |maximum| if (maximum.* == .integer) {
+        maximum.integer = @min(maximum.integer, @as(i64, @intCast(ids.len)));
+    };
+    return std.json.Stringify.valueAlloc(allocator, schema, .{});
 }
 
 pub fn cloneTable(input: *const RequestTable, allocator: std.mem.Allocator) !RequestTable {

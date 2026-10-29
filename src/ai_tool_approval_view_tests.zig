@@ -490,3 +490,50 @@ test "host approval all subjects keep icons titles and fixed decisions aligned a
         }
     }
 }
+
+test "PATCH approval detail viewports retain native thumbs and give long command and host summary input to the deepest body" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const command = try longCommand();
+    defer a.free(command);
+    try f.show(1, command);
+    const command_scroll = f.node("ai.approval.command_scroll");
+    const command_thumb = command_scroll.children.items[1];
+    try std.testing.expect(command_thumb.rectFromWorldOrFallback().w > 0 and command_thumb.getBackground().a > 0);
+    const body_context: *ui.widgets.scroll_area.ScrollEventCtx = @ptrCast(@alignCast(f.view.body.behavior.events.event_context.?));
+    const rect = command_scroll.globalRect();
+    f.cx.handleScroll(.{ .x = rect.x + 20, .y = rect.y + rect.h / 2, .dx = 0, .dy = -100000 });
+    f.cx.handleScroll(.{ .x = rect.x + 20, .y = rect.y + rect.h / 2, .dx = 0, .dy = -30 });
+    try std.testing.expectEqual(@as(f32, 0), body_context.state.scroll_y);
+
+    const Host = @import("ui/ai_host_approval_view.zig");
+    const Callback = struct {
+        fn decide(_: *anyopaque, _: u64, _: [32]u8, _: bool) !void {}
+    };
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(400, 400);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const view = try Host.View.mount(cx, scope, .{ .context = cx, .on_decision = Callback.decide });
+    cx.root = view.root;
+    const detail = try std.mem.join(a, "\n", &@as([24][]const u8, @splat("Retained original host approval argument line")));
+    defer a.free(detail);
+    try view.update(hostSnapshot(.terminal_command, detail));
+    for (0..3) |_| {
+        cx.layout();
+        _ = cx.render();
+    }
+    const summary = find(view.root, "ai.host_approval.summary_viewport").?;
+    const summary_thumb = summary.children.items[1];
+    try std.testing.expect(summary_thumb.rectFromWorldOrFallback().w > 0 and summary_thumb.getBackground().a > 0);
+    const host_body: *ui.widgets.scroll_area.ScrollEventCtx = @ptrCast(@alignCast(view.body.behavior.events.event_context.?));
+    const vr = summary.globalRect();
+    const text_before = view.summary.globalRect();
+    cx.handleScroll(.{ .x = vr.x + 20, .y = vr.y + vr.h / 2, .dx = 0, .dy = -100000 });
+    cx.handleScroll(.{ .x = vr.x + 20, .y = vr.y + vr.h / 2, .dx = 0, .dy = -30 });
+    cx.layout();
+    try std.testing.expect(view.summary.globalRect().y < text_before.y);
+    try std.testing.expectEqual(@as(f32, 0), host_body.state.scroll_y);
+}

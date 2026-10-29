@@ -5,6 +5,9 @@ const facts = @import("ai/tool_results.zig");
 const loop = @import("ai/tool_loop.zig");
 const View = @import("ui/ai_tool_results_view.zig");
 const a = std.testing.allocator;
+test {
+    _ = @import("ui/ai_card_scroll.zig");
+}
 fn find(node: *ui.Node, id: []const u8) ?*ui.Node {
     if (node.meta.ownership.meta.test_id) |test_id| if (std.mem.eql(u8, test_id, id)) return node;
     for (node.children.items) |child| if (find(child, id)) |result| return result;
@@ -228,7 +231,7 @@ test "tool result headers preserve status title projection and elapsed across th
             inline for (.{ .succeeded, .failed, .rejected, .cancelled, .timed_out, .unknown }) |status| {
                 var target = [_]facts.Target{.{ .result = .{ .session_id = 101, .status = status, .stdout = "first line\nlast output line", .cwd = "/srv/long/target/directory" }, .label = "original@long-production-target.example.net:2222" }};
                 var record: facts.Record = .{ .arena = .init(a), .owner = .{ .session = 101 }, .turn_id = 1, .call_id = "header-status", .name = "host.run_in_terminal", .arguments = "{}", .command = "printf a-long-command-with-full-parameters", .arguments_hash = @splat(0), .targets = &target, .dispatched = true, .expanded = true };
-                defer record.arena.deinit();
+                defer record.deinit();
                 const cx = try ui.Cx.init(a, std.testing.io);
                 defer cx.deinit();
                 cx.setTheme(theme.widgetTheme(name));
@@ -263,7 +266,7 @@ test "tool result headers preserve status title projection and elapsed across th
 test "tool result unknown cleanup takes precedence over a successful process icon" {
     var target = [_]facts.Target{.{ .result = .{ .session_id = 101, .status = .succeeded, .local_released = false } }};
     var record: facts.Record = .{ .arena = .init(a), .owner = .{ .session = 101 }, .turn_id = 1, .call_id = "cleanup-unknown", .name = "run_command", .arguments = "{}", .command = "true", .arguments_hash = @splat(0), .targets = &target, .dispatched = true };
-    defer record.arena.deinit();
+    defer record.deinit();
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
     const scope = try ui.Scope.init(a, null, cx.owner);
@@ -317,7 +320,7 @@ test "tool titles cover all registered host discovery lifecycle and execution ac
 
 test "tool result multiline command remains reachable in the bounded details viewport" {
     var record: facts.Record = .{ .arena = .init(a), .owner = .{ .session = 101 }, .turn_id = 1, .call_id = "multiline-command", .name = "run_command", .arguments = "{}", .command = "printf first-line\nprintf second-line\nprintf final-line", .arguments_hash = @splat(0), .targets = &.{}, .dispatched = false, .expanded = true };
-    defer record.arena.deinit();
+    defer record.deinit();
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
     const scope = try ui.Scope.init(a, null, cx.owner);
@@ -340,7 +343,7 @@ test "tool result multiline command remains reachable in the bounded details vie
 test "tool result undispatched cancellation rejection and unknown never show success or generic execution feedback" {
     inline for (.{ .rejected, .cancelled, .unknown }) |status| {
         var record: facts.Record = .{ .arena = .init(a), .owner = .{ .session = 101 }, .turn_id = 1, .call_id = "no-dispatch", .name = "host.open_session", .arguments = "{}", .command = "request arguments", .arguments_hash = @splat(0), .targets = &.{}, .dispatched = false, .error_status = status };
-        defer record.arena.deinit();
+        defer record.deinit();
         const cx = try ui.Cx.init(a, std.testing.io);
         defer cx.deinit();
         const scope = try ui.Scope.init(a, null, cx.owner);
@@ -434,7 +437,7 @@ test "execution result native card preserves real target recording output and re
         theme.select(name);
         for ([_]f32{ 572, 332 }) |width| {
             var record = executionFixture(.running, long_output);
-            defer record.arena.deinit();
+            defer record.deinit();
             var store = facts.Store.init(a);
             defer store.records.deinit(a);
             try store.records.append(a, &record);
@@ -491,7 +494,7 @@ test "execution result native card preserves real target recording output and re
 test "execution result queued controls recheck same execution latest receipt and never stop a completed or handed off command" {
     const Execution = @import("ui/ai_execution_result_view.zig");
     var record = executionFixture(.running, "partial output");
-    defer record.arena.deinit();
+    defer record.deinit();
     var store = facts.Store.init(a);
     defer store.records.deinit(a);
     try store.records.append(a, &record);
@@ -527,7 +530,7 @@ test "execution result active stop and takeover callbacks receive original full 
     const Execution = @import("ui/ai_execution_result_view.zig");
     inline for (.{ .{ "ai.execution.result.stop", Execution.Action.stop }, .{ "ai.execution.result.takeover", Execution.Action.takeover } }) |action| {
         var record = executionFixture(.running, "actual output");
-        defer record.arena.deinit();
+        defer record.deinit();
         var store = facts.Store.init(a);
         defer store.records.deinit(a);
         try store.records.append(a, &record);
@@ -555,7 +558,7 @@ test "execution result preflight refusal shows user readable reason without raw 
     defer arena.deinit();
     const receipt: @import("ai/host_tools.zig").Receipt = .{ .conversation_id = .generate(), .task_id = .generate(), .operation_id = 42, .binding_revision = 2 };
     var record = executionFixture(.running, "");
-    defer record.arena.deinit();
+    defer record.deinit();
     record.execution = try facts.execution_projection.parse(arena.allocator(), "host.run_in_terminal", "{\"command\":\"not-sent\"}", .rejected, receipt, "{\"error_code\":\"IntegrationUnavailable\",\"side_effect_started\":false,\"local_released\":true,\"remote_effect_unknown\":false}");
     var store = facts.Store.init(a);
     defer store.records.deinit(a);
@@ -594,7 +597,7 @@ test "execution interval native result separates saved observation foreground fa
         .{ .state = .running, .attribution = .unverified, .exit = null, .saved = false, .handed_off = true },
     }) |case| {
         var record = executionFixture(case.state, "ACTUAL_OBSERVED_BYTES\n");
-        defer record.arena.deinit();
+        defer record.deinit();
         const projection = &record.execution.?;
         projection.output_scope = .session_interval;
         projection.output_attribution = case.attribution;
@@ -645,4 +648,111 @@ test "execution interval native result separates saved observation foreground fa
         const icon = find(root, "ai.execution.result.icon").?.globalRect();
         try std.testing.expect(@abs(icon.y + icon.h / 2 - title.y - title.h / 2) < 0.1);
     }
+}
+
+fn settleCard(cx: *ui.Cx) void {
+    for (0..4) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+}
+fn cardScrollState(node: *ui.Node) *ui.widgets.scroll_area.ScrollState {
+    const context: *ui.widgets.scroll_area.ScrollEventCtx = @ptrCast(@alignCast(node.behavior.events.event_context.?));
+    return context.state;
+}
+
+test "PATCH card scroll restores tool and execution positions after input and safely outlives record removal" {
+    const long_line = "READING_POSITION_0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const output = try std.mem.join(a, "\n", &@as([30][]const u8, @splat(long_line)));
+    defer a.free(output);
+    inline for (.{ false, true }) |execution| {
+        var record = executionFixture(.running, output);
+        var record_alive = true;
+        defer if (record_alive) record.deinit();
+        record.command = long_line;
+        if (!execution) {
+            record.execution = null;
+            record.name = "host.get_current_context";
+            record.host = .{ .status = .succeeded, .content = output, .receipt = .{ .conversation_id = .generate(), .task_id = .generate(), .operation_id = 42, .binding_revision = 1 } };
+        }
+        var store = facts.Store.init(a);
+        defer store.records.deinit(a);
+        try store.records.append(a, &record);
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        cx.reduced_motion = true;
+        cx.setViewport(400, 400);
+        cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+        const parent = try ui.Scope.init(a, null, cx.owner);
+        defer parent.dispose();
+        var scope = try parent.childScope();
+        var card = if (execution) try @import("ui/ai_execution_result_view.zig").mount(cx, scope, &store, &record, null, null) else (try View.State.mount(cx, scope, &record)).root;
+        try cx.root.?.appendChild(a, card);
+        settleCard(cx);
+        const body_id = if (execution) "ai.execution.result.details" else "ai.tool.result.details";
+        const output_id = if (execution) "ai.execution.result.terminal_output" else "ai.tool.result.stdout";
+        var body = find(card, body_id).?;
+        const viewport = body.globalRect();
+        cx.handleScroll(.{ .x = viewport.x + 30, .y = viewport.y + viewport.h / 2, .dx = 0, .dy = -40 });
+        settleCard(cx);
+        var text = find(card, output_id).?;
+        const text_rect = text.globalRect();
+        cx.handleScroll(.{ .x = viewport.x + 40, .y = @min(viewport.y + viewport.h - 5, @max(viewport.y + 5, text_rect.y + 10)), .dx = -55, .dy = 0 });
+        settleCard(cx);
+        const horizontal = text.parent.?.parent.?;
+        try std.testing.expect(cardScrollState(horizontal).scroll_x > 0);
+        // Dispose immediately after vertical input, before the next layout hook.
+        cx.handleScroll(.{ .x = viewport.x + 30, .y = viewport.y + viewport.h / 2, .dx = 0, .dy = -20 });
+        const saved_y = cardScrollState(body).scroll_y;
+        const saved_x = cardScrollState(horizontal).scroll_x;
+        try std.testing.expect(saved_y >= 60 and saved_x > 0);
+        scope.dispose();
+        cx.detachChild(cx.root.?, card);
+        cx.destroyDetached(card);
+        scope = try parent.childScope();
+        card = if (execution) try @import("ui/ai_execution_result_view.zig").mount(cx, scope, &store, &record, null, null) else (try View.State.mount(cx, scope, &record)).root;
+        try cx.root.?.appendChild(a, card);
+        settleCard(cx);
+        body = find(card, body_id).?;
+        text = find(card, output_id).?;
+        try std.testing.expectApproxEqAbs(saved_y, cardScrollState(body).scroll_y, 0.1);
+        try std.testing.expectApproxEqAbs(saved_x, cardScrollState(text.parent.?.parent.?).scroll_x, 0.1);
+        // Rollback can release the record before the old UI scope is disposed.
+        record.deinit();
+        record_alive = false;
+        scope.dispose();
+    }
+}
+
+test "PATCH card scroll resets output positions when selecting another original target" {
+    const long_line = "SCOPED_OUTPUT_000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000";
+    const output = try std.mem.join(a, "\n", &@as([20][]const u8, @splat(long_line)));
+    defer a.free(output);
+    var targets = [_]facts.Target{
+        .{ .result = .{ .session_id = 101, .status = .succeeded, .stdout = output }, .label = "first" },
+        .{ .result = .{ .session_id = 102, .status = .succeeded, .stdout = output }, .label = "second" },
+    };
+    var record: facts.Record = .{ .arena = .init(a), .owner = .{ .group = 7 }, .turn_id = 1, .call_id = "target-scroll", .name = "run_command", .arguments = "{}", .command = long_line, .arguments_hash = @splat(0), .targets = &targets, .dispatched = true, .expanded = true };
+    defer record.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.reduced_motion = true;
+    cx.setViewport(400, 400);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const view = try View.State.mount(cx, scope, &record);
+    cx.root = view.root;
+    view.root.setStyleInline(a, .{ .width = .{ .px = 400 } });
+    settleCard(cx);
+    const body = view.body.globalRect();
+    cx.handleScroll(.{ .x = body.x + 20, .y = body.y + body.h / 2, .dx = 0, .dy = -100 });
+    settleCard(cx);
+    try std.testing.expect(cardScrollState(view.body).scroll_y > 0);
+    try view.select(1);
+    settleCard(cx);
+    try std.testing.expectEqual(@as(usize, 1), record.selected);
+    try std.testing.expectEqual(@as(f32, 0), cardScrollState(view.body).scroll_y);
+    try std.testing.expectEqual(@as(f32, 0), view.stdout_scroll.scroll_x);
+    try std.testing.expectEqual(@as(f32, 0), view.stderr_scroll.scroll_x);
 }

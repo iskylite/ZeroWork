@@ -56,3 +56,37 @@ test "recovery buttons keep captured group and turn and disable IO actions durin
     }
     try std.testing.expectEqual(@as(usize, 1), probe.count);
 }
+
+test "PATCH recovery details keep an idle thumb and contain boundary input inside the conversation" {
+    const a = std.testing.allocator;
+    const reason = try std.mem.join(a, "\n", &@as([35][]const u8, @splat("HTTP failure detail retained for inspection")));
+    defer a.free(reason);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 400);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const outer = try ui.widgets.ScrollArea(.{ .width = 600, .height = 400 }).mount(scope, cx);
+    cx.root = outer.container;
+    const Ignore = struct {
+        fn enqueue(_: *anyopaque, _: V.Envelope) void {}
+    };
+    const root = try V.mount(cx, scope, .{ .ticket = .{ .owner = .{ .session = 1 }, .turn = 1 }, .reason = reason, .retries = 0, .max_retries = 3, .retry_enabled = false, .regenerate_enabled = false, .cooldown_seconds = 0 }, .{ .context = cx, .enqueue = Ignore.enqueue });
+    try outer.content.appendChild(a, root);
+    try outer.content.appendChild(a, try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 800 }, .flex_shrink = 0 }, .{}));
+    find(root, "ai.recovery.details.toggle").?.behavior.events.on_click.?.invoke();
+    for (0..3) |_| {
+        cx.layout();
+        _ = cx.render();
+    }
+    const details = find(root, "ai.recovery.details").?;
+    const rect = details.globalRect();
+    try std.testing.expectEqual(@as(f32, 120), rect.h);
+    const thumb = details.children.items[1];
+    try std.testing.expect(thumb.rectFromWorldOrFallback().w > 0 and thumb.getBackground().a > 0);
+    const ctx: *ui.widgets.scroll_area.ScrollEventCtx = @ptrCast(@alignCast(details.behavior.events.event_context.?));
+    cx.handleScroll(.{ .x = rect.x + 30, .y = rect.y + rect.h / 2, .dx = 0, .dy = -100000 });
+    cx.handleScroll(.{ .x = rect.x + 30, .y = rect.y + rect.h / 2, .dx = 0, .dy = -30 });
+    try std.testing.expectEqual(ctx.state.maxScrollY(), ctx.state.scroll_y);
+    try std.testing.expectEqual(@as(f32, 0), outer.state.scroll_y);
+}

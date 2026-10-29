@@ -52,8 +52,10 @@ pub const State = struct {
     stderr_scroll: *ui.widgets.scroll_area.ScrollState,
     status_icon: ?*ui.Node = null,
     disclosure_icon: ?*ui.Node = null,
+    positions: *@import("ai_card_scroll.zig").Keeper,
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, record: *facts.Record) !*State {
-        const self = try scope.createState(State, .{ .cx = cx, .scope = scope, .record = record, .root = undefined, .body = undefined, .footer = undefined, .identity = undefined, .metadata = undefined, .stdout = undefined, .stderr = undefined, .feedback = undefined, .stdout_scroll = undefined, .stderr_scroll = undefined });
+        const positions = try @import("ai_card_scroll.zig").Keeper.mount(cx, scope, try record.scrollPositions(cx.allocator));
+        const self = try scope.createState(State, .{ .cx = cx, .scope = scope, .record = record, .root = undefined, .body = undefined, .footer = undefined, .identity = undefined, .metadata = undefined, .stdout = undefined, .stderr = undefined, .feedback = undefined, .stdout_scroll = undefined, .stderr_scroll = undefined, .positions = positions });
         self.root = try ui.boxStyled(cx, S.card, .{});
         self.root.meta.ownership.meta.test_id = record.testId();
         const header = try ui.widgets.Button(.{ .label = "", .variant = .ghost, .a11y_label = "展开或收起步骤", .base_style = S.headerButton() }).mount(scope, cx);
@@ -113,6 +115,8 @@ pub const State = struct {
         elapsed_node.meta.ownership.meta.test_id = "ai.tool.result.elapsed";
         try header.appendChild(cx.allocator, elapsed_node);
         const body = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
+        @import("ai_card_scroll.zig").containVertical(body);
+        positions.bind(.body, body);
         self.body = body.container;
         self.body.setStyleInline(cx.allocator, S.body(cx.tokens));
         self.body.meta.ownership.meta.test_id = "ai.tool.result.details";
@@ -125,7 +129,8 @@ pub const State = struct {
         const command_height = @max(@as(f32, 27), @as(f32, @floatFromInt(command_lines)) * 16 + 8);
         command_row.setStyleInline(cx.allocator, .{ .height = .{ .px = command_height } });
         try body.content.appendChild(cx.allocator, command_row);
-        const command_scroll = try ui.widgets.ScrollArea(.{ .direction = .both, .height = 27, .rubber_band_x = false }).mount(scope, cx);
+        const command_scroll = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .height = 27, .rubber_band_x = false }).mount(scope, cx);
+        positions.bind(.command, command_scroll);
         command_scroll.container.setStyleInline(cx.allocator, S.commandViewport(cx.tokens));
         command_scroll.container.setStyleInline(cx.allocator, .{ .height = .{ .px = command_height } });
         command_scroll.content.setStyleInline(cx.allocator, S.outputContent(cx.tokens));
@@ -175,6 +180,7 @@ pub const State = struct {
         self.stdout_label.?.meta.ownership.meta.test_id = "ai.tool.result.output_label";
         try body.content.appendChild(cx.allocator, self.stdout_label.?);
         const stdout = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .rubber_band_x = false }).mount(scope, cx);
+        positions.bind(.stdout, stdout);
         self.stdout_scroll = stdout.state;
         self.stdout_viewport = stdout.container;
         stdout.container.setStyleInline(cx.allocator, S.outputViewport(cx.tokens));
@@ -188,6 +194,7 @@ pub const State = struct {
         self.stderr_label.?.meta.ownership.meta.test_id = "ai.tool.result.error_label";
         try body.content.appendChild(cx.allocator, self.stderr_label.?);
         const stderr = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .rubber_band_x = false }).mount(scope, cx);
+        positions.bind(.stderr, stderr);
         self.stderr_scroll = stderr.state;
         self.stderr_viewport = stderr.container;
         stderr.container.setStyleInline(cx.allocator, S.outputViewport(cx.tokens));
@@ -252,7 +259,9 @@ pub const State = struct {
             self.copy_stderr_button.?.setDisplay(.none);
             return;
         }
-        self.record.selected = @min(index, self.record.targets.len - 1);
+        const selected = @min(index, self.record.targets.len - 1);
+        if (selected != self.record.selected) self.positions.resetTarget();
+        self.record.selected = selected;
         const target = self.record.targets[self.record.selected];
         const result = target.result;
         const terminal = std.mem.eql(u8, self.record.name, "run_command") or std.mem.eql(u8, self.record.name, "read_terminal");

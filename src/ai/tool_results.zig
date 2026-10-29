@@ -10,6 +10,27 @@ pub const execution_projection = @import("execution_result_projection.zig");
 pub const ExecutionProjection = execution_projection.Projection;
 pub const ExecutionActionTarget = execution_projection.ActionTarget;
 pub const HostFact = struct { status: @import("plugin_tools.zig").Status, receipt: @import("host_tools.zig").Receipt, content: []const u8 };
+/// Presentation position survives view rebuilds and may outlive its source
+/// record briefly while rollback disposes the old native tree.
+pub const ScrollPositions = struct {
+    pub const Slot = enum { body, command, stdout, stderr };
+    pub const Offset = struct { x: f32 = 0, y: f32 = 0 };
+    allocator: std.mem.Allocator,
+    references: usize = 1,
+    offsets: [4]Offset = @splat(.{}),
+    pub fn create(allocator: std.mem.Allocator) !*ScrollPositions {
+        const self = try allocator.create(ScrollPositions);
+        self.* = .{ .allocator = allocator };
+        return self;
+    }
+    pub fn retain(self: *ScrollPositions) void {
+        self.references += 1;
+    }
+    pub fn release(self: *ScrollPositions) void {
+        self.references -= 1;
+        if (self.references == 0) self.allocator.destroy(self);
+    }
+};
 pub const Record = struct {
     arena: std.heap.ArenaAllocator,
     owner: scope.Owner,
@@ -31,8 +52,18 @@ pub const Record = struct {
     decision: ?bool = null,
     expanded: bool = false,
     selected: usize = 0,
+    scroll_positions: ?*ScrollPositions = null,
     test_id: [96]u8 = @splat(0),
     test_id_len: usize = 0,
+    pub fn scrollPositions(self: *Record, allocator: std.mem.Allocator) !*ScrollPositions {
+        if (self.scroll_positions == null) self.scroll_positions = try ScrollPositions.create(allocator);
+        return self.scroll_positions.?;
+    }
+    pub fn deinit(self: *Record) void {
+        if (self.scroll_positions) |positions| positions.release();
+        self.scroll_positions = null;
+        self.arena.deinit();
+    }
     pub fn testId(self: *const Record) []const u8 {
         return self.test_id[0..self.test_id_len];
     }
@@ -73,7 +104,7 @@ pub const Store = struct {
                 var owned = reference;
                 owned.release();
             }
-            record.arena.deinit();
+            record.deinit();
             self.allocator.destroy(record);
         }
         self.records.deinit(self.allocator);
@@ -84,7 +115,7 @@ pub const Store = struct {
             var owned = ref;
             owned.release();
         }
-        record.arena.deinit();
+        record.deinit();
         self.allocator.destroy(record);
     }
     fn recount(self: *Store) void {
@@ -145,6 +176,8 @@ pub const Store = struct {
             if (record.execution) |execution| copy.execution = try execution.clone(a);
             copy.execution_view_initialized = record.execution_view_initialized;
             copy.expanded = record.expanded;
+            copy.selected = record.selected;
+            if (record.scroll_positions) |positions| (try copy.scrollPositions(self.allocator)).offsets = positions.offsets;
             copy.total_elapsed_ms = record.total_elapsed_ms;
             copy.decision = record.decision;
             for (copy.targets, record.targets) |*target, original| target.operation_id = original.operation_id;
@@ -234,7 +267,7 @@ pub const Store = struct {
                     var owned = reference;
                     owned.release();
                 }
-                record.arena.deinit();
+                record.deinit();
                 self.allocator.destroy(record);
             }
             self.records.shrinkRetainingCapacity(start);
@@ -546,4 +579,30 @@ test "execution result invalid host receipt never becomes authority for an execu
     try std.testing.expect(projection.execution_id == null and projection.target == null and projection.actionTarget() == null);
     try std.testing.expectEqualStrings("结果待核实", projection.statusLabel());
     try std.testing.expect(!projection.canStop() and !projection.canTakeover());
+}
+
+test "tool result cloned scroll positions are independent and survive original store release" {
+    const a = std.testing.allocator;
+    var store = Store.init(a);
+    var store_alive = true;
+    defer if (store_alive) store.deinit();
+    var run = loop.Loop.init(a, .{ .owner = .{ .group = 7 }, .members = .{} }, 4, .{});
+    defer run.deinit();
+    try run.records.append(run.arena.allocator(), .{ .key = .{ .owner = .{ .group = 7 }, .turn_id = 4, .call_id = "position" }, .name = "read_terminal", .arguments = "{}", .arguments_hash = @splat(0), .dispatched = false });
+    _ = try store.capture(&run, &.{});
+    const original = store.records.items[0];
+    original.selected = 1;
+    const positions = try original.scrollPositions(a);
+    positions.offsets[@backingInt(ScrollPositions.Slot.body)].y = 80;
+    positions.offsets[@backingInt(ScrollPositions.Slot.stdout)].x = 45;
+    var clone = try store.cloneTurns(&.{.{ .user = false, .text = @constCast(""), .turn = .{ .id = 4 } }});
+    defer clone.deinit();
+    const copied = clone.records.items[0];
+    try std.testing.expect(copied.scroll_positions.? != positions);
+    positions.offsets[0].y = 0;
+    store.deinit();
+    store_alive = false;
+    try std.testing.expectEqual(@as(usize, 1), copied.selected);
+    try std.testing.expectEqual(@as(f32, 80), copied.scroll_positions.?.offsets[0].y);
+    try std.testing.expectEqual(@as(f32, 45), copied.scroll_positions.?.offsets[@backingInt(ScrollPositions.Slot.stdout)].x);
 }

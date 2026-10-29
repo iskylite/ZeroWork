@@ -94,6 +94,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
         try action_row.appendChild(cx.allocator, button);
     }
     const details = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
+    @import("ai_card_scroll.zig").containVertical(details);
     details.container.setStyleInline(cx.allocator, S.details(cx.tokens));
     details.container.meta.ownership.meta.test_id = "ai.recovery.details";
     details.container.setDisplay(.none);

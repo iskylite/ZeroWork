@@ -141,6 +141,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
     // ScrollArea releases its state during a conversation rebuild.
     const state_scope = try scope.childScope();
     const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
+    @import("ai_card_scroll.zig").containVertical(scroll);
     scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{ .max = 150 } }, .flex_shrink = 0 });
     scroll.content.setStyleInline(cx.allocator, S.content(cx.tokens));
     const text = try ui.text(cx, props.detail, .{ .font_size = 11, .wrap = .word, .line_height = 16.0 / 11.0, .color = palette.fg_2 });

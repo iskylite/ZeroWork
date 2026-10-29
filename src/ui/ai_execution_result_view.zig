@@ -71,6 +71,7 @@ const State = struct {
 
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.Record, callbacks: ?Callbacks, on_toggle: ?ui.Handler(void)) !*ui.Node {
     const projection = store.executionProjection(record) orelse return error.NotExecutionResult;
+    const positions = try @import("ai_card_scroll.zig").Keeper.mount(cx, scope, try record.scrollPositions(cx.allocator));
     if (!record.execution_view_initialized) {
         record.execution_view_initialized = true;
         if (facts.execution_projection.isRun(record.name)) record.expanded = true;
@@ -109,6 +110,8 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
     clock.setStyleInline(cx.allocator, .{ .width = .{ .px = 44 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
     try header.appendChild(cx.allocator, clock);
     const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
+    @import("ai_card_scroll.zig").containVertical(scroll);
+    positions.bind(.body, scroll);
     scroll.container.setStyleInline(cx.allocator, S.body(cx.tokens));
     scroll.container.meta.ownership.meta.test_id = "ai.execution.result.details";
     scroll.content.setStyleInline(cx.allocator, S.content(cx.tokens));
@@ -164,7 +167,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
         const row = try ui.box(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .align_items = .center, .gap = 6, .min_width = 0, .flex_shrink = 0 }, .{});
         command_row = row;
         try scroll.content.appendChild(cx.allocator, row);
-        const viewport = try appendOutput(cx, scope, row, command, "ai.execution.result.command");
+        const viewport = try appendOutput(cx, scope, row, command, "ai.execution.result.command", positions);
         viewport.setStyleInline(cx.allocator, .{ .flex = 1, .min_width = 0 });
     }
     if (projection.execution_id) |id| {
@@ -178,7 +181,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
     const output_label = try ui.textStyled(cx, S.metadata, if (projection.output_scope == .session_interval) if (projection.terminal_output.len != 0) "同一终端观测片段" else if (projection.output_available) "观测区间暂无输出" else "暂未取得观测片段" else if (projection.terminal_output.len != 0) "终端输出" else if (projection.output_available) "终端暂无输出" else "暂未取得终端输出");
     output_label.meta.ownership.meta.test_id = "ai.execution.result.output_label";
     try scroll.content.appendChild(cx.allocator, output_label);
-    if (projection.terminal_output.len != 0) _ = try appendOutput(cx, scope, scroll.content, projection.terminal_output, "ai.execution.result.terminal_output");
+    if (projection.terminal_output.len != 0) _ = try appendOutput(cx, scope, scroll.content, projection.terminal_output, "ai.execution.result.terminal_output", positions);
     if (projection.output_gap or projection.output_truncated) {
         const note = try ui.textStyled(cx, S.metadata, if (projection.output_gap) "部分输出不在本次返回范围内；可查看原终端记录。" else if (projection.output_scope == .session_interval) "本次返回的观测片段已截断；可查看原终端记录。" else "本次输出已截断；完整内容请查看原终端记录。");
         note.meta.ownership.meta.test_id = "ai.execution.result.output_notice";
@@ -237,8 +240,9 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
     if (projection.actionTarget() == null and projection.terminal_output.len == 0) footer.setDisplay(.none);
     return root;
 }
-fn appendOutput(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, bytes: []const u8, id: []const u8) !*ui.Node {
+fn appendOutput(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, bytes: []const u8, id: []const u8, positions: *@import("ai_card_scroll.zig").Keeper) !*ui.Node {
     const scroll = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .rubber_band_x = false }).mount(scope, cx);
+    positions.bind(if (std.mem.eql(u8, id, "ai.execution.result.command")) .command else .stdout, scroll);
     scroll.container.setStyleInline(cx.allocator, S.output(cx.tokens));
     const lines = 1 + std.mem.count(u8, std.mem.trimEnd(u8, bytes, "\r\n"), "\n");
     scroll.container.setStyleInline(cx.allocator, .{ .height = .{ .px = @as(f32, @floatFromInt(lines)) * 16 + 8 } });

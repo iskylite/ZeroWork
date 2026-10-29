@@ -73,6 +73,7 @@ pub const View = struct {
         state.setStyleInline(cx.allocator, .{ .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = ui.Color.TRANSPARENT, .corner_radius = 5, .flex_shrink = 0 });
         try header.appendChild(cx.allocator, state);
         const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
+        @import("ai_card_scroll.zig").containVertical(scroll);
         self.body = scroll.container;
         scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 154.625 }, .flex_shrink = 0 });
         scroll.container.meta.ownership.meta.test_id = "ai.host_approval.details";
@@ -89,6 +90,7 @@ pub const View = struct {
         self.network_row.meta.ownership.meta.test_id = "ai.host_approval.address_bar";
         try scroll.content.appendChild(cx.allocator, self.network_row);
         const address_scroll = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .rubber_band_x = false }).mount(scope, cx);
+        @import("ai_card_scroll.zig").showOverflowScrollbar(address_scroll);
         address_scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 38 }, .flex = 1, .min_width = 0, .flex_shrink = 1 });
         address_scroll.container.meta.ownership.meta.test_id = "ai.host_approval.url_viewport";
         address_scroll.content.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 38 }, .direction = .row, .align_items = .center, .flex_shrink = 0 });
@@ -105,6 +107,7 @@ pub const View = struct {
         url_row.setStyleInline(cx.allocator, .{ .height = .{ .px = 76 } });
         try scroll.content.appendChild(cx.allocator, url_row);
         const url_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
+        @import("ai_card_scroll.zig").containVertical(url_scroll);
         url_scroll.container.setStyleInline(cx.allocator, S.commandViewport(cx.tokens));
         url_scroll.container.setStyleInline(cx.allocator, .{ .height = .{ .px = 56 } });
         url_scroll.container.meta.ownership.meta.test_id = "ai.host_approval.summary_viewport";

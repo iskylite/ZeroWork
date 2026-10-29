@@ -46,6 +46,37 @@ fn member(fake: *Fake, id: u64, bindings: []const tools.ToolBinding) tools.Membe
 }
 const binding: tools.ToolBinding = .{ .plugin_id = "example", .definition_id = "example.power_write", .handler = Fake.handler };
 
+test "dynamic terminal read advertises only its captured capable targets without widening dispatch" {
+    const a = std.testing.allocator;
+    var fake: Fake = .{};
+    const read_binding: tools.ToolBinding = .{ .plugin_id = "example", .definition_id = "read_terminal", .handler = Fake.handler };
+    const read_definition = @import("legacy_adapter.zig").builtin_definitions[1];
+    for ([_]bool{ false, true }) |second_authorized| {
+        var members = [_]tools.Member{ member(&fake, 101, &.{read_binding}), member(&fake, 102, &.{read_binding}) };
+        members[1].authorized = second_authorized;
+        var table = try tools.RequestTable.init(a, captured, &.{read_definition}, &members);
+        defer table.deinit();
+        const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, wire[0].dynamic.?.schema, .{});
+        defer parsed.deinit();
+        const targets = parsed.value.object.get("properties").?.object.get("session_ids").?.object;
+        const items = targets.get("items").?.object;
+        const ids = items.get("enum").?.array.items;
+        try std.testing.expectEqual(@as(usize, if (second_authorized) 2 else 1), ids.len);
+        try std.testing.expectEqual(@as(i64, @intCast(ids.len)), targets.get("maxItems").?.integer);
+        try std.testing.expectEqual(@as(i64, 1), items.get("minimum").?.integer);
+        try std.testing.expectEqual(@as(i64, 101), ids[0].integer);
+        if (second_authorized) try std.testing.expectEqual(@as(i64, 102), ids[1].integer);
+        // The advertised narrowing is not substituted for the captured host
+        // table or its independent dispatch checks.
+        try std.testing.expectEqualStrings(read_definition.schema, table.entries[0].definition.schema);
+        var accepted = try table.parse(a, "read_terminal", "{\"session_ids\":[101]}");
+        accepted.deinit();
+        if (!second_authorized) try std.testing.expectError(error.ToolCapabilityUnavailable, table.parse(a, "read_terminal", "{\"session_ids\":[102]}"));
+        try std.testing.expectError(error.ToolCapabilityUnavailable, table.parse(a, "read_terminal", "{\"session_ids\":[999]}"));
+    }
+}
+
 test "dynamic tool directory keeps 300 frozen members while each call stays bounded" {
     const a = std.testing.allocator;
     var fake: Fake = .{};
