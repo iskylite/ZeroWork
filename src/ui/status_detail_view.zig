@@ -307,6 +307,11 @@ pub const View = struct {
         try row.appendChild(self.cx.allocator, node);
         return node;
     }
+    /// Hover previews close without returning keyboard focus to their trigger.
+    pub fn dismiss(self: *View) void {
+        _ = self.controller.close();
+        self.open.set(false);
+    }
     pub fn hide(self: *View) void {
         self.open.set(false);
         if (self.controller.close()) |focus| self.restoreFocus(focus);

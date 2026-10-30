@@ -181,6 +181,10 @@ pub const View = struct {
     pub fn isOpen(self: *const View) bool {
         return self.open.peek();
     }
+    /// Hover previews close without returning keyboard focus to their trigger.
+    pub fn dismiss(self: *View) void {
+        self.open.set(false);
+    }
     pub fn hide(self: *View) void {
         self.open.set(false);
         self.restoreFocus();

@@ -89,17 +89,17 @@ try {
     assert.equal(compactLeft.rect.w, 392); assert.equal(compactLeft.rect.h, 374);
     const bodies = compact["files.rows"].filter(shown), columns = compact["files.columns"].filter(shown);
     const clips = compact["files.data_clip"].filter(shown);
-    assert.equal(columns[0].rect.w, 490); assert.equal(columns[1].rect.w, 490);
-    assert.equal(clips[0].rect.h, 142); assert.equal(clips[1].rect.h, 142);
-    assert.equal(clips[0].rect.y + clips[0].rect.h, bodies[0].rect.y + bodies[0].rect.h - 12);
+    assert.equal(columns[0].rect.w, 390); assert.equal(columns[1].rect.w, 390);
+    assert.equal(clips[0].rect.h, 175); assert.equal(clips[1].rect.h, 175);
+    assert.equal(clips[0].rect.y + clips[0].rect.h, bodies[0].rect.y + bodies[0].rect.h);
     const x = bodies[0].rect.x + 60, y = bodies[0].rect.y + 45;
     assert((await scrollAt(x, y, -1000, -200)).ok);
     const scrolled = await capture("02-compact-left-scrolled");
     const moved = scrolled["files.columns"].filter(shown);
-    assert(moved[0].rect.x < columns[0].rect.x, "Left header follows real horizontal scroll");
+    assert.equal(moved[0].rect.x, columns[0].rect.x, "Compact columns fit without horizontal drift");
     assert.equal(moved[1].rect.x, columns[1].rect.x, "Right card scroll remains independent");
     assert.equal(scrolled["files.breadcrumb"].filter(shown)[0].rect.y, compact["files.breadcrumb"].filter(shown)[0].rect.y);
-    report.checks.push("Native 392×374 cards retain 490 point columns; left horizontal scroll moves its header independently and paths remain fixed; actual data clips reserve the 12 point horizontal rail");
+    report.checks.push("Native 392×374 cards fit 390 point compact columns, hide the date column and retain fixed headers and paths while rows scroll");
   });
   await run("empty", async () => {
     const nodes = await capture("03-empty-remote");
@@ -114,9 +114,9 @@ try {
     const remote = nodes["files.remote"].find(shown), all = flatten(remote);
     assert(all.some(n => n.test_id === "files.row" && shown(n)), "Original rows remain after read failure");
     const error = nodes["files.error"].find(shown);
-    assert.equal(error.rect.h, 108);
+    assert.equal(error.rect.h, 68);
     assert(flatten(error).some(n => (n.text ?? "").includes("Connection lost")));
-    report.checks.push("Actual native failed remote preserves old rows and renders the 108 point Connection lost recovery region");
+    report.checks.push("Actual native failed remote preserves old rows and renders the 68 point Connection lost recovery region");
   });
   report.status = "passed";
 } catch (error) { failure = error; report.status = "failed"; report.error = String(error); }

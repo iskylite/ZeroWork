@@ -338,6 +338,9 @@ test "AI composer effort is a real slider whose keyboard skips unsupported model
     try std.testing.expectEqual(@as(usize, 2), f.view.reasoning_count);
     for (f.view.slider_markers[0..2], 0..) |marker, index| {
         try std.testing.expectEqual(@as(f32, 4), marker.globalRect().w);
+        const label = f.view.effort_ticks[index];
+        try std.testing.expectApproxEqAbs(marker.globalRect().x + marker.globalRect().w / 2, label.globalRect().x + label.globalRect().w / 2, 0.1);
+        try std.testing.expectEqual(.center, label.getText().?.text_align);
         try std.testing.expectApproxEqAbs(f.view.slider_track.globalRect().x - 2 + @as(f32, @floatFromInt(index)) * f.view.slider_track.globalRect().w, marker.globalRect().x, 0.1);
     }
     f.cx.setFocus(f.view.slider.wrapper);
@@ -363,6 +366,34 @@ test "AI composer effort is a real slider whose keyboard skips unsupported model
     f.settle();
     try std.testing.expect(f.view.isOpen());
     try std.testing.expect(f.view.disabled[3].peek());
+}
+
+test "AI composer default effort hides selection until an explicit effort is acknowledged" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var snapshot = f.snapshot();
+    snapshot.effort = null;
+    try f.view.update(snapshot);
+    f.settle();
+    f.enter(f.view.buttons[2]);
+    try std.testing.expectEqualStrings("推理强度 默认", f.view.effort_name.getText().?.content);
+    try std.testing.expectEqual(.none, f.view.slider_thumb.style.display);
+    try std.testing.expectEqual(.flex, f.view.slider_markers[0].style.display);
+    const track = f.view.slider_track.globalRect();
+    f.cx.handleMouseDown(track.x + 0.5, track.y + track.h / 2, .{});
+    f.cx.handleMouseUp(track.x + 0.5, track.y + track.h / 2);
+    f.settle();
+    try std.testing.expectEqual(Controls.Effort.low, f.last.?.action.effort.value);
+    try std.testing.expectEqual(.none, f.view.slider_thumb.style.display);
+    snapshot.effort = .low;
+    try f.view.update(snapshot);
+    f.settle();
+    try std.testing.expectEqual(.flex, f.view.slider_thumb.style.display);
+    snapshot.effort = null;
+    try f.view.update(snapshot);
+    f.settle();
+    try std.testing.expectEqual(.none, f.view.slider_thumb.style.display);
 }
 
 test "AI composer identical polling preserves open list and Escape restores its trigger" {
@@ -701,6 +732,8 @@ test "AI composer pointer reaches every one of seven declared native efforts" {
     f.enter(f.view.buttons[2]);
     const area = f.view.slider_track.globalRect();
     for ([_]Controls.Effort{ .none, .low, .medium, .high, .xhigh, .max, .ultra }, 0..) |expected, index| {
+        const label = f.view.effort_ticks[index].globalRect();
+        try std.testing.expectApproxEqAbs(area.x + area.w * @as(f32, @floatFromInt(index)) / 6, label.x + label.w / 2, 0.1);
         const x = area.x + std.math.clamp(area.w * @as(f32, @floatFromInt(index)) / 6, 0.5, area.w - 0.5);
         f.cx.handleMouseDown(x, area.y + area.h / 2, .{});
         f.cx.handleMouseUp(x, area.y + area.h / 2);

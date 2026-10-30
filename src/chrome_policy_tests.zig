@@ -35,6 +35,22 @@ test "chromeless controls keep keyboard focus visible with fill and restore on b
         }
         try std.testing.expectEqual(resting, button.getBackground());
         try std.testing.expect(button.style.outline() == null);
+        // Mouse focus can begin while the hover transition is already painted.
+        const rect = button.globalRect();
+        cx.handleMouseMove(rect.x + rect.w / 2, rect.y + rect.h / 2);
+        for (0..20) |_| {
+            cx.advanceFrameClock();
+            _ = cx.render();
+        }
+        cx.handleMouseDown(rect.x + rect.w / 2, rect.y + rect.h / 2, .{});
+        cx.handleMouseUp(rect.x + rect.w / 2, rect.y + rect.h / 2);
+        cx.handleMouseMove(470, 150);
+        cx.clearFocus();
+        for (0..20) |_| {
+            cx.advanceFrameClock();
+            _ = cx.render();
+        }
+        try std.testing.expectEqual(resting, button.getBackground());
     }
 }
 

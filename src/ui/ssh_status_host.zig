@@ -454,7 +454,6 @@ pub const Host = struct {
         const source = self.active orelse return;
         self.hooks.capture(self.hooks.context, source.details) catch return;
         self.detail.hide();
-        self.cx.setFocus(controls.identity_button);
         self.info.show(source.connectionInfo(), controls.identity_button, controls.bar.globalRect().y) catch {};
     }
     fn showKind(self: *Host, kind: Model.Kind, trigger: *ui.Node) void {

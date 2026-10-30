@@ -666,9 +666,12 @@ pub const View = struct {
             try track_area.insertChildBefore(self.cx.allocator, tick, self.slider_thumb);
         }
         try area.appendChild(self.cx.allocator, self.slider.wrapper);
-        const ticks = try ui.box(self.cx, S.ticks(), .{});
-        for (0..8) |index| self.effort_ticks[index] = try self.label(ticks, "", S.text(9, 400, 12, true), S.label(32, 12));
-        try area.appendChild(self.cx.allocator, ticks);
+        var tick_text = S.text(9, 400, 12, true);
+        tick_text.text_align = .center;
+        for (0..8) |index| {
+            self.effort_ticks[index] = try self.label(track_area, "", tick_text, S.sliderLabel(index, 8));
+            self.effort_ticks[index].setHitTestVisible(false);
+        }
         try parent.appendChild(self.cx.allocator, area);
     }
     /// Borrowed inputs are projected to owned display data during this call.
@@ -1088,16 +1091,17 @@ pub const View = struct {
         self.labels[3].?.setStyleInline(self.cx.allocator, S.compactEffortLabel(model_width, effort_width, has_modality));
         self.chevrons[1].setStyleInline(self.cx.allocator, S.compactModelChevron(model_width, effort_width, has_modality));
         self.button_styles[2].set(S.naturalChip());
-        var selected_choice: usize = 0;
+        var selected_choice: ?usize = null;
         for (self.reasoning_choices[0..self.reasoning_count], 0..) |choice, index| {
             const selected = switch (choice) {
-                .off => !thinking_enabled,
-                .on => thinking_enabled,
+                .off => (source.?.thinking != null or current.?.thinking_default != null) and !thinking_enabled,
+                .on => (source.?.thinking != null or current.?.thinking_default != null) and thinking_enabled,
                 .effort => |value| effort != null and value == effort.? and (source.?.thinking == null or thinking_enabled),
             };
             if (selected) selected_choice = index;
         }
-        self.slider_value.set(if (self.reasoning_count > 1) @as(f32, @floatFromInt(selected_choice)) * 4 / @as(f32, @floatFromInt(self.reasoning_count - 1)) else 0);
+        self.slider_value.set(if (self.reasoning_count > 1) @as(f32, @floatFromInt(selected_choice orelse 0)) * 4 / @as(f32, @floatFromInt(self.reasoning_count - 1)) else 0);
+        self.slider_thumb.setDisplay(if (selected_choice != null) .flex else .none);
         for (0..8) |index| {
             const visible = index < self.reasoning_count;
             self.effort_ticks[index].setDisplay(if (visible) .flex else .none);
@@ -1110,6 +1114,7 @@ pub const View = struct {
                     .effort => |value| effortLabel(value),
                 });
                 self.slider_markers[index].setStyleInline(self.cx.allocator, S.sliderTick(index, self.reasoning_count));
+                self.effort_ticks[index].setStyleInline(self.cx.allocator, S.sliderLabel(index, self.reasoning_count));
             }
             self.effort_ticks[index].setTextColor(colors.fg_2);
         }

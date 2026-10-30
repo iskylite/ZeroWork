@@ -7557,21 +7557,18 @@ const AppNavHost = struct {
                 ext.inset = .{ .left = .{ .px = rect.x - parent_rect.x }, .top = .{ .px = rect.y - parent_rect.y } };
                 ai.panel.style.width = .{ .px = rect.width };
                 if (ai.card_box) |card| {
-                    card.style.width = .{ .px = rect.width };
-                    card.style.height = .{ .px = rect.height };
-                    if (ai_geometry_changed) card.markLayoutDirty();
+                    if (ai_geometry_changed) card.setStyleInline(self.allocator, .{ .width = .{ .px = rect.width }, .height = .{ .px = rect.height } });
                 }
                 if (ai.conversation_viewport) |viewport| {
-                    const desired_height = @max(0, rect.height - 54 - composer_height);
+                    // 14px grip + 34px header + 6px transcript gap + 2px card padding.
+                    const desired_height = @max(0, rect.height - 56 - composer_height);
                     if (viewport.style.height != .px or @abs(viewport.style.height.px - desired_height) > 0.5) {
-                        viewport.style.height = .{ .px = desired_height };
-                        viewport.markLayoutDirty();
+                        viewport.setStyleInline(self.allocator, .{ .height = .{ .px = desired_height } });
                     }
                 }
                 if (resize or ai_geometry_changed or position_changed) ai.panel.markLayoutDirty();
             };
-            const group_active = workspace.active_group_view != null;
-            const local_active = !group_active and if (workspace.active_tab) |index| index < workspace.tabs.items.len and workspace.isLocalSession(workspace.tabs.items[index].id) else false;
+            const local_active = if (workspace.active_tab) |index| index < workspace.tabs.items.len and workspace.isLocalSession(workspace.tabs.items[index].id) else false;
             const terminal_active = if (workspace.active_tab) |index| index < workspace.tabs.items.len and workspace.tabs.items[index].terminal != null else false;
             const status_capabilities = if (self.application_host) |application| if (workspace.active_tab) |index| if (index < workspace.tabs.items.len and workspace.tabs.items[index].content_owner == .session) application.sessions.capabilitySnapshot(workspace.tabs.items[index].content_owner.session) catch null else null else null else null;
             const route_status = if (status_capabilities) |snapshot| @import("host/actions.zig").project(.open_route_details, snapshot).visible else false;
@@ -7583,6 +7580,15 @@ const AppNavHost = struct {
             if (self.connection_details_host) |host| if (host.ssh_status.controls) |controls| {
                 controls.sidebar_width = self.quick.sidebar.width();
                 self.refreshBroadcastStatus(controls);
+                // Group status follows the focused member, including Local.
+                // Keep the same broadcast control on the visible status bar.
+                const local_status = if (local_active) self.local_status_view else null;
+                const destination = if (local_status) |view| view.root else controls.bar;
+                const anchor = if (local_status) |view| view.theme_button else controls.chain_button;
+                if (controls.broadcast_button.parent != destination) {
+                    if (controls.broadcast_button.parent) |parent| parent.removeChild(controls.broadcast_button);
+                    destination.insertChildBefore(self.allocator, controls.broadcast_button, anchor) catch {};
+                }
             };
             if (self.local_status_view) |view| {
                 view.root.setDisplay(if (local_active) .flex else .none);
@@ -10148,12 +10154,12 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const StatusPreview = @import("ui/status_hover_preview.zig").Preview;
     const status_previews = try scope.createState(@import("ui/status_hover_preview.zig").Group, .{});
     try StatusPreview.mount(cx, scope, status_previews, status_bar.controls.identity_button, details_host.ssh_status.info.chrome, details_host.ssh_status.info.open, cx.on(@import("ui/status_connection_view.zig").View, details_host.ssh_status.info, @import("ui/status_connection_view.zig").View.dismiss));
-    try StatusPreview.mount(cx, scope, status_previews, status_bar.chain_trigger, details_host.view.chrome, details_host.view.open, cx.on(@import("ui/connection_details_view.zig").View, details_host.view, @import("ui/connection_details_view.zig").View.hide));
+    try StatusPreview.mount(cx, scope, status_previews, status_bar.chain_trigger, details_host.view.chrome, details_host.view.open, cx.on(@import("ui/connection_details_view.zig").View, details_host.view, @import("ui/connection_details_view.zig").View.dismiss));
     try StatusPreview.mount(cx, scope, status_previews, status_bar.socks_chip, socks_info.root, socks_info.open, cx.on(@import("ui/socks_info_view.zig").View, socks_info, @import("ui/socks_info_view.zig").View.hide));
     for ([_]*ui.Node{ status_bar.controls.theme_button, local_status.theme_button }) |trigger| {
-        try StatusPreview.mount(cx, scope, status_previews, trigger, theme_picker.chrome, theme_picker.open, cx.on(@import("ui/status_theme_view.zig").View, theme_picker, @import("ui/status_theme_view.zig").View.hide));
+        try StatusPreview.mount(cx, scope, status_previews, trigger, theme_picker.chrome, theme_picker.open, cx.on(@import("ui/status_theme_view.zig").View, theme_picker, @import("ui/status_theme_view.zig").View.dismiss));
     }
-    try StatusPreview.mount(cx, scope, status_previews, local_status.identity_button, status_detail.chrome, status_detail.open, cx.on(@import("ui/status_detail_view.zig").View, status_detail, @import("ui/status_detail_view.zig").View.hide));
+    try StatusPreview.mount(cx, scope, status_previews, local_status.identity_button, status_detail.chrome, status_detail.open, cx.on(@import("ui/status_detail_view.zig").View, status_detail, @import("ui/status_detail_view.zig").View.dismiss));
     for ([_]*ui.Node{ background_socks.view.remote_entry, background_socks.view.local_entry }) |trigger| {
         try StatusPreview.mount(cx, scope, status_previews, trigger, background_socks.view.popover.chrome, background_socks.view.popover.open.?, background_socks.view.popover.close);
     }

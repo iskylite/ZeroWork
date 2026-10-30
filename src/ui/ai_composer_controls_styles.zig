@@ -122,8 +122,15 @@ pub fn sliderTick(index: usize, count: usize) ui.BoxStyle {
 pub fn sliderThumb() ui.BoxStyle {
     return .{ .background = theme.current().accent, .border = .{ .width = 0, .radius = 6 }, .shadow = .{ .color = ui.Color.TRANSPARENT } };
 }
-pub fn ticks() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 12 }, .direction = .row, .justify = .space_between, .align_items = .center, .flex_shrink = 0 };
+pub fn sliderLabel(index: usize, count: usize) ui.BoxStyle {
+    var result = sliderTick(index, count);
+    result.inset.?.top = .{ .px = 12 };
+    result.margin.?.left = -16;
+    result.width = .{ .px = 32 };
+    result.height = .{ .px = 12 };
+    result.background = ui.Color.TRANSPARENT;
+    result.border = .{};
+    return result;
 }
 pub fn usageRow() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 };

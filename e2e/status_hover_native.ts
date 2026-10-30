@@ -5,7 +5,7 @@ import {mkdir,mkdtemp,realpath,copyFile,readFile,writeFile,open,rm} from 'node:f
 import {join,resolve} from 'node:path';
 import {tmpdir} from 'node:os';
 import {createHash} from 'node:crypto';
-import {waitForServerReady,waitFor,query,clickAt,key,type_,resizeWindow,screenshot,sleep,scrollAt,mouseDown,mouseMove,mouseUp} from '../zig-out/share/zenit/harness/client.ts';
+import {waitForServerReady,waitFor,query,focused,clickAt,key,type_,resizeWindow,screenshot,sleep,scrollAt,mouseDown,mouseMove,mouseUp} from '../zig-out/share/zenit/harness/client.ts';
 const out=resolve(process.argv[2]),source=resolve(process.argv[3]);await mkdir(out,{recursive:false});
 const iso=await realpath(await mkdtemp(join(tmpdir(),'zw-builtin-records-'))),rpc=join(iso,'rpc'),data=join(iso,'data'),shell=join(iso,'shell');
 // Always remove this run's sandbox, including setup and reporting failures.
@@ -34,10 +34,14 @@ try{
  async function checkEntries(cases:string[][]){
  for(const [triggerId,panelId] of cases){
   const t=await vis(triggerId);const x=t.rect.x+t.rect.w/2,y=t.rect.y+t.rect.h/2;
+  const focusBefore=(await focused()).id;
   await mouseMove(x,y);let panel=await vis(panelId);await sleep(200);
+  assert.equal((await focused()).id,focusBefore,'Hover opening must preserve keyboard focus for '+triggerId);
   await capture(triggerId.replaceAll('.','-')+'-hover');
   await mouseMove(panel.rect.x+panel.rect.w/2,panel.rect.y+25);await sleep(250);await vis(panelId);
   await mouseMove(700,300);await hidden(panelId);
+  assert.notEqual((await focused()).test_id,triggerId,'Hover dismissal must not focus '+triggerId+' and leave a filled focus background');
+  await capture(triggerId.replaceAll('.','-')+'-hover-dismissed');
   await mouseMove(x,y);await vis(panelId);await click(triggerId);await mouseMove(700,300);await sleep(350);await vis(panelId);
   const other=await vis(triggerId.startsWith('local.')?(triggerId==='local.status.theme'?'local.status.identity':'local.status.theme'):(triggerId==='status.connection.theme'?'status.connection.identity':'status.connection.theme'));await mouseMove(other.rect.x+other.rect.w/2,other.rect.y+other.rect.h/2);await sleep(250);await vis(panelId);
   await press('escape');await hidden(panelId);await mouseMove(700,300);
@@ -45,8 +49,25 @@ try{
  }
  }
  await checkEntries(cases);
+ const transfer=await vis('status.transfer');
+ await mouseMove(transfer.rect.x+transfer.rect.w/2,transfer.rect.y+transfer.rect.h/2);await sleep(300);
+ await mouseMove(700,300);await hidden('transfer.session');
+ assert.notEqual((await focused()).test_id,'status.transfer','Transfer hover must not focus its trigger');
+ await capture('status-transfer-hover-dismissed');
+ report.checks.push('status.transfer: idle hover and leave do not retain its panel or focus its trigger');
  await click('toolbar.new_session');await click('session.menu.local');await vis('local.status.identity');await mouseMove(700,300);
  await checkEntries([['local.status.identity','status.detail',''],['local.status.theme','status.theme','']]);
+ await click('terminal.surface');await key('d',{cmd:true});
+ await waitFor(async()=>content(await vis('local.status.identity')).includes('运行中')||null,15000);
+ await vis('status.group.broadcast');
+ assert(content(await vis('local.statusbar')).includes('运行中'));
+ await capture('local-group-status-wide');await resizeWindow(860,480);await sleep(180);
+ const broadcast=await vis('status.group.broadcast');assert(broadcast.rect.x>=0&&broadcast.rect.x+broadcast.rect.w<=860);
+ await capture('local-group-status-compact');await resizeWindow(1440,900);
+ const sshTab=(await query('tabs.strip')).flatMap(function flat(n:any):any[]{return [n,...(n.children??[]).flatMap(flat)]}).find(n=>/^tabs\.tab\.\d+$/.test(n.test_id??'')&&content(n).includes('Owned records SSH'));
+ assert(sshTab);assert((await clickAt(sshTab.rect.x+sshTab.rect.w/2,sshTab.rect.y+sshTab.rect.h/2)).ok);await vis('status.connection.identity');await hidden('local.statusbar');
+ await click('groups.tab');await vis('local.status.identity');await vis('status.group.broadcast');
+ report.checks.push('Local group follows its focused member, retains broadcast in compact layout, and restores the correct bar across SSH/group tab switches');
  report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await capture('failure').catch(()=>{});process.exitCode=1}
 finally{if(app.exitCode===null&&app.signalCode===null){app.kill('SIGTERM');await Promise.race([ended,sleep(3000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await ended}}peer.kill('SIGTERM');await Promise.race([peerEnded,sleep(3500)]);await peerLog.close();await log.close();await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));}

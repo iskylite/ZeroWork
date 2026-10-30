@@ -56,7 +56,10 @@ pub const Preview = struct {
             if (!pinned.open.peek()) self.group.pinned = null;
         }
         if (inside and !shown and !self.suppressed and self.group.pinned == null) {
+            // Reuse click actions without their keyboard focus side effects.
+            const focus = if (self.cx.focus_manager.current_focus) |node| self.cx.node_registry.handleFor(node) else null;
             self.action.invoke();
+            if (self.cx.node_registry.resolve(focus, null)) |node| self.cx.setFocus(node) else self.cx.clearFocus();
             self.preview = self.open.peek();
             self.pinned = false;
             self.suppressed = !self.preview;
