@@ -130,3 +130,12 @@ playwright-report/
 /docs/UI_V3/assets/design-records/
 /docs/UI_V3/connection/preview.svg
 /docs/UI_V3/settings/preview.svg
+
+# Ghostty App resources excluded from the VT-only consumer snapshot.
+/vendor/libghostty-vt/images/
+/vendor/libghostty-vt/macos/Assets.xcassets/
+/vendor/libghostty-vt/src/font/res/*
+!/vendor/libghostty-vt/src/font/res/README.md
+!/vendor/libghostty-vt/src/font/res/OFL.txt
+!/vendor/libghostty-vt/src/font/res/MIT.txt
+!/vendor/libghostty-vt/src/font/res/BSD-2-Clause.txt

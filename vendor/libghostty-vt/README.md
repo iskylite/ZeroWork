@@ -1,3 +1,8 @@
+> ZeroWork vendors this tree for the libghostty-vt C ABI. Full Ghostty App
+> icons and font binaries are omitted according to the upstream VT distribution
+> exclusions; see [ZeroWork's dependency contract](../DEPENDENCIES.md#ghostty-vt).
+> Restore those upstream resources before using the full-App instructions below.
+
 <!-- LOGO -->
 <h1>
 <p align="center">

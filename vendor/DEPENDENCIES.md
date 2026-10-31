@@ -29,29 +29,25 @@ Local adaptations are included in the canonical hash: optional independent Selec
 
 Terminal acceptance additionally extends only the compile-time test Harness: mouse requests can specify left/middle/right buttons and key names resolve the existing KeyCode enum, allowing F1–F12 and editing keys through the production dispatcher. No VT injection or screen-state override is added; formal builds retain their existing automation boundary. No toolchain or license changes.
 
-## Planned VT dependency
+## Ghostty VT
 
-- Preferred upstream: https://github.com/ghostty-org/ghostty
-- Tag: `v1.3.1`
-- Revision: `332b2aefc6e72d363aa93ab6ecfc86eeeeb5ed28`
-- Module: `ghostty-vt`
-- Minimum Zig: `0.17.0`
-- License: MIT
-- Status: official `zig-0.17` branch is vendored under `vendor/libghostty-vt` at `af7fd981e4d9c2af8ab897f5ce86afb982e4e546`; native `zig build -Demit-lib-vt -Dtarget=aarch64-macos.14.0 -Demit-xcframework=false` succeeds with the available uucode dependency cache. ZeroWork adapter/build integration remains the next gate.
-
-### Vendored fallback: libvterm
-
-- Version: `0.3.3`
-- Upstream archive: `https://www.leonerd.org.uk/code/libvterm/libvterm-0.3.3.tar.gz`
-- Archive SHA-256: `09156f43dd2128bd347cbeebe50d9a571d32c64e0cf18d211197946aff7226e0`
-- License: MIT
-- Status: verified archive extracted under `vendor/libvterm/`; compiled directly as a C99 static library by `build.zig`.
-
-### Primary VT migration status
-
-- Ghostty upstream was downloaded from `https://github.com/ghostty-org/ghostty` at commit `246f702876b924a1cb7cade1e99274d1470302fc` into `vendor/libghostty-vt` for the requested primary-engine migration.
-- Ghostty exposes the intended public `libghostty-vt` C headers and static-library build through `zig build -Demit-lib-vt`; it currently requires additional Zig 0.17 build-system porting in its own dependency packages (`libxml2`, `apple-sdk`, `translate-c`, and `aro`).
-- The current ZeroWork build remains green on the validated libvterm fallback while this vendored Ghostty port is isolated. It is not claimed as integrated until the Ghostty static library builds with Zig 0.17 and the VtEngine adapter is switched and tested.
+- Upstream: https://github.com/ghostty-org/ghostty
+- Vendored revision: `af7fd981e4d9c2af8ab897f5ce86afb982e4e546` (`zig-0.17`)
+- Module: `ghostty-vt`; minimum Zig: `0.17.0`; license: MIT.
+- ZeroWork uses the public C ABI in `include/ghostty/vt.h` and the pinned
+  `libghostty-vt.a` as its sole VT engine. `build.zig` links this archive for the
+  application and the consumer tests; the full Ghostty GUI is not a dependency.
+- This is a VT consumer snapshot: full-App icons in `images/` and
+  `macos/Assets.xcassets/`, and font binaries in `src/font/res/` are omitted.
+  These paths are included in upstream `src/build/GhosttyDist.zig`'s
+  `lib_vt_excludes`, which identifies resources not needed to build or test VT.
+- VT sources, C headers, the static archive, terminal test fixtures and license
+  texts are retained. Font attribution and OFL/MIT/BSD notices remain under
+  `src/font/res/`; ZeroWork's UI fonts remain under `docs/UI_V3/assets/fonts/`.
+- To rebuild VT from upstream sources, use the fixed dependencies declared in
+  its `build.zig.zon` and the `-Demit-lib-vt` build mode. Full Ghostty App and
+  font-renderer builds require restoring the omitted upstream resources.
+  Dependency hash checks must remain enabled when resolving its packages.
 
 ## Planned SSH dependencies
 

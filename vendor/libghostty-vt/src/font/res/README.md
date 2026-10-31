@@ -1,5 +1,11 @@
 # Fonts and Licenses
 
+ZeroWork consumes only libghostty-vt. The font binaries used by the full
+Ghostty application and its font-rendering tests are omitted from this snapshot,
+following `src/build/GhosttyDist.zig`'s `lib_vt_excludes` contract. The license
+texts and upstream attribution below are retained; ZeroWork's UI fonts are
+maintained separately under `docs/UI_V3/assets/fonts/`.
+
 This project uses several fonts which fall under the SIL Open Font License (OFL-1.1), MIT License, and BSD 2-Clause License:
 
 - Code New Roman (OFL-1.1)
