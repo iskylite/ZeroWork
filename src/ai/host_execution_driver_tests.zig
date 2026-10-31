@@ -177,6 +177,82 @@ const Tool = struct {
     }
 };
 
+test "execution driver settles released command while next SSH prompt or human draft is not ready" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(path);
+    const journal = try runtime.ProcessJournal.acquire(.{ .data_root = path, .path = "prompt-release.json", .dir = tmp.dir, .io = std.testing.io });
+    defer journal.release();
+    var pump: Pump = .{};
+    var backend: Backend = .{ .ui_thread = std.Thread.getCurrentId(), .targets = undefined, .output_scope = .session_interval };
+    for (&backend.targets, 0..) |*target, index| target.* = .{ .snapshot = .{ .owner = .{ .session_id = @fromBackingInt(index + 1), .generation = 1 }, .state = .idle, .interactive_execution = true, .input_epoch = 1 } };
+    const driver = try driver_mod.Driver.start(a, journal, .{ .context = &pump, .call = Pump.schedule }, .{ .context = &backend, .authorize = Backend.authorize, .resolve = Backend.resolve, .terminal_call = Backend.call });
+    defer {
+        driver.requestShutdown();
+        while (!driver.shutdownReady()) {
+            pump.pump();
+            pause();
+        }
+        driver.finish() catch unreachable;
+    }
+    const context: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    const raw = "{\"session_ref\":\"0\",\"command\":\"true\",\"request_key\":\"prompt-release\"}";
+    var parsed = try std.json.parseFromSlice(std.json.Value, a, raw, .{});
+    defer parsed.deinit();
+    var result = try Tool.execute(driver, &pump, .{ .context = context, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "prompt-release", .tool_id = "host.run_in_terminal", .arguments = parsed.value, .arguments_json = raw, .arguments_hash = @splat(1), .canonical_arguments_hash = @splat(2) });
+    defer result.deinit(a);
+    const snapshot = &backend.targets[0].snapshot;
+    const id = snapshot.execution_id.?;
+    snapshot.completion_source = .shell_reported;
+    snapshot.state = .process_finished;
+    snapshot.grant = null;
+    snapshot.input_ready = false;
+    snapshot.local_released = false; // native input has not drained yet
+    snapshot.recording_settled = false;
+    snapshot.process = .{ .exit_code = 0, .foreground_finished = true };
+    snapshot.revision += 1;
+    try driver.finishTask(context);
+    var deadline = now() + 3000;
+    while (true) {
+        pump.pump();
+        if (driver.taskEvidence(context.task_id)) |fact| if (fact.model_done and fact.active_executions == 1) {
+            try std.testing.expect(!fact.input_grants_released and !fact.executions_settled);
+            break;
+        };
+        if (now() > deadline) return error.DrainEvidenceMissing;
+        pause();
+    }
+    snapshot.local_released = true;
+    snapshot.recording_settled = false;
+    snapshot.revision += 1;
+    deadline = now() + 3000;
+    while (true) {
+        pump.pump();
+        if (driver.taskEvidence(context.task_id)) |fact| if (fact.input_grants_released and !fact.recordings_settled) {
+            try std.testing.expect(!fact.executions_settled);
+            break;
+        };
+        if (now() > deadline) return error.RecordingEvidenceMissing;
+        pause();
+    }
+    snapshot.state = .interval_recorded;
+    snapshot.recording_settled = true;
+    snapshot.revision += 1;
+    deadline = now() + 3000;
+    while (true) {
+        pump.pump();
+        if (driver.taskEvidence(context.task_id)) |fact| if (fact.executions_settled) {
+            try std.testing.expect(fact.model_done and fact.input_grants_released and fact.recordings_settled and fact.active_references == 0 and !fact.cleanup_pending);
+            const input = driver.executionInputEvidence(context, id) orelse return error.InputEvidenceMissing;
+            try std.testing.expect(input.local_released and !input.has_grant and !input.input_ready);
+            break;
+        };
+        if (now() > deadline) return error.TaskSettlementBlockedByPrompt;
+        pause();
+    }
+}
+
 test "execution driver precise input takeover preserves Task and read-only observation without interruption" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();

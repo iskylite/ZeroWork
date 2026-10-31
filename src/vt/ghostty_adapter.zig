@@ -13,6 +13,7 @@ const snapshot_model = @import("snapshot.zig");
 const view_types = @import("viewport.zig");
 const ViewStore = @import("ghostty_view.zig").Store;
 const RowMetadata = @import("row_metadata.zig");
+const CommandMetadata = @import("command_metadata.zig");
 fn wallClockMs() i64 {
     return @import("../platform/realtime.zig").milliseconds(undefined);
 }
@@ -30,6 +31,7 @@ pub const Adapter = struct {
     cells: []Cell,
     view_store: ViewStore,
     row_metadata: RowMetadata.Store,
+    command_metadata: CommandMetadata.Store,
     wall_clock_ms: *const fn () i64 = wallClockMs,
     /// Last shell-reported working directory. Owned by the adapter and only
     /// replaced while `mutex` is held (the Ghostty callback runs inline from
@@ -77,7 +79,7 @@ pub const Adapter = struct {
         errdefer c.ghostty_render_state_free(state);
         const cells = try allocator.alloc(Cell, @as(usize, rows) * cols);
         @memset(cells, Cell.blank());
-        return .{ .allocator = allocator, .terminal = terminal, .render_state = state, .rows = rows, .cols = cols, .cells = cells, .modes = projection.modes(terminal), .view_store = .{ .allocator = allocator }, .row_metadata = .{ .allocator = allocator } };
+        return .{ .allocator = allocator, .terminal = terminal, .render_state = state, .rows = rows, .cols = cols, .cells = cells, .modes = projection.modes(terminal), .view_store = .{ .allocator = allocator }, .row_metadata = .{ .allocator = allocator }, .command_metadata = .{ .allocator = allocator } };
     }
 
     /// Zero means unlimited. Ghostty uses a null pointer for unlimited;
@@ -99,6 +101,7 @@ pub const Adapter = struct {
         self.replies.deinit(self.allocator);
         self.view_store.deinit();
         self.row_metadata.deinit();
+        self.command_metadata.deinit();
         self.allocator.free(self.cells);
         c.ghostty_render_state_free(self.render_state);
         c.ghostty_terminal_free(self.terminal);
@@ -164,6 +167,7 @@ pub const Adapter = struct {
             else => return,
         };
         const text = if (event.command.ptr != null) event.command.ptr[0..event.command.len] else "";
+        self.command_metadata.observe(self.terminal, self.rows, self.cols, kind, text, if (event.has_exit_code) event.exit_code else null, self.wall_clock_ms(), localMonotonicNs());
         self.recordEvent(kind, text, if (event.has_exit_code) event.exit_code else null);
         if (self.osc_callback) |callback| {
             callback(.{ .semantic = .{ .sequence = self.event_sequence, .kind = kind, .text = text, .exit_code = if (event.has_exit_code) event.exit_code else null } });
@@ -207,6 +211,38 @@ pub const Adapter = struct {
         defer self.mutex.unlock();
         if (self.cwd_owned) |value| self.allocator.free(value);
         self.cwd_owned = null;
+    }
+
+    /// Called by the transport owner only for an execution it actually submits.
+    /// The next primary C consumes this association once and requires an exact
+    /// match with the complete command observed by Ghostty.
+    pub fn registerAiSubmission(self: *Adapter, execution_id: @import("../host/identity.zig").ExecutionId, command: []const u8) !void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.mutex.unlock();
+        try self.command_metadata.registerAiSubmission(execution_id, command);
+    }
+
+    pub fn cancelAiSubmission(self: *Adapter, execution_id: @import("../host/identity.zig").ExecutionId) void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.mutex.unlock();
+        self.command_metadata.cancelAiSubmission(execution_id);
+    }
+
+    /// Call before changing recording generation so observers retain the old
+    /// shell's unknown completion with that shell's existing recording identity.
+    pub fn abandonCommands(self: *Adapter) void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.mutex.unlock();
+        self.command_metadata.abandon(self.terminal, self.cols);
+        self.refreshVersions();
+    }
+
+    /// Observer runs inline with native parsing while this adapter is guarded.
+    /// Its command text is borrowed and it must not call back into the adapter.
+    pub fn setCommandObserver(self: *Adapter, observer: ?engine.CommandObserver) void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.mutex.unlock();
+        self.command_metadata.observer = observer;
     }
 
     fn onPwdChanged(_: c.GhosttyTerminal, userdata: ?*anyopaque) callconv(.c) void {

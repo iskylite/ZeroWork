@@ -12,6 +12,7 @@ pub const Action = enum {
     toggle_block_selection,
     toggle_timestamp,
     history,
+    command_history,
     search,
     export_selection,
     new_tab,
@@ -66,6 +67,7 @@ fn catalogAction(action: Action) ?actions.ActionId {
         .toggle_block_selection, .search => .search_terminal,
         .toggle_timestamp => .toggle_timestamp,
         .history => .open_history,
+        .command_history => .open_history,
         .export_selection, .export_session => .export_record,
         .new_tab, .reuse_connection => .create_sibling_session,
         .edit_host => .edit_connection,
@@ -144,6 +146,7 @@ const local_tab = [_]Item{
     .{ .action = .clone_session, .label = "复制会话与目录", .icon = "copy" },
     .{ .action = .rename_tab, .label = "重命名", .icon = "pencil", .shortcut = "⌘⇧R" },
     .{ .action = .tab_color, .label = "页签颜色", .icon = "palette" },
+    .{ .action = .command_history, .label = "命令历史", .icon = "list-restart", .shortcut = "⇧⌘B" },
     .{ .action = .history, .label = "当前会话历史", .icon = "history" },
     .{ .action = .search, .label = "搜索终端", .icon = "search", .shortcut = "⌘F" },
     .{ .action = .export_session, .label = "导出会话记录", .icon = "download" },
@@ -155,6 +158,7 @@ const local_terminal = [_]Item{
     .{ .action = .toggle_block_selection, .label = "矩形选择：⌥ + 拖拽", .icon = "text-select", .separator_before = true },
     .{ .action = .toggle_timestamp, .label = "时间戳", .icon = "clock" },
     .{ .action = .open_theme, .label = "全局主题", .icon = "palette" },
+    .{ .action = .command_history, .label = "命令历史", .icon = "list-restart", .shortcut = "⇧⌘B" },
     .{ .action = .history, .label = "当前会话历史", .icon = "history" },
     .{ .action = .search, .label = "在终端中搜索", .icon = "search", .shortcut = "⌘F", .separator_before = true },
     .{ .action = .export_selection, .label = "导出选中内容…", .icon = "download" },
@@ -163,14 +167,15 @@ const local_terminal = [_]Item{
 test "local menus expose current local capabilities without remote or future operations" {
     for ([_]Kind{ .tab, .session_ended }) |kind| {
         const list = items(kind, .{ .local_session = true });
-        try std.testing.expectEqual(@as(usize, 8), list.len);
+        try std.testing.expectEqual(@as(usize, 9), list.len);
         try std.testing.expectEqual(Action.new_tab, list[0].action);
         try std.testing.expectEqual(Action.clone_session, list[1].action);
         try std.testing.expect(list[1].shortcut == null);
         try std.testing.expectEqual(Action.tab_color, list[3].action);
-        try std.testing.expectEqual(Action.history, list[4].action);
-        try std.testing.expectEqual(Action.search, list[5].action);
-        try std.testing.expectEqual(Action.export_session, list[6].action);
+        try std.testing.expectEqual(Action.command_history, list[4].action);
+        try std.testing.expectEqual(Action.history, list[5].action);
+        try std.testing.expectEqual(Action.search, list[6].action);
+        try std.testing.expectEqual(Action.export_session, list[7].action);
         for (list) |item| try std.testing.expect(item.action != .edit_host and item.action != .view_jump_chain and item.action != .reconnect);
     }
     const context: Context = .{ .local_session = true };
@@ -180,9 +185,10 @@ test "local menus expose current local capabilities without remote or future ope
     try std.testing.expect(isEnabled(.copy, .{ .local_session = true, .read_only = true, .has_selection = true }));
     try std.testing.expect(!isEnabled(.export_selection, context));
     const terminal = items(.terminal, context);
-    try std.testing.expectEqual(Action.history, terminal[5].action);
-    try std.testing.expectEqual(Action.search, terminal[6].action);
-    try std.testing.expectEqual(Action.export_selection, terminal[7].action);
+    try std.testing.expectEqual(Action.command_history, terminal[5].action);
+    try std.testing.expectEqual(Action.history, terminal[6].action);
+    try std.testing.expectEqual(Action.search, terminal[7].action);
+    try std.testing.expectEqual(Action.export_selection, terminal[8].action);
 }
 
 test "new-window action stays unavailable until shared application host supports it" {
@@ -198,6 +204,7 @@ const terminal_selection = [_]Item{
     .{ .action = .download_file, .label = "下载文件", .icon = "download" },
     .{ .action = .toggle_block_selection, .label = "矩形块选模式", .icon = "▭", .shortcut = "⌥+拖拽", .separator_before = true },
     .{ .action = .toggle_timestamp, .label = "时间戳侧栏", .icon = "🕐", .shortcut = "@ts" },
+    .{ .action = .command_history, .label = "命令历史", .icon = "list-restart", .shortcut = "⇧⌘B" },
     .{ .action = .history, .label = "历史回溯", .icon = "📜", .shortcut = "@log" },
     .{ .action = .search, .label = "在终端中搜索", .icon = "🔍", .shortcut = "⌘F", .separator_before = true },
     .{ .action = .export_selection, .label = "导出选中内容…", .icon = "⇪" },
@@ -211,6 +218,7 @@ const terminal_empty = [_]Item{
     .{ .action = .download_file, .label = "下载文件", .icon = "download" },
     .{ .action = .toggle_block_selection, .label = "矩形块选模式", .icon = "▭", .shortcut = "⌥+拖拽", .separator_before = true },
     .{ .action = .toggle_timestamp, .label = "时间戳侧栏", .icon = "🕐", .shortcut = "@ts" },
+    .{ .action = .command_history, .label = "命令历史", .icon = "list-restart", .shortcut = "⇧⌘B" },
     .{ .action = .history, .label = "历史回溯", .icon = "📜", .shortcut = "@log" },
     .{ .action = .search, .label = "在终端中搜索", .icon = "🔍", .shortcut = "⌘F", .separator_before = true },
     .{ .action = .export_selection, .label = "导出选中内容…", .icon = "⇪" },
@@ -256,7 +264,7 @@ test "menu actions respect selection and session context" {
 test "context menus keep terminal and host actions separate" {
     const terminal = items(.terminal, .{});
     const host = items(.host_asset, .{});
-    try std.testing.expectEqual(@as(usize, 10), terminal.len);
+    try std.testing.expectEqual(@as(usize, 11), terminal.len);
     try std.testing.expectEqual(Action.copy, terminal[1].action);
     try std.testing.expectEqual(Action.new_tab, host[0].action);
     try std.testing.expect(host[7].danger);

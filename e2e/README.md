@@ -55,7 +55,7 @@ App历史自动提示专项：构建最新test-mode二进制后，运行 `node e
 
 传输浅卡片与关闭专项使用 `zig build transfer-controls-preview -Dtest-mode=true -Dtransfer-preview-presentation=global_popover`（另可选`session_popover`、`session_tray`），然后 `node e2e/transfer_controls_native.ts /absolute/bin/transfer-controls-preview /tmp/transfer-controls-new-run fixture`；tray模式用末参数`tray`，正式应用关闭检查用正式test-mode二进制及末参数`main`。该fixture复用生产renderer和按钮，仅使用合成任务。必须检查76px卡片（84px排列节距、3px进度）主行及元信息完整可见、默认不显示复选框、管理后选择、按钮直接展开、450ms hover分组详情及完成上传复制路径、SFTP按owner及上传/下载方向分列、无任务隐藏且不占位、卡片之间无细线分割、X后面板隐藏及重新打开后的第二次关闭，不能只验发送click成功。
 
-通用结构回归：`zig build test-ui -Dui-test-filter='UI constraints' -j2`。其他模块专项及未通过边界见[按钮与尺寸审计](../docs/DEVELOPMENT/UI_CONTROL_AUDIT_20261026.md)，不能将单个runner通过称为所有操作全绿。
+通用结构回归：`zig build test-ui -Dui-test-filter='UI constraints' -j2`。其他模块专项及未通过边界见，不能将单个runner通过称为所有操作全绿。
 
 ## 私有实机输入与证据
 
@@ -63,7 +63,7 @@ App历史自动提示专项：构建最新test-mode二进制后，运行 `node e
 
 AI gateway 专项默认跳过；明确开启后必须同时提供 `ZEROWORK_AI_GATEWAY_KEY`、`ZEROWORK_AI_GATEWAY_MODEL`、`ZEROWORK_AI_GATEWAY_CHAT_ENDPOINT` 与 `ZEROWORK_AI_GATEWAY_MODELS_ENDPOINT`。这些只供独立测试进程使用，不是正式 App 配置入口。`v02_grok_gateway.py` 从仓库外 mode-600 配置加载单个 Grok 模型，不使用隐式网关或模型回退。
 
-截图、节点树、运行日志和私有配置保存在仓库外的临时目录，验收后清理，不提交。当前 V3 原型结论与 App 尚未完整同步的边界见[版本状态](../docs/DEVELOPMENT/V0.2_STATUS.md)。
+截图、节点树、运行日志和私有配置保存在仓库外的临时目录，验收后清理，不提交。当前 V3 原型结论与 App 尚未完整同步的边界见。
 
 ## 保留的旧认证组件与端口转发回归
 

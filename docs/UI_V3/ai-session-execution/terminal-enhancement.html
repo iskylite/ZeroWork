@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>ZeroWork · 终端状态与命令历史</title>
+  <link rel="stylesheet" href="../theme-tokens.css">
+  <link rel="stylesheet" href="terminal-enhancement.css?v=20261031-r6">
+</head>
+<body data-theme="dark">
+<main id="app" aria-label="ZeroWork 终端设计原型">
+  <header class="window-title">
+    <div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div>
+    <div class="session-tabs" role="tablist" aria-label="会话">
+      <button class="session-tab" data-mode="local" role="tab" aria-selected="false"><span data-icon="terminal"></span>本地终端<span class="tab-kind">zsh</span></button>
+      <button class="session-tab active" data-mode="ssh" role="tab" aria-selected="true"><span data-icon="server"></span>staging-01<span class="tab-kind">SSH</span><span data-icon="x" class="tab-close"></span></button>
+    </div>
+    <button class="icon-button" aria-label="新建会话（展示）" data-icon="plus"></button>
+    <div class="title-actions"><button class="icon-button" aria-label="回看日志（展示）" data-icon="clock"></button><button class="icon-button" aria-label="文件传输（展示）" data-icon="transfer"></button><button class="icon-button" aria-label="AI 助手（展示）" data-icon="sparkles"></button><button class="icon-button" id="display-settings" aria-label="终端显示设置" data-icon="settings" title="终端显示设置"></button></div>
+  </header>
+  <div class="workspace">
+    <aside class="host-sidebar" aria-label="主机与连接">
+      <div class="sidebar-heading"><span data-icon="server"></span><strong>主机与连接</strong><span class="spacer"></span><button class="icon-button" aria-label="搜索主机（展示）" data-icon="search"></button><button class="icon-button" aria-label="添加主机（展示）" data-icon="plus"></button></div>
+      <div class="host-group"><div class="group-title">开发环境 <span>2</span></div><button class="host-item selected" data-mode="ssh"><span data-icon="server"></span><span><strong>staging-01</strong><small>ops · 192.0.2.18</small></span></button><div class="host-item"><span data-icon="server"></span><span><strong>build-01</strong><small>builder · 192.0.2.24</small></span></div></div>
+      <div class="host-group"><div class="group-title">本机</div><button class="host-item" data-mode="local"><span data-icon="terminal"></span><span><strong>本地终端</strong><small>zsh · ~/ZeroWork</small></span></button></div>
+      <div class="spacer"></div><button class="new-connection"><span data-icon="plus"></span>新建连接</button>
+    </aside>
+    <section class="terminal-pane content" id="terminal-pane" aria-label="SSH 终端">
+      <div class="terminal-scroll" id="terminal-scroll" tabindex="0" aria-label="终端内容；中键打开菜单，输入 @ 打开内置指令">
+        <div class="terminal-document" id="terminal-document">
+          <div id="terminal-gutter" class="terminal-gutter" aria-label="命令状态与时间；不属于终端文本"></div>
+          <pre id="terminal-text" aria-label="原始终端文本"></pre>
+          <div id="command-metadata-layer" class="command-metadata-layer" aria-hidden="true"></div>
+        </div>
+      </div>
+      <div class="ai-control" id="ai-control"><span class="ai-control-badge"><span data-icon="sparkles"></span>AI 控制 • 只读</span><button id="takeover">接管</button></div>
+      <div class="history-edge" id="history-edge" aria-hidden="true"></div>
+      <aside class="history-float" id="command-history" aria-label="命令历史" data-open="closed" hidden>
+        <div class="history-heading"><span data-icon="list-clock"></span><strong>命令历史</strong><span class="spacer"></span><button class="icon-button" id="close-history" aria-label="关闭命令历史" data-icon="x"></button></div>
+        <div class="history-context"><span id="history-session">staging-01</span><span>5 条</span></div>
+        <div class="history-list" id="history-list"></div>
+      </aside>
+      <div class="command-detail" id="command-detail" role="tooltip" hidden></div>
+      <div class="middle-menu" id="middle-menu" role="menu" aria-label="终端菜单" hidden>
+        <button role="menuitem" id="copy-output"><span data-icon="copy"></span>复制终端输出</button>
+        <button role="menuitem" id="history-menu-action"><span data-icon="list-clock"></span><span id="history-menu-label">显示命令历史</span></button>
+        <button role="menuitem" id="builtin-menu-action"><span data-icon="terminal"></span>内置指令<span class="menu-shortcut">@</span></button>
+      </div>
+      <div class="builtin-palette" id="builtin-palette" hidden><div class="builtin-input-wrap"><span data-icon="terminal"></span><input id="builtin-input" aria-label="内置指令" placeholder="@history on / @history off" autocomplete="off" spellcheck="false"></div><button data-builtin="@history on"><code>@history on</code><span>显示命令历史</span></button><button data-builtin="@history off"><code>@history off</code><span>隐藏命令历史</span></button></div>
+    </section>
+  </div>
+  <footer class="window-status">
+    <button class="icon-button" id="sidebar-toggle" aria-label="隐藏主机与连接" title="主机与连接" data-icon="panel-left"></button>
+    <span class="connection-state"><span class="online-dot"></span><span id="connection-label">SSH 已连接</span><span class="latency" id="latency">18 ms</span></span><span>UTF-8</span><span id="grid-size">128 × 35</span>
+    <span class="spacer"></span><button class="status-action" data-icon="network">连接链路</button><button class="status-action" data-icon="plug">端口转发</button><button class="icon-button" aria-label="全局主题（展示）" data-icon="palette"></button>
+    <button class="icon-button history-button" id="open-history" aria-label="打开命令历史" aria-controls="command-history" aria-expanded="false" title="命令历史 · ⇧⌘B" data-icon="list-clock"></button>
+  </footer>
+  <div id="feedback" class="feedback" role="status" aria-live="polite"></div>
+  <div id="settings-shade" class="settings-shade" hidden>
+    <section class="display-dialog" role="dialog" aria-modal="true" aria-labelledby="display-dialog-title">
+      <header><span id="dialog-symbol" data-icon="settings"></span><strong id="display-dialog-title">终端显示</strong><span class="spacer"></span><button class="icon-button" id="cancel-dialog-x" aria-label="关闭设置" data-icon="x"></button></header>
+      <div class="dialog-body" id="global-options"><p class="dialog-context">偏好设置 · 外观与主题</p><div class="setting-row"><div><strong>命令信息</strong><p>在命令第一行右侧显示 AI、返回码和运行时间。<br>鼠标移入命令时暂时隐藏。</p></div><button class="setting-switch" id="global-info-toggle" role="switch" aria-label="显示命令信息" aria-checked="true"><i></i></button></div></div>
+      <div class="dialog-body" id="host-options" hidden><p class="dialog-context">staging-01 · 高级选项</p><label class="host-setting"><strong>命令信息</strong><select id="host-info-select" aria-label="主机命令信息显示"><option value="inherit">继承全局设置</option><option value="on">显示</option><option value="off">隐藏</option></select></label><p id="effective-display" class="setting-note">当前：显示（继承全局）</p><p class="setting-description">AI、返回码和运行时间显示在命令第一行右侧。<br>此主机可覆盖全局设置，鼠标移入命令时暂时隐藏。</p></div>
+      <footer><button class="dialog-cancel" id="cancel-dialog">取消</button><button class="dialog-save" id="save-dialog">保存</button></footer>
+    </section>
+  </div>
+</main>
+<script src="terminal-enhancement.js?v=20261031-r5"></script>
+</body>
+</html>

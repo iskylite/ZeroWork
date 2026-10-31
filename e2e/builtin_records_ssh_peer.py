@@ -21,6 +21,8 @@ import paramiko
 logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 parser = argparse.ArgumentParser()
 parser.add_argument("--out", required=True)
+parser.add_argument("--plain-bash", action="store_true", help="Run ordinary bash without OSC 133 prompt markers")
+parser.add_argument("--reject-password", action="store_true", help="Reject fixture authentication without advertising a retry method")
 parser.add_argument("--sftp-root", type=Path, help="Allow SFTP reads/writes only inside this disposable test directory")
 args = parser.parse_args()
 out = Path(args.out); out.mkdir(parents=True)
@@ -33,12 +35,18 @@ key = paramiko.RSAKey.generate(2048)
 listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.listen(4); listener.settimeout(.1)
 port = listener.getsockname()[1]
 (out / ".zshrc").write_text("bindkey -e\nPS1=$'%{\\e]133;A\\a%}sshrecords%# %{\\e]133;B\\a%}'\npreexec() { printf '\\033]133;C\\007'; }\nprecmd() { printf '\\033]133;D;0\\007'; }\n")
+(out / ".bashrc").write_text("unset PROMPT_COMMAND\nPS1='sshrecords# '\nbind 'set editing-mode emacs'\n")
 (out / "ready.json").write_text(json.dumps(dict(port=port, user="records-fixture", password="records-secret", known_host=f"[127.0.0.1]:{port} {key.get_name()} {key.get_base64()}\n")))
 
 class Server(paramiko.ServerInterface):
-    def __init__(self): self.shell = threading.Event(); self.size = (100, 30); self.master = None; self.term = ""
-    def get_allowed_auths(self, _): return "password"
-    def check_auth_password(self, user, password): return paramiko.AUTH_SUCCESSFUL if (user,password)==("records-fixture","records-secret") else paramiko.AUTH_FAILED
+    def __init__(self): self.shell = threading.Event(); self.size = (100, 30); self.master = None; self.term = ""; self.rejected = False
+    def get_allowed_auths(self, _): return "" if self.rejected else "password"
+    def check_auth_password(self, user, password):
+        if args.reject_password:
+            self.rejected = True
+            (out / "auth-rejected.json").write_text(json.dumps(dict(rejected=True)))
+            return paramiko.AUTH_FAILED
+        return paramiko.AUTH_SUCCESSFUL if (user,password)==("records-fixture","records-secret") else paramiko.AUTH_FAILED
     def check_channel_request(self, kind, _): return paramiko.OPEN_SUCCEEDED if kind=="session" else paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
     def check_channel_pty_request(self, channel, term, width, height, *rest):
         self.size=(width,height); self.term=term.decode("ascii")
@@ -126,7 +134,8 @@ def serve(connection, index):
         def own_tty():
             os.setsid()
             fcntl.ioctl(slave,termios.TIOCSCTTY,0)
-        process=subprocess.Popen(["/bin/zsh","-i"],stdin=slave,stdout=slave,stderr=slave,preexec_fn=own_tty,cwd=root,env={**os.environ,"HOME":str(out),"ZDOTDIR":str(out),"TERM":server.term})
+        shell = ["/bin/bash", "--noprofile", "--rcfile", str(out / ".bashrc"), "-i"] if args.plain_bash else ["/bin/zsh", "-i"]
+        process=subprocess.Popen(shell,stdin=slave,stdout=slave,stderr=slave,preexec_fn=own_tty,cwd=root,env={**os.environ,"HOME":str(out),"ZDOTDIR":str(out),"TERM":server.term})
         os.close(slave)
         received=bytearray()
         with (out / f"received-{index}.bin").open("wb") as audit:

@@ -10,6 +10,7 @@ const TextSlot = @import("../vt/text_slot.zig").TextSlot;
 const S = @import("terminal_styles.zig");
 const records_style = @import("builtin_records_styles.zig");
 const input = @import("terminal_surface_input.zig");
+const annotations = @import("command_annotations.zig");
 const blink_half_period_ms = 550;
 // Viewport cell arrays are large and short-lived. Keep them out of malloc's
 // small-region high-water caches so retiring a pane actually releases pages.
@@ -39,6 +40,12 @@ const Row = struct {
     selected: *ui.Node,
     marker: ?*ui.Node = null,
     status_icon: ?*ui.Node = null,
+    command_state: ?*ui.Node = null,
+    command_info: ?*ui.Node = null,
+    command_ai: ?*ui.Node = null,
+    command_code: ?*ui.Node = null,
+    command_elapsed: ?*ui.Node = null,
+    command_id: ?u64 = null,
     article: ?*ui.Node = null,
     layout: @import("terminal_record_geometry.zig").Layout = .{},
     glyphs: std.ArrayList(Glyph) = .empty,
@@ -98,6 +105,9 @@ pub const Surface = struct {
     recovered_input: std.ArrayList(u8) = .empty,
 
     options: Options,
+    command_info_visible: bool = true,
+    command_snapshot_ns: i128 = 0,
+    command_timer_ms: f64 = 0,
     requested_theme: ?terminal.Theme = null,
     displayed_theme: ?terminal.Theme = null,
     sent_theme_revision: u64 = 0,
@@ -250,11 +260,11 @@ pub const Surface = struct {
         self.rows.deinit(self.cx.allocator);
         self.cx.allocator.destroy(self);
     }
-    fn liveControlGrant(self: *Surface) ?terminal.execution.Grant {
+    fn liveControlGrant(self: *Surface) !?terminal.execution.Grant {
         if (self.takeover_handler == null) return null;
-        const status = self.service.status() catch return null;
+        const status = try self.service.status();
         if (!status.owner.eql(self.owner) or status.eof_seen or !status.writable) return null;
-        const snapshot = self.service.executionSnapshot() catch return null;
+        const snapshot = try self.service.executionSnapshot();
         if (!snapshot.owner.eql(self.owner) or snapshot.input_handed_off) return null;
         const execution_id = snapshot.execution_id orelse return null;
         const grant = snapshot.grant orelse return null;
@@ -271,9 +281,22 @@ pub const Surface = struct {
         }
     }
     fn refreshControl(self: *Surface) !void {
-        const grant = self.liveControlGrant();
+        const grant = self.liveControlGrant() catch |err| value: {
+            // A busy mailbox cannot prove that the last observed lease ended.
+            if (err == error.WorkerBusy) {
+                self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
+                return;
+            }
+            break :value null;
+        };
         if (!std.meta.eql(grant, self.control_grant)) self.cancelControlPress();
         self.control_grant = grant;
+        if (grant != null) {
+            // Only UI events not admitted by the transport are recovered.
+            // Existing PTY content and accepted partial paste stay owned there.
+            try self.recoverQueuedInput();
+            if (self.preedit.len != 0) self.setPreedit("");
+        }
         if (grant != null and self.control_tag == null) {
             const scope = try ui.Scope.init(self.cx.allocator, null, self.cx.owner);
             errdefer scope.dispose();
@@ -313,7 +336,7 @@ pub const Surface = struct {
     }
     fn requestTakeover(self: *Surface) void {
         const expected = self.control_grant orelse return;
-        const live = self.liveControlGrant() orelse return;
+        const live = (self.liveControlGrant() catch return) orelse return;
         if (!std.meta.eql(expected, live)) return;
         const handler = self.takeover_handler orelse return;
         handler.request(handler.context, live.task_id, self.owner, live.execution_id) catch |err| self.showError(err);
@@ -454,8 +477,18 @@ pub const Surface = struct {
                 changed = false;
                 break :update;
             };
-            if (self.snapshot) |*old| old.deinit(snapshot_allocator);
+            if (self.snapshot) |*old| {
+                for (@constCast(next.projection.commands)) |*command| {
+                    if (command.state != .running) continue;
+                    for (old.projection.commands) |prior| if (prior.id == command.id and prior.state == .running) {
+                        if (self.commandElapsed(prior)) |elapsed| command.elapsed_ms = @max(command.elapsed_ms orelse 0, elapsed);
+                        break;
+                    };
+                }
+                old.deinit(snapshot_allocator);
+            }
             self.snapshot = next;
+            self.command_snapshot_ns = @import("../platform/realtime.zig").monotonicNs();
             self.displayed_theme = self.requested_theme;
             self.next_input = @max(self.next_input, next.input_revision +| 1);
             self.next_geometry = @max(self.next_geometry, next.geometry_revision +| 1);
@@ -519,7 +552,18 @@ pub const Surface = struct {
             self.blink = !self.blink;
             changed = true;
         }
+        const command_clock = self.command_info_visible and !value.projection.modes.alternate_screen and for (value.projection.commands) |command| {
+            if (command.state == .running) break true;
+        } else false;
+        if (command_clock) {
+            self.cx.scheduleRedrawAfterNs(250 * std.time.ns_per_ms);
+            if (self.cx.frame_time_ms - self.command_timer_ms >= 250) {
+                self.command_timer_ms = self.cx.frame_time_ms;
+                changed = true;
+            }
+        }
         if (changed or was_focused != self.focused or self.glyphs_pending) try self.render(now);
+        self.updateCommandHover();
         if (blink_running) {
             const remaining = @max(1, blink_half_period_ms - (self.cx.frame_time_ms - self.last_blink));
             self.cx.scheduleRedrawAfterNs(@intFromFloat(remaining * std.time.ns_per_ms));
@@ -708,10 +752,139 @@ pub const Surface = struct {
             }
         }
         try self.renderSelection();
+        try self.renderCommands();
         try self.renderCaret();
         try self.buildDocument();
         if (self.timing) |trace| trace.applied(self.snapshot.?.output_sequence);
         self.cx.requestRedraw();
+    }
+    pub fn setCommandInfoVisible(self: *Surface, visible: bool) void {
+        if (self.command_info_visible == visible) return;
+        self.command_info_visible = visible;
+        self.force_snapshot = true;
+        self.cx.requestRedraw();
+    }
+    pub fn commandEvidence(self: *Surface, value: vt.Command) vt.Command {
+        var command = value;
+        const id = command.ai_execution_id orelse return command;
+        const receipt = self.service.executionSnapshot() catch return command;
+        if (!receipt.owner.eql(self.owner) or receipt.completion_source != .private_protocol or receipt.execution_id == null or !receipt.execution_id.?.eql(id)) return command;
+        if (receipt.process) |process| {
+            if (process.foreground_finished) {
+                command.exit_code = if (process.exit_code) |code| code else null;
+                command.state = if (command.exit_code) |code| (if (code == 0) .succeeded else .failed) else .unknown;
+                return command;
+            }
+        }
+        switch (receipt.state) {
+            .running, .awaiting_start_boundary, .awaiting_submit, .awaiting_accept, .handed_off => {
+                command.state = .running;
+                command.exit_code = null;
+                command.end_ms = null;
+            },
+            else => {},
+        }
+        return command;
+    }
+    pub fn commandElapsed(self: *const Surface, command: vt.Command) ?u64 {
+        const base = command.elapsed_ms orelse return null;
+        if (command.state != .running) return base;
+        const extra = @max(0, @import("../platform/realtime.zig").monotonicNs() - self.command_snapshot_ns);
+        return base +| @as(u64, @intCast(@divTrunc(extra, std.time.ns_per_ms)));
+    }
+    fn commandAtRow(self: *const Surface, row: u64) ?vt.Command {
+        const snapshot = self.snapshot orelse return null;
+        if (snapshot.projection.modes.alternate_screen) return null;
+        for (snapshot.projection.commands) |command| if (command.screen_row != null and command.screen_row.? == row) return command;
+        return null;
+    }
+    fn commandColor(state: vt.CommandState) ui.Color {
+        const colors = @import("app_theme.zig").current();
+        return switch (state) {
+            .running => colors.accent,
+            .succeeded => colors.ok_ink,
+            .failed => colors.danger,
+            .unknown => colors.fg_3,
+        };
+    }
+    fn annotationText(self: *Surface, text: []const u8, id: []const u8) !*ui.Node {
+        const node = try ui.text(self.cx, text, .{ .font_size = 10.5, .line_height = self.options.row_height / 10.5, .color = @import("app_theme.zig").current().fg_2, .font_family = self.options.family_id, .use_monospace_font = self.options.family_id == 0, .selectable = false });
+        node.meta.ownership.meta.test_id = id;
+        return node;
+    }
+    fn renderCommands(self: *Surface) !void {
+        const projection = &self.snapshot.?.projection;
+        for (projection.visible_rows) |value| {
+            const row = &self.rows.items[value.viewport_y];
+            row.command_id = null;
+            if (row.command_state) |node| node.setDisplay(.none);
+            if (row.command_info) |node| node.setDisplay(.none);
+            if (projection.modes.alternate_screen or value.application_kind != 0) continue;
+            const command = self.commandEvidence(self.commandAtRow(projection.scrollback.viewport_offset + value.viewport_y) orelse continue);
+            row.command_id = command.id;
+            if (row.command_state == null) {
+                row.command_state = try self.annotationText("", "terminal.command.status");
+                try row.root.appendChild(self.cx.allocator, row.command_state.?);
+                (try row.command_state.?.style.ensureExtFallible(self.cx.allocator)).z_index = 4;
+            }
+            const state = row.command_state.?;
+            state.setDisplay(.flex);
+            try state.setTextContent(self.cx.allocator, annotations.glyph(command.state));
+            state.setTextColor(commandColor(command.state));
+            // Existing content padding provides this gutter. Neither the
+            // timestamp column nor the terminal's grid width is changed.
+            try absolute(self.cx, state, -@min(17, self.contentPadding().left - 1), 0, 12, self.options.row_height);
+            if (!self.command_info_visible) continue;
+            if (row.command_info == null) {
+                const group = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .right = .{ .px = 0 }, .top = .{ .px = 0 } }, .height = .{ .px = self.options.row_height }, .direction = .row, .align_items = .center, .gap = 10, .padding = .{ .left = 12 }, .background = @import("app_theme.zig").current().surface_1.withAlpha(235), .hit_behavior = .pass_through, .z_index = 4 }, .{});
+                group.meta.ownership.meta.test_id = "terminal.command.metadata";
+                const ai = try @import("command_annotation_styles.zig").mountAiTag(self.cx, self.options.family_id, self.options.row_height);
+                const code = try self.annotationText("", "terminal.command.metadata.code");
+                const elapsed = try self.annotationText("", "terminal.command.metadata.elapsed");
+                try group.appendChild(self.cx.allocator, ai);
+                try group.appendChild(self.cx.allocator, code);
+                try group.appendChild(self.cx.allocator, elapsed);
+                try row.root.appendChild(self.cx.allocator, group);
+                row.command_info = group;
+                row.command_ai = ai;
+                row.command_code = code;
+                row.command_elapsed = elapsed;
+            }
+            row.command_ai.?.setDisplay(if (command.ai_execution_id != null) .flex else .none);
+            @import("command_annotation_styles.zig").applyAiTag(self.cx, row.command_ai.?, self.options.family_id, self.options.row_height);
+            row.command_info.?.setStyle(self.cx.allocator, .gap, if (command.ai_execution_id != null) @import("command_annotation_styles.zig").ai_metadata_gap else @import("command_annotation_styles.zig").metadata_gap);
+            var code_buffer: [32]u8 = undefined;
+            const code = if (command.exit_code) |exit| try std.fmt.bufPrint(&code_buffer, "{s} {d}", .{ annotations.glyph(command.state), exit }) else "—";
+            try row.command_code.?.setTextContent(self.cx.allocator, code);
+            row.command_code.?.setTextColor(commandColor(command.state));
+            var elapsed_buffer: [40]u8 = undefined;
+            try row.command_elapsed.?.setTextContent(self.cx.allocator, try annotations.duration(&elapsed_buffer, self.commandElapsed(command)));
+            row.command_elapsed.?.setTextColor(@import("app_theme.zig").current().fg_2);
+            row.command_info.?.setBackground(@import("app_theme.zig").current().surface_1.withAlpha(235));
+            row.command_info.?.setDisplay(.flex);
+        }
+        self.updateCommandHover();
+    }
+    fn hoveredCommand(self: *const Surface) ?u64 {
+        const snapshot = self.snapshot orelse return null;
+        if (snapshot.projection.modes.alternate_screen) return null;
+        const viewport = self.viewport.globalRect();
+        if (self.cx.mouse_x < viewport.x or self.cx.mouse_x > viewport.x + viewport.w or self.cx.mouse_y < viewport.y or self.cx.mouse_y > viewport.y + viewport.h) return null;
+        const y = self.cx.mouse_y - viewport.y;
+        for (snapshot.projection.visible_rows) |row| {
+            const top = self.presentationY(row.viewport_y);
+            if (y < top or y >= top + self.options.row_height or row.application_kind != 0) continue;
+            const absolute_row = snapshot.projection.scrollback.viewport_offset + row.viewport_y;
+            for (snapshot.projection.commands) |command| if (annotations.coversRow(command, absolute_row)) return command.id;
+        }
+        return null;
+    }
+    fn updateCommandHover(self: *Surface) void {
+        const hovered = self.hoveredCommand();
+        for (self.rows.items) |row| if (row.command_info) |node| {
+            const visible = self.command_info_visible and row.command_id != null and self.selection == null and !self.dragging and (hovered == null or hovered.? != row.command_id.?);
+            node.setDisplay(if (visible) .flex else .none);
+        };
     }
     fn renderTime(self: *Surface, row: *Row, timestamp: ?i64) !void {
         if (!self.options.timestamps or timestamp == null) {
@@ -924,6 +1097,7 @@ pub const Surface = struct {
         if (self.cx.text.shapeText(.{ .text = bytes, .font_family = self.options.family_name, .font_family_id = self.options.family_id, .font_size = self.options.font_size, .font_weight = self.options.weight, .use_monospace = self.options.family_id == 0 })) |run| return run.total_advance else |_| return 0;
     }
     pub fn setPreedit(self: *Surface, bytes: []const u8) void {
+        if (self.control_grant != null and bytes.len != 0) return;
         const next = self.cx.allocator.dupe(u8, bytes) catch return;
         self.cx.allocator.free(self.preedit);
         self.preedit = next;
@@ -958,7 +1132,10 @@ pub const Surface = struct {
         try absolute(self.cx, self.preedit_node, self.contentPadding().left + self.bodyX() + @as(f32, @floatFromInt(cursor.col)) * self.options.cell_width + self.command_caret_advance, self.presentationY(cursor.row), @max(self.options.cell_width, self.measured(self.preedit)), self.options.row_height);
     }
     fn bytePayload(item: Pending) ?[]u8 {
-        return switch (item) { .bytes, .protocol => |bytes| bytes, else => null };
+        return switch (item) {
+            .bytes, .protocol => |bytes| bytes,
+            else => null,
+        };
     }
     fn queueProtocolText(self: *Surface, bytes: []const u8) !void {
         return self.queueTextFrom(bytes, false);
@@ -968,6 +1145,7 @@ pub const Surface = struct {
     }
     fn queueTextFrom(self: *Surface, bytes: []const u8, human: bool) !void {
         if (bytes.len == 0) return;
+        if (self.control_grant != null) return error.TerminalControlled;
         if (self.snapshot == null or self.snapshot.?.read_only) return error.ReadOnlyTerminal;
         if (self.snapshot.?.projection.modes.keyboard_disabled) return error.KeyboardDisabled;
         const limit: usize = if (self.trusted_pending != null) terminal.trusted_edit.max_buffer else 1024 * 1024;
@@ -984,6 +1162,7 @@ pub const Surface = struct {
         };
     }
     pub fn requestTrustedEdit(self: *Surface, request: terminal.trusted_edit.Request) !void {
+        if (self.control_grant != null) return error.TerminalControlled;
         if (self.pending.items.len != 0 or self.pending_paste != null or self.paste_requested != null or self.preedit.len != 0) return error.WorkerBusy;
         try self.service.trustedRequest(request);
         self.trusted_pending = request.operation;
@@ -1004,6 +1183,10 @@ pub const Surface = struct {
         self.user_input_revision +|= 1;
     }
     pub fn pump(self: *Surface) !void {
+        if (self.control_grant != null) {
+            try self.recoverQueuedInput();
+            return;
+        }
         defer if (self.pending.items.len > 0 or self.trusted_pending != null) self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
         const trusted_outcome = self.service.trustedOutcome() catch |err| {
             if (err == error.WorkerBusy) return;
@@ -1091,6 +1274,7 @@ pub const Surface = struct {
             error.ClipboardUnavailable => "复制失败：剪贴板不可用。",
             error.InvalidPaste, error.PasteTooLarge => "粘贴未插入：请检查 UTF-8、1 MiB 上限及终端控制边界。",
             error.ReadOnlyTerminal => "当前会话只读，仍可选择和复制输出。",
+            error.TerminalControlled => "AI 正在控制此终端；接管后可输入，仍可选择和复制输出。",
             error.StaleOwner, error.StaleSession, error.StaleBinding => "原会话已失效，本次操作未转交其它终端。",
             error.StaleMode, error.StaleInput => "终端输入或模式已变化，请重新发起操作。",
             error.StaleProjection => "终端输出已更新，请在新画面上继续选择。",
@@ -1122,6 +1306,7 @@ pub const Surface = struct {
     fn onKey(key: ui.events.KeyCode, modifiers: ui.events.Modifiers, raw: ?*anyopaque) ui.events.EventResult {
         const self: *Surface = @ptrCast(@alignCast(raw orelse return .ignored));
         if (self.cx.focus_manager.getFocused() != self.host) return .ignored;
+        if (self.control_grant != null) return input.onKey(self, key, modifiers);
         if (key == .c and modifiers.ctrl and !modifiers.alt and !modifiers.super) {
             self.cancelTrustedEdit() catch |err| {
                 self.showError(err);
@@ -1146,6 +1331,14 @@ pub const Surface = struct {
     }
     fn onEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
         const self: *Surface = @ptrCast(@alignCast(raw orelse return .ignored));
+        if (self.control_grant != null) switch (event) {
+            .key_down => |key| {
+                if (self.cx.focus_manager.getFocused() != self.host) return .ignored;
+                return input.onKey(self, key.key, key.modifiers);
+            },
+            .key_up, .text_input, .ime_preedit, .ime_commit => return .stop,
+            else => {},
+        };
         if (self.enhancement) |handler| if (handler.event) |callback| if (callback(handler.context, event)) |result| return result;
         switch (event) {
             .key_down, .key_up, .text_input, .ime_preedit, .ime_commit => {
@@ -1173,6 +1366,13 @@ pub const Surface = struct {
     }
     fn onCanvasEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
         const self: *Surface = @ptrCast(@alignCast(raw orelse return .ignored));
+        switch (event) {
+            .mouse_move, .mouse_down, .mouse_up, .double_click => {
+                self.updateCommandHover();
+                self.cx.requestRedraw();
+            },
+            else => {},
+        }
         if (self.control_grant != null) if (self.control_tag) |tag| {
             const point: ?ui.Point = switch (event) {
                 .mouse_down, .mouse_up => |mouse| .{ .x = mouse.x, .y = mouse.y },

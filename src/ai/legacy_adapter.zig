@@ -4,7 +4,7 @@ const std = @import("std");
 const identity = @import("../host/identity.zig");
 const loop = @import("tool_loop.zig");
 const scope = @import("tool_scope.zig");
-pub const Approval = struct { group: bool = false, target: []const u8 = "", tool_id: ?[]const u8 = null, owner: identity.SessionHandle, cwd: ?[]const u8, sequence: u64, arguments_hash: [32]u8, command: []const u8, call_id: []const u8 };
+pub const Approval = struct { expired: bool = false, group: bool = false, target: []const u8 = "", tool_id: ?[]const u8 = null, owner: identity.SessionHandle, cwd: ?[]const u8, sequence: u64, arguments_hash: [32]u8, command: []const u8, call_id: []const u8 };
 pub const Factory = *const fn (std.mem.Allocator) anyerror!Adapter;
 pub const Adapter = struct {
     context: *anyopaque,

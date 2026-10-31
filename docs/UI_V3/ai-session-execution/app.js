@@ -70,6 +70,7 @@ const patchWorkspace = (() => {
     'mode-menu': '输入框运行方式',
     exec: '批处理命令结果',
     ask: '运行方式与执行审批',
+    'ask-expired': '审批已过期 · 流程暂停',
     'pty-running': '新 PTY · 运行中',
     'pty-waiting': 'PTY · 等待输入',
     takeover: 'PTY · 用户已接管',
@@ -172,7 +173,7 @@ const patchWorkspace = (() => {
     app.querySelector('.toast')?.remove();
     if (toastText) app.insertAdjacentHTML('beforeend', `<div class="toast" role="status" data-testid="prototype-toast">${icon('check')}${esc(toastText)}</div>`);
   }
-  const isPTY = () => !['settings', 'settings-error', 'exec', 'ask', 'mode-menu'].includes(scene);
+  const isPTY = () => !['settings', 'settings-error', 'exec', 'ask', 'ask-expired', 'mode-menu'].includes(scene);
   const isActive = () => ['pty-running', 'pty-waiting'].includes(scene);
   const isControlling = () => isActive() || scene === 'pty-stopping';
   const isUnverified = () => ['pty-stopping','pty-unknown'].includes(scene);
@@ -238,7 +239,7 @@ const patchWorkspace = (() => {
     const paths = { exec: '批处理', attach: '现有 PTY', new: '新建 PTY' };
     const target = askPath === 'exec' ? '独立 exec · deploy@10.20.1.18' : askPath === 'attach' ? '用户终端 · session-07（已有）' : hasGroup() ? '当前组新建 AI · 部署检查' : '将当前会话建组，再新建工作会话';
     const impact = askPath === 'exec' ? '读取部署检查结果；不改变终端输入权。' : askPath === 'attach' ? 'AI 临时持有当前 session-07 的输入权，可随时接管；不会创建会话或会话组。' : hasGroup() ? '在当前组新建任务会话；用户终端继续接收输入。' : '将 session-07 正式加入新会话组，再新建 session-18；原会话继续接收输入。';
-    return `<section class="approval" data-testid="execution-approval"><div class="approval-head">${icon('alert')}<strong>选择运行方式并确认执行</strong></div><div class="approval-body"><div class="approval-paths" role="group" aria-label="本次运行方式">${Object.entries(paths).map(([key, label]) => `<button class="${askPath === key ? 'selected' : ''}" data-patch-act="ask-path" data-value="${key}" aria-pressed="${askPath === key}" data-testid="approval-path-${key}">${label}</button>`).join('')}</div><div class="approval-target">目标：${target}<br>目录：/srv/zerowork</div><pre class="code-block">./deploy/check-release.sh ${askPath === 'exec' ? '--check' : '--interactive'}</pre><p>${impact}</p></div><div class="approval-footer"><button class="button subtle" data-patch-act="reject-execution" data-testid="reject-execution">拒绝</button><button class="button primary" data-patch-act="approve-execution" data-testid="approve-execution">确认并执行</button></div></section>`;
+    return `<section class="approval" data-testid="execution-approval"><div class="approval-head">${icon('alert')}<strong>选择运行方式并确认执行</strong></div><div class="approval-body"><div class="approval-paths" role="group" aria-label="本次运行方式">${Object.entries(paths).map(([key, label]) => `<button class="${askPath === key ? 'selected' : ''}" data-patch-act="ask-path" data-value="${key}" aria-pressed="${askPath === key}" data-testid="approval-path-${key}">${label}</button>`).join('')}</div><div class="approval-target">目标：${target}<br>目录：/srv/zerowork</div><pre class="code-block">./deploy/check-release.sh ${askPath === 'exec' ? '--check' : '--interactive'}</pre><p>${impact}</p></div><div class="approval-footer"><button class="button subtle" data-patch-act="reject-execution" data-testid="reject-execution">拒绝</button><button class="button primary" data-patch-act="${scene === 'ask-expired' ? 'renew-execution' : 'approve-execution'}" data-testid="approve-execution">${scene === 'ask-expired' ? '重新确认' : '确认并执行'}</button></div></section>`;
   }
   function workingControlCard() {
     return `<div class="cleanup-row" data-testid="working-control"><div><span class="cleanup-title">${icon('terminal')}<strong>执行仍在进行</strong></span><small>模型答复结束后，前台程序仍可继续运行。</small></div><button class="button subtle" data-patch-act="stop" data-testid="working-stop">停止执行</button><button class="button secondary" data-patch-act="takeover" data-testid="working-takeover">接管终端</button></div>`;
@@ -249,7 +250,7 @@ const patchWorkspace = (() => {
     return `<div class="cleanup-row" data-state="${cleanupState}" data-testid="cleanup-status"><div><span class="cleanup-title">${icon(cleanupState === 'pending' ? 'alert' : cleanupState === 'cleaned' ? 'check' : cleanupState === 'kept' ? 'hand' : 'terminal')}<strong>${label[0]}</strong></span><small>${label[1]} 原会话与会话组保持打开。</small></div>${cleanupState === 'ready' ? '<button class="button subtle" data-patch-act="keep-session" data-testid="keep-task-session">交给我保留</button><button class="button secondary" data-patch-act="close-task" data-testid="close-task-session">关闭任务会话</button>' : cleanupState === 'pending' ? '<button class="text-button" data-patch-act="verify-cleanup" data-testid="verify-cleanup">核实状态</button>' : cleanupState === 'cleaned' ? '<button class="text-button" data-patch-act="view-terminal">查看记录</button>' : '<button class="text-button" data-patch-act="close-task">关闭任务会话</button>'}</div>`;
   }
   function transcript() {
-    if (scene === 'ask') return `<div class="assistant-question ap-user-bubble question">帮我检查 0.2.6 的部署环境。</div><div class="assistant-answer answer">我会在 app-prod-01 检查发布环境和服务状态。</div>${approvalCard()}`;
+    if (scene === 'ask' || scene === 'ask-expired') return `<div class="assistant-question ap-user-bubble question">帮我检查 0.2.6 的部署环境。</div><div class="assistant-answer answer">我会在 app-prod-01 检查发布环境和服务状态。</div>${approvalCard()}<div class="turn-status"><span>${scene === 'ask-expired' ? '审批已过期 · 流程暂停' : '等待确认 · 流程暂停'}</span><span>· 处理用时 1 秒</span></div>`;
     if (scene === 'exec') return `<div class="assistant-question ap-user-bubble question">检查部署环境，不要占用我的终端。</div>${commandCard(false)}<div class="assistant-answer answer">检查通过。发现一处尚未提交的部署配置，请发布前核对。</div>${turnStatus(false)}`;
     if (scene === 'mode-menu') return `<div class="assistant-question ap-user-bubble question">检查 0.2.6 的部署环境。</div><div class="assistant-answer answer">在这里选择当前对话的运行方式。当前沿用全局设置：${MODES[saved.globalMode][0]}。</div>${turnStatus(false)}`;
     let notices = actualTarget === 'existing' ? hostNotice('<strong>已使用现有终端</strong> · session-07 输入权交给 AI') : groupWasExisting ? hostNotice('<strong>已在当前组新建会话</strong> · AI · 部署检查') : hostNotice('<strong>已创建会话组</strong> · 部署检查 · 原会话保留');
@@ -325,7 +326,7 @@ const patchWorkspace = (() => {
     if(fixtureRequested||d.executionPatch){
       d.executionPatch=true;d.messages=[transcript()];d.draft=saved.draft;
       d.running=isActive()||(scene==='takeover'&&!takeoverRoundStopped);d.stopping=scene==='pty-stopping';
-      d.prototypePrimaryState=scene==='ask'?'approval':'send';
+      d.prototypePrimaryState=(scene==='ask'||scene==='ask-expired')?'approval':'send';
       fixtureRequested=false;
     }
     app.innerHTML = settings() + processPanel();
@@ -364,6 +365,7 @@ const patchWorkspace = (() => {
       case 'toggle-mode': menuOpen = !menuOpen; render(); if (menuOpen) workspaceApp.querySelector('.mode-option.selected')?.focus(); break;
       case 'close-menu': menuOpen = false; render(); workspaceApp.querySelector('[data-testid="run-mode-trigger"]')?.focus(); break;
       case 'mode-select': saved.override = button.dataset.value; persist(); menuOpen = false; render(); flash(saved.override === 'inherit' ? `已沿用全局：${MODES[saved.globalMode][0]}` : `当前对话：${MODES[saved.override][0]}`); workspaceApp.querySelector('[data-testid="run-mode-trigger"]')?.focus(); break;
+      case 'renew-execution': go('ask'); break;
       case 'ask-path': askPath = button.dataset.value; render(); workspaceApp.querySelector(`[data-testid="approval-path-${askPath}"]`)?.focus(); break;
       case 'approve-execution': actualTarget = askPath === 'attach' ? 'existing' : 'new'; go(askPath === 'exec' ? 'exec' : 'pty-running'); flash('已批准本次执行'); break;
       case 'reject-execution': go('mode-menu'); menuOpen = false; render(); flash('本次执行已拒绝'); break;

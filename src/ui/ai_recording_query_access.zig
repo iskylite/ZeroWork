@@ -2,8 +2,8 @@
 //! archive IO. A discovered recording ID alone is never content authority.
 //!
 //! Lifecycle/concurrency contract:
-//! - init/captureUi/captureSelectedHistory run on the UI thread before the
-//!   request worker starts. They perform no archive/filesystem IO.
+//! - init/captureUi/captureClosedReceipts/captureSelectedHistory run on the UI
+//!   thread before the request worker starts, with no archive/filesystem IO.
 //! - execute is called serially by that request's worker; it owns path/grant
 //!   storage and performs resolver/checksum/decoder IO outside the UI lock.
 //! - validateContext only reads immutable context plus the cancellation flag.
@@ -13,7 +13,8 @@
 //!   Within the SAME Task, beginQuiescentCapture is also permitted only during
 //!   a controller UI exchange that proves the worker is blocked; it never runs
 //!   concurrently with execute.
-//!   Access and its owned strings never carry into another Task/context.
+//!   Access and its owned strings never carry into another Task. A later Task
+//!   captures its own valid sources and same-conversation/binding close receipts.
 //! - expireIdle uses tryLock and only bounded reader teardown; call from the
 //!   worker/maintenance path. It never resolves/scans/decodes a recording.
 const std = @import("std");
@@ -124,6 +125,21 @@ pub const Access = struct {
             try self.captureService(owner, service);
         }
     }
+    /// Existing host close receipts form the bounded provenance index. A new
+    /// Task may read its own conversation/binding's sealed exact generation;
+    /// no archive listing or removed live session can populate this path.
+    pub fn captureClosedReceipts(self: *Access, app: anytype) !void {
+        try self.captureReady();
+        for (app.deferred_closes.items) |close| {
+            if (!@import("../ai/host_queries.zig").sameHistoricalBinding(close.context, self.context) or close.snapshot.state != .closed) continue;
+            const state = app.sessions.queryState(close.handle) orelse continue;
+            if (state.lifecycle != .closed) continue;
+            const id = close.retained_metadata.recording_id orelse continue;
+            const generation = close.retained_metadata.recording_generation;
+            if (generation == 0) continue;
+            try self.appendCandidate(.{ .owner = close.handle, .id = id, .generation = generation, .origin = .captured_source });
+        }
+    }
     /// Shared with captureUi after its exact content permission checks. Kept
     /// private so model arguments cannot install a snapshot or grant.
     fn captureService(self: *Access, owner: identity.SessionHandle, service: terminal.Service) !void {
@@ -142,12 +158,34 @@ pub const Access = struct {
         _ = identity.RecordingId.parse(&id) catch return;
         try self.appendCandidate(.{ .owner = owner, .id = id, .generation = facts.recording_generation, .origin = .captured_source });
     }
-    /// Call only for an explicitly user-selected descriptor. Metadata listing
-    /// and model recording_ref lookup must never call this capture method.
+    /// Call only for an explicitly user-selected descriptor within the binding
+    /// or a captured source. Selection itself never grants access outside it;
+    /// metadata listing and model recording_ref lookup cannot install authority.
     pub fn captureSelectedHistory(self: *Access, descriptor: archive_mod.Descriptor, generation: u64) !void {
         try self.captureReady();
         const grant = try grant_helpers.selectedHistory(self.context, descriptor, generation);
+        const in_scope = switch (self.context.binding) {
+            .session => |id| id == @backingInt(grant.owner.session_id),
+            .group => for (self.candidates.items) |candidate| {
+                if (candidate.origin == .captured_source and candidate.owner.eql(grant.owner)) break true;
+            } else false,
+        };
+        if (!in_scope) return error.TargetNotAuthorized;
         try self.appendCandidate(.{ .owner = grant.owner, .id = grant.recording_id, .generation = grant.recording_generation, .manifest_path = try self.arena.allocator().dupe(u8, grant.manifest_path), .manifest_revision = grant.manifest_revision, .origin = .explicit_history_selection });
+    }
+    /// Main-thread preflight, before archive IO. Candidate ownership comes
+    /// only from trusted capture, never from a model-supplied recording ID.
+    pub const CandidateIdentity = struct { owner: identity.SessionHandle, id: [32]u8, generation: u64 };
+    pub fn candidateIdentity(self: *const Access, invocation: host.Invocation) !CandidateIdentity {
+        try self.validateContext(invocation.context);
+        const request = try queries.parse(invocation.tool_id, invocation.arguments);
+        if (request.source != .recording) return error.TargetNotAuthorized;
+        const ref = try queries.resolveRecording(invocation.context, request.source.recording);
+        for (self.candidates.items) |candidate| if (candidate.generation == ref.generation and std.mem.eql(u8, &candidate.id, &ref.id)) return .{ .owner = candidate.owner, .id = candidate.id, .generation = candidate.generation };
+        return error.TargetNotAuthorized;
+    }
+    pub fn candidateOwner(self: *const Access, invocation: host.Invocation) !identity.SessionHandle {
+        return (try self.candidateIdentity(invocation)).owner;
     }
     fn ownDirectory(self: *Access) !void {
         if (self.owned_dir != null) return;
@@ -498,5 +536,31 @@ test "recording_access absent idle recording ID stays unauthorized until true se
     facts.recording_id = test_recording;
     try access.captureService(test_owner, service);
     try std.testing.expectEqual(@as(usize, 1), access.candidates.items.len);
+    try std.testing.expect(access.owned_dir == null);
+}
+
+test "current-tab recording candidate checks reject unknown IDs before archive IO" {
+    const a = std.testing.allocator;
+    var access = try Access.init(a, .{ .allocator = a, .io = undefined, .dir = undefined }, testContext());
+    defer access.deinit();
+    const args = try testArguments();
+    defer args.deinit();
+    try std.testing.expectError(error.TargetNotAuthorized, access.candidateOwner(testInvocation(args.value)));
+    try access.appendCandidate(.{ .owner = test_owner, .id = test_recording, .generation = 2, .origin = .captured_source });
+    try std.testing.expect((try access.candidateOwner(testInvocation(args.value))).eql(test_owner));
+    try std.testing.expect(access.owned_dir == null);
+}
+
+test "current-tab recording history selection cannot grant an external session" {
+    var record = try TestRecord.init();
+    defer record.deinit();
+    var context = testContext();
+    context.binding = .{ .session = 999 };
+    var access = try Access.init(std.testing.allocator, record.archive, context);
+    defer access.deinit();
+    var resolved = try record.archive.resolveRecord(std.testing.allocator, .{ .recording_id = &test_recording });
+    defer resolved.deinit();
+    try std.testing.expectError(error.TargetNotAuthorized, access.captureSelectedHistory(resolved.descriptor, 2));
+    try std.testing.expectEqual(@as(usize, 0), access.candidates.items.len);
     try std.testing.expect(access.owned_dir == null);
 }

@@ -86,7 +86,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
     try root.appendChild(cx.allocator, header);
     const slot = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .direction = .row, .align_items = .center, .justify = .center, .flex_shrink = 0 }, .{});
     const uncertain = projection.remote_effect_unknown or projection.state == .outcome_unknown or projection.call_status == .outcome_unknown or (projection.input_result and projection.input_receipt != null and projection.input_receipt.?.stage == .outcome_unknown) or (projection.state == null and projection.call_status == .succeeded and (!projection.input_result or projection.input_receipt == null));
-    const finished = if (projection.input_result) projection.call_status == .succeeded and !uncertain and projection.input_receipt != null and projection.input_receipt.?.stage == .consumed else (projection.sealed() or projection.intervalRecorded()) and projection.process.?.exit_code == 0 and projection.process.?.signal == null;
+    const finished = if (projection.input_result) projection.call_status == .succeeded and !uncertain and projection.input_receipt != null and (projection.input_receipt.?.stage == .consumed or projection.input_receipt.?.stage == .written) else (projection.sealed() or projection.intervalRecorded()) and projection.process.?.exit_code == 0 and projection.process.?.signal == null;
     const process_failed = projection.process != null and (projection.process.?.signal != null or (projection.process.?.exit_code != null and projection.process.?.exit_code.? != 0));
     const icon = try ui.iconTint(cx, if (uncertain) ui.icons.get("circle-help").? else if (finished) ui.icons.check else if (projection.call_status == .rejected or projection.call_status == .failed or projection.recording_failed or process_failed) ui.icons.get("circle-alert").? else if (projection.state == .cancelled_unsent or projection.call_status == .cancelled_unsent) ui.icons.get("square").? else ui.icons.terminal, if (process_failed) theme.current().danger_ink else if (uncertain or projection.recording_failed) theme.current().warn_ink else if (finished) theme.current().ok_ink else theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
     icon.meta.ownership.meta.test_id = "ai.execution.result.icon";
@@ -126,7 +126,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
             });
             input_type.meta.ownership.meta.test_id = "ai.execution.result.input_type";
             try scroll.content.appendChild(cx.allocator, input_type);
-            const sequence = try std.fmt.allocPrint(cx.allocator, "输入序号 {d} · 等待序号 {d}", .{ receipt.input_sequence, receipt.wait_sequence });
+            const sequence = if (receipt.wait_sequence == @import("../host/terminal_execution.zig").stream_wait_sequence) try std.fmt.allocPrint(cx.allocator, "输入序号 {d} · 普通终端输入", .{receipt.input_sequence}) else try std.fmt.allocPrint(cx.allocator, "输入序号 {d} · 等待序号 {d}", .{ receipt.input_sequence, receipt.wait_sequence });
             defer cx.allocator.free(sequence);
             const input_sequence = try ui.textStyled(cx, S.metadata, sequence);
             input_sequence.meta.ownership.meta.test_id = "ai.execution.result.input_sequence";
@@ -158,7 +158,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, store: *facts.Store, record: *facts.R
     }
     if (projection.process) |process| {
         var process_buffer: [128]u8 = undefined;
-        const process_text = if (process.exit_code) |code| try std.fmt.bufPrint(&process_buffer, "{s}退出码 {d}{s}", .{ if (projection.output_scope == .session_interval and process.foreground_finished) "前台已结束 · " else "", code, if (process.background_jobs or process.background_jobs_unknown) " · 后台任务仍需核实" else "" }) else if (process.signal) |signal| try std.fmt.bufPrint(&process_buffer, "{s}结束信号 {d}", .{ if (projection.output_scope == .session_interval and process.foreground_finished) "前台已结束 · " else "", signal }) else if (process.foreground_finished) "前台已结束 · 未提供退出码" else "前台尚未确认结束";
+        const process_text = if (process.exit_code) |code| try std.fmt.bufPrint(&process_buffer, "{s}退出码 {d}{s}", .{ if (projection.completion_source == .shell_reported) "Shell 报告 · " else if (projection.output_scope == .session_interval and process.foreground_finished) "前台已结束 · " else "", code, if (process.background_jobs or process.background_jobs_unknown) " · 后台任务仍需核实" else "" }) else if (process.signal) |signal| try std.fmt.bufPrint(&process_buffer, "{s}结束信号 {d}", .{ if (projection.completion_source == .shell_reported) "Shell 报告 · " else if (projection.output_scope == .session_interval and process.foreground_finished) "前台已结束 · " else "", signal }) else if (process.foreground_finished) if (projection.completion_source == .shell_reported) "Shell 报告结束 · 未提供退出码" else "前台已结束 · 未提供退出码" else "前台尚未确认结束";
         const process_node = try ui.textStyled(cx, S.metadata, process_text);
         process_node.meta.ownership.meta.test_id = "ai.execution.result.process";
         try scroll.content.appendChild(cx.allocator, process_node);

@@ -294,8 +294,10 @@ pub const Host = struct {
         controls.icons[0].setDisplay(.none);
         controls.icons[1].setDisplay(.none);
         controls.more_button.setDisplay(.none);
-        controls.chain_button.setDisplay(if (next == null) .none else .flex);
-        controls.socks_button.setDisplay(if (next == null) .none else .flex);
+        // Keep the terminal's bottom controls stable while offline. Disabled
+        // actions retain their place; a missing transport is status, not layout.
+        controls.chain_button.setDisplay(.flex);
+        controls.socks_button.setDisplay(.flex);
         if (controls.identity_button.behavior.interaction.a11y) |*props| {
             props.label = "会话连接";
             props.description = null;
@@ -414,8 +416,7 @@ pub const Host = struct {
         controls.icons[1].setDisplay(.none);
         const full_width: f32 = identity_width + 232 + S.action_width * 2 + controls.theme_button.globalRect().w + 20 + controls.progress_slot.globalRect().w;
         const narrow = controls.bar.globalRect().w < full_width;
-        const empty = self.active == null and self.file_active == null;
-        controls.theme_button.setDisplay(if (empty) .none else .flex);
+        controls.theme_button.setDisplay(.flex);
         controls.narrow = narrow;
         controls.rtt_button.setDisplay(.none);
         controls.rtt_label.setDisplay(if (self.active == null) .none else .flex);
@@ -423,7 +424,7 @@ pub const Host = struct {
         controls.forward_label.setDisplay(.flex);
         controls.chain_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = S.action_width } });
         controls.socks_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = S.action_width } });
-        for ([_]*ui.Node{ controls.encoding_button, controls.grid_button }) |node| node.setDisplay(if (empty or narrow or self.file_active != null) .none else .flex);
+        for ([_]*ui.Node{ controls.encoding_button, controls.grid_button }) |node| node.setDisplay(if (narrow or self.file_active != null) .none else .flex);
         self.detail.reanchor(controls.bar.globalRect().y);
         try self.detail.flush();
         self.info.reanchor(controls.bar.globalRect().y);

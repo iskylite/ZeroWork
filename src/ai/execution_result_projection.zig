@@ -31,6 +31,7 @@ pub const Projection = struct {
     command: ?[]const u8 = null,
     state: ?terminal.State = null,
     process: ?terminal.ProcessReceipt = null,
+    completion_source: terminal.CompletionSource = .unknown,
     recording_id: ?identity.RecordingId = null,
     terminal_output: []const u8 = "",
     output_available: bool = false,
@@ -92,6 +93,7 @@ pub const Projection = struct {
             return switch ((self.input_receipt orelse return "输入状态待核实").stage) {
                 .awaiting_host_secret => "等待宿主安全输入",
                 .queued => "输入已排队",
+                .written => "输入已写入终端",
                 .consumed => "输入已消费",
                 .cancelled_unsent => "输入未提交 · 已取消",
                 .outcome_unknown => "输入结果待核实",
@@ -155,6 +157,7 @@ const Snapshot = struct {
     execution_id: ?identity.ExecutionId = null,
     state: ?[]const u8 = null,
     process: ?terminal.ProcessReceipt = null,
+    completion_source: terminal.CompletionSource = .unknown,
     recording_id: ?[32]u8 = null,
     elapsed_ms: ?u64 = null,
     input_handed_off: bool = false,
@@ -213,6 +216,7 @@ pub fn parse(allocator: std.mem.Allocator, name: []const u8, arguments: []const 
         };
         result.state = if (snapshot.state) |state| std.meta.stringToEnum(terminal.State, state) else null;
         result.process = snapshot.process;
+        result.completion_source = snapshot.completion_source;
         result.elapsed_ms = snapshot.elapsed_ms;
         result.input_handed_off = snapshot.input_handed_off;
         result.has_input_grant = if (snapshot.grant) |grant| grant.execution_id != null and result.execution_id != null and grant.execution_id.?.eql(result.execution_id.?) else false;
@@ -241,6 +245,7 @@ pub fn parse(allocator: std.mem.Allocator, name: []const u8, arguments: []const 
         };
         result.execution_id = persisted.execution_id;
         result.process = persisted.process;
+        result.completion_source = persisted.completion_source;
         result.state = if (persisted.interval_saved) .interval_recorded else if (persisted.sealed) .sealed else null;
         result.local_released = persisted.local_released;
         result.input_handed_off = persisted.input_handed_off;
@@ -375,6 +380,22 @@ test "execution input projection keeps typed receipt separate from execution and
     unknown.failure = "InputAcknowledgementUnknown";
     try std.testing.expectEqualStrings("输入结果待核实", unknown.statusLabel());
     try std.testing.expectEqualStrings("InputAcknowledgementUnknown", unknown.failure.?);
+}
+
+test "execution projection preserves shell report source and never calls a terminal write consumption" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const receipt: host.Receipt = .{ .conversation_id = .generate(), .task_id = .generate(), .operation_id = 1, .binding_revision = 1 };
+    const observed = (try parse(a, "host.get_execution", "{}", .succeeded, receipt, "{\"snapshot\":{\"state\":\"running\",\"completion_source\":\"shell_reported\"}}")).?;
+    try std.testing.expectEqual(terminal.CompletionSource.shell_reported, observed.completion_source);
+    try std.testing.expect(observed.active() and !observed.intervalRecorded());
+    const legacy = (try parse(a, "host.get_execution", "{}", .succeeded, receipt, "{\"snapshot\":{\"state\":\"running\"}}")).?;
+    try std.testing.expectEqual(terminal.CompletionSource.unknown, legacy.completion_source);
+    const written = (try parse(a, "host.send_execution_input", "{\"text\":\"ordinary\"}", .succeeded, receipt, "{\"input_receipt\":{\"input_sequence\":1,\"wait_sequence\":2,\"kind\":\"text\",\"stage\":\"written\",\"accepted_bytes\":8}}")).?;
+    try std.testing.expectEqualStrings("输入已写入终端", written.statusLabel());
+    try std.testing.expect(written.process == null and written.command == null and !written.active());
+    try std.testing.expectEqualStrings("", written.terminal_output);
 }
 
 test "execution interval projection never upgrades missing saved evidence or user takeover into completion" {

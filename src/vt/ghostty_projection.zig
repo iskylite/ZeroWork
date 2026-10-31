@@ -169,20 +169,24 @@ pub fn capture(adapter: anytype, allocator: std.mem.Allocator) !model.Projection
     projection.cells = try cells.toOwnedSlice(allocator);
     projection.graphemes = try graphemes.toOwnedSlice(allocator);
     projection.reported_cwd = if (adapter.cwd_owned) |cwd| try allocator.dupe(u8, cwd) else null;
-    const events = try allocator.alloc(model.Event, adapter.events.items.len);
-    var count: usize = 0;
-    errdefer {
-        for (events[0..count]) |event| allocator.free(event.text);
-        allocator.free(events);
-    }
-    for (adapter.events.items, 0..) |event, i| {
-        events[i] = event;
-        events[i].text = try allocator.dupe(u8, event.text);
-        count += 1;
-    }
-    projection.events = events;
+    projection.events = events: {
+        const events = try allocator.alloc(model.Event, adapter.events.items.len);
+        var count: usize = 0;
+        errdefer {
+            for (events[0..count]) |event| allocator.free(event.text);
+            allocator.free(events);
+        }
+        for (adapter.events.items, 0..) |event, i| {
+            events[i] = event;
+            events[i].text = try allocator.dupe(u8, event.text);
+            count += 1;
+        }
+        break :events events;
+    };
     projection.events_truncated = adapter.events_truncated;
     adapter.row_metadata.annotate(adapter.terminal, @constCast(projection.visible_rows), bar.offset);
     projection.metadata_truncated = adapter.row_metadata.truncated;
+    projection.commands = try adapter.command_metadata.capture(adapter.terminal, scalar.cols, allocator);
+    projection.commands_truncated = adapter.command_metadata.truncated;
     return projection;
 }

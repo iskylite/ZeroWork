@@ -125,6 +125,26 @@ test "wizard save accepts valid untested or failed-test drafts and freezes compl
         try std.testing.expectEqual(@as(u32, 1234), value.scrollback);
     }
 }
+test "auto shell integration host selection survives save reload and draft editing" {
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    try std.testing.expect(f.wizard.currentDraft().auto_shell_integration == null);
+    f.wizard.sig_shell_integration.?.set("off");
+    try std.testing.expectEqual(@as(?bool, false), f.wizard.currentDraft().auto_shell_integration);
+    f.clickSave();
+    try std.testing.expectEqual(@as(usize, 1), f.commits);
+    var saved = try store.loadHosts(std.testing.io, f.tmp.dir, a, "hosts.toml");
+    defer saved.deinit();
+    const value = try saved.get(f.wizard.source_owner.?);
+    try std.testing.expectEqual(@as(?bool, false), value.auto_shell_integration);
+    f.wizard.loadDraft(mod.Draft.fromHost(value));
+    try std.testing.expectEqualStrings("off", f.wizard.sig_shell_integration.?.get().?);
+    f.wizard.sig_shell_integration.?.set("on");
+    try std.testing.expectEqual(@as(?bool, true), f.wizard.currentDraft().auto_shell_integration);
+    f.wizard.sig_shell_integration.?.set("inherit");
+    try std.testing.expect(f.wizard.currentDraft().auto_shell_integration == null);
+}
 
 test "wizard save disk failure keeps the exact draft focus and registry then retries once" {
     var f: SaveFixture = undefined;
@@ -1195,7 +1215,7 @@ test "wizard revised browser field typography and advanced host policy geometry"
     };
     const body = f.wizard.advanced_body.?.globalRect();
     const summary = findId(f.wizard.root.?, "wizard.advanced.toggle").?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 310), body.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 379.5), body.h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 18), summary.h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 12), body.y - summary.y - summary.h, 0.01);
     const timeout = f.wizard.connect_timeout_fact.?;
@@ -1284,4 +1304,36 @@ test "copy saved host retains credential references route and all persistent att
     var after_delete = try store.loadHosts(std.testing.io, tmp.dir, a, "hosts.toml");
     defer after_delete.deinit();
     try std.testing.expectEqualStrings("saved-password", (try after_delete.get(owner)).password.?);
+}
+
+test "command info host override shares advanced row and survives saving" {
+    var f: SaveFixture = undefined;
+    try f.init(.ssh);
+    defer f.deinit();
+    try std.testing.expect(f.wizard.currentDraft().command_info == null);
+    f.wizard.sig_command_info.?.set("off");
+    try std.testing.expectEqual(@as(?bool, false), f.wizard.currentDraft().command_info);
+    f.clickSave();
+    var saved = try store.loadHosts(std.testing.io, f.tmp.dir, a, "hosts.toml");
+    defer saved.deinit();
+    const value = try saved.get(f.wizard.source_owner.?);
+    try std.testing.expectEqual(@as(?bool, false), value.command_info);
+    f.wizard.loadDraft(mod.Draft.fromHost(value));
+    try std.testing.expectEqualStrings("off", f.wizard.sig_command_info.?.get().?);
+    f.wizard.sig_command_info.?.set("on");
+    try std.testing.expectEqual(@as(?bool, true), f.wizard.currentDraft().command_info);
+    f.wizard.sig_command_info.?.set("inherit");
+    try std.testing.expect(f.wizard.currentDraft().command_info == null);
+    f.wizard.show();
+    SaveFixture.activate(findId(f.wizard.root.?, "wizard.advanced.toggle").?);
+    feedbackFrames(&f);
+    const info = findId(f.wizard.root.?, "wizard.command_info").?.globalRect();
+    const shell = findId(f.wizard.root.?, "wizard.shell_integration").?.globalRect();
+    try std.testing.expectApproxEqAbs(info.y, shell.y, 0.1);
+    try std.testing.expectApproxEqAbs(info.h, shell.h, 0.1);
+    try std.testing.expectApproxEqAbs(info.w, shell.w, 0.1);
+    try std.testing.expect(info.w > 250 and info.w < 400);
+    try std.testing.expect(shell.x >= info.x + info.w + 15);
+    try std.testing.expect(findId(f.wizard.root.?, "wizard.command_info.help") != null);
+    try std.testing.expect(findId(f.wizard.root.?, "wizard.shell_integration.help") != null);
 }

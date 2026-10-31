@@ -19,7 +19,7 @@ const binds = [_]ui.widgets.SelectOption{
 pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const page = try controls.Page.create(cx, bound, "settings.ssh");
     const query = bound.controller.search_query;
-    if (binding.matches(query, "连接 保活 KeepAlive 超时 终端 TERM 压缩 keepalive_sec connect_timeout_sec term compression")) {
+    if (binding.matches(query, "连接 保活 KeepAlive 超时 终端 TERM 压缩 keepalive_sec connect_timeout_sec term compression 自动 会话 初始化 命令 状态 shell integration auto_shell_integration")) {
         const section = try page.section("连接", "连接保活、超时与终端类型", ui.icons.network, 8, "settings.ssh.connection", null);
         try section.input(.{ .section = "ssh", .key = "keepalive_sec" }, "KeepAlive 间隔（秒）", "用于新连接和重连。", null);
         try section.input(.{ .section = "ssh", .key = "connect_timeout_sec" }, "连接超时（秒）", "", null);
@@ -37,6 +37,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         }
         try section.select(.{ .section = "ssh", .key = "term" }, "默认终端类型", "内置类型已做兼容性验证。自定义仅声明 TERM 名称，需远端提供对应终端描述。用于新连接和重连。", term_options[0 .. terms.len + @intFromBool(!known_term)], null);
         try section.toggle(.{ .section = "ssh", .key = "compression" }, "SSH 压缩", "", null);
+        try section.toggle(.{ .section = "ssh", .key = "auto_shell_integration" }, "自动会话初始化", "新建 SSH 会话时在原 shell 内初始化文本钩子，以获取命令状态，不上传文件。主机高级选项可单独覆盖；下次新建会话生效。", null);
     }
     if (binding.matches(query, "断线 自动重连 最大次数 退避 输入缓存 auto_reconnect reconnect_max reconnect_backoff buffer_input")) {
         const section = try page.section("断线重连", "自动重连与输入缓存", ui.icons.rotate_ccw, 9, "settings.ssh.reconnect", null);

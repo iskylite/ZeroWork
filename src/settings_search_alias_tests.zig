@@ -54,6 +54,7 @@ test "settings search schema aliases mount their actual appearance section and c
         .{ .query = "cursor_style", .section = "font", .control = "settings.field.cursor_style" },
         .{ .query = "sidebar_collapsed", .section = "aids", .control = "settings.toggle.sidebar_collapsed" },
         .{ .query = "timestamp_gutter", .section = "aids", .control = "settings.toggle.timestamp_gutter" },
+        .{ .query = "command_info", .section = "aids", .control = "settings.toggle.command_info" },
         .{ .query = "input_line_highlight", .section = "aids", .control = "settings.toggle.input_line_highlight" },
         .{ .query = "enabled", .section = "aids", .control = "settings.toggle.enabled" },
         .{ .query = "blur_px", .section = "materials", .control = "settings.field.blur_px" },

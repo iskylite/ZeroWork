@@ -1,4 +1,5 @@
-//! Versioned private-shell execution facts. A lease controls local input only;
+//! Versioned terminal execution facts with explicit evidence provenance.
+//! A lease controls local input only;
 //! neither TTL nor a terminal prompt proves foreground completion.
 const std = @import("std");
 const identity = @import("identity.zig");
@@ -11,6 +12,11 @@ pub const State = enum { unavailable, idle, preparing, awaiting_start_boundary, 
 /// requests record a same-PTY interval and never imply exclusive writer identity.
 pub const OutputScope = enum { exact, session_interval };
 pub const OutputAttribution = enum { unverified, no_concurrent_owner_observed, concurrent_observed };
+/// Shell integration is cooperative reporting, not a private control channel.
+/// Unknown preserves compatibility with receipts recorded before provenance.
+pub const CompletionSource = enum { unknown, private_protocol, shell_reported };
+/// Reserved stream authorization token; never emitted by a controlled reader.
+pub const stream_wait_sequence: u64 = std.math.maxInt(i64);
 pub const Grant = struct {
     execution_id: identity.ExecutionId,
     task_id: identity.TaskId,
@@ -18,12 +24,12 @@ pub const Grant = struct {
     input_epoch: u64,
     ownership_revision: u64,
 };
-/// Only the explicitly installed shell helper can attest this wait. Ordinary
-/// prompt text, termios and a running child never create an input capability.
+/// Controlled waits come from a shell helper. `terminal_stream` grants bounded
+/// writes to the current PTY; it does not attest a waiting or consuming process.
 pub const InputKind = enum { text, enter, host_secret };
 pub const InputWait = struct {
     sequence: u64,
-    kind: enum { controlled_line, host_secret } = .controlled_line,
+    kind: enum { controlled_line, host_secret, terminal_stream } = .controlled_line,
     max_bytes: u16 = 4096,
 };
 pub const InputRequest = struct {
@@ -44,7 +50,7 @@ pub const InputReceipt = struct {
     input_sequence: u64,
     wait_sequence: u64,
     kind: InputKind,
-    stage: enum { awaiting_host_secret, queued, consumed, cancelled_unsent, outcome_unknown },
+    stage: enum { awaiting_host_secret, queued, written, consumed, cancelled_unsent, outcome_unknown },
     accepted_bytes: usize = 0,
 };
 pub const Request = struct {
@@ -71,6 +77,7 @@ pub const ProcessReceipt = struct { exit_code: ?u8 = null, signal: ?u8 = null, f
 pub const Boundary = struct { raw_offset: u64, sequence: u64, event_sequence: u64 = 0 };
 pub const Snapshot = struct {
     owner: identity.SessionHandle,
+    completion_source: CompletionSource = .unknown,
     execution_id: ?identity.ExecutionId = null,
     command_hash: [32]u8 = @splat(0),
     execution_fence: u64 = 0,
@@ -120,6 +127,7 @@ pub const Snapshot = struct {
 pub const PublicReceipt = struct {
     execution_id: identity.ExecutionId,
     command_hash: [32]u8,
+    completion_source: CompletionSource = .unknown,
     input_receipt: ?InputReceipt = null,
     input_fence: u64,
     input_epoch: u64,
@@ -147,11 +155,12 @@ pub const PublicReceipt = struct {
     pub fn fromSnapshot(value: Snapshot) ?PublicReceipt {
         const id = value.execution_id orelse return null;
         if (value.execution_fence == 0) return null;
-        return .{ .execution_id = id, .command_hash = value.command_hash, .input_receipt = value.input_receipt, .input_fence = value.execution_fence, .input_epoch = value.execution_input_epoch, .accepted_sequence = value.accepted_sequence, .submit_sequence = value.submit_sequence, .submit_ack_sequence = value.submit_ack_sequence, .submit_native_bytes = value.submit_native_bytes, .native_wake_written = value.native_wake_written, .recording_id = value.recording_id, .recording_generation = value.recording_generation, .start = value.start, .end = value.end, .manifest_revision = value.manifest_revision, .process = value.process, .recording_settled = value.recording_settled, .recording_failed = value.recording_failed, .sealed = value.state == .sealed, .output_scope = value.output_scope, .output_attribution = value.output_attribution, .output_attribution_reason = value.output_attribution_reason, .interval_saved = value.interval_saved, .local_released = value.local_released, .input_handed_off = value.input_handed_off, .remote_effect_unknown = value.remote_effect_unknown };
+        return .{ .execution_id = id, .command_hash = value.command_hash, .completion_source = value.completion_source, .input_receipt = value.input_receipt, .input_fence = value.execution_fence, .input_epoch = value.execution_input_epoch, .accepted_sequence = value.accepted_sequence, .submit_sequence = value.submit_sequence, .submit_ack_sequence = value.submit_ack_sequence, .submit_native_bytes = value.submit_native_bytes, .native_wake_written = value.native_wake_written, .recording_id = value.recording_id, .recording_generation = value.recording_generation, .start = value.start, .end = value.end, .manifest_revision = value.manifest_revision, .process = value.process, .recording_settled = value.recording_settled, .recording_failed = value.recording_failed, .sealed = value.state == .sealed, .output_scope = value.output_scope, .output_attribution = value.output_attribution, .output_attribution_reason = value.output_attribution_reason, .interval_saved = value.interval_saved, .local_released = value.local_released, .input_handed_off = value.input_handed_off, .remote_effect_unknown = value.remote_effect_unknown };
     }
     pub fn validate(self: PublicReceipt) !void {
         if (!self.execution_id.valid() or self.input_fence == 0) return error.InvalidExecutionReceipt;
         if (self.input_receipt) |receipt| {
+            if (receipt.kind == .host_secret and receipt.stage == .written) return error.InvalidExecutionReceipt;
             if (receipt.input_sequence == 0 or receipt.wait_sequence == 0 or receipt.accepted_bytes > 4096 or ((receipt.kind == .enter or receipt.kind == .host_secret) and receipt.accepted_bytes != 0) or ((receipt.stage == .awaiting_host_secret or receipt.stage == .queued or receipt.stage == .cancelled_unsent) and receipt.accepted_bytes != 0)) return error.InvalidExecutionReceipt;
         }
         if (self.output_attribution_reason) |reason| if (reason.len > 96 or !std.unicode.utf8ValidateSlice(reason)) return error.InvalidExecutionReceipt;
@@ -167,16 +176,18 @@ pub const PublicReceipt = struct {
             if (end.raw_offset < start.raw_offset or end.sequence <= start.sequence or end.event_sequence <= start.event_sequence) return error.InvalidExecutionReceipt;
         }
         if (self.sealed and (self.start == null or self.end == null or !self.recording_settled or self.recording_failed or !self.local_released or self.remote_effect_unknown or self.process == null or !self.process.?.foreground_finished or (self.process.?.background_jobs or self.process.?.background_jobs_unknown))) return error.InvalidExecutionReceipt;
-        if (self.sealed and (self.output_scope != .exact or self.interval_saved)) return error.InvalidExecutionReceipt;
-        if (self.interval_saved and (self.output_scope != .session_interval or self.sealed or self.accepted_sequence == 0 or self.submit_sequence == 0 or self.submit_ack_sequence == 0 or self.submit_native_bytes == 0 or !self.native_wake_written or self.start == null or self.end == null or self.recording_id == null or self.manifest_revision == 0 or !self.recording_settled or self.recording_failed or !self.local_released or self.remote_effect_unknown or self.process == null or !self.process.?.foreground_finished)) return error.InvalidExecutionReceipt;
+        if (self.sealed and (self.completion_source == .shell_reported or self.output_scope != .exact or self.interval_saved)) return error.InvalidExecutionReceipt;
+        if (self.interval_saved and (self.output_scope != .session_interval or self.sealed or self.accepted_sequence == 0 or self.submit_sequence == 0 or self.submit_native_bytes == 0 or self.start == null or self.end == null or self.recording_id == null or self.manifest_revision == 0 or !self.recording_settled or self.recording_failed or !self.local_released or self.remote_effect_unknown or self.process == null or !self.process.?.foreground_finished)) return error.InvalidExecutionReceipt;
+        if (self.interval_saved and self.completion_source != .shell_reported and (self.submit_ack_sequence == 0 or !self.native_wake_written)) return error.InvalidExecutionReceipt;
     }
     pub fn validateTransition(self: PublicReceipt, prior: PublicReceipt) !void {
         try self.validate();
         if (prior.input_receipt) |old| {
             const next = self.input_receipt orelse return error.ExecutionReceiptRegression;
-            if (next.input_sequence < old.input_sequence or next.wait_sequence < old.wait_sequence) return error.ExecutionReceiptRegression;
-            if (next.input_sequence == old.input_sequence and (next.kind != old.kind or next.wait_sequence != old.wait_sequence or ((old.stage == .consumed or old.stage == .cancelled_unsent or old.stage == .outcome_unknown) and !std.meta.eql(next, old)))) return error.ExecutionReceiptRegression;
+            if (next.input_sequence < old.input_sequence or (next.wait_sequence != stream_wait_sequence and old.wait_sequence != stream_wait_sequence and next.wait_sequence < old.wait_sequence)) return error.ExecutionReceiptRegression;
+            if (next.input_sequence == old.input_sequence and (next.kind != old.kind or next.wait_sequence != old.wait_sequence or ((old.stage == .written or old.stage == .consumed or old.stage == .cancelled_unsent or old.stage == .outcome_unknown) and !std.meta.eql(next, old)))) return error.ExecutionReceiptRegression;
         }
+        if (self.completion_source != prior.completion_source) return error.ExecutionReceiptRegression;
         if (self.output_scope != prior.output_scope or (prior.interval_saved and !self.interval_saved)) return error.ExecutionReceiptRegression;
         if (prior.output_attribution == .concurrent_observed and self.output_attribution != .concurrent_observed) return error.ExecutionReceiptRegression;
         if (prior.interval_saved and (self.output_attribution != prior.output_attribution or !sameReason(self.output_attribution_reason, prior.output_attribution_reason))) return error.ExecutionReceiptRegression;
@@ -264,6 +275,68 @@ test "observed interval receipt saves real foreground facts without exact output
     regressed = receipt;
     regressed.output_attribution = .no_concurrent_owner_observed;
     try std.testing.expectError(error.ExecutionReceiptRegression, regressed.validateTransition(receipt));
+}
+test "shell reported intervals do not fabricate private acknowledgements" {
+    const snapshot: Snapshot = .{
+        .owner = .{ .session_id = @fromBackingInt(7) },
+        .execution_id = identity.ExecutionId.generate(),
+        .completion_source = .shell_reported,
+        .execution_fence = 4,
+        .state = .interval_recorded,
+        .accepted_sequence = 1,
+        .submit_sequence = 2,
+        .submit_native_bytes = 5,
+        .start = .{ .raw_offset = 0, .sequence = 1, .event_sequence = 1 },
+        .end = .{ .raw_offset = 10, .sequence = 2, .event_sequence = 2 },
+        .recording_id = std.fmt.bytesToHex(identity.RecordingId.generate().bytes, .lower),
+        .recording_generation = 1,
+        .manifest_revision = 3,
+        .process = .{ .exit_code = 7, .foreground_finished = true, .background_jobs_unknown = true },
+        .recording_settled = true,
+        .output_scope = .session_interval,
+        .interval_saved = true,
+    };
+    const receipt = PublicReceipt.fromSnapshot(snapshot).?;
+    try receipt.validate();
+    try std.testing.expectEqual(CompletionSource.shell_reported, receipt.completion_source);
+    try std.testing.expect(!receipt.native_wake_written and receipt.submit_ack_sequence == 0);
+    var invalid = receipt;
+    invalid.completion_source = .private_protocol;
+    try std.testing.expectError(error.InvalidExecutionReceipt, invalid.validate());
+    invalid = receipt;
+    invalid.submit_native_bytes = 0;
+    try std.testing.expectError(error.InvalidExecutionReceipt, invalid.validate());
+    invalid = receipt;
+    invalid.end = null;
+    try std.testing.expectError(error.InvalidExecutionReceipt, invalid.validate());
+}
+test "native written input is final and stream tokens are not reader sequences" {
+    var receipt: PublicReceipt = .{
+        .execution_id = identity.ExecutionId.generate(),
+        .command_hash = @splat(0),
+        .completion_source = .private_protocol,
+        .input_fence = 1,
+        .input_epoch = 0,
+        .input_receipt = .{ .input_sequence = 1, .wait_sequence = stream_wait_sequence, .kind = .text, .stage = .written, .accepted_bytes = 3 },
+    };
+    try receipt.validate();
+    var changed = receipt;
+    changed.input_receipt.?.kind = .host_secret;
+    changed.input_receipt.?.accepted_bytes = 0;
+    try std.testing.expectError(error.InvalidExecutionReceipt, changed.validate());
+    changed = receipt;
+    changed.input_receipt.?.stage = .consumed;
+    try std.testing.expectError(error.ExecutionReceiptRegression, changed.validateTransition(receipt));
+    changed = receipt;
+    changed.completion_source = .shell_reported;
+    try std.testing.expectError(error.ExecutionReceiptRegression, changed.validateTransition(receipt));
+    changed = receipt;
+    changed.input_receipt = .{ .input_sequence = 2, .wait_sequence = 1, .kind = .text, .stage = .queued };
+    try changed.validateTransition(receipt);
+    receipt = changed;
+    changed.input_receipt.?.stage = .consumed;
+    changed.input_receipt.?.accepted_bytes = 3;
+    try changed.validateTransition(receipt);
 }
 pub fn digest(bytes: []const u8) [32]u8 {
     var out: [32]u8 = undefined;

@@ -14,6 +14,9 @@ pub fn loadCancelable(allocator: std.mem.Allocator, cast: []const u8, cancel: ?*
     return loadWithDisplay(allocator, cast, cancel, .{});
 }
 pub fn loadWithDisplay(allocator: std.mem.Allocator, cast: []const u8, cancel: ?*const std.atomic.Value(bool), display: @import("../vt/recording_manifest.zig").Display) !Timeline {
+    return loadWithManifest(allocator, cast, cancel, display, null);
+}
+pub fn loadWithManifest(allocator: std.mem.Allocator, cast: []const u8, cancel: ?*const std.atomic.Value(bool), display: @import("../vt/recording_manifest.zig").Display, metadata: ?@import("../vt/recording_manifest.zig").Manifest) !Timeline {
     // Display color snapshots are historical metadata, never a UI theme.
     // Keep native cell color tags; the reader resolves them against the live
     // global palette without changing recorded bytes or literal truecolor.
@@ -28,9 +31,9 @@ pub fn loadWithDisplay(allocator: std.mem.Allocator, cast: []const u8, cancel: ?
     if (version != .integer or version.integer != 2) return error.InvalidCast;
     // A ring tail may begin inside an ANSI sequence, alternate screen or
     // unknown geometry. Never interpret it from a fabricated empty VT.
-    if (header.value.object.get("zerowork")) |metadata| {
-        if (metadata != .object) return error.InvalidCast;
-        if (metadata.object.get("replay_baseline")) |baseline| {
+    if (header.value.object.get("zerowork")) |header_metadata| {
+        if (header_metadata != .object) return error.InvalidCast;
+        if (header_metadata.object.get("replay_baseline")) |baseline| {
             if (baseline != .string) return error.InvalidCast;
             if (std.mem.eql(u8, baseline.string, "unavailable")) return error.RecordingBaselineUnavailable;
             return error.UnsupportedRecordingBaseline;
@@ -43,13 +46,18 @@ pub fn loadWithDisplay(allocator: std.mem.Allocator, cast: []const u8, cancel: ?
     adapter.wall_clock_ms = replayClockUnknown;
     var timeline = Timeline.init(allocator, 128 * 1024 * 1024);
     errdefer timeline.deinit();
+    var command_replay: CommandReplay = .{ .timeline = &timeline, .metadata = metadata };
+    adapter.setCommandObserver(.{ .context = &command_replay, .changed = CommandReplay.observed });
     var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(1) } };
     var composite = @import("terminal_document.zig").Document.init(allocator, source.service(), source.owner);
     defer composite.deinit();
     var previous_ms: i64 = 0;
+    var cast_line: u64 = 0;
     while (lines.next()) |line| {
         if (cancel) |token| if (token.load(.acquire)) return error.Cancelled;
         if (std.mem.trim(u8, line, " \r\t").len == 0) continue;
+        cast_line += 1;
+        command_replay.atLine(cast_line);
         const event = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
         defer event.deinit();
         if (event.value != .array or event.value.array.items.len != 3) return error.InvalidCast;
@@ -77,9 +85,12 @@ pub fn loadWithDisplay(allocator: std.mem.Allocator, cast: []const u8, cancel: ?
             defer record.deinit();
             try composite.restore(record.value);
         } else continue;
+        if (command_replay.failure) |err| return err;
+        try command_replay.refreshLocations(&adapter, allocator);
         if (composite.enabled) {
             var combined = try composite.service().snapshot(allocator);
             defer combined.deinit(allocator);
+            command_replay.takeLocations(combined.projection.commands);
             var captured = try composite.service().searchSnapshot(allocator);
             const search_bytes = captured.document.text.len + captured.document.rows.len * @sizeOf(@import("../vt/search_snapshot.zig").Row) + captured.document.spans.len * @sizeOf(@import("../vt/search_snapshot.zig").Span);
             if (timeline.bytes + Timeline.projectionStorageBytes(&combined.projection) + search_bytes > timeline.limit) {
@@ -117,6 +128,86 @@ pub fn loadWithDisplay(allocator: std.mem.Allocator, cast: []const u8, cancel: ?
     if (timeline.frames.items.len == 0) return error.EmptyRecording;
     return timeline;
 }
+
+const CommandReplay = struct {
+    timeline: *Timeline,
+    metadata: ?@import("../vt/recording_manifest.zig").Manifest,
+    generation: u64 = 1,
+    generation_index: usize = 0,
+    failure: ?anyerror = null,
+    fn atLine(self: *CommandReplay, line: u64) void {
+        const metadata = self.metadata orelse return;
+        var sequence: u64 = 0;
+        for (metadata.events) |event| if (event.cast_line == line) {
+            sequence = event.sequence;
+            break;
+        };
+        const generations = metadata.recording.generations;
+        while (self.generation_index + 1 < generations.len and sequence >= generations[self.generation_index + 1].event_sequence_start) {
+            self.generation_index += 1;
+            self.generation = generations[self.generation_index].recording_generation;
+        }
+    }
+    fn refreshLocations(self: *CommandReplay, adapter: *Adapter, allocator: std.mem.Allocator) !void {
+        if (self.timeline.commands.items.len == 0) return;
+        var current = try adapter.copyProjection(allocator);
+        defer current.deinit(allocator);
+        self.takeLocations(current.commands);
+    }
+    fn takeLocations(self: *CommandReplay, commands: []const @import("../vt/snapshot.zig").Command) void {
+        for (self.timeline.commands.items, self.timeline.command_frames.items) |*command, frame_index| {
+            if (frame_index != self.timeline.frames.items.len) continue;
+            command.screen_row = null;
+            command.col = null;
+            command.input_end_row = null;
+            command.input_end_col = null;
+            command.output_start_row = null;
+            command.output_start_col = null;
+            for (commands) |native| if (native.id == command.id) {
+                command.screen_row = native.screen_row;
+                command.col = native.col;
+                command.input_end_row = native.input_end_row;
+                command.input_end_col = native.input_end_col;
+                command.output_start_row = native.output_start_row;
+                command.output_start_col = native.output_start_col;
+                break;
+            };
+        }
+    }
+    fn observed(raw: *anyopaque, native: @import("../vt/snapshot.zig").Command) void {
+        const self: *CommandReplay = @ptrCast(@alignCast(raw));
+        if (self.failure != null) return;
+        var command = native;
+        // Old archives have no authoritative wall clock, elapsed time or AI
+        // provenance. Never assign their decode-time values to historical runs.
+        command.start_ms = 0;
+        command.end_ms = null;
+        command.elapsed_ms = null;
+        command.exit_code = null;
+        command.state = .unknown;
+        command.ai_execution_id = null;
+        if (self.metadata) |metadata| for (metadata.command_history) |saved| {
+            if (saved.recording_generation != self.generation or saved.value.id != native.id) continue;
+            if (saved.value.command) |text| {
+                const captured = native.command orelse break;
+                if (!std.mem.eql(u8, text, captured)) break;
+            }
+            // The manifest and cast are leased and checksum-verified together.
+            // Preserve native row coordinates at this frame, restore facts only.
+            command.start_ms = saved.value.start_ms;
+            command.end_ms = saved.value.end_ms;
+            command.elapsed_ms = saved.value.elapsed_ms;
+            command.exit_code = saved.value.exit_code;
+            command.state = saved.value.state;
+            command.ai_execution_id = saved.value.ai_execution_id;
+            @import("../vt/recording_manifest.zig").applyPrivateCommandEvidence(&command, self.generation, metadata.execution_ranges);
+            break;
+        };
+        self.timeline.recordCommand(command, self.timeline.frames.items.len) catch |err| {
+            self.failure = err;
+        };
+    }
+};
 
 fn replayClockUnknown() i64 {
     return 0;
@@ -223,4 +314,44 @@ test "history refuses retained ANSI tails without a replay baseline after snapsh
     try frozen.exportCast(&writer, 80, 24);
     try std.testing.expectError(error.RecordingBaselineUnavailable, load(a, writer.buffered()));
     try std.testing.expectError(error.UnsupportedRecordingBaseline, load(a, "{\"version\":2,\"width\":80,\"height\":24,\"zerowork\":{\"replay_baseline\":\"future\"}}\n"));
+}
+
+test "command history replay separates reconnect generations and leaves old provenance unknown" {
+    const a = std.testing.allocator;
+    const Manifest = @import("../vt/recording_manifest.zig");
+    const ai_id = @import("../host/identity.zig").ExecutionId.generate();
+    const cast = "{\"version\":2,\"width\":20,\"height\":4}\n[0,\"o\",\"\\u001b]133;A\\u0007$ \\u001b]133;B\\u0007true\\r\\n\\u001b]133;C\\u0007\\u001b]133;D;0\\u0007\"]\n[1,\"o\",\"\\u001b]133;A\\u0007$ \\u001b]133;B\\u0007true\\r\\n\\u001b]133;C\\u0007\\u001b]133;D;7\\u0007\"]\n";
+    const metadata: Manifest.Manifest = .{
+        .archive_key = "11111111111111111111111111111111",
+        .recording_id = "22222222222222222222222222222222",
+        .source_kind = .ssh,
+        .started_ms = 100,
+        .recording = .{ .generations = &.{
+            .{ .recording_generation = 1, .session_id = 1, .session_generation = 1, .initial_cols = 20, .initial_rows = 4, .receive_time_origin = 0, .event_sequence_start = 1 },
+            .{ .recording_generation = 2, .session_id = 1, .session_generation = 2, .initial_cols = 20, .initial_rows = 4, .receive_time_origin = 1, .event_sequence_start = 2 },
+        } },
+        .events = &.{
+            .{ .sequence = 1, .raw_offset = 0, .raw_length = 1, .cast_line = 1, .kind = .output },
+            .{ .sequence = 2, .raw_offset = 1, .raw_length = 1, .cast_line = 2, .kind = .output },
+        },
+        .command_history = &.{
+            .{ .recording_generation = 1, .value = .{ .id = 1, .command = "true", .start_ms = 100, .end_ms = 110, .elapsed_ms = 10, .exit_code = 0, .state = .succeeded } },
+            .{ .recording_generation = 2, .value = .{ .id = 2, .command = "true", .start_ms = 200, .end_ms = 230, .elapsed_ms = 30, .exit_code = 7, .state = .failed, .ai_execution_id = ai_id } },
+        },
+    };
+    var replay = try loadWithManifest(a, cast, null, .{}, metadata);
+    defer replay.deinit();
+    try std.testing.expectEqual(@as(usize, 2), replay.commands.items.len);
+    try std.testing.expect(replay.commands.items[0].ai_execution_id == null);
+    try std.testing.expect(replay.commands.items[1].ai_execution_id.?.eql(ai_id));
+    try std.testing.expectEqual(@as(i64, 200), replay.commands.items[1].start_ms);
+    try std.testing.expectEqual(@as(?u64, 30), replay.commands.items[1].elapsed_ms);
+    try std.testing.expectEqual(@as(?usize, 0), replay.commandFrame(1));
+    try std.testing.expectEqual(@as(?usize, 1), replay.commandFrame(2));
+    var old = try load(a, cast);
+    defer old.deinit();
+    for (old.commands.items) |command| {
+        try std.testing.expectEqual(@import("../vt/snapshot.zig").CommandState.unknown, command.state);
+        try std.testing.expect(command.start_ms == 0 and command.end_ms == null and command.elapsed_ms == null and command.exit_code == null and command.ai_execution_id == null);
+    }
 }

@@ -27,6 +27,8 @@ pub const Transport = struct {
     close: *const fn (*anyopaque) void,
 };
 pub const BoundaryKind = enum { start, end };
+/// Reserved for a host-authorized PTY stream; never emitted by a shell helper.
+pub const terminal_stream_wait_sequence = execution.stream_wait_sequence;
 pub const Sink = struct {
     context: *anyopaque,
     output: *const fn (*anyopaque, []const u8, u64) void,
@@ -95,11 +97,14 @@ pub const Bridge = struct {
     input_inflight: bool = false,
     tx_input: bool = false,
     input_deadline: i64 = 0,
+    stream_buffer: [4096]u8 = undefined,
+    stream_len: usize = 0,
+    stream_offset: usize = 0,
     pub fn init(a: std.mem.Allocator, owner: identity.SessionHandle, native: *Native) Bridge {
-        return .{ .allocator = a, .owner = owner, .native = native, .snapshot = .{ .owner = owner } };
+        return .{ .allocator = a, .owner = owner, .native = native, .snapshot = .{ .owner = owner, .completion_source = .private_protocol } };
     }
     pub fn initTransport(a: std.mem.Allocator, owner: identity.SessionHandle, transport: Transport) Bridge {
-        return .{ .allocator = a, .owner = owner, .native = null, .transport = transport, .snapshot = .{ .owner = owner } };
+        return .{ .allocator = a, .owner = owner, .native = null, .transport = transport, .snapshot = .{ .owner = owner, .completion_source = .private_protocol } };
     }
     fn nonce(self: *const Bridge) []const u8 {
         return if (self.transport) |t| t.nonce else std.mem.span(zw_local_edit_nonce(self.native.?));
@@ -134,8 +139,47 @@ pub const Bridge = struct {
         try self.lease.renew(grant, now);
         self.changed();
     }
+    /// This authorizes bytes to the running execution's PTY, not a claim that
+    /// a particular child is waiting for, or will consume, those bytes.
+    pub fn inputAvailability(self: *const Bridge) ?execution.InputWait {
+        if (self.snapshot.input_wait) |wait| return wait;
+        if (self.transport != null or !self.hello or self.disabled or self.lease.holder == null or self.snapshot.state != .running or self.snapshot.input_handed_off or self.snapshot.remote_effect_unknown) return null;
+        return .{ .sequence = terminal_stream_wait_sequence, .kind = .terminal_stream };
+    }
+    pub fn streamInputPending(self: *const Bridge) bool {
+        return self.stream_offset < self.stream_len;
+    }
+    pub fn streamInputBytes(self: *Bridge) []const u8 {
+        return self.stream_buffer[self.stream_offset..self.stream_len];
+    }
+    pub fn streamInputWritten(self: *Bridge, count: usize) void {
+        std.debug.assert(count <= self.stream_len - self.stream_offset);
+        self.stream_offset += count;
+        if (self.snapshot.input_receipt) |*receipt| {
+            if (self.stream_offset == self.stream_len) {
+                receipt.accepted_bytes = if (receipt.kind == .text) self.stream_offset else 0;
+                receipt.stage = .written;
+            }
+        }
+        if (!self.streamInputPending()) {
+            self.stream_len = 0;
+            self.stream_offset = 0;
+            if (self.lease.draining and self.tx.items.len == self.tx_offset and !self.wake_pending and !self.awaiting_submit_ack) self.lease.draining = false;
+        }
+        self.changed();
+    }
+    pub fn streamInputFailed(self: *Bridge) void {
+        if (self.snapshot.input_receipt) |*receipt| {
+            receipt.stage = if (self.stream_offset == 0) .cancelled_unsent else .outcome_unknown;
+            receipt.accepted_bytes = if (receipt.kind == .text) self.stream_offset else 0;
+        }
+        self.stream_len = 0;
+        self.stream_offset = 0;
+        self.lease.draining = self.wake_pending or self.awaiting_submit_ack;
+        self.fail("TerminalInputWriteFailed", false);
+    }
     pub fn sendInput(self: *Bridge, request: execution.InputRequest, now: i64) !execution.InputReceipt {
-        if (self.transport != null or !self.input_capability or !self.hello or self.disabled or request.kind == .host_secret) return error.UnsupportedInteraction;
+        if (self.transport != null or !self.hello or self.disabled or request.kind == .host_secret) return error.UnsupportedInteraction;
         try self.lease.check(request.grant, now);
         if (request.input_sequence == 0 or request.input_sequence > std.math.maxInt(i64) or request.wait_sequence == 0) return error.InvalidArguments;
         if (request.kind == .text) try execution.validateInput(request.text) else if (request.text.len != 0) return error.InvalidArguments;
@@ -150,11 +194,24 @@ pub const Bridge = struct {
             if (!std.mem.eql(u8, &hash, &self.last_input_hash)) return error.InputConflict;
             return self.snapshot.input_receipt orelse error.InputConflict;
         }
-        if (request.input_sequence < self.last_input_sequence or self.input_inflight or self.tx.items.len != self.tx_offset) return error.InputConflict;
-        const wait = self.snapshot.input_wait orelse return error.InputNotExpected;
-        if (wait.kind != .controlled_line) return error.SecretMustUseHost;
+        if (request.input_sequence < self.last_input_sequence or self.input_inflight or self.streamInputPending() or self.tx.items.len != self.tx_offset) return error.InputConflict;
+        const wait = self.inputAvailability() orelse return error.InputNotExpected;
+        if (wait.kind == .host_secret) return error.SecretMustUseHost;
+        if (wait.kind == .controlled_line and !self.input_capability) return error.UnsupportedInteraction;
         if (self.snapshot.state != .running or self.snapshot.input_handed_off or self.snapshot.remote_effect_unknown or wait.sequence != request.wait_sequence) return error.InputNotExpected;
-        if (request.text.len > wait.max_bytes or self.input_buffered_bytes + request.text.len > 4096) return error.InputLimit;
+        if (request.text.len > wait.max_bytes or (wait.kind == .controlled_line and self.input_buffered_bytes + request.text.len > 4096)) return error.InputLimit;
+        if (wait.kind == .terminal_stream) {
+            const bytes = if (request.kind == .enter) "\r" else request.text;
+            @memcpy(self.stream_buffer[0..bytes.len], bytes);
+            self.stream_len = bytes.len;
+            self.stream_offset = 0;
+            self.last_input_sequence = request.input_sequence;
+            self.last_input_hash = hash;
+            const receipt: execution.InputReceipt = .{ .input_sequence = request.input_sequence, .wait_sequence = request.wait_sequence, .kind = request.kind, .stage = .queued };
+            self.snapshot.input_receipt = receipt;
+            self.changed();
+            return receipt;
+        }
         var fence: [32]u8 = undefined;
         var epoch: [32]u8 = undefined;
         var wait_sequence: [32]u8 = undefined;
@@ -179,6 +236,7 @@ pub const Bridge = struct {
         };
         if (self.transport != null or !self.secret_capability or !self.hello or self.disabled) return error.HostSecretUnavailable;
         try self.lease.check(request.grant, now);
+        if (self.streamInputPending()) return error.InputConflict;
         if (request.kind != .host_secret or request.text.len != 0 or request.input_sequence == 0 or request.input_sequence > std.math.maxInt(i64)) return error.InvalidArguments;
         const wait = self.snapshot.input_wait orelse return error.InputNotExpected;
         if (wait.kind != .host_secret or wait.sequence != request.wait_sequence or self.snapshot.state != .running or self.snapshot.input_handed_off or self.snapshot.remote_effect_unknown) return error.InputNotExpected;
@@ -227,6 +285,12 @@ pub const Bridge = struct {
     /// Cancel queued bytes before releasing a grant. A partially written frame
     /// cannot be completed after revocation; close that private protocol.
     fn cancelInput(self: *Bridge) bool {
+        // Native PTY input is a byte stream. Once a prefix was written, retain
+        // only that original tail and block other producers until it drains.
+        if (self.streamInputPending() and self.stream_offset == 0) {
+            self.stream_len = 0;
+            if (self.snapshot.input_receipt) |*receipt| receipt.stage = .cancelled_unsent;
+        }
         if (self.tx_input and self.tx_offset > 0 and self.tx_offset < self.tx.items.len) {
             if (self.snapshot.input_receipt) |*receipt| receipt.stage = .outcome_unknown;
             self.disable();
@@ -250,7 +314,7 @@ pub const Bridge = struct {
         return true;
     }
     fn releaseHelper(self: *Bridge, grant: execution.Grant) !void {
-        if (!self.input_capability or self.transport != null) return;
+        if (!self.input_capability or self.transport != null or self.snapshot.input_wait == null) return;
         var fence: [32]u8 = undefined;
         var epoch: [32]u8 = undefined;
         const id = std.fmt.bytesToHex(grant.execution_id.bytes, .lower);
@@ -262,7 +326,7 @@ pub const Bridge = struct {
     pub fn wakeCompleted(self: *Bridge) void {
         self.wake_pending = false;
         self.snapshot.native_wake_written = true;
-        if (self.lease.draining and self.tx.items.len == self.tx_offset) self.lease.draining = false;
+        if (self.lease.draining and self.tx.items.len == self.tx_offset and !self.streamInputPending()) self.lease.draining = false;
         self.changed();
     }
     pub fn ordinaryInput(self: *Bridge) !void {
@@ -322,7 +386,7 @@ pub const Bridge = struct {
         self.last_input_sequence = 0;
         self.last_input_hash = @splat(0);
         self.input_expected_bytes = 0;
-        self.snapshot = .{ .owner = self.owner, .execution_id = request.execution_id, .command_hash = request.command_hash, .execution_fence = grant.fence, .execution_input_epoch = grant.input_epoch, .state = .preparing, .started_at = @import("../platform/realtime.zig").milliseconds(undefined), .revision = self.snapshot.revision +| 1, .interactive_execution = true, .grant = grant, .input_epoch = self.lease.input_epoch, .input_ready = false, .local_released = false, .output_scope = request.output_scope };
+        self.snapshot = .{ .owner = self.owner, .completion_source = .private_protocol, .execution_id = request.execution_id, .command_hash = request.command_hash, .execution_fence = grant.fence, .execution_input_epoch = grant.input_epoch, .state = .preparing, .started_at = @import("../platform/realtime.zig").milliseconds(undefined), .revision = self.snapshot.revision +| 1, .interactive_execution = true, .grant = grant, .input_epoch = self.lease.input_epoch, .input_ready = false, .local_released = false, .output_scope = request.output_scope };
         self.observation_grant = grant;
     }
     /// Called only after RecordingStartBarrier has durably succeeded.
@@ -383,7 +447,7 @@ pub const Bridge = struct {
         self.snapshot.state = state;
         self.snapshot.recording_settled = true;
         self.observation_grant = null;
-        if (self.lease.holder != null) self.lease.revoke((self.tx_offset > 0 and self.tx_offset < self.tx.items.len) or self.wake_pending or self.awaiting_submit_ack);
+        if (self.lease.holder != null) self.lease.revoke((self.tx_offset > 0 and self.tx_offset < self.tx.items.len) or self.wake_pending or self.awaiting_submit_ack or self.streamInputPending());
         self.changed();
     }
     pub fn fail(self: *Bridge, reason: []const u8, degraded: bool) void {
@@ -401,7 +465,7 @@ pub const Bridge = struct {
         self.snapshot.recording_failed = self.snapshot.recording_failed or degraded;
         self.snapshot.remote_effect_unknown = self.snapshot.submit_sent;
         self.snapshot.state = if (degraded) .recording_degraded else if (self.snapshot.submit_sent) .outcome_unknown else .cancelled_unsent;
-        self.lease.revoke((self.tx_offset > 0 and self.tx_offset < self.tx.items.len) or self.wake_pending or self.awaiting_submit_ack);
+        self.lease.revoke((self.tx_offset > 0 and self.tx_offset < self.tx.items.len) or self.wake_pending or self.awaiting_submit_ack or self.streamInputPending());
         if (!self.lease.draining) {
             self.clearTransmit();
             self.tx_offset = 0;
@@ -430,7 +494,7 @@ pub const Bridge = struct {
                 // The original exact submit may already be in flight. Keep
                 // only its authenticated observation/drain path; do not send
                 // shell revoke, which would discard the real finish hooks.
-                self.lease.revoke((self.tx_offset > 0 and self.tx_offset < self.tx.items.len) or self.wake_pending or self.awaiting_submit_ack);
+                self.lease.revoke((self.tx_offset > 0 and self.tx_offset < self.tx.items.len) or self.wake_pending or self.awaiting_submit_ack or self.streamInputPending());
                 if (!self.lease.draining) {
                     self.clearTransmit();
                     self.tx_offset = 0;
@@ -559,7 +623,7 @@ pub const Bridge = struct {
                 self.tx_offset = 0;
                 self.tx_submit = false;
                 self.tx_input = false;
-                if (self.lease.draining and !self.wake_pending and !self.awaiting_submit_ack) {
+                if (self.lease.draining and !self.wake_pending and !self.awaiting_submit_ack and !self.streamInputPending()) {
                     self.lease.draining = false;
                     self.changed();
                 }
@@ -579,7 +643,7 @@ pub const Bridge = struct {
         self.input_inflight = false;
         self.disabled = true;
         self.hello = false;
-        self.lease.draining = self.wake_pending or self.awaiting_submit_ack;
+        self.lease.draining = self.wake_pending or self.awaiting_submit_ack or self.streamInputPending();
         self.fail("IntegrationLost", false);
         self.snapshot.interactive_execution = false;
     }
@@ -673,7 +737,7 @@ pub const Bridge = struct {
             const wait_kind: @TypeOf(@as(execution.InputWait, undefined).kind) = if (!self.reading_secret and eq(fields[4], "controlled_line")) .controlled_line else if (self.reading_secret and self.secret_capability and eq(fields[4], "host_secret")) .host_secret else return error.UnsupportedInteraction;
             if (self.lease.holder == null) return; // observer never grants input
             const wait_sequence = try number(fields[3]);
-            if (wait_sequence == 0 or wait_sequence <= self.last_wait_sequence or self.snapshot.input_wait != null or self.input_inflight) return error.InputConflict;
+            if (wait_sequence == 0 or wait_sequence >= terminal_stream_wait_sequence or wait_sequence <= self.last_wait_sequence or self.snapshot.input_wait != null or self.input_inflight) return error.InputConflict;
             self.last_wait_sequence = wait_sequence;
             self.input_buffered_bytes = 0;
             self.snapshot.input_wait = .{ .sequence = wait_sequence, .kind = wait_kind };
@@ -723,6 +787,7 @@ pub const Bridge = struct {
             self.snapshot.process = .{ .exit_code = @intCast(code), .foreground_finished = true, .background_jobs = eq(fields[3], "1"), .background_jobs_unknown = !eq(fields[3], "0") and !eq(fields[3], "1") };
             self.observeOutput(try number(fields[3]));
             self.snapshot.state = .output_draining;
+            _ = self.cancelInput();
             self.snapshot.input_wait = null;
             self.input_inflight = false;
             self.boundary_deadline = now + 5000;
@@ -1137,4 +1202,63 @@ test "execution secret queue is host only bounded and zeroed before an unsent ca
     try std.testing.expect(std.mem.allEqual(u8, transmitted[position + 16 ..][0 .. bytes.len - 16], 0));
     try std.testing.expect(std.mem.indexOf(u8, bridge.tx.items, &bytes) == null);
     try std.testing.expectError(error.InputNotExpected, bridge.secret(.{ .submit = .{ .request = request, .bytes = &bytes } }, 5));
+}
+
+test "execution terminal stream retains one partial native tail through takeover without consumption claims" {
+    const a = std.testing.allocator;
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(928), .generation = 1 };
+    var edit = try @import("trusted_edit.zig").Bridge.init(a, owner);
+    defer edit.deinit();
+    var bridge = Bridge.init(a, owner, edit.native);
+    defer bridge.deinit();
+    bridge.hello = true;
+    const command = "builtin read -r REPLY";
+    try bridge.begin(.{ .execution_id = .generate(), .task_id = .generate(), .expected_input_epoch = 0, .ownership_revision = 1, .command = command, .command_hash = execution.digest(command) }, 1);
+    bridge.snapshot.state = .running;
+    bridge.snapshot.submit_sent = true;
+    const grant = bridge.lease.holder.?;
+    const request: execution.InputRequest = .{ .grant = grant, .wait_sequence = terminal_stream_wait_sequence, .input_sequence = 1, .kind = .text, .text = "ordinary-line" };
+    try std.testing.expect(bridge.inputAvailability().?.kind == .terminal_stream);
+    _ = try bridge.sendInput(request, 2);
+    bridge.streamInputWritten(3);
+    try std.testing.expect(bridge.snapshot.input_receipt.?.stage == .queued and bridge.snapshot.input_receipt.?.accepted_bytes == 0);
+    try bridge.revoke(grant, true, 3);
+    try std.testing.expect(bridge.lease.holder == null and bridge.lease.draining and bridge.snapshot.input_handed_off);
+    try std.testing.expect(bridge.observationGrant() != null and bridge.inputAvailability() == null);
+    try std.testing.expectError(error.TerminalControlled, bridge.ordinaryInput());
+    try std.testing.expectEqualStrings("inary-line", bridge.streamInputBytes());
+    try std.testing.expectError(error.StaleFence, bridge.sendInput(request, 4));
+    bridge.streamInputWritten(bridge.streamInputBytes().len);
+    try std.testing.expect(!bridge.lease.draining and !bridge.streamInputPending());
+    try std.testing.expect(bridge.snapshot.input_receipt.?.stage == .written);
+    try std.testing.expectEqual(request.text.len, bridge.snapshot.input_receipt.?.accepted_bytes);
+    try bridge.ordinaryInput();
+}
+
+test "execution terminal stream cancels an unsent input on finish and preserves helper waits" {
+    const a = std.testing.allocator;
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(929), .generation = 1 };
+    var edit = try @import("trusted_edit.zig").Bridge.init(a, owner);
+    defer edit.deinit();
+    var bridge = Bridge.init(a, owner, edit.native);
+    defer bridge.deinit();
+    bridge.hello = true;
+    const command = "builtin read -r REPLY";
+    try bridge.begin(.{ .execution_id = .generate(), .task_id = .generate(), .expected_input_epoch = 0, .ownership_revision = 1, .command = command, .command_hash = execution.digest(command) }, 1);
+    bridge.snapshot.state = .running;
+    bridge.snapshot.submit_sent = true;
+    const grant = bridge.lease.holder.?;
+    const request: execution.InputRequest = .{ .grant = grant, .wait_sequence = terminal_stream_wait_sequence, .input_sequence = 1, .kind = .text, .text = "must-not-replay" };
+    _ = try bridge.sendInput(request, 2);
+    _ = bridge.cancelInput();
+    bridge.snapshot.state = .output_draining;
+    try std.testing.expect(!bridge.streamInputPending() and bridge.snapshot.input_receipt.?.stage == .cancelled_unsent);
+    try std.testing.expect(bridge.inputAvailability() == null);
+    var next = request;
+    next.input_sequence = 2;
+    try std.testing.expectError(error.InputNotExpected, bridge.sendInput(next, 3));
+    bridge.snapshot.state = .running;
+    bridge.snapshot.input_wait = .{ .sequence = 1, .kind = .host_secret };
+    try std.testing.expect(bridge.inputAvailability().?.kind == .host_secret);
+    try std.testing.expectError(error.SecretMustUseHost, bridge.sendInput(next, 4));
 }

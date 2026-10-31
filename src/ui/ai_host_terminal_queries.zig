@@ -54,7 +54,22 @@ pub fn execute(app: *Application, roster: ?*@import("group_model.zig").Roster, o
         return provider.execute(provider.context, invocation, allocator);
     }
     const handle = try queries.resolveSession(invocation.context, request.source.session);
-    _ = try options.captured_scope.validate(&.{@backingInt(handle.session_id)});
+    _ = options.captured_scope.validate(&.{@backingInt(handle.session_id)}) catch return error.TargetNotAuthorized;
+    if (invocation.context.binding == .group) {
+        const group = (roster orelse return error.ScopeChanged).findById(std.math.cast(u32, invocation.context.binding.group) orelse return error.ScopeChanged) orelse return error.ScopeChanged;
+        // Walk only current members' identities before looking up requested
+        // state. Removed and nonexistent outside IDs produce the same error.
+        const member = allowed: {
+            for (group.members.items) |relation| {
+                if (!relation.active) continue;
+                for (app.workspace.tabs.items) |item| {
+                    if (item.id == relation.pane_id and item.content_owner == .session and item.content_owner.session.eql(handle)) break :allowed true;
+                }
+            }
+            break :allowed false;
+        };
+        if (!member) return error.TargetNotAuthorized;
+    }
     const captured = for (options.captured_handles) |owner| {
         if (owner.eql(handle)) break true;
     } else false;
@@ -62,12 +77,12 @@ pub fn execute(app: *Application, roster: ?*@import("group_model.zig").Roster, o
     const tab = for (app.workspace.tabs.items) |item| {
         if (item.content_owner == .session and item.content_owner.session.eql(handle)) break item;
     } else return error.StaleReference;
-    if (tab.closing or tab.failed or tab.archived or tab.owned_pending) return error.CapabilityUnavailable;
     if (invocation.context.binding == .group) {
         const group = (roster orelse return error.ScopeChanged).findById(std.math.cast(u32, invocation.context.binding.group) orelse return error.ScopeChanged) orelse return error.ScopeChanged;
         const member = currentMember(group.members.items, tab.id);
-        if (!member or app.workspace.groupClosing(group.id)) return error.TargetOutsideScope;
+        if (!member or app.workspace.groupClosing(group.id)) return error.TargetNotAuthorized;
     }
+    if (tab.closing or tab.failed or tab.archived or tab.owned_pending) return error.CapabilityUnavailable;
     const manifest = app.sessions.manifestFor(handle) orelse return error.CapabilityUnavailable;
     if (!manifest.integration.ai) return error.PermissionDenied;
     const allowed = for (manifest.tools) |tool| {

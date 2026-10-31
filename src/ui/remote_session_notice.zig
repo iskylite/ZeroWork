@@ -14,6 +14,7 @@ pub const Snapshot = struct {
     failure: ?anyerror = null,
     buffer_input: bool = false,
     auto_retry_seconds: ?u64 = null,
+    initialization_confirmation: bool = false,
 
     pub fn fromRuntime(value: Control.Snapshot, retrying: bool) Snapshot {
         return .{
@@ -36,6 +37,7 @@ pub const Snapshot = struct {
         };
     }
     pub fn title(self: Snapshot) []const u8 {
+        if ((self.failure != null and self.failure.? == error.ShellInitializationFailed)) return if (self.initialization_confirmation) "终端自动初始化再次失败" else "终端自动初始化失败，正在自动重连一次…";
         return switch (self.state) {
             .connected => "已连接",
             .exited => "远程终端已退出",
@@ -45,6 +47,10 @@ pub const Snapshot = struct {
         };
     }
     pub fn detail(self: Snapshot, buffer: []u8) []const u8 {
+        if ((self.failure != null and self.failure.? == error.ShellInitializationFailed) and self.cleanup == .released) return if (self.initialization_confirmation)
+            "可确认仅本次跳过初始化后重连；全局和主机设置保持不变。未执行或重放业务命令"
+        else
+            "将使用新连接重新初始化；未执行或重放业务命令";
         if (self.state != .connected and self.state != .reconnecting and self.cleanup != .released) return if (self.cleanup == .unknown)
             "历史输出仍可查看；资源释放结果未知，暂时无法重连"
         else
@@ -74,6 +80,7 @@ pub const Hooks = struct {
     session_id: u64,
     reconnect: *const fn (*anyopaque, u64) void,
     close: *const fn (*anyopaque, u64) void,
+    without_initialization: ?*const fn (*anyopaque, u64) void = null,
 };
 pub const View = struct {
     cx: *ui.Cx,
@@ -88,6 +95,7 @@ pub const View = struct {
     reconnect: *ui.Node,
     retry: *ui.Node,
     close: *ui.Node,
+    without_initialization: *ui.Node,
     snapshot: ?Snapshot = null,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, hooks: Hooks) !*View {
@@ -110,10 +118,11 @@ pub const View = struct {
         const detail_node = try ui.text(cx, "", S.detail());
         detail_node.meta.ownership.meta.test_id = "remote.notice.detail";
         try copy.appendChild(cx.allocator, detail_node);
-        self.* = .{ .cx = cx, .hooks = hooks, .root = root, .title_node = title_node, .detail_node = detail_node, .icon = icon, .spinner = spinner, .spinner_color = spinner_color, .reconnect = undefined, .retry = undefined, .close = undefined };
+        self.* = .{ .cx = cx, .hooks = hooks, .root = root, .title_node = title_node, .detail_node = detail_node, .icon = icon, .spinner = spinner, .spinner_color = spinner_color, .reconnect = undefined, .retry = undefined, .close = undefined, .without_initialization = undefined };
         self.close = try self.button(scope, "关闭页签", "remote.notice.close", false, onClose);
         self.reconnect = try self.button(scope, "重新连接", "remote.notice.reconnect", true, onReconnect);
         self.retry = try self.button(scope, "重试连接", "remote.notice.retry", true, onReconnect);
+        self.without_initialization = try self.button(scope, "确认本次不初始化重连", "remote.notice.without-initialization", true, onWithoutInitialization);
         try scope.onCleanup(View, self, destroy);
         self.update(.{});
         return self;
@@ -142,8 +151,10 @@ pub const View = struct {
         visible(self.icon, value.state != .reconnecting);
         visible(self.spinner, value.state == .reconnecting);
         visible(self.close, value.state != .connected);
-        visible(self.reconnect, value.canRetry() and value.state != .retry_failed);
-        visible(self.retry, value.canRetry() and value.state == .retry_failed);
+        const initialization_failure = (value.failure != null and value.failure.? == error.ShellInitializationFailed);
+        visible(self.reconnect, !initialization_failure and value.canRetry() and value.state != .retry_failed);
+        visible(self.retry, !initialization_failure and value.canRetry() and value.state == .retry_failed);
+        visible(self.without_initialization, initialization_failure and value.initialization_confirmation and value.canRetry() and self.hooks.without_initialization != null);
         _ = self.icon.setTint(if (value.state == .disconnected or value.state == .retry_failed) theme.current().danger else theme.current().fg_2);
         self.cx.requestRedraw();
     }
@@ -156,6 +167,11 @@ pub const View = struct {
     }
     fn onClose(self: *View) void {
         self.hooks.close(self.hooks.context, self.hooks.session_id);
+    }
+    fn onWithoutInitialization(self: *View) void {
+        const state = self.snapshot orelse return;
+        if ((state.failure == null or state.failure.? != error.ShellInitializationFailed) or !state.initialization_confirmation or !state.canRetry()) return;
+        if (self.hooks.without_initialization) |call| call(self.hooks.context, self.hooks.session_id);
     }
     fn destroy(self: *View) void {
         self.cx.allocator.destroy(self);
@@ -201,6 +217,7 @@ test "Remote session notice native layout and actions preserve output and reject
     const Recorder = struct {
         retries: usize = 0,
         closes: usize = 0,
+        bypasses: usize = 0,
         fn reconnect(raw: *anyopaque, id: u64) void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             std.debug.assert(id == 42);
@@ -211,9 +228,14 @@ test "Remote session notice native layout and actions preserve output and reject
             std.debug.assert(id == 42);
             self.closes += 1;
         }
+        fn bypass(raw: *anyopaque, id: u64) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            std.debug.assert(id == 42);
+            self.bypasses += 1;
+        }
     };
     var recorder: Recorder = .{};
-    const view = try View.mount(cx, scope, cx.root.?, .{ .context = &recorder, .session_id = 42, .reconnect = Recorder.reconnect, .close = Recorder.close });
+    const view = try View.mount(cx, scope, cx.root.?, .{ .context = &recorder, .session_id = 42, .reconnect = Recorder.reconnect, .close = Recorder.close, .without_initialization = Recorder.bypass });
     const output = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0 }, .{});
     try cx.root.?.appendChild(a, output);
     const states = [_]Snapshot{
@@ -251,6 +273,29 @@ test "Remote session notice native layout and actions preserve output and reject
     try std.testing.expectEqual(@as(usize, 1), recorder.retries);
     view.close.behavior.events.on_click.?.invoke();
     try std.testing.expectEqual(@as(usize, 1), recorder.closes);
+    const initialization: Snapshot = .{ .state = .retry_failed, .failure = error.ShellInitializationFailed, .initialization_confirmation = true };
+    view.update(initialization);
+    for ([_]f32{ 620, 1100 }) |width| {
+        cx.setViewport(width, 600);
+        cx.layout();
+        _ = cx.render();
+        const bar = view.root.globalRect();
+        const action = view.without_initialization.globalRect();
+        try std.testing.expect(action.w > 0 and action.x + action.w <= bar.x + bar.w);
+        try std.testing.expect(view.reconnect.style.display == .none and view.retry.style.display == .none);
+    }
+    view.without_initialization.behavior.events.on_click.?.invoke();
+    try std.testing.expectEqual(@as(usize, 1), recorder.bypasses);
+    var unconfirmed = initialization;
+    unconfirmed.initialization_confirmation = false;
+    view.update(unconfirmed);
+    view.without_initialization.behavior.events.on_click.?.invoke();
+    try std.testing.expectEqual(@as(usize, 1), recorder.bypasses);
+    var unreleased = initialization;
+    unreleased.cleanup = .unknown;
+    view.update(unreleased);
+    view.without_initialization.behavior.events.on_click.?.invoke();
+    try std.testing.expectEqual(@as(usize, 1), recorder.bypasses);
     const previous_theme = theme.currentName();
     defer theme.select(previous_theme);
     for ([_]theme.Name{ .dark, .light, .sauber }) |name| {

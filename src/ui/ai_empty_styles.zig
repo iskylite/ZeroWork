@@ -37,10 +37,21 @@ pub fn welcomeTitle(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 15, .font_weight = 600, .line_height = 22.0 / 15.0, .color = ink() };
 }
 pub fn recentGroup(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .max_width = 440, .direction = .column, .gap = 2, .margin = .{ .top = 4 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .min_width = 0, .max_width = 440, .direction = .column, .gap = 2, .margin = .{ .top = 4 }, .flex_shrink = 0 };
 }
 pub fn recent() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{ .left = 0, .right = 0 }, .border = .{ .width = 0, .radius = 5 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
+    return .{ .width = .fill(), .min_width = 0, .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{ .left = 0, .right = 0 }, .border = .{ .width = 0, .radius = 5 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
+}
+pub fn recentSlot() ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .height = .{ .px = 30 }, .flex_shrink = 0 };
+}
+pub fn recentTitle(_: *const ui.ThemeTokens) ui.TextStyle {
+    var result = label();
+    result.text_overflow = .ellipsis;
+    return result;
+}
+pub fn recentTitleBox() ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .height = .{ .px = 16 }, .overflow_hidden = true };
 }
 
 pub fn accentInk() ui.Color {

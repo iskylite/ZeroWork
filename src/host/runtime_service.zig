@@ -34,6 +34,7 @@ pub const Runtime = struct {
         cleanupReleased: *const fn (*anyopaque) bool,
         reconnectSnapshot: *const fn (*anyopaque) ?@import("../vt/reconnect.zig").Control.Snapshot,
         requestReconnect: *const fn (*anyopaque, OperationKey, OperationKey) anyerror!void,
+        requestReconnectWithInitialization: ?*const fn (*anyopaque, OperationKey, OperationKey, bool) anyerror!void = null,
         preflightExplicitDisconnect: ?*const fn (*anyopaque, OperationKey) anyerror!u64 = null,
         requestExplicitDisconnect: ?*const fn (*anyopaque, OperationKey) anyerror!ReleaseReceipt = null,
         acknowledgeAttached: *const fn (*anyopaque, OperationKey) bool,
@@ -58,6 +59,7 @@ pub const Runtime = struct {
         semanticSequence: *const fn (*anyopaque) u64,
         documentSource: ?*const fn (*anyopaque) anyerror!terminal.Service = null,
         terminalService: ?*const fn (*anyopaque) anyerror!terminal.Service = null,
+        bindTerminalService: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!terminal.Service = null,
         copyProjection: *const fn (*anyopaque, std.mem.Allocator) anyerror!@import("../vt/snapshot.zig").Projection,
         hasJoined: *const fn (*anyopaque) bool,
         isStopping: *const fn (*anyopaque) bool,
@@ -143,6 +145,12 @@ pub const Runtime = struct {
         if (self.torn_down) return error.SessionClosed;
         return self.vtable.requestReconnect(self.context, previous, next);
     }
+    pub fn requestReconnectWithInitialization(self: *Runtime, previous: OperationKey, next: OperationKey, skip: bool) anyerror!void {
+        if (self.torn_down) return error.SessionClosed;
+        if (self.vtable.requestReconnectWithInitialization) |call| return call(self.context, previous, next, skip);
+        if (skip) return error.UnsupportedService;
+        return self.requestReconnect(previous, next);
+    }
     pub fn acknowledgeAttached(self: *Runtime, key: OperationKey) bool {
         return self.vtable.acknowledgeAttached(self.context, key);
     }
@@ -220,6 +228,10 @@ pub const Runtime = struct {
         return (self.vtable.documentSource orelse return error.UnsupportedService)(self.context);
     }
 
+    pub fn bindTerminalService(self: *Runtime, binding: session.ServiceHandle) !terminal.Service {
+        if (self.torn_down) return error.SessionClosed;
+        return (self.vtable.bindTerminalService orelse return error.UnsupportedService)(self.context, binding);
+    }
     pub fn terminalService(self: *Runtime) !terminal.Service {
         if (self.torn_down) return error.SessionClosed;
         return (self.vtable.terminalService orelse return error.UnsupportedService)(self.context);
@@ -304,6 +316,7 @@ test "released runtime rejects retained consumers before dereferencing provider 
     try std.testing.expectError(error.SessionClosed, runtime.copyCwd(std.testing.allocator));
     try std.testing.expectError(error.SessionClosed, runtime.readLines(.{}, std.testing.allocator));
     try std.testing.expectError(error.SessionClosed, runtime.readonlyProvider());
+    try std.testing.expectError(error.SessionClosed, runtime.bindTerminalService(undefined));
 }
 
 test "bootstrap product terminal mounts release owned frame buffers and preserve borrowed buffers" {

@@ -74,7 +74,7 @@ const Range = struct {
         self.process = observation.process;
     }
 };
-const Segment = struct { bytes: []u8, timestamp_ms: i64, raw_offset: u64 = 0, sequence: u64 = 0, request: ?*Request = null, application: bool = false, boundary_marker: bool = false, geometry: ?struct { cols: u16, rows: u16 } = null, theme: ?@import("../vt/engine.zig").Theme = null };
+const Segment = struct { bytes: []u8, timestamp_ms: i64, raw_offset: u64 = 0, sequence: u64 = 0, request: ?*Request = null, command: ?@import("../vt/snapshot.zig").Command = null, application: bool = false, boundary_marker: bool = false, geometry: ?struct { cols: u16, rows: u16 } = null, theme: ?@import("../vt/engine.zig").Theme = null };
 
 pub const Recording = struct {
     allocator: std.mem.Allocator,
@@ -118,6 +118,7 @@ pub const Recording = struct {
     mutex: std.atomic.Mutex = .unlocked,
     queue: std.ArrayList(Segment) = .empty,
     queued_bytes: usize = 0,
+    pending_commands: usize = 0,
     queue_capacity: usize,
     output_bytes: u64 = 0,
     dropped_bytes: u64 = 0,
@@ -336,6 +337,57 @@ pub const Recording = struct {
             tail.reason = "MultipleRecordingGaps";
         }
     }
+    /// Borrowed native C/D notifications are copied before returning to the
+    /// parser. They use the existing ordered recording queue, never PTY input.
+    pub fn recordCommand(self: *Recording, owner: identity.SessionHandle, value: @import("../vt/snapshot.zig").Command) void {
+        if (!self.owner.eql(owner)) return;
+        const bytes = self.allocator.dupe(u8, value.command orelse "") catch |err| {
+            self.fail(err);
+            return;
+        };
+        self.lock();
+        defer self.mutex.unlock();
+        if (self.stop or self.closed) {
+            self.allocator.free(bytes);
+            return;
+        }
+        if (bytes.len + @sizeOf(Segment) > self.queue_capacity -| self.queued_bytes) {
+            self.allocator.free(bytes);
+            self.failLocked(error.CommandHistoryQueueFull);
+            return;
+        }
+        var command = value;
+        command.command = if (value.command != null) bytes else null;
+        self.queue.append(self.allocator, .{ .bytes = bytes, .timestamp_ms = value.end_ms orelse value.start_ms, .command = command }) catch |err| {
+            self.allocator.free(bytes);
+            self.failLocked(err);
+            return;
+        };
+        self.queued_bytes += bytes.len + @sizeOf(Segment);
+        self.pending_commands += 1;
+        self.wakeup.notify();
+    }
+
+    pub fn commandHistorySnapshot(self: *Recording, owner: identity.SessionHandle, allocator: std.mem.Allocator) !manifest.CommandHistorySnapshot {
+        if (!self.owner.eql(owner)) return error.StaleOwner;
+        if (!self.mutex.tryLock()) return error.WorkerBusy;
+        defer self.mutex.unlock();
+        var result = try self.timeline.commandHistorySnapshot(allocator);
+        errdefer result.deinit(allocator);
+        result.owner = owner;
+        result.recording_id = self.recording_id;
+        result.recording_generation = self.recording_generation;
+        result.pending = self.pending_commands != 0;
+        result.partial = result.partial or self.failure != null or self.storage_failed;
+        result.persistent = self.failure == null and !self.storage_failed;
+        const failure: ?[]const u8 = self.failure orelse if (self.storage_failed) "RecordingUnavailable" else if (result.partial) "CommandHistoryCapacity" else null;
+        result.failure = if (failure) |value| try allocator.dupe(u8, value) else null;
+        if (self.closed) for (result.records) |*record| if (record.value.state == .running) {
+            record.value.state = .unknown;
+        };
+        return result;
+    }
+
     pub fn appendApplication(self: *Recording, record: @import("../host/terminal_service.zig").ApplicationRecord) !void {
         if (!self.owner.eql(record.owner)) return error.StaleOwner;
         const bytes = try std.json.Stringify.valueAlloc(self.allocator, record, .{});
@@ -706,10 +758,15 @@ pub const Recording = struct {
     fn commitManifest(self: *Recording, state: @FieldType(manifest.Manifest, "state"), ended_ms: ?i64, exit_code: ?i32, commit_state: @FieldType(@FieldType(manifest.Manifest, "commit"), "state")) !void {
         // This is called by the sole writer, or after it has been joined.
         if (self.checkpoint.raw_file) |file| try file.sync(self.io);
+        var frozen = try self.timeline.snapshotWithAllocator(self.allocator);
+        defer frozen.deinit();
+        if (state == .closed) for (frozen.command_history.items) |*item| if (item.value.state == .running) {
+            item.value.state = .unknown;
+        };
         const revision = try std.math.add(u64, self.manifest_revision, 1);
         const data_path = if (state == .active) try std.fmt.allocPrint(self.allocator, "{s}.commit-{d}.cast", .{ self.cast_path[0 .. self.cast_path.len - 5], revision }) else try self.allocator.dupe(u8, self.cast_path);
         errdefer self.allocator.free(data_path);
-        try self.timeline.saveCast(self.io, self.dir, data_path, self.initial_cols, self.initial_rows);
+        try frozen.saveCast(self.io, self.dir, data_path, self.initial_cols, self.initial_rows);
         errdefer self.dir.deleteFile(self.io, data_path) catch {};
         var file_checksums: [3][64]u8 = undefined;
         var files: [3]manifest.File = undefined;
@@ -730,7 +787,7 @@ pub const Recording = struct {
         }
         const ranges = try self.allocator.alloc(manifest.ExecutionRange, self.ranges.items.len);
         defer self.allocator.free(ranges);
-        for (self.ranges.items, ranges) |*range, *target| target.* = .{ .execution_id = &range.id, .recording_generation = self.recording_generation, .start = range.start, .end = range.end, .start_boundary_sequence = range.start_fence, .end_boundary_sequence = range.end_fence, .completion_evidence = range.evidence, .sealed = range.sealed, .output_scope = range.output_scope, .output_attribution = range.output_attribution, .output_attribution_reason = if (range.attribution_reason_len > 0) range.attribution_reason[0..range.attribution_reason_len] else null, .process_receipt = range.process, .interval_saved = range.interval_saved, .failure = if (range.reason_len > 0) range.reason[0..range.reason_len] else null };
+        for (self.ranges.items, ranges) |*range, *target| target.* = .{ .execution_id = &range.id, .recording_generation = self.recording_generation, .start = range.start, .end = range.end, .start_boundary_sequence = range.start_fence, .end_boundary_sequence = range.end_fence, .completion_evidence = range.evidence, .completion_source = .private_protocol, .sealed = range.sealed, .output_scope = range.output_scope, .output_attribution = range.output_attribution, .output_attribution_reason = if (range.attribution_reason_len > 0) range.attribution_reason[0..range.attribution_reason_len] else null, .process_receipt = range.process, .interval_saved = range.interval_saved, .failure = if (range.reason_len > 0) range.reason[0..range.reason_len] else null };
         self.lock();
         const total_received = self.raw_position;
         const dropped = self.dropped_bytes;
@@ -743,9 +800,9 @@ pub const Recording = struct {
         @memcpy(frozen_gaps[0..self.gap_count], self.gaps[0..self.gap_count]);
         var gap_count = self.gap_count;
         self.mutex.unlock();
-        self.coverage = if (failure != null) .partial else if (dropped > 0) .gapped else if (self.timeline.evicted_events > 0) .retained else .complete;
-        self.replayability = if (self.timeline.evicted_events > 0 or dropped > 0) .baseline_unavailable else .verified;
-        const start: manifest.Position = if (self.timeline.events.items.len == 0) .{} else .{ .raw_offset = self.timeline.events.items[0].stream_offset, .event_sequence = self.timeline.events.items[0].event_sequence };
+        self.coverage = if (failure != null) .partial else if (dropped > 0) .gapped else if (frozen.evicted_events > 0) .retained else .complete;
+        self.replayability = if (frozen.evicted_events > 0 or dropped > 0) .baseline_unavailable else .verified;
+        const start: manifest.Position = if (frozen.events.items.len == 0) .{} else .{ .raw_offset = frozen.events.items[0].stream_offset, .event_sequence = frozen.events.items[0].event_sequence };
         const baseline: manifest.Baseline = .{ .event_sequence = 0, .raw_offset = 0, .kind = .initial_empty };
         const gap: manifest.Gap = .{ .start = self.committed_position, .end = .{ .raw_offset = total_received, .event_sequence = last_sequence }, .reason = failure orelse "RecordingQueueFull", .known_dropped_bytes = dropped };
         if (failure != null and gap_count == 0) {
@@ -755,7 +812,9 @@ pub const Recording = struct {
         for (self.mappings.items, 0..) |*mapping, index| mapping.cast_line = index + 1;
         const segment: manifest.Segment = .{ .start = start, .end = self.committed_position, .data_file_ref = data_path, .committed_length = files[0].committed_length, .checksum = files[0].checksum };
         const generation: manifest.Generation = .{ .recording_generation = self.recording_generation, .session_id = @backingInt(self.owner.session_id), .session_generation = self.owner.generation, .initial_cols = self.initial_cols, .initial_rows = self.initial_rows, .receive_time_origin = self.receive_time_origin, .segments = &.{segment}, .baselines = if (self.replayability == .verified) &.{baseline} else &.{} };
-        try manifest.save(self.allocator, self.io, self.dir, self.manifest_path, .{ .archive_key = &self.archive_key, .recording_id = &self.recording_id, .manifest_revision = revision, .source_kind = .local, .started_ms = self.started_ms, .ended_ms = ended_ms, .exit_code = exit_code, .end_reason = if (state == .closed) "process_closed" else null, .state = state, .recording = .{ .generations = &.{generation} }, .execution_ranges = ranges, .files = files[0..count], .events = self.mappings.items, .display = display, .coverage = self.coverage, .replayability = self.replayability, .total_received = total_received, .retained_range = .{ .start = start, .end = self.committed_position }, .gaps = frozen_gaps[0..gap_count], .failure = failure, .commit = .{ .state = commit_state, .committed_length = files[0].committed_length } });
+        self.timeline.applyPrivateEvidence(ranges);
+        for (frozen.command_history.items) |*item| manifest.applyPrivateCommandEvidence(&item.value, item.recording_generation, ranges);
+        try manifest.save(self.allocator, self.io, self.dir, self.manifest_path, .{ .archive_key = &self.archive_key, .recording_id = &self.recording_id, .manifest_revision = revision, .source_kind = .local, .started_ms = self.started_ms, .ended_ms = ended_ms, .exit_code = exit_code, .end_reason = if (state == .closed) "process_closed" else null, .state = state, .recording = .{ .generations = &.{generation} }, .execution_ranges = ranges, .command_history = frozen.command_history.items, .files = files[0..count], .events = self.mappings.items, .display = display, .coverage = self.coverage, .replayability = self.replayability, .total_received = total_received, .retained_range = .{ .start = start, .end = self.committed_position }, .gaps = frozen_gaps[0..gap_count], .failure = failure, .commit = .{ .state = commit_state, .committed_length = files[0].committed_length } });
         if (self.committed_cast_path) |previous| {
             if (!std.mem.eql(u8, previous, self.cast_path)) self.dir.deleteFile(self.io, previous) catch {};
             self.allocator.free(previous);
@@ -777,7 +836,7 @@ pub const Recording = struct {
         while (true) {
             self.lock();
             const segment = if (self.queue.items.len > 0) self.queue.orderedRemove(0) else null;
-            if (segment) |value| self.queued_bytes -= value.bytes.len;
+            if (segment) |value| self.queued_bytes -= value.bytes.len + (if (value.command != null) @sizeOf(Segment) else @as(usize, 0));
             const done = self.stop and segment == null;
             self.mutex.unlock();
             if (done) {
@@ -786,6 +845,13 @@ pub const Recording = struct {
             }
             if (segment) |value| {
                 defer self.allocator.free(value.bytes);
+                if (value.command) |command| {
+                    self.timeline.recordCommand(self.recording_generation, command) catch |err| self.fail(err);
+                    self.lock();
+                    self.pending_commands -= 1;
+                    self.mutex.unlock();
+                    continue;
+                }
                 if (value.request) |request| {
                     self.processRequest(request) catch |err| {
                         request.failure = err;
@@ -1258,4 +1324,118 @@ test "recording interval retention ignores old eviction and gaps but refuses los
     _ = try recording.noteExecutionBoundary(owner, gapped_id, .end, recording.raw_position, 2, .session_interval);
     const gapped = try recording.saveInterval(owner, gapped_id, observation);
     try std.testing.expect(!gapped.interval_saved and !gapped.sealed);
+}
+
+test "command history native recording retains every repeated execution after close and reopen" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(path);
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(5512), .generation = 3 };
+    const recording = try Recording.init(a, owner, .{ .io = std.testing.io, .directory = path, .log = .{ .ring_mb = 1, .checkpoint_sec = 30 } }, 20, 4, 0);
+    defer recording.deinit();
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 4, 20);
+    defer adapter.destroy();
+    const Observer = struct {
+        recording: *Recording,
+        owner: identity.SessionHandle,
+        fn changed(raw: *anyopaque, value: @import("../vt/snapshot.zig").Command) void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.recording.recordCommand(self.owner, value);
+        }
+        fn wall() i64 {
+            return 1_800_000_000_123;
+        }
+    };
+    var observer: Observer = .{ .recording = recording, .owner = owner };
+    adapter.wall_clock_ms = Observer.wall;
+    adapter.setCommandObserver(.{ .context = &observer, .changed = Observer.changed });
+    const ai_id = identity.ExecutionId.generate();
+    try adapter.registerAiSubmission(ai_id, ":");
+    var stream: std.ArrayList(u8) = .empty;
+    defer stream.deinit(a);
+    for (0..520) |index| try stream.appendSlice(a, if (index % 2 == 0)
+        "\x1b]133;A\x07$ \x1b]133;B\x07:\r\n\x1b]133;C\x07\x1b]133;D;0\x07"
+    else
+        "\x1b]133;A\x07$ \x1b]133;B\x07:\r\n\x1b]133;C\x07\x1b]133;D;7\x07");
+    recording.appendOutput(owner, stream.items, 100);
+    _ = try adapter.feed(stream.items);
+    var live = try adapter.copyProjection(a);
+    defer live.deinit(a);
+    try std.testing.expectEqual(@as(usize, 512), live.commands.len);
+    const deadline = @import("native.zig").zw_local_monotonic_ms() + 5000;
+    var metadata_ready = false;
+    while (@import("native.zig").zw_local_monotonic_ms() < deadline) {
+        var metadata = recording.commandHistorySnapshot(owner, a) catch |err| {
+            if (err == error.WorkerBusy) {
+                std.Thread.yield() catch {};
+                continue;
+            }
+            return err;
+        };
+        defer metadata.deinit(a);
+        if (!metadata.pending) {
+            try std.testing.expectEqual(@as(usize, 520), metadata.records.len);
+            try std.testing.expect(metadata.persistent and !metadata.partial);
+            try std.testing.expectEqual(owner, metadata.owner);
+            try std.testing.expectEqual(recording.recording_id, metadata.recording_id.?);
+            var again = try recording.commandHistorySnapshot(owner, a);
+            defer again.deinit(a);
+            try std.testing.expectEqual(metadata.revision, again.revision);
+            try std.testing.expectEqual(metadata.records.len, again.records.len);
+            for (again.records, 0..) |record, index| try std.testing.expectEqual(@as(u64, index + 1), record.value.id);
+            metadata_ready = true;
+            break;
+        }
+        std.Thread.yield() catch {};
+    }
+    try std.testing.expect(metadata_ready);
+    recording.close(owner, recording.started_ms + 1000, 0);
+    try std.testing.expect(recording.snapshot().failure == null);
+    const restored = try manifest.load(a, std.testing.io, tmp.dir, recording.manifest_path);
+    defer restored.deinit();
+    try std.testing.expectEqual(@as(usize, 520), restored.value.command_history.len);
+    for (restored.value.command_history, 0..) |item, index| {
+        try std.testing.expectEqual(@as(u64, 1), item.recording_generation);
+        try std.testing.expectEqual(@as(u64, index + 1), item.value.id);
+        try std.testing.expectEqualStrings(":", item.value.command.?);
+        try std.testing.expectEqual(@as(?i32, if (index % 2 == 0) 0 else 7), item.value.exit_code);
+        try std.testing.expectEqual(Observer.wall(), item.value.start_ms);
+        try std.testing.expect(item.value.end_ms != null and item.value.elapsed_ms != null);
+        if (index == 0) try std.testing.expect(item.value.ai_execution_id.?.eql(ai_id)) else try std.testing.expect(item.value.ai_execution_id == null);
+    }
+    const cast = try tmp.dir.readFileAlloc(std.testing.io, recording.cast_path, a, .limited(1024 * 1024));
+    defer a.free(cast);
+    var replay = try @import("../ui/history_cast.zig").loadWithManifest(a, cast, null, .{}, restored.value);
+    defer replay.deinit();
+    try std.testing.expectEqual(@as(usize, 520), replay.commands.items.len);
+    try std.testing.expect(replay.commands.items[0].ai_execution_id.?.eql(ai_id));
+    try std.testing.expectEqual(@as(?i32, 7), replay.commands.items[519].exit_code);
+    try std.testing.expect(replay.commandFrame(1) != null and replay.commandFrame(520) != null);
+    try std.testing.expect(replay.commands.items[0].screen_row == null);
+    try std.testing.expect(replay.commands.items[519].screen_row != null);
+}
+
+test "command history queue exhaustion remains an explicit partial recording after close" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+    defer a.free(path);
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(5513), .generation = 1 };
+    const recording = try Recording.init(a, owner, .{ .io = std.testing.io, .directory = path, .log = .{ .ring_mb = 1, .checkpoint_sec = 30 } }, 20, 4, 0);
+    defer recording.deinit();
+    recording.queue_capacity = 1;
+    recording.recordCommand(owner, .{ .id = 1, .command = ":", .start_ms = 1 });
+    recording.close(owner, recording.started_ms + 1000, 0);
+    const restored = try manifest.load(a, std.testing.io, tmp.dir, recording.manifest_path);
+    defer restored.deinit();
+    try std.testing.expectEqualStrings("CommandHistoryQueueFull", restored.value.failure.?);
+    try std.testing.expectEqual(manifest.Coverage.partial, restored.value.coverage);
+    try std.testing.expectEqual(@as(usize, 0), restored.value.command_history.len);
+    var metadata = try recording.commandHistorySnapshot(owner, a);
+    defer metadata.deinit(a);
+    try std.testing.expect(metadata.partial and !metadata.persistent and !metadata.pending);
+    try std.testing.expectEqualStrings("CommandHistoryQueueFull", metadata.failure.?);
 }

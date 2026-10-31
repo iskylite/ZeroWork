@@ -36,6 +36,8 @@ pub const HostConfig = struct {
     totp_secret_ref: ?[]const u8 = null,
     jump_chain: []const []const u8 = &.{},
     startup_commands: []const []const u8 = &.{},
+    auto_shell_integration: ?bool = null,
+    command_info: ?bool = null,
     group: ?[]const u8 = null,
     ts_default: bool = true,
     terminal_type: []const u8 = "xterm-256color",
@@ -489,6 +491,8 @@ pub const Registry = struct {
             try writer.writeAll("\nstartup_commands = ");
             try writeStringArray(writer, host.startup_commands);
         }
+        if (host.auto_shell_integration) |enabled| try writer.print("\nauto_shell_integration = {}", .{enabled});
+        if (host.command_info) |enabled| try writer.print("\ncommand_info = {}", .{enabled});
         try writer.print("\nts_default = {}", .{host.ts_default});
         if (host.terminal_type_explicit) {
             try writer.writeAll("\nterminal_type = ");
@@ -773,6 +777,8 @@ const Builder = struct {
     totp_secret_ref: ?[]const u8 = null,
     jump_chain: []const []const u8 = &.{},
     startup_commands: []const []const u8 = &.{},
+    auto_shell_integration: ?bool = null,
+    command_info: ?bool = null,
     group: ?[]const u8 = null,
     ts_default: bool = true,
     terminal_type: []const u8 = "xterm-256color",
@@ -863,7 +869,7 @@ const Builder = struct {
             }
             return;
         }
-        if (std.mem.eql(u8, key, "name")) self.name = try parseString(allocator, value) else if (std.mem.eql(u8, key, "host")) self.host = try parseString(allocator, value) else if (std.mem.eql(u8, key, "port")) self.port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue else if (std.mem.eql(u8, key, "user")) self.user = try parseString(allocator, value) else if (std.mem.eql(u8, key, "auth")) try self.parseAuth(allocator, value) else if (std.mem.eql(u8, key, "totp_secret_ref")) self.totp_secret_ref = try parseString(allocator, value) else if (std.mem.eql(u8, key, "totp_secret")) self.totp_secret = try parseString(allocator, value) else if (std.mem.eql(u8, key, "jump_chain")) self.jump_chain = try parseStringArray(allocator, value) else if (std.mem.eql(u8, key, "startup_commands")) self.startup_commands = try parseStringArray(allocator, value) else if (std.mem.eql(u8, key, "group")) self.group = try parseString(allocator, value) else if (std.mem.eql(u8, key, "ts_default")) self.ts_default = try parseBool(value) else if (std.mem.eql(u8, key, "terminal_type")) self.terminal_type = try parseString(allocator, value) else if (std.mem.eql(u8, key, "socks_bind")) self.socks_bind = try parseString(allocator, value) else if (std.mem.eql(u8, key, "keepalive")) self.keepalive = try parseBool(value) else if (std.mem.eql(u8, key, "compression")) self.compression = try parseBool(value) else if (std.mem.eql(u8, key, "socks_enabled")) self.socks_enabled = try parseBool(value) else if (std.mem.eql(u8, key, "socks_auto_start")) self.socks_auto_start = try parseBool(value) else if (std.mem.eql(u8, key, "scrollback")) {
+        if (std.mem.eql(u8, key, "name")) self.name = try parseString(allocator, value) else if (std.mem.eql(u8, key, "host")) self.host = try parseString(allocator, value) else if (std.mem.eql(u8, key, "port")) self.port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue else if (std.mem.eql(u8, key, "user")) self.user = try parseString(allocator, value) else if (std.mem.eql(u8, key, "auth")) try self.parseAuth(allocator, value) else if (std.mem.eql(u8, key, "totp_secret_ref")) self.totp_secret_ref = try parseString(allocator, value) else if (std.mem.eql(u8, key, "totp_secret")) self.totp_secret = try parseString(allocator, value) else if (std.mem.eql(u8, key, "jump_chain")) self.jump_chain = try parseStringArray(allocator, value) else if (std.mem.eql(u8, key, "auto_shell_integration")) self.auto_shell_integration = try parseBool(value) else if (std.mem.eql(u8, key, "command_info")) self.command_info = try parseBool(value) else if (std.mem.eql(u8, key, "startup_commands")) self.startup_commands = try parseStringArray(allocator, value) else if (std.mem.eql(u8, key, "group")) self.group = try parseString(allocator, value) else if (std.mem.eql(u8, key, "ts_default")) self.ts_default = try parseBool(value) else if (std.mem.eql(u8, key, "terminal_type")) self.terminal_type = try parseString(allocator, value) else if (std.mem.eql(u8, key, "socks_bind")) self.socks_bind = try parseString(allocator, value) else if (std.mem.eql(u8, key, "keepalive")) self.keepalive = try parseBool(value) else if (std.mem.eql(u8, key, "compression")) self.compression = try parseBool(value) else if (std.mem.eql(u8, key, "socks_enabled")) self.socks_enabled = try parseBool(value) else if (std.mem.eql(u8, key, "socks_auto_start")) self.socks_auto_start = try parseBool(value) else if (std.mem.eql(u8, key, "scrollback")) {
             self.scrollback = std.fmt.parseInt(u32, value, 10) catch return error.InvalidValue;
             self.scrollback_explicit = true;
         } else if (std.mem.eql(u8, key, "socks_port")) self.socks_port = std.fmt.parseInt(u16, value, 10) catch return error.InvalidValue else if (std.mem.eql(u8, key, "socks_exit")) self.socks_exit = std.fmt.parseInt(usize, value, 10) catch return error.InvalidValue else self.unknown_fields = try appendRaw(allocator, self.unknown_fields, key, value);
@@ -887,7 +893,7 @@ const Builder = struct {
         if (self.auth_mode) |mode| if ((self.identity_file != null or self.password != null or self.password_ref != null) and mode != inferred) return error.AmbiguousCredential;
         if (self.route.len != 0 and self.jump_chain.len != 0) return error.ConflictingRoute;
         if (self.group != null and self.asset_group_id != null) return error.ConflictingGroup;
-        const result: HostConfig = .{ .connection_id = self.connection_id, .revision = self.revision, .protocol = self.protocol, .protocol_id = self.protocol_id, .payload_version = self.payload_version, .plugin_payload = self.plugin_payload, .unknown_fields = self.unknown_fields, .unknown_options = self.unknown_options, .unknown_auth = self.unknown_auth, .auth_mode = self.auth_mode orelse inferred, .pinned = self.pinned, .strict_host_key_checking = self.strict_host_key_checking, .asset_group_id = self.asset_group_id, .route = self.route, .name = self.name orelse return error.MissingName, .host = self.host orelse if (self.protocol_id != null or self.payload_version > 1) "" else return error.MissingHost, .port = self.port, .user = self.user orelse if (self.protocol_id != null or self.payload_version > 1) "" else return error.MissingUser, .identity_file = self.identity_file, .key_passphrase = self.key_passphrase, .password = self.password, .totp_secret = self.totp_secret, .password_ref = self.password_ref, .key_passphrase_ref = self.key_passphrase_ref, .totp_secret_ref = self.totp_secret_ref, .jump_chain = self.jump_chain, .startup_commands = self.startup_commands, .group = self.group, .ts_default = self.ts_default, .terminal_type = self.terminal_type, .terminal_type_explicit = self.terminal_type_explicit, .scrollback = self.scrollback, .scrollback_explicit = self.scrollback_explicit, .keepalive = self.keepalive, .compression = self.compression, .compression_explicit = self.compression_explicit, .socks_enabled = self.socks_enabled, .socks_port = self.socks_port, .socks_bind = self.socks_bind, .socks_exit = self.socks_exit, .socks_auto_start = self.socks_auto_start, .socks_max_connections = self.socks_max_connections };
+        const result: HostConfig = .{ .connection_id = self.connection_id, .revision = self.revision, .protocol = self.protocol, .protocol_id = self.protocol_id, .payload_version = self.payload_version, .plugin_payload = self.plugin_payload, .unknown_fields = self.unknown_fields, .unknown_options = self.unknown_options, .unknown_auth = self.unknown_auth, .auth_mode = self.auth_mode orelse inferred, .pinned = self.pinned, .strict_host_key_checking = self.strict_host_key_checking, .asset_group_id = self.asset_group_id, .route = self.route, .name = self.name orelse return error.MissingName, .host = self.host orelse if (self.protocol_id != null or self.payload_version > 1) "" else return error.MissingHost, .port = self.port, .user = self.user orelse if (self.protocol_id != null or self.payload_version > 1) "" else return error.MissingUser, .identity_file = self.identity_file, .key_passphrase = self.key_passphrase, .password = self.password, .totp_secret = self.totp_secret, .password_ref = self.password_ref, .key_passphrase_ref = self.key_passphrase_ref, .totp_secret_ref = self.totp_secret_ref, .jump_chain = self.jump_chain, .startup_commands = self.startup_commands, .auto_shell_integration = self.auto_shell_integration, .command_info = self.command_info, .group = self.group, .ts_default = self.ts_default, .terminal_type = self.terminal_type, .terminal_type_explicit = self.terminal_type_explicit, .scrollback = self.scrollback, .scrollback_explicit = self.scrollback_explicit, .keepalive = self.keepalive, .compression = self.compression, .compression_explicit = self.compression_explicit, .socks_enabled = self.socks_enabled, .socks_port = self.socks_port, .socks_bind = self.socks_bind, .socks_exit = self.socks_exit, .socks_auto_start = self.socks_auto_start, .socks_max_connections = self.socks_max_connections };
         try result.validate();
         return result;
     }
@@ -1070,6 +1076,18 @@ test "registry parses documented hosts and round trips escapes" {
     defer reparsed.deinit();
     try std.testing.expectEqualStrings("echo \"ok\"", reparsed.hosts[0].startup_commands[1]);
 }
+test "auto shell integration host override preserves inheritance on and off" {
+    var registry = try Registry.parse(std.testing.allocator, "[[hosts]] name=\"inherit\";host=\"h\";user=\"u\"\n[[hosts]] name=\"on\";host=\"h\";user=\"u\";auto_shell_integration=true\n[[hosts]] name=\"off\";host=\"h\";user=\"u\";auto_shell_integration=false\n");
+    defer registry.deinit();
+    var buffer: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try registry.format(&writer);
+    var loaded = try Registry.parse(std.testing.allocator, writer.buffered());
+    defer loaded.deinit();
+    try std.testing.expect(loaded.hosts[0].auto_shell_integration == null);
+    try std.testing.expectEqual(@as(?bool, true), loaded.hosts[1].auto_shell_integration);
+    try std.testing.expectEqual(@as(?bool, false), loaded.hosts[2].auto_shell_integration);
+}
 
 test "registry rejects incomplete ambiguous and excessive hosts" {
     try std.testing.expectError(error.MissingUser, Registry.parse(std.testing.allocator, "[[hosts]]; name=\"n\"; host=\"h\""));
@@ -1167,4 +1185,18 @@ test "unknown provider, future payload and unknown fields survive clone and cano
     try std.testing.expectEqualStrings("future_meta = { a = 1 }", second.unknown_fields[0]);
     try std.testing.expectError(error.UnsupportedProtocol, second.resolveRoute(second.hosts[0].owner(), std.testing.allocator));
     try std.testing.expectError(error.UnsupportedProtocol, second.resolveRoute(second.hosts[1].owner(), std.testing.allocator));
+}
+
+test "command info host tri state survives canonical host storage" {
+    var registry = try Registry.parse(std.testing.allocator, "[[hosts]] name=\"inherit\";host=\"h\";user=\"u\"\n[[hosts]] name=\"show\";host=\"h\";user=\"u\";command_info=true\n[[hosts]] name=\"hide\";host=\"h\";user=\"u\";command_info=false\n");
+    defer registry.deinit();
+    const encoded = try registry.encode(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
+    var reloaded = try Registry.parse(std.testing.allocator, encoded);
+    defer reloaded.deinit();
+    try std.testing.expect(reloaded.hosts[0].command_info == null);
+    try std.testing.expectEqual(@as(?bool, true), reloaded.hosts[1].command_info);
+    try std.testing.expectEqual(@as(?bool, false), reloaded.hosts[2].command_info);
+    try std.testing.expect(reloaded.hosts[0].auto_shell_integration == null);
+    try std.testing.expectError(error.InvalidValue, Registry.parse(std.testing.allocator, "[[hosts]] name=\"bad\";host=\"h\";user=\"u\";command_info=7\n"));
 }

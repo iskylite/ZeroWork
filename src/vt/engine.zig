@@ -12,6 +12,8 @@ pub const Cursor = struct { row: u32 = 0, col: u16 = 0, visible: bool = true, bl
 pub const Selection = struct { start_row: u64, start_col: u16, end_row: u64, end_col: u16 };
 pub const CopyMode = enum { plain, with_attributes };
 pub const OscEvent = union(enum) { cwd: []const u8, command_boundary, semantic: SemanticEvent, notification: []const u8 };
+pub const CommandObserver = struct { context: *anyopaque, changed: *const fn (*anyopaque, @import("snapshot.zig").Command) void };
+
 pub const OscCallback = *const fn (event: OscEvent) void;
 
 pub const FeedResult = struct {
@@ -68,6 +70,10 @@ pub const VtEngine = struct {
         read_lines: *const fn (*anyopaque, Viewport.LineLimits, std.mem.Allocator) anyerror!Viewport.Lines,
         record_submission: *const fn (*anyopaque) void,
         set_theme: *const fn (*anyopaque, Theme) anyerror!void,
+        register_ai_submission: ?*const fn (*anyopaque, @import("../host/identity.zig").ExecutionId, []const u8) anyerror!void = null,
+        cancel_ai_submission: ?*const fn (*anyopaque, @import("../host/identity.zig").ExecutionId) void = null,
+        abandon_commands: ?*const fn (*anyopaque) void = null,
+        set_command_observer: ?*const fn (*anyopaque, ?CommandObserver) void = null,
         search_snapshot: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!@import("search_snapshot.zig").Document = null,
     };
 
@@ -126,6 +132,19 @@ pub const VtEngine = struct {
     pub fn searchSnapshot(self: VtEngine, allocator: std.mem.Allocator) !@import("search_snapshot.zig").Document {
         const capture = self.vtable.search_snapshot orelse return error.SearchUnavailable;
         return capture(self.ptr, allocator);
+    }
+    pub fn registerAiSubmission(self: VtEngine, id: @import("../host/identity.zig").ExecutionId, command: []const u8) !void {
+        const register = self.vtable.register_ai_submission orelse return error.CommandMetadataUnavailable;
+        try register(self.ptr, id, command);
+    }
+    pub fn cancelAiSubmission(self: VtEngine, id: @import("../host/identity.zig").ExecutionId) void {
+        if (self.vtable.cancel_ai_submission) |cancel| cancel(self.ptr, id);
+    }
+    pub fn abandonCommands(self: VtEngine) void {
+        if (self.vtable.abandon_commands) |abandon| abandon(self.ptr);
+    }
+    pub fn setCommandObserver(self: VtEngine, observer: ?CommandObserver) void {
+        if (self.vtable.set_command_observer) |set| set(self.ptr, observer);
     }
     pub fn recordSubmission(self: VtEngine) void {
         self.vtable.record_submission(self.ptr);
@@ -207,11 +226,24 @@ pub const VtEngine = struct {
                 if (@hasDecl(T, "setTheme")) return cast(ptr).setTheme(theme);
                 return error.ThemeUnavailable;
             }
+            fn callRegisterAiSubmission(ptr: *anyopaque, id: @import("../host/identity.zig").ExecutionId, command: []const u8) !void {
+                if (@hasDecl(T, "registerAiSubmission")) return cast(ptr).registerAiSubmission(id, command);
+                return error.CommandMetadataUnavailable;
+            }
+            fn callCancelAiSubmission(ptr: *anyopaque, id: @import("../host/identity.zig").ExecutionId) void {
+                if (@hasDecl(T, "cancelAiSubmission")) cast(ptr).cancelAiSubmission(id);
+            }
+            fn callAbandonCommands(ptr: *anyopaque) void {
+                if (@hasDecl(T, "abandonCommands")) cast(ptr).abandonCommands();
+            }
+            fn callSetCommandObserver(ptr: *anyopaque, observer: ?CommandObserver) void {
+                if (@hasDecl(T, "setCommandObserver")) cast(ptr).setCommandObserver(observer);
+            }
             fn callSearchSnapshot(ptr: *anyopaque, allocator: std.mem.Allocator) !@import("search_snapshot.zig").Document {
                 if (@hasDecl(T, "searchSnapshot")) return cast(ptr).searchSnapshot(allocator);
                 return error.SearchUnavailable;
             }
-            const vtable: VTable = .{ .destroy = callDestroy, .feed = callFeed, .resize = callResize, .snapshot = callSnapshot, .line_at = callLineAt, .selection_text = callSelectionText, .set_osc_callback = callSetOscCallback, .copy_projection = callCopyProjection, .read_reply = callReadReply, .encode_key = callEncodeKey, .encode_mouse = callEncodeMouse, .create_anchor = callCreateAnchor, .resolve_anchor = callResolveAnchor, .release_anchor = callReleaseAnchor, .selection_from_anchors = callSelectionFromAnchors, .scroll = callScroll, .read_lines = callReadLines, .record_submission = callRecordSubmission, .set_theme = callSetTheme, .search_snapshot = callSearchSnapshot };
+            const vtable: VTable = .{ .destroy = callDestroy, .feed = callFeed, .resize = callResize, .snapshot = callSnapshot, .line_at = callLineAt, .selection_text = callSelectionText, .set_osc_callback = callSetOscCallback, .copy_projection = callCopyProjection, .read_reply = callReadReply, .encode_key = callEncodeKey, .encode_mouse = callEncodeMouse, .create_anchor = callCreateAnchor, .resolve_anchor = callResolveAnchor, .release_anchor = callReleaseAnchor, .selection_from_anchors = callSelectionFromAnchors, .scroll = callScroll, .read_lines = callReadLines, .record_submission = callRecordSubmission, .set_theme = callSetTheme, .search_snapshot = callSearchSnapshot, .register_ai_submission = callRegisterAiSubmission, .cancel_ai_submission = callCancelAiSubmission, .set_command_observer = callSetCommandObserver, .abandon_commands = callAbandonCommands };
         };
         return .{ .ptr = instance, .vtable = &Adapter.vtable };
     }

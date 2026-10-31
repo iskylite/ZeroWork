@@ -93,6 +93,8 @@ pub const Draft = struct {
     jump_chain: []const []const u8 = &.{},
     route: []const identity.ConnectionId = &.{},
     startup_commands: []const []const u8 = &.{},
+    auto_shell_integration: ?bool = null,
+    command_info: ?bool = null,
 
     /// 主机名/连接名非空、用户名非空、端口 1-65535（u16 上限即端口上界，
     /// 解析溢出回退 0 在此拒绝）。
@@ -139,6 +141,8 @@ pub const Draft = struct {
             .route = host.route,
             .jump_chain = host.jump_chain,
             .startup_commands = host.startup_commands,
+            .auto_shell_integration = host.auto_shell_integration,
+            .command_info = host.command_info,
             .socks_enabled = host.socks_enabled,
             .socks_port = host.socks_port,
             .socks_bind = host.socks_bind,
@@ -184,6 +188,8 @@ pub const Draft = struct {
             .route = self.route,
             .jump_chain = self.jump_chain,
             .startup_commands = self.startup_commands,
+            .auto_shell_integration = self.auto_shell_integration,
+            .command_info = self.command_info,
             .socks_enabled = self.socks_enabled,
             .socks_port = self.socks_port,
             .socks_bind = self.socks_bind,
@@ -382,6 +388,8 @@ pub const RemoteEditor = struct {
     startup_textarea: ?ui.widgets.input.TextareaResult = null,
     startup_overflow: bool = false,
     sig_compression: ?*ui.Signal(bool) = null,
+    sig_shell_integration: ?*ui.Signal(?[]const u8) = null,
+    sig_command_info: ?*ui.Signal(?[]const u8) = null,
     logs_open: ?*ui.Signal(bool) = null,
     header: ?*ui.Node = null,
     title: ?*ui.Node = null,
@@ -552,6 +560,8 @@ pub const RemoteEditor = struct {
     /// the detailed controls remain collapsed until the user enables them.
     socks_card: ?*ui.Node = null,
     commands_card: ?*ui.Node = null,
+    shell_integration_field: ?*ui.Node = null,
+    command_info_row: ?*ui.Node = null,
     socks_details: ?*ui.Node = null,
     commands_details: ?*ui.Node = null,
     advanced_expanded: bool = false,
@@ -703,6 +713,8 @@ pub const RemoteEditor = struct {
         self.copy_open = try scope.createSignal(bool, false);
         self.sig_strict = try scope.createSignal(bool, self.strict_host_key_checking);
         self.sig_compression = try scope.createSignal(bool, self.compression);
+        self.sig_shell_integration = try scope.createSignal(?[]const u8, "inherit");
+        self.sig_command_info = try scope.createSignal(?[]const u8, "inherit");
         self.logs_open = try scope.createSignal(bool, false);
         self.test_action_disabled = try scope.createSignal(bool, false);
         const ModalParts = struct { overlay: *ui.Node, dialog: *ui.Node, body: *ui.Node, portaled: bool };
@@ -1150,6 +1162,8 @@ pub const RemoteEditor = struct {
         self.sig_strict.?.set(draft.strict_host_key_checking);
         self.sig_strict_policy.?.set(if (draft.strict_host_key_checking) "true" else "false");
         self.sig_compression.?.set(draft.compression);
+        self.sig_shell_integration.?.set(if (draft.auto_shell_integration) |enabled| if (enabled) "on" else "off" else "inherit");
+        self.sig_command_info.?.set(if (draft.command_info) |enabled| if (enabled) "on" else "off" else "inherit");
         self.sig_protocol.?.set(if (draft.protocol == .sftp) "sftp" else "ssh");
         self.sig_name.?.set(draft.name);
         self.sig_host.?.set(draft.host);
@@ -1318,6 +1332,7 @@ pub const RemoteEditor = struct {
         }
         if (self.socks_details) |node| node.setDisplay(if (self.socks_enabled) .flex else .none);
         if (self.commands_details) |node| node.setDisplay(if (self.protocol == .ssh) .flex else .none);
+        if (self.command_info_row) |node| node.setDisplay(if (self.protocol == .ssh) .flex else .none);
         if (self.advanced_disclosure) |section_motion| section_motion.setExpanded(self.advanced_expanded);
         if (self.advanced_chevron) |node| paintIcon(node, if (self.advanced_expanded) ui.icons.chevron_down else ui.icons.chevron_right, 10, S.theme.current().fg_1);
         if (self.identity_body) |node| node.setDisplay(if (self.identity_expanded) .flex else .none);
@@ -1644,6 +1659,8 @@ pub const RemoteEditor = struct {
             .route = self.route_ids[0..jump_len],
             .jump_chain = self.jumps[0..jump_len],
             .startup_commands = self.commands[0..command_len],
+            .auto_shell_integration = if (self.sig_shell_integration.?.get()) |choice| if (std.mem.eql(u8, choice, "on")) true else if (std.mem.eql(u8, choice, "off")) false else null else null,
+            .command_info = if (self.sig_command_info.?.get()) |choice| if (std.mem.eql(u8, choice, "on")) true else if (std.mem.eql(u8, choice, "off")) false else null else null,
             .socks_enabled = self.socks_enabled,
             .socks_auto_start = self.socks_auto_start,
             .socks_max_connections = self.socks_max_connections,
@@ -2257,6 +2274,16 @@ pub const RemoteEditor = struct {
         if (self.isLocked()) return;
         self.setStrictHostKeyChecking(checked);
     }
+    fn onShellIntegrationPicked(self: *RemoteEditor, value: ?[]const u8) void {
+        if (self.isLocked()) return;
+        self.sig_shell_integration.?.set(value);
+        self.onFieldChange("");
+    }
+    fn onCommandInfoPicked(self: *RemoteEditor, value: ?[]const u8) void {
+        if (self.isLocked()) return;
+        self.sig_command_info.?.set(value);
+        self.onFieldChange("");
+    }
     fn onCompressionPicked(self: *RemoteEditor, value: []const u8) void {
         self.onCompressionChanged(std.mem.eql(u8, value, "on"));
     }
@@ -2850,6 +2877,16 @@ fn fieldLabel(cx: *ui.Cx, value: []const u8) !*ui.Node {
     label.setStyleInline(cx.allocator, .{ .height = .{ .px = 16.5 }, .flex_shrink = 0 });
     return label;
 }
+fn helpLabel(w: *RemoteEditor, label: []const u8, explanation: []const u8, test_id: []const u8) !*ui.Node {
+    const row = try ui.box(w.cx, .{ .width = .fill(), .height = .{ .px = 16.5 }, .direction = .row, .align_items = .center, .gap = 5, .flex_shrink = 0 }, .{});
+    try row.appendChild(w.alloc, try fieldLabel(w.cx, label));
+    const tip = try ui.widgets.Tooltip(.{ .text = explanation, .open_delay_ms = 450 }).mount(w.scope, w.cx);
+    const help = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.info, .icon_size = 12, .icon_tint = S.theme.current().fg_2, .a11y_label = explanation, .base_style = .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .padding = .{}, .border = .{ .radius = 4 }, .flex_shrink = 0 } }).mount(w.scope, w.cx);
+    help.meta.ownership.meta.test_id = test_id;
+    try tip.trigger.appendChild(w.alloc, help);
+    try row.appendChild(w.alloc, tip.wrapper);
+    return row;
+}
 fn readonlyField(w: *RemoteEditor, parent: *ui.Node, label: []const u8, text: []const u8) !*ui.Node {
     const group = try ui.box(w.cx, S.field(null), .{});
     try group.appendChild(w.alloc, try fieldLabel(w.cx, label));
@@ -3073,6 +3110,40 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     _ = try field(w, terminal_row, "字符编码", w.sig_encoding.?, "UTF-8", "wizard.encoding", null, false);
     _ = try field(w, terminal_row, "终端最大显示行数", w.sig_scrollback.?, "继承全局；0 不限制", "wizard.scrollback", null, false);
     try advanced_body.appendChild(w.alloc, terminal_row);
+    const info_row = try ui.box(cx, S.fieldRow(), .{});
+    info_row.meta.ownership.meta.test_id = "wizard.command_info.row";
+    w.command_info_row = info_row;
+    const info_field = try ui.box(cx, S.field(null), .{});
+    info_field.meta.ownership.meta.test_id = "wizard.command_info.field";
+    try info_field.appendChild(w.alloc, try helpLabel(w, "命令信息", "在命令首行右缘显示 AI、返回码与运行时间；hover 命令时隐藏，不影响复制。保存后立即更新已打开的此主机终端。", "wizard.command_info.help"));
+    const info_options = [_]ui.widgets.SelectOption{
+        .{ .value = "inherit", .label = "继承全局设置", .test_id = "wizard.command_info.inherit" },
+        .{ .value = "on", .label = "显示", .test_id = "wizard.command_info.on" },
+        .{ .value = "off", .label = "隐藏", .test_id = "wizard.command_info.off" },
+    };
+    const info_choice = try ui.widgets.Select(.{ .options = &info_options, .value = w.sig_command_info.?, .width = (S.width - 64) / 2, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onCommandInfoPicked) }).mount(w.scope, cx);
+    skinSelect(w, info_choice, 34, 12);
+    info_choice.wrapper.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0 });
+    info_choice.trigger.meta.ownership.meta.test_id = "wizard.command_info";
+    try info_field.appendChild(w.alloc, info_choice.wrapper);
+    try info_row.appendChild(w.alloc, info_field);
+
+    const shell_field = try ui.box(cx, S.field(null), .{});
+    w.shell_integration_field = shell_field;
+    try shell_field.appendChild(w.alloc, try helpLabel(w, "自动会话初始化", "新建 SSH 会话时发送文本钩子以获取命令状态，不上传文件。登录后会自动运行其他程序的主机可关闭；下次新建会话生效。", "wizard.shell_integration.help"));
+    const shell_options = [_]ui.widgets.SelectOption{
+        .{ .value = "inherit", .label = "继承全局设置", .test_id = "wizard.shell_integration.inherit" },
+        .{ .value = "on", .label = "开启", .test_id = "wizard.shell_integration.on" },
+        .{ .value = "off", .label = "关闭", .test_id = "wizard.shell_integration.off" },
+    };
+    const shell_choice = try ui.widgets.Select(.{ .options = &shell_options, .value = w.sig_shell_integration.?, .width = (S.width - 64) / 2, .disabled = w.locked.?, .on_change = cx.on(RemoteEditor, w, RemoteEditor.onShellIntegrationPicked) }).mount(w.scope, cx);
+    skinSelect(w, shell_choice, 34, 12);
+    shell_choice.wrapper.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0 });
+    shell_choice.trigger.meta.ownership.meta.test_id = "wizard.shell_integration";
+    try shell_field.appendChild(w.alloc, shell_choice.wrapper);
+    try info_row.appendChild(w.alloc, shell_field);
+    try advanced_body.appendChild(w.alloc, info_row);
+
     const commands = try ui.boxStyled(cx, S.commandField, .{});
     w.commands_card = commands;
     w.commands_details = commands;

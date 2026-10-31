@@ -219,7 +219,7 @@ test "SSH status host reuses a single actual log modal and keeps its captured ke
     try std.testing.expect(f.captured.?.key.eql(key));
 }
 
-test "SSH status host hides empty workspace actions and restores global theme with a session" {
+test "SSH status host retains disabled offline actions and the global theme entry" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
@@ -239,9 +239,11 @@ test "SSH status host hides empty workspace actions and restores global theme wi
     try std.testing.expect(f.last_key.?.eql(key));
     try f.host.updateActive(null);
     f.settle();
-    try std.testing.expect(f.bar.controls.theme_button.style.display == .none);
+    try std.testing.expect(f.bar.controls.theme_button.style.display == .flex);
     try std.testing.expect(f.bar.controls.more_button.style.display == .none);
-    try std.testing.expect(f.bar.controls.chain_button.style.display == .none);
+    try std.testing.expect(f.bar.controls.chain_button.style.display == .flex);
+    try std.testing.expect(f.bar.controls.disabled.peek());
+    try std.testing.expect(!f.bar.controls.theme_disabled.peek());
     try f.update(source, true);
     try std.testing.expect(f.bar.controls.theme_button.style.display == .flex);
     f.enter(f.bar.controls.theme_button);

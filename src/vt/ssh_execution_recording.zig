@@ -17,12 +17,12 @@ pub const Recording = struct {
     boundaries: std.ArrayList(Marker) = .empty,
     failure: ?[]const u8 = null,
     committed_path: ?[]u8 = null,
-    const Range = struct { id: [32]u8, start: manifest.Position, end: ?manifest.Position = null, start_fence: ?u64 = null, end_fence: ?u64 = null, process: ?execution.ProcessReceipt = null, attribution: execution.OutputAttribution = .unverified, reason: ?[]const u8 = null, saved: bool = false, failure: ?[]const u8 = null, evidence: manifest.Evidence = .pending };
+    const Range = struct { id: [32]u8, generation: u64, completion_source: execution.CompletionSource = .unknown, start: manifest.Position, end: ?manifest.Position = null, start_fence: ?u64 = null, end_fence: ?u64 = null, process: ?execution.ProcessReceipt = null, attribution: execution.OutputAttribution = .unverified, reason: ?[]const u8 = null, saved: bool = false, failure: ?[]const u8 = null, evidence: manifest.Evidence = .pending };
     const Marker = struct { position: manifest.Position, consumed: bool = false };
     pub const Barrier = struct { recording_id: [32]u8, generation: u64, revision: u64 };
     pub const BoundaryReceipt = struct { position: manifest.Position, revision: u64 };
     pub fn init(a: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: recording.Options) !Recording {
-        if (options.timeline == null or options.generations.len != 1 or options.ended_ms != null) return error.InvalidExecutionRecording;
+        if (options.timeline == null or options.generations.len == 0 or options.ended_ms != null) return error.InvalidExecutionRecording;
         const path = try manifest.pathForCast(a, options.cast_path);
         defer a.free(path);
         const current = try manifest.load(a, io, dir, path);
@@ -51,6 +51,22 @@ pub const Recording = struct {
         self.boundaries.deinit(self.allocator);
         if (self.committed_path) |path| self.allocator.free(path);
     }
+    /// A replacement transport keeps the recording identity and old ranges,
+    /// while future submissions belong to its freshly allocated generation.
+    pub fn beginGeneration(self: *Recording, generations: []const manifest.Generation) !void {
+        if (generations.len <= self.options.generations.len or generations.len > 256) return error.InvalidRecordingGeneration;
+        for (self.options.generations, generations[0..self.options.generations.len]) |old, next| {
+            if (old.recording_generation != next.recording_generation or old.session_id != next.session_id or old.session_generation != next.session_generation) return error.RecordingIdentityChanged;
+        }
+        if (generations[generations.len - 1].recording_generation <= self.options.generations[self.options.generations.len - 1].recording_generation) return error.InvalidRecordingGeneration;
+        const copy = try self.arena.allocator().dupe(manifest.Generation, generations);
+        for (self.ranges.items) |*range| if (range.evidence == .pending) {
+            range.evidence = .unknown;
+            range.failure = "SessionReconnected";
+        };
+        for (self.boundaries.items) |*marker| marker.consumed = true;
+        self.options.generations = copy;
+    }
     pub fn markBoundary(self: *Recording, raw_offset: u64, now: i64) !manifest.Position {
         if (self.failure != null) return error.RecordingDegraded;
         if (self.boundaries.items.len >= 256) return error.RecordingBoundaryCapacity;
@@ -66,9 +82,9 @@ pub const Recording = struct {
         for (self.ranges.items) |range| if (range.end == null and range.evidence == .pending) return error.OperationBusy;
         var frozen = try self.options.timeline.?.snapshotWithAllocator(self.allocator);
         defer frozen.deinit();
-        try self.ranges.append(self.allocator, .{ .id = std.fmt.bytesToHex(id.bytes, .lower), .start = .{ .raw_offset = total, .event_sequence = frozen.next_event_sequence -| 1 } });
+        try self.ranges.append(self.allocator, .{ .id = std.fmt.bytesToHex(id.bytes, .lower), .generation = self.options.generations[self.options.generations.len - 1].recording_generation, .start = .{ .raw_offset = total, .event_sequence = frozen.next_event_sequence -| 1 } });
         const revision = try self.persist(total, null);
-        return .{ .recording_id = std.fmt.bytesToHex(self.options.recording_id.bytes, .lower), .generation = self.options.generations[0].recording_generation, .revision = revision };
+        return .{ .recording_id = std.fmt.bytesToHex(self.options.recording_id.bytes, .lower), .generation = self.options.generations[self.options.generations.len - 1].recording_generation, .revision = revision };
     }
     pub fn noteBoundary(self: *Recording, id: identity.ExecutionId, start: bool, boundary: execution.Boundary, total: u64) !BoundaryReceipt {
         const range = try self.find(id);
@@ -96,6 +112,7 @@ pub const Recording = struct {
         var frozen = try self.options.timeline.?.snapshotWithAllocator(self.allocator);
         defer frozen.deinit();
         if (frozen.events.items.len == 0 or frozen.events.items[0].event_sequence > range.start.event_sequence) return error.ExecutionIntervalNotRetained;
+        range.completion_source = snapshot.completion_source;
         range.process = snapshot.process;
         range.attribution = snapshot.output_attribution;
         range.reason = snapshot.output_attribution_reason;
@@ -106,6 +123,7 @@ pub const Recording = struct {
     }
     pub fn abandon(self: *Recording, id: identity.ExecutionId, snapshot: execution.Snapshot, total: u64) !u64 {
         const range = self.find(id) catch return self.revision;
+        range.completion_source = snapshot.completion_source;
         range.process = snapshot.process;
         range.attribution = snapshot.output_attribution;
         range.reason = snapshot.output_attribution_reason;
@@ -120,7 +138,7 @@ pub const Recording = struct {
     }
     pub fn rangeValues(self: *Recording, buffer: []manifest.ExecutionRange) []const manifest.ExecutionRange {
         std.debug.assert(buffer.len >= self.ranges.items.len);
-        for (self.ranges.items, buffer[0..self.ranges.items.len]) |*range, *value| value.* = .{ .execution_id = &range.id, .recording_generation = self.options.generations[0].recording_generation, .start = range.start, .end = range.end, .start_boundary_sequence = range.start_fence, .end_boundary_sequence = range.end_fence, .output_scope = .session_interval, .completion_evidence = range.evidence, .process_receipt = range.process, .output_attribution = range.attribution, .output_attribution_reason = range.reason, .interval_saved = range.saved, .failure = range.failure };
+        for (self.ranges.items, buffer[0..self.ranges.items.len]) |*range, *value| value.* = .{ .execution_id = &range.id, .completion_source = range.completion_source, .recording_generation = range.generation, .start = range.start, .end = range.end, .start_boundary_sequence = range.start_fence, .end_boundary_sequence = range.end_fence, .output_scope = .session_interval, .completion_evidence = range.evidence, .process_receipt = range.process, .output_attribution = range.attribution, .output_attribution_reason = range.reason, .interval_saved = range.saved, .failure = range.failure };
         return buffer[0..self.ranges.items.len];
     }
     pub fn persist(self: *Recording, total: u64, ended_ms: ?i64) !u64 {
@@ -146,3 +164,35 @@ pub const Recording = struct {
         return receipt.manifest_revision;
     }
 };
+
+test "command history reconnect recording keeps old ranges in their original generation" {
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var timeline = try Timeline.init(a, 16, 8192);
+    defer timeline.deinit();
+    const key = identity.ArchiveKey.generate();
+    const key_text = std.fmt.bytesToHex(key.bytes, .lower);
+    defer @import("session_archive.zig").setActiveRecord(&key_text, false) catch {};
+    const first: manifest.Generation = .{ .session_id = 17, .session_generation = 1, .initial_cols = 20, .initial_rows = 4, .receive_time_origin = 10, .event_sequence_start = 1 };
+    const second: manifest.Generation = .{ .recording_generation = 2, .session_id = 17, .session_generation = 2, .initial_cols = 20, .initial_rows = 4, .receive_time_origin = 20, .event_sequence_start = 2 };
+    const options: recording.Options = .{ .recording_id = .generate(), .archive_key = key, .generations = &.{first}, .cast_path = "logs/history/reconnect-commands.cast", .started_ms = 10, .display = .{}, .timeline = &timeline };
+    try recording.reserve(a, std.testing.io, tmp.dir, options);
+    var rec = try Recording.init(a, std.testing.io, tmp.dir, options);
+    defer rec.deinit();
+    const old_id = identity.ExecutionId.generate();
+    const new_id = identity.ExecutionId.generate();
+    const old_barrier = try rec.startBarrier(old_id, 0);
+    try std.testing.expectEqual(@as(u64, 1), old_barrier.generation);
+    try rec.beginGeneration(&.{ first, second });
+    const new_barrier = try rec.startBarrier(new_id, 0);
+    try std.testing.expectEqual(@as(u64, 2), new_barrier.generation);
+    const document = try manifest.load(a, std.testing.io, tmp.dir, "logs/history/reconnect-commands.session.json");
+    defer document.deinit();
+    try std.testing.expectEqual(@as(usize, 2), document.value.recording.generations.len);
+    try std.testing.expectEqual(@as(u64, 1), document.value.execution_ranges[0].recording_generation);
+    try std.testing.expectEqual(manifest.Evidence.unknown, document.value.execution_ranges[0].completion_evidence);
+    try std.testing.expectEqualStrings("SessionReconnected", document.value.execution_ranges[0].failure.?);
+    try std.testing.expectEqual(@as(u64, 2), document.value.execution_ranges[1].recording_generation);
+    try std.testing.expectError(error.InvalidRecordingGeneration, rec.beginGeneration(&.{first}));
+}

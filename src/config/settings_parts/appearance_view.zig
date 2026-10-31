@@ -198,7 +198,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     if (query.len == 0 or binding.matches(query, "外观 主题 theme 主题库")) try root.appendChild(cx.allocator, try themeSection(cx, bound));
     if (query.len == 0 or binding.matches(query, "背景 图片 材质 模糊 透明度 fit 对齐 blur_px background enabled path alignment_x alignment_y transparency")) try root.appendChild(cx.allocator, try materialSection(cx, bound));
     if (query.len == 0 or binding.matches(query, "字体 字号 行高 光标 font cursor font_family font_size font_weight line_height cursor_style")) try root.appendChild(cx.allocator, try fontSection(cx, bound));
-    if (query.len == 0 or binding.matches(query, "终端 工作区 最大显示行数 回滚 scrollback_limit 时间戳 侧栏 高亮 补全 timestamp_gutter sidebar_collapsed input_line_highlight completion enabled")) try root.appendChild(cx.allocator, try aidsSection(cx, bound));
+    if (query.len == 0 or binding.matches(query, "终端 工作区 最大显示行数 回滚 scrollback_limit 时间戳 侧栏 高亮 补全 timestamp_gutter sidebar_collapsed input_line_highlight command_info 命令信息 AI 返回码 耗时 completion enabled")) try root.appendChild(cx.allocator, try aidsSection(cx, bound));
     if (root.children.items.len == 0) try root.appendChild(cx.allocator, try ui.textStyled(cx, S.note, "没有匹配的设置"));
     return root;
 }
@@ -984,6 +984,7 @@ fn aidsSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const section = try card(cx, bound, "终端与工作区", "辅助显示、回滚缓冲与侧栏", ui.icons.terminal, 3, "settings.appearance.aids");
     for ([_]struct { label: []const u8, key: binding.Key, help: ?[]const u8 }{
         .{ .label = "时间戳侧栏", .key = .{ .section = "ui", .key = "timestamp_gutter" }, .help = "显示输出时间，不包含在复制的终端内容中。" },
+        .{ .label = "命令信息", .key = .{ .section = "ui", .key = "command_info" }, .help = "在命令首行右缘显示 AI、返回码和运行时间；hover 命令时隐藏，不进入复制内容。仅本地终端和 SSH，主机高级选项可覆盖。" },
         .{ .label = "应用命令补全", .key = .{ .section = "completion", .key = "enabled" }, .help = null },
         .{ .label = "输入行相对高亮", .key = .{ .section = "ui", .key = "input_line_highlight" }, .help = null },
         .{ .label = "默认隐藏侧栏", .key = .{ .section = "ui", .key = "sidebar_collapsed" }, .help = "保存侧栏显示偏好；⌘B 随时显示或隐藏。" },

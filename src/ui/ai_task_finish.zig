@@ -267,7 +267,7 @@ pub const Controller = struct {
         return buffer[0..count];
     }
     fn projected(task: *const Task) Snapshot {
-        return .{ .context = task.context, .sequence = task.order, .revision = task.revision, .phase = task.phase, .resources = task.resources.items, .targets = task.targets.items, .active_executions = task.active_executions, .remote_effect_unknown = task.remote_effect_unknown, .feedback = task.feedback, .visible = task.resources.items.len > 0 or task.active_executions > 0 or task.phase == .settling, .control_pending = task.pending_control != null or task.takeover_requested or task.stop_sent, .model_done = task.model_ended };
+        return .{ .context = task.context, .sequence = task.order, .revision = task.revision, .phase = task.phase, .resources = task.resources.items, .targets = task.targets.items, .active_executions = task.active_executions, .remote_effect_unknown = task.remote_effect_unknown, .feedback = task.feedback, .visible = if (task.phase == .working) task.active_executions > 0 else task.resources.items.len > 0 or task.phase == .settling, .control_pending = task.pending_control != null or task.takeover_requested or task.stop_sent, .model_done = task.model_ended };
     }
     pub fn snapshotFor(self: *Controller, context: host.Context) ?Snapshot {
         const task = self.find(context.task_id) orelse return null;
@@ -299,14 +299,34 @@ pub const Controller = struct {
         const task = self.find(context.task_id) orelse return null;
         return if (task.context.conversation_id.eql(context.conversation_id)) task.receipt else null;
     }
+    fn inScope(app: *Application, context: host.Context, handle: identity.SessionHandle) bool {
+        return switch (context.binding) {
+            .session => |id| id == @backingInt(handle.session_id),
+            .group => |id| blk: {
+                const roster = app.workspace.group_roster orelse return false;
+                const group = roster.findById(std.math.cast(u32, id) orelse return false) orelse return false;
+                const legacy = app.legacyForHandle(handle) orelse return false;
+                for (group.members.items) |member| if (member.active and member.pane_id == legacy) break :blk true;
+                break :blk false;
+            },
+        };
+    }
+    fn historicalInScope(app: *Application, context: host.Context, handle: identity.SessionHandle) bool {
+        for (app.deferred_closes.items) |close| if (close.handle.eql(handle) and close.snapshot.state == .closed and @import("../ai/host_queries.zig").sameHistoricalBinding(close.context, context)) return true;
+        // Settlement may show the final state of its own already-known work
+        // resource. This is UI history only, never a content/archive grant.
+        if (app.lifecycle_supervisor.resource(handle)) |entry| if (entry.snapshot.state == .closed and @import("../ai/host_queries.zig").sameHistoricalBinding(entry.request.context, context)) return true;
+        return false;
+    }
     fn readTargets(self: *Controller, task: *Task, app: *Application, source: ?ExecutionSource) !void {
         task.targets.clearRetainingCapacity();
         if (source) |owner| if (owner.input_targets) |read| {
             var buffer: [64]InputTarget = undefined;
-            try task.targets.appendSlice(self.allocator, try read(owner.context, task.context, &buffer));
+            for (try read(owner.context, task.context, &buffer)) |target| if (inScope(app, task.context, target.handle)) try task.targets.append(self.allocator, target);
             return;
         };
         for (app.domain.attachments.items) |host_app| for (host_app.mappings.items) |mapping| {
+            if (host_app != app or !inScope(app, task.context, mapping.handle)) continue;
             const tab = host_app.workspace.sessionTab(mapping.legacy_id) orelse continue;
             if (tab.archived or tab.content_owner != .session or !tab.content_owner.session.eql(mapping.handle)) continue;
             const binding = switch (host_app.sessions.queryService(mapping.handle, .terminal)) {
@@ -361,9 +381,17 @@ pub const Controller = struct {
         task.close_presented = false;
     }
     fn harvest(self: *Controller, task: *Task, app: *Application) !void {
+        var index: usize = 0;
+        while (index < task.resources.items.len) {
+            const handle = task.resources.items[index].handle;
+            if (!inScope(app, task.context, handle) and !historicalInScope(app, task.context, handle)) {
+                _ = task.resources.orderedRemove(index);
+            } else index += 1;
+        }
         for (app.lifecycle_supervisor.entries.items) |entry| {
             if (!entry.request.context.task_id.eql(task.context.task_id) or !entry.request.context.conversation_id.eql(task.context.conversation_id)) continue;
             const handle = entry.snapshot.session orelse continue;
+            if (!inScope(app, task.context, handle) and !historicalInScope(app, task.context, handle)) continue;
             const resource = for (task.resources.items) |*item| {
                 if (item.handle.eql(handle)) break item;
             } else blk: {
@@ -394,6 +422,7 @@ pub const Controller = struct {
         const decision = task.decision orelse return;
         if (decision == .keep) {
             for (task.selection.items) |selected| {
+                if (!inScope(app, task.context, selected.handle)) continue;
                 const entry = app.lifecycle_supervisor.resource(selected.handle) orelse continue;
                 if (!entry.request.context.task_id.eql(task.context.task_id) or entry.snapshot.ownership != .created_task or entry.snapshot.ownership_revision != selected.ownership_revision) continue;
                 app.handedToUserFor(selected.handle, .keep_choice) catch |err| switch (err) {
@@ -408,6 +437,11 @@ pub const Controller = struct {
         task.phase = .closing;
         while (task.close_cursor < task.selection.items.len) {
             const selected = task.selection.items[task.close_cursor];
+            if (!inScope(app, task.context, selected.handle)) {
+                task.close_cursor += 1;
+                task.close_presented = false;
+                continue;
+            }
             const entry = app.lifecycle_supervisor.resource(selected.handle) orelse {
                 task.close_cursor += 1;
                 continue;
@@ -1065,4 +1099,20 @@ test "task finish task registration advances legal binding without losing takeov
     try std.testing.expect(visible[1].context.task_id.eql(next.task_id));
     try std.testing.expectError(error.OutputTooSmall, controller.snapshotsForConversation(grouped.conversation_id, buffer[0..1]));
     try std.testing.expectEqual(@as(usize, 0), (try controller.snapshotsForConversation(.generate(), &buffer)).len);
+}
+
+test "task status does not call an idle owned terminal a running execution" {
+    const a = std.testing.allocator;
+    var controller = Controller.init(a);
+    defer controller.deinit();
+    const context: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+    try controller.registerTask(context);
+    const task = controller.find(context.task_id).?;
+    try task.resources.append(a, .{ .handle = .{ .session_id = @fromBackingInt(7), .generation = 1 }, .ownership_revision = 1, .ownership = .created_task, .retention = .auto_idle, .state = .ready });
+    try std.testing.expect(!controller.snapshotFor(context).?.visible);
+    task.active_executions = 1;
+    try std.testing.expect(controller.snapshotFor(context).?.visible);
+    task.active_executions = 0;
+    task.phase = .retained;
+    try std.testing.expect(controller.snapshotFor(context).?.visible);
 }

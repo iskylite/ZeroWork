@@ -294,8 +294,8 @@ test "AI conversation rollback clears manager transcript while preserving prepar
 test "AI conversation lifecycle row formats elapsed time and actual token usage without borders" {
     const Status = @import("ui/ai_turn_status_view.zig");
     var buffer: [96]u8 = undefined;
-    try std.testing.expectEqualStrings("已运行3分钟20秒", try Status.elapsedLabel(&buffer, 200000));
-    try std.testing.expectEqualStrings("已运行30分钟20秒", try Status.elapsedLabel(&buffer, 1820000));
+    try std.testing.expectEqualStrings("处理用时3分钟20秒", try Status.elapsedLabel(&buffer, 200000));
+    try std.testing.expectEqualStrings("处理用时30分钟20秒", try Status.elapsedLabel(&buffer, 1820000));
     var turn: turns.Turn = .{ .sent_at_ms = 1000, .started_mono_ms = 50 };
     try std.testing.expectEqual(@as(u64, 200000), Status.elapsedMs(&turn, 999999, 200050));
     try std.testing.expectEqualStrings("Token 用量未返回", try Status.usageLabel(&buffer, &turn));
@@ -353,7 +353,7 @@ test "AI conversation activity label follows tool phases and prioritizes pending
     try steps.apply(a, &turn.steps, .{ .call_id = "command", .name = "run_command", .phase = .assembling, .at_ms = 1 });
     try std.testing.expectEqualStrings("～准备操作中～", Status.turnLabel(&turn).text);
     try steps.apply(a, &turn.steps, .{ .call_id = "command", .phase = .approval, .at_ms = 2 });
-    try std.testing.expectEqualStrings("～等待你确认～", Status.turnLabel(&turn).text);
+    try std.testing.expectEqualStrings("等待确认 · 流程暂停", Status.turnLabel(&turn).text);
     try std.testing.expect(!Status.turnLabel(&turn).animated);
     try steps.apply(a, &turn.steps, .{ .call_id = "command", .phase = .approved, .at_ms = 3 });
     try std.testing.expectEqualStrings("～准备操作中～", Status.turnLabel(&turn).text);
@@ -363,7 +363,7 @@ test "AI conversation activity label follows tool phases and prioritizes pending
     try steps.apply(a, &turn.steps, .{ .call_id = "next", .name = "read_terminal", .phase = .assembling, .at_ms = 5 });
     try std.testing.expectEqualStrings("～执行命令中～", Status.turnLabel(&turn).text);
     try steps.apply(a, &turn.steps, .{ .call_id = "next", .phase = .approval, .at_ms = 6 });
-    try std.testing.expectEqualStrings("～等待你确认～", Status.turnLabel(&turn).text);
+    try std.testing.expectEqualStrings("等待确认 · 流程暂停", Status.turnLabel(&turn).text);
     try steps.apply(a, &turn.steps, .{ .call_id = "next", .phase = .rejected, .at_ms = 7 });
     try steps.apply(a, &turn.steps, .{ .call_id = "command", .phase = .failed, .at_ms = 8 });
     try std.testing.expectEqualStrings("～大浪淘金中～", Status.turnLabel(&turn).text);
@@ -473,4 +473,29 @@ test "AI conversation activity label recovers when tool arguments fail before ho
     _ = try manager.run(.{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models }, .{ .model = "invalid-tool-fixture", .system = "", .messages = &.{.{ .content = "检查参数错误后的状态" }}, .tools = &.{.{ .tool = .run_command, .session_ids = &.{101} }} });
     try std.testing.expectEqual(@as(usize, 2), fixture.rounds);
     try std.testing.expectEqual(steps.Phase.failed, fixture.turn.steps.items[0].phase);
+}
+
+test "AI conversation processing time freezes through approval expiry and preserves message boundaries" {
+    const events = @import("ai/step_events.zig");
+    const Status = @import("ui/ai_turn_status_view.zig");
+    var turn: @import("ai/conversation_turn.zig").Turn = .{ .started_mono_ms = 1000 };
+    defer turn.deinit(a);
+    try turn.prose.appendSlice(a, "先确认命令，再执行。");
+    try events.apply(a, &turn.steps, .{ .call_id = "one", .name = "host.run_in_terminal", .phase = .assembling, .text_offset = turn.prose.items.len, .at_ms = 1200 });
+    try events.apply(a, &turn.steps, .{ .call_id = "one", .phase = .approval, .at_ms = 2000 });
+    try std.testing.expectEqual(@as(u64, 1000), Status.elapsedMs(&turn, 0, 122000));
+    turn.steps.items[0].approval_expired = true;
+    try std.testing.expectEqualStrings("审批已过期 · 流程暂停", Status.turnLabel(&turn).text);
+    try std.testing.expectEqual(@as(u64, 1000), Status.elapsedMs(&turn, 0, 242000));
+    try std.testing.expectEqual(@as(u64, 0), turn.steps.items[0].elapsedAt(242000));
+    try events.apply(a, &turn.steps, .{ .call_id = "one", .phase = .approved, .at_ms = 242000 });
+    try events.apply(a, &turn.steps, .{ .call_id = "one", .phase = .running, .at_ms = 242010 });
+    try events.apply(a, &turn.steps, .{ .call_id = "one", .phase = .succeeded, .at_ms = 242100 });
+    try turn.prose.appendSlice(a, "命令完成。");
+    var copy = try turn.clone(a);
+    defer copy.deinit(a);
+    try std.testing.expectEqualStrings(turn.prose.items, copy.prose.items);
+    try std.testing.expectEqual(@as(usize, "先确认命令，再执行。".len), copy.steps.items[0].text_offset);
+    try std.testing.expectEqual(@as(u64, 100), copy.steps.items[0].elapsedAt(300000));
+    try std.testing.expectEqual(@as(u64, 1100), Status.elapsedMs(&copy, 0, 242100));
 }

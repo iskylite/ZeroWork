@@ -40,6 +40,7 @@ pub const RemoteConfig = struct {
     strict_host_key_checking: bool = true,
     terminal_type: []const u8 = "xterm-256color",
     startup_commands: []const []const u8 = &.{},
+    auto_shell_integration: bool = true,
     keepalive_sec: u16 = 30,
     compression: bool = false,
 };

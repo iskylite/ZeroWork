@@ -18,6 +18,10 @@ pub const Timeline = struct {
     max_events: usize,
     max_bytes: usize,
     bytes: usize = 0,
+    command_history: std.ArrayList(@import("recording_manifest.zig").CommandExecution) = .empty,
+    command_history_bytes: usize = 0,
+    command_history_revision: u64 = 0,
+    command_history_truncated: bool = false,
     next_event_sequence: u64 = 1,
     /// Retained bytes alone cannot reconstruct the VT state at their start.
     evicted_events: u64 = 0,
@@ -61,7 +65,79 @@ pub const Timeline = struct {
             event.storage.release();
         }
         self.events.deinit(self.allocator);
+        for (self.command_history.items) |item| if (item.value.command) |command| self.allocator.free(command);
+        self.command_history.deinit(self.allocator);
         self.* = undefined;
+    }
+
+    /// Native C/D updates have their own lifetime, independent of UI refreshes
+    /// and the 512-command live projection. The existing recording budget bounds
+    /// this metadata too; publication reports a gap if it cannot be retained.
+    pub fn recordCommand(self: *Timeline, generation: u64, command: @import("snapshot.zig").Command) !void {
+        const copy = if (command.command) |text| try self.allocator.dupe(u8, text) else null;
+        errdefer if (copy) |text| self.allocator.free(text);
+        self.lock();
+        defer self.mutex.unlock();
+        for (self.command_history.items) |*item| if (item.recording_generation == generation and item.value.id == command.id) {
+            if (item.value.command) |text| {
+                self.command_history_bytes -= text.len;
+                self.allocator.free(text);
+            }
+            item.value = command;
+            item.value.command = copy;
+            self.command_history_bytes += if (copy) |text| text.len else 0;
+            self.command_history_revision +|= 1;
+            return;
+        };
+        const size = @sizeOf(@import("recording_manifest.zig").CommandExecution) + (if (copy) |text| text.len else @as(usize, 0));
+        if (self.command_history_bytes + size > @min(self.max_bytes, 4 * 1024 * 1024)) {
+            self.command_history_truncated = true;
+            return error.CommandHistoryCapacity;
+        }
+        self.command_history.append(self.allocator, .{ .recording_generation = generation, .value = command }) catch |err| {
+            self.command_history_truncated = true;
+            return err;
+        };
+        self.command_history.items[self.command_history.items.len - 1].value.command = copy;
+        self.command_history_bytes += size;
+        self.command_history_revision +|= 1;
+    }
+
+    pub fn applyPrivateEvidence(self: *Timeline, ranges: []const @import("recording_manifest.zig").ExecutionRange) void {
+        self.lock();
+        defer self.mutex.unlock();
+        var changed = false;
+        for (self.command_history.items) |*item| {
+            const old_state = item.value.state;
+            const old_exit = item.value.exit_code;
+            @import("recording_manifest.zig").applyPrivateCommandEvidence(&item.value, item.recording_generation, ranges);
+            changed = changed or old_state != item.value.state or old_exit != item.value.exit_code;
+        }
+        if (changed) self.command_history_revision +|= 1;
+    }
+    /// Copies only the bounded command metadata. Old observation positions are
+    /// cleared; callers may merge currently resolved native Projection anchors.
+    pub fn commandHistorySnapshot(self: *Timeline, allocator: std.mem.Allocator) !@import("recording_manifest.zig").CommandHistorySnapshot {
+        self.lock();
+        defer self.mutex.unlock();
+        const records = try allocator.alloc(@import("recording_manifest.zig").CommandExecution, self.command_history.items.len);
+        var count: usize = 0;
+        errdefer {
+            for (records[0..count]) |item| if (item.value.command) |command| allocator.free(command);
+            allocator.free(records);
+        }
+        for (self.command_history.items, records) |source, *record| {
+            record.* = source;
+            record.value.command = if (source.value.command) |command| try allocator.dupe(u8, command) else null;
+            record.value.screen_row = null;
+            record.value.col = null;
+            record.value.input_end_row = null;
+            record.value.input_end_col = null;
+            record.value.output_start_row = null;
+            record.value.output_start_col = null;
+            count += 1;
+        }
+        return .{ .records = records, .revision = self.command_history_revision, .partial = self.command_history_truncated };
     }
 
     /// Immutable segments let export pin history without copying all bytes
@@ -147,9 +223,18 @@ pub const Timeline = struct {
         self.lock();
         defer self.mutex.unlock();
         var copy = try Timeline.init(allocator, self.max_events, self.max_bytes);
+        errdefer copy.deinit();
         copy.evicted_events = self.evicted_events;
         copy.next_event_sequence = self.next_event_sequence;
-        errdefer copy.deinit();
+        copy.command_history_truncated = self.command_history_truncated;
+        for (self.command_history.items) |item| {
+            var value = item.value;
+            value.command = if (value.command) |text| try allocator.dupe(u8, text) else null;
+            errdefer if (value.command) |text| allocator.free(text);
+            try copy.command_history.append(allocator, .{ .recording_generation = item.recording_generation, .value = value });
+        }
+        copy.command_history_bytes = self.command_history_bytes;
+        copy.command_history_revision = self.command_history_revision;
         try copy.events.ensureTotalCapacity(allocator, self.events.items.len);
         for (self.events.items) |event| {
             _ = event.storage.refs.fetchAdd(1, .monotonic);
@@ -430,4 +515,33 @@ test "timeline snapshot pins immutable bytes after producer eviction and destruc
     try timeline.append(2, 10, "replacement");
     timeline.deinit();
     try std.testing.expectEqualStrings("old output", frozen.events.items[0].payload);
+}
+
+test "command history capacity failure and immutable export snapshot preserve provenance" {
+    const a = std.testing.allocator;
+    var timeline = try Timeline.init(a, 8, 4096);
+    const id = @import("../host/identity.zig").ExecutionId.generate();
+    try timeline.recordCommand(2, .{ .id = 1, .command = "true", .start_ms = 100, .ai_execution_id = id });
+    var frozen = try timeline.snapshotWithAllocator(a);
+    defer frozen.deinit();
+    try timeline.recordCommand(2, .{ .id = 1, .command = "true", .start_ms = 100, .end_ms = 120, .state = .succeeded, .exit_code = 0 });
+    try timeline.recordCommand(3, .{ .id = 1, .command = "true", .start_ms = 200 });
+    try std.testing.expectEqual(@as(usize, 2), timeline.command_history.items.len);
+    var metadata = try timeline.commandHistorySnapshot(a);
+    defer metadata.deinit(a);
+    var repeated = try timeline.commandHistorySnapshot(a);
+    defer repeated.deinit(a);
+    try std.testing.expectEqual(@as(usize, 2), metadata.records.len);
+    try std.testing.expectEqual(metadata.revision, repeated.revision);
+    try std.testing.expectEqual(@as(u64, 2), metadata.records[0].recording_generation);
+    try std.testing.expectEqual(@as(u64, 3), metadata.records[1].recording_generation);
+    try std.testing.expect(metadata.records[0].value.command.?.ptr != timeline.command_history.items[0].value.command.?.ptr);
+    timeline.deinit();
+    try std.testing.expectEqual(@as(usize, 1), frozen.command_history.items.len);
+    try std.testing.expect(frozen.command_history.items[0].value.ai_execution_id.?.eql(id));
+    try std.testing.expect(frozen.command_history.items[0].value.end_ms == null);
+    var limited = try Timeline.init(a, 1, 1);
+    defer limited.deinit();
+    try std.testing.expectError(error.CommandHistoryCapacity, limited.recordCommand(1, .{ .id = 1, .command = "true", .start_ms = 1 }));
+    try std.testing.expect(limited.command_history_truncated);
 }

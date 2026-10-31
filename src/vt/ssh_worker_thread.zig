@@ -51,8 +51,11 @@ pub const Thread = struct {
     }
 
     pub fn requestReconnect(self: *Thread, previous: OperationKey, next: OperationKey) !void {
+        return self.requestReconnectWithInitialization(previous, next, false);
+    }
+    pub fn requestReconnectWithInitialization(self: *Thread, previous: OperationKey, next: OperationKey, skip: bool) !void {
         if (self.stop_requested.load(.acquire)) return error.WorkerStopped;
-        try self.reconnect_control.request(previous, next);
+        try self.reconnect_control.requestWithInitialization(previous, next, skip);
         self.explicit_disconnect_active.store(false, .release);
     }
 
@@ -81,6 +84,15 @@ pub const Thread = struct {
         if (worker.execution) |*bridge| {
             const snapshot = bridge.snapshot;
             if (bridge.lease.holder != null or snapshot.grant != null or !snapshot.local_released or snapshot.remote_effect_unknown) return error.ActiveExecutionConflict;
+            switch (snapshot.state) {
+                .unavailable, .idle, .sealed, .interval_recorded, .cancelled_unsent => {},
+                else => return error.ActiveExecutionConflict,
+            }
+            std.hash.autoHash(&hash, .{ snapshot.execution_id, snapshot.revision, snapshot.input_epoch });
+        }
+        if (worker.shell_execution) |*bridge| {
+            const snapshot = bridge.snapshot;
+            if (bridge.lease.holder != null or bridge.lease.draining or snapshot.grant != null or !snapshot.local_released or snapshot.remote_effect_unknown) return error.ActiveExecutionConflict;
             switch (snapshot.state) {
                 .unavailable, .idle, .sealed, .interval_recorded, .cancelled_unsent => {},
                 else => return error.ActiveExecutionConflict,
@@ -146,18 +158,19 @@ pub const Thread = struct {
                     failure = err;
                 };
                 if (failure == null) {
+                    if (!self.worker.startup_pending.load(.acquire) and !self.worker.shell_initializer_failed) self.reconnect_control.initialized(self.worker.options.operation_key);
                     // A deferred tail frame or close exchange must not busy
                     // spin on the socket's permanent EOF readiness.
                     if (self.worker.io.closed) pause();
                     continue;
                 }
                 self.worker.presentation_attached.store(false, .release);
-                if (failure.? != error.ShellEnded and failure.? != error.ForwardParentClosing and failure.? != error.ExplicitDisconnect) {
+                if (failure.? != error.ShellEnded and failure.? != error.ForwardParentClosing and failure.? != error.ExplicitDisconnect and failure.? != error.ShellInitializationFailed) {
                     self.worker.transportFailed();
                     self.worker.reconnect.suspect(null);
                     self.failed.store(true, .release);
                 }
-                if (failure.? == error.ExplicitDisconnect) self.worker.reconnect.suspect(null);
+                if (failure.? == error.ExplicitDisconnect or failure.? == error.ShellInitializationFailed) self.worker.reconnect.suspect(null);
             }
             const shell_ended = failure.? == error.ShellEnded;
             if (!shell_ended) self.worker.disconnectInput();
@@ -183,7 +196,7 @@ pub const Thread = struct {
                     continue;
                 };
                 self.worker.reconnect.authorized();
-                self.worker.rebuildForOperation(grant.previous, grant.next) catch |err| {
+                self.worker.rebuildForOperationWithInitialization(grant.previous, grant.next, grant.skip_shell_initialization) catch |err| {
                     failure = err;
                     break;
                 };

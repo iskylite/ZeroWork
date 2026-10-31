@@ -6,7 +6,7 @@
 
 ## 运行与场景
 
-从仓库根目录启动静态服务，例如 `python3 -m http.server 8768 --bind 127.0.0.1 --directory .`，访问 `http://127.0.0.1:8768/docs/UI_V3/ai-session-execution/`。不需要安装依赖。下面的 URL 相对于本模块目录。
+从仓库根目录启动静态服务，例如 `python3 -m http.server 8768 --bind 127.0.0.1 --directory.`，访问 `http://127.0.0.1:8768/docs/UI_V3/ai-session-execution/`。不需要安装依赖。下面的 URL 相对于本模块目录。
 
 | 场景 | URL | 验收内容 |
 | --- | --- | --- |
@@ -29,7 +29,7 @@
 | 已清理 | [cleanup / cleaned](./?state=cleanup&cleanup=cleaned&theme=dark) | 工作会话变为 @log，组保留，不自动回到单会话 |
 | 保存失败保稿 | [settings-error](./?state=settings-error&theme=dark) | 首次保存失败，保留设置草稿，再次保存成功 |
 
-所有场景共用 `app.js` 的 renderer 与 fixture。`theme=dark|light|sauber` 和 `viewport=default|compact` 可组合；产品画板分别为 1440 × 900 和 860 × 480；最小窗口助手仍由真实 pane bounds 夹取；当前侧栏224px时可用宽588px，组状态实测高336px、单pane实测高376px。当前审批占满可用transcript内容区并默认滚动定位，上方消息保留在外层滚动区供回查；实际目标、目录和完整命令初始可见，影响说明可在审批正文内部滚动。菜单正文内部滚动，批准footer、composer及停止按钮保持固定可达。评审栏位于产品画板外。首选入口为 `pty-running`。
+所有场景共用 `app.js` 的 renderer 与 fixture。`theme=dark|light|sauber` 和 `viewport=default|compact` 可组合；产品画板分别为 1440 × 900 和 860 × 480；最小窗口助手仍由真实 pane bounds 夹取；当前侧栏224px时可用宽588px，组状态实测高336px、单pane实测高376px。影响说明可在审批正文内部滚动。菜单正文内部滚动，批准footer、composer及停止按钮保持固定可达。评审栏位于产品画板外。首选入口为 `pty-running`。
 
 ## 共享组件与交互映射
 
@@ -95,7 +95,7 @@
 | 图标 | `app.js` 中只复用当前工作区 svgPaths 的所需子集；回合状态复用既有 sparkles SVG，避免引入不同角色素材 |
 | 反馈 | hover / focus / pane 定位用约150 ms paint反馈；菜单、工具折叠使用原生控件语义；尊重 reduced motion，不加循环装饰动画 |
 
-精确颜色为浏览器解析当前 theme token 的结果。此处记录源约束，不把 CSS 声明假称为实际测量。历史计算样式与交互检查见[专项验证记录](verification/README.md)，效果图统一通过 HTML/CSS/JS 查看，历史截图已清理。
+精确颜色为浏览器解析当前 theme token 的结果。此处记录源约束，不把 CSS 声明假称为实际测量。效果图统一通过 HTML/CSS/JS 查看，历史截图已清理。
 
 ## 当前限制与验证责任
 
@@ -111,15 +111,15 @@
 
 AI关闭后的记录与全局列表共用 `ZeroWorkHistory.register/open`、ArchiveKey与同一原会话renderer；cmd-42仅提供区间定位参数，不再创建type=history的旧页面。短记录滑轮禁用并显示唯一真实时间；没有返回实时入口。全局入口再点同一记录聚焦同一Tab。
 
-历史阅读保存 entry/row/text offset 逻辑锚，缩窗重新换行后按锚定位，再计算百分比。停止/结果未知/封存中使用独立fixture状态；这些是可点击原型，不模拟后端已取得真实收据。专项验证结果和截图见[合并评审验证](verification/review-20261028/README.md)，较早截图仅代表当时版本。
+历史阅读保存 entry/row/text offset 逻辑锚，缩窗重新换行后按锚定位，再计算百分比。停止/结果未知/封存中使用独立fixture状态；这些是可点击原型，不模拟后端已取得真实收据。较早截图仅代表当时版本。
 
 
 ## 助手复用修订
 
-补丁不再定义assistant()、标题栏和composer renderer，也不再挂载patch-assistant。直接调用工作区renderAssistant，以原有#assistant为唯一窗口，V3AI.header/composer、模型/推理、权限、附件、会话列表、拖动/缩放和三点浮条继续由原实现处理。
+补丁不再定义assistant、标题栏和composer renderer，也不再挂载patch-assistant。直接调用工作区renderAssistant，以原有#assistant为唯一窗口，V3AI.header/composer、模型/推理、权限、附件、会话列表、拖动/缩放和三点浮条继续由原实现处理。
 
 composer只插入运行方式控件，并移动原上下文与模型控件：左侧附件→权限模式→运行模式；中间弹性留白；右侧上下文→模型/推理→原输入状态及发送/暂停。控件尺寸和样式不复制，模型/推理由当前共享状态显示，预算由原计算器提供。
 
 外部消息增加输入方向图标及“外部消息 · 宿主更新”来源；工具卡只显示中文动作和具体参数投影。标题栏无执行历史按钮，查看过程仍位于工具卡。较早截图中的自建助手、GPT-5.4硬编码与1.3k自建预算已废止，不作为原生实施基线。
 
-当前效果图以[助手复用修订验证](verification/reuse-20261028/README.md)为准；此前独立助手外壳和composer截图已废止，不用于实现。
+当前效果图以为准；此前独立助手外壳和composer截图已废止，不用于实现。

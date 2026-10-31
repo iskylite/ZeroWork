@@ -49,6 +49,19 @@ void zw_ssh_relay_wait(ZW_SSH_RELAY *relay, int transport_fd, LIBSSH2_SESSION *s
 LIBSSH2_SESSION *zw_libssh2_session_create(void);
 int zw_libssh2_session_handshake(LIBSSH2_SESSION *session, int socket_fd);
 int zw_libssh2_session_handshake_driven(LIBSSH2_SESSION *session, const ZW_SSH_DRIVE *drive);
+/* Handshake-only transport metadata. No banner, packet or credential bytes
+   are retained. Callback codes preserve libssh2's negative-errno convention. */
+typedef struct {
+    long long recv_code, send_code;
+    int recv_errno, send_errno;
+    unsigned long long received_bytes, sent_bytes;
+    unsigned long long identification_bytes, identification_hash;
+    int identification_complete, socket_flags;
+    unsigned short peer_port, local_port;
+    char peer_address[64];
+} ZW_SSH_HANDSHAKE_DIAGNOSTIC;
+int zw_libssh2_session_handshake_observed(LIBSSH2_SESSION *session,
+    const ZW_SSH_DRIVE *drive, ZW_SSH_HANDSHAKE_DIAGNOSTIC *diagnostic);
 /// Writes the negotiated host-key algorithm and SHA256 fingerprint. The
 /// fingerprint is returned as `SHA256:<base64>` (RFC 4716/OpenSSH form).
 /// Returns 0 on success and -1 when libssh2 has no host key/hash available or

@@ -27,6 +27,8 @@ test {
     _ = @import("ai/host_approval.zig");
     _ = @import("ai/fetch_url.zig");
     _ = @import("ui/ai_execution_backend.zig");
+    _ = @import("ai/host_execution.zig");
+    _ = @import("ai/host_execution_driver.zig");
     _ = @import("ui/ai_host_queries.zig");
     _ = @import("ai/host_terminal_queries.zig");
     _ = @import("host_terminal_queries_tests.zig");
@@ -368,4 +370,5 @@ test {
     _ = @import("data_lifecycle_tests.zig");
     _ = @import("platform/data_scope_lock.zig");
     _ = @import("credential_store_tests.zig");
+    _ = @import("ai_host_catalog_tests.zig");
 }

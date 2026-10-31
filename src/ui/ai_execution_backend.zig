@@ -135,7 +135,7 @@ pub const Context = struct {
         return .{ .secret_host = options.secret_host, .app = options.app, .roster = options.roster, .store = options.store, .lookup_context = options.lookup_context, .lookup_task = options.lookup_task, .approval = options.approval };
     }
     pub fn backend(self: *Context) supervisor.Backend {
-        return .{ .context = self, .authorize = authorize, .resolve = resolve, .terminal_call = terminalCall, .handed_to_user = handedToUser, .authorize_input = authorizeInput, .request_secret = requestSecret };
+        return .{ .context = self, .authorize = authorize, .resolve = resolve, .terminal_call = terminalCall, .handed_to_user = handedToUser, .authorize_input = authorizeInput, .request_secret = requestSecret, .authorize_read = authorizeRead };
     }
     /// Trusted UI close acceptance, before releasing the terminal view/native
     /// service. Block future input and return each admitted original Task once;
@@ -174,6 +174,41 @@ pub const Context = struct {
             empty = index;
         };
         self.tasks[empty orelse return error.ExecutionLimit] = value;
+    }
+    /// Model queries require the current binding or its exact closed receipts;
+    /// same-conversation historical reads may cross Tasks. Actions still need
+    /// the original Task and a current member; cleanup grants no new input.
+    pub fn validateInvocationScope(self: *Context, invocation: host.Invocation) !void {
+        const controller = try self.current(invocation.context, true);
+        if (std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal")) {
+            const handle = try parseSession(invocation.context, try string(invocation.arguments, "session_ref"));
+            if (!controller.inBinding(handle)) return error.TargetNotAuthorized;
+            return;
+        }
+        const reference = try string(invocation.arguments, "execution_ref");
+        if (!std.mem.startsWith(u8, reference, "x1:")) return error.TargetNotAuthorized;
+        const id = identity.ExecutionId.parse(reference[3..]) catch return error.TargetNotAuthorized;
+        for (self.admissions) |item| if (item) |record| {
+            if (!record.authorized or record.execution_id == null or !record.execution_id.?.eql(id)) continue;
+            const observing = std.mem.eql(u8, invocation.tool_id, "host.get_execution") or std.mem.eql(u8, invocation.tool_id, "host.wait_execution");
+            if (observing) {
+                if (!record.context.conversation_id.eql(invocation.context.conversation_id)) continue;
+            } else if (!sameTask(record.context, invocation.context)) continue;
+            if (!controller.inBinding(record.boundary.handle) and !(observing and controller.permitsHistoricalOwner(record.boundary.handle))) return error.TargetNotAuthorized;
+            return;
+        };
+        return error.TargetNotAuthorized;
+    }
+    fn authorizeRead(raw: *anyopaque, context: host.Context, original: host.Context, handle: identity.SessionHandle, id: identity.ExecutionId) !void {
+        const self: *Context = @ptrCast(@alignCast(raw));
+        if (!original.conversation_id.eql(context.conversation_id)) return error.TargetNotAuthorized;
+        const controller = try self.current(context, true);
+        for (self.admissions) |item| if (item) |record| {
+            if (!record.authorized or !record.context.eql(original) or !record.boundary.handle.eql(handle) or record.execution_id == null or !record.execution_id.?.eql(id)) continue;
+            if (!controller.inBinding(handle) and !controller.permitsHistoricalOwner(handle)) return error.TargetNotAuthorized;
+            return;
+        };
+        return error.TargetNotAuthorized;
     }
     /// UI preflight before publishing the approval card. The returned value
     /// owns its display text. Set Prepared.subject.impact to evidence.text()
@@ -232,14 +267,14 @@ pub const Context = struct {
             const is_secret = invocation.arguments.object.get("host_secret_request") != null;
             const wait = snapshot.input_wait orelse return if (is_secret) error.HostSecretUnavailable else error.UnsupportedInteraction;
             if (is_secret and wait.kind != .host_secret) return error.HostSecretUnavailable;
-            if (!is_secret and wait.kind != .controlled_line) return error.SecretMustUseHost;
+            if (!is_secret and wait.kind == .host_secret) return error.SecretMustUseHost;
             if (!grant.task_id.eql(invocation.context.task_id) or !grant.execution_id.eql(id) or grant.ownership_revision != record.boundary.ownership_revision) return error.StaleFence;
             var arena = std.heap.ArenaAllocator.init(allocator);
             errdefer arena.deinit();
             const a = arena.allocator();
             const detail = if (is_secret) try a.dupe(u8, "安全宿主输入请求（内容仅宿主可见）") else if (invocation.arguments.object.get("text")) |text| try a.dupe(u8, text.string) else try a.dupe(u8, "按下 Enter（提交已接收的当前行）");
             const target = try a.dupe(u8, reference);
-            const impact = try std.fmt.allocPrint(a, "受控 {s} 交互；终端 {d}/{d}，输入授权 {d}，epoch {d}，等待序号 {d}，已接收输入序号 {d}。本次输入可能影响后续命令行为。", .{ if (is_secret) "zerowork_secret_consume" else "zerowork_read", @backingInt(record.boundary.handle.session_id), record.boundary.handle.generation, grant.fence, grant.input_epoch, wait.sequence, if (snapshot.input_receipt) |receipt| receipt.input_sequence else 0 });
+            const impact = try std.fmt.allocPrint(a, "{s}；终端 {d}/{d}，输入授权 {d}，epoch {d}，能力序号 {d}，已接收输入序号 {d}。本次输入可能影响后续命令行为。", .{ if (is_secret) "宿主安全输入" else if (wait.kind == .terminal_stream) "向当前终端发送普通输入；写入成功不证明程序已消费" else "向受控行输入程序发送内容", @backingInt(record.boundary.handle.session_id), record.boundary.handle.generation, grant.fence, grant.input_epoch, wait.sequence, if (snapshot.input_receipt) |receipt| receipt.input_sequence else 0 });
             return .{ .arena = arena, .subject = .{ .kind = .terminal_command, .target = target, .detail = detail, .impact = impact } };
         };
         return error.TargetNotAuthorized;
@@ -395,6 +430,7 @@ pub const Context = struct {
         return .{ .instance = input.context_instance, .revision = input.authorization_revision, .authorized = input.authorized, .automation = input.automation };
     }
     fn captureBoundary(self: *Context, controller: *Controller, handle: identity.SessionHandle, idle: bool, handed_to_user: bool, command_hash: [32]u8) !Boundary {
+        if (!controller.inBinding(handle)) return error.TargetNotAuthorized;
         const legacy = self.app.legacyForHandle(handle) orelse return error.StaleReference;
         const state = self.app.sessions.queryState(handle) orelse return error.StaleReference;
         const tab = self.app.workspace.sessionTab(legacy) orelse return error.StaleReference;

@@ -109,6 +109,7 @@ const Fixture = struct {
 
 const DroppingPeer = struct {
     listener: Socket,
+    reset_before_banner: bool = false,
     accepted: std.atomic.Value(u8) = .init(0),
     stopped: std.atomic.Value(bool) = .init(false),
 
@@ -118,6 +119,18 @@ const DroppingPeer = struct {
             if (std.c.poll(&descriptors, 1, 20) <= 0) continue;
             const fd = std.c.accept(self.listener.fd, null, null);
             if (fd < 0) return;
+            if (self.reset_before_banner) {
+                var readable = [_]std.c.pollfd{.{ .fd = fd, .events = std.c.POLL.IN, .revents = 0 }};
+                if (std.c.poll(&readable, 1, 500) > 0) {
+                    var identification: [256]u8 = undefined;
+                    _ = std.c.recv(fd, &identification, identification.len, 0);
+                }
+                const linger: std.c.linger = .{ .onoff = 1, .linger = 0 };
+                _ = std.c.setsockopt(fd, std.c.SOL.SOCKET, std.c.SO.LINGER, &linger, @sizeOf(@TypeOf(linger)));
+                c.zw_ssh_socket_close(fd);
+                _ = self.accepted.fetchAdd(1, .acq_rel);
+                continue;
+            }
             const banner = "SSH-2.0-ZeroWork_retry_fixture\r\n";
             _ = std.c.send(fd, banner.ptr, banner.len, 0);
             _ = std.c.shutdown(fd, std.c.SHUT.RDWR);
@@ -126,6 +139,145 @@ const DroppingPeer = struct {
         }
     }
 };
+
+const owned_lifecycle = @import("host/lifecycle_supervisor.zig");
+fn startOwnedRetryFixture(f: *Fixture, roster: *@import("ui/group_model.zig").Roster, port: u16) !owned_lifecycle.OpenRequest {
+    var prepared = try roster.prepareNew("owned-retry", 0xff00ffff, null);
+    defer prepared.deinit();
+    const group = try prepared.commit();
+    try f.workspace.openGroup(roster, group);
+    const index = try f.workspace.appendHost(.{ .connection_id = @fromBackingInt(7001), .revision = 1, .name = "Owned retry fixture", .host = "127.0.0.1", .port = port, .user = "fixture", .auth_mode = .password, .password = "fixture-only" });
+    const request: owned_lifecycle.OpenRequest = .{ .operation_ref = .generate(), .context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .group = group }, .binding_revision = 1, .grant_revision = 1 }, .group = .{ .id = @fromBackingInt(group) }, .saved_source = f.workspace.registry.hosts[index].owner(), .connection_policy = .new_only, .retention = .keep };
+    _ = try f.application.queueOwnedSession(request);
+    try f.tick();
+    const snapshot = try f.application.queryOwnedSession(request.operation_ref, request.context);
+    _ = try f.application.authorizeOwnedSessionDispatch(request.operation_ref, request.context, snapshot.revision, snapshot.session.?);
+    try f.tick();
+    return request;
+}
+
+test "owned SSH retry rejects host key authentication unknown errors and previously authenticated jump hops" {
+    const Job = @import("plugins/ssh/connect_job.zig").ConnectJob;
+    const progress = @import("proto/ssh/connection_progress.zig");
+    var job: Job = undefined;
+    job.connection_attempts = 1;
+    job.runtime = null;
+    job.cancelled = .init(false);
+    job.cleanup_unknown = false;
+    job.shared_connection = null;
+    job.bootstrap = null;
+    job.progress = .{};
+    const cases = [_]struct { phase: progress.Phase, err: anyerror, retry: bool }{
+        .{ .phase = .transport, .err = error.ConnectionRefused, .retry = true },
+        .{ .phase = .handshake, .err = error.SshHandshakeReceiveFailed, .retry = true },
+        .{ .phase = .handshake, .err = error.SshHandshakeTimedOut, .retry = true },
+        .{ .phase = .host_key, .err = error.HostKeyRejected, .retry = false },
+        .{ .phase = .authentication, .err = error.AuthenticationFailed, .retry = false },
+        .{ .phase = .authentication, .err = error.CredentialUnavailable, .retry = false },
+        .{ .phase = .authentication, .err = error.ConnectionTimedOut, .retry = false },
+        .{ .phase = .shell, .err = error.SshHandshakeReceiveFailed, .retry = false },
+        .{ .phase = .handshake, .err = error.HandshakeFailed, .retry = false },
+        .{ .phase = .handshake, .err = error.SshHandshakeBannerFailed, .retry = false },
+        .{ .phase = .handshake, .err = error.SshHandshakeNegotiationFailed, .retry = false },
+    };
+    for (cases) |case| {
+        job.progress.begin(1);
+        job.err = case.err;
+        job.progress.record(.{ .attempt = 1, .hop = 0, .hop_count = 1, .host = "fixture", .port = 22, .phase = case.phase, .status = .failed, .failure = case.err });
+        try std.testing.expectEqual(case.retry, job.canRetryOwnedTransport());
+    }
+    job.progress.begin(1);
+    job.err = error.SshHandshakeReceiveFailed;
+    job.progress.record(.{ .attempt = 1, .hop = 0, .hop_count = 2, .host = "jump", .port = 22, .phase = .authentication, .status = .started });
+    job.progress.record(.{ .attempt = 1, .hop = 1, .hop_count = 2, .host = "target", .port = 22, .phase = .handshake, .status = .failed, .failure = job.err });
+    try std.testing.expect(!job.canRetryOwnedTransport());
+    job.progress.begin(1);
+    var event: progress.Event = .{ .attempt = 1, .hop = 0, .hop_count = 1, .host = "target", .port = 22, .phase = .transport, .status = .started };
+    for (0..progress.Journal.capacity + 1) |_| job.progress.record(event);
+    event.phase = .handshake;
+    event.status = .failed;
+    event.failure = job.err;
+    job.progress.record(event);
+    try std.testing.expect(!job.canRetryOwnedTransport());
+}
+
+test "owned SSH retry exhausts three real banner resets without replacing operation or committing membership" {
+    var peer: DroppingPeer = .{ .listener = try Socket.init(true), .reset_before_banner = true };
+    defer peer.listener.deinit();
+    const server = try std.Thread.spawn(.{}, DroppingPeer.run, .{&peer});
+    defer server.join();
+    defer peer.stopped.store(true, .release);
+    var roster = @import("ui/group_model.zig").Roster.init(a);
+    defer roster.deinit();
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const request = try startOwnedRetryFixture(&f, &roster, peer.listener.port);
+    const job = f.workspace.connect_jobs.items[0];
+    const key = job.operation_key.?;
+    const reserved = (try f.application.queryOwnedSession(request.operation_ref, request.context)).session.?;
+    const deadline = clock.monotonicNs() + 5 * std.time.ns_per_s;
+    var saw_backoff = false;
+    var snapshot = try f.application.queryOwnedSession(request.operation_ref, request.context);
+    while (snapshot.state != .failed) {
+        try f.tick();
+        snapshot = try f.application.queryOwnedSession(request.operation_ref, request.context);
+        if (job.automatic_retry_deadline_ns != null) {
+            saw_backoff = true;
+            try std.testing.expectEqual(owned_lifecycle.State.opening, snapshot.state);
+            try std.testing.expectEqual(@import("host/session_host.zig").Lifecycle.creating, f.application.sessions.queryState(reserved).?.lifecycle);
+        }
+        try std.testing.expect(!snapshot.membership_committed);
+        try std.testing.expect(snapshot.session.?.eql(reserved));
+        try std.testing.expect(job.operation_key.?.eql(key));
+        if (clock.monotonicNs() >= deadline) return error.OwnedRetryExhaustionTimedOut;
+    }
+    try std.testing.expect(saw_backoff);
+    try std.testing.expectEqual(@as(u8, 3), peer.accepted.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 3), job.connection_attempts);
+    try std.testing.expectEqual(@as(usize, 2), job.progress_history.items.len);
+    const first_log = job.progress_history.items[0].journal;
+    const second_log = job.progress_history.items[1].journal;
+    const last_log = job.progress.snapshot();
+    try std.testing.expect(first_log.failure != null and second_log.failure != null and last_log.failure != null);
+    try std.testing.expect(second_log.entries[0].sequence > first_log.entries[first_log.count - 1].sequence);
+    try std.testing.expect(last_log.entries[0].sequence > second_log.entries[second_log.count - 1].sequence);
+    try std.testing.expect(job.resource_ledger.snapshot().released());
+    try std.testing.expectEqual(@as(usize, 0), roster.findById(@intCast(@backingInt(request.group.id))).?.members.items.len);
+    try std.testing.expectEqual(@as(usize, 1), f.application.lifecycle_supervisor.entries.items.len);
+    try std.testing.expectEqual(@as(usize, 1), f.application.sessions.sessions.items.len);
+}
+
+test "owned SSH retry cancellation during real banner reset backoff never connects or commits late" {
+    var peer: DroppingPeer = .{ .listener = try Socket.init(true), .reset_before_banner = true };
+    defer peer.listener.deinit();
+    const server = try std.Thread.spawn(.{}, DroppingPeer.run, .{&peer});
+    defer server.join();
+    defer peer.stopped.store(true, .release);
+    var roster = @import("ui/group_model.zig").Roster.init(a);
+    defer roster.deinit();
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const request = try startOwnedRetryFixture(&f, &roster, peer.listener.port);
+    const job = f.workspace.connect_jobs.items[0];
+    const deadline = clock.monotonicNs() + 2 * std.time.ns_per_s;
+    while (job.automatic_retry_deadline_ns == null) {
+        try f.tick();
+        if (clock.monotonicNs() >= deadline) return error.OwnedBackoffMissing;
+    }
+    const after_backoff = job.automatic_retry_deadline_ns.? + 100 * std.time.ns_per_ms;
+    _ = try f.application.cancelOwnedSession(request.operation_ref, request.context);
+    while (clock.monotonicNs() < after_backoff) try f.tick();
+    const snapshot = try f.application.queryOwnedSession(request.operation_ref, request.context);
+    try std.testing.expectEqual(owned_lifecycle.State.cancelled, snapshot.state);
+    try std.testing.expect(!snapshot.membership_committed);
+    try std.testing.expectEqual(@as(u8, 1), peer.accepted.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 1), job.connection_attempts);
+    try std.testing.expect(job.automatic_retry_deadline_ns == null);
+    try std.testing.expect(job.resource_ledger.snapshot().released());
+    try std.testing.expectEqual(@as(usize, 0), roster.findById(@intCast(@backingInt(request.group.id))).?.members.items.len);
+}
 
 const FailureFeedback = struct {
     count: usize = 0,

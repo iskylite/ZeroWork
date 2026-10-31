@@ -320,7 +320,7 @@ pub const View = struct {
         if (self.config_button.behavior.interaction.a11y) |*attrs| attrs.label = if (self.has_rule) "编辑转发配置" else "添加转发";
         const message = if (data.error_text.len > 0) data.error_text else data.test_result;
         try self.message.setTextContent(self.cx.allocator, message);
-        self.message.setDisplay(.flex);
+        self.message.setDisplay(if (message.len > 0) .flex else .none);
         self.retheme();
         self.paintState();
     }
@@ -417,8 +417,9 @@ pub const View = struct {
         const upper = anchorRect(self).y;
         const available = @max(@as(f32, 1), @min(self.cx.viewport.height - 16, upper - 14));
         const width = @max(@as(f32, 1), @min(S.width, self.cx.viewport.width - 16));
-        // Content changes must never move the bottom-anchored popup.
-        const natural = S.body_height;
+        // Hug the measured content; only a viewport-constrained body scrolls.
+        // The popover remains anchored to the same bottom-bar trigger.
+        const natural = @max(@as(f32, 1), self.body.content.globalRect().h);
         const body_h = @min(natural, @max(@as(f32, 1), available - S.chrome_height));
         const card_h = body_h + S.chrome_height;
         var changed = false;

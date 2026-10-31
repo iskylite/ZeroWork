@@ -20,12 +20,17 @@ const identity = @import("../host/identity.zig");
 const manifest = @import("recording_manifest.zig");
 const Bootstrap = @import("../proto/ssh/bootstrap.zig");
 const ExecutionProtocol = @import("../local/execution.zig");
+const ShellExecution = @import("ssh_shell_execution.zig");
+const ShellIntegration = @import("shell_integration.zig");
 const ExecutionRecording = @import("ssh_execution_recording.zig").Recording;
 const Execution = ExecutionProtocol.execution;
 const Channel = @import("../proto/ssh/channel.zig").Channel;
 const ForwardService = @import("../proto/ssh/forward_service.zig").Service;
 
 pub const RuntimeOptions = struct {
+    /// Run the reviewed, in-memory shell hooks for each fresh shell generation.
+    /// Hosts whose login rc owns the terminal can disable this independently.
+    auto_shell_integration: bool = true,
     /// Borrowed only for owned-session construction; requires an exact Permit.
     bootstrap: ?*const Bootstrap.Plan = null,
     scrollback: ?u32 = null,
@@ -96,6 +101,7 @@ pub const SshWorker = struct {
     allocator: std.mem.Allocator,
     execution_mutex: std.atomic.Mutex = .unlocked,
     execution: ?ExecutionProtocol.Bridge = null,
+    shell_execution: ?ShellExecution.Bridge = null,
     execution_control: ?Channel = null,
     execution_control_closing: bool = false,
     execution_nonce: [64]u8 = undefined,
@@ -142,6 +148,16 @@ pub const SshWorker = struct {
     auto_reconnect: bool,
     buffer_input: bool,
     startup_input: []u8,
+    shell_initializer_chunks: []const []u8 = &.{},
+    shell_initializer_index: usize = 0,
+    shell_initializer_expected: ?u64 = null,
+    shell_initializer_deadline: i64 = 0,
+    shell_initializer_started: i64 = 0,
+    shell_initializer_failed: bool = false,
+    auto_shell_integration: bool = true,
+    /// Host commands/initial input run only on the original attach.
+    startup_commands_allowed: bool = true,
+    ai_registered_execution: ?identity.ExecutionId = null,
     startup_pending: std.atomic.Value(bool) = .init(false),
     presentation_attached: std.atomic.Value(bool) = .init(true),
     startup_end_index: ?usize = null,
@@ -313,11 +329,27 @@ pub const SshWorker = struct {
         errdefer timeline.deinit();
         const startup_input = try encodeStartupInput(allocator, runtime.startup_commands, runtime.initial_input);
         errdefer allocator.free(startup_input);
+        const initializer_nonce = std.fmt.bytesToHex(identity.ExecutionId.generate().bytes, .lower);
+        const initializer_chunks: []const []u8 = if (runtime.bootstrap == null and runtime.auto_shell_integration) try ShellIntegration.initializerChunks(allocator, &initializer_nonce) else &.{};
+        errdefer {
+            for (initializer_chunks) |chunk| allocator.free(chunk);
+            if (initializer_chunks.len != 0) allocator.free(initializer_chunks);
+        }
         worker.* = undefined;
         worker.allocator = allocator;
         worker.native_mutex = .unlocked;
         worker.execution_mutex = .unlocked;
         worker.execution = null;
+        worker.shell_execution = null;
+        worker.shell_initializer_chunks = &.{};
+        worker.shell_initializer_index = 0;
+        worker.shell_initializer_expected = null;
+        worker.shell_initializer_deadline = 0;
+        worker.shell_initializer_started = 0;
+        worker.shell_initializer_failed = false;
+        worker.auto_shell_integration = runtime.auto_shell_integration;
+        worker.startup_commands_allowed = true;
+        worker.ai_registered_execution = null;
         worker.execution_control = control;
         worker.execution_control_closing = false;
         worker.execution_recording = null;
@@ -328,6 +360,11 @@ pub const SshWorker = struct {
         if (runtime.bootstrap) |plan| {
             worker.execution_nonce = plan.nonce;
             worker.execution = ExecutionProtocol.Bridge.initTransport(allocator, plan.owner, .{ .context = worker, .nonce = &worker.execution_nonce, .read = executionRead, .write = executionWrite, .close = executionClose });
+        }
+        if (runtime.bootstrap == null) {
+            const shell_owner: identity.SessionHandle = if (options.operation_key) |key| if (key.owner == .session) key.owner.session else .{ .session_id = @fromBackingInt(0) } else .{ .session_id = @fromBackingInt(0) };
+            worker.shell_execution = ShellExecution.Bridge.init(allocator, shell_owner);
+            worker.shell_execution.?.initialization_nonce = initializer_nonce;
         }
         worker.rebuilding = .init(false);
         worker.shared_connection = shared_group;
@@ -378,8 +415,10 @@ pub const SshWorker = struct {
         };
         worker.recording_initial_cols = options.cols;
         worker.recording_initial_rows = options.rows;
+        worker.vt.setCommandObserver(.{ .context = worker, .changed = commandObserved });
         worker.startup_input = startup_input;
-        worker.startup_pending = .init(runtime.wait_for_attachment or startup_input.len != 0);
+        worker.shell_initializer_chunks = initializer_chunks;
+        worker.startup_pending = .init(runtime.wait_for_attachment or startup_input.len != 0 or initializer_chunks.len != 0);
         worker.presentation_attached = .init(!runtime.wait_for_attachment);
         worker.pending_scrollback_limit = .init(0);
         worker.resize_dims = .init(0);
@@ -412,7 +451,7 @@ pub const SshWorker = struct {
         worker.loop_active = true;
         worker.reconnect = try Reconnect.init(@max(runtime.reconnect_max, 1), &worker.reconnect_backoff);
         worker.replay = try Replay.init(allocator, 8192);
-        worker.replay.configure(session_options.operation_key, runtime.buffer_input, !runtime.wait_for_attachment and startup_input.len == 0);
+        worker.replay.configure(session_options.operation_key, runtime.buffer_input, !runtime.wait_for_attachment and startup_input.len == 0 and initializer_chunks.len == 0);
         errdefer worker.replay.deinit();
         try worker.loop.setInterest(.{ .read = true });
         // No relay can borrow facades until every fallible Worker allocation
@@ -475,11 +514,14 @@ pub const SshWorker = struct {
         };
         self.forward_count = 0;
         if (self.execution) |*bridge| bridge.deinit();
+        if (self.shell_execution) |*bridge| bridge.deinit();
         if (self.execution_recording) |*recording| recording.deinit();
         self.exec_bridge.deinitLocal();
         self.allocator.free(self.read_buffer);
         self.allocator.free(self.write_buffer);
         self.allocator.free(self.startup_input);
+        for (self.shell_initializer_chunks) |chunk| self.allocator.free(chunk);
+        if (self.shell_initializer_chunks.len != 0) self.allocator.free(self.shell_initializer_chunks);
         self.recording_generations.deinit(self.allocator);
         self.timeline.deinit();
         self.replay.deinit();
@@ -734,6 +776,9 @@ pub const SshWorker = struct {
     /// A controller-issued successor replaces only protocol resources. VT,
     /// output, recording and this IO owner stay with the original pane.
     pub fn rebuildForOperation(self: *SshWorker, previous: @import("../host/operation.zig").OperationKey, next: @import("../host/operation.zig").OperationKey) !void {
+        return self.rebuildForOperationWithInitialization(previous, next, false);
+    }
+    pub fn rebuildForOperationWithInitialization(self: *SshWorker, previous: @import("../host/operation.zig").OperationKey, next: @import("../host/operation.zig").OperationKey, skip: bool) !void {
         switch (self.releaseConnection()) {
             .released => {},
             .awaiting => return error.CleanupNotReleased,
@@ -744,6 +789,9 @@ pub const SshWorker = struct {
         self.options.operation_key = next;
         self.options.attempt_id = next.attempt_id orelse return error.InvalidOperation;
         try self.replay.authorize(previous, next);
+        // A new shell is a new in-memory integration. Never reuse the old
+        // owner's lease, partial ACK, parser or nonce after a reconnect.
+        try self.resetShellInitialization(!skip and self.auto_shell_integration);
         const dims = self.resize_dims.load(.acquire);
         if (dims != 0) {
             self.options.cols = @truncate(dims);
@@ -853,12 +901,17 @@ pub const SshWorker = struct {
         self.loop = replacement_loop;
         self.loop_active = true;
         self.io.resetTransport(try self.session.reader(), try self.session.writer());
+        self.vt.abandonCommands();
         const recording_owner: identity.SessionHandle = if (self.options.operation_key) |key| if (key.owner == .session) key.owner.session else .{ .session_id = @fromBackingInt(0), .generation = 0 } else .{ .session_id = @fromBackingInt(0), .generation = 0 };
         if (self.recording_generations.items.len < 256) {
             self.recording_generations.append(self.allocator, .{ .recording_generation = self.recording_generations.items.len + 1, .session_id = @backingInt(recording_owner.session_id), .session_generation = recording_owner.generation, .initial_cols = self.options.cols, .initial_rows = self.options.rows, .receive_time_origin = realtime.milliseconds(undefined), .raw_offset_start = self.io.stream_offset, .event_sequence_start = self.timeline.next_event_sequence }) catch {
                 self.recording_generation_failed = true;
             };
         } else self.recording_generation_failed = true;
+        if (self.execution_recording) |*rec| rec.beginGeneration(self.recording_generations.items) catch |err| {
+            self.recording_generation_failed = true;
+            rec.failure = @errorName(err);
+        };
         self.shell_eof_ns = null;
         self.shell_exit_code = null;
         self.shell_opened_ns = realtime.monotonicNs();
@@ -877,7 +930,9 @@ pub const SshWorker = struct {
         // Startup and the original initial input belong only to first attach.
         // Rebuilding a transport must never re-arm potentially side-effecting
         // commands, including startup that had not yet drained at disconnect.
-        try self.resumeInputAfterReconnect();
+        self.startup_commands_allowed = false;
+        self.startup_end_index = null;
+        self.startup_pending.store(self.shell_initializer_chunks.len != 0, .release);
         self.reconnect.connected();
         try self.loop.setInterest(.{ .read = true });
         // A failed shared open may have detached the old group and established
@@ -890,6 +945,14 @@ pub const SshWorker = struct {
     pub fn releaseConnection(self: *SshWorker) @import("../proto/ssh/session.zig").ReleaseReceipt {
         self.lockNative();
         defer self.unlockNative();
+        if (self.shell_execution != null) {
+            while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
+            self.shell_execution.?.flushInitializationEcho(.{ .context = self, .output = shellExecutionOutput, .boundary = shellExecutionBoundary }, executionNow());
+            self.io.stream_offset = self.shell_execution.?.raw_received;
+            self.shell_execution.?.fail("SessionClosed");
+            self.settleShellFailure();
+            self.execution_mutex.unlock();
+        }
         if (self.execution != null) {
             while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
             defer self.execution_mutex.unlock();
@@ -1045,13 +1108,26 @@ pub const SshWorker = struct {
 
     /// Copy the shell-reported cwd (OSC 7/9/1337) for UI/AI consumers.
     pub fn configureExecutionRecording(self: *SshWorker, io: std.Io, dir: std.Io.Dir, options: @import("ssh_recording_manifest.zig").Options) !void {
-        if (self.execution == null) return;
+        if (self.execution == null and self.shell_execution == null) return;
         if (self.execution_recording != null) return error.RecordingAlreadyConfigured;
         self.execution_recording = try ExecutionRecording.init(self.allocator, io, dir, options);
     }
     pub fn executionSnapshot(self: *SshWorker) !Execution.Snapshot {
         if (!self.execution_mutex.tryLock()) return error.WorkerBusy;
         defer self.execution_mutex.unlock();
+        if (self.shell_execution) |*bridge| {
+            var snapshot = bridge.snapshot;
+            if (self.execution_recording == null or self.execution_recording.?.failure != null) {
+                snapshot.interactive_execution = false;
+                snapshot.failure = if (self.execution_recording) |rec| rec.failure orelse "RecordingUnavailable" else "RecordingUnavailable";
+            }
+            if (self.startup_pending.load(.acquire) or self.input.pending() != 0 or self.io.write_len != 0) snapshot.input_ready = false;
+            if (self.shell_initializer_failed or self.startup_pending.load(.acquire)) {
+                snapshot.interactive_execution = false;
+                snapshot.failure = if (self.shell_initializer_failed) (if (bridge.initialization_restored) "ShellInitializationFailed" else "ShellInitializationRecoveryUnknown") else "ShellIntegrationPending";
+            }
+            return snapshot;
+        }
         const bridge = if (self.execution) |*value| value else return .{ .owner = if (self.options.operation_key) |key| key.owner.session else .{ .session_id = @fromBackingInt(0) }, .failure = "IntegrationUnavailable" };
         if (bridge.lease.holder != null and executionNow() >= bridge.lease.expires_at) bridge.fail("LeaseExpired", false);
         var snapshot = bridge.snapshot;
@@ -1065,6 +1141,15 @@ pub const SshWorker = struct {
     pub fn executionRequest(self: *SshWorker, request: Execution.Request) !void {
         if (!self.execution_mutex.tryLock()) return error.WorkerBusy;
         defer self.execution_mutex.unlock();
+        if (self.shell_execution) |*bridge| {
+            if (self.shell_initializer_failed) return error.IntegrationUnavailable;
+            if (self.execution_recording == null or self.execution_recording.?.failure != null or self.io.timeline == null) return error.RecordingUnavailable;
+            if (self.reconnect.currentState() != .connected or self.io.closed or !self.presentation_attached.load(.acquire)) return error.SessionNotWritable;
+            if (self.input.pending() != 0 or self.io.write_len != 0 or self.io.repliesPending() or self.startup_pending.load(.acquire)) return error.InputConflict;
+            try bridge.begin(request, executionNow());
+            self.wakeup.notify();
+            return;
+        }
         const bridge = if (self.execution) |*value| value else return error.IntegrationUnavailable;
         if (self.execution_recording == null or self.execution_recording.?.failure != null or self.io.timeline == null) return error.RecordingUnavailable;
         if (self.reconnect.currentState() != .connected or self.io.closed or !self.presentation_attached.load(.acquire)) return error.SessionNotWritable;
@@ -1075,12 +1160,18 @@ pub const SshWorker = struct {
     pub fn executionRenew(self: *SshWorker, grant: Execution.Grant) !void {
         if (!self.execution_mutex.tryLock()) return error.WorkerBusy;
         defer self.execution_mutex.unlock();
+        if (self.shell_execution) |*bridge| return bridge.renew(grant, executionNow());
         const bridge = if (self.execution) |*value| value else return error.IntegrationUnavailable;
         try bridge.renew(grant, executionNow());
     }
     pub fn executionRevoke(self: *SshWorker, grant: Execution.Grant, takeover: bool) !void {
         if (!self.execution_mutex.tryLock()) return error.WorkerBusy;
         defer self.execution_mutex.unlock();
+        if (self.shell_execution) |*bridge| {
+            try bridge.revoke(grant, takeover, &self.input, self.io.write_len != 0, executionNow());
+            self.wakeup.notify();
+            return;
+        }
         const bridge = if (self.execution) |*value| value else return error.IntegrationUnavailable;
         // No guessed Ctrl-C injection: first BootstrapV1 supports precise input
         // handoff, but has not negotiated a foreground interrupt capability.
@@ -1091,18 +1182,24 @@ pub const SshWorker = struct {
     pub fn readExecutionOutput(self: *SshWorker, id: identity.ExecutionId, allocator: std.mem.Allocator, cursor: u64, max_bytes: usize) !Execution.Output {
         if (!self.execution_mutex.tryLock()) return error.WorkerBusy;
         defer self.execution_mutex.unlock();
+        if (self.shell_execution) |*bridge| return bridge.readOutput(id, allocator, cursor, max_bytes);
         const bridge = if (self.execution) |*value| value else return error.IntegrationUnavailable;
         return bridge.readOutput(id, allocator, cursor, max_bytes);
     }
     /// The caller keeps this short guard through admission of the same bytes.
     pub fn lockOrdinaryExecutionInput(self: *SshWorker) !bool {
-        if (self.execution == null) return false;
+        if (self.execution == null and self.shell_execution == null) return false;
+        if (self.shell_initializer_chunks.len != 0 and self.startup_pending.load(.acquire)) return error.TerminalControlled;
         if (!self.execution_mutex.tryLock()) return error.WorkerBusy;
         errdefer self.execution_mutex.unlock();
-        try self.execution.?.ordinaryInput();
+        if (self.shell_execution) |*bridge| try bridge.ordinaryInput() else try self.execution.?.ordinaryInput();
         return true;
     }
     fn stepExecution(self: *SshWorker) void {
+        if (self.shell_execution != null) {
+            self.stepShellExecution();
+            return;
+        }
         const bridge = if (self.execution) |*value| value else return;
         const now = executionNow();
         bridge.poll(0, now);
@@ -1198,6 +1295,130 @@ pub const SshWorker = struct {
             });
         }
     }
+    pub fn executionInput(self: *SshWorker, request: Execution.InputRequest) !Execution.InputReceipt {
+        if (!self.execution_mutex.tryLock()) return error.WorkerBusy;
+        defer self.execution_mutex.unlock();
+        if (self.reconnect.currentState() != .connected or self.io.closed or !self.presentation_attached.load(.acquire)) return error.SessionNotWritable;
+        if (self.io.write_len != 0 or self.io.repliesPending() or self.vt.modes.alternate_screen) return error.UnsupportedInteraction;
+        const bridge = if (self.shell_execution) |*value| value else return error.UnsupportedInteraction;
+        const receipt = try bridge.sendInput(request, &self.input, executionNow());
+        self.wakeup.notify();
+        return receipt;
+    }
+    fn stepShellExecution(self: *SshWorker) void {
+        const bridge = &self.shell_execution.?;
+        bridge.written(&self.input, executionNow());
+        self.registerShellAiSubmission();
+        if (self.execution_output_error) |reason| bridge.fail(reason);
+        if (self.io.closed) bridge.fail("SessionClosed");
+        const id = bridge.snapshot.execution_id orelse return;
+        const rec = if (self.execution_recording) |*value| value else {
+            bridge.fail("RecordingUnavailable");
+            bridge.settled(bridge.snapshot.manifest_revision, true);
+            return;
+        };
+        if (bridge.snapshot.state == .preparing) {
+            self.execution_mutex.unlock();
+            const result = rec.startBarrier(id, self.io.stream_offset);
+            while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
+            const barrier = result catch |err| {
+                bridge.fail(@errorName(err));
+                return;
+            };
+            if (bridge.lease.holder != null and bridge.snapshot.state == .preparing) bridge.prepared(barrier.recording_id, barrier.generation, barrier.revision);
+        }
+        if (bridge.snapshot.state == .awaiting_submit) bridge.enqueue(&self.input) catch |err| {
+            bridge.fail(@errorName(err));
+        };
+        if (bridge.start_pending) {
+            bridge.start_pending = false;
+            const boundary = bridge.snapshot.start.?;
+            self.execution_mutex.unlock();
+            const result = rec.noteBoundary(id, true, boundary, self.io.stream_offset);
+            while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
+            const receipt = result catch |err| {
+                bridge.fail(@errorName(err));
+                return;
+            };
+            bridge.snapshot.start.?.event_sequence = receipt.position.event_sequence;
+            bridge.snapshot.manifest_revision = receipt.revision;
+        }
+        if (bridge.end_pending) {
+            bridge.end_pending = false;
+            const boundary = bridge.snapshot.end.?;
+            self.execution_mutex.unlock();
+            const result = rec.noteBoundary(id, false, boundary, self.io.stream_offset);
+            while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
+            const receipt = result catch |err| {
+                bridge.fail(@errorName(err));
+                return;
+            };
+            bridge.snapshot.end.?.event_sequence = receipt.position.event_sequence;
+            bridge.snapshot.manifest_revision = receipt.revision;
+        }
+        if (bridge.snapshot.state == .process_finished and !bridge.lease.draining and !bridge.snapshot.recording_settled) {
+            const snapshot = bridge.snapshot;
+            self.execution_mutex.unlock();
+            const result_saved = rec.saveInterval(id, snapshot, self.io.stream_offset);
+            while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
+            const revision = result_saved catch |err| {
+                bridge.fail(@errorName(err));
+                bridge.settled(rec.revision, true);
+                return;
+            };
+            bridge.recorded(revision);
+        }
+        self.settleShellFailure();
+    }
+    fn settleShellFailure(self: *SshWorker) void {
+        const bridge = &self.shell_execution.?;
+        const id = bridge.snapshot.execution_id orelse return;
+        if (bridge.snapshot.recording_settled or (bridge.snapshot.state != .outcome_unknown and bridge.snapshot.state != .cancelled_unsent and bridge.snapshot.state != .recording_degraded)) return;
+        if (self.execution_recording) |*rec| {
+            const snapshot = bridge.snapshot;
+            self.execution_mutex.unlock();
+            const result = rec.abandon(id, snapshot, self.io.stream_offset);
+            while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
+            if (result) |revision| bridge.settled(revision, bridge.snapshot.recording_failed) else |_| bridge.settled(rec.revision, true);
+        } else bridge.settled(bridge.snapshot.manifest_revision, true);
+    }
+    fn shellExecutionOutput(raw: *anyopaque, bytes: []const u8, raw_start: u64) void {
+        const self: *SshWorker = @ptrCast(@alignCast(raw));
+        if (self.shell_execution) |*bridge| bridge.capture(bytes);
+        self.io.stream_offset = raw_start;
+        self.cwd_capture.feed(&self.io, bytes, realtime.monotonicNs()) catch |err| {
+            self.execution_output_error = @errorName(err);
+        };
+    }
+    fn registerShellAiSubmission(self: *SshWorker) void {
+        const bridge = if (self.shell_execution) |*value| value else return;
+        const id = bridge.snapshot.execution_id orelse return;
+        if (!bridge.snapshot.submit_sent or (self.ai_registered_execution != null and self.ai_registered_execution.?.eql(id))) return;
+        // Attempt once at the actual native write. A later retry could consume
+        // an unrelated human command with the same text.
+        self.ai_registered_execution = id;
+        self.vt.registerAiSubmission(id, bridge.command orelse return) catch {};
+    }
+    fn commandObserved(raw: *anyopaque, value: @import("snapshot.zig").Command) void {
+        const self: *SshWorker = @ptrCast(@alignCast(raw));
+        if (self.recording_generations.items.len == 0) return;
+        const generation = self.recording_generations.items[self.recording_generations.items.len - 1].recording_generation;
+        self.timeline.recordCommand(generation, value) catch {
+            self.recording_generation_failed = true;
+        };
+    }
+    fn shellExecutionBoundary(raw: *anyopaque, boundary: Execution.Boundary) Execution.Boundary {
+        const self: *SshWorker = @ptrCast(@alignCast(raw));
+        var result = boundary;
+        if (self.execution_recording) |*rec| {
+            const position = rec.markBoundary(boundary.raw_offset, executionNow()) catch |err| {
+                self.execution_output_error = @errorName(err);
+                return result;
+            };
+            result.event_sequence = position.event_sequence;
+        } else self.execution_output_error = "RecordingUnavailable";
+        return result;
+    }
     fn bootstrapLock(raw: *anyopaque) void {
         const group: *@import("shared_ssh_connection.zig").Connection = @ptrCast(@alignCast(raw));
         group.lock();
@@ -1249,6 +1470,11 @@ pub const SshWorker = struct {
     }
     fn finishDirectoryOutput(raw: *anyopaque, io: *WorkerIo) !void {
         const self: *SshWorker = @ptrCast(@alignCast(raw));
+        if (self.shell_execution) |*bridge| {
+            bridge.flushInitializationEcho(.{ .context = self, .output = shellExecutionOutput, .boundary = shellExecutionBoundary }, executionNow());
+            io.stream_offset = bridge.raw_received;
+            bridge.fail("SessionClosed");
+        }
         if (self.execution) |*bridge| {
             bridge.flushOutput(.{ .context = self, .output = executionOutput, .boundary = executionBoundary });
             io.stream_offset = bridge.raw_received;
@@ -1257,6 +1483,13 @@ pub const SshWorker = struct {
     }
     fn captureDirectoryOutput(raw: *anyopaque, io: *WorkerIo, bytes: []const u8) !void {
         const self: *SshWorker = @ptrCast(@alignCast(raw));
+        if (self.shell_execution) |*bridge| {
+            bridge.written(&self.input, executionNow());
+            self.registerShellAiSubmission();
+            bridge.output(bytes, .{ .context = self, .output = shellExecutionOutput, .boundary = shellExecutionBoundary }, executionNow());
+            io.stream_offset = bridge.raw_received;
+            return;
+        }
         if (self.execution) |*bridge| {
             bridge.output(bytes, .{ .context = self, .output = executionOutput, .boundary = executionBoundary });
             io.stream_offset = bridge.raw_received;
@@ -1381,13 +1614,81 @@ pub const SshWorker = struct {
         self.presentation_attached.store(true, .release);
     }
 
+    /// Flush only proven initialization bytes before releasing this failed
+    /// channel. Restoration never reopens its ordinary input admission gate.
+    fn recoverShellInitialization(self: *SshWorker) !void {
+        const bridge = if (self.shell_execution) |*value| value else return;
+        bridge.flushInitializationEcho(.{ .context = self, .output = shellExecutionOutput, .boundary = shellExecutionBoundary }, executionNow());
+        self.io.stream_offset = bridge.raw_received;
+        // Keep the startup gate closed even when restoration is acknowledged:
+        // the controller may replace this failed shell. No business input may
+        // race the asynchronously delivered initialization-failure receipt.
+        if (bridge.initialization_restored) return;
+        // Only a nonce-matched ready receipt proves our initializer is the
+        // input target. Finish any original native buffer, then cancel once.
+        // No business/startup command has been admitted at this point.
+        if (bridge.initialization_ack != 0 and self.shell_initializer_index < self.shell_initializer_chunks.len and self.shell_initializer_expected == null and self.input.pending() == 0 and self.io.write_len == 0) {
+            try self.replay.startup(&self.input, "\x03");
+            self.shell_initializer_expected = 0;
+        }
+        // Missing restoration receipt remains input-not-ready; the ordinary
+        // disconnect action is available instead of guessing echo recovered.
+    }
+
     fn enqueueStartupIfReady(self: *SshWorker, now_ns: i128, last_output_ns: i128) !void {
-        if (!self.presentation_attached.load(.acquire) or !self.startup_pending.load(.acquire) or !startupReadyAt(now_ns, last_output_ns)) return;
-        try self.replay.startup(&self.input, self.startup_input);
+        if (!self.presentation_attached.load(.acquire) or !self.startup_pending.load(.acquire)) return;
+        const now = executionNow();
+        if (self.shell_initializer_failed) return error.ShellInitializationFailed;
+        if (self.shell_initializer_chunks.len != 0) {
+            const bridge = &self.shell_execution.?;
+            // Existing complete events are reused before sending any hook text.
+            if (self.shell_initializer_index == 0 and bridge.snapshot.interactive_execution) self.shell_initializer_index = self.shell_initializer_chunks.len;
+            if (self.shell_initializer_expected) |expected| {
+                if (bridge.initialization_ack != expected) {
+                    if (now >= self.shell_initializer_deadline or now - self.shell_initializer_started > 60_000) {
+                        self.shell_initializer_failed = true;
+                        bridge.fail("ShellInitializationTimedOut");
+                        // Never send remaining script or configured commands after
+                        // a partially observed initialization. No replay/Enter.
+                        self.shell_initializer_expected = null;
+                        try self.recoverShellInitialization();
+                        return error.ShellInitializationFailed;
+                    }
+                    return;
+                }
+                const final = self.shell_initializer_index == self.shell_initializer_chunks.len;
+                if ((final and bridge.initialization_ack_size != 0) or (!final and (bridge.initialization_ack_size == 0 or bridge.initialization_ack_size > 128))) {
+                    self.shell_initializer_failed = true;
+                    bridge.fail("ShellInitializationInvalidAck");
+                    self.shell_initializer_expected = null;
+                    try self.recoverShellInitialization();
+                    return error.ShellInitializationFailed;
+                }
+                self.shell_initializer_expected = null;
+            }
+            if (self.shell_initializer_index < self.shell_initializer_chunks.len) {
+                if (self.input.pending() != 0 or self.io.write_len != 0 or self.io.repliesPending()) return;
+                if (self.shell_initializer_index == 0 and !startupReadyAt(now_ns, last_output_ns)) return;
+                if (self.shell_initializer_started == 0) self.shell_initializer_started = now;
+                const sequence = self.shell_initializer_index + 1;
+                bridge.initialization_expected = sequence;
+                try self.replay.startup(&self.input, self.shell_initializer_chunks[self.shell_initializer_index]);
+                if (self.shell_initializer_index == 0) bridge.initialization_echo.arm(self.shell_initializer_chunks[0], &bridge.initialization_nonce.?);
+                self.shell_initializer_expected = sequence;
+                self.shell_initializer_deadline = now + 5000;
+                self.shell_initializer_index += 1;
+                return;
+            }
+        }
+        if (self.shell_initializer_chunks.len == 0 and !startupReadyAt(now_ns, last_output_ns)) return;
+        if (self.startup_commands_allowed) {
+            if (self.startup_input.len != 0) if (self.shell_execution) |*bridge| try bridge.ordinaryInput();
+            try self.replay.startup(&self.input, self.startup_input);
+        }
         self.startup_end_index = self.input.write_index.load(.acquire);
         self.startup_pending.store(false, .release);
         _ = self.replay.attached(&self.input, self.options.operation_key, replay_mod.InputMode.from(self.vt.snapshot().modes)) catch |err| switch (err) {
-            error.Full => false, // Retry handoff after startup drains; no transport failure.
+            error.Full => false,
             else => return err,
         };
     }
@@ -1398,6 +1699,29 @@ pub const SshWorker = struct {
         // off after the controller accepts the new attachment and VT modes.
         self.startup_end_index = null;
         self.startup_pending.store(false, .release);
+    }
+
+    fn resetShellInitialization(self: *SshWorker, enabled: bool) !void {
+        if (self.execution != null) return error.BootstrapReconnectRequiresFreshAuthorization;
+        while (!self.execution_mutex.tryLock()) std.atomic.spinLoopHint();
+        defer self.execution_mutex.unlock();
+        const nonce = std.fmt.bytesToHex(identity.ExecutionId.generate().bytes, .lower);
+        const chunks: []const []u8 = if (enabled) try ShellIntegration.initializerChunks(self.allocator, &nonce) else &.{};
+        if (self.ai_registered_execution) |id| self.vt.cancelAiSubmission(id);
+        self.ai_registered_execution = null;
+        if (self.shell_execution) |*bridge| bridge.deinit();
+        for (self.shell_initializer_chunks) |chunk| self.allocator.free(chunk);
+        if (self.shell_initializer_chunks.len != 0) self.allocator.free(self.shell_initializer_chunks);
+        self.shell_execution = ShellExecution.Bridge.init(self.allocator, self.options.operation_key.?.owner.session);
+        self.shell_execution.?.initialization_nonce = nonce;
+        self.shell_execution.?.raw_received = self.io.stream_offset;
+        self.shell_initializer_chunks = chunks;
+        self.shell_initializer_index = 0;
+        self.shell_initializer_expected = null;
+        self.shell_initializer_deadline = 0;
+        self.shell_initializer_started = 0;
+        self.shell_initializer_failed = false;
+        self.execution_output_error = null;
     }
 
     pub fn interest(self: *const SshWorker) @import("worker_interest.zig").Interest {
@@ -1433,6 +1757,9 @@ test "startup command encoder bounds input before allocation" {
 }
 
 fn inputTestWorker(worker: *SshWorker) !void {
+    worker.startup_commands_allowed = true;
+    worker.auto_shell_integration = true;
+    worker.ai_registered_execution = null;
     worker.cwd_capture = .{};
     worker.input = try InputQueue.init(std.testing.allocator, 256);
     worker.replay = try Replay.init(std.testing.allocator, 256);
@@ -1453,6 +1780,13 @@ test "notification SSH read receipt requires successful current publication and 
     const a = std.testing.allocator;
     var worker: SshWorker = undefined;
     worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.shell_initializer_index = 0;
+    worker.shell_initializer_expected = null;
+    worker.shell_initializer_deadline = 0;
+    worker.shell_initializer_started = 0;
+    worker.shell_initializer_failed = false;
     worker.execution_mutex = .unlocked;
     worker.execution_recording = null;
     worker.execution_control = null;
@@ -1491,6 +1825,13 @@ test "notification SSH read receipt requires successful current publication and 
 test "notification SSH snapshot retains actual parser facts for only the live operation owner" {
     var worker: SshWorker = undefined;
     worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.shell_initializer_index = 0;
+    worker.shell_initializer_expected = null;
+    worker.shell_initializer_deadline = 0;
+    worker.shell_initializer_started = 0;
+    worker.shell_initializer_failed = false;
     worker.execution_mutex = .unlocked;
     worker.execution_recording = null;
     worker.execution_control = null;
@@ -1532,6 +1873,13 @@ test "notification SSH snapshot retains actual parser facts for only the live op
 test "startup and initial input wait for attached and are consumed once" {
     var worker: SshWorker = undefined;
     worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.shell_initializer_index = 0;
+    worker.shell_initializer_expected = null;
+    worker.shell_initializer_deadline = 0;
+    worker.shell_initializer_started = 0;
+    worker.shell_initializer_failed = false;
     worker.execution_mutex = .unlocked;
     worker.execution_recording = null;
     worker.execution_control = null;
@@ -1553,9 +1901,93 @@ test "startup and initial input wait for attached and are consumed once" {
     try std.testing.expectEqual(@as(usize, 0), worker.input.pending());
 }
 
+test "quiet initializer failure keeps business input gated through restoration and cancels its receiver once" {
+    var worker: SshWorker = undefined;
+    try inputTestWorker(&worker);
+    defer deinitInputTestWorker(&worker);
+    worker.shell_execution = ShellExecution.Bridge.init(std.testing.allocator, worker.options.operation_key.?.owner.session);
+    defer worker.shell_execution.?.deinit();
+    const chunks = [_][]u8{ @constCast("receiver\n"), @constCast("payload\n") };
+    worker.shell_initializer_chunks = &chunks;
+    worker.shell_initializer_index = 1;
+    worker.shell_initializer_failed = true;
+    worker.shell_initializer_expected = null;
+    worker.startup_input = @constCast("DO_NOT_SEND_BUSINESS\n");
+    worker.io.write_len = 0;
+    try worker.recoverShellInitialization();
+    try std.testing.expect(worker.startup_pending.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), worker.input.pending());
+    worker.shell_execution.?.initialization_ack = 1;
+    worker.io.write_len = 2;
+    try worker.recoverShellInitialization();
+    try std.testing.expectEqual(@as(usize, 0), worker.input.pending());
+    worker.io.write_len = 0;
+    try worker.input.push("old suffix");
+    try worker.recoverShellInitialization();
+    try std.testing.expectEqual(@as(usize, 10), worker.input.pending());
+    try worker.input.consume(10);
+    try worker.recoverShellInitialization();
+    try worker.recoverShellInitialization();
+    var bytes: [8]u8 = undefined;
+    try std.testing.expectEqualStrings("\x03", worker.input.drain(&bytes));
+    try worker.recoverShellInitialization();
+    try std.testing.expect(worker.startup_pending.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), worker.input.pending());
+    worker.shell_execution.?.initialization_restored = true;
+    try worker.recoverShellInitialization();
+    try std.testing.expect(worker.startup_pending.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), worker.input.pending());
+}
+
+test "reconnected shell resets owner nonce ACK and never replays original startup commands" {
+    const a = std.testing.allocator;
+    var worker: SshWorker = undefined;
+    try inputTestWorker(&worker);
+    defer deinitInputTestWorker(&worker);
+    worker.allocator = a;
+    worker.execution_mutex = .unlocked;
+    worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.io.stream_offset = 42;
+    worker.startup_input = @constCast("NEVER_REPLAY_STARTUP\n");
+    worker.startup_commands_allowed = false;
+    worker.options.operation_key.?.owner.session.generation += 1;
+    worker.replay.configure(worker.options.operation_key, true, false);
+    try worker.resetShellInitialization(true);
+    defer {
+        worker.shell_execution.?.deinit();
+        for (worker.shell_initializer_chunks) |chunk| a.free(chunk);
+        if (worker.shell_initializer_chunks.len != 0) a.free(worker.shell_initializer_chunks);
+    }
+    const nonce = worker.shell_execution.?.initialization_nonce.?;
+    worker.shell_execution.?.initialization_ack = 17;
+    worker.shell_execution.?.initialization_restored = true;
+    try worker.resetShellInitialization(true);
+    try std.testing.expect(!std.mem.eql(u8, &nonce, &worker.shell_execution.?.initialization_nonce.?));
+    try std.testing.expectEqual(@as(u64, 0), worker.shell_execution.?.initialization_ack);
+    try std.testing.expect(!worker.shell_execution.?.initialization_restored);
+    try std.testing.expectEqual(@as(u64, 2), worker.shell_execution.?.snapshot.owner.generation);
+    try std.testing.expectEqual(@as(u64, 42), worker.shell_execution.?.raw_received);
+    try worker.resetShellInitialization(false);
+    try std.testing.expectEqual(@as(usize, 0), worker.shell_initializer_chunks.len);
+    try std.testing.expect(worker.auto_shell_integration); // transient override
+    worker.markAttached();
+    try worker.enqueueStartupIfReady(2 * std.time.ns_per_s, 0);
+    try std.testing.expectEqual(@as(usize, 0), worker.input.pending());
+    try std.testing.expect(!worker.startup_pending.load(.acquire));
+}
+
 test "reconnect discards one-time startup and waits for new attachment" {
     var worker: SshWorker = undefined;
     worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.shell_initializer_index = 0;
+    worker.shell_initializer_expected = null;
+    worker.shell_initializer_deadline = 0;
+    worker.shell_initializer_started = 0;
+    worker.shell_initializer_failed = false;
     worker.execution_mutex = .unlocked;
     worker.execution_recording = null;
     worker.execution_control = null;
@@ -1583,6 +2015,13 @@ test "reconnect discards one-time startup and waits for new attachment" {
 test "reconnect drops partial startup and only retains untouched ordinary events" {
     var worker: SshWorker = undefined;
     worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.shell_initializer_index = 0;
+    worker.shell_initializer_expected = null;
+    worker.shell_initializer_deadline = 0;
+    worker.shell_initializer_started = 0;
+    worker.shell_initializer_failed = false;
     worker.execution_mutex = .unlocked;
     worker.execution_recording = null;
     worker.execution_control = null;
@@ -1615,6 +2054,13 @@ test "reconnect drops partial startup and only retains untouched ordinary events
 test "full startup queue defers ordinary handoff without failing the transport" {
     var worker: SshWorker = undefined;
     worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.shell_initializer_index = 0;
+    worker.shell_initializer_expected = null;
+    worker.shell_initializer_deadline = 0;
+    worker.shell_initializer_started = 0;
+    worker.shell_initializer_failed = false;
     worker.execution_mutex = .unlocked;
     worker.execution_recording = null;
     worker.execution_control = null;
@@ -1637,6 +2083,13 @@ test "AI legacy SSH selection capture freezes actual VT bytes original owner ver
     const a = std.testing.allocator;
     var worker: SshWorker = undefined;
     worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.shell_initializer_index = 0;
+    worker.shell_initializer_expected = null;
+    worker.shell_initializer_deadline = 0;
+    worker.shell_initializer_started = 0;
+    worker.shell_initializer_failed = false;
     worker.execution_mutex = .unlocked;
     worker.execution_recording = null;
     worker.execution_control = null;
@@ -1674,6 +2127,13 @@ test "AI legacy SSH selection capture freezes actual VT bytes original owner ver
 test "current directory request clears stale paths and consumes a fresh shell report" {
     var worker: SshWorker = undefined;
     worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.shell_initializer_index = 0;
+    worker.shell_initializer_expected = null;
+    worker.shell_initializer_deadline = 0;
+    worker.shell_initializer_started = 0;
+    worker.shell_initializer_failed = false;
     worker.execution_mutex = .unlocked;
     worker.execution_recording = null;
     worker.execution_control = null;
@@ -1697,6 +2157,13 @@ test "live scrollback requests apply to existing SSH engine and zero removes the
     const a = std.testing.allocator;
     var worker: SshWorker = undefined;
     worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.shell_initializer_index = 0;
+    worker.shell_initializer_expected = null;
+    worker.shell_initializer_deadline = 0;
+    worker.shell_initializer_started = 0;
+    worker.shell_initializer_failed = false;
     worker.execution_mutex = .unlocked;
     worker.execution_recording = null;
     worker.execution_control = null;
@@ -1782,6 +2249,13 @@ test "queued RTT expires without disturbing the current channel owner" {
 test "SSH reuse request does not block behind a reconnect owner" {
     var worker: SshWorker = undefined;
     worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.shell_initializer_index = 0;
+    worker.shell_initializer_expected = null;
+    worker.shell_initializer_deadline = 0;
+    worker.shell_initializer_started = 0;
+    worker.shell_initializer_failed = false;
     worker.execution_mutex = .unlocked;
     worker.execution_recording = null;
     worker.execution_control = null;
@@ -1811,6 +2285,13 @@ test "shared shell EOF waits for the native owner before observing released tran
     var group: Group = .{ .allocator = std.testing.allocator, .library = .{ .active = false }, .native = .{ .state = .closed } };
     var worker: SshWorker = undefined;
     worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.shell_initializer_index = 0;
+    worker.shell_initializer_expected = null;
+    worker.shell_initializer_deadline = 0;
+    worker.shell_initializer_started = 0;
+    worker.shell_initializer_failed = false;
     worker.execution_mutex = .unlocked;
     worker.execution_recording = null;
     worker.execution_control = null;
@@ -1841,6 +2322,13 @@ test "history SSH applied resize is ordered with output and keeps original geome
     const a = std.testing.allocator;
     var worker: SshWorker = undefined;
     worker.execution = null;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.shell_initializer_index = 0;
+    worker.shell_initializer_expected = null;
+    worker.shell_initializer_deadline = 0;
+    worker.shell_initializer_started = 0;
+    worker.shell_initializer_failed = false;
     worker.execution_mutex = .unlocked;
     worker.execution_recording = null;
     worker.execution_control = null;
@@ -1872,4 +2360,8 @@ test "history SSH applied resize is ordered with output and keeps original geome
 
 fn executionNow() i64 {
     return @intCast(@divTrunc(realtime.monotonicNs(), std.time.ns_per_ms));
+}
+
+test {
+    _ = ShellExecution;
 }

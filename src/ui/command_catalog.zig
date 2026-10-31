@@ -15,7 +15,7 @@ pub const Entry = struct {
     }
 };
 
-pub const operation_count = 13;
+pub const operation_count = 14;
 
 /// Order and wording follow mockup-at-help.png. @@ is an escape, not an action.
 pub const entries = [_]Entry{
@@ -28,6 +28,7 @@ pub const entries = [_]Entry{
     .{ .name = "@pin", .usage = "@pin", .description = "组内置顶会话（AI/斜杠锚点）", .example = "@pin", .icon = "📌" },
     .{ .name = "@sync", .usage = "@sync on|off", .description = "广播输入开关", .example = "@sync on", .icon = "🔁", .requires_arguments = true },
     .{ .name = "@ts", .usage = "@ts [on|off]", .description = "切换时间戳侧栏（无参数自动开关）", .example = "@ts", .icon = "🕐" },
+    .{ .name = "@history", .usage = "@history [on|off]", .description = "显示或隐藏命令历史", .example = "@history on", .icon = "📋" },
     .{ .name = "@log", .usage = "@log", .description = "历史回溯模式", .example = "@log", .icon = "📜" },
     .{ .name = "@socks", .usage = "@socks on|off", .description = "SOCKS5 动态转发开关", .example = "@socks on 1080", .icon = "🧦", .requires_arguments = true },
     .{ .name = "@theme", .usage = "@theme [名称]", .description = "全局主题选择（应用与全部终端）", .palette_description = "全局主题选择", .example = "@theme dark-pro", .icon = "🎨" },
@@ -42,11 +43,11 @@ pub fn find(name: []const u8) ?Entry {
     return null;
 }
 
-test "catalog has thirteen operations plus the literal escape in the mockup order" {
+test "catalog operations include command history and literal escape" {
     try std.testing.expectEqual(@as(usize, operation_count + 1), entries.len);
     try std.testing.expectEqualStrings("@up", entries[0].name);
     try std.testing.expectEqualStrings("@@", entries[operation_count].name);
-    try std.testing.expect(find("@history") == null);
+    try std.testing.expect(find("@history") != null);
     try std.testing.expectEqualStrings("@log", find("@log").?.usage);
     try std.testing.expectEqualStrings("历史回溯模式", find("@log").?.description);
     try std.testing.expectEqualStrings("@new", find("@new").?.usage);

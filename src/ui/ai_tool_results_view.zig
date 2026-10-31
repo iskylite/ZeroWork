@@ -99,8 +99,8 @@ pub const State = struct {
         title.setStyleInline(cx.allocator, S.headerTitle(cx.tokens));
         title.meta.ownership.meta.test_id = "ai.tool.result.title";
         try header.appendChild(cx.allocator, title);
-        var summary: [256]u8 = undefined;
-        const projection = if (record.decision) |approved| std.fmt.bufPrint(&summary, "{s} · {s}", .{ if (approved) "已批准" else "已拒绝", record.command }) catch record.command else record.command;
+        const projection = try @import("ai_tool_header_projection.zig").projectWithStatus(cx.allocator, record.name, record.command, if (record.decision) |approved| if (approved) "已批准" else "已拒绝" else null);
+        defer cx.allocator.free(projection);
         const status = try ui.text(cx, projection, .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = palette.fg_2, .text_overflow = .ellipsis });
         status.setStyleInline(cx.allocator, S.headerSummary(cx.tokens));
         status.meta.ownership.meta.test_id = "ai.tool.result.status";

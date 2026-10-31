@@ -11,6 +11,7 @@ const encoder = @import("../../vt/ghostty_input.zig");
 pub const Provider = struct {
     native: *Native,
     source: ReadSource,
+    registered_binding: ?Binding = null,
     input_sequence: u64 = 0,
     geometry: terminal.Geometry,
     pending_geometry: ?terminal.Geometry = null,
@@ -25,8 +26,17 @@ pub const Provider = struct {
         const state = native.worker.vt.snapshot();
         return .{ .native = native, .source = .{ .adapter = &native.worker.vt, .owner = owner, .timeline = native.worker.timelinePtr() }, .geometry = .{ .revision = 1, .cols = state.cols, .rows = state.rows } };
     }
+    /// The domain host supplies the actual live binding after ready. The
+    /// pre-ready renderer's document binding never becomes AI authority.
+    pub fn bind(self: *Provider, binding: Binding) !void {
+        if (binding.kind != .terminal or binding.binding_id == 0 or binding.binding_generation != self.source.owner.generation or
+            binding.resource_owner != .session or !binding.resource_owner.session.eql(self.source.owner) or
+            binding.origin_session == null or !binding.origin_session.?.eql(self.source.owner)) return error.StaleBinding;
+        if (self.registered_binding) |current| if (!current.eql(binding)) return error.StaleBinding;
+        self.registered_binding = binding;
+    }
     pub fn service(self: *Provider) terminal.Service {
-        return .{ .binding = self.source.service().binding, .context = self, .vtable = &vtable };
+        return .{ .binding = self.registered_binding orelse self.source.service().binding, .context = self, .vtable = &vtable };
     }
     fn get(raw: *anyopaque, binding: Binding) !*Provider {
         const self: *Provider = @ptrCast(@alignCast(raw));
@@ -95,6 +105,12 @@ pub const Provider = struct {
         if (!self.native.worker.vt.mutex.tryLock()) return error.WorkerBusy;
     }
     fn submit(self: *Provider, sequence: u64, bytes: []const u8) !terminal.Submission {
+        // Native clicks and modifier-only events can encode no PTY input.
+        // Acknowledge their sequence without invalidating the clean prompt.
+        if (bytes.len == 0) {
+            self.input_sequence = sequence;
+            return .{ .input_sequence = sequence, .queued_bytes = 0 };
+        }
         const execution_locked = try self.native.worker.lockOrdinaryExecutionInput();
         defer if (execution_locked) self.native.worker.execution_mutex.unlock();
         self.native.worker.text.timing.accepted(sequence, self.native.worker.input.write_index.load(.acquire) + bytes.len);
@@ -204,6 +220,10 @@ pub const Provider = struct {
         const wrapped = self.native.worker.vt.modes.bracketed_paste;
         const bytes = if (wrapped) try std.mem.concat(self.native.allocator, u8, &.{ "\x1b[200~", paste.text, "\x1b[201~" }) else try self.native.allocator.dupe(u8, paste.text);
         errdefer self.native.allocator.free(bytes);
+        // Paste admission owns input just like a key/write. Keep the same
+        // execution guard through the pending payload and sequence update.
+        const execution_locked = try self.native.worker.lockOrdinaryExecutionInput();
+        defer if (execution_locked) self.native.worker.execution_mutex.unlock();
         self.pending_paste = .{ .bytes = bytes, .sequence = sequence, .mode = paste.mode_revision };
         self.input_sequence = sequence;
         return .{ .input_sequence = sequence, .queued_bytes = bytes.len };
@@ -251,8 +271,35 @@ pub const Provider = struct {
     }
     fn executionSnapshot(raw: *anyopaque, binding: Binding) !terminal.execution.Snapshot {
         const self = try get(raw, binding);
-        if (self.native.worker.execution == null) return .{ .owner = self.source.owner, .failure = "IntegrationUnavailable" };
+        if (self.native.worker.execution == null and self.native.worker.shell_execution == null) return .{ .owner = self.source.owner, .failure = "IntegrationUnavailable" };
         return self.native.worker.executionSnapshot();
+    }
+    fn commandHistorySnapshot(raw: *anyopaque, binding: Binding, allocator: std.mem.Allocator) !terminal.CommandHistorySnapshot {
+        const self = try get(raw, binding);
+        const worker = self.native.worker;
+        if (!worker.native_mutex.tryLock()) return error.WorkerBusy;
+        defer worker.native_mutex.unlock();
+        if (!worker.execution_mutex.tryLock()) return error.WorkerBusy;
+        defer worker.execution_mutex.unlock();
+        var result = try worker.timeline.commandHistorySnapshot(allocator);
+        errdefer result.deinit(allocator);
+        result.owner = self.source.owner;
+        if (worker.recording_id.valid()) result.recording_id = std.fmt.bytesToHex(worker.recording_id.bytes, .lower);
+        if (worker.recording_generations.items.len != 0) {
+            const generation = worker.recording_generations.items[worker.recording_generations.items.len - 1];
+            if (generation.session_id != @backingInt(self.source.owner.session_id) or generation.session_generation != self.source.owner.generation) return error.StaleOwner;
+            result.recording_generation = generation.recording_generation;
+        }
+        const recording_failure: ?[]const u8 = if (worker.execution_recording) |recording| recording.failure else null;
+        const failure: ?[]const u8 = self.native.recording_manifest_failure orelse recording_failure orelse
+            if (!worker.recording_id.valid() or worker.recording_generations.items.len == 0) "RecordingUnavailable" else if (worker.recording_generation_failed) "RecordingDegraded" else if (worker.io.timeline == null) "RecordingDisabled" else if (result.partial) "CommandHistoryCapacity" else null;
+        result.failure = if (failure) |value| try allocator.dupe(u8, value) else null;
+        result.partial = result.partial or failure != null;
+        result.persistent = failure == null;
+        if (self.ended()) for (result.records) |*record| if (record.value.state == .running) {
+            record.value.state = .unknown;
+        };
+        return result;
     }
     fn recordingIdentity(raw: *anyopaque, binding: Binding) !terminal.RecordingIdentity {
         const self = try get(raw, binding);
@@ -284,9 +331,124 @@ pub const Provider = struct {
         const self = try get(raw, binding);
         return self.native.worker.executionRevoke(grant, takeover);
     }
+    fn executionInput(raw: *anyopaque, binding: Binding, request: terminal.execution.InputRequest) !terminal.execution.InputReceipt {
+        const self = try get(raw, binding);
+        if (self.pending_paste != null) return error.InputConflict;
+        return self.native.worker.executionInput(request);
+    }
     fn executionOutput(raw: *anyopaque, binding: Binding, id: @import("../../host/identity.zig").ExecutionId, allocator: std.mem.Allocator, cursor: u64, max_bytes: usize) !terminal.execution.Output {
         const self = try get(raw, binding);
         return self.native.worker.readExecutionOutput(id, allocator, cursor, max_bytes);
     }
-    const vtable: terminal.Service.VTable = .{ .recording_identity = recordingIdentity, .content_query = contentQuery, .recording_display = recordingDisplay, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = theme, .search_snapshot = searchSnapshot, .application_record = applicationRecord };
+    const vtable: terminal.Service.VTable = .{ .command_history_snapshot = commandHistorySnapshot, .recording_identity = recordingIdentity, .content_query = contentQuery, .recording_display = recordingDisplay, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .execution_input = executionInput, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = lines, .theme = theme, .search_snapshot = searchSnapshot, .application_record = applicationRecord };
 };
+
+test "SSH terminal provider preserves the registered binding and rejects a different owner" {
+    const owner: Owner = .{ .session_id = @fromBackingInt(7), .generation = 3 };
+    var provider: Provider = .{ .native = undefined, .source = .{ .adapter = undefined, .owner = owner }, .geometry = .{ .revision = 1, .cols = 80, .rows = 24 } };
+    const provisional = provider.service().binding;
+    var registered = provisional;
+    registered.binding_id = 47;
+    try provider.bind(registered);
+    try std.testing.expect(provider.service().binding.eql(registered));
+    try std.testing.expect(!provider.service().binding.eql(provisional));
+    try std.testing.expectError(error.StaleBinding, provider.bind(provisional));
+    var stale = registered;
+    stale.resource_owner = .{ .session = .{ .session_id = owner.session_id, .generation = owner.generation + 1 } };
+    try std.testing.expectError(error.StaleBinding, provider.bind(stale));
+    stale = registered;
+    stale.binding_generation += 1;
+    try std.testing.expectError(error.StaleBinding, provider.bind(stale));
+    stale = registered;
+    stale.kind = .exec;
+    try std.testing.expectError(error.StaleBinding, provider.bind(stale));
+    stale = registered;
+    stale.origin_session = null;
+    try std.testing.expectError(error.StaleBinding, provider.bind(stale));
+    try std.testing.expect(provider.service().binding.eql(registered));
+}
+
+// No socket or UI surrogate: exercise the production Provider, Ghostty mode
+// snapshot, replay admission and shell lease with a small real byte queue.
+const PasteFixture = struct {
+    const Worker = @import("../../vt/ssh_worker.zig").SshWorker;
+    const a = std.testing.allocator;
+    worker: Worker = undefined,
+    native: Native = undefined,
+    provider: Provider = undefined,
+    fn init(self: *@This()) !void {
+        const owner: Owner = .{ .session_id = @fromBackingInt(71), .generation = 1 };
+        self.worker.execution = null;
+        self.worker.shell_execution = @import("../../vt/ssh_shell_execution.zig").Bridge.init(a, owner);
+        self.worker.execution_mutex = .unlocked;
+        self.worker.shell_initializer_chunks = &.{};
+        self.worker.startup_pending = .init(false);
+        self.worker.presentation_attached = .init(true);
+        self.worker.reconnect = try @import("../../vt/reconnect.zig").Machine.init(1, &.{1});
+        self.worker.replay = try @import("../../vt/reconnect_replay.zig").Replay.init(a, 32);
+        self.worker.replay.configure(.{ .owner = .{ .session = owner }, .operation_id = 1, .attempt_id = 1 }, true, true);
+        self.worker.input = try @import("../../vt/input_queue.zig").InputQueue.init(a, 8);
+        self.worker.vt = try @import("../../vt/ghostty_adapter.zig").Adapter.init(a, 3, 80);
+        self.native.allocator = a;
+        self.native.worker = &self.worker;
+        self.native.torn_down = false;
+        self.provider = Provider.init(&self.native, owner);
+    }
+    fn deinit(self: *@This()) void {
+        self.provider.deinit();
+        self.worker.shell_execution.?.deinit();
+        self.worker.input.deinit(a);
+        self.worker.replay.deinit();
+        self.worker.vt.destroy();
+    }
+    fn acquire(self: *@This()) !terminal.execution.Grant {
+        return self.worker.shell_execution.?.lease.acquire(.{ .execution_id = .generate(), .task_id = .generate(), .expected_input_epoch = self.worker.shell_execution.?.lease.input_epoch, .ownership_revision = 1, .command = "true", .command_hash = terminal.execution.digest("true") }, 1);
+    }
+};
+
+test "SSH paste lease rejects prepared commit without pending bytes or sequence and never replays after handoff" {
+    var f: PasteFixture = .{};
+    try f.init();
+    defer f.deinit();
+    const service = f.provider.service();
+    var paste = try service.preparePaste(std.testing.allocator, "NEVER_ADMITTED_PASTE");
+    defer paste.deinit(std.testing.allocator);
+    _ = try f.acquire();
+    const epoch = f.worker.shell_execution.?.lease.input_epoch;
+    try std.testing.expectError(error.TerminalControlled, service.commitPaste(paste, 1, false));
+    try std.testing.expectEqual(@as(u64, 0), f.provider.input_sequence);
+    try std.testing.expect(f.provider.pending_paste == null);
+    try std.testing.expectEqual(@as(usize, 0), f.worker.input.pending());
+    try std.testing.expectEqual(epoch, f.worker.shell_execution.?.lease.input_epoch);
+    var candidate = try service.preparePaste(std.testing.allocator, "NEVER_PREPARED");
+    defer candidate.deinit(std.testing.allocator);
+    try std.testing.expectEqual(epoch, f.worker.shell_execution.?.lease.input_epoch);
+    f.worker.shell_execution.?.lease.revoke(false);
+    try std.testing.expect(try service.takeWriteReceipt() == null);
+    try std.testing.expectEqual(@as(usize, 0), f.worker.input.pending());
+}
+
+test "SSH paste lease preserves accepted partial bytes and blocks a new execution" {
+    var f: PasteFixture = .{};
+    try f.init();
+    defer f.deinit();
+    const service = f.provider.service();
+    const epoch = f.worker.shell_execution.?.lease.input_epoch;
+    var paste = try service.preparePaste(std.testing.allocator, "partial-paste");
+    defer paste.deinit(std.testing.allocator);
+    try std.testing.expectEqual(epoch, f.worker.shell_execution.?.lease.input_epoch);
+    const submitted = try service.commitPaste(paste, 1, false);
+    try std.testing.expectEqual(paste.text.len, submitted.queued_bytes);
+    try std.testing.expect(f.worker.shell_execution.?.lease.input_epoch > epoch);
+    try std.testing.expect(try service.takeWriteReceipt() == null);
+    try std.testing.expectEqual(@as(usize, 8), f.provider.pending_paste.?.offset);
+    try std.testing.expectError(error.InputConflict, service.executionRequest(.{ .execution_id = .generate(), .task_id = .generate(), .expected_input_epoch = f.worker.shell_execution.?.lease.input_epoch, .ownership_revision = 1, .command = "true", .command_hash = terminal.execution.digest("true") }));
+    var actual: [13]u8 = undefined;
+    const first = f.worker.input.drain(actual[0..8]);
+    try std.testing.expectEqualStrings("partial-", first);
+    try std.testing.expect(try service.takeWriteReceipt() == null);
+    const rest = f.worker.input.drain(actual[8..]);
+    try std.testing.expectEqualStrings("paste", rest);
+    try std.testing.expectEqualStrings(paste.text, &actual);
+    try std.testing.expect(f.provider.pending_paste == null);
+}

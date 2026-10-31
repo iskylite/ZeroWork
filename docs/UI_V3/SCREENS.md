@@ -4,13 +4,12 @@
 
 [可编辑交互入口](ai-session-execution/index.html) · [状态索引](ai-session-execution/README.md) · [详细设计](../DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)。覆盖全局设置与 composer 模式、批处理/交互式命令卡、单会话建组后的真实工具步骤、PTY 控制权、清理及只读历史。效果稿使用本地确定性数据，非真实 SSH/模型执行；原生验收状态以详细设计中的门槛为准。
 
-本项状态入口与历史验证记录见[专项记录](ai-session-execution/verification/README.md)：[全局设置](ai-session-execution/index.html?state=settings)、[composer 模式](ai-session-execution/index.html?state=mode-menu)、[批处理结果](ai-session-execution/index.html?state=exec)、[PTY 工作流](ai-session-execution/index.html?state=pty-running)、[PTY 输出](ai-session-execution/index.html?state=pty-running)、[关闭后历史](ai-session-execution/index.html?state=history)、[紧凑审批](ai-session-execution/index.html?state=ask&viewport=compact)。
+本项状态入口与历史验证记录见：[全局设置](ai-session-execution/index.html?state=settings)、[composer 模式](ai-session-execution/index.html?state=mode-menu)、[批处理结果](ai-session-execution/index.html?state=exec)、[PTY 工作流](ai-session-execution/index.html?state=pty-running)、[PTY 输出](ai-session-execution/index.html?state=pty-running)、[关闭后历史](ai-session-execution/index.html?state=history)、[紧凑审批](ai-session-execution/index.html?state=ask&viewport=compact)。
 
-当前分层与范围以[组件组合合同](COMPONENT_MAP.md)及[本轮一致性检查](verification/consistency.md)为准：通用组件→功能组件→功能模块→整机；VNC/RDP/FTP独立归未来设计，默认预览保留KVM。
+当前分层与范围以[组件组合合同](COMPONENT_MAP.md)为准：通用组件→功能组件→功能模块→整机；VNC/RDP/FTP独立归未来设计，默认预览保留KVM。
 
-本轮逐项检查：[交互与布局审计](AUDIT.md) · [Zenit落地条件](ZENIT_READINESS.md)。历史记录以本轮实际测量与分模块报告为准。
 
-[设计中心](index.html) · [完整功能与组件验收表](COVERAGE.md)。以下都是可编辑HTML原型的实际浏览器状态；完整交互以模块入口及README为准。所有网络、模型和系统能力为本地模拟，未来协议不等于当前App已经支持。连接和设置完整模块按用户确认冻结，其余调整见本轮验收与冻结边界。
+[设计中心](index.html)。以下都是可编辑HTML原型的实际浏览器状态；完整交互以模块入口及README为准。所有网络、模型和系统能力为本地模拟，未来协议不等于当前App已经支持。连接和设置完整模块按用户确认冻结，其余调整见本轮验收与冻结边界。
 
 ## 工作区与 AI
 
@@ -53,7 +52,7 @@
 
 ## 对照资料
 
-[本轮Figma参数](verification/figma-reference.json)。原生参考截图已清理；现有原型用于查看设计，原生实现状态仍以交接合同为准。
+。原生参考截图已清理；现有原型用于查看设计，原生实现状态仍以交接合同为准。
 
 ## 专项状态与独立参考
 

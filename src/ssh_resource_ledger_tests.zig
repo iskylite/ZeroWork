@@ -85,8 +85,16 @@ test "real worker reconnect releases the previous descriptor before attempting a
     defer native.zw_ssh_socket_close(pair.relay_fd);
     const library: ssh.Library = .{ .active = false };
     var worker: Worker = undefined;
+    worker.allocator = std.testing.allocator;
     worker.execution = null;
     worker.execution_mutex = .unlocked;
+    worker.shell_execution = null;
+    worker.shell_initializer_chunks = &.{};
+    worker.auto_shell_integration = false;
+    worker.ai_registered_execution = null;
+    worker.io.stream_offset = 0;
+    worker.rebuilding = .init(false);
+    defer if (worker.shell_execution) |*bridge| bridge.deinit();
     worker.execution_recording = null;
     worker.execution_control = null;
     worker.execution_deployment = null;

@@ -1054,15 +1054,20 @@ pub const Session = struct {
         }
         try self.enterIoMode();
         const drive = nativeDrive(options, self.socket_fd);
-        const handshake_rc = c.zw_libssh2_session_handshake_driven(self.handle.?, &drive);
+        var transport_diagnostic: c.ZW_SSH_HANDSHAKE_DIAGNOSTIC = undefined;
+        const handshake_rc = c.zw_libssh2_session_handshake_observed(self.handle.?, &drive, &transport_diagnostic);
+        @import("../../platform/applog.zig").info(.ssh, "handshake transport host={s}:{d} hop={d} rc={d} peer={s}:{d} local_port={d} flags={d} identification_bytes={d} identification_hash={x} identification_complete={d}", .{
+            options.host, options.port, options.hop_index, handshake_rc, std.mem.sliceTo(&transport_diagnostic.peer_address, 0), transport_diagnostic.peer_port, transport_diagnostic.local_port, transport_diagnostic.socket_flags, transport_diagnostic.identification_bytes, transport_diagnostic.identification_hash, transport_diagnostic.identification_complete,
+        });
         if (handshake_rc != 0) {
             const diagnostic = @import("handshake_failure.zig");
             const native_code = c.zw_libssh2_last_error_code(self.handle.?);
             const native_message = c.zw_libssh2_last_error(self.handle.?);
             var message_buffer: [1024]u8 = undefined;
             const message = if (native_message != null) std.mem.span(native_message) else "";
-            @import("../../platform/applog.zig").err(.ssh, "handshake failed host={s}:{d} hop={d} rc={d} libssh2_code={d} fd={d} message={s}", .{
-                options.host,                                                                                    options.port, options.hop_index, handshake_rc, native_code, self.socket_fd,
+            @import("../../platform/applog.zig").err(.ssh, "handshake failed host={s}:{d} hop={d} rc={d} libssh2_code={d} fd={d} recv_code={d} recv_errno={d} received_bytes={d} send_code={d} send_errno={d} sent_bytes={d} message={s}", .{
+                options.host,                                                                                    options.port,                    options.hop_index,                   handshake_rc,                   native_code,                     self.socket_fd,
+                transport_diagnostic.recv_code,                                                                  transport_diagnostic.recv_errno, transport_diagnostic.received_bytes, transport_diagnostic.send_code, transport_diagnostic.send_errno, transport_diagnostic.sent_bytes,
                 diagnostic.logMessage(&message_buffer, if (message.len > 0) message else "(no libssh2 detail)"),
             });
             try checkDriveResult(handshake_rc);

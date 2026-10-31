@@ -29,6 +29,7 @@ pub const Init = struct {
     execution_policy: config.ExecutionPolicy,
     notice_revision: u64 = 0,
     /// Frozen exact user selections. Inventory/discovery never fills these.
+    /// Compatibility only: historical selections no longer grant authority.
     selected_sessions: []const identity.SessionHandle = &.{},
     selected_sources: []const identity.AssetOwner = &.{},
     callbacks: Callbacks = .{},
@@ -55,8 +56,6 @@ pub const Controller = struct {
     execution_policy: config.ExecutionPolicy,
     config_revision: u64,
     notice_revision: u64,
-    selected_sessions: []const identity.SessionHandle,
-    selected_sources: []const identity.AssetOwner,
     callbacks: Callbacks,
     prepared: std.ArrayList(*Prepared) = .empty,
     close_targets: std.ArrayList(CloseTarget) = .empty,
@@ -66,11 +65,7 @@ pub const Controller = struct {
     pub fn init(options: Init) !Controller {
         try options.authority.validate();
         if ((options.callbacks.on_handoff != null or options.callbacks.on_membership_changed != null) and options.callbacks.context == null) return error.InvalidCallbacks;
-        const sessions = try options.allocator.dupe(identity.SessionHandle, options.selected_sessions);
-        errdefer options.allocator.free(sessions);
-        const sources = try options.allocator.dupe(identity.AssetOwner, options.selected_sources);
-        errdefer options.allocator.free(sources);
-        var self: Controller = .{ .allocator = options.allocator, .app = options.app, .roster = options.roster, .store = options.store, .bridge = options.bridge, .authority = options.authority, .execution_policy = options.execution_policy, .config_revision = options.app.workspace.app_config.config_revision, .notice_revision = options.notice_revision, .selected_sessions = sessions, .selected_sources = sources, .callbacks = options.callbacks };
+        var self: Controller = .{ .allocator = options.allocator, .app = options.app, .roster = options.roster, .store = options.store, .bridge = options.bridge, .authority = options.authority, .execution_policy = options.execution_policy, .config_revision = options.app.workspace.app_config.config_revision, .notice_revision = options.notice_revision, .callbacks = options.callbacks };
         try self.validateAuthority(options.authority);
         return self;
     }
@@ -109,8 +104,6 @@ pub const Controller = struct {
         self.prepared.deinit(self.allocator);
         self.close_targets.deinit(self.allocator);
         self.open_authorizations.deinit(self.allocator);
-        self.allocator.free(self.selected_sessions);
-        self.allocator.free(self.selected_sources);
         self.* = undefined;
     }
     fn validateAuthority(self: *Controller, context: host.Context) !void {
@@ -138,43 +131,43 @@ pub const Controller = struct {
         if (owner != .group or @backingInt(owner.group.id) != id) return error.StaleReference;
         return owner.group;
     }
-    fn inBinding(self: *Controller, handle_: identity.SessionHandle) bool {
-        const legacy = self.app.legacyForHandle(handle_) orelse return false;
+    pub fn inBinding(self: *Controller, handle_: identity.SessionHandle) bool {
         return switch (self.authority.binding) {
             .session => |id| id == @backingInt(handle_.session_id),
-            .group => |id| if (self.roster.findById(std.math.cast(u32, id) orelse return false)) |group| group.contains(legacy) else false,
+            .group => |id| blk: {
+                const group = self.roster.findById(std.math.cast(u32, id) orelse return false) orelse return false;
+                const legacy = self.app.legacyForHandle(handle_) orelse return false;
+                for (group.members.items) |member| if (member.active and member.pane_id == legacy) break :blk true;
+                break :blk false;
+            },
         };
     }
-    fn selected(self: *Controller, handle_: identity.SessionHandle) bool {
-        for (self.selected_sessions) |item| if (item.eql(handle_)) return true;
+    /// Closed content requires an exact host close receipt from this
+    /// conversation and binding, including receipts from an earlier Task. Historical ownership alone never authorizes a live outsider.
+    pub fn permitsHistoricalOwner(self: *Controller, handle_: identity.SessionHandle) bool {
+        for (self.app.deferred_closes.items) |close| {
+            if (!@import("../ai/host_queries.zig").sameHistoricalBinding(close.context, self.authority) or !close.handle.eql(handle_) or close.snapshot.state != .closed) continue;
+            const state = self.app.sessions.queryState(handle_) orelse return false;
+            return state.lifecycle == .closed;
+        }
         return false;
     }
-    fn taskOwned(self: *Controller, handle_: identity.SessionHandle) bool {
-        const entry = self.app.lifecycle_supervisor.resource(handle_) orelse return false;
-        return entry.request.context.conversation_id.eql(self.authority.conversation_id) and entry.request.context.task_id.eql(self.authority.task_id) and entry.snapshot.ownership == .created_task;
-    }
-    fn associatedAsset(self: *Controller, handle_: identity.SessionHandle) ?identity.AssetOwner {
-        const mapping = self.app.findHandle(handle_) orelse return null;
-        if (mapping.source) |source| {
-            const saved = source.value.host;
-            if (@backingInt(saved.connection_id) != 0) return .{ .id = saved.connection_id, .revision = saved.revision };
+    pub fn permitsHistoricalRecording(self: *Controller, handle_: identity.SessionHandle, id: [32]u8, generation: u64) bool {
+        if (!self.permitsHistoricalOwner(handle_)) return false;
+        for (self.app.deferred_closes.items) |close| {
+            if (!@import("../ai/host_queries.zig").sameHistoricalBinding(close.context, self.authority) or !close.handle.eql(handle_) or close.snapshot.state != .closed) continue;
+            const expected = close.retained_metadata.recording_id orelse continue;
+            if (close.retained_metadata.recording_generation == generation and std.mem.eql(u8, &expected, &id)) return true;
         }
-        const envelope = self.app.sessions.connectionEnvelope(handle_) orelse return null;
-        return if (@backingInt(envelope.id) != 0) .{ .id = envelope.id, .revision = envelope.revision } else null;
+        return false;
     }
     fn authorizeAsset(self: *Controller, source: identity.AssetOwner) !void {
+        // Static saved-host sources are an independent allowed domain. They
+        // never authorize access to any already-open external session.
         const index = self.app.workspace.registry.indexOf(source.id) orelse return error.StaleReference;
         const saved = self.app.workspace.registry.hosts[index];
         if (saved.revision != source.revision) return error.SourceChanged;
         if (!std.mem.eql(u8, saved.protocolId(), "ssh")) return error.UnsupportedSource;
-        for (self.selected_sources) |selected_source| if (std.meta.eql(source, selected_source)) return;
-        // Only immutable source identities actually associated with this
-        // binding's live members are allowed. Never scan all registry assets.
-        for (self.app.mappings.items) |mapping| {
-            if (!self.inBinding(mapping.handle)) continue;
-            if (self.associatedAsset(mapping.handle)) |associated| if (std.meta.eql(associated, source)) return;
-        }
-        return error.TargetNotAuthorized;
     }
     fn checkMembershipDependencies(self: *Controller, session: identity.SessionHandle) !void {
         const legacy = try self.validateIdentity(session, true);
@@ -186,11 +179,35 @@ pub const Controller = struct {
             if (impact.transfer != 0 or impact.socks != 0 or impact.unknown != 0 or impact.remote_effect_unknown) return error.ActiveReference;
         }
     }
-    fn authorize(self: *Controller, context: host.Context, request: tools.Request) !runtime.Authorized {
+    /// Model-facing preflight also runs before idempotent receipt reuse, so
+    /// a former member cannot be revived by a historical request key.
+    pub fn validateRequestScope(self: *Controller, context: host.Context, request: tools.Request) !void {
         try self.validateAuthority(context);
+        if (request.group) |group| if (context.binding != .group or context.binding.group != @backingInt(group.id)) return error.TargetNotAuthorized;
+        if (request.session) |target| if (!self.inBinding(target) and !((request.kind == .close_session or request.kind == .wait_session_ready) and self.permitsHistoricalOwner(target))) return error.TargetNotAuthorized;
+        if (request.source) |target| if (!self.inBinding(target)) return error.TargetNotAuthorized;
+        if (request.saved_source) |source| try self.authorizeAsset(source);
+        if (request.operation) |operation| {
+            const entry = self.app.lifecycle_supervisor.find(operation) orelse return error.TargetNotAuthorized;
+            if (!entry.request.context.eql(context)) return error.TargetNotAuthorized;
+            // A task's own opening operation precedes membership commit.
+            // Once committed, removal takes effect immediately.
+            if (entry.snapshot.membership_committed) {
+                const target = entry.snapshot.session orelse return error.TargetNotAuthorized;
+                if (!self.inBinding(target)) return error.TargetNotAuthorized;
+            }
+        }
+    }
+    fn authorize(self: *Controller, context: host.Context, request: tools.Request) !runtime.Authorized {
+        try self.validateRequestScope(context, request);
+        // Every existing-object ref is rejected before identity/state/source
+        // metadata lookup. Existence, generation and old selections cannot
+        // affect the external-target error.
+        if (request.session) |target| if (!self.inBinding(target)) return error.TargetNotAuthorized;
+        if (request.source) |target| if (!self.inBinding(target)) return error.TargetNotAuthorized;
         var result: runtime.Authorized = .{ .session = request.session, .source = request.source, .saved_source = request.saved_source, .retention = request.retention orelse self.execution_policy.session_retention, .approval_required = true, .policy_revision = self.config_revision };
         if (request.group) |group| {
-            if (context.binding != .group or context.binding.group != @backingInt(group.id)) return error.TargetOutsideScope;
+            if (context.binding != .group or context.binding.group != @backingInt(group.id)) return error.TargetNotAuthorized;
             result.group = try self.groupOwner(@backingInt(group.id));
             const entry = self.roster.findById(@intCast(@backingInt(group.id))).?;
             result.membership_revision = entry.membership_revision;
@@ -209,7 +226,7 @@ pub const Controller = struct {
             .open_session => {
                 if (result.group == null or (request.source == null) == (request.saved_source == null)) return error.InvalidArguments;
                 if (request.source) |source| {
-                    if (!self.inBinding(source)) return error.TargetOutsideScope;
+                    if (!self.inBinding(source)) return error.TargetNotAuthorized;
                     _ = try self.validateIdentity(source, true);
                     const mapping = self.app.findHandle(source).?;
                     if (mapping.process != null and request.connection_policy != .new_only) return error.UnsupportedSource;
@@ -217,15 +234,9 @@ pub const Controller = struct {
                     try self.authorizeAsset(request.saved_source.?);
                     if (request.connection_policy == .reuse_only) return error.ReuseUnavailable;
                 }
-                const wants_trusted = request.interactive_execution or self.execution_policy.execution_mode == .new_pty or if (self.bridge.route_broker) |broker| broker.execution_route.requiresPtyCreate(context, if (request.source) |source| .{ .session = source } else .{ .saved = request.saved_source.? }) else false;
-                if (request.source) |source| {
-                    result.bootstrap_required = wants_trusted and self.app.findHandle(source).?.process == null;
-                } else if (wants_trusted) return error.BootstrapRequiresSharedSource;
-                if (result.bootstrap_required) {
-                    if (request.connection_policy != .reuse_only) return error.BootstrapRequiresSharedSource;
-                    const source_mapping = self.app.findHandle(request.source.?).?;
-                    if (source_mapping.source) |saved| if (saved.value.host.startup_commands.len != 0) return error.BootstrapStartupInputConflict;
-                }
+                // Shell integration belongs to the terminal's default startup.
+                // A PTY request never authorizes remote helper deployment.
+                // Actual execution readiness is discovered from the live service.
                 // Exact approval explicitly includes any new transport fallback.
                 result.allow_new_fallback = request.connection_policy == .prefer_reuse;
             },
@@ -233,18 +244,16 @@ pub const Controller = struct {
             .add_group_member => {
                 const target = request.session orelse return error.InvalidArguments;
                 _ = try self.validateIdentity(target, true);
-                if (!self.inBinding(target) and !self.selected(target)) return error.TargetNotAuthorized;
                 try self.checkMembershipDependencies(target);
             },
             .remove_group_member => {
                 const target = request.session orelse return error.InvalidArguments;
-                if (!self.inBinding(target)) return error.TargetOutsideScope;
+                if (!self.inBinding(target)) return error.TargetNotAuthorized;
                 try self.checkMembershipDependencies(target);
             },
             .close_session => {
                 const target = request.session orelse return error.InvalidArguments;
                 _ = try self.validateIdentity(target, false);
-                if (!self.inBinding(target) and !self.selected(target) and !self.taskOwned(target)) return error.TargetOutsideScope;
                 // Broker's exact close approval is mandatory for borrowed and
                 // task-owned resources alike. The worker gates queue_close.
                 result.explicit_user_close = true;
@@ -268,7 +277,6 @@ pub const Controller = struct {
             .disconnect_session => {
                 const target = request.session orelse return error.InvalidArguments;
                 _ = try self.validateIdentity(target, false);
-                if (!self.inBinding(target) and !self.selected(target) and !self.taskOwned(target)) return error.TargetOutsideScope;
                 if (self.bridge.writeRisk(target)) return error.ActiveExecutionConflict;
                 const preflight = try self.app.preflightSessionDisconnect(target);
                 result.create_operation = preflight.create_operation;
@@ -279,7 +287,6 @@ pub const Controller = struct {
             .reconnect_session => {
                 const target = request.session orelse return error.InvalidArguments;
                 _ = try self.validateIdentity(target, false);
-                if (!self.inBinding(target) and !self.selected(target)) return error.TargetOutsideScope;
                 if (request.connection_policy != .new_only or !self.app.supportsIntegration(target, "transport_loss")) return error.ToolNotAvailable;
                 const live = self.app.sessions.queryState(target).?;
                 if (live.lifecycle != .failed and live.lifecycle != .ended) return error.AlreadyConnected;
@@ -488,6 +495,7 @@ pub const Controller = struct {
                 call.result = .{ .session = snapshot };
             },
             .resolve_owned => |handle_| {
+                if (!self.inBinding(handle_)) return error.TargetNotAuthorized;
                 const snapshot = try self.app.resolveOwnedSession(handle_, call.context);
                 self.adoptRouteSession(call.context, snapshot.operation_ref, snapshot);
                 call.result = .{ .session = snapshot };
@@ -553,6 +561,7 @@ const TestFixture = struct {
     previous_data_dir: ?[:0]u8 = null,
     reject_bootstrap_deployment: bool = false,
     bootstrap_approvals_seen: usize = 0,
+    acknowledge_ssh_frames: bool = false,
     extern "c" fn setenv([*:0]const u8, [*:0]const u8, c_int) c_int;
     extern "c" fn unsetenv([*:0]const u8) c_int;
     fn init(self: *@This()) !void {
@@ -581,6 +590,14 @@ const TestFixture = struct {
     }
     fn tick(self: *@This(), bridge: ?*Bridge) !void {
         _ = try self.app.safeTick();
+        // The loopback lifecycle fixture mounts no terminal text consumer.
+        // Acknowledge presentation frames only in that headless test mode;
+        // the worker's timeline and execution recording retain all output.
+        if (self.acknowledge_ssh_frames) for (self.workspace.tabs.items) |tab| {
+            if (tab.runtime) |session_runtime| if (!session_runtime.torn_down) {
+                _ = session_runtime.textSlot().acknowledge(0);
+            };
+        };
         if (bridge) |value| value.pump(self.app);
         self.cx.advanceFrameClock();
         self.cx.layout();
@@ -807,16 +824,15 @@ test "lifecycle controller real Local group open and close preserve conversation
         try fixture.tick(&bridge);
         if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.OwnedSessionCloseTimeout;
     }
-    var closed = try testMetadata(&fixture, &roster, next, "host.get_session", query_args);
-    defer closed.deinit(a);
-    const closed_body = try std.json.parseFromSlice(std.json.Value, a, closed.blocks[0].structured, .{});
-    defer closed_body.deinit();
-    const closed_row = closed_body.value.object.get("session").?.object;
+    try std.testing.expect(controller.permitsHistoricalOwner(owned));
+    var closed_metadata = try testMetadata(&fixture, &roster, next, "host.get_session", query_args);
+    defer closed_metadata.deinit(a);
+    const closed_metadata_json = try std.json.parseFromSlice(std.json.Value, a, closed_metadata.blocks[0].structured, .{});
+    defer closed_metadata_json.deinit();
+    const closed_row = closed_metadata_json.value.object.get("session").?.object;
     try std.testing.expectEqualStrings("closed", closed_row.get("state").?.string);
     try std.testing.expectEqualStrings(recording_ref, closed_row.get("recording_ref").?.string);
-    try std.testing.expect(closed_row.get("source_ref").? == .null and !closed_row.get("current_member").?.bool);
-    const caps = closed_row.get("capabilities").?.object;
-    try std.testing.expect(!caps.get("read_terminal").?.bool and !caps.get("batch_execution").?.bool and !caps.get("trusted_pty_execution").?.bool);
+    try std.testing.expect(!closed_row.get("current_member").?.bool);
     var closed_list = try testMetadata(&fixture, &roster, next, "host.list_sessions", "{\"state_filter\":\"closed\"}");
     defer closed_list.deinit(a);
     const closed_rows = try std.json.parseFromSlice(std.json.Value, a, closed_list.blocks[0].structured, .{});
@@ -832,7 +848,32 @@ test "lifecycle controller real Local group open and close preserve conversation
     try std.testing.expectEqual(@as(usize, 1), fixture.app.deferred_closes.items.len);
     var other_task = next;
     other_task.task_id.bytes[0] ^= 1;
-    try std.testing.expectError(error.TargetOutsideScope, testMetadata(&fixture, &roster, other_task, "host.get_session", query_args));
+    var later_metadata = try testMetadata(&fixture, &roster, other_task, "host.get_session", query_args);
+    defer later_metadata.deinit(a);
+    var later_controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = other_task, .execution_policy = .{ .execution_mode = .auto, .session_retention = .keep } });
+    defer later_controller.deinitAfterWorker();
+    try std.testing.expect(later_controller.permitsHistoricalOwner(owned));
+    try std.testing.expect(later_controller.permitsHistoricalRecording(owned, recording.id, recording.generation));
+    var historical = try @import("ai_recording_query_access.zig").Access.init(a, .{ .allocator = a, .io = std.testing.io, .dir = fixture.tmp.dir }, other_task);
+    defer historical.deinit();
+    try historical.captureClosedReceipts(fixture.app);
+    try std.testing.expectEqual(@as(usize, 1), historical.candidates.items.len);
+    const historical_arguments = try std.json.Stringify.valueAlloc(a, .{ .recording_ref = recording_ref }, .{});
+    defer a.free(historical_arguments);
+    const historical_parsed = try std.json.parseFromSlice(std.json.Value, a, historical_arguments, .{});
+    defer historical_parsed.deinit();
+    const historical_call: host.Invocation = .{ .context = other_task, .authority = .conversation_context, .operation_id = 1, .turn_id = 1, .call_id = "later-task-own-history", .tool_id = "host.read_terminal", .arguments = historical_parsed.value, .arguments_json = historical_arguments, .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
+    try std.testing.expect((try historical.candidateOwner(historical_call)).eql(owned));
+    var historical_result = try historical.execute(historical_call, a);
+    defer historical_result.deinit(a);
+    try historical_result.validate(other_task, 1);
+    var unrelated = other_task;
+    unrelated.conversation_id.bytes[0] ^= 1;
+    const unrelated_ref = try @import("../ai/host_queries.zig").sessionRef(a, unrelated, owned);
+    defer a.free(unrelated_ref);
+    const unrelated_args = try std.json.Stringify.valueAlloc(a, .{ .session_ref = unrelated_ref }, .{});
+    defer a.free(unrelated_args);
+    try std.testing.expectError(error.TargetNotAuthorized, testMetadata(&fixture, &roster, unrelated, "host.get_session", unrelated_args));
     var wrong_generation = owned;
     wrong_generation.generation += 1;
     const stale_ref = try @import("../ai/host_queries.zig").sessionRef(a, next, wrong_generation);
@@ -991,7 +1032,531 @@ test "lifecycle controller group publication is allocation free after validated 
     try std.testing.expectError(error.ScopeChanged, controller.refreshAuthority(next));
 }
 
-test "lifecycle bootstrap product real SSH source opens an approved new trusted work terminal" {
+test "current-tab lifecycle rejects existing external selected handles and removed members before metadata" {
+    const a = std.testing.allocator;
+    var fixture: TestFixture = undefined;
+    try fixture.init();
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const source = try fixture.local();
+    const external = try fixture.local();
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    const context = try testContext(&store, source);
+    const external_asset: identity.AssetOwner = .{ .id = @fromBackingInt(999), .revision = 7 };
+    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .selected_sessions = &.{external}, .selected_sources = &.{external_asset}, .execution_policy = .{ .execution_mode = .auto, .session_retention = .auto_idle } });
+    defer controller.deinitAfterWorker();
+    for ([_]identity.SessionHandle{ external, .{ .session_id = @fromBackingInt(999999), .generation = 98 } }) |outside| {
+        for ([_]tools.Kind{ .create_group, .add_group_member, .remove_group_member, .close_session, .disconnect_session, .reconnect_session, .set_session_retention, .wait_session_ready }) |kind| {
+            try std.testing.expectError(error.TargetNotAuthorized, controller.validateRequestScope(context, .{ .kind = kind, .session = outside }));
+            try std.testing.expectError(error.TargetNotAuthorized, controller.authorize(context, .{ .kind = kind, .session = outside }));
+        }
+        try std.testing.expectError(error.TargetNotAuthorized, controller.validateRequestScope(context, .{ .kind = .open_session, .source = outside }));
+    }
+    try std.testing.expectError(error.StaleReference, controller.authorizeAsset(external_asset));
+    // The existing own session can still create its group, keeping the CID.
+    const request: tools.Request = .{ .kind = .create_group, .request_key = "bounded-group", .session = source, .name = "current group" };
+    const authorized = try controller.authorize(context, request);
+    const plan = try controller.prepareGroup(context, .{ .operation = identity.HostOperationId.generate(), .request = request, .authorized = authorized });
+    try controller.commitGroup(context, plan);
+    try controller.releaseGroup(plan);
+    var next = context;
+    next.binding = .{ .group = plan.id };
+    next.binding_revision = plan.binding_revision;
+    try controller.refreshAuthority(next);
+    const own_group: identity.GroupOwner = .{ .id = @fromBackingInt(plan.id) };
+    _ = try controller.authorize(next, .{ .kind = .open_session, .group = own_group, .source = source, .connection_policy = .new_only });
+    const legacy = fixture.app.legacyForHandle(source).?;
+    roster.findById(@intCast(plan.id)).?.members.items[0].active = false;
+    try std.testing.expect(!controller.inBinding(source));
+    try std.testing.expectError(error.TargetNotAuthorized, controller.validateRequestScope(next, .{ .kind = .add_group_member, .group = own_group, .session = source }));
+    try std.testing.expectError(error.TargetNotAuthorized, controller.validateRequestScope(next, .{ .kind = .open_session, .group = own_group, .source = source }));
+    roster.findById(@intCast(plan.id)).?.members.items[0].active = true;
+    try std.testing.expect(roster.findById(@intCast(plan.id)).?.contains(legacy));
+    try std.testing.expect(controller.inBinding(source));
+}
+
+/// Real host-tool/Driver acceptance over the same product SSH service. The
+/// loopback peer supplies only a PTY shell, never execution receipts.
+const ShellProductExecution = struct {
+    const execution = @import("../host/terminal_execution.zig");
+    const Backend = @import("ai_execution_backend.zig");
+    const Driver = @import("../ai/host_execution_driver.zig").Driver;
+    const approvals = @import("../ai/host_approval.zig");
+    const a = std.testing.allocator;
+    const View = struct { snapshot: execution.Snapshot, output: []const u8, execution_ref: []const u8 };
+    fixture: *TestFixture,
+    controller: *Controller,
+    broker: *approvals.Broker,
+    backend: Backend.Context,
+    driver: *Driver,
+    sequence: u64 = 100,
+    fn lookup(raw: *anyopaque, conversation: identity.ConversationId, task: identity.TaskId) ?*Controller {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return if (self.controller.authority.conversation_id.eql(conversation) and self.controller.authority.task_id.eql(task)) self.controller else null;
+    }
+    fn unavailable(_: *anyopaque, _: host.Invocation, _: std.mem.Allocator) !host.Result {
+        return error.ToolNotAvailable;
+    }
+    fn init(self: *@This(), fixture: *TestFixture, controller: *Controller, broker: *approvals.Broker, journal: *runtime.ProcessJournal) !void {
+        self.* = .{ .fixture = fixture, .controller = controller, .broker = broker, .backend = undefined, .driver = undefined };
+        controller.bridge.host_binding = .{ .context = controller.authority, .handler_context = self, .invoke = unavailable, .contributions = &@import("../ai/host_execution.zig").contributions };
+        self.backend = try Backend.Context.init(.{ .app = fixture.app, .roster = controller.roster, .store = controller.store, .lookup_context = self, .lookup_task = lookup, .approval = broker });
+        try self.backend.captureTask(controller);
+        self.driver = try Driver.start(a, journal, .{ .context = controller.bridge, .call = testScheduler }, self.backend.backend());
+    }
+    fn deinit(self: *@This()) void {
+        self.driver.requestShutdown();
+        while (!self.driver.shutdownReady()) self.fixture.tick(self.controller.bridge) catch unreachable;
+        self.driver.finish() catch unreachable;
+        self.controller.bridge.host_binding = null;
+    }
+    fn invoke(self: *@This(), tool: []const u8, arguments: anytype) !host.Result {
+        const raw = try std.json.Stringify.valueAlloc(a, arguments, .{});
+        defer a.free(raw);
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, raw, .{});
+        defer parsed.deinit();
+        self.sequence += 1;
+        const call_id = try std.fmt.allocPrint(a, "shell-product-{d}", .{self.sequence});
+        defer a.free(call_id);
+        var invocation: host.Invocation = .{ .context = self.controller.authority, .authority = .execution_control, .operation_id = self.sequence, .turn_id = 2, .call_id = call_id, .tool_id = tool, .arguments = parsed.value, .arguments_json = raw, .arguments_hash = execution.digest(raw), .canonical_arguments_hash = try @import("../ai/canonical_arguments.zig").digest(a, parsed.value) };
+        var prepared: ?Backend.Prepared = null;
+        defer if (prepared) |*value| value.deinit();
+        var input_prepared: ?Backend.InputPrepared = null;
+        defer if (input_prepared) |*value| value.deinit();
+        var evidence: Backend.ApprovalEvidence = undefined;
+        var subject: ?approvals.Subject = null;
+        const deadline = @import("../platform/realtime.zig").monotonicNs() + 10 * std.time.ns_per_s;
+        if (std.mem.eql(u8, tool, "host.run_in_terminal")) {
+            prepared = try Backend.prepare(invocation, a);
+            invocation = prepared.?.invocation;
+            while (true) {
+                evidence = self.backend.preflight(invocation, prepared.?.command, prepared.?.command_hash) catch |err| {
+                    // No dispatch occurs during preflight. A completed SSH
+                    // interval can precede its next ready A/B prompt.
+                    if ((err != error.WorkerBusy and err != error.TerminalBusy) or @import("../platform/realtime.zig").monotonicNs() > deadline) return err;
+                    try self.fixture.tick(self.controller.bridge);
+                    continue;
+                };
+                break;
+            }
+            prepared.?.subject.impact = evidence.text();
+            subject = prepared.?.subject;
+        } else if (std.mem.eql(u8, tool, "host.send_execution_input")) {
+            while (true) {
+                input_prepared = self.backend.preflightInput(invocation, a) catch |err| {
+                    if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() > deadline) return err;
+                    try self.fixture.tick(self.controller.bridge);
+                    continue;
+                };
+                break;
+            }
+            subject = input_prepared.?.subject;
+        }
+        var permit: ?approvals.Permit = null;
+        defer if (permit) |value| self.broker.finish(value);
+        if (subject) |value| {
+            try self.broker.configure(invocation.context, self.controller.config_revision);
+            permit = try self.broker.beginSubject(invocation, value, self.controller.config_revision, a);
+            try self.broker.decide(permit.?.sequence, permit.?.arguments_hash, true);
+            invocation.approval_sequence = permit.?.sequence;
+        }
+        const Call = struct {
+            driver: *Driver,
+            invocation: host.Invocation,
+            result: ?host.Result = null,
+            failure: ?anyerror = null,
+            done: std.atomic.Value(bool) = .init(false),
+            fn run(call: *@This()) void {
+                call.result = call.driver.executeAlloc(call.invocation, a, null) catch |err| blk: {
+                    call.failure = err;
+                    break :blk null;
+                };
+                call.done.store(true, .release);
+            }
+        };
+        var call: Call = .{ .driver = self.driver, .invocation = invocation };
+        const thread = try std.Thread.spawn(.{}, Call.run, .{&call});
+        while (!call.done.load(.acquire)) {
+            self.fixture.tick(self.controller.bridge) catch {
+                self.driver.requestShutdown();
+            };
+            if (@import("../platform/realtime.zig").monotonicNs() > deadline) self.driver.requestShutdown();
+        }
+        thread.join();
+        if (call.failure) |failure| return failure;
+        var result = call.result orelse return error.MissingHostResult;
+        errdefer result.deinit(a);
+        try result.validate(invocation.context, invocation.operation_id);
+        return result;
+    }
+    fn expectPromptBusy(self: *@This(), reference: []const u8) !void {
+        const raw = try std.json.Stringify.valueAlloc(a, .{ .session_ref = reference, .command = "printf NEVER_ADMITTED", .request_key = "draft-must-stay-blocked" }, .{});
+        defer a.free(raw);
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, raw, .{});
+        defer parsed.deinit();
+        self.sequence += 1;
+        const invocation: host.Invocation = .{ .context = self.controller.authority, .authority = .execution_control, .operation_id = self.sequence, .turn_id = 2, .call_id = "blocked-draft-call", .tool_id = "host.run_in_terminal", .arguments = parsed.value, .arguments_json = raw, .arguments_hash = execution.digest(raw), .canonical_arguments_hash = try @import("../ai/canonical_arguments.zig").digest(a, parsed.value) };
+        var prepared = try Backend.prepare(invocation, a);
+        defer prepared.deinit();
+        const deadline = @import("../platform/realtime.zig").monotonicNs() + 3 * std.time.ns_per_s;
+        while (true) {
+            _ = self.backend.preflight(prepared.invocation, prepared.command, prepared.command_hash) catch |err| {
+                if (err == error.WorkerBusy and @import("../platform/realtime.zig").monotonicNs() < deadline) {
+                    try self.fixture.tick(self.controller.bridge);
+                    continue;
+                }
+                try std.testing.expectEqual(error.TerminalBusy, err);
+                return;
+            };
+            return error.DraftWasAuthorized;
+        }
+    }
+    fn run(self: *@This(), reference: []const u8, command: []const u8, key: []const u8) ![]u8 {
+        var result = try self.invoke("host.run_in_terminal", .{ .session_ref = reference, .command = command, .request_key = key });
+        defer result.deinit(a);
+        try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.succeeded, result.status);
+        var view = try std.json.parseFromSlice(View, a, result.blocks[0].structured, .{ .ignore_unknown_fields = true });
+        defer view.deinit();
+        return a.dupe(u8, view.value.execution_ref);
+    }
+    const WaitFor = union(enum) { finished, input_ready, written: u64 };
+    fn wait(self: *@This(), reference: []const u8, target: WaitFor) !host.Result {
+        const deadline = @import("../platform/realtime.zig").monotonicNs() + 10 * std.time.ns_per_s;
+        while (true) {
+            var result = try self.invoke("host.wait_execution", .{ .execution_ref = reference, .wait_ms = 50, .output_cursor = "0", .max_bytes = 8192 });
+            errdefer result.deinit(a);
+            var view = try std.json.parseFromSlice(View, a, result.blocks[0].structured, .{ .ignore_unknown_fields = true });
+            const snapshot = view.value.snapshot;
+            view.deinit();
+            const reached = switch (target) {
+                .finished => snapshot.state == .interval_recorded,
+                .input_ready => snapshot.state == .running and snapshot.input_wait != null,
+                .written => |sequence| if (snapshot.input_receipt) |receipt| receipt.input_sequence == sequence and receipt.stage == .written else false,
+            };
+            if (reached) return result;
+            if (snapshot.remote_effect_unknown or snapshot.state == .cancelled_unsent or snapshot.state == .recording_degraded or @import("../platform/realtime.zig").monotonicNs() > deadline) {
+                std.debug.print("shell product AI wait failed: {s}\n", .{result.blocks[0].structured});
+                return error.ShellProductExecutionNotFinished;
+            }
+            result.deinit(a);
+        }
+    }
+    fn expectFinished(self: *@This(), reference: []const u8, owner: identity.SessionHandle, exit_code: u8, output: []const u8) !void {
+        var result = try self.wait(reference, .finished);
+        defer result.deinit(a);
+        var view = try std.json.parseFromSlice(View, a, result.blocks[0].structured, .{ .ignore_unknown_fields = true });
+        defer view.deinit();
+        const snapshot = view.value.snapshot;
+        try std.testing.expect(snapshot.owner.eql(owner) and snapshot.interval_saved and snapshot.recording_settled);
+        try std.testing.expectEqual(execution.CompletionSource.shell_reported, snapshot.completion_source);
+        try std.testing.expectEqual(@as(?u8, exit_code), snapshot.process.?.exit_code);
+        try std.testing.expect(std.mem.indexOf(u8, view.value.output, output) != null);
+        try execution.PublicReceipt.fromSnapshot(snapshot).?.validate();
+    }
+    fn takeoverAndFinish(self: *@This(), reference: []const u8, owner: identity.SessionHandle, ssh_service: ?@import("../host/terminal_service.zig").Service) !void {
+        const id = try identity.ExecutionId.parse(reference[3..]);
+        const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+        // The real start boundary must exist before requesting human input.
+        while (true) {
+            var observed = try self.invoke("host.get_execution", .{ .execution_ref = reference });
+            defer observed.deinit(a);
+            var view = try std.json.parseFromSlice(View, a, observed.blocks[0].structured, .{ .ignore_unknown_fields = true });
+            defer view.deinit();
+            const accepted = view.value.snapshot.completion_source == .shell_reported or view.value.snapshot.command_accepted;
+            if (view.value.snapshot.start != null and view.value.snapshot.grant != null and accepted and view.value.snapshot.submit_sent and view.value.snapshot.state == .running and outputLine(view.value.output, "TAKEOVER_BEGIN")) break;
+            if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.TakeoverExecutionNotRunning;
+        }
+        if (ssh_service) |service| try shellProductControlledInput(self.fixture, service);
+        try self.driver.requestTakeover(self.controller.authority, reference);
+        while (true) {
+            try self.fixture.tick(self.controller.bridge);
+            if (self.driver.executionInputEvidence(self.controller.authority, id)) |fact| if (fact.input_handed_off and fact.local_released and !fact.has_grant) break;
+            if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.TakeoverInputNotReleased;
+        }
+        var mid = try self.invoke("host.get_execution", .{ .execution_ref = reference });
+        defer mid.deinit(a);
+        var middle = try std.json.parseFromSlice(View, a, mid.blocks[0].structured, .{ .ignore_unknown_fields = true });
+        defer middle.deinit();
+        try std.testing.expect(middle.value.snapshot.input_handed_off and middle.value.snapshot.local_released and middle.value.snapshot.process == null);
+        try std.testing.expect(!middle.value.snapshot.remote_effect_unknown and !middle.value.snapshot.recording_settled);
+        try std.testing.expect(outputLine(middle.value.output, "TAKEOVER_BEGIN") and !outputLine(middle.value.output, "TAKEOVER_END"));
+        if (ssh_service) |service| try shellProductHumanInput(self.fixture, service);
+        // Model completion must not stop or reacquire the human's terminal.
+        try self.driver.finishTask(self.controller.authority);
+        var completion = try self.wait(reference, .finished);
+        completion.deinit(a);
+        var final = try self.invoke("host.get_execution", .{ .execution_ref = reference });
+        defer final.deinit(a);
+        var ended = try std.json.parseFromSlice(View, a, final.blocks[0].structured, .{ .ignore_unknown_fields = true });
+        defer ended.deinit();
+        try std.testing.expect(ended.value.snapshot.input_handed_off and ended.value.snapshot.grant == null and ended.value.snapshot.process.?.foreground_finished);
+        try std.testing.expect(ended.value.snapshot.owner.eql(owner) and ended.value.snapshot.interval_saved and ended.value.snapshot.recording_settled);
+        try std.testing.expectEqual(@as(?u8, 0), ended.value.snapshot.process.?.exit_code);
+        try execution.PublicReceipt.fromSnapshot(ended.value.snapshot).?.validate();
+        try std.testing.expect(outputLine(ended.value.output, "TAKEOVER_BEGIN") and outputLine(ended.value.output, "TAKEOVER_END"));
+        if (ssh_service != null) try std.testing.expect(outputLine(ended.value.output, "TAKEOVER_HUMAN:human-after-takeover"));
+        while (true) {
+            try self.fixture.tick(self.controller.bridge);
+            if (self.driver.taskEvidence(self.controller.authority.task_id)) |fact| if (fact.model_done and fact.executions_settled and fact.input_grants_released and fact.recordings_settled and fact.active_references == 0) break;
+            if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.TakeoverTaskNotSettled;
+        }
+    }
+    fn outputLine(output: []const u8, line: []const u8) bool {
+        // The first output can follow a VT mode prefix on the same raw line.
+        // Require the *actual* LF after a marker, not the echoed '\\n' input.
+        var offset: usize = 0;
+        while (std.mem.indexOfPos(u8, output, offset, line)) |at| {
+            offset = at + line.len;
+            var end = offset;
+            if (end < output.len and output[end] == '\r') end += 1;
+            if (end < output.len and output[end] == '\n') return true;
+        }
+        return false;
+    }
+};
+
+test "lifecycle real Local takeover keeps original observation until natural finish and task settlement" {
+    const a = std.testing.allocator;
+    var fixture: TestFixture = undefined;
+    try fixture.init();
+    // This fixture's lifecycle-only default disables all RCS. The execution
+    // test needs the normal private Local shell integration startup instead.
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".zshenv", .data = "PROMPT=''\nRPROMPT=''\n" });
+    try fixture.tmp.dir.writeFile(std.testing.io, .{ .sub_path = ".zshrc", .data = "bindkey -e\n" });
+    try fixture.app.local_adapter.configureRecording(.{ .io = std.testing.io, .directory = fixture.directory, .log = .{ .ring_mb = 2, .checkpoint_sec = 1 } });
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const source = try fixture.local();
+    const ready_deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    while (true) {
+        try fixture.tick(null);
+        if (fixture.app.legacyForHandle(source)) |legacy| if (fixture.workspace.sessionTab(legacy)) |tab| if (tab.terminal) |view| if (view.terminal_surface) |surface| {
+            const snapshot = surface.service.executionSnapshot() catch |err| {
+                if (err == error.WorkerBusy) continue;
+                return err;
+            };
+            if (snapshot.interactive_execution and snapshot.input_ready) break;
+        };
+        if (@import("../platform/realtime.zig").monotonicNs() > ready_deadline) return error.LocalExecutionNotReady;
+    }
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    const context = try testContext(&store, source);
+    var controller = try Controller.init(.{ .allocator = a, .app = fixture.app, .roster = &roster, .store = &store, .bridge = &bridge, .authority = context, .execution_policy = .{ .execution_mode = .attached_pty, .session_retention = .keep } });
+    defer controller.deinitAfterWorker();
+    const journal = try runtime.ProcessJournal.acquire(.{ .data_root = fixture.directory, .path = "local-takeover-finish.json" });
+    defer journal.release();
+    var broker: @import("../ai/host_approval.zig").Broker = .{};
+    var execution_driver: ShellProductExecution = undefined;
+    try execution_driver.init(&fixture, &controller, &broker, journal);
+    defer execution_driver.deinit();
+    const reference = try @import("../ai/host_queries.zig").sessionRef(a, context, source);
+    defer a.free(reference);
+    const active = try execution_driver.run(reference, "printf 'TAKEOVER_BEGIN\\n'; sleep 2; printf 'TAKEOVER_END\\n'", "local-takeover-finish");
+    defer a.free(active);
+    try execution_driver.takeoverAndFinish(active, source, null);
+    std.debug.print("LOCAL_PRODUCT_TAKEOVER_PASS same_execution=true natural_end=true complete_output=true task_settled=true\n", .{});
+}
+
+// Uses the real SSH Provider/encoder and the fixture's interactive shell. A
+// no-op native event must not dirty its prompt; actual editing remains gated
+// until the shell reports a fresh A/B after the explicit user interrupt.
+fn shellProductPromptReadiness(fixture: *TestFixture, service: @import("../host/terminal_service.zig").Service, driver: *ShellProductExecution, reference: []const u8) !void {
+    const Terminal = @import("../host/terminal_service.zig");
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    var initial: Terminal.execution.Snapshot = undefined;
+    var mode: u64 = 0;
+    var geometry: u64 = 0;
+    while (true) {
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.ShellPromptNotReady;
+        try fixture.tick(null);
+        initial = service.executionSnapshot() catch |err| {
+            if (err == error.WorkerBusy) continue;
+            return err;
+        };
+        _ = service.status() catch |err| {
+            if (err == error.WorkerBusy) continue;
+            return err;
+        };
+        var screen = service.snapshot(std.testing.allocator) catch |err| {
+            if (err == error.WorkerBusy) continue;
+            return err;
+        };
+        defer screen.deinit(std.testing.allocator);
+        if (initial.input_ready) {
+            mode = screen.projection.mode_revision;
+            geometry = screen.geometry_revision;
+            break;
+        }
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.ShellPromptNotReady;
+    }
+    const mouse = try shellProductSubmit(fixture, service, Terminal.Service.writeMouse, Terminal.MouseRequest{ .input_sequence = 1, .mode_revision = mode, .geometry_revision = geometry, .event = .{ .action = .press, .button = .left, .x = 10, .y = 10, .screen_width = 640, .screen_height = 480, .cell_width = 8, .cell_height = 16 } });
+    try std.testing.expectEqual(@as(usize, 0), mouse.queued_bytes);
+    const modifier = try shellProductSubmit(fixture, service, Terminal.Service.writeKey, Terminal.KeyRequest{ .input_sequence = 2, .mode_revision = mode, .event = .{ .key = .unidentified, .modifiers = .{ .shift = true } } });
+    try std.testing.expectEqual(@as(usize, 0), modifier.queued_bytes);
+    // No worker tick is needed: this checks admission itself, before any
+    // remote output could accidentally make the prompt ready again.
+    const untouched = try shellProductExecutionSnapshot(fixture, service);
+    try std.testing.expect(untouched.input_ready and untouched.grant == null);
+    try std.testing.expectEqual(initial.input_epoch, untouched.input_epoch);
+    std.debug.print("SHELL_PRODUCT_NOOP_INPUT_PASS mouse_bytes=0 modifier_bytes=0 epoch_unchanged=true ready=true\n", .{});
+
+    _ = try shellProductSubmit(fixture, service, Terminal.Service.write, Terminal.WriteRequest{ .input_sequence = 3, .mode_revision = mode, .bytes = "printf NEVER_EXECUTE_DRAFT" });
+    // Require the real shell's editor echo before testing its clear operation.
+    while (true) {
+        try fixture.tick(null);
+        if (try shellProductScreenContains(service, "NEVER_EXECUTE_DRAFT")) break;
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.ShellDraftNotEchoed;
+    }
+    try std.testing.expect(!(try shellProductExecutionSnapshot(fixture, service)).input_ready);
+    _ = try shellProductSubmit(fixture, service, Terminal.Service.write, Terminal.WriteRequest{ .input_sequence = 4, .mode_revision = mode, .bytes = "\x15" });
+    // Ctrl+U is explicit fixture user input. Its visible edit is not trusted
+    // as an empty-editor receipt and must never authorize AI injection.
+    while (true) {
+        try fixture.tick(null);
+        const present = shellProductScreenContains(service, "NEVER_EXECUTE_DRAFT") catch |err| {
+            if (err == error.WorkerBusy) continue;
+            return err;
+        };
+        if (!present) break;
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.ShellDraftNotCleared;
+    }
+    const cleared = try shellProductExecutionSnapshot(fixture, service);
+    try std.testing.expect(!cleared.input_ready and cleared.grant == null);
+    try driver.expectPromptBusy(reference);
+    // A user's interrupt produces the real next shell prompt; the application
+    // never sends recovery keys to silently erase or submit a user's draft.
+    _ = try shellProductSubmit(fixture, service, Terminal.Service.write, Terminal.WriteRequest{ .input_sequence = 5, .mode_revision = mode, .bytes = "\x03" });
+    while (true) {
+        try fixture.tick(null);
+        const restored = try shellProductExecutionSnapshot(fixture, service);
+        if (restored.input_ready) {
+            try std.testing.expect(restored.owner.eql(initial.owner));
+            try std.testing.expectEqual(Terminal.execution.CompletionSource.shell_reported, restored.completion_source);
+            break;
+        }
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.ShellPromptNotRestored;
+    }
+    std.debug.print("SHELL_PRODUCT_DRAFT_GATE_PASS draft_blocked=true ctrl_u_still_blocked=true ctrl_c_shell_prompt_restored=true same_session=true\n", .{});
+}
+
+fn shellProductControlledInput(fixture: *TestFixture, service: @import("../host/terminal_service.zig").Service) !void {
+    const Terminal = @import("../host/terminal_service.zig");
+    const provider: *@import("../plugins/ssh/terminal_service.zig").Provider = @ptrCast(@alignCast(service.context));
+    const before = provider.input_sequence;
+    const epoch = (try shellProductExecutionSnapshot(fixture, service)).input_epoch;
+    try std.testing.expectError(error.TerminalControlled, shellProductSubmit(fixture, service, Terminal.Service.write, Terminal.WriteRequest{ .input_sequence = before + 1, .bytes = "NEVER_READONLY_WRITE" }));
+    try std.testing.expectError(error.TerminalControlled, shellProductSubmit(fixture, service, Terminal.Service.writeKey, Terminal.KeyRequest{ .input_sequence = before + 1, .mode_revision = 1, .event = .{ .key = .enter } }));
+    try std.testing.expectError(error.TerminalControlled, shellProductSubmit(fixture, service, Terminal.Service.writeKey, Terminal.KeyRequest{ .input_sequence = before + 1, .mode_revision = 1, .event = .{ .key = .c, .utf8 = "c", .unshifted_codepoint = 'c', .modifiers = .{ .control = true } } }));
+    var paste = try shellProductPreparePaste(fixture, service, "NEVER_READONLY_PASTE");
+    defer paste.deinit(std.testing.allocator);
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 3 * std.time.ns_per_s;
+    while (true) {
+        _ = service.commitPaste(paste, before + 1, false) catch |err| {
+            if (err == error.WorkerBusy and @import("../platform/realtime.zig").monotonicNs() < deadline) {
+                try fixture.tick(null);
+                continue;
+            }
+            try std.testing.expectEqual(error.TerminalControlled, err);
+            break;
+        };
+        return error.ReadOnlyPasteWasQueued;
+    }
+    try std.testing.expectEqual(before, provider.input_sequence);
+    try std.testing.expect(provider.pending_paste == null);
+    try std.testing.expectEqual(@as(usize, 0), provider.native.worker.input.pending());
+    try std.testing.expectEqual(epoch, (try shellProductExecutionSnapshot(fixture, service)).input_epoch);
+    std.debug.print("SHELL_PRODUCT_READONLY_PASS write=true key=true ctrl_c=true paste=true pending=0 sequence_unchanged=true epoch_unchanged=true\n", .{});
+}
+
+fn shellProductPreparePaste(fixture: *TestFixture, service: @import("../host/terminal_service.zig").Service, text: []const u8) !@import("../host/terminal_service.zig").Paste {
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 3 * std.time.ns_per_s;
+    while (true) return service.preparePaste(std.testing.allocator, text) catch |err| {
+        if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() > deadline) return err;
+        try fixture.tick(null);
+        continue;
+    };
+}
+
+fn shellProductHumanInput(fixture: *TestFixture, service: @import("../host/terminal_service.zig").Service) !void {
+    const Terminal = @import("../host/terminal_service.zig");
+    const provider: *@import("../plugins/ssh/terminal_service.zig").Provider = @ptrCast(@alignCast(service.context));
+    try std.testing.expect(provider.pending_paste == null);
+    try std.testing.expectEqual(@as(usize, 0), provider.native.worker.input.pending());
+    var paste = try shellProductPreparePaste(fixture, service, "human-after-takeover");
+    defer paste.deinit(std.testing.allocator);
+    const sequence = provider.input_sequence + 1;
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 3 * std.time.ns_per_s;
+    while (true) {
+        _ = service.commitPaste(paste, sequence, false) catch |err| {
+            if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() > deadline) return err;
+            try fixture.tick(null);
+            continue;
+        };
+        break;
+    }
+    while (provider.pending_paste != null) {
+        _ = service.takeWriteReceipt() catch |err| {
+            if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() > deadline) return err;
+            try fixture.tick(null);
+            continue;
+        };
+        try fixture.tick(null);
+    }
+    _ = try shellProductSubmit(fixture, service, Terminal.Service.writeKey, Terminal.KeyRequest{ .input_sequence = sequence + 1, .mode_revision = 1, .event = .{ .key = .enter } });
+    std.debug.print("SHELL_PRODUCT_HUMAN_INPUT_PASS old_payload=0 new_paste=true enter=true same_execution=true\n", .{});
+}
+
+fn shellProductScreenContains(service: @import("../host/terminal_service.zig").Service, marker: []const u8) !bool {
+    const a = std.testing.allocator;
+    var screen = try service.snapshot(a);
+    defer screen.deinit(a);
+    var text: std.ArrayList(u8) = .empty;
+    defer text.deinit(a);
+    for (screen.projection.cells) |cell| try text.appendSlice(a, screen.projection.grapheme(cell));
+    return std.mem.indexOf(u8, text.items, marker) != null;
+}
+
+fn shellProductSubmit(fixture: *TestFixture, service: @import("../host/terminal_service.zig").Service, comptime method: anytype, request: anytype) !@import("../host/terminal_service.zig").Submission {
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 3 * std.time.ns_per_s;
+    while (true) {
+        const status = service.status() catch |err| {
+            if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() > deadline) return err;
+            try fixture.tick(null);
+            continue;
+        };
+        var current = request;
+        current.mode_revision = status.mode_revision;
+        if (@hasField(@TypeOf(request), "geometry_revision")) current.geometry_revision = status.geometry.revision;
+        return @call(.auto, method, .{ service, current }) catch |err| {
+            // These are pre-admission races with real PTY mode/resize updates;
+            // retry only unaccepted user input with freshly observed metadata.
+            if ((err != error.WorkerBusy and err != error.StaleMode and err != error.StaleGeometry) or @import("../platform/realtime.zig").monotonicNs() > deadline) return err;
+            try fixture.tick(null);
+            continue;
+        };
+    }
+}
+
+fn shellProductExecutionSnapshot(fixture: *TestFixture, service: @import("../host/terminal_service.zig").Service) !@import("../host/terminal_service.zig").execution.Snapshot {
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 3 * std.time.ns_per_s;
+    while (true) {
+        return service.executionSnapshot() catch |err| {
+            if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() > deadline) return err;
+            try fixture.tick(null);
+            continue;
+        };
+    }
+}
+
+test "lifecycle default shell integration opens SSH work terminal without helper approval" {
     const raw_port = std.c.getenv("ZW_TEST_BOOTSTRAP_PRODUCT_PORT") orelse return error.SkipZigTest;
     const isolated = std.c.getenv("ZEROWORK_DATA_DIR") orelse return error.IsolatedBootstrapTestDirectoryRequired;
     if (!std.mem.startsWith(u8, std.mem.span(isolated), "/tmp/zw-bootstrap-product")) return error.IsolatedBootstrapTestDirectoryRequired;
@@ -999,7 +1564,9 @@ test "lifecycle bootstrap product real SSH source opens an approved new trusted 
     const a = std.testing.allocator;
     var fixture: TestFixture = undefined;
     try fixture.init();
-    fixture.reject_bootstrap_deployment = if (std.c.getenv("ZW_TEST_BOOTSTRAP_PRODUCT_MODE")) |mode| std.mem.eql(u8, std.mem.span(mode), "deny") else false;
+    // Reject any legacy deployment approval; default session creation must never ask for one.
+    fixture.reject_bootstrap_deployment = true;
+    fixture.acknowledge_ssh_frames = true;
     fixture.config_.ssh.auto_reconnect = false;
     fixture.config_.ssh.reconnect_max = 0;
     var roster = groups.Roster.init(a);
@@ -1045,25 +1612,21 @@ test "lifecycle bootstrap product real SSH source opens an approved new trusted 
     try controller.refreshAuthority(next);
     const group_ref = try @import("../ai/host_queries.zig").groupRef(a, next, next.binding.group);
     defer a.free(group_ref);
+    for ([_]@import("../host/lifecycle_supervisor.zig").ConnectionPolicy{ .reuse_only, .new_only, .prefer_reuse }) |policy| {
+        const allowed = try controller.authorize(next, .{ .kind = .open_session, .group = try controller.groupOwner(next.binding.group), .source = source, .connection_policy = policy, .interactive_execution = true });
+        try std.testing.expect(!allowed.bootstrap_required);
+        try std.testing.expectEqual(policy == .prefer_reuse, allowed.allow_new_fallback);
+    }
     const args = try std.json.Stringify.valueAlloc(a, .{ .group_ref = group_ref, .source_ref = source_ref, .connection_policy = "reuse_only", .interactive_execution = true, .request_key = "product-open" }, .{});
     defer a.free(args);
     var opened = try testInvoke(&fixture, &controller, &backend, &broker, "host.open_session", args);
     defer opened.deinit(a);
-    if (fixture.reject_bootstrap_deployment) {
-        try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.rejected, opened.status);
-        try std.testing.expectEqual(@as(usize, 1), fixture.bootstrap_approvals_seen);
-        for (0..5) |_| try fixture.tick(&bridge);
-        const cancelled = fixture.app.lifecycle_supervisor.entries.items[0].snapshot;
-        try std.testing.expectEqual(@import("../host/lifecycle_supervisor.zig").State.cancelled, cancelled.state);
-        try std.testing.expect(fixture.app.findHandle(cancelled.session.?) == null);
-        try std.testing.expectEqual(@as(usize, 1), fixture.workspace.tabs.items.len);
-        return;
-    }
     if (opened.status != .succeeded) std.debug.print("bootstrap product open receipt: {s}\n", .{opened.blocks[0].structured});
     try std.testing.expectEqual(@import("../ai/plugin_tools.zig").Status.succeeded, opened.status);
     const operation = fixture.app.lifecycle_supervisor.entries.items[0].request.operation_ref;
     const owned = fixture.app.lifecycle_supervisor.entries.items[0].snapshot.session.?;
     const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    var last_execution: ?@import("../host/terminal_execution.zig").Snapshot = null;
     while (true) {
         try fixture.tick(&bridge);
         const snapshot = try fixture.app.queryOwnedSession(operation, next);
@@ -1079,16 +1642,77 @@ test "lifecycle bootstrap product real SSH source opens an approved new trusted 
                 error.WorkerBusy => continue,
                 else => return err,
             };
-            if (execution.interactive_execution) break;
+            last_execution = execution;
+            if (execution.interactive_execution) {
+                try std.testing.expectEqual(@import("../host/terminal_execution.zig").CompletionSource.shell_reported, execution.completion_source);
+                break;
+            }
         }
-        if (@import("../platform/realtime.zig").monotonicNs() > deadline) return error.BootstrapTrustedSessionNotReady;
+        if (@import("../platform/realtime.zig").monotonicNs() > deadline) {
+            if (last_execution) |value| std.debug.print("shell product execution timeout state={s} source={s} capability={} input_ready={} failure={?s}\n", .{ @tagName(value.state), @tagName(value.completion_source), value.interactive_execution, value.input_ready, value.failure });
+            return error.ShellIntegrationSessionNotReady;
+        }
     }
-    try std.testing.expectEqual(@as(usize, 1), fixture.bootstrap_approvals_seen);
+    try std.testing.expectEqual(@as(usize, 0), fixture.bootstrap_approvals_seen);
     try std.testing.expectEqual(@as(usize, 2), roster.findById(@intCast(next.binding.group)).?.members.items.len);
     const source_mapping = fixture.app.findHandle(source).?;
     const source_runtime = fixture.workspace.sessionTab(source_mapping.legacy_id).?.runtime.?;
     const source_terminal = try source_runtime.terminalService();
-    try std.testing.expect(!(try source_terminal.executionSnapshot()).interactive_execution);
+    const source_execution = try source_terminal.executionSnapshot();
+    try std.testing.expectEqual(@import("../host/terminal_execution.zig").CompletionSource.shell_reported, source_execution.completion_source);
     try std.testing.expectEqual(@import("../host/session_host.zig").Lifecycle.attached, fixture.app.sessions.queryState(source).?.lifecycle);
     try std.testing.expect(!source.eql(owned));
+    const registered_terminal = switch (fixture.app.sessions.queryService(owned, .terminal)) {
+        .available => |value| value,
+        else => return error.TerminalServiceUnavailable,
+    };
+    const owned_mapping = fixture.app.findHandle(owned).?;
+    const owned_service = try fixture.workspace.sessionTab(owned_mapping.legacy_id).?.runtime.?.terminalService();
+    try std.testing.expect(owned_service.binding.eql(registered_terminal));
+    try std.testing.expect(fixture.app.sessions.bindingIsLive(owned_service.binding));
+    var execution_driver: ShellProductExecution = undefined;
+    try execution_driver.init(&fixture, &controller, &broker, journal_owner);
+    defer execution_driver.deinit();
+    const owned_ref = try @import("../ai/host_queries.zig").sessionRef(a, next, owned);
+    defer a.free(owned_ref);
+    try shellProductPromptReadiness(&fixture, owned_service, &execution_driver, owned_ref);
+    const first = try execution_driver.run(owned_ref, "cd /tmp; ZW_AI_STATE=persistent; printf 'AI_READY:%s\\n' \"$ZW_AI_STATE\"", "ai-state-first");
+    defer a.free(first);
+    try execution_driver.expectFinished(first, owned, 0, "AI_READY:persistent");
+    const second = try execution_driver.run(owned_ref, "printf 'AI_STATE:%s:%s\\n' \"$PWD\" \"$ZW_AI_STATE\"; (exit 7)", "ai-state-second");
+    defer a.free(second);
+    try execution_driver.expectFinished(second, owned, 7, "AI_STATE:/tmp:persistent");
+    const interactive = try execution_driver.run(owned_ref, "read -r -t 5 ZW_AI_ANSWER; printf 'AI_ANSWER:%s\\n' \"$ZW_AI_ANSWER\"", "ai-input-run");
+    defer a.free(interactive);
+    var waiting = try execution_driver.wait(interactive, .input_ready);
+    waiting.deinit(a);
+    var typed = try execution_driver.invoke("host.send_execution_input", .{ .execution_ref = interactive, .request_key = "ai-input-text", .text = "ordinary-answer" });
+    defer typed.deinit(a);
+    var typed_receipt = try std.json.parseFromSlice(struct { input_receipt: @import("../host/terminal_execution.zig").InputReceipt }, a, typed.blocks[0].structured, .{ .ignore_unknown_fields = true });
+    defer typed_receipt.deinit();
+    var written = try execution_driver.wait(interactive, .{ .written = typed_receipt.value.input_receipt.input_sequence });
+    written.deinit(a);
+    var entered = try execution_driver.invoke("host.send_execution_input", .{ .execution_ref = interactive, .request_key = "ai-input-enter", .key = "enter" });
+    entered.deinit(a);
+    try execution_driver.expectFinished(interactive, owned, 0, "AI_ANSWER:ordinary-answer");
+    const takeover = try execution_driver.run(owned_ref, "printf 'TAKEOVER_BEGIN\\n'; read -r -t 5 ZW_HUMAN; printf 'TAKEOVER_HUMAN:%s\\n' \"$ZW_HUMAN\"; sleep 0.3; printf 'TAKEOVER_END\\n'", "ssh-takeover-finish");
+    defer a.free(takeover);
+    try execution_driver.takeoverAndFinish(takeover, owned, owned_service);
+    std.debug.print("SHELL_PRODUCT_TAKEOVER_PASS same_execution=true natural_end=true complete_output=true task_settled=true\n", .{});
+    // A shell's next input prompt is not this Task's native lease. Finish the
+    // real Driver and wait for its execution/input/recording settlement facts.
+    try execution_driver.driver.finishTask(controller.authority);
+    const settlement_deadline = @import("../platform/realtime.zig").monotonicNs() + 5 * std.time.ns_per_s;
+    while (true) {
+        try fixture.tick(controller.bridge);
+        if (execution_driver.driver.taskEvidence(controller.authority.task_id)) |fact| if (fact.model_done and fact.executions_settled and fact.input_grants_released and fact.recordings_settled and fact.active_references == 0) break;
+        if (@import("../platform/realtime.zig").monotonicNs() > settlement_deadline) return error.ShellProductTaskNotSettled;
+    }
+    std.debug.print("SHELL_PRODUCT_SETTLED model_done=true input_released=true recordings_settled=true\n", .{});
+    std.debug.print("SHELL_PRODUCT_AI_PASS run=3 wait=true input=text+enter same_session=true source=shell_reported exits=0,7,0\n", .{});
+}
+
+// Include the narrow real Provider admission tests in the root test runner.
+test {
+    _ = @import("../plugins/ssh/terminal_service.zig");
 }

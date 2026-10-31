@@ -128,7 +128,7 @@ pub const Driver = struct {
         errdefer allocator.destroy(self);
         self.* = .{ .allocator = allocator, .journal_owner = retained, .scheduler = scheduler, .backend = backend, .controller = undefined, .wake = try Wakeup.init() };
         errdefer self.wake.deinit();
-        self.controller = execution.Controller.initWithJournal(allocator, execution.JournalAccess.from(lifecycle.ProcessJournal, retained), .{ .context = self, .authorize = authorize, .resolve = resolve, .handed_to_user = handedToUser, .terminal_call = terminalCall, .should_cancel = shouldCancel, .authorize_input = authorizeInput, .request_secret = requestSecret });
+        self.controller = execution.Controller.initWithJournal(allocator, execution.JournalAccess.from(lifecycle.ProcessJournal, retained), .{ .context = self, .authorize = authorize, .resolve = resolve, .handed_to_user = handedToUser, .terminal_call = terminalCall, .should_cancel = shouldCancel, .authorize_input = authorizeInput, .request_secret = requestSecret, .authorize_read = authorizeRead });
         self.thread = try std.Thread.spawn(.{}, run, .{self});
         return self;
     }
@@ -178,9 +178,8 @@ pub const Driver = struct {
         result.blocks = blocks;
         return result;
     }
-    /// UI-safe nonblocking commands. Ownership/input becomes handed off only
-    /// when the scheduled controller callback accepts the request; UI may show
-    /// revoking until it observes the execution's input_ready receipt.
+    /// UI-safe nonblocking stop request. Queue admission is not native input
+    /// release or process exit; taskEvidence/targetEvidence supply release facts.
     pub fn stopTask(self: *Driver, context: host.Context) !void {
         const request = try self.allocator.create(Request);
         errdefer self.allocator.destroy(request);
@@ -508,7 +507,7 @@ pub const Driver = struct {
             };
 
             const terminal_state = switch (snapshot.state) {
-                .sealed, .interval_recorded, .cancelled_unsent, .handed_off, .outcome_unknown, .recording_degraded => true,
+                .sealed, .interval_recorded, .cancelled_unsent, .outcome_unknown, .recording_degraded => true,
                 else => false,
             };
             if (input_count < inputs.len) {
@@ -532,7 +531,11 @@ pub const Driver = struct {
                 fact.active_executions += 1;
                 target_fact.active_executions += 1;
             }
-            const released = snapshot.local_released and snapshot.input_ready and snapshot.grant == null;
+            // input_ready is the empty editor/prompt gate for a *new* AI
+            // command. SSH reports completion before the next prompt and a
+            // human draft clears that gate again. Neither retains this
+            // execution's lease. local_released includes native input drain.
+            const released = snapshot.local_released and snapshot.grant == null;
             if (active and snapshot.input_handed_off) fact.handed_off_observers += 1;
             fact.controlled_executions_settled = fact.controlled_executions_settled and if (snapshot.input_handed_off and !pending) released else terminal_state and released and snapshot.recording_settled;
             fact.input_grants_released = fact.input_grants_released and released;
@@ -610,6 +613,27 @@ pub const Driver = struct {
         var exchange: Exchange = .{ .driver = self, .invocation = invocation, .reference = reference, .command = command, .hash = hash };
         try self.scheduled(&exchange, Exchange.invoke);
         return exchange.result orelse error.InvalidControllerReceipt;
+    }
+    fn authorizeRead(raw: *anyopaque, context: host.Context, original: host.Context, owner: identity.SessionHandle, id: identity.ExecutionId) !void {
+        const self: *Driver = @ptrCast(@alignCast(raw));
+        const authorize_read = self.backend.authorize_read orelse {
+            if (!context.conversation_id.eql(original.conversation_id) or !context.task_id.eql(original.task_id)) return error.ExecutionNotFound;
+            return;
+        };
+        const Exchange = struct {
+            driver: *Driver,
+            current: host.Context,
+            original: host.Context,
+            owner: identity.SessionHandle,
+            id: identity.ExecutionId,
+            callback: *const fn (*anyopaque, host.Context, host.Context, identity.SessionHandle, identity.ExecutionId) anyerror!void,
+            fn invoke(raw_exchange: *anyopaque) !void {
+                const value: *@This() = @ptrCast(@alignCast(raw_exchange));
+                try value.callback(value.driver.backend.context, value.current, value.original, value.owner, value.id);
+            }
+        };
+        var exchange: Exchange = .{ .driver = self, .current = context, .original = original, .owner = owner, .id = id, .callback = authorize_read };
+        try self.scheduled(&exchange, Exchange.invoke);
     }
     fn authorizeInput(raw: *anyopaque, invocation: host.Invocation, owner: identity.SessionHandle, id: identity.ExecutionId, request: terminal.execution.InputRequest) !void {
         const self: *Driver = @ptrCast(@alignCast(raw));

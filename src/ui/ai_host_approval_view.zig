@@ -9,6 +9,7 @@ const theme = @import("app_theme.zig");
 pub const Callbacks = struct {
     context: *anyopaque,
     on_decision: *const fn (*anyopaque, u64, [32]u8, bool) anyerror!void,
+    on_renew: ?*const fn (*anyopaque, u64, [32]u8) anyerror!void = null,
     on_route: ?*const fn (*anyopaque, u64, [32]u8, approval.routing.Route) anyerror!void = null,
 };
 pub const View = struct {
@@ -40,21 +41,28 @@ pub const View = struct {
     operation_id: u64 = 0,
     arguments_hash: [32]u8 = @splat(0),
     requested_url: ?[]u8 = null,
+    expired: bool = false,
+    state_label: *ui.Node = undefined,
+    accept_text: *ui.Signal([]const u8) = undefined,
     decision_pending: *ui.Signal(bool),
     accept_style: *ui.Signal(S.ButtonStyle),
     reject_style: *ui.Signal(S.ButtonStyle),
-    current_height: f32 = 167.625,
-    pub const card_height: f32 = 231.625;
-    pub const network_card_height: f32 = 167.625;
+    accept_label: *ui.Signal([]const u8) = undefined,
+    reject_label: *ui.Signal([]const u8) = undefined,
+    copy_label: *ui.Signal([]const u8) = undefined,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
         const self = try scope.createState(View, .{ .cx = cx, .root = undefined, .card = undefined, .body = undefined, .title = undefined, .target = undefined, .url = undefined, .summary = undefined, .network_row = undefined, .summary_row = undefined, .feedback = undefined, .source = undefined, .accept = undefined, .reject = undefined, .copy = undefined, .network_icon = undefined, .lifecycle_icon = undefined, .terminal_icon = undefined, .callbacks = callbacks, .decision_pending = try scope.createSignal(bool, false), .accept_style = try scope.createSignal(S.ButtonStyle, S.iconButton(true)), .reject_style = try scope.createSignal(S.ButtonStyle, S.iconButton(false)) });
+        self.accept_text = try scope.createSignal([]const u8, "批准此调用");
+        self.accept_label = try scope.createSignal([]const u8, "批准这次本机网络读取");
+        self.reject_label = try scope.createSignal([]const u8, "拒绝这次本机网络读取");
+        self.copy_label = try scope.createSignal([]const u8, "复制完整请求 URL");
         try scope.onCleanup(View, self, cleanup);
         self.root = try ui.boxStyled(cx, S.wrapper, .{});
         self.root.meta.ownership.meta.test_id = "ai.host_approval";
         self.root.setDisplay(.none);
-        self.card = try ui.boxStyled(cx, S.panel, .{});
-        self.card.setStyleInline(cx.allocator, .{ .height = .{ .px = card_height } });
+        self.card = try ui.boxStyled(cx, panelStyle, .{});
+        self.card.meta.ownership.meta.test_id = "ai.host_approval.card";
         try self.root.appendChild(cx.allocator, self.card);
         const header = try ui.boxStyled(cx, S.header, .{});
         try self.card.appendChild(cx.allocator, header);
@@ -76,12 +84,14 @@ pub const View = struct {
         self.target.meta.ownership.meta.test_id = "ai.host_approval.target";
         try header.appendChild(cx.allocator, self.target);
         const state = try ui.text(cx, "待确认", .{ .font_size = 10, .line_height = 1.65, .color = theme.current().fg_2 });
+        self.state_label = state;
+        state.meta.ownership.meta.test_id = "ai.host_approval.state";
         state.setStyleInline(cx.allocator, .{ .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = ui.Color.TRANSPARENT, .corner_radius = 5, .flex_shrink = 0 });
         try header.appendChild(cx.allocator, state);
         const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
         @import("ai_card_scroll.zig").containVertical(scroll);
         self.body = scroll.container;
-        scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 154.625 }, .flex_shrink = 0 });
+        scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{ .max = 220 } }, .max_height = 220, .flex_shrink = 0 });
         scroll.container.meta.ownership.meta.test_id = "ai.host_approval.details";
         scroll.content.setStyleInline(cx.allocator, S.content(cx.tokens));
         try self.card.appendChild(cx.allocator, scroll.container);
@@ -101,7 +111,7 @@ pub const View = struct {
             try self.route_row.appendChild(cx.allocator, button);
         }
         self.route_reason = try ui.textStyled(cx, R.reason, "");
-        self.route_reason.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 20 }, .margin = .{ .bottom = 6 }, .flex_shrink = 0 });
+        self.route_reason.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .margin = .{ .bottom = 6 }, .flex_shrink = 0 });
         self.route_reason.meta.ownership.meta.test_id = "ai.host_approval.route.reason";
         self.route_reason.setDisplay(.none);
         try scroll.content.appendChild(cx.allocator, self.route_reason);
@@ -123,14 +133,14 @@ pub const View = struct {
         const address_copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制完整请求 URL", .base_style = S.disclosureButton(), .on_click = cx.on(View, self, copyUrl) }).mount(scope, cx);
         address_copy.meta.ownership.meta.test_id = "ai.host_approval.copy_url";
         try self.network_row.appendChild(cx.allocator, address_copy);
-        const url_row = try ui.boxStyled(cx, S.commandRow, .{});
+        const url_row = try ui.boxStyled(cx, summaryRowStyle, .{});
         self.summary_row = url_row;
-        url_row.setStyleInline(cx.allocator, .{ .height = .{ .px = 76 } });
+        url_row.meta.ownership.meta.test_id = "ai.host_approval.summary_row";
         try scroll.content.appendChild(cx.allocator, url_row);
         const url_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
         @import("ai_card_scroll.zig").containVertical(url_scroll);
         url_scroll.container.setStyleInline(cx.allocator, S.commandViewport(cx.tokens));
-        url_scroll.container.setStyleInline(cx.allocator, .{ .height = .{ .px = 56 } });
+        url_scroll.container.setStyleInline(cx.allocator, .{ .height = .{ .fit = .{ .min = 37, .max = 105 } }, .min_height = 37, .max_height = 105, .overflow_hidden = true });
         url_scroll.container.meta.ownership.meta.test_id = "ai.host_approval.summary_viewport";
         url_scroll.content.setStyleInline(cx.allocator, S.commandContent(cx.tokens));
         try url_row.appendChild(cx.allocator, url_scroll.container);
@@ -138,7 +148,7 @@ pub const View = struct {
         self.summary.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         self.summary.meta.ownership.meta.test_id = "ai.host_approval.summary";
         try url_scroll.content.appendChild(cx.allocator, self.summary);
-        const copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制完整请求 URL", .base_style = S.disclosureButton(), .on_click = cx.on(View, self, copyUrl) }).mount(scope, cx);
+        const copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = self.copy_label, .base_style = S.disclosureButton(), .on_click = cx.on(View, self, copyUrl) }).mount(scope, cx);
         self.copy = copy;
         copy.meta.ownership.meta.test_id = "ai.host_approval.copy";
         try url_row.appendChild(cx.allocator, copy);
@@ -150,15 +160,15 @@ pub const View = struct {
         self.feedback.meta.ownership.meta.test_id = "ai.host_approval.impact";
         try impact.appendChild(cx.allocator, self.feedback);
         try scroll.content.appendChild(cx.allocator, impact);
-        const footer = try ui.boxStyled(cx, S.footer, .{});
+        const footer = try ui.boxStyled(cx, footerStyle, .{});
         footer.meta.ownership.meta.test_id = "ai.host_approval.footer";
         try self.card.appendChild(cx.allocator, footer);
         try footer.appendChild(cx.allocator, try ui.spacer(cx));
-        const reject = try ui.widgets.Button(.{ .variant = .secondary, .label = "拒绝此调用", .a11y_label = "拒绝这次本机网络读取", .base_style = self.reject_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, rejectCall) }).mount(scope, cx);
+        const reject = try ui.widgets.Button(.{ .variant = .secondary, .label = "拒绝此调用", .a11y_label = self.reject_label, .base_style = self.reject_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, rejectCall) }).mount(scope, cx);
         self.reject = reject;
         reject.meta.ownership.meta.test_id = "ai.host_approval.reject";
         try footer.appendChild(cx.allocator, reject);
-        const accept = try ui.widgets.Button(.{ .variant = .primary, .label = "批准此调用", .a11y_label = "批准这次本机网络读取", .base_style = self.accept_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, acceptCall) }).mount(scope, cx);
+        const accept = try ui.widgets.Button(.{ .variant = .primary, .label = self.accept_text, .a11y_label = self.accept_label, .base_style = self.accept_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, acceptCall) }).mount(scope, cx);
         self.accept = accept;
         accept.meta.ownership.meta.test_id = "ai.host_approval.accept";
         try footer.appendChild(cx.allocator, accept);
@@ -182,40 +192,41 @@ pub const View = struct {
             errdefer self.cx.allocator.free(url);
             if (pending.kind == .network_url) try self.url.setTextContent(self.cx.allocator, url) else try self.summary.setTextContent(self.cx.allocator, url);
             const network = pending.kind == .network_url;
-            self.current_height = if (network) network_card_height else card_height + @as(f32, if (pending.route != null and pending.route.?.selectable) 58 else 0);
-            self.card.setStyleInline(self.cx.allocator, .{ .height = .{ .px = self.current_height } });
-            self.body.setStyleInline(self.cx.allocator, .{ .height = .{ .px = if (network) 90.625 else self.current_height - 77 } });
             self.network_row.setDisplay(if (network) .flex else .none);
             self.summary_row.setDisplay(if (network) .none else .flex);
             self.source.setDisplay(if (network) .none else .flex);
-            var target = pending.target.text();
             if (pending.kind == .network_url) {
                 const parsed = try std.Uri.parse(pending.canonical_url.text());
-                target = if (parsed.host) |value| switch (value) {
+                const target = if (parsed.host) |value| switch (value) {
                     .raw, .percent_encoded => |text| text,
                 } else "本机网络";
+                try self.target.setTextContent(self.cx.allocator, target);
+            } else {
+                const target = try @import("ai_tool_header_projection.zig").approvalTarget(self.cx.allocator, pending.tool.text(), pending.target.text(), pending.detail.text());
+                defer self.cx.allocator.free(target);
+                try self.target.setTextContent(self.cx.allocator, target);
             }
-            try self.target.setTextContent(self.cx.allocator, target);
             const interaction = std.mem.eql(u8, pending.tool.text(), "host.send_execution_input");
+            const saving_host = std.mem.eql(u8, pending.tool.text(), "host.create_host");
             try self.title.setTextContent(self.cx.allocator, switch (pending.kind) {
                 .network_url => "获取网页",
-                .lifecycle => "管理会话",
-                .terminal_command => if (interaction) "发送交互输入" else "执行命令",
+                .lifecycle => if (saving_host) "保存新主机" else "管理会话",
+                .terminal_command => if (interaction) "请求交互输入" else "请求执行命令",
             });
             self.network_icon.setDisplay(if (pending.kind == .network_url) .flex else .none);
             self.lifecycle_icon.setDisplay(if (pending.kind == .lifecycle) .flex else .none);
             self.terminal_icon.setDisplay(if (pending.kind == .terminal_command) .flex else .none);
-            if (self.accept.behavior.interaction.a11y) |*attrs| attrs.label = switch (pending.kind) {
+            self.accept_label.set(switch (pending.kind) {
                 .network_url => "批准这次本机网络读取",
-                .lifecycle => "批准这次会话管理操作",
+                .lifecycle => if (saving_host) "批准保存这台主机" else "批准这次会话管理操作",
                 .terminal_command => if (interaction) "批准这次受控输入" else "批准这次终端命令",
-            };
-            if (self.reject.behavior.interaction.a11y) |*attrs| attrs.label = switch (pending.kind) {
+            });
+            self.reject_label.set(switch (pending.kind) {
                 .network_url => "拒绝这次本机网络读取",
-                .lifecycle => "拒绝这次会话管理操作",
+                .lifecycle => if (saving_host) "拒绝保存这台主机" else "拒绝这次会话管理操作",
                 .terminal_command => if (interaction) "拒绝这次受控输入" else "拒绝这次终端命令",
-            };
-            if (self.copy.behavior.interaction.a11y) |*attrs| attrs.label = if (pending.kind == .network_url) "复制完整请求 URL" else "复制完整操作详情";
+            });
+            self.copy_label.set(if (pending.kind == .network_url) "复制完整请求 URL" else "复制完整操作详情");
             try self.source.setTextContent(self.cx.allocator, switch (pending.kind) {
                 .network_url => "来源 · 本机网络 · HTTP/HTTPS GET",
                 .lifecycle => "来源 · 当前对话 · 宿主管理操作",
@@ -234,6 +245,15 @@ pub const View = struct {
             self.arguments_hash = pending.arguments_hash;
             self.decision_pending.set(false);
         }
+        if (self.expired != pending.expired) self.decision_pending.set(false);
+        self.expired = pending.expired;
+        self.accept_text.set(if (pending.expired) "重新确认" else "批准此调用");
+        self.accept_label.set(if (pending.expired) "重新确认此请求" else switch (pending.kind) {
+            .network_url => "批准这次本机网络读取",
+            .lifecycle => if (std.mem.eql(u8, pending.tool.text(), "host.create_host")) "批准保存这台主机" else "批准这次会话管理操作",
+            .terminal_command => if (std.mem.eql(u8, pending.tool.text(), "host.send_execution_input")) "批准这次受控输入" else "批准这次终端命令",
+        });
+        try self.state_label.setTextContent(self.cx.allocator, if (pending.expired) "已过期 · 流程暂停" else "待确认");
         const has_routes = pending.route != null and pending.route.?.selectable;
         self.route_row.setDisplay(if (has_routes) .flex else .none);
         self.route_reason.setDisplay(if (has_routes) .flex else .none);
@@ -245,7 +265,7 @@ pub const View = struct {
         self.root.setDisplay(.flex);
     }
     pub fn height(self: *const View) f32 {
-        return if (self.sequence == null) 0 else self.current_height;
+        return if (self.sequence == null) 0 else self.card.globalRect().h;
     }
     fn cancelPress(self: *View) void {
         if (self.cx.pressed_node) |pressed| if (pressed == self.root or pressed.isDescendantOf(self.root)) self.cx.cancelPointerInteractions(.explicit);
@@ -253,6 +273,15 @@ pub const View = struct {
     fn decision(self: *View, approved: bool) void {
         const sequence = self.sequence orelse return;
         if (self.decision_pending.peek()) return;
+        if (approved and self.expired) {
+            const renew = self.callbacks.on_renew orelse return;
+            renew(self.callbacks.context, sequence, self.arguments_hash) catch |err| {
+                self.feedback.setTextContent(self.cx.allocator, @errorName(err)) catch {};
+                return;
+            };
+            self.cx.requestRedraw();
+            return;
+        }
         self.callbacks.on_decision(self.callbacks.context, sequence, self.arguments_hash, approved) catch |err| {
             self.feedback.setTextContent(self.cx.allocator, @errorName(err)) catch {};
             return;
@@ -306,5 +335,25 @@ fn impactTextStyle(tokens: *const ui.ThemeTokens) ui.TextStyle {
     var style = S.impact(tokens);
     const colors = theme.current();
     style.color = theme.patchInk(colors.warn_ink, &.{theme.patchPaint(colors.warn.withAlpha(20), theme.popupAction())});
+    return style;
+}
+
+// Keep host approval sizing in the named styles themselves. Theme replay applies
+// these styles again; overriding S.commandRow's fixed 37px after mount allowed
+// the taller argument viewport to overlap both its source and impact notice.
+fn panelStyle(tokens: *const ui.ThemeTokens) ui.BoxStyle {
+    var style = S.panel(tokens);
+    style.height = .{ .fit = .{} };
+    return style;
+}
+fn summaryRowStyle(tokens: *const ui.ThemeTokens) ui.BoxStyle {
+    var style = S.commandRow(tokens);
+    style.height = .{ .fit = .{} };
+    style.margin = .{ .bottom = 8 };
+    return style;
+}
+fn footerStyle(tokens: *const ui.ThemeTokens) ui.BoxStyle {
+    var style = S.footer(tokens);
+    style.margin = .{ .top = 8 };
     return style;
 }

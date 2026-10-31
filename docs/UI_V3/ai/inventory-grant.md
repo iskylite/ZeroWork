@@ -45,9 +45,9 @@
 
 - `zig build test-ui -Dui-test-filter='inventory view' -j2 --summary all`：32/32 通过，含按需隐藏、三种决定、键盘、重复点击、失效反馈、禁用恢复、按压中换票和三主题/最窄宽布局。
 - `zig build test-ui -Dui-test-filter='AI composer' -j2 --summary all`：58/58 通过，含仅持续授权出现的撤销、运行中撤销且配置保持禁用、撤销消失/切换绑定的旧选择以及同绑定更换对话 ID 的旧菜单。
-- `zig build inventory-grant-preview -Dtest-mode=true -p /tmp/zw-inventory-ondemand-ui/build -j2 --summary all`：原生验收夹具构建通过。
-- `node e2e/ai_inventory_grant_component_native.ts /tmp/zw-inventory-ondemand-ui/build/bin/inventory-grant-preview /tmp/zw-inventory-ondemand-ui/native`：三主题×600/320 的六场景通过。实际点击拒绝、一次允许、持续允许、后续请求免重复审批、现有权限菜单运行中撤销、禁用和失效反馈；六个进程均通过正常 `/quit` 退出，退出码 0。
 
-HTML 计算样式、参考截图和原型交互结果位于 `/tmp/zw-inventory-ondemand-ui/html/`；原生截图、节点树、按钮几何与检查报告位于 `/tmp/zw-inventory-ondemand-ui/native/`。这些是生产组件与 broker 的隔离夹具，使用合成身份、独立 RPC 和数据目录，没有构造 ApplicationHost，也不读取用户工作区。真实应用的 provider/请求接线由主应用场景另行验证；这里不以隔离组件截图宣称真实查询路径已验收。
+实际点击拒绝、一次允许、持续允许、后续请求免重复审批、现有权限菜单运行中撤销、禁用和失效反馈；六个进程均通过正常 `/quit` 退出，退出码 0。
 
-最后一次禁用渐变修正使用本组件显式实色渐变替换 inline style host 中保留的旧主操作渐变；没有修改全局 Button。修正后定向 UI 仍为 32/32 通过，并只补验三个主题、320×420 原有视口中的 disabled/expired 六张实际 Metal 截图。`/tmp/zw-inventory-ondemand-ui/disabled-native/pixels.json` 记录按钮左内侧与审批卡空白处的 RGB 相等，六项最大通道差均为 0；图像为 `disabled-native/review.png`，已目视检查。完整六场景交互报告生成于该单行样式纠正之前；最后修正后的业务行为没有另行扩大回归范围。
+这些是生产组件与 broker 的隔离夹具，使用合成身份、独立 RPC 和数据目录，没有构造 ApplicationHost，也不读取用户工作区。真实应用的 provider/请求接线由主应用场景另行验证；这里不以隔离组件截图宣称真实查询路径已验收。
+
+最后一次禁用渐变修正使用本组件显式实色渐变替换 inline style host 中保留的旧主操作渐变；没有修改全局 Button。修正后定向 UI 仍为 32/32 通过，并只补验三个主题、320×420 原有视口中的 disabled/expired 六张实际 Metal 截图。完整六场景交互报告生成于该单行样式纠正之前；最后修正后的业务行为没有另行扩大回归范围。

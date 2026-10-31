@@ -176,8 +176,11 @@ body:not([data-functional-component]) .app-window[data-size=compact]{width:860px
 .host-hop{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:11px;line-height:18px;font-variant-numeric:tabular-nums}
 .host-hop svg{width:16px;height:16px;stroke-width:2.5}
 .host-route{overflow:visible;max-width:none;flex:none;display:inline-flex}
-/* Keep hop count visible while hover reveals the original row actions. */
+/* Keep route and hop count visible when row actions appear. */
+.host-route{width:36px;justify-content:flex-end;padding-right:0}
 .host-row:hover .host-route,.host-row:focus-within .host-route{display:inline-flex}
+.host-actions{gap:0}
+.host-action{width:24px;height:24px}
 .host-open .host-meta{flex:0 1 auto}
 
 /* SFTP columns align with the sidebar; transfer cards are siblings below file cards. */
@@ -263,3 +266,6 @@ body:not([data-functional-component]) .app-window[data-size=compact]{width:860px
 
 /* Host identity is marked by its row fill; no accent edge. */
 .host-row::before,.host-row:hover::before,.host-row:focus-within::before{content:none}
+
+/* Group members use spacing and header tint for focus; never a pane frame. */
+.pane-group .terminal-pane.focused .pane-head{background:var(--sel)}

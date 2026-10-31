@@ -197,11 +197,89 @@ static int drive_again(LIBSSH2_SESSION *session, struct zw_drive_wait *wait) {
     } \
 } while (0)
 
-int zw_libssh2_session_handshake_driven(LIBSSH2_SESSION *session, const ZW_SSH_DRIVE *options) {
+struct zw_handshake_io {
+    LIBSSH2_RECV_FUNC((*recv));
+    LIBSSH2_SEND_FUNC((*send));
+    ZW_SSH_HANDSHAKE_DIAGNOSTIC *diagnostic;
+};
+/* The driver is synchronous on the Session's sole IO owner. Thread-local
+   observation forwards the original callback/abstract unchanged, including
+   its EAGAIN/EINTR handling. Only the public SSH identification is hashed;
+   packet, authentication and terminal payloads are never inspected. */
+static _Thread_local struct zw_handshake_io *zw_handshake_io;
+static LIBSSH2_RECV_FUNC(observed_handshake_recv) {
+    struct zw_handshake_io *io = zw_handshake_io;
+    ssize_t rc = io->recv(socket, buffer, length, flags, abstract);
+    io->diagnostic->recv_code = rc;
+    io->diagnostic->recv_errno = rc < 0 ? errno : 0;
+    if (rc > 0) io->diagnostic->received_bytes += (unsigned long long)rc;
+    return rc;
+}
+static LIBSSH2_SEND_FUNC(observed_handshake_send) {
+    struct zw_handshake_io *io = zw_handshake_io;
+    ssize_t rc = io->send(socket, buffer, length, flags, abstract);
+    io->diagnostic->send_code = rc;
+    io->diagnostic->send_errno = rc < 0 ? errno : 0;
+    if (rc > 0) {
+        io->diagnostic->sent_bytes += (unsigned long long)rc;
+        const unsigned char *bytes = buffer;
+        for (ssize_t i = 0; i < rc && !io->diagnostic->identification_complete; ++i) {
+            io->diagnostic->identification_hash ^= bytes[i];
+            io->diagnostic->identification_hash *= 1099511628211ULL;
+            ++io->diagnostic->identification_bytes;
+            if (bytes[i] == '\n') io->diagnostic->identification_complete = 1;
+        }
+    }
+    return rc;
+}
+static void handshake_socket_metadata(int fd, ZW_SSH_HANDSHAKE_DIAGNOSTIC *diagnostic) {
+    diagnostic->socket_flags = fcntl(fd, F_GETFL, 0);
+    struct sockaddr_storage address;
+    socklen_t length = sizeof(address);
+    if (getpeername(fd, (struct sockaddr *)&address, &length) == 0) {
+        if (address.ss_family == AF_INET) {
+            const struct sockaddr_in *peer = (const struct sockaddr_in *)&address;
+            (void)inet_ntop(AF_INET, &peer->sin_addr, diagnostic->peer_address, sizeof(diagnostic->peer_address));
+            diagnostic->peer_port = ntohs(peer->sin_port);
+        } else if (address.ss_family == AF_INET6) {
+            const struct sockaddr_in6 *peer = (const struct sockaddr_in6 *)&address;
+            (void)inet_ntop(AF_INET6, &peer->sin6_addr, diagnostic->peer_address, sizeof(diagnostic->peer_address));
+            diagnostic->peer_port = ntohs(peer->sin6_port);
+        }
+    }
+    length = sizeof(address);
+    if (getsockname(fd, (struct sockaddr *)&address, &length) == 0) {
+        if (address.ss_family == AF_INET) diagnostic->local_port = ntohs(((const struct sockaddr_in *)&address)->sin_port);
+        else if (address.ss_family == AF_INET6) diagnostic->local_port = ntohs(((const struct sockaddr_in6 *)&address)->sin6_port);
+    }
+}
+int zw_libssh2_session_handshake_observed(LIBSSH2_SESSION *session,
+    const ZW_SSH_DRIVE *options, ZW_SSH_HANDSHAKE_DIAGNOSTIC *diagnostic) {
     struct zw_drive_wait wait = drive_begin(options);
+    struct zw_handshake_io io = {0};
+    struct zw_handshake_io *previous_io = zw_handshake_io;
+    if (diagnostic) {
+        memset(diagnostic, 0, sizeof(*diagnostic));
+        diagnostic->identification_hash = 14695981039346656037ULL;
+        handshake_socket_metadata(options->socket_fd, diagnostic);
+        io.diagnostic = diagnostic;
+        io.recv = (LIBSSH2_RECV_FUNC((*)))libssh2_session_callback_set2(session,
+            LIBSSH2_CALLBACK_RECV, (libssh2_cb_generic *)observed_handshake_recv);
+        io.send = (LIBSSH2_SEND_FUNC((*)))libssh2_session_callback_set2(session,
+            LIBSSH2_CALLBACK_SEND, (libssh2_cb_generic *)observed_handshake_send);
+        zw_handshake_io = &io;
+    }
     int result;
     DRIVE_STEP(result, libssh2_session_handshake(session, options->socket_fd), session, &wait);
+    if (diagnostic) {
+        libssh2_session_callback_set2(session, LIBSSH2_CALLBACK_RECV, (libssh2_cb_generic *)io.recv);
+        libssh2_session_callback_set2(session, LIBSSH2_CALLBACK_SEND, (libssh2_cb_generic *)io.send);
+        zw_handshake_io = previous_io;
+    }
     return result;
+}
+int zw_libssh2_session_handshake_driven(LIBSSH2_SESSION *session, const ZW_SSH_DRIVE *options) {
+    return zw_libssh2_session_handshake_observed(session, options, NULL);
 }
 
 static int connect_cancelled(zw_ssh_cancel_cb cancelled, void *ctx) {

@@ -79,14 +79,14 @@
 .v3-ai-welcome-logo{width:88px;height:88px;object-fit:contain;flex:none}
 .v3-ai-welcome h3{margin:0;font-size:15px;line-height:22px;font-weight:600;color:var(--fg)}
 .v3-ai-welcome .v3-ai-starters{width:100%;max-width:440px;gap:8px;flex:none}
-.v3-ai-welcome-recent{width:100%;max-width:440px;display:flex;flex-direction:column;gap:2px;margin-top:4px;flex:none}
+.v3-ai-welcome-recent{width:100%;min-width:0;max-width:440px;display:flex;flex-direction:column;gap:2px;margin-top:4px;flex:none}
 .v3-ai-welcome-recent>small{font-size:10.5px;line-height:16px;color:var(--muted)}
-.v3-ai-welcome-recent button{height:30px;min-height:30px;display:flex;align-items:center;gap:8px;border:0;border-radius:5px;padding:0;background:transparent;color:var(--fg);font-size:11px;line-height:16px;font-family:inherit;cursor:pointer}
+.v3-ai-welcome-recent button{width:100%;min-width:0;height:30px;min-height:30px;display:flex;align-items:center;gap:8px;border:0;border-radius:5px;padding:0;background:transparent;color:var(--fg);font-size:11px;line-height:16px;font-family:inherit;cursor:pointer}
 .v3-ai-welcome-recent button:hover,.v3-ai-welcome-recent button:focus-visible{background:var(--hover)}
 .v3-ai-welcome-recent button:disabled{opacity:.45;cursor:default}
 .v3-ai-welcome-recent svg{width:16px;height:16px;flex:none;fill:none;stroke:var(--muted);stroke-width:1.8}
 .v3-ai-welcome-recent button>span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left}
-.v3-ai-welcome-recent button>small{color:var(--muted)}
+.v3-ai-welcome-recent button>small{width:16px;height:16px;color:var(--muted);flex:none;text-align:center}
 
 @container ai-welcome (max-height:259px){.v3-ai-welcome{gap:8px}.v3-ai-welcome-logo{width:56px;height:56px}}
 
@@ -102,3 +102,6 @@
 
 /* Provider labels group the indented, primary model choices. */
 .v3-ai-model-row{padding-left:18px;font-size:11px;line-height:16px;font-weight:400}
+
+/* Transcript siblings share one 14px inset; cards own only their inner padding. */
+#ai-messages > :is(.assistant-answer,.ai-tool-card,.ap-card,.cleanup-row,.approval,.turn-status){width:100%;min-width:0;box-sizing:border-box;margin-left:0;margin-right:0}

@@ -6,6 +6,7 @@ const S = @import("ai_tool_approval_styles.zig");
 const theme = @import("app_theme.zig");
 pub const Callbacks = struct {
     context: *anyopaque,
+    renew: ?*const fn (*anyopaque, u64, [32]u8) anyerror!void = null,
     decide: *const fn (*anyopaque, u64, [32]u8, bool) anyerror!void,
 };
 pub const View = struct {
@@ -31,12 +32,16 @@ pub const View = struct {
     arguments_hash: [32]u8 = @splat(0),
     command_owned: ?[]u8 = null,
     expanded: bool = true,
+    expired: bool = false,
+    state_label: *ui.Node = undefined,
+    accept_text: *ui.Signal([]const u8) = undefined,
     decision_pending: *ui.Signal(bool),
     accept_style: *ui.Signal(S.ButtonStyle),
     reject_style: *ui.Signal(S.ButtonStyle),
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
         const self = try scope.createState(View, .{ .cx = cx, .root = undefined, .card = undefined, .body = undefined, .footer = undefined, .group_footer = undefined, .target_copy = undefined, .tail = undefined, .identity = undefined, .header_identity = undefined, .title = undefined, .command_copy = undefined, .command = undefined, .feedback = undefined, .callbacks = callbacks, .decision_pending = try scope.createSignal(bool, false), .accept_style = try scope.createSignal(S.ButtonStyle, S.iconButton(true)), .reject_style = try scope.createSignal(S.ButtonStyle, S.iconButton(false)) });
+        self.accept_text = try scope.createSignal([]const u8, "批准此调用");
         try scope.onCleanup(View, self, cleanup);
         self.root = try ui.boxStyled(cx, S.wrapper, .{});
         self.root.meta.ownership.meta.test_id = "ai.approval";
@@ -57,6 +62,8 @@ pub const View = struct {
         self.header_identity.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
         try header.appendChild(cx.allocator, self.header_identity);
         const state = try ui.text(cx, "待确认", .{ .font_size = 10, .line_height = 1.65, .color = theme.current().fg_2 });
+        self.state_label = state;
+        state.meta.ownership.meta.test_id = "ai.approval.state";
         state.setStyleInline(cx.allocator, .{ .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = ui.Color.TRANSPARENT, .corner_radius = 5, .flex_shrink = 0 });
         try header.appendChild(cx.allocator, state);
         self.target_copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制全部目标信息", .base_style = S.disclosureButton(), .on_click = cx.on(View, self, copyTargets) }).mount(scope, cx);
@@ -105,7 +112,7 @@ pub const View = struct {
         const reject = try ui.widgets.Button(.{ .variant = .secondary, .label = "拒绝此调用", .a11y_label = "拒绝此调用", .base_style = self.reject_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, rejectCall) }).mount(scope, cx);
         reject.meta.ownership.meta.test_id = "ai.approval.reject";
         try footer.appendChild(cx.allocator, reject);
-        const accept = try ui.widgets.Button(.{ .variant = .primary, .label = "批准此调用", .a11y_label = "批准此调用", .base_style = self.accept_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, acceptCall) }).mount(scope, cx);
+        const accept = try ui.widgets.Button(.{ .variant = .primary, .label = self.accept_text, .a11y_label = self.accept_text, .base_style = self.accept_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, acceptCall) }).mount(scope, cx);
         accept.meta.ownership.meta.test_id = "ai.approval.accept";
         try footer.appendChild(cx.allocator, accept);
         self.group_footer = try ui.boxStyled(cx, S.groupFooter, .{});
@@ -136,7 +143,7 @@ pub const View = struct {
             const command = try self.cx.allocator.dupe(u8, source.command);
             errdefer self.cx.allocator.free(command);
             const terminal = source.tool_id == null or std.mem.eql(u8, source.tool_id.?, "run_command");
-            try self.title.setTextContent(self.cx.allocator, if (terminal) "执行命令" else @import("ai_tool_titles.zig").title(source.tool_id.?) orelse "工具调用");
+            try self.title.setTextContent(self.cx.allocator, if (terminal) "请求执行命令" else @import("ai_tool_titles.zig").title(source.tool_id.?) orelse "工具调用");
             if (self.command_copy.behavior.interaction.a11y) |*attrs| attrs.label = if (terminal) "复制完整命令" else "复制调用参数";
             const target = if (source.group) try self.cx.allocator.dupe(u8, source.target) else if (source.cwd != null or terminal) try std.fmt.allocPrint(self.cx.allocator, "{s} · #{d} · 目录 {s}", .{ source.target, @backingInt(source.owner.session_id), source.cwd orelse "未知" }) else try std.fmt.allocPrint(self.cx.allocator, "{s} · #{d}", .{ source.target, @backingInt(source.owner.session_id) });
             defer self.cx.allocator.free(target);
@@ -155,6 +162,10 @@ pub const View = struct {
             self.expanded = true;
             self.decision_pending.set(false);
         }
+        if (self.expired != source.expired) self.decision_pending.set(false);
+        self.expired = source.expired;
+        self.accept_text.set(if (source.expired) "重新确认" else "批准此调用");
+        try self.state_label.setTextContent(self.cx.allocator, if (source.expired) "已过期 · 流程暂停" else "待确认");
         self.body.setDisplay(.flex);
         const desired: f32 = if (source.group) 207.625 else 167.625;
         self.card_height = desired;
@@ -186,6 +197,15 @@ pub const View = struct {
     fn decision(self: *View, approved: bool) void {
         const sequence = self.sequence orelse return;
         if (self.decision_pending.peek()) return;
+        if (approved and self.expired) {
+            const renew = self.callbacks.renew orelse return;
+            renew(self.callbacks.context, sequence, self.arguments_hash) catch |err| {
+                self.feedback.setTextContent(self.cx.allocator, @errorName(err)) catch {};
+                return;
+            };
+            self.cx.requestRedraw();
+            return;
+        }
         self.callbacks.decide(self.callbacks.context, sequence, self.arguments_hash, approved) catch |err| {
             self.feedback.setTextContent(self.cx.allocator, @errorName(err)) catch {};
             return;

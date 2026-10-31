@@ -23,6 +23,8 @@ pub const Record = struct {
     dispatch_started: bool = false,
     created_group: ?u64 = null,
     created_session: ?identity.SessionHandle = null,
+    /// Saved-host identity only; never a live session or credential source.
+    created_asset: ?identity.AssetOwner = null,
     execution: ?identity.ExecutionId = null,
     execution_receipt: ?ExecutionReceipt = null,
     committed_binding: ?scope.Owner = null,
@@ -61,6 +63,7 @@ pub const Update = struct {
     stage: Stage,
     created_group: ?u64 = null,
     created_session: ?identity.SessionHandle = null,
+    created_asset: ?identity.AssetOwner = null,
     execution: ?identity.ExecutionId = null,
     execution_receipt: ?ExecutionReceipt = null,
     committed_binding: ?scope.Owner = null,
@@ -191,6 +194,10 @@ pub const Journal = struct {
             if (record.created_session) |prior| if (!prior.eql(value)) return error.ResourceIdentityChanged;
             record.created_session = value;
         }
+        if (change.created_asset) |value| {
+            if (record.created_asset) |prior| if (!std.meta.eql(prior, value)) return error.ResourceIdentityChanged;
+            record.created_asset = value;
+        }
         if (change.execution) |value| {
             if (record.execution) |prior| if (!prior.eql(value)) return error.ResourceIdentityChanged;
             record.execution = value;
@@ -285,6 +292,7 @@ fn validateRecord(record: Record) !void {
     }
     if (record.created_group) |value| if (value == 0) return error.InvalidJournal;
     if (record.created_session) |value| if (@backingInt(value.session_id) == 0 or value.generation == 0) return error.InvalidJournal;
+    if (record.created_asset) |value| if (@backingInt(value.id) == 0 or value.revision == 0) return error.InvalidJournal;
     if (record.ownership != .borrowed_user and record.created_session == null) return error.InvalidJournal;
 }
 fn transitionAllowed(before: Stage, after: Stage) bool {

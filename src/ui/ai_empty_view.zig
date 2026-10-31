@@ -71,13 +71,26 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !
             const click = try scope.createState(RecentClick, .{ .context = actions.context, .select = actions.select.?, .id = entry.id });
             const button = try ui.widgets.Button(.{ .label = entry.title, .variant = .ghost, .block = true, .base_style = S.recent(), .on_click = cx.on(RecentClick, click, RecentClick.run) }).mount(scope, cx);
             button.meta.ownership.meta.test_id = "ai.empty.recent.link";
+            // Button's recipe only forwards part of base_style. Keep the row's
+            // width and spacing in its inline layer across theme replays.
+            button.setStyleInline(cx.allocator, S.recent());
             for (button.children.items) |child| child.setDisplay(.none);
-            try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("message-circle").?, S.muted(), S.icon()));
-            const text = try ui.text(cx, entry.title, S.label());
-            text.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0, .overflow_hidden = true });
+            const icon = try ui.iconTint(cx, ui.icons.get("message-circle").?, S.muted(), S.icon());
+            icon.meta.ownership.meta.test_id = "ai.empty.recent.icon";
+            try button.appendChild(cx.allocator, icon);
+            const text = try ui.textStyled(cx, S.recentTitle, entry.title);
+            text.meta.ownership.meta.test_id = "ai.empty.recent.title";
+            text.setStyleInline(cx.allocator, S.recentTitleBox());
             try button.appendChild(cx.allocator, text);
-            try button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("arrow-up-right").?, S.muted(), S.icon()));
-            try recent.appendChild(cx.allocator, button);
+            const arrow = try ui.iconTint(cx, ui.icons.get("arrow-up-right").?, S.muted(), S.icon());
+            arrow.meta.ownership.meta.test_id = "ai.empty.recent.arrow";
+            try button.appendChild(cx.allocator, arrow);
+            const hint = try ui.widgets.Tooltip(.{ .text = entry.title, .width = @as(f32, 320), .wrap = .char }).mount(scope, cx);
+            hint.content.meta.ownership.meta.test_id = "ai.empty.recent.tooltip";
+            hint.wrapper.setStyleInline(cx.allocator, S.recentSlot());
+            hint.trigger.setStyleInline(cx.allocator, S.recentSlot());
+            try hint.trigger.appendChild(cx.allocator, button);
+            try recent.appendChild(cx.allocator, hint.wrapper);
         }
         try root.appendChild(cx.allocator, recent);
     }

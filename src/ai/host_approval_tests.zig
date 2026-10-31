@@ -185,3 +185,67 @@ test "routing rejected pending choice and changed command cannot mint successor 
     changed.detail = "pwd; touch x";
     try std.testing.expect(try broker.beginGrantedSubject(call, changed, 9, a) == null);
 }
+
+test "host approval expiry suspends the worker until explicit renewal and a separate decision" {
+    const a = std.testing.allocator;
+    const ctx = context();
+    const json = "{\"url\":\"https://example.com/\"}";
+    const args = try std.json.parseFromSlice(std.json.Value, a, json, .{});
+    defer args.deinit();
+    const Clock = struct {
+        value: std.atomic.Value(i64) = .init(1000),
+        fn read(raw: ?*anyopaque) i64 {
+            return @as(*@This(), @ptrCast(@alignCast(raw.?))).value.load(.acquire);
+        }
+    };
+    var clock: Clock = .{};
+    var broker: approval.Broker = .{ .clock_context = &clock, .clock = Clock.read };
+    try broker.configure(ctx, 4);
+    const Worker = struct {
+        broker: *approval.Broker,
+        call: host.Invocation,
+        finished: std.atomic.Value(bool) = .init(false),
+        cancel: provider.CancelToken = .{},
+        failure: ?anyerror = null,
+        permit: ?approval.Permit = null,
+        fn run(self: *@This()) void {
+            defer self.finished.store(true, .release);
+            self.permit = self.broker.request(self.call, "https://example.com/", 4, std.testing.allocator, &self.cancel) catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+    };
+    var worker: Worker = .{ .broker = &broker, .call = try invocation(ctx, args.value, json) };
+    const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+    defer {
+        worker.cancel.cancel();
+        thread.join();
+    }
+    var pending: ?approval.Snapshot = null;
+    for (0..1000) |_| {
+        pending = broker.snapshot();
+        if (pending != null) break;
+        try @import("retry.zig").wait(1, null);
+    }
+    const frozen = pending orelse return error.ApprovalNotPublished;
+    clock.value.store(frozen.expires_at_ms + 1000, .release);
+    try @import("retry.zig").wait(30, null);
+    try std.testing.expect(broker.snapshot().?.expired);
+    try std.testing.expect(!worker.finished.load(.acquire));
+    try std.testing.expectError(error.StaleApproval, broker.decide(frozen.sequence, frozen.arguments_hash, true));
+    try broker.renew(frozen.sequence, frozen.arguments_hash);
+    try std.testing.expect(!broker.snapshot().?.expired);
+    try std.testing.expectEqual(frozen.sequence, broker.snapshot().?.sequence);
+    try std.testing.expectEqualStrings(frozen.call.text(), broker.snapshot().?.call.text());
+    try @import("retry.zig").wait(30, null);
+    try std.testing.expect(!worker.finished.load(.acquire));
+    try broker.decide(frozen.sequence, frozen.arguments_hash, true);
+    for (0..1000) |_| {
+        if (worker.finished.load(.acquire)) break;
+        try @import("retry.zig").wait(1, null);
+    }
+    try std.testing.expect(worker.finished.load(.acquire));
+    try std.testing.expect(worker.failure == null and worker.permit != null);
+    broker.finish(worker.permit.?);
+}

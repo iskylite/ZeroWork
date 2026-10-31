@@ -13,11 +13,16 @@ pub fn dot(cx: *ui.Cx) !*ui.Node {
 }
 pub fn elapsedLabel(buffer: []u8, elapsed_ms: u64) ![]const u8 {
     const seconds = elapsed_ms / std.time.ms_per_s;
-    return if (seconds < 60) std.fmt.bufPrint(buffer, "已运行{d}秒", .{seconds}) else std.fmt.bufPrint(buffer, "已运行{d}分钟{d:0>2}秒", .{ seconds / 60, seconds % 60 });
+    return if (seconds < 60) std.fmt.bufPrint(buffer, "处理用时{d}秒", .{seconds}) else std.fmt.bufPrint(buffer, "处理用时{d}分钟{d:0>2}秒", .{ seconds / 60, seconds % 60 });
 }
 pub fn elapsedMs(turn: *const Turn, now_wall: u64, now_mono: u64) u64 {
-    if (turn.ended_at_ms) |ended| return if (turn.started_mono_ms > 0) turn.elapsed_ms else ended -| turn.sent_at_ms;
-    return if (turn.started_mono_ms > 0) now_mono -| turn.started_mono_ms else now_wall -| turn.sent_at_ms;
+    const elapsed = if (turn.ended_at_ms) |ended| (if (turn.started_mono_ms > 0) turn.elapsed_ms else ended -| turn.sent_at_ms) else (if (turn.started_mono_ms > 0) now_mono -| turn.started_mono_ms else now_wall -| turn.sent_at_ms);
+    var waiting: u64 = 0;
+    for (turn.steps.items) |step| {
+        waiting +|= step.approval_elapsed_ms;
+        if (step.approval_started_ms) |start| waiting +|= (step.ended_ms orelse now_mono) -| start;
+    }
+    return elapsed -| waiting;
 }
 pub fn usageLabel(buffer: []u8, turn: *const Turn) ![]const u8 {
     const input = turn.input_tokens orelse return "Token 用量未返回";
@@ -35,7 +40,7 @@ pub const Label = struct {
 pub fn turnLabel(turn: *const Turn) Label {
     if (turn.ended_at_ms != null) return .{ .text = "～回合结束～", .animated = false };
     // A decision that needs the user takes precedence over other active tools.
-    for (turn.steps.items) |step| if (step.phase == .approval) return .{ .text = "～等待你确认～", .animated = false };
+    for (turn.steps.items) |step| if (step.phase == .approval) return .{ .text = if (step.approval_expired) "审批已过期 · 流程暂停" else "等待确认 · 流程暂停", .animated = false };
     var index = turn.steps.items.len;
     while (index > 0) {
         index -= 1;

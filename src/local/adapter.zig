@@ -150,6 +150,7 @@ const Entry = struct {
     trusted: ?trusted_mod.Bridge = null,
     trusted_error: ?[]const u8 = null,
     execution: ?execution_mod.Bridge = null,
+    ai_registered_execution: ?@import("../host/identity.zig").ExecutionId = null,
     execution_interrupt_requested: bool = false,
     execution_interrupt_deadline: i64 = 0,
     metadata_identity: archive_mod.MetadataIdentity,
@@ -655,7 +656,18 @@ pub const LocalAdapter = struct {
         return .{ .handle = handle, .stdout = stdout, .stderr = try allocator.dupe(u8, job.stderr.items), .exit = job.exit, .cancelled = job.cancelled, .timed_out = job.timed_out, .truncated = job.truncated, .cleanup = job.cleanup, .done = job.done };
     }
 
-    const service_vtable: terminal.Service.VTable = .{ .recording_identity = serviceRecordingIdentity, .content_query = serviceContentQuery, .execution_input = serviceExecutionInput, .execution_secret = serviceExecutionSecret, .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .search_async = serviceSearchAsync, .search_tail = serviceSearchTail, .export_recording = serviceExportRecording, .recording_lease = serviceRecordingLease, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel, .recording_display = serviceRecordingDisplay, .execution_output = serviceExecutionOutput, .execution_snapshot = serviceExecutionSnapshot, .execution_request = serviceExecutionRequest, .execution_renew = serviceExecutionRenew, .execution_revoke = serviceExecutionRevoke };
+    const service_vtable: terminal.Service.VTable = .{ .command_history_snapshot = serviceCommandHistorySnapshot, .recording_identity = serviceRecordingIdentity, .content_query = serviceContentQuery, .execution_input = serviceExecutionInput, .execution_secret = serviceExecutionSecret, .write = serviceWrite, .resize = serviceResize, .read = serviceRead, .receipt = serviceReceipt, .status = serviceStatus, .text_slot = serviceText, .snapshot = serviceSnapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = serviceKey, .mouse = serviceMouse, .create_anchor = serviceCreateAnchor, .resolve_anchor = serviceResolveAnchor, .release_anchor = serviceReleaseAnchor, .selection_text = serviceSelectionText, .scroll = serviceScroll, .read_lines = serviceReadLines, .theme = serviceSetTheme, .search_snapshot = serviceSearchSnapshot, .search_async = serviceSearchAsync, .search_tail = serviceSearchTail, .export_recording = serviceExportRecording, .recording_lease = serviceRecordingLease, .application_record = serviceApplicationRecord, .trusted_snapshot = serviceTrustedSnapshot, .trusted_request = serviceTrustedRequest, .trusted_outcome = serviceTrustedOutcome, .trusted_cancel = serviceTrustedCancel, .recording_display = serviceRecordingDisplay, .execution_output = serviceExecutionOutput, .execution_snapshot = serviceExecutionSnapshot, .execution_request = serviceExecutionRequest, .execution_renew = serviceExecutionRenew, .execution_revoke = serviceExecutionRevoke };
+    fn serviceCommandHistorySnapshot(raw: *anyopaque, binding: host.ServiceHandle, allocator: std.mem.Allocator) !terminal.CommandHistorySnapshot {
+        const self: *LocalAdapter = @ptrCast(@alignCast(raw));
+        const entry = try self.resolve(binding, .terminal, false);
+        if (!entry.mutex.tryLock()) return error.WorkerBusy;
+        defer entry.mutex.unlock();
+        if (entry.recording) |recording| return recording.commandHistorySnapshot(entry.handle, allocator);
+        const failure = entry.recording_error orelse "RecordingDisabled";
+        const owned_failure = try allocator.dupe(u8, failure);
+        errdefer allocator.free(owned_failure);
+        return .{ .owner = entry.handle, .records = try allocator.alloc(manifest.CommandExecution, 0), .partial = true, .failure = owned_failure };
+    }
     fn serviceRecordingIdentity(raw: *anyopaque, binding: host.ServiceHandle) !terminal.RecordingIdentity {
         const self: *LocalAdapter = @ptrCast(@alignCast(raw));
         const entry = try self.resolve(binding, .terminal, false);
@@ -686,6 +698,7 @@ pub const LocalAdapter = struct {
         if (entry.close_requested.load(.acquire) or entry.process_state != .running or entry.eof or entry.terminal_error != null) return error.SessionNotWritable;
         if (entry.writes.items.len != 0 or entry.pending_bytes != 0 or entry.reply_offset != entry.reply_len) return error.InputConflict;
         const execution = if (entry.execution) |*value| value else return error.UnsupportedInteraction;
+        if (request.wait_sequence == terminal.execution.stream_wait_sequence and entry.modes.alternate_screen) return error.UnsupportedInteraction;
         const receipt = try execution.sendInput(request, nowMs());
         entry.wakeup.notify();
         return receipt;
@@ -718,6 +731,8 @@ pub const LocalAdapter = struct {
         const execution = if (entry.execution) |*value| value else return .{ .owner = entry.handle };
         if (execution.lease.holder != null and nowMs() >= execution.lease.expires_at) execution.fail("LeaseExpired", false);
         var value = execution.snapshot;
+        value.input_wait = execution.inputAvailability();
+        if (entry.modes.alternate_screen and value.input_wait != null and value.input_wait.?.kind == .terminal_stream) value.input_wait = null;
         if (entry.recording == null and execution.last_execution == null) {
             value.interactive_execution = false;
             value.state = .unavailable;
@@ -1201,6 +1216,7 @@ fn run(entry: *Entry) void {
         return;
     };
     entry.vt.?.configureTerminalType(entry.options.term);
+    entry.vt.?.setCommandObserver(.{ .context = entry, .changed = nativeCommandObserved });
     entry.vt.?.setScrollbackLimit(entry.options.scrollback_limit) catch {
         startFailure(entry, .{ .domain = .plugin, .code = "ScrollbackConfigurationFailed", .stage = "terminal", .cleanup = .released, .safe_message = "无法设置终端显示行数" });
         return;
@@ -1268,10 +1284,14 @@ fn run(entry: *Entry) void {
             if (closing) {
                 if (execution.observationGrant() != null or execution.lease.holder != null) execution.fail("SessionClosed", false);
             } else if (entry.pid) |pid| execution.poll(pid, nowMs());
+            registerNativeAiSubmission(entry);
             advanceExecution(entry);
             settleFailedExecution(entry);
         }
-        if (closing) while (entry.writes.items.len > 0) entry.completeWrite(.cancelled);
+        if (closing) {
+            while (entry.writes.items.len > 0) entry.completeWrite(.cancelled);
+            if (entry.execution) |*execution| if (execution.streamInputPending()) execution.streamInputFailed();
+        }
         if (entry.process) |*process| {
             if (!closing) {
                 if (entry.requested_geometry) |geometry| {
@@ -1292,7 +1312,15 @@ fn run(entry: *Entry) void {
                 // reply may precede a not-yet-started input, never bisect an
                 // input whose partial prefix already reached the PTY.
                 const input_started = entry.writes.items.len > 0 and entry.writes.items[0].consumed > 0;
-                if (!input_started) flushReply(entry, transport);
+                const stream_started = if (entry.execution) |*execution| execution.streamInputPending() and execution.stream_offset > 0 else false;
+                if (!input_started and !stream_started) flushReply(entry, transport);
+                if (entry.execution) |*execution| if (execution.streamInputPending() and entry.writes.items.len == 0 and entry.reply_offset == entry.reply_len) {
+                    const result = transport.write(execution.streamInputBytes()) catch blk: {
+                        execution.streamInputFailed();
+                        break :blk terminal.Write.would_block;
+                    };
+                    if (result == .bytes) execution.streamInputWritten(result.bytes);
+                };
                 if (entry.writes.items.len > 0 and entry.reply_offset == entry.reply_len) {
                     if (entry.execution) |*execution| if (execution.lease.holder != null and entry.writes.items[0].consumed == 0) {
                         entry.completeWrite(.cancelled);
@@ -1454,7 +1482,8 @@ fn run(entry: *Entry) void {
         const fd = if (!entry.eof and entry.output.freeCapacity() > 0) if (entry.process) |p| if (p.process) |native_process| native.zw_local_poll_fd(native_process) else -1 else -1 else -1;
         const edit_fd = if (!closing) if (entry.trusted) |*bridge| bridge.pollFd() else -1 else -1;
         const edit_writable = if (entry.trusted) |*bridge| bridge.tx_offset < bridge.tx.items.len else false;
-        const writable = entry.writes.items.len > 0 or entry.reply_offset < entry.reply_len;
+        const stream_pending = if (entry.execution) |*execution| execution.streamInputPending() else false;
+        const writable = stream_pending or entry.writes.items.len > 0 or entry.reply_offset < entry.reply_len;
         const edit_pending = if (entry.trusted) |bridge| bridge.pending != null else false;
         // Readability and the input pipe wake immediately. An idle session
         // only needs its next metadata deadline, not twenty timer polls/sec.
@@ -1658,9 +1687,27 @@ test "local adapter queued ordinary input follows live modes while paste and mou
     try std.testing.expectError(error.StaleMode, entry.synchronizeWrite(&text));
 }
 
+fn nativeCommandObserved(raw: *anyopaque, command: @import("../vt/snapshot.zig").Command) void {
+    const entry: *Entry = @ptrCast(@alignCast(raw));
+    if (entry.recording) |recording| recording.recordCommand(entry.handle, command);
+}
+fn registerNativeAiSubmission(entry: *Entry) void {
+    const bridge = if (entry.execution) |*value| value else return;
+    const id = bridge.snapshot.execution_id orelse return;
+    if (entry.ai_registered_execution) |previous| if (previous.eql(id)) return;
+    if (!bridge.snapshot.submit_sent) return;
+    const command = bridge.command orelse return;
+    const vt = if (entry.vt) |*value| value else return;
+    // An unsuccessful registration remains unknown. Retrying after the real
+    // C event could attribute a later manual command with identical text.
+    entry.ai_registered_execution = id;
+    vt.registerAiSubmission(id, command) catch return;
+}
+
 fn executionOutput(raw: *anyopaque, bytes: []const u8, raw_start: u64) void {
     const entry: *Entry = @ptrCast(@alignCast(raw));
     if (bytes.len == 0) return;
+    registerNativeAiSubmission(entry);
     if (entry.execution) |*execution| execution.capture(bytes);
     if (entry.options.retain_raw_output) entry.output.push(bytes) catch {
         entry.terminal_error = "OutputQueueFull";

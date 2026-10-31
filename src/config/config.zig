@@ -119,7 +119,7 @@ pub const Config = struct {
     pub fn format(self: Config, buffer: []u8) std.Io.Writer.Error![]const u8 {
         var writer = std.Io.Writer.fixed(buffer);
         try writer.print("[meta]\nconfig_revision = {d}\n\n", .{self.config_revision});
-        try writer.print("[ui]\nicon_background = \"{s}\"\ntheme = \"{s}\"\nfont_family = \"{s}\"\nfont_size = {d}\nfont_weight = \"{s}\"\nline_height = {d}\ncursor_style = \"{s}\"\nsidebar_collapsed = {}\ninput_line_highlight = {}\ntimestamp_gutter = {}\nscrollback_limit = {d}\n\n", .{ @tagName(self.ui.icon_background), self.ui.theme, self.ui.font_family, self.ui.font_size, self.ui.font_weight, self.ui.line_height, self.ui.cursor_style, self.ui.sidebar_collapsed, self.ui.input_line_highlight, self.ui.timestamp_gutter, self.ui.scrollback_limit });
+        try writer.print("[ui]\nicon_background = \"{s}\"\ntheme = \"{s}\"\nfont_family = \"{s}\"\nfont_size = {d}\nfont_weight = \"{s}\"\nline_height = {d}\ncursor_style = \"{s}\"\nsidebar_collapsed = {}\ninput_line_highlight = {}\ntimestamp_gutter = {}\ncommand_info = {}\nscrollback_limit = {d}\n\n", .{ @tagName(self.ui.icon_background), self.ui.theme, self.ui.font_family, self.ui.font_size, self.ui.font_weight, self.ui.line_height, self.ui.cursor_style, self.ui.sidebar_collapsed, self.ui.input_line_highlight, self.ui.timestamp_gutter, self.ui.command_info, self.ui.scrollback_limit });
         if (self.ui.sidebar_width) |width| try writer.print("sidebar_width = {d}\n\n", .{width});
         const background = self.ui.materials.background;
         try writer.print("[ui.materials]\nblur_px = {d}\n\n[ui.materials.background]\nenabled = {}\npath = ", .{ self.ui.materials.blur_px, background.enabled });
@@ -127,7 +127,7 @@ pub const Config = struct {
         try writer.print("\nfit = \"{s}\"\nalignment_x = \"{s}\"\nalignment_y = \"{s}\"\ntransparency = {d}\n\n", .{ @tagName(background.fit), @tagName(background.alignment_x), @tagName(background.alignment_y), background.transparency });
         try writer.print("[completion]\nenabled = {}\n\n", .{self.completion.enabled});
         try writer.print("[transfer]\ndedicated_connection = {}\nwindow_chunks = {d}\nchunk_kb = {d}\ndownload_dir = \"{s}\"\nverify_md5 = {}\nshared_pacing_kbps = {d}\nresume = {}\nmax_tasks = {d}\nconflict_policy = \"{s}\"\n\n", .{ self.transfer.dedicated_connection, self.transfer.window_chunks, self.transfer.chunk_kb, self.transfer.download_dir, self.transfer.verify_md5, self.transfer.shared_pacing_kbps, self.transfer.@"resume", self.transfer.max_tasks, self.transfer.conflict_policy });
-        try writer.print("[ssh]\nkeepalive_sec = {d}\nreconnect_max = {d}\nreconnect_backoff = [{d},{d},{d},{d},{d}]\nconnect_timeout_sec = {d}\nterm = \"{s}\"\ncompression = {}\nauto_reconnect = {}\nbuffer_input = {}\nsocks_port = {d}\nsocks_bind = \"{s}\"\notp_modal = {}\ntotp_autofill = {}\n\n", .{ self.ssh.keepalive_sec, self.ssh.reconnect_max, self.ssh.reconnect_backoff[0], self.ssh.reconnect_backoff[1], self.ssh.reconnect_backoff[2], self.ssh.reconnect_backoff[3], self.ssh.reconnect_backoff[4], self.ssh.connect_timeout_sec, self.ssh.term, self.ssh.compression, self.ssh.auto_reconnect, self.ssh.buffer_input, self.ssh.socks_port, self.ssh.socks_bind, self.ssh.otp_modal, self.ssh.totp_autofill });
+        try writer.print("[ssh]\nkeepalive_sec = {d}\nreconnect_max = {d}\nreconnect_backoff = [{d},{d},{d},{d},{d}]\nconnect_timeout_sec = {d}\nterm = \"{s}\"\ncompression = {}\nauto_shell_integration = {}\nauto_reconnect = {}\nbuffer_input = {}\nsocks_port = {d}\nsocks_bind = \"{s}\"\notp_modal = {}\ntotp_autofill = {}\n\n", .{ self.ssh.keepalive_sec, self.ssh.reconnect_max, self.ssh.reconnect_backoff[0], self.ssh.reconnect_backoff[1], self.ssh.reconnect_backoff[2], self.ssh.reconnect_backoff[3], self.ssh.reconnect_backoff[4], self.ssh.connect_timeout_sec, self.ssh.term, self.ssh.compression, self.ssh.auto_shell_integration, self.ssh.auto_reconnect, self.ssh.buffer_input, self.ssh.socks_port, self.ssh.socks_bind, self.ssh.otp_modal, self.ssh.totp_autofill });
         try writer.print("[ai]\ndefault_provider = \"{s}\"\npermission_mode = \"{s}\"\nexecution_mode = \"{s}\"\nsession_retention = \"{s}\"\nredact_ip = {}\nerror_hint = {}\nprovider_count = {d}\n", .{ self.ai.default_provider, @tagName(self.ai.permission_mode), @tagName(self.ai.execution_mode), @tagName(self.ai.session_retention), self.ai.redact_ip, self.ai.error_hint, self.ai.provider_count });
         var has_provider = false;
         for (self.ai.providers) |p| if (p.endpoint.len > 0 or p.api_key.len > 0 or p.api_key_ref != null or p.name.len > 0 or p.model_count > 0 or p.enabled) {
@@ -200,7 +200,7 @@ pub const Config = struct {
                 if (eq(key, "config_revision")) self.config_revision = try parseInt(u64, value) else return error.UnknownKey;
             },
             .ui => {
-                if (eq(key, "scrollback_limit")) self.ui.scrollback_limit = try parseInt(u32, value) else if (eq(key, "icon_background")) self.ui.icon_background = std.meta.stringToEnum(IconBackground, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "theme")) self.ui.theme = try parseString(value) else if (eq(key, "font_family")) self.ui.font_family = try parseString(value) else if (eq(key, "font_size")) self.ui.font_size = try parseInt(u8, value) else if (eq(key, "font_weight")) self.ui.font_weight = try parseString(value) else if (eq(key, "line_height")) self.ui.line_height = try parseFloat(value) else if (eq(key, "cursor_style")) self.ui.cursor_style = try parseString(value) else if (eq(key, "sidebar_collapsed")) self.ui.sidebar_collapsed = try parseBool(value) else if (eq(key, "sidebar_width")) self.ui.sidebar_width = try parseFloat(value) else if (eq(key, "input_line_highlight")) self.ui.input_line_highlight = try parseBool(value) else if (eq(key, "timestamp_gutter")) self.ui.timestamp_gutter = try parseBool(value) else return error.UnknownKey;
+                if (eq(key, "scrollback_limit")) self.ui.scrollback_limit = try parseInt(u32, value) else if (eq(key, "icon_background")) self.ui.icon_background = std.meta.stringToEnum(IconBackground, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "theme")) self.ui.theme = try parseString(value) else if (eq(key, "font_family")) self.ui.font_family = try parseString(value) else if (eq(key, "font_size")) self.ui.font_size = try parseInt(u8, value) else if (eq(key, "font_weight")) self.ui.font_weight = try parseString(value) else if (eq(key, "line_height")) self.ui.line_height = try parseFloat(value) else if (eq(key, "cursor_style")) self.ui.cursor_style = try parseString(value) else if (eq(key, "sidebar_collapsed")) self.ui.sidebar_collapsed = try parseBool(value) else if (eq(key, "sidebar_width")) self.ui.sidebar_width = try parseFloat(value) else if (eq(key, "input_line_highlight")) self.ui.input_line_highlight = try parseBool(value) else if (eq(key, "timestamp_gutter")) self.ui.timestamp_gutter = try parseBool(value) else if (eq(key, "command_info")) self.ui.command_info = try parseBool(value) else return error.UnknownKey;
             },
             .@"ui.materials" => {
                 if (eq(key, "blur_px")) self.ui.materials.blur_px = try parseInt(u8, value) else return error.UnknownKey;
@@ -216,7 +216,7 @@ pub const Config = struct {
                 if (eq(key, "dedicated_connection")) self.transfer.dedicated_connection = try parseBool(value) else if (eq(key, "window_chunks")) self.transfer.window_chunks = try parseInt(u8, value) else if (eq(key, "chunk_kb")) self.transfer.chunk_kb = try parseInt(u16, value) else if (eq(key, "download_dir")) self.transfer.download_dir = try parseString(value) else if (eq(key, "verify_md5")) self.transfer.verify_md5 = try parseBool(value) else if (eq(key, "shared_pacing_kbps")) self.transfer.shared_pacing_kbps = try parseInt(u32, value) else if (eq(key, "resume")) self.transfer.@"resume" = try parseBool(value) else if (eq(key, "max_tasks")) self.transfer.max_tasks = try parseInt(u8, value) else if (eq(key, "conflict_policy")) self.transfer.conflict_policy = try parseString(value) else return error.UnknownKey;
             },
             .ssh => {
-                if (eq(key, "keepalive_sec")) self.ssh.keepalive_sec = try parseInt(u16, value) else if (eq(key, "reconnect_max")) self.ssh.reconnect_max = try parseInt(u8, value) else if (eq(key, "reconnect_backoff")) self.ssh.reconnect_backoff = try parseBackoff(value) else if (eq(key, "connect_timeout_sec")) self.ssh.connect_timeout_sec = try parseInt(u16, value) else if (eq(key, "term")) self.ssh.term = try parseString(value) else if (eq(key, "compression")) self.ssh.compression = try parseBool(value) else if (eq(key, "auto_reconnect")) self.ssh.auto_reconnect = try parseBool(value) else if (eq(key, "buffer_input")) self.ssh.buffer_input = try parseBool(value) else if (eq(key, "socks_port")) self.ssh.socks_port = try parseInt(u16, value) else if (eq(key, "socks_bind")) self.ssh.socks_bind = try parseString(value) else if (eq(key, "otp_modal")) self.ssh.otp_modal = try parseBool(value) else if (eq(key, "totp_autofill")) self.ssh.totp_autofill = try parseBool(value) else return error.UnknownKey;
+                if (eq(key, "keepalive_sec")) self.ssh.keepalive_sec = try parseInt(u16, value) else if (eq(key, "reconnect_max")) self.ssh.reconnect_max = try parseInt(u8, value) else if (eq(key, "reconnect_backoff")) self.ssh.reconnect_backoff = try parseBackoff(value) else if (eq(key, "connect_timeout_sec")) self.ssh.connect_timeout_sec = try parseInt(u16, value) else if (eq(key, "term")) self.ssh.term = try parseString(value) else if (eq(key, "compression")) self.ssh.compression = try parseBool(value) else if (eq(key, "auto_shell_integration")) self.ssh.auto_shell_integration = try parseBool(value) else if (eq(key, "auto_reconnect")) self.ssh.auto_reconnect = try parseBool(value) else if (eq(key, "buffer_input")) self.ssh.buffer_input = try parseBool(value) else if (eq(key, "socks_port")) self.ssh.socks_port = try parseInt(u16, value) else if (eq(key, "socks_bind")) self.ssh.socks_bind = try parseString(value) else if (eq(key, "otp_modal")) self.ssh.otp_modal = try parseBool(value) else if (eq(key, "totp_autofill")) self.ssh.totp_autofill = try parseBool(value) else return error.UnknownKey;
             },
             .ai => {
                 if (eq(key, "default_provider")) self.ai.default_provider = try parseString(value) else if (eq(key, "permission_mode")) self.ai.permission_mode = std.meta.stringToEnum(PermissionMode, try parseString(value)) orelse return error.InvalidValue else if (eq(key, "execution_mode")) self.ai.execution_mode = std.meta.stringToEnum(ExecutionMode, try parseString(value)) orelse return error.InvalidExecutionMode else if (eq(key, "session_retention")) self.ai.session_retention = std.meta.stringToEnum(SessionRetention, try parseString(value)) orelse return error.InvalidSessionRetention else if (eq(key, "redact_ip")) self.ai.redact_ip = try parseBool(value) else if (eq(key, "error_hint")) self.ai.error_hint = try parseBool(value) else if (eq(key, "provider_count")) self.ai.provider_count = try parseInt(usize, value) else try self.applyProvider(allocator, key, value);
@@ -337,7 +337,7 @@ fn validPreferenceId(value: []const u8) bool {
 }
 
 pub const IconBackground = enum { transparent, light, dark };
-pub const Ui = struct { scrollback_limit: u32 = 25000, icon_background: IconBackground = .transparent, theme: []const u8 = "dark", font_family: []const u8 = "Monaco", font_size: u8 = 14, font_weight: []const u8 = "regular", line_height: f32 = 1.5, cursor_style: []const u8 = "bar", sidebar_collapsed: bool = false, sidebar_width: ?f32 = null, input_line_highlight: bool = true, timestamp_gutter: bool = false, materials: material.Materials = .{} };
+pub const Ui = struct { scrollback_limit: u32 = 25000, icon_background: IconBackground = .transparent, theme: []const u8 = "dark", font_family: []const u8 = "Monaco", font_size: u8 = 14, font_weight: []const u8 = "regular", line_height: f32 = 1.5, cursor_style: []const u8 = "bar", sidebar_collapsed: bool = false, sidebar_width: ?f32 = null, input_line_highlight: bool = true, timestamp_gutter: bool = false, command_info: bool = true, materials: material.Materials = .{} };
 pub fn resetDefaults() Config {
     var value: Config = .{};
     value.ui.theme = "sauber";
@@ -351,7 +351,7 @@ pub fn validCursorStyle(value: []const u8) bool {
 }
 pub const Completion = struct { enabled: bool = true };
 pub const Transfer = struct { dedicated_connection: bool = true, window_chunks: u8 = 16, chunk_kb: u16 = 64, download_dir: []const u8 = "~/Downloads", verify_md5: bool = false, shared_pacing_kbps: u32 = 2048, @"resume": bool = true, max_tasks: u8 = 3, conflict_policy: []const u8 = "ask" };
-pub const Ssh = struct { keepalive_sec: u16 = 30, reconnect_max: u8 = 5, reconnect_backoff: [5]u8 = .{ 1, 2, 4, 8, 16 }, connect_timeout_sec: u16 = 15, term: []const u8 = "xterm-256color", compression: bool = false, auto_reconnect: bool = true, buffer_input: bool = true, socks_port: u16 = 1080, socks_bind: []const u8 = "127.0.0.1", otp_modal: bool = true, totp_autofill: bool = false };
+pub const Ssh = struct { keepalive_sec: u16 = 30, reconnect_max: u8 = 5, reconnect_backoff: [5]u8 = .{ 1, 2, 4, 8, 16 }, connect_timeout_sec: u16 = 15, term: []const u8 = "xterm-256color", compression: bool = false, auto_shell_integration: bool = true, auto_reconnect: bool = true, buffer_input: bool = true, socks_port: u16 = 1080, socks_bind: []const u8 = "127.0.0.1", otp_modal: bool = true, totp_autofill: bool = false };
 pub const PermissionMode = enum { confirm, auto };
 /// Command routing is independent of the existing permission approval policy.
 pub const ExecutionMode = enum { auto, ask, isolated_exec, attached_pty, new_pty };
@@ -560,6 +560,13 @@ test "settings extensions survive non-default roundtrip and validate ranges" {
     try std.testing.expectError(error.InvalidValue, Config.parse("[notify]\nquiet_hours = \"25:00-08:00\"\n"));
     try std.testing.expectError(error.InvalidValue, Config.parse("[log]\nexport_format = \"html\"\n"));
 }
+test "auto shell integration global defaults on and persists off" {
+    try std.testing.expect((try Config.parse("")).ssh.auto_shell_integration);
+    const configured = try Config.parse("[ssh]\nauto_shell_integration = false\n");
+    var buffer: [8192]u8 = undefined;
+    const reloaded = try Config.parse(try configured.format(&buffer));
+    try std.testing.expect(!reloaded.ssh.auto_shell_integration);
+}
 
 test "provider models roundtrip with allocator ownership" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
@@ -725,4 +732,14 @@ test "execution policy five modes and retention round trip separately from permi
     try std.testing.expectEqual(SessionRetention.keep, frozen.session_retention);
     try std.testing.expectEqual(ExecutionMode.new_pty, resolveExecutionPolicy(.{}, .new_pty, null).execution_mode);
     try std.testing.expectEqual(ExecutionMode.isolated_exec, frozen.execution_mode);
+}
+
+test "command info defaults enabled and persists the visual opt out" {
+    try std.testing.expect((try Config.parse("")).ui.command_info);
+    const configured = try Config.parse("[ui]\ncommand_info = false\n");
+    var bytes: [16 * 1024]u8 = undefined;
+    const reloaded = try Config.parse(try configured.format(&bytes));
+    try std.testing.expect(!reloaded.ui.command_info);
+    try std.testing.expect(reloaded.ssh.auto_shell_integration);
+    try std.testing.expect(!reloaded.ui.timestamp_gutter);
 }

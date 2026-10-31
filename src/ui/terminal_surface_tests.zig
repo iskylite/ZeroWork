@@ -433,7 +433,9 @@ test "terminal surface public Cx wheel moves document viewport once without scro
     try std.testing.expectEqual(bottom, view.terminalSnapshot(owner).?.projection.scrollback.viewport_offset);
     try std.testing.expectEqual(@as(usize, 0), transport.scroll_calls);
     view.unbindTerminalService(owner);
-    try std.testing.expect(view.root.behavior.events.on_scroll == null);
+    try std.testing.expect(view.terminal_surface == null);
+    cx.handleScroll(.{ .x = bounds.x + bounds.w * 0.6, .y = bounds.y + bounds.h * 0.5, .dx = 0, .dy = 32 });
+    try std.testing.expectEqual(@as(usize, 0), transport.scroll_calls);
 }
 
 test "terminal surface scrolling retains glyph nodes for overlapping document rows" {
@@ -2405,7 +2407,6 @@ test "terminal surface double click spans soft wrapped filenames but stops at ha
     try std.testing.expectEqualStrings(filename, copied);
 }
 
-
 test "terminal surface AI control tag revalidates its exact grant and never submits terminal input" {
     var transport: FakeTransport = undefined;
     try transport.init(4, 60);
@@ -2465,4 +2466,85 @@ test "terminal surface AI control tag revalidates its exact grant and never subm
     transport.execution.?.input_handed_off = true;
     _ = try view.refreshTerminalService(owner, true);
     try std.testing.expectEqual(.none, tag.style.display);
+}
+
+test "terminal surface AI readonly rejects busy keyboard and paste without replay after takeover" {
+    var transport: FakeTransport = undefined;
+    try transport.init(4, 60);
+    defer transport.deinit();
+    try transport.controller.feedOutput(owner, 1, "READONLY_COPY", 1);
+    var clipboard: TestClipboard = .{};
+    var sdk = TestSdk.init(a, &clipboard, &TestClipboard.vtable, .{ .clipboard = true });
+    defer sdk.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setSystemSdk(&sdk);
+    cx.setViewport(600, 240);
+    var view = try View.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    const Handler = struct {
+        fn request(_: *anyopaque, _: identity.TaskId, _: identity.SessionHandle, _: identity.ExecutionId) !void {}
+    };
+    var ignored: u8 = 0;
+    view.setTerminalTakeoverHandler(.{ .context = &ignored, .request = Handler.request });
+    try view.bindTerminalService(transport.service());
+    _ = cx.render();
+    cx.setFocus(view.root);
+    _ = try view.refreshTerminalService(owner, true);
+    _ = cx.render();
+    const surface = view.terminal_surface.?;
+    transport.receipt_busy = true;
+    try surface.queueText("LOCAL_DRAFT_BEFORE_LEASE");
+    cx.handleKeyDown(.@"return", .{});
+    try surface.requestPaste("NEVER_QUEUED_PASTE");
+    try std.testing.expect(surface.pending.items.len == 2 and surface.paste_requested != null);
+    const execution_id = identity.ExecutionId.generate();
+    transport.execution = .{ .owner = owner, .execution_id = execution_id, .state = .running, .input_ready = false, .local_released = false, .grant = .{ .execution_id = execution_id, .task_id = .generate(), .fence = 2, .input_epoch = 3, .ownership_revision = 1 } };
+    transport.input_leased = true;
+    _ = try view.refreshTerminalService(owner, true);
+    try std.testing.expect(surface.control_grant != null);
+    // The existing view adopts recovery as a local editor draft; refresh
+    // never submits it, and the cancelled Enter cannot execute it later.
+    try std.testing.expectEqualStrings("LOCAL_DRAFT_BEFORE_LEASE", view.local_editor.text.items);
+    try std.testing.expectEqual(@as(usize, 0), surface.recovered_input.items.len);
+    _ = cx.render();
+    const x = surface.root.globalRect().x + surface.contentPadding().left + surface.bodyX();
+    const y = surface.root.globalRect().y + surface.contentPadding().top + 0.5 * surface.options.row_height;
+    cx.handleMouseDownEx(x, y, .left, .{});
+    cx.handleMouseMoveEx(x + 13 * surface.options.cell_width, y, .{});
+    cx.handleMouseUpEx(x + 13 * surface.options.cell_width, y, .left, .{});
+    const copies = clipboard.writes;
+    cx.handleKeyDown(.c, .{ .super = true });
+    try std.testing.expectEqual(copies + 1, clipboard.writes);
+    try std.testing.expectEqualStrings("READONLY_COPY", clipboard.text);
+    // A failed refresh must retain the known grant and its visible tag.
+    transport.busy = true;
+    _ = try view.refreshTerminalService(owner, true);
+    try std.testing.expect(surface.control_grant != null and surface.control_tag.?.style.display == .flex);
+    const sequence = surface.next_input;
+    // The busy receipt comes before write admission, reproducing the window
+    // in which queued read-only input previously survived until handoff.
+    transport.receipt_busy = true;
+    try std.testing.expectError(error.TerminalControlled, surface.queueText("NEVER_BUSY_WRITE"));
+    try std.testing.expectError(error.TerminalControlled, surface.requestPaste("NEVER_BUSY_PASTE"));
+    cx.handleKeyDown(.@"return", .{});
+    cx.handleKeyDown(.c, .{ .ctrl = true });
+    _ = view.root.behavior.events.on_event.?(.{ .ime_preedit = .{ .text = "NEVER_PREEDIT" } }, view.root.behavior.events.event_context);
+    _ = view.root.behavior.events.on_event.?(.{ .ime_commit = .{ .text = "NEVER_IME" } }, view.root.behavior.events.event_context);
+    try std.testing.expectEqual(@as(usize, 0), surface.pending.items.len);
+    try std.testing.expectEqual(@as(usize, 0), surface.pending_bytes);
+    try std.testing.expect(surface.pending_paste == null and surface.paste_requested == null);
+    try std.testing.expectEqual(@as(usize, 0), surface.preedit.len);
+    try std.testing.expectEqual(sequence, surface.next_input);
+    transport.receipt_busy = false;
+    transport.busy = false;
+    transport.input_leased = false;
+    transport.execution.?.grant = null;
+    transport.execution.?.input_handed_off = true;
+    _ = try view.refreshTerminalService(owner, true);
+    try surface.pump();
+    try std.testing.expectEqualStrings("", transport.written.items);
+    try surface.queueText("HUMAN_AFTER_TAKEOVER");
+    try std.testing.expectEqualStrings("HUMAN_AFTER_TAKEOVER", transport.written.items);
 }

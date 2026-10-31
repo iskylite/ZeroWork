@@ -33,6 +33,7 @@ pub const ExecutionRange = struct {
     start_boundary_sequence: ?u64 = null,
     end_boundary_sequence: ?u64 = null,
     completion_evidence: Evidence = .pending,
+    completion_source: execution.CompletionSource = .unknown,
     sealed: bool = false,
     output_scope: execution.OutputScope = .exact,
     output_attribution: execution.OutputAttribution = .unverified,
@@ -42,6 +43,28 @@ pub const ExecutionRange = struct {
     failure: ?[]const u8 = null,
     gaps: []const Gap = &.{},
 };
+pub const CommandExecution = struct { recording_generation: u64, value: @import("snapshot.zig").Command };
+
+/// Bounded, metadata-only copy for the on-demand live history panel. Every
+/// record and failure string is owned; no PTY bytes or cast replay are involved.
+pub const CommandHistorySnapshot = struct {
+    owner: @import("../host/identity.zig").SessionHandle = .{ .session_id = @fromBackingInt(0) },
+    recording_id: ?[32]u8 = null,
+    recording_generation: u64 = 0,
+    revision: u64 = 0,
+    records: []CommandExecution,
+    partial: bool = false,
+    pending: bool = false,
+    persistent: bool = false,
+    failure: ?[]u8 = null,
+    pub fn deinit(self: *CommandHistorySnapshot, allocator: std.mem.Allocator) void {
+        for (self.records) |record| if (record.value.command) |command| allocator.free(command);
+        allocator.free(self.records);
+        if (self.failure) |failure| allocator.free(failure);
+        self.* = undefined;
+    }
+};
+
 pub const Display = struct {
     title: []const u8 = "",
     host: []const u8 = "",
@@ -75,6 +98,7 @@ pub const Manifest = struct {
     display: Display = .{},
     recording: struct { version: u32 = 1, generations: []const Generation },
     execution_ranges: []const ExecutionRange = &.{},
+    command_history: []const CommandExecution = &.{},
     files: []const File = &.{},
     events: []const Event = &.{},
     coverage: Coverage = .partial,
@@ -85,6 +109,21 @@ pub const Manifest = struct {
     failure: ?[]const u8 = null,
     commit: struct { state: enum { recording, pending_index, indexed, metadata_only, removed } = .recording, committed_length: u64 = 0 } = .{},
 };
+
+/// The original Local private protocol is stronger evidence than a printable
+/// OSC D. Bind it by both execution identity and recording generation.
+pub fn applyPrivateCommandEvidence(command: *@import("snapshot.zig").Command, generation: u64, ranges: []const ExecutionRange) void {
+    const id = command.ai_execution_id orelse return;
+    const text = std.fmt.bytesToHex(id.bytes, .lower);
+    for (ranges) |range| {
+        if (range.recording_generation != generation or range.completion_source != .private_protocol or !std.mem.eql(u8, range.execution_id, &text)) continue;
+        const receipt = range.process_receipt orelse continue;
+        if (!receipt.foreground_finished) continue;
+        command.exit_code = if (receipt.exit_code) |code| code else null;
+        command.state = if (receipt.exit_code) |code| if (code == 0) .succeeded else .failed else if (receipt.signal != null) .failed else .unknown;
+        return;
+    }
+}
 
 pub fn pathForCast(allocator: std.mem.Allocator, cast_path: []const u8) ![]u8 {
     try validatePath(cast_path);
@@ -113,7 +152,17 @@ pub fn validate(value: Manifest) !void {
         _ = std.fmt.hexToBytes(&digest, file.checksum) catch return error.InvalidManifest;
         for (value.files[0..index]) |previous| if (std.mem.eql(u8, file.path, previous.path)) return error.InvalidManifest;
     }
+    for (value.command_history) |item| {
+        if (item.value.id == 0) return error.InvalidManifest;
+        const belongs = for (value.recording.generations) |generation| {
+            if (generation.recording_generation == item.recording_generation) break true;
+        } else false;
+        if (!belongs) return error.InvalidManifest;
+        if (item.value.ai_execution_id) |execution_id| if (!execution_id.valid()) return error.InvalidManifest;
+        if (item.value.command) |command| if (command.len > 16 * 1024 or !std.unicode.utf8ValidateSlice(command)) return error.InvalidManifest;
+    }
     for (value.execution_ranges) |range| {
+        if (range.sealed and range.completion_source == .shell_reported) return error.InvalidManifest;
         if (range.execution_id.len != 32) return error.InvalidManifest;
         if (range.end) |end| if (end.raw_offset < range.start.raw_offset or end.event_sequence <= range.start.event_sequence) return error.InvalidManifest;
         if (range.sealed and (range.end == null or range.start_boundary_sequence == null or range.end_boundary_sequence == null)) return error.InvalidManifest;
@@ -241,5 +290,28 @@ test "manifest old execution range defaults to exact without interval evidence" 
     const parsed = try std.json.parseFromSlice(ExecutionRange, std.testing.allocator, "{\"execution_id\":\"11111111111111111111111111111111\",\"recording_generation\":1,\"start\":{}}", .{});
     defer parsed.deinit();
     try std.testing.expect(parsed.value.output_scope == .exact and parsed.value.output_attribution == .unverified);
+    try std.testing.expectEqual(execution.CompletionSource.unknown, parsed.value.completion_source);
     try std.testing.expect(parsed.value.output_attribution_reason == null and parsed.value.process_receipt == null and !parsed.value.interval_saved);
+}
+test "manifest roundtrip preserves shell reported provenance" {
+    const value: ExecutionRange = .{ .execution_id = "11111111111111111111111111111111", .recording_generation = 1, .start = .{}, .completion_source = .shell_reported, .output_scope = .session_interval };
+    const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, value, .{});
+    defer std.testing.allocator.free(bytes);
+    const parsed = try std.json.parseFromSlice(ExecutionRange, std.testing.allocator, bytes, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(execution.CompletionSource.shell_reported, parsed.value.completion_source);
+    try std.testing.expect(!parsed.value.sealed and !parsed.value.interval_saved);
+}
+
+test "command history private result overrides printable D only for exact recording generation" {
+    const id = @import("../host/identity.zig").ExecutionId.generate();
+    const id_text = std.fmt.bytesToHex(id.bytes, .lower);
+    const ranges: []const ExecutionRange = &.{.{ .execution_id = &id_text, .recording_generation = 2, .start = .{}, .completion_source = .private_protocol, .process_receipt = .{ .foreground_finished = true, .exit_code = 7 } }};
+    var command: @import("snapshot.zig").Command = .{ .id = 1, .ai_execution_id = id, .command = "false", .start_ms = 100, .end_ms = 101, .elapsed_ms = 1, .exit_code = 0, .state = .succeeded };
+    applyPrivateCommandEvidence(&command, 1, ranges);
+    try std.testing.expectEqual(@as(?i32, 0), command.exit_code);
+    applyPrivateCommandEvidence(&command, 2, ranges);
+    try std.testing.expectEqual(@as(?i32, 7), command.exit_code);
+    try std.testing.expectEqual(@import("snapshot.zig").CommandState.failed, command.state);
+    try std.testing.expectEqual(@as(?u64, 1), command.elapsed_ms);
 }

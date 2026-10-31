@@ -11,4 +11,4 @@
 
 远程会话沿用同一组几何与主题样式，状态为远程终端已退出、连接已断开、正在重新连接、重新连接失败；退出码及错误原因来自当前运行时快照。只在原连接实际释放后显示重新连接／重试连接按钮。重连中保留“关闭页签”，既有会话的普通重连进度显示在提示条中，认证仍使用受保护的认证弹窗；连接恢复后自动隐藏提示条。自动重连倒计时来自控制器已有重连票据；输入缓冲说明跟随用户实际设置。
 
-原生验收：`node e2e/remote_session_notice_native.ts output/remote-session-notice`；自动重连及缓冲输入：`node e2e/remote_session_notice_native.ts output/remote-session-notice-auto --automatic --buffered`。用 `ZW_REMOTE_NOTICE_PREFIX` 指定本次构建前缀，默认 /tmp/zw-remote-notice-build。所有 SSH 流量与信任记录均使用临时目录和本机回环服务。远程参考截图为 remote-reference.png。
+原生验收：`node e2e/remote_session_notice_native.ts output/remote-session-notice`；自动重连及缓冲输入：`node e2e/remote_session_notice_native.ts output/remote-session-notice-auto --automatic --buffered`。所有 SSH 流量与信任记录均使用临时目录和本机回环服务。远程参考截图为 remote-reference.png。

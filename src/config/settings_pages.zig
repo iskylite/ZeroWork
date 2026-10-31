@@ -31,6 +31,7 @@ pub const keys = [_]ConfigKey{
     .{ .page = "SSH 与网络", .section = "ssh", .key = "connect_timeout_sec" },
     .{ .page = "SSH 与网络", .section = "ssh", .key = "term" },
     .{ .page = "SSH 与网络", .section = "ssh", .key = "compression" },
+    .{ .page = "SSH 与网络", .section = "ssh", .key = "auto_shell_integration" },
     .{ .page = "SSH 与网络", .section = "ssh", .key = "auto_reconnect" },
     .{ .page = "SSH 与网络", .section = "ssh", .key = "buffer_input" },
     .{ .page = "SSH 与网络", .section = "ssh", .key = "socks_port" },
@@ -59,6 +60,7 @@ pub const keys = [_]ConfigKey{
     .{ .page = "外观与主题", .section = "ui", .key = "scrollback_limit" },
     .{ .page = "AI 辅助", .section = "ai", .key = "execution_mode" },
     .{ .page = "AI 辅助", .section = "ai", .key = "session_retention" },
+    .{ .page = "外观与主题", .section = "ui", .key = "command_info" },
 };
 pub const sections = [_][]const u8{ "ui", "ui.materials", "ui.materials.background", "completion", "transfer", "ssh", "ai", "log", "notify" };
 
@@ -100,7 +102,7 @@ test "settings page map covers eight documented pages" {
     var buffer: [1024]u8 = undefined;
     const text = try formatPages(&buffer);
     try std.testing.expect(std.mem.indexOf(u8, text, "AI 辅助 [ai]") != null);
-    try std.testing.expectEqual(@as(usize, 56), keys.len);
+    try std.testing.expectEqual(@as(usize, 58), keys.len);
     try std.testing.expectEqualStrings("line_height", keys[5].key);
     try std.testing.expectEqualStrings("permission_mode", keys[20].key);
     try std.testing.expectEqualStrings("error_hint", keys[22].key);

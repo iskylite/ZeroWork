@@ -68,7 +68,7 @@ test "formatted help renders every local command" {
 
 test "help entries mirror local command catalog" {
     const entries = helpEntries();
-    try std.testing.expectEqual(@as(usize, 14), entries.len);
+    try std.testing.expectEqual(@as(usize, 15), entries.len);
     try std.testing.expect(catalog.find("@help") != null);
     try std.testing.expect(catalog.find("@sync") != null);
     try std.testing.expect(catalog.find("@@") != null);

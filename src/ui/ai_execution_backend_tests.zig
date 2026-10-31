@@ -542,7 +542,7 @@ fn revokeWithdrawnAuthorityBody(fixture: *Fixture, roster: *groups.Roster, kind:
     try std.testing.expect(cleanup_service.binding.eql(accepted.service.binding));
     try std.testing.expectError(error.WorkspaceClosed, api.terminal_call.?(api.context, cleanup_service, .{ .renew = grant }));
     switch (kind) {
-        .membership => try std.testing.expectError(error.TargetOutsideScope, ctx.preflight(prepared.invocation, prepared.command, prepared.command_hash)),
+        .membership => try std.testing.expectError(error.TargetNotAuthorized, ctx.preflight(prepared.invocation, prepared.command, prepared.command_hash)),
         .config_revision => try std.testing.expectError(error.ScopeChanged, ctx.preflight(prepared.invocation, prepared.command, prepared.command_hash)),
         .closed_conversation => try std.testing.expectError(error.BindingConflict, ctx.preflight(prepared.invocation, prepared.command, prepared.command_hash)),
     }
@@ -814,4 +814,41 @@ test "execution backend withdrawn member observes original idle shell before fix
         std.debug.print("withdrawal cleanup regression iteration={d}\n", .{iteration});
         try revokeWithdrawnAuthority(.membership);
     }
+}
+
+test "current-tab execution preflight rejects external existing and nonexistent session references" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    var roster = groups.Roster.init(a);
+    defer roster.deinit();
+    defer fixture.deinit();
+    const current = try fixture.local();
+    const external = try fixture.local();
+    var store = assistants.Store.init(a);
+    defer store.deinit();
+    var bridge = Bridge.init(a);
+    defer bridge.deinit();
+    var controller = try makeController(&fixture, &store, &roster, &bridge, current, .attached_pty);
+    defer controller.deinitAfterWorker();
+    var lookup: Lookup = .{ .controller = &controller };
+    var broker: approvals.Broker = .{};
+    var ctx = try backend.Context.init(.{ .app = fixture.app, .roster = &roster, .store = &store, .lookup_context = &lookup, .lookup_task = Lookup.find, .approval = &broker });
+    try ctx.captureTask(&controller);
+    var own = try Call.init(controller.authority, current, "true", 70);
+    defer own.deinit();
+    try ctx.validateInvocationScope(own.value);
+    for ([_]identity.SessionHandle{ external, .{ .session_id = @fromBackingInt(999999), .generation = 88 } }) |outside| {
+        var call = try Call.init(controller.authority, outside, "true", 71);
+        defer call.deinit();
+        try std.testing.expectError(error.TargetNotAuthorized, ctx.validateInvocationScope(call.value));
+        var prepared = try backend.prepare(call.value, a);
+        defer prepared.deinit();
+        try std.testing.expectError(error.TargetNotAuthorized, ctx.preflight(prepared.invocation, prepared.command, prepared.command_hash));
+    }
+    const next = try handoff(&fixture, &store, &roster, &controller, &bridge, current);
+    var within = try Call.init(next, current, "true", 72);
+    defer within.deinit();
+    try ctx.validateInvocationScope(within.value);
+    try roster.leave("backend-handoff", fixture.app.legacyForHandle(current).?);
+    try std.testing.expectError(error.TargetNotAuthorized, ctx.validateInvocationScope(within.value));
 }

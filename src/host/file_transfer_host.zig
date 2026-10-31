@@ -479,7 +479,7 @@ fn sameAuth(a: sessions.AuthOptions, b: sessions.AuthOptions) bool {
     };
 }
 fn sameConfig(a: sessions.RemoteConfig, b: sessions.RemoteConfig) bool {
-    if (!sameEndpoint(a.endpoint, b.endpoint) or !sameAuth(a.auth, b.auth) or a.strict_host_key_checking != b.strict_host_key_checking or !std.mem.eql(u8, a.terminal_type, b.terminal_type) or a.keepalive_sec != b.keepalive_sec or a.compression != b.compression or a.startup_commands.len != b.startup_commands.len) return false;
+    if (!sameEndpoint(a.endpoint, b.endpoint) or !sameAuth(a.auth, b.auth) or a.strict_host_key_checking != b.strict_host_key_checking or !std.mem.eql(u8, a.terminal_type, b.terminal_type) or a.keepalive_sec != b.keepalive_sec or a.compression != b.compression or a.auto_shell_integration != b.auto_shell_integration or a.startup_commands.len != b.startup_commands.len) return false;
     for (a.startup_commands, b.startup_commands) |left, right| if (!std.mem.eql(u8, left, right)) return false;
     return true;
 }

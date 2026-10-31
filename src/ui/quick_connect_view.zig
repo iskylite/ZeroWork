@@ -288,12 +288,14 @@ pub const View = struct {
             .escape => self.hide(),
             .up, .down => {
                 if (self.dirty or self.mode != .saved or self.matches.items.len == 0) return .stop;
-                var current: usize = 0;
+                var current: ?usize = null;
                 for (self.matches.items, 0..) |index, rank| if (self.selected != null and std.meta.eql(self.source.?.assets[index].owner, self.selected.?)) {
                     current = rank;
                     break;
                 };
-                const rank = if (key == .down) (current + 1) % self.matches.items.len else (current + self.matches.items.len - 1) % self.matches.items.len;
+                const rank = if (current) |rank|
+                    if (key == .down) (rank + 1) % self.matches.items.len else (rank + self.matches.items.len - 1) % self.matches.items.len
+                else if (key == .down) 0 else self.matches.items.len - 1;
                 self.selected = self.source.?.assets[self.matches.items[rank]].owner;
                 self.invalidate();
             },
@@ -368,7 +370,7 @@ pub const View = struct {
                 found = true;
                 break;
             };
-            if (!found) self.selected = if (self.matches.items.len > 0) self.source.?.assets[self.matches.items[0]].owner else null;
+            if (!found) self.selected = if (query.len > 0 and self.matches.items.len > 0) self.source.?.assets[self.matches.items[0]].owner else null;
             try self.title.setTextContent(self.cx.allocator, "快速连接");
             const caption = try std.fmt.allocPrint(self.cx.allocator, "已保存的主机 · {d} 个结果", .{self.matches.items.len});
             defer self.cx.allocator.free(caption);
@@ -416,7 +418,9 @@ pub const View = struct {
             self.secondary_label.set("关闭");
             self.disabled.set(false);
         }
-        self.primary.setStyleInline(self.cx.allocator, S.button(true, self.mode != .saved));
+        var primary_style = S.button(true, self.mode != .saved);
+        primary_style.opacity = if (self.disabled.peek()) 0.45 else 1;
+        self.primary.setStyleInline(self.cx.allocator, primary_style);
         self.secondary.setStyleInline(self.cx.allocator, S.button(false, self.mode != .saved));
         self.secondary.setDisplay(if (no_match) .none else .flex);
         if (no_match) self.secondary.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 84 } });

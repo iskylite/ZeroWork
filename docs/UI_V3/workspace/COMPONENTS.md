@@ -4,10 +4,10 @@
 
 | 功能组件 id | 来源 renderer/controller | 核心选择器 | 可操作状态/参数 |
 | --- | --- | --- | --- |
-| shell-tabs | renderTabs → V3.tab | #tabs, .titlebar | 点击/右键/关闭/拖序；mode=local/ssh/group；theme |
-| host-sidebar | renderHosts, showHostMenu, showWorkspaceTooltip | #sidebar, #tooltip, #context-menu | sidebar=expanded/collapsed；搜索/折叠/右键/连接；隔离页只有原侧栏折叠按钮，整机只显示顶栏折叠钮 |
-| terminal-input | terminalPane, inputCommand, commandKey | .terminal-scroll, .command-input, .command-palette | mode=local/ssh；直接输入、@补全、参数、右键粘贴与中键菜单 |
-| command-record | logMarkup, appRecord, execute | .app-command, .command-input | mode=ssh；@ts/@help/未知命令可生成成功或失败记录；与Shell文档同起点 |
+| shell-tabs | renderTabs → V3.tab | #tabs,.titlebar | 点击/右键/关闭/拖序；mode=local/ssh/group；theme |
+| host-sidebar | renderHosts, showHostMenu, showWorkspaceTooltip | #sidebar, #tooltip, #context-menu | sidebar=expanded/collapsed；hosts=layout、sidebar-width=220/238/480 检查直连/多跳与长名称；默认36px路由区，悬停/焦点保留路由并增加72px操作区；搜索/折叠/右键/连接；隔离页只有原侧栏折叠按钮，整机只显示顶栏折叠钮 |
+| terminal-input | terminalPane, inputCommand, commandKey |.terminal-scroll,.command-input,.command-palette | mode=local/ssh；直接输入、@补全、参数、右键粘贴与中键菜单 |
+| command-record | logMarkup, appRecord, execute |.app-command,.command-input | mode=ssh；@ts/@help/未知命令可生成成功或失败记录；与Shell文档同起点 |
 | session-menus | showHostMenu, showTabMenu, showTerminalMenu, menu | #context-menu | menu=host/tab/terminal；mode=local/ssh；真实复制配置、新会话、搜索、历史与导出入口；禁用能力保留状态 |
 | connection-status | renderStatus, identityPopover | #statusbar, #popover | mode=ssh/local；state=failed；延迟与状态同一组件 |
 | connection-route | connectionNodes, chainPopover, testConnectionRoute | #popover, #modal-root | mode=ssh；state=failed；查看节点、编辑、测试、取消；测试冻结原路径与owner |

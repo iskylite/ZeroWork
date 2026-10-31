@@ -111,3 +111,22 @@ playwright-report/
 # Locally rebuilt SSH dependency provenance
 /vendor/.ssh-build-receipt.json
 /vendor/.ssh-build-receipt.tmp
+
+# Keep design sources, code, tests and manuals; never track delivery records.
+/docs/DEVELOPMENT/
+/docs/DESIGN/*_VALIDATION.md
+/docs/DESIGN/*_ACCEPTANCE_MATRIX.md
+/docs/UI_V3/**/*VALIDATION*.md
+/docs/UI_V3/**/native-validation*.md
+/docs/UI_V3/**/review-[0-9]*.html
+/docs/UI_V3/**/review-followup-[0-9]*.html
+/docs/**/*.measurements.json
+/docs/**/*.png
+/docs/**/*.jpg
+/docs/**/*.jpeg
+/docs/**/*.webp
+/docs/**/*.gif
+!/docs/UI_V3/assets/ai/assistant-logo.png
+/docs/UI_V3/assets/design-records/
+/docs/UI_V3/connection/preview.svg
+/docs/UI_V3/settings/preview.svg

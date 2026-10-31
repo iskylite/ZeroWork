@@ -10,6 +10,74 @@ const scope: scope_mod.Scope = .{ .owner = .{ .session = 101 }, .members = .{ .i
 const definitions = [_]provider.ToolDefinition{ .{ .tool = .run_command, .session_ids = &.{101} }, .{ .tool = .read_terminal, .session_ids = &.{101} } };
 const df: provider.ToolCall = .{ .id = "call-local-df", .name = "run_command", .arguments = "{\"session_ids\":[101],\"command\":\"df -h\"}" };
 
+test "new offline turn retains two host tool turns without inheriting their authority" {
+    const tools = @import("plugin_tools.zig");
+    const identity = @import("../host/identity.zig");
+    const Fixture = struct {
+        count: usize = 0,
+        fn legacy(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedLegacyDispatch;
+        }
+        fn invoke(raw: *anyopaque, invocation: tools.host.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !tools.host.Result {
+            @as(*@This(), @ptrCast(@alignCast(raw))).count += 1;
+            return .{ .status = .succeeded, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision } };
+        }
+    };
+    var fixture: Fixture = .{};
+    var manager = manager_mod.Manager.init(a);
+    defer manager.deinit();
+    manager.scope = scope;
+    manager.tool_host = .{ .context = &fixture, .execute = Fixture.legacy, .execute_host = Fixture.invoke };
+    manager.tool_limits.context_window = 200_000;
+    var history: @import("wire_history.zig").History = .{};
+    defer history.deinit();
+    const conversation = identity.ConversationId.generate();
+    for (0..2) |index| {
+        const context: tools.host.Context = .{ .conversation_id = conversation, .task_id = identity.TaskId.generate(), .binding = scope.owner, .binding_revision = 1, .grant_revision = 1 };
+        var table = try tools.RequestTable.initWithHost(a, scope, &.{}, &.{}, context, &.{.{ .authority = .conversation_context, .definition = .{ .id = "host.get_current_context", .schema = "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}" } }});
+        defer table.deinit();
+        const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+        const call: provider.ToolCall = .{ .id = if (index == 0) "connected-first" else "connected-second", .name = wire[0].name(), .arguments = "{}" };
+        var script: Script = .{ .rounds = &.{ .{ .calls = &.{call} }, .{ .text = "connected answer" } } };
+        defer script.deinit();
+        var messages: std.ArrayList(provider.Message) = .empty;
+        defer messages.deinit(a);
+        try messages.appendSlice(a, history.messages);
+        try messages.append(a, .{ .content = "connected question" });
+        manager.turn_id = index + 1;
+        _ = try manager.run(script.interface(), .{ .model = "test", .system = "", .messages = messages.items, .tools = wire, .tool_table = &table });
+        try std.testing.expectEqual(index + 1, fixture.count);
+        const next = try @import("wire_history.zig").History.copy(a, manager.tool_run.?.messages.items, manager.round_text.items);
+        history.deinit();
+        history = next;
+    }
+    var messages: std.ArrayList(provider.Message) = .empty;
+    defer messages.deinit(a);
+    try messages.appendSlice(a, history.messages);
+    try messages.append(a, .{ .content = "terminal disconnected; answer without tools" });
+    var offline: Script = .{ .rounds = &.{.{ .text = "OFFLINE_NEW_ANSWER" }} };
+    defer offline.deinit();
+    manager.tool_host = null;
+    const request: provider.ChatRequest = .{ .model = "test", .system = "", .messages = messages.items };
+    // Removing authority cannot turn a retry into a new dispatchable turn.
+    try std.testing.expectError(error.InvalidHostAuthority, manager.run(offline.interface(), request));
+    try std.testing.expectEqual(@as(usize, 0), offline.index);
+    manager.turn_id += 1;
+    _ = try manager.run(offline.interface(), request);
+    try std.testing.expectEqual(@as(usize, 2), fixture.count);
+    try std.testing.expectEqualStrings("OFFLINE_NEW_ANSWER", manager.cards.cards.items[0].text);
+    try std.testing.expect(manager.tool_run.?.tool_table == null);
+    try std.testing.expectEqual(@as(usize, 0), manager.tool_run.?.records.items.len);
+    const body = try std.json.parseFromSlice(std.json.Value, a, offline.requests.items[0], .{});
+    defer body.deinit();
+    try std.testing.expect(body.value.object.get("tools") == null);
+    var results: usize = 0;
+    for (body.value.object.get("messages").?.array.items) |message| {
+        if (std.mem.eql(u8, message.object.get("role").?.string, "tool")) results += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 2), results);
+}
+
 test "round authority handoff preserves old tool pairs and refreshes only the next batch" {
     const tools = @import("plugin_tools.zig");
     const identity = @import("../host/identity.zig");

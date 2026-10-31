@@ -375,7 +375,7 @@ test "AI generic tool approval names the tool call and never invents a working d
     approval.sequence = 12;
     approval.tool_id = "run_command";
     try f.view.update(approval);
-    try std.testing.expectEqualStrings("执行命令", f.node("ai.approval.title").getText().?.content);
+    try std.testing.expectEqualStrings("请求执行命令", f.node("ai.approval.title").getText().?.content);
     try std.testing.expect(std.mem.endsWith(u8, f.view.identity.getText().?.content, "目录 未知"));
 }
 
@@ -456,6 +456,24 @@ test "host approval all subjects keep icons titles and fixed decisions aligned a
                     cx.layout();
                     _ = cx.render();
                 }
+                // Button's own reactive effect may rerun on disabled/style
+                // changes; its accessible name must keep the current subject.
+                view.decision_pending.set(true);
+                cx.layout();
+                _ = cx.render();
+                view.decision_pending.set(false);
+                cx.layout();
+                _ = cx.render();
+                try std.testing.expectEqualStrings(switch (@as(@import("ai/host_approval.zig").SubjectKind, kind)) {
+                    .network_url => "批准这次本机网络读取",
+                    .lifecycle => "批准这次会话管理操作",
+                    .terminal_command => "批准这次终端命令",
+                }, view.accept.behavior.interaction.a11y.?.label.?);
+                try std.testing.expectEqualStrings(switch (@as(@import("ai/host_approval.zig").SubjectKind, kind)) {
+                    .network_url => "拒绝这次本机网络读取",
+                    .lifecycle => "拒绝这次会话管理操作",
+                    .terminal_command => "拒绝这次终端命令",
+                }, view.reject.behavior.interaction.a11y.?.label.?);
                 const title = view.title.globalRect();
                 const icon = (switch (@as(@import("ai/host_approval.zig").SubjectKind, kind)) {
                     .network_url => view.network_icon,
@@ -536,4 +554,77 @@ test "PATCH approval detail viewports retain native thumbs and give long command
     cx.layout();
     try std.testing.expect(view.summary.globalRect().y < text_before.y);
     try std.testing.expectEqual(@as(f32, 0), host_body.state.scroll_y);
+}
+
+test "host approval content sizing survives theme replay and bounds long arguments and impact" {
+    const Host = @import("ui/ai_host_approval_view.zig");
+    const theme = @import("ui/app_theme.zig");
+    const Callback = struct {
+        fn decide(_: *anyopaque, _: u64, _: [32]u8, _: bool) !void {}
+    };
+    for ([_]f32{ 600, 360 }) |width| {
+        for ([_]bool{ false, true }) |long| {
+            const cx = try ui.Cx.init(a, std.testing.io);
+            defer cx.deinit();
+            cx.setViewport(width, 360);
+            const scope = try ui.Scope.init(a, null, cx.owner);
+            defer scope.dispose();
+            cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+            const view = try Host.View.mount(cx, scope, .{ .context = cx, .on_decision = Callback.decide });
+            try cx.root.?.appendChild(a, view.root);
+            const detail = if (long) try longCommand() else try a.dupe(u8, "{\"name\":\"catalog-created\",\"protocol\":\"ssh\",\"host\":\"192.0.2.42\",\"port\":2222,\"user\":\"fixture\",\"auth_mode\":\"password\",\"identity_file\":null}");
+            defer a.free(detail);
+            var source = hostSnapshot(if (long) .terminal_command else .lifecycle, detail);
+            const impact = if (long) try std.mem.join(a, " ", &@as([24][]const u8, @splat("执行完整命令前复验目标和运行方式；输出保留在终端记录中。"))) else try a.dupe(u8, "将此 SSH 主机保存到主机列表；密码和私钥口令由宿主安全界面输入。保存后可在当前绑定组中新建工作会话。");
+            defer a.free(impact);
+            @memcpy(source.impact.bytes[0..impact.len], impact);
+            source.impact.len = @intCast(impact.len);
+            if (long) {
+                @memcpy(source.impact.bytes[impact.len..][0..9], " END2048!");
+                source.impact.len += 9;
+            }
+            try view.update(source);
+            // The real app replays named styles while applying its theme after
+            // the approval mounts. A post-mount fixed row override was lost.
+            cx.setTheme(theme.widgetTheme(.dark));
+            for (0..4) |_| {
+                cx.layout();
+                _ = cx.render();
+            }
+            const body = view.body.globalRect();
+            const row = view.summary_row.globalRect();
+            const viewport = find(view.root, "ai.host_approval.summary_viewport").?.globalRect();
+            const notice = find(view.root, "ai.host_approval.impact_notice").?.globalRect();
+            const footer = find(view.root, "ai.host_approval.footer").?.globalRect();
+            const feedback = view.feedback.globalRect();
+            const source_rect = view.source.globalRect();
+            try std.testing.expect(row.y >= source_rect.y + source_rect.h - 0.01);
+            try std.testing.expect(viewport.y >= row.y and viewport.y + viewport.h <= row.y + row.h + 0.01);
+            try std.testing.expect(notice.y >= row.y + row.h + 7.99);
+            try std.testing.expect(feedback.y >= notice.y and feedback.y + feedback.h <= notice.y + notice.h + 0.01);
+            try std.testing.expect(body.h <= 220.01);
+            try std.testing.expect(viewport.h <= 105.01);
+            try std.testing.expectApproxEqAbs(body.y + body.h + 8, footer.y, 0.01);
+            try std.testing.expect(footer.y + footer.h <= view.card.globalRect().y + view.card.globalRect().h);
+            try std.testing.expect(footer.y + footer.h <= 360);
+            try std.testing.expectEqualStrings(detail, view.requested_url.?);
+            if (!long) {
+                // No spare fixed-height body remains below the short notice.
+                try std.testing.expectApproxEqAbs(notice.y + notice.h, body.y + body.h, 0.01);
+                try std.testing.expect(view.summary.globalRect().h + 20 <= viewport.h + 0.01);
+            } else {
+                try std.testing.expect(view.summary.globalRect().h > viewport.h);
+                try std.testing.expect(notice.h > 100);
+                const before = view.summary.globalRect().y;
+                cx.handleScroll(.{ .x = viewport.x + 20, .y = viewport.y + viewport.h / 2, .dx = 0, .dy = -100000 });
+                cx.layout();
+                try std.testing.expect(view.summary.globalRect().y < before);
+                const before_notice = view.feedback.globalRect().y;
+                cx.handleScroll(.{ .x = body.x + body.w - 10, .y = body.y + body.h - 10, .dx = 0, .dy = -100000 });
+                cx.layout();
+                try std.testing.expect(view.feedback.globalRect().y < before_notice);
+                try std.testing.expectEqual(footer, find(view.root, "ai.host_approval.footer").?.globalRect());
+            }
+        }
+    }
 }

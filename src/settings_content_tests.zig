@@ -78,6 +78,21 @@ fn byId(node: *ui.Node, id: []const u8) ?*ui.Node {
     for (node.children.items) |child| if (byId(child, id)) |found| return found;
     return null;
 }
+test "auto shell integration global toggle edits settings without affecting live sessions" {
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.controller.model.selectPage(2);
+    const mounted = try f.mount();
+    const toggle = byId(mounted.root, "settings.field.auto_shell_integration").?;
+    try std.testing.expect(f.controller.model.value.ssh.auto_shell_integration);
+    clickButton(toggle);
+    try std.testing.expect(!f.controller.model.value.ssh.auto_shell_integration);
+    try std.testing.expect(f.controller.model.dirty and f.controller.canSave());
+    clickButton(toggle);
+    try std.testing.expect(f.controller.model.value.ssh.auto_shell_integration);
+    try std.testing.expect(!f.controller.model.dirty);
+}
 
 test "AI settings filtered fields retain body and footer without a missing Provider action" {
     const ProviderHooks = struct {
@@ -749,7 +764,7 @@ test "native settings SSH uses precise accordion and inline control geometry" {
     const reconnect = byId(mounted.root, "settings.ssh.reconnect").?;
     const keepalive = byId(mounted.root, "settings.field.keepalive_sec").?;
     try std.testing.expectApproxEqAbs(@as(f32, 626), connection.globalRect().w, 0.1);
-    try std.testing.expectApproxEqAbs(@as(f32, 264), connection.globalRect().h, 0.1);
+    try std.testing.expectApproxEqAbs(@as(f32, 316), connection.globalRect().h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 62), reconnect.globalRect().h, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 220), keepalive.globalRect().w, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 32), keepalive.globalRect().h, 0.1);
@@ -1100,4 +1115,21 @@ test "appearance transparency uses tenths for display submission and slider keyb
     f.cx.handleKeyDown(.right, .{});
     try std.testing.expectApproxEqAbs(@as(f32, 74.6), f.controller.model.value.ui.materials.background.transparency, 0.0001);
     try std.testing.expectEqualStrings("74.6", input.getText());
+}
+
+test "command info global toggle participates in the saved appearance draft" {
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.controller.folded_sections = 0;
+    const mounted = try f.mount();
+    const toggle = byId(mounted.root, "settings.toggle.command_info").?;
+    try std.testing.expect(f.controller.model.value.ui.command_info);
+    clickButton(toggle);
+    try std.testing.expect(!f.controller.model.value.ui.command_info);
+    try std.testing.expect(f.controller.model.dirty and f.controller.canSave());
+    try std.testing.expect(f.controller.model.value.ssh.auto_shell_integration);
+    clickButton(toggle);
+    try std.testing.expect(f.controller.model.value.ui.command_info);
+    try std.testing.expect(!f.controller.model.dirty);
 }

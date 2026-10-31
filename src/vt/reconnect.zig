@@ -106,8 +106,10 @@ pub const Control = struct {
         /// Retained for this exact operation after a later transport fault.
         was_attached: bool = false,
         notification_incident: ?u64 = null,
+        /// True only after this generation's startup gate has completed.
+        shell_initialized: bool = false,
     };
-    pub const Grant = struct { previous: OperationKey, next: OperationKey };
+    pub const Grant = struct { previous: OperationKey, next: OperationKey, skip_shell_initialization: bool = false };
     mutex: std.atomic.Value(bool) = .init(false),
     value: Snapshot,
     grant: ?Grant = null,
@@ -149,18 +151,28 @@ pub const Control = struct {
         self.grant = null;
     }
     pub fn request(self: *Control, previous: OperationKey, next: OperationKey) !void {
+        return self.requestWithInitialization(previous, next, false);
+    }
+    pub fn requestWithInitialization(self: *Control, previous: OperationKey, next: OperationKey, skip: bool) !void {
         self.lock();
         defer self.unlock();
         if (self.value.key == null or !self.value.key.?.eql(previous)) return error.StaleOperation;
         if ((self.value.phase != .waiting and self.value.phase != .ended) or self.grant != null) return error.ReconnectAlreadyRequested;
         if (self.value.cleanup != .released) return error.CleanupNotReleased;
+        if (skip and (self.value.failure == null or self.value.failure.? != error.ShellInitializationFailed)) return error.InitializationConfirmationNotApplicable;
         if (previous.owner != .session or next.owner != .session or
             previous.owner.session.session_id != next.owner.session.session_id or
             previous.owner.session.generation == std.math.maxInt(u64) or next.owner.session.generation != previous.owner.session.generation + 1 or
             previous.attempt_id == null or previous.attempt_id.? == std.math.maxInt(u64) or next.attempt_id != previous.attempt_id.? + 1 or
             next.operation_id == previous.operation_id) return error.InvalidOperation;
-        self.grant = .{ .previous = previous, .next = next };
+        self.grant = .{ .previous = previous, .next = next, .skip_shell_initialization = skip };
         self.value.phase = .connecting;
+    }
+    pub fn initialized(self: *Control, key: ?OperationKey) void {
+        self.lock();
+        defer self.unlock();
+        if (!std.meta.eql(key, self.value.key) or (self.value.phase != .active and self.value.phase != .ready)) return;
+        self.value.shell_initialized = true;
     }
     /// IO-owner only. Taking the grant consumes it before any network IO.
     pub fn take(self: *Control) ?Grant {
@@ -296,4 +308,29 @@ test "normal shell end has no failure or automatic grant and keeps actual exit p
     try std.testing.expect(control.snapshot().exit_code == null);
     control.ended(first, .released, 0);
     try std.testing.expectEqual(Control.Phase.connecting, control.snapshot().phase);
+}
+
+test "initialization bypass is explicit generation-bound single-use and unavailable for network faults" {
+    const first: OperationKey = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(7) } }, .operation_id = 1, .attempt_id = 1 };
+    var next = first;
+    next.owner.session.generation += 1;
+    next.operation_id += 1;
+    next.attempt_id = 2;
+    var control = Control.init(first);
+    control.lost(first, .released, error.ConnectionClosed);
+    try std.testing.expectError(error.InitializationConfirmationNotApplicable, control.requestWithInitialization(first, next, true));
+    control.lost(first, .released, error.ShellInitializationFailed);
+    try control.requestWithInitialization(first, next, true);
+    const grant = control.take().?;
+    try std.testing.expect(grant.skip_shell_initialization);
+    try std.testing.expect(control.take() == null);
+    control.initialized(first);
+    try std.testing.expect(!control.snapshot().shell_initialized);
+    control.ready(next);
+    control.initialized(next);
+    try std.testing.expect(control.snapshot().shell_initialized);
+    control.lost(first, .released, error.ShellInitializationFailed);
+    try std.testing.expectEqual(Control.Phase.ready, control.snapshot().phase);
+    control.lost(next, .released, error.ShellInitializationFailed);
+    try std.testing.expectError(error.StaleOperation, control.requestWithInitialization(first, next, true));
 }

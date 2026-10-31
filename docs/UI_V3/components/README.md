@@ -20,7 +20,7 @@
 
 `primitives.css` / `primitives.js` 为本展板与真实设置模板共同消费的基础几何及命中区：32px输入、24px图标动作、30×18小开关。业务选择器的验证/自定义创建由对应业务控制器负责，不用静态样例冒充已接通业务。新功能组件通过现有设置/连接/工作区受控入口组合，禁止再复制相似演示。
 
-本轮细化验证：[记录](../settings/verification/refined/README.md)。下文旧轮次操作保留为历史证据，不等同本轮重新穷举。
+本轮细化验证：。下文旧轮次操作保留为历史证据，不等同本轮重新穷举。
 
 [返回设计中心](../index.html#components) · [打开独立组件展板](index.html)
 
@@ -65,4 +65,4 @@ IAB 1280×720 CSS px，DPR 2：API 协议下拉切到 Anthropic；文件页签 �
 
 补充实测：自定义字体输入 `Custom Mono` → Enter 后触发器更新；Tooltip 聚焦显示，位于视口内（x671/y384/240×46）；Sheet 输入0显示范围错误，改为5保存，重新打开读得5，Escape关闭并回返触发按钮。Sheet 遮罩为可见画布交集（x40/y8/1200×704）。查看 [Tooltip](index.html) 与 [Sheet](index.html) 交互原型；历史视口截图已清理。
 
-本轮实际复测了 Select 单步键盘移动、分段/Tab 方向键、Modal 连续打开后 Esc 的取消语义、Sheet 草稿取消/保存、滑块、任务失败重试与通知列表。860px 评审画布与滚动中浮层均有界；尺寸选择器位于产品外。详细路径、测量和原生 API 差异见 [专项报告](../verification/settings-components-audit.md)。
+本轮实际复测了 Select 单步键盘移动、分段/Tab 方向键、Modal 连续打开后 Esc 的取消语义、Sheet 草稿取消/保存、滑块、任务失败重试与通知列表。860px 评审画布与滚动中浮层均有界；尺寸选择器位于产品外。

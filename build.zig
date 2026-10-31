@@ -131,6 +131,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_data_alert.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_transfer_picker.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/app_icon.m"), .flags = &.{"-fobjc-arc"} });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_app_menu.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addAnonymousImport("app_icon_assets", .{ .root_source_file = b.path("assets/macos/icons.zig") });
     exe.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/ui_fonts.m"), .flags = &.{} });
@@ -444,10 +445,16 @@ pub fn build(b: *std.Build) void {
     notification_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     notification_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
     b.step("test-notification-preview", "Build isolated native notification acceptance fixture").dependOn(&b.addInstallArtifact(notification_preview, .{}).step);
-    for ([_][]const u8{ "host-approval", "task-finish", "execution-result", "inventory-grant" }, [_][]const u8{ "src/host_approval_preview_runner.zig", "src/task_finish_preview_runner.zig", "src/execution_result_preview_runner.zig", "src/inventory_grant_preview_runner.zig" }) |name, source| {
+    for ([_][]const u8{ "host-approval", "task-finish", "execution-result", "inventory-grant", "close-confirmation", "ai-empty-recent" }, [_][]const u8{ "src/host_approval_preview_runner.zig", "src/task_finish_preview_runner.zig", "src/execution_result_preview_runner.zig", "src/inventory_grant_preview_runner.zig", "src/ai_close_confirmation_preview_runner.zig", "src/ai_empty_recent_preview_runner.zig" }) |name, source| {
         const preview = b.addExecutable(.{ .name = b.fmt("{s}-preview", .{name}), .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = target, .optimize = optimize }) });
         zenit.attach(zenit_dep, preview);
         preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
+        if (std.mem.eql(u8, name, "close-confirmation") or std.mem.eql(u8, name, "ai-empty-recent")) {
+            // Match the production UI font chain when comparing this HTML baseline.
+            preview.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
+            preview.root_module.addCSourceFile(.{ .file = b.path("src/platform/ui_fonts.m"), .flags = &.{} });
+        }
+        if (std.mem.eql(u8, name, "ai-empty-recent")) preview.root_module.addAnonymousImport("app_icon_assets", .{ .root_source_file = b.path("assets/macos/icons.zig") });
         preview.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
         preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
         preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
@@ -543,6 +550,7 @@ pub fn build(b: *std.Build) void {
     const run_ui_tests = std.Build.Step.Run.create(b, "run transfer-panel and layout tests");
     run_ui_tests.addFileArg(ui_test_binary);
     b.step("test-ui", "Run transfer-panel/zenit-layout tests").dependOn(&run_ui_tests.step);
+    b.step("ssh-shell-product-acceptance", "Export product lifecycle tests for controlled SSH loopback; select with -Dtest-filter").dependOn(&b.addInstallFile(root_test_binary, "bin/ssh-shell-product-tests").step);
 
     // API-v2 acceptance runs separately so the non-terminal fixture is never
     // registered or linked by the production executable.
@@ -624,12 +632,14 @@ pub fn build(b: *std.Build) void {
 
     const disconnect_acceptance = b.step("ssh-disconnect-acceptance", "Build headless explicit SSH disconnect lifecycle acceptance runner");
     const bootstrap_acceptance = b.step("ssh-bootstrap-acceptance", "Build headless production BootstrapV1 loopback acceptance runner");
+    const shell_execution_acceptance = b.step("ssh-shell-execution-acceptance", "Build same-shell SSH execution loopback acceptance runner");
     const forward_acceptance = b.step("forward-acceptance", "Build real forwarding and production Worker/Relay lifecycle acceptance runners");
     const shared_acceptance = b.step("shared-connection-acceptance", "Build independent SSH channel and reconnect acceptance runner");
     const reconnect_acceptance = b.step("reconnect-acceptance", "Build original-terminal reconnect acceptance runner");
     for ([_]struct { name: []const u8, source: []const u8 }{
         .{ .name = "ssh-disconnect-runner", .source = "src/ssh_disconnect_runner.zig" },
         .{ .name = "ssh-bootstrap-runner", .source = "src/ssh_bootstrap_runner.zig" },
+        .{ .name = "ssh-shell-execution-runner", .source = "src/ssh_shell_execution_runner.zig" },
         .{ .name = "fixed-forward-runner", .source = "src/fixed_forward_runner.zig" },
         .{ .name = "socks-worker-host-runner", .source = "src/socks_worker_host_runner.zig" },
         .{ .name = "forward-load-runner", .source = "src/forward_load_runner.zig" },
@@ -661,7 +671,7 @@ pub fn build(b: *std.Build) void {
         fixed_forward_runner.root_module.linkSystemLibrary("mbedcrypto", .{});
         fixed_forward_runner.root_module.linkSystemLibrary("z", .{});
         addCoreTextBridgeForTest(zenit_dep, fixed_forward_runner);
-        if (std.mem.eql(u8, runner.name, "ssh-disconnect-runner") or std.mem.eql(u8, runner.name, "ssh-bootstrap-runner") or std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner") or std.mem.eql(u8, runner.name, "ssh-shared-connection-runner")) {
+        if (std.mem.eql(u8, runner.name, "ssh-disconnect-runner") or std.mem.eql(u8, runner.name, "ssh-bootstrap-runner") or std.mem.eql(u8, runner.name, "ssh-shell-execution-runner") or std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner") or std.mem.eql(u8, runner.name, "ssh-shared-connection-runner")) {
             fixed_forward_runner.root_module.addCSourceFiles(.{ .files = &.{ "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
             fixed_forward_runner.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_credentials.m"), .flags = &.{} });
             fixed_forward_runner.root_module.linkFramework("Security", .{});
@@ -670,6 +680,7 @@ pub fn build(b: *std.Build) void {
         forward_acceptance.dependOn(&runner_install.step);
         if (std.mem.eql(u8, runner.name, "ssh-disconnect-runner")) disconnect_acceptance.dependOn(&runner_install.step);
         if (std.mem.eql(u8, runner.name, "ssh-bootstrap-runner")) bootstrap_acceptance.dependOn(&runner_install.step);
+        if (std.mem.eql(u8, runner.name, "ssh-shell-execution-runner")) shell_execution_acceptance.dependOn(&runner_install.step);
         if (std.mem.eql(u8, runner.name, "ssh-shared-connection-runner")) shared_acceptance.dependOn(&runner_install.step);
         if (std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner")) reconnect_acceptance.dependOn(&runner_install.step);
     }

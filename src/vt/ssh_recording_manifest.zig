@@ -41,9 +41,13 @@ pub fn reserve(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, option
 
 pub fn publish(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, options: Options) !Receipt {
     const source_timeline = options.timeline orelse return error.RecordingUnavailable;
+    source_timeline.applyPrivateEvidence(options.execution_ranges);
     var frozen = try source_timeline.snapshotWithAllocator(allocator);
     defer frozen.deinit();
     const timeline = &frozen;
+    if (options.ended_ms != null) for (timeline.command_history.items) |*item| if (item.value.state == .running) {
+        item.value.state = .unknown;
+    };
     if (options.generations.len == 0) return error.InvalidRecordingMetadata;
     const key = std.fmt.bytesToHex(options.archive_key.bytes, .lower);
     const id = std.fmt.bytesToHex(options.recording_id.bytes, .lower);
@@ -55,6 +59,7 @@ pub fn publish(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, option
         defer previous.deinit();
         if (previous.value.state == .closed and previous.value.commit.state == .indexed) return .{ .manifest_revision = previous.value.manifest_revision, .coverage = previous.value.coverage, .replayability = previous.value.replayability };
     } else |err| if (err != error.FileNotFound) return err;
+    for (timeline.command_history.items) |*item| manifest.applyPrivateCommandEvidence(&item.value, item.recording_generation, options.execution_ranges);
     const initial = options.generations[0];
     const data_path = if (options.ended_ms == null) try std.fmt.allocPrint(allocator, "{s}.commit-{d}.cast", .{ options.cast_path[0 .. options.cast_path.len - 5], revision }) else try allocator.dupe(u8, options.cast_path);
     defer allocator.free(data_path);
@@ -96,10 +101,11 @@ pub fn publish(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, option
         generation.segments = segment[0..1];
         if (index == 0 and timeline.evicted_events == 0 and generation.baselines.len == 0) generation.baselines = &.{initial_baseline};
     }
-    const coverage: manifest.Coverage = if (options.failure != null) .partial else if (timeline.evicted_events > 0) .retained else .complete;
+    const history_failure: ?[]const u8 = if (timeline.command_history_truncated) "CommandHistoryCapacity" else options.failure;
+    const coverage: manifest.Coverage = if (history_failure != null) .partial else if (timeline.evicted_events > 0) .retained else .complete;
     const replayability: manifest.Replayability = if (timeline.evicted_events > 0 or options.failure != null) .baseline_unavailable else .verified;
-    const gap: manifest.Gap = .{ .start = start, .end = end, .reason = options.failure orelse "RecordingDegraded" };
-    var value: manifest.Manifest = .{ .archive_key = &key, .recording_id = &id, .manifest_revision = revision, .source_kind = .ssh, .connection_id = options.connection_id, .config_revision = options.config_revision, .started_ms = options.started_ms, .ended_ms = options.ended_ms, .exit_code = options.exit_code, .end_reason = if (options.ended_ms != null) "session_closed" else null, .state = if (options.ended_ms != null) .closed else .active, .display = options.display, .recording = .{ .generations = generations }, .execution_ranges = options.execution_ranges, .files = files, .events = events, .coverage = coverage, .replayability = replayability, .retained_range = .{ .start = start, .end = end }, .total_received = options.total_received, .gaps = if (options.failure != null) &.{gap} else &.{}, .failure = options.failure, .commit = .{ .state = if (options.ended_ms != null) .pending_index else .recording, .committed_length = files[0].committed_length } };
+    const gap: manifest.Gap = .{ .start = start, .end = end, .reason = history_failure orelse "RecordingDegraded" };
+    var value: manifest.Manifest = .{ .archive_key = &key, .recording_id = &id, .manifest_revision = revision, .source_kind = .ssh, .connection_id = options.connection_id, .config_revision = options.config_revision, .started_ms = options.started_ms, .ended_ms = options.ended_ms, .exit_code = options.exit_code, .end_reason = if (options.ended_ms != null) "session_closed" else null, .state = if (options.ended_ms != null) .closed else .active, .display = options.display, .recording = .{ .generations = generations }, .execution_ranges = options.execution_ranges, .command_history = timeline.command_history.items, .files = files, .events = events, .coverage = coverage, .replayability = replayability, .retained_range = .{ .start = start, .end = end }, .total_received = options.total_received, .gaps = if (history_failure != null) &.{gap} else &.{}, .failure = history_failure, .commit = .{ .state = if (options.ended_ms != null) .pending_index else .recording, .committed_length = files[0].committed_length } };
     try manifest.save(allocator, io, dir, path, value);
     if (options.ended_ms == null) return .{ .manifest_revision = revision, .coverage = coverage, .replayability = replayability };
     var index: archive.Archive = .{ .allocator = allocator, .io = io, .dir = dir };

@@ -74,7 +74,7 @@ test "background SOCKS sidebar badge preserves row geometry route actions and co
     row.setForwardBadge(null);
     h.frames();
     try std.testing.expect(row.forward.style.display == .none and row.route.style.display == .flex);
-    try std.testing.expectEqual(@as(f32, 72), find(row.node, "sidebar.host.tail").?.globalRect().w);
+    try std.testing.expectEqual(V.styles.tail_width, find(row.node, "sidebar.host.tail").?.globalRect().w);
 }
 const Capture = struct {
     selected: usize = 0,
@@ -182,7 +182,7 @@ fn firstIcon(node: *ui.Node) ?*ui.Node {
     for (node.children.items) |child| if (firstIcon(child)) |result| return result;
     return null;
 }
-test "sidebar native exact chrome and host tail remain fixed across hover focus" {
+test "sidebar native chrome gives unused action space back to host names" {
     var c: Capture = .{};
     const h = try H.init();
     defer h.deinit();
@@ -201,8 +201,8 @@ test "sidebar native exact chrome and host tail remain fixed across hover focus"
     const rect = row.node.globalRect();
     h.cx.handleMouseMove(rect.x + 20, rect.y + 12);
     h.frames();
-    try std.testing.expectEqual(@as(@TypeOf(row.route.style.display), .none), row.route.style.display);
-    try std.testing.expectApproxEqAbs(before, row.name.globalRect().w, 0.1);
+    try std.testing.expectEqual(@as(@TypeOf(row.route.style.display), .flex), row.route.style.display);
+    try std.testing.expectApproxEqAbs(before - (V.styles.action_size * 3 + 4), row.name.globalRect().w, 0.1);
     h.click(find(row.node, "sidebar.host.connect").?);
     try std.testing.expectEqual(@as(usize, 1), c.connected);
     h.click(find(row.node, "sidebar.host.edit").?);
@@ -304,6 +304,8 @@ test "sidebar native retained chrome and rows follow three themes and global mat
     try h.root.appendChild(h.cx.allocator, v.root);
     const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "主机", .detail = "ops@10.0.0.1:22", .route = "本机 → 主机", .hops = 0, .online = false, .selected = true }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu, .action = Capture.hostAction });
     try list.appendChild(h.cx.allocator, row.node);
+    try std.testing.expectEqualStrings("0", find(row.node, "sidebar.host.hops").?.getText().?.content);
+    try std.testing.expect(firstIcon(row.route) != null);
     const publication = try h.cx.bindState(@import("ui/shell_styles.zig").ThemePublication, .{});
     const node_id = row.node.id;
     for ([_]T.Name{ .light, .sauber, .dark }) |name| {
@@ -528,14 +530,16 @@ test "main workspace sidebar follows V3 measured group search and footer geometr
         try std.testing.expectApproxEqAbs(@as(f32, 212), row.node.globalRect().w, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 36), row.node.globalRect().h, 0.1);
         try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
-        try std.testing.expect(find(row.node, "sidebar.host.hops") == null);
+        try std.testing.expectEqualStrings("0", find(row.node, "sidebar.host.hops").?.getText().?.content);
+        try std.testing.expectEqual(V.styles.tail_width, row.trailing.globalRect().w);
 
         const width = row.name.globalRect().w;
         row.setMenuOpen(true);
         h.frames();
         try std.testing.expect(row.actions.style.display == .flex);
-        try std.testing.expect(row.route.style.display == .none);
-        try std.testing.expectApproxEqAbs(width, row.name.globalRect().w, 0.1);
+        try std.testing.expect(row.route.style.display == .flex);
+        try std.testing.expect(row.name.globalRect().w <= width);
+        try std.testing.expectEqual(V.styles.tail_width + 4 + V.styles.action_size * 3, row.trailing.globalRect().w);
         const footer = find(view.root, "sidebar.footer.new").?;
         const frame = find(footer.parent.?, "sidebar.footer.frame").?;
         try std.testing.expectApproxEqAbs(@as(f32, 218), frame.globalRect().w, 0.1);
@@ -676,10 +680,12 @@ test "reported input typography and narrow host hover geometry" {
         h.cx.handleMouseMove(rect.x + 10, rect.y + 10);
         h.frames();
         const actions = row.actions.globalRect();
+        const route = row.route.globalRect();
+        try std.testing.expect(route.x + route.w + 3.9 <= actions.x);
         try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
-        try std.testing.expect(row.route.style.display == .none);
+        try std.testing.expect(row.route.style.display == .flex);
         try std.testing.expect(row.name.globalRect().w > 0);
-        try std.testing.expect(row.name.globalRect().x + row.name.globalRect().w <= actions.x + 0.1);
+        try std.testing.expect(row.name.globalRect().x + row.name.globalRect().w <= route.x + 0.1);
         try std.testing.expect(actions.x + actions.w <= rect.x + rect.w - 8.9);
         h.cx.handleMouseMove(800, 700);
         h.frames();

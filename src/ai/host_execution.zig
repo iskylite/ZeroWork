@@ -11,10 +11,10 @@ const ref_field = "\"execution_ref\":{\"type\":\"string\",\"minLength\":1,\"maxL
 const key_field = "\"request_key\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128}";
 const output_fields = "\"output_cursor\":{\"type\":\"string\",\"maxLength\":128},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":65536}";
 pub const contributions = [_]host.Contribution{
-    tool("run_in_terminal", "Execute the exact approved command in an authorized, ready terminal using its private shell protocol. Saves the same-PTY START/END observation interval; output_scope=session_interval and output_attribution describe its limits, never complete exclusive command output. Requires a durable recording barrier and empty trusted input boundary. Fixed modes and write approvals still apply. Returns an execution_ref and current asynchronous state; use get_execution/wait_execution. IntegrationUnavailable writes no command. Never replay an unknown outcome with a new request_key.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":65534}," ++ key_field ++ "},\"required\":[\"session_ref\",\"command\",\"request_key\"]}"),
+    tool("run_in_terminal", "Execute the exact approved command in the same authorized, ready terminal and shell. Local private integration and SSH shell events provide different evidence: inspect snapshot.completion_source. shell_reported events are cooperative shell reports, not tamper-proof private receipts. Saves the same-PTY START/END observation interval; output_scope=session_interval and output_attribution describe its limits, never complete exclusive command output. Requires a durable recording barrier and a ready input boundary. Fixed modes and write approvals still apply. Returns an execution_ref and current asynchronous state; use get_execution/wait_execution. IntegrationUnavailable writes no command. Never replay an unknown outcome with a new request_key.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ref\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":128},\"command\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":65534}," ++ key_field ++ "},\"required\":[\"session_ref\",\"command\",\"request_key\"]}"),
     tool("get_execution", "Read one execution in this conversation/task, its true process/output/recording stages, recording range and bounded incremental output. An ordinary prompt or printed marker never proves completion.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ "},\"required\":[\"execution_ref\"]}"),
     tool("wait_execution", "Wait up to wait_ms for this authorized execution revision to change, then return the same bounded snapshot/output as get_execution. Timeout is not completion and never replays a command.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ output_fields ++ ",\"after_revision\":{\"type\":\"integer\",\"minimum\":0},\"wait_ms\":{\"type\":\"integer\",\"minimum\":0,\"maximum\":30000}},\"required\":[\"execution_ref\"]}"),
-    tool("send_execution_input", "Send an ordinary non-secret line only to the explicitly installed Local zerowork_read helper after its private input_wait attestation, with a current fence and fresh per-input approval. Arbitrary child readline, builtin read, raw/TUI and SSH input are unsupported. Text is single line UTF-8, at most 4096 bytes; Enter is a separate key request. host_secret_request is supported only by the explicit Local native zerowork_secret_consume sink, which consumes and erases a secret without delivering it to arbitrary programs. Unknown password/OTP consumers require user takeover; never send secrets as text. Unknown readline/raw/TUI interaction returns UnsupportedInteraction and offers user takeover.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ ",\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"key\":{\"type\":\"string\",\"enum\":[\"enter\"]},\"host_secret_request\":{\"type\":\"boolean\"}},\"required\":[\"execution_ref\",\"request_key\"]}"),
+    tool("send_execution_input", "Send approved non-secret text or Enter to the current execution using its live input capability, current fence and fresh per-input approval. controlled_line is a helper-attested consumer; terminal_stream only authorizes ordinary PTY bytes and does not prove which foreground program consumes them or that it is waiting. A written receipt means native write completed, not foreground consumption. Text is single line UTF-8, at most 4096 bytes; Enter is a separate key request. host_secret_request is supported only by the explicit Local native zerowork_secret_consume sink, which consumes and erases a secret without delivering it to arbitrary programs. Unknown password/OTP consumers require user takeover; never send secrets as text. Use user takeover for unknown input targets, raw/TUI interaction or secrets; never infer input authority from prompt text.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ ",\"text\":{\"type\":\"string\",\"minLength\":1,\"maxLength\":4096},\"key\":{\"type\":\"string\",\"enum\":[\"enter\"]},\"host_secret_request\":{\"type\":\"boolean\"}},\"required\":[\"execution_ref\",\"request_key\"]}"),
     tool("stop_execution", "Revoke future AI input for this exact execution and request only its supported foreground interrupt. Release is distinct from process exit; unknown effects stay unknown. This never aborts a shared SSH transport or closes a borrowed terminal.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ ref_field ++ "," ++ key_field ++ "},\"required\":[\"execution_ref\",\"request_key\"]}"),
 };
 fn tool(comptime name: []const u8, description: []const u8, schema: []const u8) host.Contribution {
@@ -87,6 +87,7 @@ pub const Backend = struct {
     /// permission/mode/capability revisions at every dispatch/renewal. Returning
     /// a terminal by ID alone is insufficient authority.
     resolve: *const fn (*anyopaque, host.Context, identity.SessionHandle) anyerror!terminal.Service,
+    authorize_read: ?*const fn (*anyopaque, host.Context, host.Context, identity.SessionHandle, identity.ExecutionId) anyerror!void = null,
     request_secret: ?*const fn (*anyopaque, host.Invocation, identity.SessionHandle, identity.ExecutionId, execution.InputRequest) anyerror!execution.InputReceipt = null,
     authorize_input: ?*const fn (*anyopaque, host.Invocation, identity.SessionHandle, identity.ExecutionId, execution.InputRequest) anyerror!void = null,
     should_cancel: ?*const fn (*anyopaque) bool = null,
@@ -167,9 +168,10 @@ pub const Controller = struct {
         if (invocation.authority != .execution_control or !supports(invocation.tool_id) or invocation.arguments != .object) return error.InvalidArguments;
         if (std.mem.eql(u8, invocation.tool_id, "host.run_in_terminal")) return .{ .result = try self.run(invocation, now) };
         const reference = try string(invocation.arguments, "execution_ref");
-        const index = try self.find(invocation.context, reference);
+        const observing = std.mem.eql(u8, invocation.tool_id, "host.get_execution") or std.mem.eql(u8, invocation.tool_id, "host.wait_execution");
+        const index = if (observing) try self.findRead(invocation.context, reference) else try self.find(invocation.context, reference);
         const is_stop = std.mem.eql(u8, invocation.tool_id, "host.stop_execution");
-        if (!is_stop) try self.refresh(index, now);
+        if (!is_stop and !terminalState(self.entries.items[index].snapshot.state)) try self.refresh(index, now);
         if (is_stop) {
             _ = try string(invocation.arguments, "request_key");
             const operation = try self.beginJournal(invocation);
@@ -211,8 +213,9 @@ pub const Controller = struct {
         return .{ .result = try self.result(invocation.context, invocation.operation_id, index, output_cursor, max_bytes, false) };
     }
     pub fn pollWait(self: *Controller, wait: Wait, now: i64) !?host.Result {
-        if (wait.index >= self.entries.items.len or !sameAuthority(self.entries.items[wait.index].context, wait.context)) return error.ExecutionNotFound;
-        try self.refresh(wait.index, now);
+        if (wait.index >= self.entries.items.len) return error.ExecutionNotFound;
+        try self.authorizeRead(wait.context, wait.index);
+        if (!terminalState(self.entries.items[wait.index].snapshot.state)) try self.refresh(wait.index, now);
         const changed = self.entries.items[wait.index].snapshot.revision > wait.after_revision;
         if (!changed and now < wait.deadline) return null;
         return try self.result(wait.context, wait.operation_id, wait.index, wait.output_cursor, wait.max_bytes, !changed);
@@ -354,7 +357,7 @@ pub const Controller = struct {
             self.allocator.free(index_command);
             return err;
         };
-        self.entries.appendAssumeCapacity(.{ .context = invocation.context, .id = id, .target = target.handle, .journal = operation, .journal_revision = record.revision + 1, .journal_stage = .dispatch_started, .snapshot = .{ .owner = target.handle, .state = .preparing, .interactive_execution = true, .input_ready = true, .local_released = true, .output_scope = .session_interval }, .next_renew_at = now + execution.renew_ms, .submitted_command = index_command, .dispatch_pending = .{ .execution_id = id, .task_id = invocation.context.task_id, .expected_input_epoch = snapshot.input_epoch, .ownership_revision = target.ownership_revision, .command = frozen_command, .command_hash = hash } });
+        self.entries.appendAssumeCapacity(.{ .context = invocation.context, .id = id, .target = target.handle, .journal = operation, .journal_revision = record.revision + 1, .journal_stage = .dispatch_started, .snapshot = .{ .owner = target.handle, .state = .preparing, .completion_source = snapshot.completion_source, .interactive_execution = true, .input_ready = true, .local_released = true, .output_scope = .session_interval }, .next_renew_at = now + execution.renew_ms, .submitted_command = index_command, .dispatch_pending = .{ .execution_id = id, .task_id = invocation.context.task_id, .expected_input_epoch = snapshot.input_epoch, .ownership_revision = target.ownership_revision, .command = frozen_command, .command_hash = hash } });
         // Retry only a mailbox's explicit WorkerBusy/zero-admission response.
         // Any accepted, partial or unknown dispatch permanently clears pending.
         self.dispatchPending(self.entries.items.len - 1) catch {};
@@ -366,6 +369,7 @@ pub const Controller = struct {
         const body = try std.json.Stringify.valueAlloc(self.allocator, .{ .execution_ref = try string(invocation.arguments, "execution_ref"), .input_receipt = input.receipt, .host_secret_status = if (input.receipt != null and input.receipt.?.kind == .host_secret) @as(?[]const u8, switch (input.receipt.?.stage) {
             .awaiting_host_secret => "awaiting_host_secret",
             .queued => "queued",
+            .written => "outcome_unknown",
             .consumed => "secret_submitted",
             .cancelled_unsent => "cancelled",
             .outcome_unknown => "outcome_unknown",
@@ -395,7 +399,7 @@ pub const Controller = struct {
         if (entry.snapshot.state != .running or entry.snapshot.input_handed_off or entry.snapshot.remote_effect_unknown) return error.InputNotExpected;
         const wait = entry.snapshot.input_wait orelse return if (payload.kind == .host_secret) error.HostSecretUnavailable else error.UnsupportedInteraction;
         if (payload.kind == .host_secret and wait.kind != .host_secret) return error.HostSecretUnavailable;
-        if (payload.kind != .host_secret and wait.kind != .controlled_line) return error.SecretMustUseHost;
+        if (payload.kind != .host_secret and wait.kind == .host_secret) return error.SecretMustUseHost;
         const grant = entry.snapshot.grant orelse return error.StaleFence;
         if (!grant.execution_id.eql(entry.id) or !grant.task_id.eql(invocation.context.task_id) or !entry.snapshot.owner.eql(entry.target)) return error.StaleFence;
         if (payload.kind == .text and payload.text.len > wait.max_bytes) return error.InputLimit;
@@ -411,7 +415,7 @@ pub const Controller = struct {
         const current = try self.terminalSnapshot(service);
         if (!current.owner.eql(entry.target) or current.execution_id == null or !current.execution_id.?.eql(entry.id) or current.grant == null or !std.meta.eql(current.grant.?, grant) or current.input_wait == null or !std.meta.eql(current.input_wait.?, wait)) return error.InputConflict;
         if (self.backend.should_cancel) |check| if (check(self.backend.context)) return error.CancelledBeforeDispatch;
-        // Persist the no-replay fence before any private byte can be queued.
+        // Persist the no-replay fence before any input byte can be queued.
         try self.journal.update(operation, record.revision, .{ .stage = .dispatch_started, .execution = entry.id });
         self.next_input_sequence = sequence;
         if (retry_input) |input_index| self.inputs.items[input_index].journal_revision = record.revision + 1 else self.inputs.appendAssumeCapacity(.{ .operation = operation, .entry_index = index, .journal_revision = record.revision + 1, .input_sequence = sequence });
@@ -426,7 +430,7 @@ pub const Controller = struct {
             try self.journal.update(operation, record.revision + 1, .{ .stage = .outcome_unknown, .execution = entry.id, .remote_effect_unknown = true });
             return err;
         };
-        if (response != .input or response.input.input_sequence != sequence or response.input.wait_sequence != wait.sequence or response.input.kind != payload.kind) {
+        if (response != .input or response.input.input_sequence != sequence or response.input.wait_sequence != wait.sequence or response.input.kind != payload.kind or (response.input.kind == .host_secret and response.input.stage == .written)) {
             self.inputs.items[input_index].failure = error.InvalidControllerReceipt;
             try self.journal.update(operation, record.revision + 1, .{ .stage = .outcome_unknown, .execution = entry.id, .remote_effect_unknown = true });
             return error.InvalidControllerReceipt;
@@ -490,7 +494,7 @@ pub const Controller = struct {
             if (entry.dispatch_pending != null) return;
         }
         // A later execution in the same shell must not overwrite an old card.
-        if (terminalState(entry.snapshot.state) and entry.snapshot.recording_settled and entry.snapshot.local_released) {
+        if (terminalState(entry.snapshot.state) and entry.snapshot.recording_settled and entry.snapshot.local_released and entry.snapshot.grant == null) {
             entry.stop_intent = .none;
             return;
         }
@@ -546,12 +550,14 @@ pub const Controller = struct {
             entry.next_renew_at = now + execution.renew_ms;
         };
         const next: journal_mod.Stage = switch (current.state) {
-            .running, .awaiting_submit, .process_finished, .output_draining, .recording_sealing => .running,
+            // Input handoff leaves the same foreground and its observation
+            // alive. It is neither an unknown effect nor a final outcome.
+            .running, .handed_off, .awaiting_submit, .process_finished, .output_draining, .recording_sealing => .running,
             // The journal stage describes the real foreground outcome. A
             // saved interval remains distinct from an exact sealed receipt.
             .sealed, .interval_recorded => if (current.process != null and current.process.?.exit_code != null and current.process.?.exit_code.? == 0) .succeeded else .failed,
             .cancelled_unsent => .failed,
-            .outcome_unknown, .handed_off, .recording_degraded => .outcome_unknown,
+            .outcome_unknown, .recording_degraded => .outcome_unknown,
             else => entry.journal_stage,
         };
         if (next != entry.journal_stage or !sameReceipt(execution.PublicReceipt.fromSnapshot(previous), execution.PublicReceipt.fromSnapshot(current))) {
@@ -576,6 +582,20 @@ pub const Controller = struct {
         const id = identity.ExecutionId.parse(reference[3..]) catch return error.ExecutionNotFound;
         for (self.entries.items, 0..) |entry, index| if (entry.id.eql(id) and sameAuthority(entry.context, context)) return index;
         return error.ExecutionNotFound;
+    }
+    fn authorizeRead(self: *Controller, context: host.Context, index: usize) !void {
+        const entry = self.entries.items[index];
+        if (self.backend.authorize_read) |authorize_read| return authorize_read(self.backend.context, context, entry.context, entry.target, entry.id);
+        if (!sameAuthority(entry.context, context)) return error.ExecutionNotFound;
+    }
+    fn findRead(self: *Controller, context: host.Context, reference: []const u8) !usize {
+        if (!std.mem.startsWith(u8, reference, "x1:")) return if (self.backend.authorize_read != null) error.TargetNotAuthorized else error.ExecutionNotFound;
+        const id = identity.ExecutionId.parse(reference[3..]) catch return if (self.backend.authorize_read != null) error.TargetNotAuthorized else error.ExecutionNotFound;
+        for (self.entries.items, 0..) |entry, index| if (entry.id.eql(id)) {
+            try self.authorizeRead(context, index);
+            return index;
+        };
+        return if (self.backend.authorize_read != null) error.TargetNotAuthorized else error.ExecutionNotFound;
     }
     fn result(self: *Controller, context: host.Context, operation_id: u64, index: usize, output_cursor: u64, max_bytes: usize, timed_out: bool) !host.Result {
         const entry = self.entries.items[index];
@@ -610,7 +630,7 @@ pub const Controller = struct {
 fn inputStage(receipt: execution.InputReceipt) journal_mod.Stage {
     return switch (receipt.stage) {
         .awaiting_host_secret, .queued => .running,
-        .consumed => .succeeded,
+        .written, .consumed => .succeeded,
         .cancelled_unsent => .failed,
         .outcome_unknown => .outcome_unknown,
     };
@@ -627,7 +647,7 @@ fn sameReceipt(a: ?execution.PublicReceipt, b: ?execution.PublicReceipt) bool {
 }
 fn terminalState(state: execution.State) bool {
     return switch (state) {
-        .sealed, .interval_recorded, .cancelled_unsent, .handed_off, .outcome_unknown, .recording_degraded => true,
+        .sealed, .interval_recorded, .cancelled_unsent, .outcome_unknown, .recording_degraded => true,
         else => false,
     };
 }
@@ -713,7 +733,7 @@ test "execution target stop keeps other members running and preserves revocation
     try std.testing.expect(!controller.taskFinishing(context));
 }
 
-test "execution interval publication failure retains prior evidence and retries the exact durable receipt" {
+test "execution interval publication retains durable receipt before next input prompt" {
     const Mock = struct {
         current: execution.Snapshot,
         fn authorize(_: *anyopaque, _: host.Invocation, _: []const u8, _: []const u8, _: [32]u8) !Target {
@@ -747,7 +767,8 @@ test "execution interval publication failure retains prior evidence and retries 
     mock.current.state = .interval_recorded;
     mock.current.end = .{ .raw_offset = 20, .sequence = 2, .event_sequence = 2 };
     mock.current.process = .{ .exit_code = 0, .foreground_finished = true };
-    mock.current.input_ready = true;
+    // The interval is durable before the following shell prompt arrives.
+    mock.current.input_ready = false;
     mock.current.local_released = true;
     mock.current.recording_settled = true;
     mock.current.interval_saved = true;
@@ -768,9 +789,30 @@ test "execution interval publication failure retains prior evidence and retries 
     var saved = try journal.snapshot(a, operation);
     defer saved.deinit(a);
     try std.testing.expect(saved.stage == .succeeded and saved.execution_receipt.?.interval_saved and !saved.execution_receipt.?.sealed);
+    try std.testing.expect(!controller.entries.items[0].snapshot.input_ready);
+    mock.current.input_ready = true;
+    mock.current.revision += 1;
+    try controller.refresh(0, 12);
+    // The archived receipt retains its original empty-prompt observation.
+    // Task settlement uses the actual lease release, not input_ready, which
+    // also becomes false whenever the human is editing their next command.
+    try std.testing.expect(!controller.entries.items[0].snapshot.input_ready);
+    // A later execution must not replace this original saved completion.
+    mock.current.execution_id = identity.ExecutionId.generate();
+    try controller.refresh(0, 13);
+    try std.testing.expect(controller.entries.items[0].snapshot.execution_id.?.eql(id));
+    try std.testing.expect(controller.entries.items[0].snapshot.state == .interval_recorded);
 }
 
-test "execution input request key preserves exact receipt through consumption revocation and recovery without replay" {
+test "execution input request key preserves controlled consumption through revocation and recovery without replay" {
+    try testInputReceiptRecovery(false);
+}
+
+test "execution input request key preserves terminal written receipt through revocation and recovery without replay" {
+    try testInputReceiptRecovery(true);
+}
+
+fn testInputReceiptRecovery(stream: bool) !void {
     const Mock = struct {
         snapshot: execution.Snapshot,
         input_calls: usize = 0,
@@ -830,7 +872,7 @@ test "execution input request key preserves exact receipt through consumption re
     const grant: execution.Grant = .{ .execution_id = id, .task_id = context.task_id, .fence = 2, .input_epoch = 1, .ownership_revision = 1 };
     const original = try journal.begin(.{ .context = context, .tool_id = "host.run_in_terminal", .request_key = "run", .canonical_hash = @splat(1), .turn_id = 1, .call_id = "run" });
     try journal.update(original, 1, .{ .stage = .dispatch_started, .execution = id });
-    var mock: Mock = .{ .snapshot = .{ .owner = target, .execution_id = id, .execution_fence = 2, .execution_input_epoch = 1, .state = .running, .grant = grant, .input_wait = .{ .sequence = 7 }, .submit_sent = true } };
+    var mock: Mock = .{ .snapshot = .{ .owner = target, .execution_id = id, .execution_fence = 2, .execution_input_epoch = 1, .state = .running, .completion_source = if (stream) .shell_reported else .private_protocol, .grant = grant, .input_wait = .{ .sequence = if (stream) execution.stream_wait_sequence else 7, .kind = if (stream) .terminal_stream else .controlled_line }, .submit_sent = true } };
     var controller = Controller.init(a, &journal, .{ .context = &mock, .authorize = Mock.authorize, .resolve = Mock.resolve, .terminal_call = Mock.call, .authorize_input = Mock.inputAuthorize, .request_secret = Mock.secretRequest });
     defer controller.deinit();
     try controller.entries.append(a, .{ .context = context, .id = id, .target = target, .journal = original, .journal_revision = 2, .journal_stage = .dispatch_started, .snapshot = mock.snapshot, .next_renew_at = std.math.maxInt(i64) });
@@ -845,13 +887,13 @@ test "execution input request key preserves exact receipt through consumption re
     var response = try controller.execute(invocation, 10);
     defer response.result.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), mock.input_calls);
-    mock.snapshot.input_receipt.?.stage = .consumed;
+    mock.snapshot.input_receipt.?.stage = if (stream) .written else .consumed;
     mock.snapshot.input_receipt.?.accepted_bytes = 13;
     mock.snapshot.revision += 1;
     var repeated = try controller.execute(invocation, 11);
     defer repeated.result.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), mock.input_calls);
-    try std.testing.expect(std.mem.indexOf(u8, repeated.result.blocks[0].structured, "consumed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, repeated.result.blocks[0].structured, if (stream) "written" else "consumed") != null);
     mock.snapshot.input_wait = .{ .sequence = 8, .kind = .host_secret };
     mock.snapshot.revision += 1;
     const secret_json = try std.fmt.allocPrint(a, "{{\"execution_ref\":\"{s}\",\"request_key\":\"host-secret-1\",\"host_secret_request\":true}}", .{reference});
@@ -886,7 +928,7 @@ test "execution input request key preserves exact receipt through consumption re
     var after_revoke = try controller.execute(invocation, 12);
     defer after_revoke.result.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), mock.input_calls);
-    try std.testing.expect(std.mem.indexOf(u8, after_revoke.result.blocks[0].structured, "consumed") != null);
+    try std.testing.expect(std.mem.indexOf(u8, after_revoke.result.blocks[0].structured, if (stream) "written" else "consumed") != null);
     const stored = try tmp.dir.readFileAlloc(std.testing.io, "inputs.json", a, .limited(journal_mod.max_file_bytes));
     defer a.free(stored);
     try std.testing.expect(std.mem.indexOf(u8, stored, "ordinary line") == null);
@@ -895,8 +937,65 @@ test "execution input request key preserves exact receipt through consumption re
     const operation = try recovered.beginJournal(invocation);
     var record = try journal.snapshot(a, operation);
     defer record.deinit(a);
-    try std.testing.expect(operation.reused and record.execution_receipt.?.input_receipt.?.stage == .consumed);
+    try std.testing.expect(operation.reused and record.execution_receipt.?.input_receipt.?.stage == @as(@FieldType(execution.InputReceipt, "stage"), if (stream) .written else .consumed));
+    try std.testing.expectEqual(if (stream) execution.CompletionSource.shell_reported else .private_protocol, record.execution_receipt.?.completion_source);
     var recovery_result = try recovered.recoveredResult(invocation, record);
     defer recovery_result.deinit(a);
     try std.testing.expectEqual(@as(usize, 1), mock.input_calls);
+}
+
+test "current-tab read-only execution history crosses related Tasks without granting stop or input" {
+    const a = std.testing.allocator;
+    const Mock = struct {
+        allowed: bool = true,
+        resolves: usize = 0,
+        fn authorize(_: *anyopaque, _: host.Invocation, _: []const u8, _: []const u8, _: [32]u8) !Target {
+            return error.UnexpectedEffect;
+        }
+        fn resolve(raw: *anyopaque, _: host.Context, _: identity.SessionHandle) !terminal.Service {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.resolves += 1;
+            return error.UnexpectedLiveRead;
+        }
+        fn read(raw: *anyopaque, current: host.Context, original: host.Context, _: identity.SessionHandle, _: identity.ExecutionId) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!self.allowed or !@import("host_queries.zig").sameHistoricalBinding(original, current)) return error.TargetNotAuthorized;
+        }
+    };
+    var mock: Mock = .{};
+    var controller = Controller.initWithJournal(a, undefined, .{ .context = &mock, .authorize = Mock.authorize, .resolve = Mock.resolve, .authorize_read = Mock.read });
+    defer controller.deinit();
+    const original: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .group = 7 }, .binding_revision = 1, .grant_revision = 1 };
+    var later = original;
+    later.task_id = .generate();
+    later.grant_revision += 1;
+    const target: identity.SessionHandle = .{ .session_id = @fromBackingInt(44), .generation = 2 };
+    const id = identity.ExecutionId.generate();
+    const bytes = "prior task output";
+    try controller.entries.append(a, .{ .context = original, .id = id, .target = target, .journal = .{ .index = 0, .operation_ref = .generate() }, .journal_revision = 1, .journal_stage = .succeeded, .snapshot = .{ .owner = target, .execution_id = id, .state = .interval_recorded, .revision = 3, .local_released = true }, .next_renew_at = 0, .final_output = .{ .bytes = try a.dupe(u8, bytes), .start_cursor = 0, .next_cursor = bytes.len, .gap = false, .truncated = false } });
+    const reference = try std.fmt.allocPrint(a, "x1:{s}", .{std.fmt.bytesToHex(id.bytes, .lower)});
+    defer a.free(reference);
+    const wire = try std.json.Stringify.valueAlloc(a, .{ .execution_ref = reference, .wait_ms = 100, .after_revision = 3 }, .{});
+    defer a.free(wire);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, wire, .{});
+    defer parsed.deinit();
+    var invocation: host.Invocation = .{ .context = later, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "historical-execution", .tool_id = "host.get_execution", .arguments = parsed.value, .arguments_json = wire, .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
+    var result = (try controller.execute(invocation, 1)).result;
+    defer result.deinit(a);
+    try result.validate(later, 1);
+    try std.testing.expect(std.mem.indexOf(u8, result.blocks[0].structured, bytes) != null);
+    try std.testing.expectEqual(@as(usize, 0), mock.resolves);
+    invocation.tool_id = "host.stop_execution";
+    try std.testing.expectError(error.ExecutionNotFound, controller.execute(invocation, 1));
+    invocation.tool_id = "host.send_execution_input";
+    try std.testing.expectError(error.ExecutionNotFound, controller.execute(invocation, 1));
+    invocation.tool_id = "host.wait_execution";
+    const wait = (try controller.execute(invocation, 1)).wait;
+    mock.allowed = false;
+    try std.testing.expectError(error.TargetNotAuthorized, controller.pollWait(wait, 101));
+    invocation.tool_id = "host.get_execution";
+    try std.testing.expectError(error.TargetNotAuthorized, controller.execute(invocation, 1));
+    mock.allowed = true;
+    invocation.context.binding = .{ .group = 8 };
+    try std.testing.expectError(error.TargetNotAuthorized, controller.execute(invocation, 1));
 }

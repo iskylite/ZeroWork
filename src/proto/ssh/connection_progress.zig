@@ -79,6 +79,16 @@ pub const Journal = struct {
     pub fn observer(self: *Journal) Observer {
         return .{ .context = self, .callback = receive };
     }
+    /// Serial pre-auth transport retry under the same create operation. Its
+    /// previous worker is joined; keep sequence monotonic across saved logs.
+    pub fn restartTransport(self: *Journal) void {
+        self.lock();
+        defer self.unlock();
+        self.count = 0;
+        self.dropped = 0;
+        self.completed = false;
+        self.failure = null;
+    }
     fn receive(raw: *anyopaque, event: Event) void {
         const self: *Journal = @ptrCast(@alignCast(raw));
         self.record(event);

@@ -57,6 +57,7 @@ pub fn writeConfig(value: *config.Config, section: []const u8, key: []const u8, 
         if (std.mem.eql(u8, key, "cursor_style")) return setText(&value.ui.cursor_style, next);
         if (std.mem.eql(u8, key, "input_line_highlight")) return setBool(&value.ui.input_line_highlight, next);
         if (std.mem.eql(u8, key, "timestamp_gutter")) return setBool(&value.ui.timestamp_gutter, next);
+        if (std.mem.eql(u8, key, "command_info")) return setBool(&value.ui.command_info, next);
         if (std.mem.eql(u8, key, "sidebar_collapsed")) return setBool(&value.ui.sidebar_collapsed, next);
         if (std.mem.eql(u8, key, "scrollback_limit")) return setUnsigned(&value.ui.scrollback_limit, next, 0, std.math.maxInt(u32));
         if (std.mem.eql(u8, key, "font_size")) return setUnsigned(&value.ui.font_size, next, 8, 48);
@@ -66,6 +67,7 @@ pub fn writeConfig(value: *config.Config, section: []const u8, key: []const u8, 
         if (std.mem.eql(u8, key, "connect_timeout_sec")) return setUnsigned(&value.ssh.connect_timeout_sec, next, 1, 65535);
         if (std.mem.eql(u8, key, "term")) return setText(&value.ssh.term, next);
         if (std.mem.eql(u8, key, "compression")) return setBool(&value.ssh.compression, next);
+        if (std.mem.eql(u8, key, "auto_shell_integration")) return setBool(&value.ssh.auto_shell_integration, next);
         if (std.mem.eql(u8, key, "auto_reconnect")) return setBool(&value.ssh.auto_reconnect, next);
         if (std.mem.eql(u8, key, "buffer_input")) return setBool(&value.ssh.buffer_input, next);
         if (std.mem.eql(u8, key, "socks_port")) return setUnsigned(&value.ssh.socks_port, next, 1, 65535);
@@ -185,6 +187,7 @@ pub fn read(value: config.Config, section: []const u8, key: []const u8) ?Value {
         if (std.mem.eql(u8, key, "cursor_style")) return .{ .text = value.ui.cursor_style };
         if (std.mem.eql(u8, key, "input_line_highlight")) return .{ .boolean = value.ui.input_line_highlight };
         if (std.mem.eql(u8, key, "timestamp_gutter")) return .{ .boolean = value.ui.timestamp_gutter };
+        if (std.mem.eql(u8, key, "command_info")) return .{ .boolean = value.ui.command_info };
         if (std.mem.eql(u8, key, "sidebar_collapsed")) return .{ .boolean = value.ui.sidebar_collapsed };
         if (std.mem.eql(u8, key, "scrollback_limit")) return .{ .unsigned = value.ui.scrollback_limit };
         if (std.mem.eql(u8, key, "font_size")) return .{ .unsigned = value.ui.font_size };
@@ -194,6 +197,7 @@ pub fn read(value: config.Config, section: []const u8, key: []const u8) ?Value {
         if (std.mem.eql(u8, key, "connect_timeout_sec")) return .{ .unsigned = value.ssh.connect_timeout_sec };
         if (std.mem.eql(u8, key, "term")) return .{ .text = value.ssh.term };
         if (std.mem.eql(u8, key, "compression")) return .{ .boolean = value.ssh.compression };
+        if (std.mem.eql(u8, key, "auto_shell_integration")) return .{ .boolean = value.ssh.auto_shell_integration };
         if (std.mem.eql(u8, key, "auto_reconnect")) return .{ .boolean = value.ssh.auto_reconnect };
         if (std.mem.eql(u8, key, "buffer_input")) return .{ .boolean = value.ssh.buffer_input };
         if (std.mem.eql(u8, key, "socks_port")) return .{ .unsigned = value.ssh.socks_port };

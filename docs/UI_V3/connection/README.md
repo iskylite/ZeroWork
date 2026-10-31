@@ -1,6 +1,6 @@
 # 连接与资产管理 · V3 可交互设计
 
-> 当前评审： [2026-10-26 修订说明](../REVIEW_20261026.md) · [效果图总览](../review-20261026.html)。本轮替代下文与其冲突的侧栏、会话、气泡、连接页与 KVM 展示规则；待用户确认后再落地 APP UI。
+> 当前评审：。本轮替代下文与其冲突的侧栏、会话、气泡、连接页与 KVM 展示规则；待用户确认后再落地 APP UI。
 [新建连接](index.html) · [连接管理](index.html?open=none) · [KVM 配置](index.html?protocol=kvm)
 
 这是依据现有原生 APP、V3 视觉规范及 Figma 连接/路径契约补建的可编辑 HTML/CSS/JS 原稿。历史 `artifacts/connection-experience-proposal/connection-modal-v3.html` 文件尚未找回；本稿不冒充历史文件恢复。使用本目录脚本与样式，无构建、CDN或网络请求。首页入口打开的是真正表单，可输入、切换、校验、测试、保存和进入认证状态。
@@ -29,8 +29,8 @@
 ## 引用与视觉合同
 
 - 已落地参考：`src/ui/quick_connect.zig`、`quick_connect_view.zig`、`connection_host.zig`、`plugin_editor_host.zig`，公共资产与配置宿主。
-- KVM：`docs/DESIGN/V0.3_BMC_IKVM.md` §3（配置/独立连接/有序路径/测试边界）。Figma 证据由根任务统一保存于 `../verification/figma-reference.json`；本任务另实读启动节点 `1066:217241` 的字段和样式。
-- V3 tokens 最后加载 ../theme-tokens.css，遵循 DESIGN_STANDARDS §2.2：bg #060608、surface-1 #131316、surface-2 #1b1b1f、well #0c0c0f、overlay #18181c。字体使用本地 Inter / JetBrains Mono 和系统中文字体；17px/1.7线性SVG。
+- KVM：`docs/DESIGN/V0.3_BMC_IKVM.md` §3（配置/独立连接/有序路径/测试边界）。
+- V3 tokens 最后加载../theme-tokens.css，遵循 DESIGN_STANDARDS §2.2：bg #060608、surface-1 #131316、surface-2 #1b1b1f、well #0c0c0f、overlay #18181c。字体使用本地 Inter / JetBrains Mono 和系统中文字体；17px/1.7线性SVG。
 - 默认 App 1440×900，外圆角14，壳外边距8、区域间距6，展开侧栏224/折叠48；连接模态760×710（小窗最大432高，内部滚动），头脚固定。尺寸选择是评审工具，不属于产品功能。
 
 ## 与工作区共用向导
@@ -57,7 +57,7 @@ parent.postMessage({
 
 资产更多菜单、移动分组、新建分组空态及逐跳失败由独立审计实际点击。失败阶段禁用目标继续认证/信任，重试原路径返回connecting，并保留route原顺序。分组编辑预填原名，保存改名后筛选仍指向新分组。最终资源版本为 `20261025-audit-12`。最小窗实测App860×480、Modal760×432，边界内受控滚动。
 
-本轮逐项操作、尺寸与原生映射以 [独立审计](../verification/connection-protocols-audit.md) 为准。新增从已有主机复制、私钥文件选择夹具；高级项与当前原生编辑器一致，超时15秒/KeepAlive30秒为全局只读默认，UTF-8只读，压缩可选，启动命令每行一条。产品 Select 使用 APP 内列表，评审故障开关移到 APP 外。
+本轮逐项操作、尺寸与原生映射以  为准。新增从已有主机复制、私钥文件选择夹具；高级项与当前原生编辑器一致，超时15秒/KeepAlive30秒为全局只读默认，UTF-8只读，压缩可选，启动命令每行一条。产品 Select 使用 APP 内列表，评审故障开关移到 APP 外。
 
 ## 当前设计与可复用功能组件
 
@@ -65,8 +65,7 @@ parent.postMessage({
 
 组件故事复用本页唯一编辑器与状态控制器：`?feature=connection-review`（核对测试）、`connection-route`（路径编辑）、`connection-auth`（认证挑战）。可附加`protocol=SSH|SFTP|KVM`。`editName`匹配已有主机；未匹配时`hostName/address/user/port/route`预填快照。正常导航仍使用现有打开/保存入口，不以故事夹具替代业务状态。
 
-本轮调整与实际测量见[一致性检查](verification/consistency/README.md)。
 
 ## 本轮定点修正（2026-10-25）
 
-冻结依据为拆分组件前已确认的完整连接模块；本轮未重画资产列表、侧栏或壳结构，仅按用户明确问题修正：步骤条移出正文滚动区、路径箭头垂直居中、直连/跳板使用并列选择块、增加保存密码/仅本次使用交互。详见[实际点击记录](verification/round3/README.md)。原生密码持久化契约使用 `config/store.zig` → `credential_store` → 系统钥匙串；HTML内存夹具不能代替原生验收。
+冻结依据为拆分组件前已确认的完整连接模块；本轮未重画资产列表、侧栏或壳结构，仅按用户明确问题修正：步骤条移出正文滚动区、路径箭头垂直居中、直连/跳板使用并列选择块、增加保存密码/仅本次使用交互。原生密码持久化契约使用 `config/store.zig` → `credential_store` → 系统钥匙串；HTML内存夹具不能代替原生验收。

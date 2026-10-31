@@ -105,6 +105,7 @@ pub fn workerRuntimeOptions(app_config: config.Config) @import("../vt/ssh_worker
         .timeline_max_bytes = @as(usize, app_config.log.ring_mb) * 1024 * 1024,
         .reconnect_max = app_config.ssh.reconnect_max,
         .auto_reconnect = app_config.ssh.auto_reconnect and app_config.ssh.reconnect_max > 0,
+        .auto_shell_integration = app_config.ssh.auto_shell_integration,
         .buffer_input = app_config.ssh.buffer_input,
         .reconnect_backoff = app_config.ssh.reconnect_backoff,
     };
@@ -147,6 +148,7 @@ pub const HostTarget = struct {
     /// semantics intentionally remain unsupported until a dedicated protocol
     /// model and interaction UI exist.
     startup_commands: []const []const u8 = &.{},
+    auto_shell_integration: ?bool = null,
     /// Legacy display projection only; numeric route owns transport order.
     jump_chain: []const []const u8 = &.{},
     route: []const identity.ConnectionId = &.{},
@@ -251,6 +253,7 @@ pub const SessionRuntime = struct {
         worker_options.keepalive_sec = if (target.keepalive orelse true) app_config.ssh.keepalive_sec else 0;
         worker_options.compression = target.compression orelse app_config.ssh.compression;
         worker_options.startup_commands = target.startup_commands;
+        worker_options.auto_shell_integration = target.auto_shell_integration orelse app_config.ssh.auto_shell_integration;
         worker_options.initial_input = target.initial_input;
         worker_options.wait_for_attachment = true;
         worker_options.connect_timeout_ms = @as(u32, @max(app_config.ssh.connect_timeout_sec, 1)) * 1000;
@@ -314,7 +317,7 @@ pub const SessionRuntime = struct {
         }) catch |err| {
             manifest_failure = @errorName(err);
         };
-        if (target.bootstrap != null and log_directory != null and manifest_failure == null) {
+        if ((worker.execution != null or worker.shell_execution != null) and log_directory != null and manifest_failure == null) {
             worker.configureExecutionRecording(io, log_directory.?, .{
                 .recording_id = worker.recording_id,
                 .archive_key = worker.archive_key,
@@ -463,6 +466,10 @@ pub const SessionRuntime = struct {
     pub fn requestReconnect(self: *SessionRuntime, previous: OperationKey, next: OperationKey) !void {
         if (self.torn_down) return error.SessionClosed;
         try self.thread.requestReconnect(previous, next);
+    }
+    pub fn requestReconnectWithInitialization(self: *SessionRuntime, previous: OperationKey, next: OperationKey, skip: bool) !void {
+        if (self.torn_down) return error.SessionClosed;
+        try self.thread.requestReconnectWithInitialization(previous, next, skip);
     }
     pub fn preflightExplicitDisconnect(self: *SessionRuntime, key: OperationKey) !u64 {
         if (self.torn_down) return error.SessionClosed;
@@ -660,6 +667,7 @@ pub fn targetFromHost(host: hosts_mod.HostConfig, route_hosts: []const hosts_mod
         .keepalive = host.keepalive,
         .compression = if (host.compression_explicit) host.compression else null,
         .startup_commands = host.startup_commands,
+        .auto_shell_integration = host.auto_shell_integration,
         .jump_chain = host.jump_chain,
         .route = host.route,
         .jump_hosts = route_hosts,
@@ -1010,6 +1018,18 @@ test "runtime policy follows persisted log and reconnect configuration" {
     try std.testing.expectEqual(@as(usize, 12 * 1024 * 1024), runtime.timeline_max_bytes);
     try std.testing.expectEqual(@as(u8, 3), runtime.reconnect_max);
     try std.testing.expectEqualSlices(u8, &app_config.ssh.reconnect_backoff, &runtime.reconnect_backoff);
+}
+test "auto shell integration global policy reaches worker and target keeps host override" {
+    var cfg: config.Config = .{};
+    try std.testing.expect(workerRuntimeOptions(cfg).auto_shell_integration);
+    cfg.ssh.auto_shell_integration = false;
+    try std.testing.expect(!workerRuntimeOptions(cfg).auto_shell_integration);
+    var host: hosts_mod.HostConfig = .{ .name = "fixture", .host = "host", .user = "user" };
+    try std.testing.expect(targetFromHost(host, &.{}).auto_shell_integration == null);
+    host.auto_shell_integration = true;
+    try std.testing.expectEqual(@as(?bool, true), targetFromHost(host, &.{}).auto_shell_integration);
+    host.auto_shell_integration = false;
+    try std.testing.expectEqual(@as(?bool, false), targetFromHost(host, &.{}).auto_shell_integration);
 }
 
 test "disabled reconnect and disconnected input settings reach the worker policy" {

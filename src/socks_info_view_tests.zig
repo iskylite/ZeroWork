@@ -31,7 +31,9 @@ test "socks card mounts hidden, copies live values and dispatches actions" {
     try view.update(.{ .state = .running, .test_result = "SOCKS CONNECT 成功 - 15 ms", .logs = "日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n日志\n" });
     cx.layout();
     _ = view.updateGeometry();
-    try std.testing.expectEqual(stable_height, view.root.style.height.px);
+    // A visible result can resize the overview; the separate log text does
+    // not reserve space in this card.
+    try std.testing.expect(view.root.style.height.px != stable_height);
     view.dispatch(.logs);
     cx.layout();
     _ = view.updateGeometry();
@@ -57,6 +59,52 @@ test "socks card mounts hidden, copies live values and dispatches actions" {
     try std.testing.expectEqualStrings("重试", view.control_text.getText().?.content);
     view.dispatch(.start);
     try std.testing.expectEqual(view_mod.Action.start, sink.last.?);
+}
+
+test "socks card hugs content and removes cleared result space" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(1280, 720);
+    try cx.setTestFrameStep(100);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    var sink = Sink{};
+    const view = try view_mod.mount(cx, scope, .{ .context = &sink, .action = action });
+    if (!view.portaled) try cx.root.?.appendChild(cx.allocator, view.wrapper);
+    const configured: view_mod.Data = .{ .configured = true, .host = "db", .port = 1081 };
+    try view.update(configured);
+    view.show(.{ .x = 1160, .y = 680, .w = 80, .h = 20 });
+    settle(cx);
+    const compact = view.root.globalRect();
+    try std.testing.expect(view.message.style.display == .none);
+    try std.testing.expectApproxEqAbs(@as(f32, 14), view.footer.globalRect().y - (view.rule.globalRect().y + view.rule.globalRect().h), 0.5);
+    try std.testing.expect(compact.h < 400);
+
+    var with_result = configured;
+    with_result.test_result = "SOCKS CONNECT 成功 - 15 ms";
+    try view.update(with_result);
+    settle(cx);
+    const expanded = view.root.globalRect();
+    try std.testing.expect(expanded.h > compact.h);
+    try std.testing.expectApproxEqAbs(compact.y + compact.h, expanded.y + expanded.h, 0.5);
+
+    try view.update(configured);
+    settle(cx);
+    try std.testing.expectApproxEqAbs(compact.h, view.root.globalRect().h, 0.5);
+    try std.testing.expect(view.message.style.display == .none);
+    try view.update(.{});
+    settle(cx);
+    try std.testing.expect(view.root.globalRect().h < compact.h);
+    try std.testing.expectApproxEqAbs(@as(f32, 14), view.footer.globalRect().y - (view.empty.globalRect().y + view.empty.globalRect().h), 0.5);
+}
+
+fn settle(cx: *ui.Cx) void {
+    for (0..12) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
 }
 
 test "socks card follows the live trigger through resize without leaving the window" {

@@ -162,13 +162,46 @@ test "quick connect native saved prototype geometry and keyboard submit use capt
     try part(pieces[2], row, 432, 10, 46, 24);
     try std.testing.expect(pieces[1].children.items[1].getText().?.use_monospace_font);
     h.key(.down);
-    try std.testing.expectEqual(owner_b, view.selected.?);
+    try std.testing.expectEqual(owner_a, view.selected.?);
     h.key(.@"return");
     h.key(.@"return");
     try std.testing.expectEqual(@as(usize, 1), probe.saved_count);
-    try std.testing.expectEqual(owner_b, probe.owner.?);
+    try std.testing.expectEqual(owner_a, probe.owner.?);
     try std.testing.expect(!view.isOpen());
     try std.testing.expectEqual(@as(usize, 1), probe.closed_count);
+}
+test "quick connect empty query waits for arrow selection and disables submit until selected" {
+    var probe: Probe = .{};
+    const h = try H.init(&probe);
+    defer h.deinit();
+    const view = h.view;
+    try std.testing.expect(view.selected == null);
+    try std.testing.expect(view.disabled.peek());
+    h.key(.@"return");
+    h.click(view.primary);
+    try std.testing.expectEqual(@as(usize, 0), probe.saved_count);
+    try std.testing.expect(view.isOpen());
+
+    h.key(.down);
+    try std.testing.expectEqual(owner_a, view.selected.?);
+    try std.testing.expect(!view.disabled.peek());
+    h.key(.up);
+    try std.testing.expectEqual(assets[2].owner, view.selected.?);
+
+    h.query("DB");
+    try std.testing.expectEqual(owner_a, view.selected.?);
+    h.query("");
+    try std.testing.expect(view.selected == null);
+    try std.testing.expect(view.disabled.peek());
+    h.key(.up);
+    try std.testing.expectEqual(assets[2].owner, view.selected.?);
+    try std.testing.expect(!view.disabled.peek());
+
+    view.hide();
+    try view.show();
+    h.frames();
+    try std.testing.expect(view.selected == null);
+    try std.testing.expect(view.disabled.peek());
 }
 test "quick connect native invalid raw port remains editable and corrected fields submit structured IPv6" {
     var probe: Probe = .{};

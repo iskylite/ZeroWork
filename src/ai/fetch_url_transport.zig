@@ -349,7 +349,7 @@ const Job = struct {
                 client.connection_pool.release(connection, io);
                 return;
             }
-            var request = try client.request(.GET, uri, .{ .connection = connection, .keep_alive = false, .redirect_behavior = .unhandled, .headers = .{ .authorization = .omit, .user_agent = .{ .override = "ZeroWork/0.2.6 (public text fetch)" } } });
+            var request = try client.request(.GET, uri, .{ .connection = connection, .keep_alive = false, .redirect_behavior = .unhandled, .headers = .{ .authorization = .omit, .user_agent = .{ .override = "ZeroWork/0.2.7 (public text fetch)" } } });
             owned_connection = false;
             // Also close without draining when response parsing fails before
             // receiveHead has populated its keep-alive state.

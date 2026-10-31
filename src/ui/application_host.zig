@@ -185,6 +185,8 @@ const Mapping = struct {
     reconnect_policy: ?ReconnectPolicy = null,
     reconnect_ticket: ?@import("../vt/reconnect.zig").Ticket = null,
     reconnect_count: u8 = 0,
+    /// Separate from network retries; reset only after startup actually opens.
+    shell_initialization_retry_used: bool = false,
     explicit_disconnect: bool = false,
     runtime_loss_received: bool = false,
     close_display: ?CloseDisplay = null,
@@ -1451,6 +1453,8 @@ pub const ApplicationHost = struct {
         _ = try self.syncSshReconnect(mapping);
         const state = self.sessions.queryState(mapping.handle) orelse return error.StaleSession;
         if (state.lifecycle != .failed and state.lifecycle != .ended) return error.LifecycleDoesNotAllowRetry;
+        const tab = self.workspace.sessionTab(id) orelse return error.StaleSession;
+        if (tab.shell_init_confirmation_required and (tab.shell_init_skip_for_operation == null or !tab.shell_init_skip_for_operation.?.eql(mapping.create_operation))) return error.ShellInitializationConfirmationRequired;
         if (mapping.reconnect_ticket == null) mapping.reconnect_ticket = .{ .key = mapping.create_operation, .deadline_ns = null };
         if (!mapping.reconnect_ticket.?.claim(mapping.create_operation, @import("../platform/realtime.zig").monotonicNs(), true)) return error.ReconnectAlreadyRequested;
         mapping.explicit_disconnect = false;
@@ -1677,7 +1681,8 @@ pub const ApplicationHost = struct {
             if (state.close_operation == null and mapping.close_display == null) try self.freezeCloseDisplay(mapping);
         }
         if (self.findHandle(handle)) |mapping| if (mapping.reconnect_ticket) |*ticket| ticket.invalidate();
-        return self.sessions.requestClose(handle, self.closeHooks()) catch |err| {
+        const retry_unknown = if (self.findHandle(handle)) |mapping| if (mapping.waiting) |waiting| waiting.unknown else false else false;
+        const key = self.sessions.requestClose(handle, self.closeHooks()) catch |err| {
             // Once the domain has accepted a close, a later publication OOM
             // must not turn its real operation into a rejected UI command.
             const state = self.sessions.queryState(handle) orelse return err;
@@ -1692,6 +1697,18 @@ pub const ApplicationHost = struct {
             if (mapping.waiting == null) mapping.waiting = .{ .key = key, .step = .release_content };
             return key;
         };
+        if (retry_unknown) if (self.findHandle(handle)) |mapping| try self.retryUnknownClose(mapping);
+        return key;
+    }
+
+    fn retryUnknownClose(self: *ApplicationHost, mapping: *Mapping) !void {
+        const waiting = mapping.waiting orelse return;
+        if (!waiting.unknown) return;
+        // Retry only the uncertain step of the original operation. Awaiting
+        // work keeps polling, and release_content still waits for a safe hook.
+        mapping.waiting = null;
+        const receipt = self.runCloseStep(mapping, waiting.key, waiting.step, false);
+        if (receipt != .awaiting) _ = try self.publishCloseReceipt(mapping, waiting, receipt);
     }
 
     /// No archive IO or identity inference: only the live SessionHost binding
@@ -1943,6 +1960,20 @@ pub const ApplicationHost = struct {
             if (self.supportsIntegration(mapping.handle, "transport_loss") and mapping.ready_published and !mapping.attached_published) {
                 if (self.workspace.sessionTab(mapping.legacy_id)) |tab| {
                     if (tab.generation == mapping.legacy_generation and tab.tab_id == mapping.tab_id and tab.content_owner.eql(mapping.owner)) {
+                        // The provider can render before domain readiness, but
+                        // execution must use the binding allocated by SessionHost.
+                        // Retire the provisional view before changing the provider
+                        // so old anchors are released through their original handle.
+                        if (tab.runtime) |runtime| if (runtime.vtable.bindTerminalService != null) {
+                            const binding = switch (self.sessions.queryService(mapping.handle, .terminal)) {
+                                .available => |value| value,
+                                else => return error.ServiceUnavailable,
+                            };
+                            if (!self.sessions.bindingIsLive(binding)) return error.StaleBinding;
+                            if (tab.terminal) |*view| if (view.terminal_surface) |surface| if (!surface.service.binding.eql(binding)) view.unbindTerminalService(mapping.handle);
+                            const live = try runtime.bindTerminalService(binding);
+                            if (tab.terminal) |*view| try view.bindTerminalService(live);
+                        };
                         _ = try self.sessions.attached(mapping.handle, .{ .target = self.target(), .tab_id = mapping.tab_id });
                         if (self.sessions.queryState(mapping.handle)) |state| if (state.lifecycle == .attached and state.attachment != null and state.attachment.?.tab_id == mapping.tab_id) {
                             mapping.attached_published = self.workspace.acknowledgeSessionAttached(mapping.legacy_id, mapping.legacy_generation, mapping.create_operation);
@@ -2117,6 +2148,10 @@ pub const ApplicationHost = struct {
         }
         const notice = runtime.reconnectSnapshot() orelse return false;
         if (notice.key == null or !notice.key.?.eql(mapping.create_operation)) return false;
+        if (notice.shell_initialized) {
+            mapping.shell_initialization_retry_used = false;
+            tab.shell_init_confirmation_required = false;
+        }
         if (notice.phase == .ready) {
             mapping.connected_received = true;
             self.workspace.finishSshReconnect(mapping.legacy_id, mapping.create_operation, null);
@@ -2169,16 +2204,27 @@ pub const ApplicationHost = struct {
             mapping.failed_published = true;
             mapping.recordFailure(failure.safe_message);
             self.workspace.finishSshReconnect(mapping.legacy_id, mapping.create_operation, notice.failure orelse error.ConnectionClosed);
-            if (mapping.reconnect_policy == null) {
-                const policy = self.workspace.app_config.ssh;
-                mapping.reconnect_policy = .{ .automatic = !mapping.explicit_disconnect and self.lifecycle_supervisor.resource(mapping.handle) == null and policy.auto_reconnect and (notice.failure orelse error.ConnectionClosed) != error.Cancelled, .max = policy.reconnect_max, .backoff = policy.reconnect_backoff };
+            const initialization_failure = (notice.failure != null and notice.failure.? == error.ShellInitializationFailed);
+            if (initialization_failure) {
+                // The worker keeps startup input gated until release, so this
+                // retry cannot replace a shell already used by the user.
+                const retry = !mapping.shell_initialization_retry_used and !mapping.explicit_disconnect;
+                mapping.shell_initialization_retry_used = true;
+                tab.shell_init_confirmation_required = !retry;
+                mapping.reconnect_policy = null;
+                mapping.reconnect_ticket = .{ .key = mapping.create_operation, .deadline_ns = if (retry) @import("../platform/realtime.zig").monotonicNs() else null };
+            } else {
+                if (mapping.reconnect_policy == null) {
+                    const policy = self.workspace.app_config.ssh;
+                    mapping.reconnect_policy = .{ .automatic = !mapping.shell_initialization_retry_used and !mapping.explicit_disconnect and self.lifecycle_supervisor.resource(mapping.handle) == null and policy.auto_reconnect and (notice.failure orelse error.ConnectionClosed) != error.Cancelled, .max = policy.reconnect_max, .backoff = policy.reconnect_backoff };
+                }
+                const policy = mapping.reconnect_policy.?;
+                const delay: ?i128 = if (policy.automatic and mapping.reconnect_count < policy.max and mapping.reconnect_count < policy.backoff.len)
+                    @import("../platform/realtime.zig").monotonicNs() + @as(i128, policy.backoff[mapping.reconnect_count]) * std.time.ns_per_s
+                else
+                    null;
+                mapping.reconnect_ticket = .{ .key = mapping.create_operation, .deadline_ns = delay };
             }
-            const policy = mapping.reconnect_policy.?;
-            const delay: ?i128 = if (policy.automatic and mapping.reconnect_count < policy.max and mapping.reconnect_count < policy.backoff.len)
-                @import("../platform/realtime.zig").monotonicNs() + @as(i128, policy.backoff[mapping.reconnect_count]) * std.time.ns_per_s
-            else
-                null;
-            mapping.reconnect_ticket = .{ .key = mapping.create_operation, .deadline_ns = delay };
         }
         mapping.cleanup_received = notice.cleanup == .released;
         mapping.cleanup_unknown_received = notice.cleanup == .unknown;
@@ -3160,7 +3206,8 @@ test "task finish takeover keeps round live and accepts a later fresh grant" {
     try controller.registerTask(context);
     _ = try controller.tick(app, callbacks, gates);
     for (0..2) |_| {
-        try std.testing.expectError(error.TargetSelectionRequired, controller.control(context.task_id, controller.snapshotFor(context).?.revision, .takeover));
+        try std.testing.expectEqual(@as(usize, 1), controller.snapshotFor(context).?.targets.len);
+        try std.testing.expectError(error.ScopeChanged, controller.controlTarget(context.task_id, controller.snapshotFor(context).?.revision, source.other.handle, source.other.execution_id));
         try controller.controlCurrentTarget(context.task_id, source.target.handle, source.target.execution_id);
         _ = try controller.tick(app, callbacks, gates);
         try std.testing.expect(controller.snapshotFor(context).?.control_pending);
@@ -4150,4 +4197,29 @@ test "tab new window freezes source after its saved host is removed" {
 test {
     _ = @import("../ai/ssh_bootstrap_product.zig");
     _ = @import("../host/runtime_service.zig");
+    _ = @import("../plugins/ssh/terminal_service.zig");
+}
+
+test "repeated close retries the original unknown step and resumes safe polling" {
+    const Extension = struct {
+        calls: usize = 0,
+        fn run(raw: *anyopaque, _: LegacySessionId, step: CloseStep) CloseReceipt {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            std.debug.assert(step == .stop_ai);
+            self.calls += 1;
+            return .awaiting;
+        }
+    };
+    var extension: Extension = .{};
+    var app: ApplicationHost = undefined;
+    app.close_extension = .{ .context = &extension, .run = Extension.run };
+    const handle: identity.SessionHandle = .{ .session_id = @fromBackingInt(4) };
+    const key: OperationKey = .{ .owner = .{ .session = handle }, .operation_id = 8 };
+    var mapping: Mapping = .{ .handle = handle, .create_operation = key, .legacy_id = 20, .legacy_generation = 1, .tab_id = @fromBackingInt(2), .owner = .{ .session = handle }, .source = null, .waiting = .{ .key = key, .step = .stop_ai, .unknown = true } };
+    try app.retryUnknownClose(&mapping);
+    try std.testing.expectEqual(@as(usize, 1), extension.calls);
+    try std.testing.expect(mapping.waiting.?.key.eql(key));
+    try std.testing.expect(mapping.waiting.?.step == .stop_ai and !mapping.waiting.?.unknown);
+    try app.retryUnknownClose(&mapping);
+    try std.testing.expectEqual(@as(usize, 1), extension.calls);
 }

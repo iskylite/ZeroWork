@@ -135,6 +135,9 @@ pub const SessionTab = struct {
     remote_notice: ?*RemoteNotice.View = null,
     remote_retrying: bool = false,
     remote_retry_deadline: ?i128 = null,
+    shell_init_confirmation_required: bool = false,
+    /// Explicit confirmation is bound to the failed operation, never settings.
+    shell_init_skip_for_operation: ?OperationKey = null,
     file_scope: ?*ui.Scope = null,
     transfer_trays: [2]?*@import("transfer_manager_view.zig").Panel = .{ null, null },
     plugin_renderer: ?plugin_ui.RendererInstance = null,
@@ -2109,7 +2112,7 @@ pub const Workspace = struct {
                         if (point.x >= rect.x and point.x < rect.x + rect.w and point.y >= rect.y and point.y < rect.y + rect.h) view.drag_target = pane.session;
                     };
                     for (view.panes.items) |pane| {
-                        pane.node.setBorderWidth(1);
+                        pane.node.setBorderWidth(0);
                         pane.node.setOpacityRaw(1);
                     }
                     if (event_value.phase == .end) if (view.drag_target) |target| if (view.drag_source) |source| {
@@ -2140,7 +2143,7 @@ pub const Workspace = struct {
                     self.workspace.active_tab = index;
                     if (self.workspace.groupView(self.group)) |view| {
                         view.focused = self.session;
-                        for (view.panes.items) |pane| pane.node.setBorderColor(if (pane.session == self.session) app_theme.current().action_accent.withAlpha(112) else app_theme.current().border);
+                        for (view.panes.items) |pane| if (pane.node.children.items.len > 0) pane.node.children.items[0].setBackground(if (pane.session == self.session) app_theme.current().selection else app_theme.current().surface_2);
                     }
                 },
                 .key_down => |key| if (key.key == .escape) {
@@ -2204,8 +2207,8 @@ pub const Workspace = struct {
             if (tab.terminal == null or tab.archived) continue;
             tab.terminal.?.setGrouped(true);
             var pane_style = group_styles.pane();
-            pane_style.border = .{ .width = 1, .color = app_theme.current().border, .radius = 8 };
-            pane_style.padding = ui.Padding.all(1);
+            pane_style.border = .{ .width = 0, .radius = 11 };
+            pane_style.padding = .{};
             const pane = try ui.box(self.cx, pane_style, .{});
             const cell = try self.groupCell(scope, view.id, tab.id, .pin);
             pane.meta.ownership.meta.test_id = try std.fmt.bufPrint(&cell.test_id, "groups.pane.{d}", .{tab.id});
@@ -2296,7 +2299,7 @@ pub const Workspace = struct {
             visible += 1;
             if (view.focused == null or self.sessionTab(view.focused.?) == null) view.focused = tab.id;
         }
-        for (view.panes.items) |pane| pane.node.setBorderColor(if (pane.session == view.focused) app_theme.current().action_accent.withAlpha(112) else app_theme.current().border);
+        for (view.panes.items) |pane| if (pane.node.children.items.len > 0) pane.node.children.items[0].setBackground(if (pane.session == view.focused) app_theme.current().selection else app_theme.current().surface_2);
         if (visible == 1 and view.panes.items.len == 1) {
             const waiting = try ui.text(self.cx, "等待其他终端加入", group_styles.label());
             waiting.setStyleInline(self.allocator, .{ .width = .fill(), .height = .{ .px = 30 }, .flex_shrink = 0, .padding = .{ .left = 12 } });
@@ -2723,7 +2726,10 @@ pub const Workspace = struct {
     /// immediately — exactly the old behavior.
     pub fn requestCloseTab(self: *Workspace, index: usize) void {
         if (index >= self.tabs.items.len) return;
-        if (self.tabs.items[index].closing) return;
+        if (self.tabs.items[index].closing) {
+            self.forceCloseTab(index);
+            return;
+        }
         const risk = if (self.close_bridge.risk) |callback| callback(self.close_bridge.context, self.tabs.items[index].id) else CloseRisk{};
         if (risk.any()) {
             self.confirmClose(index);
@@ -2860,13 +2866,12 @@ pub const Workspace = struct {
     pub fn forceCloseTab(self: *Workspace, index: usize) void {
         if (index >= self.tabs.items.len) return;
         const tab = self.tabs.items[index];
-        if (tab.closing) return;
         if (self.close_bridge.request_close) |request| {
             tab.closing = true;
             switch (request(self.close_bridge.context, tab.tab_id, tab.content_owner)) {
                 .released => self.receiveCloseReceipt(tab.tab_id, tab.content_owner, true),
-                .awaiting => {},
-                .unknown => self.status("会话仍在关闭，请稍候"),
+                .awaiting => self.status("正在关闭会话，等待已启动的操作收尾。"),
+                .unknown => self.statusFailure("关闭尚未完成：资源释放结果未知。再次点击关闭按钮可重试检查。"),
                 .rejected => {
                     tab.closing = false;
                     self.abortCloseBatch();
@@ -4378,7 +4383,10 @@ pub const Workspace = struct {
             // The mailbox is single-use and the old native graph is released.
             // A rejected grant is surfaced on the new operation, never turned
             // into a factory error claiming that this Runtime does not exist.
-            runtime.requestReconnect(previous, next) catch |err| {
+            const skip = if (tab.shell_init_skip_for_operation) |key| key.eql(previous) else false;
+            tab.shell_init_skip_for_operation = null;
+            tab.shell_init_confirmation_required = false;
+            runtime.requestReconnectWithInitialization(previous, next, skip) catch |err| {
                 job.err = err;
                 job.ready.store(true, .release);
                 tab.failed = true;
@@ -4415,6 +4423,21 @@ pub const Workspace = struct {
         const self: *Workspace = @ptrCast(@alignCast(raw));
         const index = self.tabIndex(id) orelse return;
         self.reconnectTab(index) catch |err| self.statusFailure(@errorName(err));
+    }
+    fn reconnectWithoutInitialization(raw: *anyopaque, id: u64) void {
+        const self: *Workspace = @ptrCast(@alignCast(raw));
+        const tab = self.sessionTab(id) orelse return;
+        if (!tab.shell_init_confirmation_required) return;
+        const runtime = tab.runtime orelse return;
+        const state = runtime.reconnectSnapshot() orelse return;
+        const key = state.key orelse return;
+        if ((state.failure == null or state.failure.? != error.ShellInitializationFailed) or state.cleanup != .released or state.phase != .waiting) return;
+        tab.shell_init_skip_for_operation = key;
+        const index = self.tabIndex(id) orelse return;
+        self.reconnectTab(index) catch |err| {
+            tab.shell_init_skip_for_operation = null;
+            self.statusFailure(@errorName(err));
+        };
     }
 
     fn closeRemoteNotice(raw: *anyopaque, id: u64) void {
@@ -4487,7 +4510,7 @@ pub const Workspace = struct {
         const pane = try ui.box(self.cx, local_styles.pane(), .{});
         owned_pane = pane;
         terminal.root.setStyleInline(self.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0 });
-        const notice = try RemoteNotice.View.mount(self.cx, notice_scope.?, pane, .{ .context = self, .session_id = ticket.session_id, .reconnect = reconnectRemoteNotice, .close = closeRemoteNotice });
+        const notice = try RemoteNotice.View.mount(self.cx, notice_scope.?, pane, .{ .context = self, .session_id = ticket.session_id, .reconnect = reconnectRemoteNotice, .without_initialization = reconnectWithoutInitialization, .close = closeRemoteNotice });
         try pane.appendChild(self.allocator, terminal.root);
         terminal_attached = true;
         tab.* = .{
@@ -4537,6 +4560,16 @@ pub const Workspace = struct {
     /// those runtimes before Workspace.cleanup frees the IO contexts.
     fn drainResults(self: *Workspace) void {
         for (self.connect_jobs.items) |job| {
+            if (job.drained and !self.shutting_down and !job.cancelled.load(.acquire)) if (job.automatic_retry_deadline_ns) |deadline| {
+                if (self.findTicket(job.ticket)) |tab| if (tab.owned_origin and !tab.closing and @import("../platform/realtime.zig").monotonicNs() >= deadline) {
+                    job.retryOwnedTransport() catch |err| {
+                        job.automatic_retry_deadline_ns = null;
+                        job.err = err;
+                        job.drained = false;
+                        job.ready.store(true, .release);
+                    };
+                };
+            };
             // Reconnect runs on the existing Runtime thread, not a second
             // ConnectJob.thread. Cancellation must poll that Runtime even
             // while its current auth/handshake has not produced ready.
@@ -4587,7 +4620,7 @@ pub const Workspace = struct {
             }
             const target = tab.?;
             if (job.err) |err| {
-                if (!target.owned_origin and self.session_bridge.retry_ssh != null and job.canAutomaticallyRetry()) {
+                if (self.session_bridge.retry_ssh != null and (if (target.owned_origin) job.canRetryOwnedTransport() else job.canAutomaticallyRetry())) {
                     const receipt = job.failedCleanupReceipt();
                     if (receipt == .awaiting) continue;
                     if (receipt == .released) {
@@ -4596,9 +4629,12 @@ pub const Workspace = struct {
                         const delay_ms: i128 = @as(i128, job.connection_attempts) * 500;
                         job.automatic_retry_deadline_ns = @import("../platform/realtime.zig").monotonicNs() + delay_ms * std.time.ns_per_ms;
                         applog.info(.workspace, "connect retry scheduled session={d} attempt={d}/3 delay_ms={d} cause={s}", .{ target.id, job.connection_attempts + 1, delay_ms, @errorName(err) });
-                        if (self.session_bridge.failed) |failed| failed(self.session_bridge.context, target.id, target.generation, @errorName(err));
                         job.drained = true;
-                        self.notifyConnectionCleanup(job, .released);
+                        if (!target.owned_origin) {
+                            if (self.session_bridge.failed) |failed| failed(self.session_bridge.context, target.id, target.generation, @errorName(err));
+                            self.notifyConnectionCleanup(job, .released);
+                        }
+                        self.cx.scheduleRedrawAfterNs(@intCast(delay_ms * std.time.ns_per_ms));
                         continue;
                     }
                 }
@@ -4670,6 +4706,7 @@ pub const Workspace = struct {
             const runtime = tab.runtime orelse continue;
             if (tab.remote_notice) |notice| if (runtime.reconnectSnapshot()) |captured| {
                 var state = RemoteNotice.Snapshot.fromRuntime(captured, tab.remote_retrying);
+                state.initialization_confirmation = tab.shell_init_confirmation_required;
                 state.buffer_input = self.app_config.ssh.buffer_input;
                 if (tab.remote_retry_deadline) |deadline| {
                     const remaining = @max(0, deadline - @import("../platform/realtime.zig").monotonicNs());
@@ -6385,4 +6422,33 @@ test "material workspace confirmation cards retain overlay alpha and blur across
             try std.testing.expectEqual(ids, .{ workspace.confirm_card.?.id, workspace.host_key_card.?.id });
         }
     }
+}
+
+test "repeated close on retained closing tab reaches the same owner bridge" {
+    const Retry = struct {
+        calls: usize = 0,
+        fn request(raw: ?*anyopaque, _: identity.TabId, _: identity.ContentOwner) CloseResult {
+            const self: *@This() = @ptrCast(@alignCast(raw.?));
+            self.calls += 1;
+            return .awaiting;
+        }
+    };
+    var retry: Retry = .{};
+    var tab: SessionTab = undefined;
+    tab.closing = true;
+    tab.tab_id = @fromBackingInt(12);
+    tab.content_owner = .{ .session = .{ .session_id = @fromBackingInt(22) } };
+    var tabs = [_]*SessionTab{&tab};
+    var workspace: Workspace = undefined;
+    workspace.tabs = .empty;
+    workspace.tabs.items = &tabs;
+    workspace.tabs.capacity = 1;
+    workspace.close_bridge = .{ .context = &retry, .request_close = Retry.request };
+    workspace.status_feedback = null;
+    workspace.status_node = null;
+    workspace.command_output = null;
+    workspace.requestCloseTab(0);
+    workspace.requestCloseTab(0);
+    try std.testing.expectEqual(@as(usize, 2), retry.calls);
+    try std.testing.expect(tab.closing);
 }

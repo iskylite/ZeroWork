@@ -8,7 +8,7 @@
 
 全局通知用于值得用户现在转移注意力的事。来源局部状态是事实的主要承载位置，通知只提供必要的及时提醒与定位。跨页面、后台运行、warning／failure 本身均不构成升级理由。
 
-同时满足以下条件才升级：事件属于允许的业务类型；存在需要用户处理的实际影响；晚些处理会导致损失或使已委托的工作持续阻塞；用户没有在关注原位置。应用级持续保存风险是明确例外，即使用户正在当前工作区也需保持可见。
+同时满足以下条件才升级：事件属于允许的业务类型；存在需要用户处理的实际影响；晚些处理会导致损失或使已委托的工作持续阻塞；用户没有在关注原位置。
 
 用户显式开启的后台完成提醒是另一独立例外，只在离开应用后通知。默认关闭；应用前台完成只更新原来源状态。
 
@@ -58,7 +58,7 @@
 - 本会话唯一负责 `shared/notification-policy.js`、`notification-policy.css`、`notification-integration.js`、`notifications/review.js` 和整机挂载入口。共享卡片 renderer、原生 styles 及其 metadata 转发保留视觉会话的结果。
 - 重要提醒横幅调用现有 `V3Feedback.show`，不复制一份卡片。列表外壳使用 `overlay` 与允许的柔和投影；内部条目用 `control-bg / popupInset`、9px 圆角、68px 最小折叠高度、6px 间距，无整圈描边、条目阴影或分隔线。
 - 次操作与选择分别使用 `popupAction`、`popupSelection`；图标与文本使用现有 `danger-ink / warn-ink / ok-ink / accent-ink / fg / muted`。文字不随背景透明度变化，不设置整棵树 opacity。
-- popupInset／`--control-bg` 默认采用不透明 overlay/well 70:30；当与 overlay 的对比不足 1.1:1 时，回退到该主题完整不透明 well，由共享 `--control-inset-well-strength` 的 30%／100% 决定。popupAction 为 overlay/fg₂ 88:12，选中态沿用当前主题定义，不自行增加调色板。17 个内置主题的 UI 角色已补全，`--sel` 统一映射 UI 的 `--popup-selected`，终端 `--sel-bg`／ANSI 保持独立。主题会话已完成全 17 主题原生组件、浮层及对比度回归和修后独立复核；覆盖与边界以[主题最终验证记录](../verification/theme-completion-20261029.md)为准，不将其扩大为本次通知策略在全部业务状态的验收。
+- popupInset／`--control-bg` 默认采用不透明 overlay/well 70:30；当与 overlay 的对比不足 1.1:1 时，回退到该主题完整不透明 well，由共享 `--control-inset-well-strength` 的 30%／100% 决定。popupAction 为 overlay/fg₂ 88:12，选中态沿用当前主题定义，不自行增加调色板。17 个内置主题的 UI 角色已补全，`--sel` 统一映射 UI 的 `--popup-selected`，终端 `--sel-bg`／ANSI 保持独立。主题会话已完成全 17 主题原生组件、浮层及对比度回归和修后独立复核；覆盖与边界以为准，不将其扩大为本次通知策略在全部业务状态的验收。
 
 ## HTML 与原生实现
 
@@ -69,14 +69,3 @@ HTML 的 `shared/notification-policy.js`、`notification-integration.js` 保留�
 共享 SSH transport 使用不复用的进程内 incident ID，沿 worker 的受锁快照传递，不按名称或错误文案合并。同一业务定义内的共享故障按实际 owner 去重来源；部分来源恢复后，其他来源仍待处理时保留完整关联，普通历史淘汰不会拆散活动事件。
 
 待处理、已查看、横幅与系统投递独立。清除只移除已结束事项，已消费事件的去重标量继续保留；真正的新风险获得新 operation，不被清除旧历史误吞。普通完成新默认关闭，已有显式配置保持；订阅后的后台完成只投递一次，最近提醒关联同一系统回执，不在返回应用后补弹。
-
-## 2026-10-29 原生验证
-
-本次补齐了真实传输批次生产者、聚合来源去重与保留、清除后新风险、AI 历史阅读判定和后台完成回执关联。沿用邻会话确认的主题与卡片样式，未另建调色板。
-
-- 通知相关单元测试 69 项、UI 测试 47 项通过；完整原生 App 与通知验收窗口构建通过。
-- `e2e/notification_policy_app_native.ts` 在隔离数据目录中运行完整 App 和真实本地 shell：普通命令失败留在局部 AI 提示，不生成全局横幅、未读、待处理或最近提醒；关闭来源也不重建提醒。
-- `e2e/notification_policy_native.ts` 使用生产通知宿主与视图验证 Dark/Light/Sauber、1440×900 和 860×480：单横幅、三来源聚合、展开与原来源定位、待处理保留、恢复更新、最近提醒与清除；折叠行高 68、列表不越界。已查看实际原生截图。
-- 本次窗口截图与报告位于 `/tmp/zw-native-notification-20261029/`。业务故障用合成事实注入原生宿主，未对真实远端制造故障；系统渠道的授权、去重和异步回执由平台替身测试验证，不声称已在本机系统通知中心实际弹出。
-
-详细范围与证据见[原生通知验证记录](native-validation-20261029.md)。

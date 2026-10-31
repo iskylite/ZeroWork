@@ -71,6 +71,7 @@ pub const ContentCapture = struct {
 pub const Read = union(enum) { bytes: usize, would_block, eof };
 pub const Write = union(enum) { bytes: usize, would_block };
 pub const Geometry = struct { revision: u64, cols: u16, rows: u16 };
+pub const CommandHistorySnapshot = @import("../vt/recording_manifest.zig").CommandHistorySnapshot;
 pub const RecordingKind = enum { txt, cast };
 /// Exact provider-owned recording metadata. This carries no file path,
 /// terminal text, archive lease, or authority to read a returned identity.
@@ -192,6 +193,7 @@ pub const Service = struct {
     context: *anyopaque,
     vtable: *const VTable,
     pub const VTable = struct {
+        command_history_snapshot: ?*const fn (*anyopaque, session.ServiceHandle, std.mem.Allocator) anyerror!CommandHistorySnapshot = null,
         recording_identity: ?*const fn (*anyopaque, session.ServiceHandle) anyerror!RecordingIdentity = null,
         content_query: ?*const fn (*anyopaque, session.ServiceHandle, ContentRequest, std.mem.Allocator) anyerror!ContentCapture = null,
         recording_display: ?*const fn (*anyopaque, session.ServiceHandle, @import("../vt/recording_manifest.zig").Display) anyerror!void = null,
@@ -263,6 +265,28 @@ pub const Service = struct {
     pub fn executionRequest(self: Service, request: execution.Request) !void {
         const call = self.vtable.execution_request orelse return error.IntegrationUnavailable;
         return call(self.context, self.binding, request);
+    }
+    /// On-demand bounded metadata copy; this never scans or replays a cast.
+    pub fn commandHistorySnapshot(self: Service, allocator: std.mem.Allocator) !CommandHistorySnapshot {
+        const call = self.vtable.command_history_snapshot orelse return error.CommandHistoryUnavailable;
+        const owner = switch (self.binding.resource_owner) {
+            .session => |value| value,
+            else => return error.InvalidOwner,
+        };
+        var result = try call(self.context, self.binding, allocator);
+        errdefer result.deinit(allocator);
+        if (!result.owner.eql(owner)) return error.StaleOwner;
+        if (result.recording_id) |id| {
+            _ = identity.RecordingId.parse(&id) catch return error.InvalidRecordingIdentity;
+            if (result.recording_generation == 0) return error.InvalidRecordingIdentity;
+        }
+        var bytes: usize = 0;
+        for (result.records) |record| {
+            if (record.recording_generation == 0 or record.value.id == 0) return error.InvalidCommandHistory;
+            bytes = std.math.add(usize, bytes, @sizeOf(@import("../vt/recording_manifest.zig").CommandExecution) + (if (record.value.command) |text| text.len else @as(usize, 0))) catch return error.CommandHistoryCapacity;
+            if (bytes > 4 * 1024 * 1024) return error.CommandHistoryCapacity;
+        }
+        return result;
     }
     pub fn recordingIdentity(self: Service) !RecordingIdentity {
         const call = self.vtable.recording_identity orelse return error.RecordingIdentityUnavailable;
@@ -416,4 +440,41 @@ test "recording identity validates owner generation and availability without con
     try std.testing.expect(!(try service.recordingIdentity()).available);
     hooks.recording_identity = null;
     try std.testing.expectError(error.RecordingIdentityUnavailable, service.recordingIdentity());
+}
+
+test "command history snapshot owns complete metadata and checks the exact service owner" {
+    const a = std.testing.allocator;
+    const Fixture = struct {
+        owner: identity.SessionHandle,
+        record_generation: u64 = 2,
+        fn capture(raw: *anyopaque, _: session.ServiceHandle, allocator: std.mem.Allocator) !CommandHistorySnapshot {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const records = try allocator.alloc(@import("../vt/recording_manifest.zig").CommandExecution, 1);
+            errdefer allocator.free(records);
+            const command = try allocator.dupe(u8, "true");
+            errdefer allocator.free(command);
+            records[0] = .{ .recording_generation = self.record_generation, .value = .{ .id = 9, .command = command, .start_ms = 100, .exit_code = 0, .state = .succeeded } };
+            return .{ .owner = self.owner, .recording_id = "0123456789abcdef0123456789abcdef".*, .recording_generation = 2, .revision = 7, .records = records, .partial = true, .failure = try allocator.dupe(u8, "RecordingDegraded") };
+        }
+    };
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(17), .generation = 2 };
+    var fixture: Fixture = .{ .owner = owner };
+    var hooks: Service.VTable = undefined;
+    hooks.command_history_snapshot = Fixture.capture;
+    const service: Service = .{ .binding = .{ .resource_owner = .{ .session = owner }, .kind = .terminal, .binding_id = 1, .binding_generation = 2 }, .context = &fixture, .vtable = &hooks };
+    var first = try service.commandHistorySnapshot(a);
+    defer first.deinit(a);
+    var second = try service.commandHistorySnapshot(a);
+    defer second.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), first.records.len);
+    try std.testing.expectEqual(first.revision, second.revision);
+    try std.testing.expectEqualStrings("true", second.records[0].value.command.?);
+    try std.testing.expect(first.records[0].value.command.?.ptr != second.records[0].value.command.?.ptr);
+    fixture.owner.generation += 1;
+    try std.testing.expectError(error.StaleOwner, service.commandHistorySnapshot(a));
+    fixture.owner = owner;
+    fixture.record_generation = 0;
+    try std.testing.expectError(error.InvalidCommandHistory, service.commandHistorySnapshot(a));
+    hooks.command_history_snapshot = null;
+    try std.testing.expectError(error.CommandHistoryUnavailable, service.commandHistorySnapshot(a));
 }

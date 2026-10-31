@@ -145,7 +145,12 @@ pub const Bridge = struct {
         if (self.queries_only) return error.ToolNotAvailable;
         const broker = self.route_broker orelse return error.RouteSelectionUnavailable;
         if (try broker.beginGrantedSubject(invocation, subject, self.policy_revision, allocator)) |permit| return permit;
-        return broker.requestSubject(invocation, subject, self.policy_revision, allocator, cancel);
+        // This wait is part of the same tool call, but no command has been
+        // submitted yet. Publish the actual approval stage before blocking.
+        self.emitHostStep(invocation, .approval, "等待你确认");
+        const permit = try broker.requestSubject(invocation, subject, self.policy_revision, allocator, cancel);
+        self.emitHostStep(invocation, .approved, "已批准，准备提交");
+        return permit;
     }
     pub fn hostRouteChange(self: *Bridge, invocation: host_tools.Invocation, subject: approvals.Subject, permit: approvals.Permit, allocator: std.mem.Allocator) !?host_tools.Result {
         const proposed = (subject.route orelse return null).proposed;
@@ -398,7 +403,7 @@ pub const Bridge = struct {
     }
     fn executeHost(raw: *anyopaque, invocation: host_tools.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !host_tools.Result {
         const self: *Bridge = @ptrCast(@alignCast(raw));
-        self.emitHostStep(invocation, .running, "");
+        self.emitHostStep(invocation, .assembling, "");
         const result = self.dispatchHost(invocation, allocator, cancel) catch |err| {
             self.emitHostStep(invocation, if (err == error.CancelledBeforeDispatch) .cancelled else .failed, @errorName(err));
             return err;
@@ -484,6 +489,9 @@ pub const Bridge = struct {
         self.lock();
         self.pending_binding = owner;
         self.mutex.unlock();
+    }
+    pub fn hostExecutionStarted(self: *Bridge, invocation: host_tools.Invocation) void {
+        self.emitHostStep(invocation, .running, "");
     }
     fn emitHostStep(self: *Bridge, invocation: host_tools.Invocation, phase: @import("../ai/step_events.zig").Phase, detail: []const u8) void {
         const events = self.events orelse return;
@@ -711,10 +719,13 @@ pub const Bridge = struct {
         }
         while (true) {
             self.lock();
+            if (exchange.decision == .approved and timeNow(self) >= ticket.expires_at_ms) {
+                exchange.decision = .pending;
+                self.emitStep(invocation, .approval, "审批已过期，等待重新确认");
+            }
             const decision = exchange.decision;
             self.mutex.unlock();
             if (self.stopped.load(.acquire) or (if (cancel) |token| token.isCancelled() else false)) return error.CancelledBeforeDispatch;
-            if (timeNow(self) >= ticket.expires_at_ms) return error.ToolApprovalExpired;
             switch (decision) {
                 .approved => return true,
                 .rejected => return false,
@@ -745,13 +756,20 @@ pub const Bridge = struct {
             const value = arguments.object.get("command") orelse break :blk current.invocation.arguments;
             break :blk if (value == .string) value.string else current.invocation.arguments;
         } else current.invocation.arguments;
-        return .{ .group = group, .target = target_writer.buffered(), .tool_id = tool_id, .owner = current.ticket.targets[0].owner, .cwd = null, .sequence = current.sequence, .arguments_hash = current.invocation.parsed.arguments_hash, .command = command, .call_id = current.invocation.call_id };
+        return .{ .expired = timeNow(self) >= current.ticket.expires_at_ms, .group = group, .target = target_writer.buffered(), .tool_id = tool_id, .owner = current.ticket.targets[0].owner, .cwd = null, .sequence = current.sequence, .arguments_hash = current.invocation.parsed.arguments_hash, .command = command, .call_id = current.invocation.call_id };
+    }
+    pub fn renewApproval(self: *Bridge, sequence: u64, hash: [32]u8) !void {
+        self.lock();
+        defer self.mutex.unlock();
+        const current = self.pending orelse return error.StaleApproval;
+        if (current.sequence != sequence or current.decision != .pending or !std.mem.eql(u8, &hash, &current.ticket.arguments_hash) or self.stopped.load(.acquire) or timeNow(self) < current.ticket.expires_at_ms) return error.StaleApproval;
+        current.ticket.expires_at_ms = timeNow(self) + 60_000;
     }
     pub fn decide(self: *Bridge, sequence: u64, hash: [32]u8, approved: bool) !void {
         self.lock();
         defer self.mutex.unlock();
         const current = self.pending orelse return error.StaleApproval;
-        if (current.sequence != sequence or current.decision != .pending or !std.mem.eql(u8, &hash, &current.ticket.arguments_hash) or timeNow(self) >= current.ticket.expires_at_ms or self.stopped.load(.acquire)) return error.StaleApproval;
+        if (current.sequence != sequence or current.decision != .pending or !std.mem.eql(u8, &hash, &current.ticket.arguments_hash) or (approved and timeNow(self) >= current.ticket.expires_at_ms) or self.stopped.load(.acquire)) return error.StaleApproval;
         current.decision = if (approved) .approved else .rejected;
         self.emitStep(current.invocation, if (approved) .approved else .rejected, if (approved) "用户已批准" else "用户已拒绝");
         @import("../ai/tool_trace.zig").emit(.{ .event = "dynamic_approval_decision", .call_id = current.invocation.call_id, .tool_id = current.invocation.parsed.entry.definition.id, .sequence = sequence, .approved = approved, .arguments_hash = std.fmt.bytesToHex(hash, .lower) });
@@ -1437,6 +1455,9 @@ test "routing run_command to current terminal returns real plan change with zero
     try broker.configure(ctx, 1);
     var bridge = Bridge.init(a);
     defer bridge.deinit();
+    var mailbox = @import("../ai/step_events.zig").Mailbox.init(a);
+    defer mailbox.deinit();
+    bridge.events = &mailbox;
     bridge.execution_mode = .ask;
     bridge.captured_scope = .{ .owner = ctx.binding, .members = .{ .ids = .{1} ++ @as([15]u64, @splat(0)), .len = 1 } };
     bridge.host_binding = .{ .context = ctx, .handler_context = &fixture, .invoke = Fixture.hostInvoke, .contributions = &.{} };
@@ -1486,6 +1507,20 @@ test "routing run_command to current terminal returns real plan change with zero
     try std.testing.expectEqual(tools.Status.cancelled_unsent, results[0].status);
     try std.testing.expect(std.mem.indexOf(u8, results[0].blocks[0].structured, "requires_plan_change") != null);
     try std.testing.expect(broker.execution_route.resolve(ctx, target, "pwd", .batch).approved);
+    const events = try mailbox.drain();
+    defer a.free(events);
+    var pending_event = false;
+    var approved_event = false;
+    for (events) |event| {
+        defer event.deinit(a);
+        try std.testing.expectEqualStrings("route-one", event.call_id);
+        if (event.phase == .approval) pending_event = true;
+        if (event.phase == .approved) {
+            try std.testing.expect(pending_event);
+            approved_event = true;
+        }
+    }
+    try std.testing.expect(pending_event and approved_event);
 }
 
 test "routing intent and approval grants cannot expand retired metadata only bridge" {

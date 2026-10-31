@@ -442,7 +442,7 @@ fn lifecycleSubject(invocation: host.Invocation, authorized: Authorized, buffer:
         .open_session => blk: {
             const policy = invocation.arguments.object.get("connection_policy").?.string;
             const connection = if (std.mem.eql(u8, policy, "prefer_reuse")) "先复用来源连接；不可复用时明确允许建立新连接" else if (std.mem.eql(u8, policy, "reuse_only")) "仅复用来源连接并新开 shell；不可复用则停止，不新建连接" else "始终新建独立工作终端，不复用原连接";
-            break :blk std.fmt.bufPrint(buffer, "{s}。不执行用户命令。{s}冻结保留方式：{s}。", .{ connection, if (authorized.bootstrap_required) "将先只读探测平台/zsh，再另行审批本次临时 helper 的精确目录与资源 hash。" else "", retention }) catch "创建独立工作会话；不执行命令。";
+            break :blk std.fmt.bufPrint(buffer, "{s}。不执行用户命令。{s}冻结保留方式：{s}。", .{ connection, if (authorized.bootstrap_required) "将先只读探测平台/zsh，再另行审批本次临时 helper 的精确目录与资源 hash。" else "默认启用终端集成；SSH 如需命令事件，仅在原 shell 内初始化文本钩子，不上传运行文件。", retention }) catch "创建独立工作会话；不执行用户命令。";
         },
         .create_group => "创建真实终端组，原会话加入；同一 AI 对话、历史和草稿迁移到该组。",
         .close_session => "明确关闭本次精确会话及其进程/连接；真实关闭会在工具结果受理后再次核查影响。",

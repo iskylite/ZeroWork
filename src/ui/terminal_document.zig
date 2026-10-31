@@ -92,6 +92,31 @@ pub const Document = struct {
         // Keep the existing bottom alignment, including command-card spacing.
         return rowOrigin(doc, self.maxTop(doc));
     }
+    /// Translate an actual retained VT row into this display document. A
+    /// builtin application card may precede that native row, but is never the
+    /// command's target. Missing source rows remain unavailable.
+    pub fn displayRowForNative(self: *const Document, native_row: u32) ?u32 {
+        if (!self.composed() or self.alternate) return native_row;
+        const source = self.source_cache orelse return null;
+        if (native_row < self.map_base) return null;
+        const index = native_row - self.map_base;
+        if (index >= self.source_map.items.len or index >= source.rows.len or source.rows[index].screen_row != native_row) return null;
+        var display = self.source_map.items[index];
+        while (display < self.metadata.items.len and self.metadata.items[display].kind != .shell) : (display += 1) {}
+        const document = self.cached orelse return null;
+        if (display >= document.rows.len or !std.meta.eql(document.rows[display].id, source.rows[index].id)) return null;
+        return display;
+    }
+    /// Only the owned presentation copy is remapped. Raw VT coordinates and
+    /// persisted anchors are not changed by application-card composition.
+    pub fn mapCommandRows(self: *const Document, commands: []vt.Command) void {
+        if (!self.composed() or self.alternate) return;
+        for (commands) |*command| {
+            if (command.screen_row) |row| command.screen_row = self.displayRowForNative(row);
+            if (command.input_end_row) |row| command.input_end_row = self.displayRowForNative(row);
+            if (command.output_start_row) |row| command.output_start_row = self.displayRowForNative(row);
+        }
+    }
     fn locatePixel(self: *Document, doc: *const search.Document, origin: f32) void {
         var lo: usize = 0;
         var hi = doc.rows.len;
@@ -885,6 +910,7 @@ pub const Document = struct {
         projection.cursor = cursor;
         projection.version = self.revision;
         projection.scrollback = .{ .total_rows = @max(doc.rows.len, self.height), .viewport_offset = self.top, .viewport_rows = self.height };
+        self.mapCommandRows(@constCast(projection.commands));
         return native;
     }
     fn find(self: *Document, anchor: terminal.Anchor) !?struct { row: usize, col: u16 } {
@@ -1106,6 +1132,9 @@ pub const Document = struct {
     fn executionSnapshot(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding)) !terminal.execution.Snapshot {
         return (try checked(raw, binding)).raw.executionSnapshot();
     }
+    fn commandHistorySnapshot(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), allocator: std.mem.Allocator) !terminal.CommandHistorySnapshot {
+        return (try checked(raw, binding)).raw.commandHistorySnapshot(allocator);
+    }
     fn recordingIdentity(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding)) !terminal.RecordingIdentity {
         return (try checked(raw, binding)).raw.recordingIdentity();
     }
@@ -1132,7 +1161,7 @@ pub const Document = struct {
     fn recordingDisplay(raw: *anyopaque, binding: @TypeOf(@as(terminal.Service, undefined).binding), display: @import("../vt/recording_manifest.zig").Display) !void {
         return (try checked(raw, binding)).raw.setRecordingDisplay(display);
     }
-    const vtable: terminal.Service.VTable = .{ .recording_identity = recordingIdentity, .content_query = contentQuery, .execution_input = executionInput, .execution_secret = executionSecret, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = readLines, .theme = theme, .export_recording = exportRecording, .recording_lease = recordingLease, .trusted_snapshot = trustedSnapshot, .trusted_request = trustedRequest, .trusted_outcome = trustedOutcome, .trusted_cancel = trustedCancel, .search_snapshot = searchSnapshot, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .recording_display = recordingDisplay };
+    const vtable: terminal.Service.VTable = .{ .command_history_snapshot = commandHistorySnapshot, .recording_identity = recordingIdentity, .content_query = contentQuery, .execution_input = executionInput, .execution_secret = executionSecret, .write = write, .resize = resize, .read = read, .receipt = receipt, .status = status, .text_slot = textSlot, .snapshot = snapshot, .prepare_paste = preparePaste, .commit_paste = commitPaste, .key = key, .mouse = mouse, .create_anchor = createAnchor, .resolve_anchor = resolveAnchor, .release_anchor = releaseAnchor, .selection_text = selectionText, .scroll = scroll, .read_lines = readLines, .theme = theme, .export_recording = exportRecording, .recording_lease = recordingLease, .trusted_snapshot = trustedSnapshot, .trusted_request = trustedRequest, .trusted_outcome = trustedOutcome, .trusted_cancel = trustedCancel, .search_snapshot = searchSnapshot, .execution_snapshot = executionSnapshot, .execution_request = executionRequest, .execution_renew = executionRenew, .execution_revoke = executionRevoke, .execution_output = executionOutput, .recording_display = recordingDisplay };
 };
 
 test "builtin_records native rows and app rows share ordered search selection and scroll" {
@@ -1495,4 +1524,30 @@ test "history composite archived source cannot create a protocol execution capab
     try std.testing.expectError(error.IntegrationUnavailable, service.executionOutput(grant.execution_id, a, 0, 32));
     try std.testing.expectError(error.RecordingUnavailable, service.setRecordingDisplay(.{ .title = "readonly" }));
     try std.testing.expectError(error.ReadOnlyDocument, service.write(.{ .input_sequence = 1, .bytes = "forbidden" }));
+}
+
+test "terminal command coordinates skip builtin cards without changing native copy" {
+    const a = std.testing.allocator;
+    var adapter = try @import("../vt/ghostty_adapter.zig").Adapter.init(a, 12, 50);
+    defer adapter.destroy();
+    _ = try adapter.feed("\x1b]133;A\x07$ \x1b]133;B\x07");
+    var source: @import("terminal_document_source.zig").Source = .{ .adapter = &adapter, .owner = .{ .session_id = @fromBackingInt(5) } };
+    var document = Document.init(a, source.service(), source.owner);
+    defer document.deinit();
+    const builtin = try document.begin("@history on", 100);
+    try document.finish(source.owner, builtin, .success, "已打开命令历史");
+    _ = try adapter.feed("true\r\n\x1b]133;C\x07\x1b]133;D;0\x07$ ");
+    var snapshot = try document.service().snapshot(a);
+    defer snapshot.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), snapshot.projection.commands.len);
+    const command = snapshot.projection.commands[0];
+    try std.testing.expectEqualStrings("true", command.command.?);
+    try std.testing.expect(command.screen_row.? > 0);
+    var captured_search = try document.service().searchSnapshot(a);
+    defer captured_search.deinit(a);
+    const row = for (captured_search.document.rows) |value| {
+        if (value.screen_row == command.screen_row.?) break value;
+    } else return error.CommandPositionMissing;
+    try std.testing.expectEqual(@as(u8, 0), row.application_kind);
+    try std.testing.expectEqualStrings("$ true", captured_search.document.text[row.start..row.end]);
 }

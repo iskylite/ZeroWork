@@ -14,7 +14,6 @@
 
 可以追加`size=compact`、`theme=...`、`saveFailure=1`等已有受控场景参数。普通设置与隔离路由共用`.settings-viewport`居中容器、左菜单/右正文独立滚动、固定头脚和components/primitives基础几何。整机集成模式不重复计算外层居中，由宿主负责16px边距。
 
-本轮验证与尺寸见[细化记录](verification/refined/README.md)。
 
 状态：**待用户确认**。入口：[完整设置](index.html)。
 
@@ -100,7 +99,7 @@
 
 ### 图层边界
 
-`.settings-window` 是设置应用区域。模态遮罩、Modal、统一选择菜单、Toast 和自定义 Tooltip 均按该区域的 `getBoundingClientRect()` 定位，页面滚动/视口变化/分类切换/评审说明展开时重新测量。菜单在空间不足时向上翻转，Toast 固定在所属窗口内部底部；浏览器默认 title 提示替换为窗口内 Tooltip。评审工具与模拟开关在窗口外。
+`.settings-window` 是设置应用区域。模态遮罩、Modal、统一选择菜单、Toast 和自定义 Tooltip 均按该区域的 `getBoundingClientRect` 定位，页面滚动/视口变化/分类切换/评审说明展开时重新测量。菜单在空间不足时向上翻转，Toast 固定在所属窗口内部底部；浏览器默认 title 提示替换为窗口内 Tooltip。评审工具与模拟开关在窗口外。
 
 ### 新增状态入口
 
@@ -128,4 +127,4 @@ Codex IAB，1280×720 CSS px、DPR 2、100%：八个分类及全部 24 张设置
 
 ## 本轮逐项核验补充
 
-标准面板 900×640；最小窗口内面板 828×432。评审尺寸控件位于产品窗外。输入 32px、普通图标按钮 24px、紧凑开关 30×18 / 滑块 14px。导入主题、字体请求值与实际回退、24 卡片、模态焦点和紧凑模型单行条目的实测见 [专项报告](../verification/settings-components-audit.md)。
+标准面板 900×640；最小窗口内面板 828×432。评审尺寸控件位于产品窗外。输入 32px、普通图标按钮 24px、紧凑开关 30×18 / 滑块 14px。

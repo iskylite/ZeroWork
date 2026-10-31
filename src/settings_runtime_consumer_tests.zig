@@ -243,3 +243,29 @@ test "settings runtime saved retention controls actual Recording close pruning" 
         }
     }
 }
+
+test "auto shell integration source freezes global inheritance and host override" {
+    const source_codec = @import("plugins/ssh/connection_source.zig");
+    var global: @import("config/config.zig").Config = .{};
+    global.ssh.auto_shell_integration = false;
+    const host: @import("config/hosts.zig").HostConfig = .{ .connection_id = @fromBackingInt(1), .name = "fixture", .host = "host", .user = "user" };
+    var inherited = try source_codec.freezeSource(std.testing.allocator, host, global, &.{}, 1, 0, "");
+    defer inherited.deinit();
+    global.ssh.auto_shell_integration = true;
+    var hops: [8]@import("host/session_host.zig").RouteHop = undefined;
+    try std.testing.expect(!source_codec.sourceSpec(inherited.value, &hops, "").saved.immutable_config.auto_shell_integration);
+    var override = host;
+    override.auto_shell_integration = false;
+    var disabled = try source_codec.freezeSource(std.testing.allocator, override, global, &.{}, 1, 0, "");
+    defer disabled.deinit();
+    try std.testing.expect(!source_codec.sourceSpec(disabled.value, &hops, "").saved.immutable_config.auto_shell_integration);
+    override.auto_shell_integration = true;
+    global.ssh.auto_shell_integration = false;
+    var enabled = try source_codec.freezeSource(std.testing.allocator, override, global, &.{}, 1, 0, "");
+    defer enabled.deinit();
+    try std.testing.expect(source_codec.sourceSpec(enabled.value, &hops, "").saved.immutable_config.auto_shell_integration);
+}
+
+comptime {
+    _ = @import("config/command_info.zig");
+}

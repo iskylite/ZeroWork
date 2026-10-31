@@ -98,6 +98,11 @@ pub const TerminalViewNode = struct {
     history_title_text: ?*ui.Node = null,
     history_title_icon: ?*ui.Node = null,
     terminal_surface: ?*TerminalSurface = null,
+    command_info_visible: bool = true,
+    command_history_partial: bool = false,
+    command_history_pending: bool = false,
+    command_history_fetch_ns: i128 = 0,
+    command_history_revision: u64 = 0,
     legacy_document: ?*@import("terminal_document.zig").Document = null,
     terminal_theme: ?terminal_service.Theme = null,
     terminal_menu_handler: ?TerminalSurface.MenuHandler = null,
@@ -162,6 +167,10 @@ pub const TerminalViewNode = struct {
     record_times: [max_grid_rows]?*ui.Node = @splat(null),
     record_states: [max_grid_rows]?*ui.Node = @splat(null),
     record_backgrounds: [max_grid_rows]?*ui.Node = @splat(null),
+    history_command_states: [max_grid_rows]?*ui.Node = @splat(null),
+    history_command_info: [max_grid_rows]?*ui.Node = @splat(null),
+    history_command_ids: [max_grid_rows]?u64 = @splat(null),
+    history_command_cover: [max_grid_rows]?u64 = @splat(null),
     row_layouts: [max_grid_rows]@import("terminal_record_geometry.zig").Layout = @splat(.{}),
     row_timestamps: [max_grid_rows]?i64 = @splat(null),
     history_projection_version: u64 = 0,
@@ -438,6 +447,8 @@ pub const TerminalViewNode = struct {
             for (self.record_markers) |maybe| if (maybe) |node| node.setDisplay(.none);
             for (self.record_times) |maybe| if (maybe) |node| node.setDisplay(.none);
             for (self.record_states) |maybe| if (maybe) |node| node.setDisplay(.none);
+            for (self.history_command_states) |maybe| if (maybe) |node| node.setDisplay(.none);
+            for (self.history_command_info) |maybe| if (maybe) |node| node.setDisplay(.none);
             for (self.timestamp_nodes) |maybe| if (maybe) |node| node.setDisplay(.none);
         } else if (self.legacy_document != null and self.legacy_document.?.composed()) {
             _ = self.refreshLegacyDocument() catch false;
@@ -579,6 +590,7 @@ pub const TerminalViewNode = struct {
         fn run(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
             const self: *TerminalViewNode = @ptrCast(@alignCast(raw));
             if (self.history.selected == null or self.history_reading == null) return .done;
+            self.updateHistoricalCommandHover();
             var ancestor: ?*ui.Node = self.root;
             while (ancestor) |node| : (ancestor = node.parent) if (node.style.display == .none) return .done;
             const height = self.historyViewportHeight();
@@ -1710,6 +1722,12 @@ pub const TerminalViewNode = struct {
             !self.local_editor.active and !self.palette.isOpen() and surface.pending_paste == null and surface.paste_requested == null;
     }
 
+    fn clientCommandsOffline(self: *const TerminalViewNode) bool {
+        if (self.archive_read_only) return false;
+        if (self.terminal_surface) |surface| return if (surface.snapshot) |snapshot| snapshot.eof_seen else false;
+        return self.worker == null;
+    }
+
     fn commandInputAllowed(self: *TerminalViewNode) bool {
         const surface = self.terminal_surface orelse return false;
         const snapshot = self.trusted_snapshot orelse return false;
@@ -1931,7 +1949,25 @@ pub const TerminalViewNode = struct {
             self.renderLocalInput();
             return true;
         }
-        if (self.worker != null and self.tombstone.allowsRemoteInput() and !self.palette.isOpen() and text.len > 0 and text[0] == '@' and !containsControlByte(text) and self.line.atLineStart() and surface.snapshot != null and surface.snapshot.?.projection.at_prompt and !surface.snapshot.?.projection.modes.alternate_screen and !surface.snapshot.?.read_only) {
+        if (self.clientCommandsOffline() and !self.palette.isOpen() and text.len > 0 and text[0] == '@' and !containsControlByte(text)) {
+            self.hideCommandMessage();
+            self.openCommandPalette();
+            if (text.len > 1) {
+                _ = self.palette.handleChar(self.cx.allocator, text[1..]);
+                self.refreshCommandPaletteRows();
+            }
+            return true;
+        }
+        // OSC 133 prompt markers are optional on SSH shells (ordinary bash
+        // does not emit them). Keep the observed empty-line trigger while
+        // excluding terminal application modes, as in the legacy input path.
+        if (self.worker != null and self.tombstone.allowsRemoteInput() and !self.palette.isOpen() and
+            text.len > 0 and text[0] == '@' and !containsControlByte(text) and self.line.atLineStart() and
+            self.remote_input_context.prompt_editing and !self.remote_input_context.alternate_screen and
+            surface.snapshot != null and !surface.snapshot.?.read_only and
+            !surface.snapshot.?.projection.modes.alternate_screen and !surface.snapshot.?.projection.modes.application_cursor and
+            surface.snapshot.?.projection.modes.mouse_tracking == .none)
+        {
             self.hideCommandMessage();
             self.openCommandPalette();
             if (text.len > 1) {
@@ -1941,7 +1977,7 @@ pub const TerminalViewNode = struct {
             return true;
         }
         if (self.palette.isOpen()) {
-            if (self.worker != null) {
+            if (self.worker != null or self.clientCommandsOffline()) {
                 switch (self.palette.handleChar(self.cx.allocator, text)) {
                     .filtered => self.refreshCommandPaletteRows(),
                     .escape_at => surface.queueText("@") catch |err| surface.showError(err),
@@ -2004,6 +2040,12 @@ pub const TerminalViewNode = struct {
             }
         }
         self.completion.add(command, .history, 1, wallClockMs()) catch {};
+    }
+
+    /// Called only once a host-owned AI command has actually been submitted.
+    /// Shares ordinary owner-scoped history; never replays input.
+    pub fn observeSubmittedCommand(self: *TerminalViewNode, command: []const u8) void {
+        self.recordCompletionHistory(command);
     }
 
     fn refreshCompletion(self: *TerminalViewNode) void {
@@ -2412,7 +2454,7 @@ pub const TerminalViewNode = struct {
             else => {},
         }
         self.hideCommandMessage();
-        if (self.worker != null) {
+        if (self.worker != null or self.clientCommandsOffline()) {
             self.executeLocalCommandChecked();
             return;
         }
@@ -2436,7 +2478,7 @@ pub const TerminalViewNode = struct {
     }
     fn executeLocalCommandChecked(self: *TerminalViewNode) void {
         self.active_command_record = self.beginCommandRecord(self.local_editor.text.items);
-        if (self.active_command_record == null and (self.terminal_surface != null or self.legacy_document != null)) {
+        if (self.active_command_record == null and !self.clientCommandsOffline() and (self.terminal_surface != null or self.legacy_document != null)) {
             if (self.command_record_retry) self.cx.scheduleRedrawAfterNs(8 * std.time.ns_per_ms);
             return;
         }
@@ -2684,6 +2726,136 @@ pub const TerminalViewNode = struct {
         self.cx.setFocus(self.root);
     }
 
+    pub fn setCommandInfoVisible(self: *TerminalViewNode, visible: bool) void {
+        self.command_info_visible = visible;
+        if (self.terminal_surface) |surface| surface.setCommandInfoVisible(visible);
+        self.updateHistoricalCommandHover();
+        self.cx.requestRedraw();
+    }
+    /// Metadata-only recording snapshot, requested while the history card is
+    /// open. Bounded by the existing recording budget, never a cast replay.
+    pub fn refreshCommandHistory(self: *TerminalViewNode, force: bool) void {
+        if (self.archive_read_only) return;
+        const now = @import("../platform/realtime.zig").monotonicNs();
+        if (!force and now - self.command_history_fetch_ns < 500 * std.time.ns_per_ms) return;
+        self.command_history_fetch_ns = now;
+        const service = if (self.worker) |worker| worker.terminalService() catch return else if (self.terminal_surface) |surface| surface.service else return;
+        var snapshot = service.commandHistorySnapshot(self.cx.allocator) catch |err| {
+            if (err == error.WorkerBusy) {
+                self.command_history_pending = true;
+                return;
+            }
+            self.command_history_partial = true;
+            self.command_history_pending = false;
+            return;
+        };
+        defer snapshot.deinit(self.cx.allocator);
+        self.command_history_partial = snapshot.partial or snapshot.failure != null or !snapshot.persistent;
+        self.command_history_pending = snapshot.pending;
+        self.command_history_revision = snapshot.revision;
+        const timeline = self.recordingHistory();
+        for (snapshot.records) |record| {
+            var command = record.value;
+            var frame_index = timeline.frames.items.len -| 1;
+            // Saved native coordinates belong to the event's grid, not today's
+            // viewport. Only reuse a captured UI witness or current native ref.
+            for (timeline.commands.items, timeline.command_frames.items) |old, old_frame| if (old.id == command.id) {
+                command.screen_row = old.screen_row;
+                command.col = old.col;
+                command.input_end_row = old.input_end_row;
+                command.input_end_col = old.input_end_col;
+                command.output_start_row = old.output_start_row;
+                command.output_start_col = old.output_start_col;
+                frame_index = old_frame;
+                if (command.state == .running and command.elapsed_ms == null) command.elapsed_ms = old.elapsed_ms;
+                break;
+            };
+            if (self.terminal_surface) |surface| if (surface.snapshot) |current| for (current.projection.commands) |native| if (native.id == command.id and native.screen_row != null) {
+                command.screen_row = native.screen_row;
+                command.col = native.col;
+                command.input_end_row = native.input_end_row;
+                command.input_end_col = native.input_end_col;
+                command.output_start_row = native.output_start_row;
+                command.output_start_col = native.output_start_col;
+                frame_index = timeline.frames.items.len -| 1;
+                if (command.state == .running and command.elapsed_ms == null) command.elapsed_ms = native.elapsed_ms;
+                break;
+            };
+            timeline.recordCommand(command, frame_index) catch {
+                self.command_history_partial = true;
+                return;
+            };
+        }
+    }
+    pub fn commandHistory(self: *TerminalViewNode) []const @import("../vt/snapshot.zig").Command {
+        return self.recordingHistory().commands.items;
+    }
+    pub fn commandElapsed(self: *TerminalViewNode, command: @import("../vt/snapshot.zig").Command) ?u64 {
+        if (self.terminal_surface) |surface| if (self.history.selected == null) return surface.commandElapsed(command);
+        return command.elapsed_ms;
+    }
+    pub fn commandLocationAvailable(self: *TerminalViewNode, id: u64) bool {
+        if (self.terminal_surface) |surface| if (self.history.selected == null) if (surface.snapshot) |snapshot| {
+            if (!snapshot.projection.modes.alternate_screen) for (snapshot.projection.commands) |command| if (command.id == id and command.screen_row != null) return true;
+        };
+        const timeline = self.recordingHistory();
+        const index = timeline.commandFrame(id) orelse return false;
+        if (index >= timeline.frames.items.len) return false;
+        const document = timeline.frames.items[index].search orelse return false;
+        for (timeline.commands.items) |command| if (command.id == id) {
+            const row = command.screen_row orelse return false;
+            for (document.rows) |line| if (line.screen_row == row) return true;
+        };
+        return false;
+    }
+    pub fn locateCommand(self: *TerminalViewNode, id: u64) bool {
+        // A pinned reading snapshot may predate a newly recorded execution.
+        // Restore its retained live timeline before resolving that real row.
+        if (self.history_live != null) self.closeHistory();
+        if (self.terminal_surface) |surface| if (self.history.selected == null) if (surface.snapshot) |snapshot| {
+            if (!snapshot.projection.modes.alternate_screen) for (snapshot.projection.commands) |command| {
+                if (command.id != id) continue;
+                const row = command.screen_row orelse break;
+                const anchor = surface.service.createAnchor(.{ .space = .screen, .row = row, .col = command.col orelse 0, .source_version = snapshot.projection.version }) catch break;
+                defer surface.service.releaseAnchor(anchor) catch {};
+                surface.service.scroll(.{ .anchor = anchor }) catch break;
+                surface.force_snapshot = true;
+                self.cx.requestRedraw();
+                return true;
+            };
+        };
+        const timeline = self.recordingHistory();
+        const index = timeline.commandFrame(id) orelse return false;
+        var row: ?u32 = null;
+        for (timeline.commands.items) |command| if (command.id == id) {
+            row = command.screen_row;
+            break;
+        };
+        const screen_row = row orelse return false;
+        if (index >= timeline.frames.items.len) return false;
+        const document = timeline.frames.items[index].search orelse return false;
+        const target = for (document.rows) |line| {
+            if (line.screen_row == screen_row) break line;
+        } else return false;
+        // Resolve the real recorded row witness before opening frozen reading.
+        const target_id = target.logical_id;
+        const target_text = document.text[target.start..target.end];
+        if (!self.openHistory()) return false;
+        self.layoutHistoryReading();
+        const reading = if (self.history_reading) |*value| value else return false;
+        for (reading.anchors.items) |anchor| {
+            const entry = self.history.frames.items[anchor.frame_index];
+            const witness = entry.search orelse continue;
+            if (anchor.row >= witness.rows.len) continue;
+            const actual = witness.rows[anchor.row];
+            if (!std.meta.eql(actual.logical_id, target_id) or !std.mem.eql(u8, witness.text[actual.start..actual.end], target_text)) continue;
+            if (reading.maximum > 0) reading.seek(anchor.y / reading.maximum) else reading.seek(0);
+            self.renderHistoryReading() catch return false;
+            return true;
+        }
+        return false;
+    }
+
     /// Binds an existing domain service; process/VT ownership stays outside UI.
     pub fn bindTerminalService(self: *TerminalViewNode, service: terminal_service.Service) !void {
         if (self.terminal_surface) |surface| {
@@ -2698,6 +2870,7 @@ pub const TerminalViewNode = struct {
         self.active_command_record = null;
         self.command_record_retry = false;
         const surface = try TerminalSurface.create(self.cx, self.root, service, self.surfaceOptions());
+        surface.setCommandInfoVisible(self.command_info_visible);
         surface.menu_handler = self.terminal_menu_handler;
         surface.takeover_handler = self.terminal_takeover_handler;
         surface.shell_observer = .{ .context = self, .accepted = serviceShellAccepted, .paste_stamp = servicePasteStamp };
@@ -2816,6 +2989,16 @@ pub const TerminalViewNode = struct {
         self.completion.dismiss();
         self.terminal_surface = null;
         surface.destroy();
+        if (!self.archive_read_only) {
+            // Retained ended terminals still accept client-only @ commands.
+            // No worker or terminal service is installed by these handlers.
+            self.root.behavior.events.key_context = @ptrCast(self);
+            self.root.behavior.events.event_context = @ptrCast(self);
+            self.root.behavior.events.on_key_down = onWorkerKeyDown;
+            self.root.behavior.events.on_event = onWorkerEvent;
+            self.root.behavior.events.on_scroll = onWorkerScroll;
+            self.root.behavior.interaction.text_input_client = .{ .context = @ptrCast(self), .text_len = textInputLen, .copy_text = textInputCopy, .selection = textInputSelection };
+        }
         self.cx.requestRedraw();
     }
     /// The handler receives the clicked service owner and window coordinates;
@@ -2849,7 +3032,11 @@ pub const TerminalViewNode = struct {
     fn captureHistoryProjection(self: *TerminalViewNode, surface: *TerminalSurface, projection: *const @import("../vt/snapshot.zig").Projection) !void {
         const started = @import("terminal_document.zig").Document.profileNow();
         defer self.profile_history_us += (@import("terminal_document.zig").Document.profileNow() -| started) / 1000;
-        if (!try self.recordingHistory().appendProjectionChanged(wallClockMs(), projection)) return;
+        const timeline = self.recordingHistory();
+        const changed = try timeline.appendProjectionChanged(wallClockMs(), projection);
+        self.command_history_partial = self.command_history_partial or projection.commands_truncated;
+        for (projection.commands) |command| try timeline.recordCommand(surface.commandEvidence(command), timeline.frames.items.len -| 1);
+        if (!changed) return;
         if (!surface.composite.composed()) return;
         if (surface.composite.cached) |document| if (!self.recordingHistory().canAttachSearch(document)) return;
         // Immutable full-history copies can be large. Page ownership avoids
@@ -3386,9 +3573,9 @@ pub const TerminalViewNode = struct {
                 },
             }
         } else if (bytes.len > 0 and bytes[0] == '@' and !containsControlByte(bytes) and
-            view.line.atLineStart() and view.worker != null and
-            view.preedit == null and view.tombstone.allowsRemoteInput() and
-            view.remote_input_context.prompt_editing and !view.remote_input_context.alternate_screen)
+            view.line.atLineStart() and view.preedit == null and !view.archive_read_only and
+            ((view.worker == null) or (view.tombstone.allowsRemoteInput() and
+                view.remote_input_context.prompt_editing and !view.remote_input_context.alternate_screen)))
         {
             // 行首 '@'（line buffer 为空，见 LineTracker）：打开面板并吞掉该
             // 字符 —— 它不发送远端，直到采纳/执行/@@ 转义。
@@ -3853,11 +4040,6 @@ pub const TerminalViewNode = struct {
                 return .handled;
             }
         }
-        if (view.worker == null) {
-            if (key == .f and ui.events.primaryModifier(modifiers)) view.openSearch();
-            return .handled;
-        }
-        const worker = view.worker.?;
         view.text_input_modified = modifiers.ctrl or modifiers.alt or modifiers.super or modifiers.shift;
         view.suppress_broadcast = modifiers.ctrl or modifiers.alt or modifiers.super or modifiers.shift;
         defer view.suppress_broadcast = false;
@@ -3936,6 +4118,11 @@ pub const TerminalViewNode = struct {
             }
         }
 
+        if (view.worker == null) {
+            if (key == .f and ui.events.primaryModifier(modifiers)) view.openSearch();
+            return .handled;
+        }
+        const worker = view.worker.?;
         if (key == .c and ui.events.primaryModifier(modifiers)) {
             if (view.selection.normalized()) |selection| {
                 if (worker.copySelection(selection, view.cx.allocator)) |text| {
@@ -4419,6 +4606,109 @@ pub const TerminalViewNode = struct {
         const result = metrics.pointAt(x, metrics.origin_y);
         return .{ .row = row, .col = result.col };
     }
+    fn updateHistoricalCommandHover(self: *TerminalViewNode) void {
+        var hovered: ?u64 = null;
+        const bounds = self.rows_box.globalRect();
+        if (bounds.contains(self.cx.mouse_x, self.cx.mouse_y)) {
+            for (self.history_command_cover, 0..) |id, index| {
+                const top = bounds.y + self.rows_box.style.padding.top + self.presentationRowY(index);
+                if (id != null and self.cx.mouse_y >= top and self.cx.mouse_y < top + self.cell_height) {
+                    hovered = id;
+                    break;
+                }
+            }
+        }
+        for (self.history_command_info, self.history_command_ids) |node, id| if (node) |label| {
+            label.setDisplay(if (self.command_info_visible and id != null and self.selection.anchor == null and (hovered == null or hovered.? != id.?)) .flex else .none);
+        };
+    }
+    fn renderHistoricalCommands(self: *TerminalViewNode, presentation: []const history_replay.Timeline.PresentationRow) !void {
+        const vt = @import("../vt/snapshot.zig");
+        const annotations = @import("command_annotations.zig");
+        const c = app_theme.current();
+        for (self.history_command_states) |maybe| if (maybe) |node| node.setDisplay(.none);
+        for (self.history_command_info) |maybe| if (maybe) |node| node.setDisplay(.none);
+        self.history_command_ids = @splat(null);
+        self.history_command_cover = @splat(null);
+        if (self.history.selected == null and self.terminal_surface != null) return;
+        for (self.history.commands.items) |command| {
+            const frame_index = self.history.commandFrame(command.id) orelse continue;
+            if (frame_index >= self.history.frames.items.len) continue;
+            const witness = self.history.frames.items[frame_index].search orelse continue;
+            const first = command.screen_row orelse continue;
+            var last = command.input_end_row orelse first;
+            if (last > first and command.input_end_col != null and command.input_end_col.? == 0) last -= 1;
+            // Search documents keep physical screen rows in ascending order.
+            // Bound continuation matching to this command's input rows instead
+            // of rescanning the complete recording for every visible line.
+            var lo: usize = 0;
+            var hi = witness.rows.len;
+            while (lo < hi) {
+                const mid = lo + (hi - lo) / 2;
+                if (witness.rows[mid].screen_row < first) lo = mid + 1 else hi = mid;
+            }
+            if (lo >= witness.rows.len or witness.rows[lo].screen_row != first) continue;
+            const start_id: vt.RowId = witness.rows[lo].id;
+            var end = lo + 1;
+            while (end < witness.rows.len and witness.rows[end].screen_row <= last) : (end += 1) {}
+            const input_rows = witness.rows[lo..end];
+            for (presentation) |row| {
+                if (row.kind != 0 or row.y < self.history_display_skip) continue;
+                const index = row.y - self.history_display_skip;
+                if (index >= max_grid_rows or index >= self.frame_rows) continue;
+                for (input_rows) |source| if (std.meta.eql(source.id, row.id)) {
+                    self.history_command_cover[index] = command.id;
+                    break;
+                };
+                if (!std.meta.eql(row.id, start_id)) continue;
+                const y = self.rows_box.style.padding.top + self.presentationRowY(index);
+                if (self.history_command_states[index] == null) {
+                    const label = try ui.text(self.cx, "", .{ .font_size = 10.5, .selectable = false });
+                    label.meta.ownership.meta.test_id = "terminal.command.status";
+                    label.setStyleInline(self.cx.allocator, .{ .position = .absolute, .hit_behavior = .pass_through, .z_index = 4 });
+                    try self.rows_box.appendChild(self.cx.allocator, label);
+                    self.history_command_states[index] = label;
+                }
+                const state = self.history_command_states[index].?;
+                try state.setTextContent(self.cx.allocator, annotations.glyph(command.state));
+                state.setTextColor(switch (command.state) {
+                    .running => c.accent,
+                    .succeeded => c.ok_ink,
+                    .failed => c.danger,
+                    .unknown => c.fg_3,
+                });
+                @import("builtin_records_styles.zig").place(self.cx, state, self.rows_box.style.padding.left - 17, y, 12, self.cell_height);
+                state.setDisplay(.flex);
+                if (self.history_command_info[index] == null) {
+                    const group = try ui.box(self.cx, .{ .position = .absolute, .height = .{ .px = self.cell_height }, .padding = .{ .left = 12 }, .direction = .row, .align_items = .center, .hit_behavior = .pass_through, .z_index = 4 }, .{});
+                    group.meta.ownership.meta.test_id = "terminal.command.metadata";
+                    const tag = try @import("command_annotation_styles.zig").mountAiTag(self.cx, 0, self.cell_height);
+                    const detail = try ui.text(self.cx, "", .{ .font_size = 10.5, .use_monospace_font = true, .selectable = false });
+                    detail.meta.ownership.meta.test_id = "terminal.command.metadata.detail";
+                    try group.appendChild(self.cx.allocator, tag);
+                    try group.appendChild(self.cx.allocator, detail);
+                    try self.rows_box.appendChild(self.cx.allocator, group);
+                    self.history_command_info[index] = group;
+                }
+                const label = self.history_command_info[index].?;
+                var elapsed: [40]u8 = undefined;
+                var code: [24]u8 = undefined;
+                var text: [110]u8 = undefined;
+                const code_text = if (command.exit_code) |exit| try std.fmt.bufPrint(&code, "{s} {d}", .{ annotations.glyph(command.state), exit }) else "—";
+                const tag = label.children.items[0];
+                tag.setDisplay(if (command.ai_execution_id != null) .flex else .none);
+                @import("command_annotation_styles.zig").applyAiTag(self.cx, tag, 0, self.cell_height);
+                label.setStyle(self.cx.allocator, .gap, if (command.ai_execution_id != null) @import("command_annotation_styles.zig").ai_metadata_gap else @import("command_annotation_styles.zig").metadata_gap);
+                const detail = label.children.items[1];
+                try detail.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&text, "{s}  {s}", .{ code_text, try annotations.duration(&elapsed, command.elapsed_ms) }));
+                detail.setTextColor(c.fg_2);
+                label.setBackground(c.surface_1.withAlpha(235));
+                label.setStyleInline(self.cx.allocator, .{ .inset = .{ .right = .{ .px = self.rows_box.style.padding.right }, .top = .{ .px = y } } });
+                self.history_command_ids[index] = command.id;
+            }
+        }
+        self.updateHistoricalCommandHover();
+    }
     fn renderRecordDecorations(self: *TerminalViewNode, presentation: []const history_replay.Timeline.PresentationRow) !void {
         self.rows_box.style.padding.left = self.legacyGutterWidth() + self.historyContentPadding().left;
         self.rows_box.style.padding.right = self.historyContentPadding().right;
@@ -4525,6 +4815,7 @@ pub const TerminalViewNode = struct {
             if (self.row_layouts[row_index].y == null) styles.place(self.cx, node, x, self.rows_box.style.padding.top + self.presentationRowY(row_index), @max(1, self.root.rectFromWorldOrFallback().w - x - self.rows_box.style.padding.right), self.cell_height);
         };
         self.refreshLegacyTimestamps();
+        try self.renderHistoricalCommands(presentation);
     }
     fn legacySearchText(self: *TerminalViewNode, allocator: std.mem.Allocator) ![]u8 {
         if (self.legacy_document) |doc| if (doc.composed()) {
@@ -5053,7 +5344,7 @@ test "Figma command catalogue mounts exact card rows and viewport" {
     try std.testing.expectApproxEqAbs(card.y + 42, viewport.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 406), viewport.w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 200), viewport.h, 0.01);
-    try std.testing.expectEqual(@as(usize, 14), view.palette_rows.items.len);
+    try std.testing.expectEqual(@as(usize, 15), view.palette_rows.items.len);
     const first = view.palette_rows.items[0].globalRect();
     const second = view.palette_rows.items[1].globalRect();
     try std.testing.expectApproxEqAbs(@as(f32, 400), first.w, 0.01);
@@ -5064,7 +5355,7 @@ test "Figma command catalogue mounts exact card rows and viewport" {
     try std.testing.expectApproxEqAbs(@as(f32, 16), footer.h, 0.01);
     const count = view.palette_count_text;
     const count_props = count.getText().?;
-    try std.testing.expectEqualStrings("共14项", count_props.content);
+    try std.testing.expectEqualStrings("共15项", count_props.content);
     try std.testing.expectEqual(@as(f32, 0), count.style.flex_shrink);
     const count_width = cx.text.measureTextWidth(count_props.content, count_props.font_size, count_props.font_weight, false);
     try std.testing.expect(count.globalRect().w + 0.01 >= count_width);
@@ -5076,7 +5367,7 @@ test "Figma command catalogue mounts exact card rows and viewport" {
     _ = cx.render();
     var rendered_full_count = false;
     for (cx.display_list.items.items) |item| switch (item) {
-        .text_run => |run| if (std.mem.eql(u8, run.content, "共14项")) {
+        .text_run => |run| if (std.mem.eql(u8, run.content, "共15项")) {
             rendered_full_count = true;
         },
         else => {},
@@ -6165,6 +6456,65 @@ test "terminal prepared font preserves fixed columns across colored SGR runs" {
     try std.testing.expect(found >= 3);
 }
 
+test "builtin command SSH surface works without prompt markers and preserves shell input gates" {
+    const fixture = @import("terminal_surface_tests.zig");
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(12, 80);
+    defer transport.deinit();
+    var worker: ClipboardTestWorker = .{};
+    try worker.init();
+    defer worker.deinit();
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(900, 500);
+    var view = try TerminalViewNode.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    view.bindWorker(worker.presentation());
+    try view.bindTerminalService(transport.service());
+    cx.setFocus(view.root);
+    _ = cx.render();
+    _ = try transport.vt.feed("[root@localhost ~]# ");
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expect(!view.terminal_surface.?.snapshot.?.projection.at_prompt);
+    cx.handleTextInput("@");
+    try std.testing.expect(view.palette.isOpen());
+    cx.handleTextInput("t");
+    cx.handleTextInput("s");
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expect(view.local_state.timestamp_gutter);
+    cx.handleTextInput("@ts off");
+    cx.handleKeyDown(.@"return", .{});
+    try std.testing.expect(!view.local_state.timestamp_gutter);
+    try std.testing.expectEqualStrings("", transport.written.items);
+
+    cx.handleTextInput("echo ");
+    try std.testing.expect(!TerminalViewNode.serviceEditText(&view, "@"));
+    try std.testing.expect(!view.palette.isOpen());
+    view.line.clearLine();
+    view.line.markUnknown();
+    try std.testing.expect(!TerminalViewNode.serviceEditText(&view, "@"));
+    view.line.clearLine();
+    for ([_]struct { enter: []const u8, leave: []const u8 }{
+        .{ .enter = "\x1b[?1049h", .leave = "\x1b[?1049l" },
+        .{ .enter = "\x1b[?1h", .leave = "\x1b[?1l" },
+        .{ .enter = "\x1b[?1000h", .leave = "\x1b[?1000l" },
+    }) |mode| {
+        _ = try transport.vt.feed(mode.enter);
+        _ = try view.refreshTerminalService(fixture.owner, true);
+        try std.testing.expect(!TerminalViewNode.serviceEditText(&view, "@"));
+        try std.testing.expect(!view.palette.isOpen());
+        _ = try transport.vt.feed(mode.leave);
+    }
+    _ = try view.refreshTerminalService(fixture.owner, true);
+    try std.testing.expect(TerminalViewNode.serviceEditText(&view, "@"));
+    try std.testing.expect(view.palette.isOpen());
+    view.closeCommandPalette();
+    view.terminal_surface.?.snapshot.?.read_only = true;
+    try std.testing.expect(!TerminalViewNode.serviceEditText(&view, "@"));
+    try std.testing.expectEqualStrings("echo ", transport.written.items);
+}
+
 test "builtin command whole SSH paste stays local and invalid parameters explain recovery" {
     const a = std.testing.allocator;
     var fixture: ClipboardTestWorker = .{};
@@ -6577,4 +6927,176 @@ test "history track Escape exits active reading and preserves an archive documen
     cx.handleKeyDown(.escape, .{});
     try std.testing.expect(view.history.selected != null);
     try std.testing.expect(view.history_bar.?.style.display == .flex);
+}
+
+test "terminal command annotations preserve grid copy hover wrapped rows and display setting" {
+    const a = std.testing.allocator;
+    const fixture = @import("terminal_surface_tests.zig");
+    var transport: fixture.FakeTransport = undefined;
+    try transport.init(9, 28);
+    defer transport.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(700, 400);
+    var view = try @import("terminal_view.zig").TerminalViewNode.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    const command = "printf abcdefghijklmnopqrstuvwxyz0123456789";
+    const id: @import("../host/identity.zig").ExecutionId = .{ .bytes = @splat(71) };
+    try transport.vt.registerAiSubmission(id, command);
+    try transport.controller.feedOutput(fixture.owner, 1, "\x1b]133;A\x07$ \x1b]133;B\x07" ++ command ++ "\r\n\x1b]133;C\x07OUTPUT\r\n\x1b]133;D;7\x07\x1b]133;A\x07$ \x1b]133;B\x07", 100);
+    cx.layout();
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    cx.layout();
+    const surface = view.terminal_surface.?;
+    const value = surface.snapshot.?.projection.commands[0];
+    try std.testing.expect(value.ai_execution_id.?.eql(id));
+    try std.testing.expectEqual(@as(?i32, 7), value.exit_code);
+    try std.testing.expectEqual(@as(u16, 28), surface.snapshot.?.projection.cols);
+    const row_index = value.screen_row.? - surface.snapshot.?.projection.scrollback.viewport_offset;
+    const row = &surface.rows.items[row_index];
+    try std.testing.expect(row.command_state != null and row.command_info != null);
+    try std.testing.expectEqualStrings("AI", row.command_ai.?.getText().?.content);
+    try std.testing.expectEqualStrings("CommandAiTag", row.command_ai.?.meta.ownership.meta.component_name.?);
+    try std.testing.expect(row.command_ai.?.style.height.px <= surface.options.row_height);
+    // A real theme application must not replace the compact soft tag with the
+    // stock status Badge's wider solid capsule after its initial mount.
+    cx.setTheme(&ui.theme.light);
+    _ = cx.render();
+    try std.testing.expectEqual(@as(f32, 4), row.command_ai.?.style.padding.left);
+    try std.testing.expectEqual(@as(f32, 4), row.command_ai.?.style.padding.right);
+    try std.testing.expectEqual(app_theme.popupSelection(), row.command_ai.?.getBackground());
+    try std.testing.expectEqualStrings("× 7", row.command_code.?.getText().?.content);
+    try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "AI") == null);
+    try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "×") == null);
+    const wrapped = value.screen_row.? + 1;
+    try std.testing.expect(@import("command_annotations.zig").coversRow(value, wrapped));
+    const rect = surface.viewport.globalRect();
+    cx.mouse_x = rect.x + 5;
+    cx.mouse_y = rect.y + (surface.rows.items[wrapped].root.globalRect().y - rect.y) + 2;
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try std.testing.expect(row.command_info.?.style.display == .none);
+    cx.mouse_x = -1;
+    cx.mouse_y = -1;
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try std.testing.expect(row.command_info.?.style.display == .flex);
+    view.setCommandInfoVisible(false);
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    try std.testing.expect(row.command_info.?.style.display == .none);
+    try std.testing.expect(row.command_state.?.style.display == .flex);
+    try std.testing.expectEqual(@as(usize, 1), view.commandHistory().len);
+    const before = transport.written.items.len;
+    try std.testing.expect(view.locateCommand(value.id));
+    try std.testing.expectEqual(before, transport.written.items.len);
+    try transport.controller.feedOutput(fixture.owner, 2, "\x1b[?1049hALT", 110);
+    _ = try view.refreshTerminalService(fixture.owner, false);
+    for (surface.rows.items) |next| {
+        if (next.command_state) |node| try std.testing.expect(node.style.display == .none);
+        if (next.command_info) |node| try std.testing.expect(node.style.display == .none);
+    }
+}
+
+test "terminal command history keeps executions distinct and virtualizes complete recorded list" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 600);
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    cx.root = root;
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const workspace_mod = @import("workspace.zig");
+    var workspace: workspace_mod.Workspace = undefined;
+    workspace.tabs = .empty;
+    defer workspace.tabs.deinit(a);
+    workspace.active_tab = 0;
+    var tab: workspace_mod.SessionTab = undefined;
+    tab.id = 1;
+    tab.archived = false;
+    tab.terminal = try TerminalViewNode.mount(cx);
+    defer tab.terminal.?.releaseBuffers(cx);
+    tab.root = tab.terminal.?.root;
+    tab.setTitle("test zsh");
+    try root.appendChild(a, tab.root);
+    try workspace.tabs.append(a, &tab);
+    for (0..520) |index| try tab.terminal.?.history.recordCommand(.{ .id = index + 1, .command = "true", .start_ms = @intCast(1000 + index), .elapsed_ms = 12, .exit_code = 0, .state = .succeeded }, 0);
+    const ssh_bar = try ui.box(cx, .{}, .{});
+    const local_bar = try ui.box(cx, .{}, .{});
+    try root.appendChild(a, ssh_bar);
+    try root.appendChild(a, local_bar);
+    const popup = try @import("command_history_view.zig").View.mount(cx, scope, &workspace, ssh_bar, local_bar);
+    popup.show(true);
+    for (0..5) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expectEqual(@as(usize, 520), popup.visible_count);
+    try std.testing.expectEqual(@as(usize, 520), popup.virtual.item_count);
+    try std.testing.expect(popup.rows.items.len < 100);
+    try std.testing.expectEqual(@as(u64, 520), popup.records.items[0].id);
+    try std.testing.expectEqual(@as(u64, 1), popup.records.items[519].id);
+    popup.toggle();
+    try std.testing.expect(popup.mode == .closed);
+    popup.toggle();
+    try std.testing.expect(popup.mode == .pinned);
+    cx.mouse_x = -100;
+    cx.mouse_y = -100;
+    for (0..3) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expect(popup.mode == .pinned);
+}
+
+test "terminal command archive restores first row annotations and locates its real recorded output" {
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(700, 400);
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    const ai_id: @import("../host/identity.zig").ExecutionId = .{ .bytes = @splat(3) };
+    const cast = "{\"version\":2,\"width\":40,\"height\":4}\n[0,\"o\",\"\\u001b]133;A\\u0007$ \\u001b]133;B\\u0007false\\r\\n\\u001b]133;C\\u0007\\u001b]133;D;1\\u0007$ \"]\n";
+    const metadata: @import("../vt/recording_manifest.zig").Manifest = .{
+        .archive_key = "11111111111111111111111111111111",
+        .recording_id = "22222222222222222222222222222222",
+        .source_kind = .local,
+        .started_ms = 100,
+        .recording = .{ .generations = &.{.{ .recording_generation = 1, .session_id = 1, .session_generation = 1, .initial_cols = 40, .initial_rows = 4, .receive_time_origin = 0, .event_sequence_start = 1 }} },
+        .events = &.{.{ .sequence = 1, .raw_offset = 0, .raw_length = 1, .cast_line = 1, .kind = .output }},
+        .command_history = &.{.{ .recording_generation = 1, .value = .{ .id = 1, .command = "false", .start_ms = 100, .end_ms = 112, .elapsed_ms = 12, .exit_code = 1, .state = .failed, .ai_execution_id = ai_id } }},
+    };
+    view.history.deinit();
+    view.history = try @import("history_cast.zig").loadWithManifest(a, cast, null, .{}, metadata);
+    view.bindArchived();
+    cx.layout();
+    try std.testing.expect(view.openHistory());
+    cx.layout();
+    try view.renderHistoryReading();
+    try std.testing.expectEqual(@as(usize, 1), view.commandHistory().len);
+    try std.testing.expect(view.commandLocationAvailable(1));
+    try std.testing.expect(view.locateCommand(1));
+    var seen = false;
+    for (view.history_command_info) |maybe| if (maybe) |node| {
+        const tag = node.children.items[0];
+        if (tag.style.display == .none) continue;
+        try std.testing.expectEqualStrings("CommandAiTag", tag.meta.ownership.meta.component_name.?);
+        try std.testing.expectEqualStrings("AI", tag.getText().?.content);
+        const content = node.children.items[1].getText().?.content;
+        try std.testing.expect(std.mem.indexOf(u8, content, "1") != null);
+        try std.testing.expect(std.mem.indexOf(u8, content, "12 ms") != null);
+        seen = true;
+    };
+    try std.testing.expect(seen);
+    view.setCommandInfoVisible(false);
+    for (view.history_command_info) |maybe| if (maybe) |node| try std.testing.expect(node.style.display == .none);
+    var state_visible = false;
+    for (view.history_command_states) |maybe| if (maybe) |node| {
+        if (node.style.display == .flex) state_visible = true;
+    };
+    try std.testing.expect(state_visible);
 }

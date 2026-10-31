@@ -1,9 +1,31 @@
 # 工作区 V3 · 本地 ZSH / SSH / SFTP
 
-> 当前评审： [2026-10-26 修订说明](../REVIEW_20261026.md) · [效果图总览](../review-20261026.html)。本轮替代下文与其冲突的侧栏、会话、气泡、连接页与 KVM 展示规则；待用户确认后再落地 APP UI。
+> 当前评审：。本轮替代下文与其冲突的侧栏、会话、气泡、连接页与 KVM 展示规则；待用户确认后再落地 APP UI。
 [返回设计中心](../index.html) · [打开交互原稿](index.html) · [公共组件标准](../components/index.html) · [设置 V3](../settings/index.html)
 
 本目录是新的可编辑 HTML/CSS/JS 设计原稿，供确认交互后映射到原生 zenit。**不是原生功能完成声明**。所有主机、命令输出、认证、AI、文件、传输与异步结果均为固定示例或本地模拟；不连接真实服务器，不读取或保存密码，不操作实际文件。
+
+## 主机行布局补全 · 2026-10-30
+
+原型原本已有路由图标及直连 `0`（`hostRouteLabel`），此次故障来自原生实现的 `hops > 0` 条件及固定 72px 操作占位。此次补全长名称、窄侧栏和悬停的可复现场景，以下规则作为该区域的当前基准。
+
+- SSH / SFTP 默认显示路由图标及跳板数，直连为 `0`，数字不表示分组主机数量。
+- 默认右侧路由区 36px；三个操作按钮隐藏时不占位。悬停或键盘焦点进入该行时，保留路由图标和跳数，并在右侧增加 72px 操作区；离开且焦点移出后仅收起操作区。路由信息与操作按钮不得重叠。
+- 名称保持单行，获得图标、状态及必要间距之外的可用宽度；仅在实际不足时显示省略号。SSH 不重复显示协议标签；SFTP 保留标签。
+- 完整名称、地址及路径由原有主机提示框显示；操作仍为连接、复制配置、编辑配置，不新增交互。
+- 侧栏检查宽度为 220 / 238 / 480px。`hosts=layout` 仅替换本地演示名称及分组，复用 `renderHosts` 和原有交互；`sidebar-width` 用于固定检查宽度，普通入口保持自动宽度逻辑。
+
+| 检查场景 | 可编辑原型入口 |
+| --- | --- |
+| 窄侧栏、直连与多跳、长中英文名称 | [220px](index.html?hosts=layout&sidebar-width=220&mode=local) |
+| 常规宽度 | [238px](index.html?hosts=layout&sidebar-width=238&mode=local) |
+| 宽侧栏 | [480px](index.html?hosts=layout&sidebar-width=480&mode=local) |
+| 最小窗口展开侧栏 | [860×480](index.html?hosts=layout&sidebar-width=220&size=compact&sidebar=expanded&mode=local) |
+| 独立主机组件，同一 renderer | [主机组件](index.html?component=host-sidebar&sidebar=expanded&hosts=layout&sidebar-width=220) |
+
+悬停名称可查看完整身份；按 Tab 可检查焦点状态及操作按钮。三主题通过页面已有主题按钮切换。
+
+已用浏览器检查 220px 深色、238px 浅色、480px Sauber 和 860×480 展开侧栏；跳数均为 `0 / 1 / 2 / 0 / 0`。220px 下两个短名称完整显示，长名称按可用宽度省略；480px 下全部名称完整显示。操作区为 72px，默认路由区为 36px；完整名称提示已显示。悬停保留路由的修正同步到原生布局。
 
 ## 直接进入
 
@@ -96,30 +118,6 @@
 
 实际项目为 Zig 0.17.0 和仓库 vendor/zenit；不升级或降级工具链。此交付没有修改原生源码。
 
-## 验证记录
-
-前一版验证记录（调整窗口基准前）：Codex in-app browser，**1280 × 720 CSS px，DPR 2，100% 缩放**。暗色 app 实测 x=24、y=67、宽1232、高610；外圆角14、壳间距8，展开侧栏224，正文 Inter / macOS系统中文字体；终端 12px / 22.8px Menlo。详见 [computed-style.json](verification/computed-style.json)。
-
-已实际点击 / 输入核验：
-
-- 本地展开 / 折叠侧栏，`@grp production` 建组；`@new` 新增一个组成员，来源记录保留。
-- SSH 组内 `@dup`：2 pane → 3 pane，仍只有组页签；pending → success 更新同条记录。
-- 创建回调期间输入 `echo next-draft`，完成后来源 input 保持 session #2、草稿与 caret(15,15)。
-- 开启广播后追加 dup，新成员 #5 显示“未获批准”，底栏仍为2个参与终端，原来源不变。
-- SFTP 两侧独立选区：左侧选择 release + README，右侧选择 access.log，上传确认仍是左侧两项；冲突“保留两份”后任务名保留两文件。
-- 全局传输管理器可以打开并展示已完成的多项任务；广播确认与身份浮卡实际打开。
-- `node --check app.js`、`git diff --check` 通过。
-
-HTML 原型入口：
-
-- [SSH 组命令流](index.html?mode=group)
-- [广播确认](index.html?mode=group)、[新增成员未自动批准](index.html?mode=group)
-- [身份浮卡](index.html?mode=ssh)
-- [上传确认](index.html?mode=sftp)、[冲突处理](index.html?mode=sftp)、[传输管理器](index.html?mode=sftp)
-
-未作为实机事实验证的项目：真实文件系统 / SSH / SFTP / AI / 钥匙串、原生 IME / VoiceOver、macOS 系统文件选择器和真实复制。这些在原稿中明确为模拟。页面不连接任意深度的真实远端文件树或完整 Shell / VT；固定目录与只读文件预览用于基础交互路径，不宣称覆盖所有协议能力。
-
-
 ## 2026-10-25 完整工作区补全
 
 本轮参考原生 `src/ui/ai_assistant_styles.zig`、`src/ai/float_model.zig`、终端/组/状态/传输控制器及已读取的 Figma **416:1912203**。AI 保留顶部居中 **100×14 三点边条 → 600×456 浮窗**，不是挤压终端的右侧栏。采用 V3 深/浅/Sauber tokens、14px 外圆角；头部 owner 只读，仅收起/最大化/关闭三窗控各22px；历史/新建放消息区轻工具行，输入区90px。浮窗可拖移与右下缩放，始终夹取到内容区；关闭停止生成、收起保留生成，草稿和对话按会话/组 owner 保存。
@@ -164,35 +162,16 @@ HTML 原型入口：
 
 已核对 `vendor/zenit/src/ui/components/mod.zig`。按钮/输入/选择器分别复用 `ui.widgets.Button` / `Input` / `Textarea` / `Select`；合法档使用 `Slider`；列表 `VirtualList` / `ScrollArea`；浮卡 `Popover`，菜单 **`Menu`**（不写不存在的 DropdownMenu），提示 `Tooltip`，确认 `Modal`，折叠区 `Accordion`、标签 `Tag`、步骤 `Steps`。TerminalSurface、Editor/Palette、FloatModel、Workspace/TabModel、组roster、challenge/transfer/AI工具控制器均是**项目专用业务模型**，不伪装成 zenit widget。原生必须沿用 owner/session generation、取消确认、资源清理与主线程生命周期；HTML事件不能直接替代这些契约。
 
-### 本轮实际核验与证据
-
-- 浏览器实测1440×900与860×480；两尺寸左下连接浮卡都inside APP=true，最小窗侧栏48px可恢复；浮卡打开时tooltip hidden=true。
-- 转发非法端口99999显示校验错误，8080创建规则并显示监听状态；启动/停止控件可操作。
-- SFTP实际选择文件上传→演示MD5失败→全局管理显示失败原因→重试→已完成1，更新任务截图；通知可选job/session来源定位动作。
-- AI三点展开实测600×456；点击建议→发送→工具计划批准，增加附件后原exit0结果仍保留；预算超限发送disabled，清理后恢复；收起/再展开草稿保留。
-- 模型浮卡实测336px，ArrowRight将effort中→高；远端附件空/失败/重试/预览/附加，处理中发送disabled均已实际点击。
-- 独立归档页实测新tab、0个命令输入，底栏无广播/转发，返回实时恢复原owner；独立审计还验证了归档空/失败/缺口和组回流。
-- 共享连接表单已实际输入名称/地址并走三步；Notes→终端多行保持和确认由主线程实际核验。其他新增拖拽/快捷键/异常分支属于可操作设计实现，不能据此宣称都已在原生引擎验收。
-- `node --check app.js` 通过。仅HTML/CSS/JS与本模块说明/截图，无原生代码、构建产物或提交。
-
-本轮状态入口：[最小窗口与状态浮卡](index.html?mode=local&size=compact)、[独立历史页](index.html?mode=history)、[AI最终空态](index.html?mode=ai)、[AI完整对话](index.html?mode=ai)、[模型滑块](index.html?mode=ai)、[端口转发](index.html?mode=ssh)。历史截图已清理，状态以可编辑 HTML 为准。真实SSH/SFTP/AI/钥匙串/系统文件选择器、任意深远端文件树、完整VT、原生IME/VoiceOver不由浏览器模拟证明。
-
-最终实测样式记录：[computed-style-final.json](verification/computed-style-final.json)，浏览器DPR2/100%缩放、1440×900 APP、600×456 AI、224px侧栏；各页面最后控制台未见脚本错误。
-
-跨模块笔记附件保存实际 `{type, source, text, name}` 只读快照，预览按附件快照显示原文（保留换行、转义HTML），不会套用示例远端日志；预算按该文本长度估算，不固定按4 KB计算。`noteContext`只进入附件，不重复塞入问题输入区。
-
-主线程最终复验：`@ai 分析服务日志` 直接输入后，终端保留特殊命令记录，问题完整进入当前AI草稿但不发送；预算弹层显示6.5k/200k的组成且在APP边界内。笔记跨模块附件点击显示真实Markdown原文，问题输入保持空，快照来源和字符数可见；证据见 [笔记与工作区原型](../notes/index.html)。本次复验使用更新后的 `complete-notes` 资源版本。
-
 ## 2026-10-25 V3逐项审计更新
 
-当前壳体统一5pt外边距、36pt顶栏、8pt卡片间隙、26pt底栏、30pt页签；侧栏宽度由实际模型与手动偏好决定；终端JetBrains Mono14/22。新增共享12主题及本地字体资源由 `../theme-tokens.css` 最后载入。任务管理器为锚定Popover，底栏UTF-8/网格/延迟只读，故障演示控制位于APP外评审面板。真实点击发现并修复MRU、页签双击、精确参数Enter、SFTP误入终端组、文件单位排序/mixed、批量冲突范围、任务计时器焦点、SOCKS配置、AI异步owner、共享连接身份链路串用等问题。逐项操作路径、测量及未验分支以[本轮审计](../verification/workspace-audit.md)为准；不把源码可达等同交互通过。原生内置命令持久记录需要新的终端文档层，不复用AI工具字节格式化器冒充该能力。
+当前壳体统一5pt外边距、36pt顶栏、8pt卡片间隙、26pt底栏、30pt页签；侧栏宽度由实际模型与手动偏好决定；终端JetBrains Mono14/22。新增共享12主题及本地字体资源由 `../theme-tokens.css` 最后载入。任务管理器为锚定Popover，底栏UTF-8/网格/延迟只读，故障演示控制位于APP外评审面板。真实点击发现并修复MRU、页签双击、精确参数Enter、SFTP误入终端组、文件单位排序/mixed、批量冲突范围、任务计时器焦点、SOCKS配置、AI异步owner、共享连接身份链路串用等问题。逐项操作路径、测量及未验分支以为准；不把源码可达等同交互通过。原生内置命令持久记录需要新的终端文档层，不复用AI工具字节格式化器冒充该能力。
 
 
 ## 2026-10-25 细粒度组件与交互对齐
 
 当前版本以[功能组件契约](COMPONENTS.md)为准，`?component=id`加载同一模型与控制器；没有复制第二套组件。页签使用`../shared/functional.js`的`V3.tab`与公共功能外壳样式。主机右键、页签右键和终端中键菜单分开；终端右键粘贴到原输入区，不执行，剪贴板不可访问时明确提示⌘V。单终端不再添加内容顶部工具横幅，搜索、历史、导出等由中键菜单及快捷键进入，分栏成员保留必要pane头部。折叠侧栏主机浮卡包含类型、状态、会话数与地址；页签浮卡包含身份、状态和目录/跳板。命令块与普通文档同起点，移除时间戳样式遗留的50px缩进。底栏延迟并入连接状态。链路浮卡在render重建后按语义锚点重新查找元素，不再定位已销毁节点。
 
-AI继续复用`docs/SPEC/prototypes/v2/index-dark.html`与`vanta.css`的三点入口、600×456浮窗、14px握柄、三窗控、只读owner、75%用户气泡和输入控制顺序，不另起侧栏设计。`verification/consistency/`保存针对性验证记录，效果状态通过 HTML 原型查看。
+AI继续复用`docs/SPEC/prototypes/v2/index-dark.html`与`vanta.css`的三点入口、600×456浮窗、14px握柄、三窗控、只读owner、75%用户气泡和输入控制顺序，不另起侧栏设计。
 
 
 ## 本轮修正契约（2026-10-25）
@@ -209,7 +188,7 @@ AI继续复用`docs/SPEC/prototypes/v2/index-dark.html`与`vanta.css`的三点�
 
 ## 2026-10-26 二轮评审更新
 
-当前以 [二轮效果图](../review-followup-20261026.html)、[修改与逐入口检查记录](../REVIEW_FOLLOWUP_20261026.md) 为准。侧栏为显示/隐藏，不保留图标折叠态；保存主机与会话分离，主机菜单不操作任意一条同主机会话的转发。旧验证截图已清理，相关状态通过 HTML 原型查看。传输使用共享 `transfer-row`，消息使用共享 `feedback`，具体语义、时长和位置见设计指南。
+当前以 、 为准。侧栏为显示/隐藏，不保留图标折叠态；保存主机与会话分离，主机菜单不操作任意一条同主机会话的转发。旧验证截图已清理，相关状态通过 HTML 原型查看。传输使用共享 `transfer-row`，消息使用共享 `feedback`，具体语义、时长和位置见设计指南。
 
 
 ## 2026-10-27 SFTP 确认框与文件菜单
@@ -220,7 +199,7 @@ AI继续复用`docs/SPEC/prototypes/v2/index-dark.html`与`vanta.css`的三点�
 
 HTML 原型：[SFTP 文件工作区](index.html?mode=sftp)、[小窗口](index.html?mode=sftp&size=compact)。选中文件后打开上传/下载确认，或右键打开文件菜单；历史原生截图已清理，既有尺寸与验收结论保留。
 
-验证覆盖原生真实鼠标拖拽上传/下载及外部文件投放、传输内容校验、860×480 小窗口确认框边界与底层提示关闭；文件工作区相关测试通过。App 产物为 0.2.2，仅构建 .app。
+验证覆盖原生真实鼠标拖拽上传/下载及外部文件投放、传输内容校验、860×480 小窗口确认框边界与底层提示关闭；文件工作区相关测试通过。App 产物为 0.2.2，仅构建.app。
 
 
 2026-10-28：历史回看与AI执行合并为[同一PATCH主方案](../../DESIGN/V0.2.6_AI_SESSION_EXECUTION.md#16-全局历史会话与原会话回看)。两入口共用session-history renderer；阅读位置保存逻辑行/文字锚，resize后重算进度。原生实现状态及局部修复见主方案§17。

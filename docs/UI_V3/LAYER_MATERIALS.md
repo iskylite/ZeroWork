@@ -1,4 +1,4 @@
-# 图层透明度与浮层设计记录
+# 图层透明度与浮层设计合同
 
 记录日期：2026-10-29。本文直接记录最终设计数值，原生实现与HTML基准使用相同参数。通用规则以[设计指南§3.3](../DESIGN/DESIGN_STANDARDS.md#33-阴影与背景能力)为准，实现入口为[app_theme.zig](../../src/ui/app_theme.zig)。
 
@@ -92,7 +92,3 @@ ZW_LAYER_TEST_PREFIX=/tmp/zw-layer-materials-build node e2e/layer_materials_nati
 共享 Input 的底色与必要的焦点反馈、次级按钮和未选复选框由同一主题发布提供这些颜色。显式覆盖样式的终端搜索、资产表单、页签筛选、传输确认、AI 菜单、连接与 SOCKS 详情同步采用相同语义。保留节点重绘同时更新派生内容底色，保留文本、选择、焦点和业务状态。HTML 对应 `theme-tokens.css` 的 `--control-bg`、`--popup-action`、`--popup-selected`。
 
 本轮实际层级、覆盖范围及截图的可复现入口见上述验证方式；原生脚本为 `e2e/layer_materials_native.ts`，中间截图保存于运行时指定的仓库外目录。
-
-2026-10-29 的控件与浮层巡检、最终无框复核及验证边界见[层级巡检记录](verification/layer-hierarchy-20261029.md)。
-
-全部 17 个主题的配色补全、原生组件覆盖与后续去线修正见[主题补全记录](verification/theme-completion-20261029.md)。

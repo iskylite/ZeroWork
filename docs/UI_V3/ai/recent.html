@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><title>AI 最近会话 · 长标题验收</title>
+<link rel="stylesheet" href="../shared/ai-assistant.css?recent=20261031">
+<style>
+:root{color-scheme:dark;--fg:#e8e8ed;--muted:#92929e;--card:#222228;--hover:#2b2b32}*{box-sizing:border-box}body{margin:0;background:#18181c;color:var(--fg);font:12px/1.65 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif}main{width:min(600px,100vw);height:276px;container-name:ai-welcome;container-type:size;padding:0 14px;display:flex;flex-direction:column}button{font-family:inherit}
+</style>
+<main id="welcome"></main><script src="../shared/ai-assistant.js?recent=20261031"></script><script>
+const titles={mixed:'请检查 Nginx 服务的 error 日志，解释这个 SSH 连接超时问题，并给出每一步的排查方法与处理建议 Please inspect the complete application error log and explain the connection timeout in detail',wide:'👩🏽‍💻 检查宽字符 ＡＢＣＤＥＦＧ 与中文日志 🧑‍🚀🚀🌍，保留整个原始问题并检查所有错误信息，尤其是终端输出中的启动失败 👩🏽‍💻 检查宽字符 ＡＢＣＤＥＦＧ 与中文日志 🧑‍🚀🚀🌍',unbroken:'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'};
+const fixture=new URLSearchParams(location.search).get('fixture')||'mixed';
+document.querySelector('main').innerHTML=V3AI.welcome({recent:[{title:titles[fixture]||titles.mixed,key:'17'},{title:'普通短标题',key:'29'}]});
+</script></html>

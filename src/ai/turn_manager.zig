@@ -18,6 +18,7 @@ pub const Manager = struct {
         reset: *const fn (*anyopaque) void,
         delta: *const fn (*anyopaque, provider.Delta) anyerror!void,
         /// Calls rejected by parsing or preflight may never reach the tool host.
+        round_start: ?*const fn (*anyopaque) void = null,
         tool_rejected: ?*const fn (*anyopaque, provider.ToolCall, []const u8) anyerror!void = null,
     };
     allocator: std.mem.Allocator,
@@ -92,18 +93,24 @@ pub const Manager = struct {
 
     pub fn run(self: *Manager, p: provider.Provider, request: provider.ChatRequest) !provider.ChatStats {
         if (self.tool_run) |previous| {
-            if (self.scope) |current| {
+            // Only a retry of the same turn inherits its dispatch ledger.
+            // A later tools-free turn keeps historical tool messages as
+            // context without requiring the previous turn's live authority.
+            if (previous.turn_id == self.turn_id) if (self.scope) |current| {
                 const same_conversation = if (previous.tool_table) |table| if (table.host_context) |context| same: {
                     const next = request.tool_table orelse return error.InvalidHostAuthority;
                     const other = next.host_context orelse return error.InvalidHostAuthority;
                     break :same context.conversation_id.eql(other.conversation_id);
                 } else tool_scope.Owner.eql(previous.scope.owner, current.owner) else tool_scope.Owner.eql(previous.scope.owner, current.owner);
-                if (previous.turn_id == self.turn_id and same_conversation) {
+                if (same_conversation) {
                     for (previous.records.items) |record| if (record.dispatched) return error.ToolTurnAlreadyDispatched;
                 }
-            }
+            };
         }
-        if (self.observer) |observer| observer.reset(observer.context);
+        if (self.observer) |observer| {
+            if (observer.round_start) |notify| notify(observer.context);
+            observer.reset(observer.context);
+        }
         try self.turn.resetForRun();
         self.last_error = null;
         self.saw_done = false;
@@ -164,7 +171,10 @@ pub const Manager = struct {
         try self.turn.begin();
         try self.turn.stream();
         errdefer self.turn.abort();
-        if (self.observer) |observer| observer.reset(observer.context);
+        if (self.observer) |observer| {
+            if (observer.round_start) |notify| notify(observer.context);
+            observer.reset(observer.context);
+        }
         var resumed = loop.request;
         resumed.messages = loop.messages.items;
         resumed.tools = &.{};
@@ -206,6 +216,7 @@ pub const Manager = struct {
     /// Retries only this provider round. Tool dispatch is outside the retry
     /// region; already completed calls and their transcript never run again.
     fn runRound(self: *Manager, p: provider.Provider, request: provider.ChatRequest) !provider.ChatStats {
+        if (self.observer) |observer| if (observer.round_start) |notify| notify(observer.context);
         self.clearPending();
         self.round_text.clearRetainingCapacity();
         self.saw_done = false;

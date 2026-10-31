@@ -10,9 +10,7 @@ ZeroWork 是面向 Apple Silicon Mac 的 SSH 终端，架构定义见 [总体架
 
 ## 当前基线
 
-当前版本为 **0.2（插件宿主 API 2）**。**目前仅确认 Figma 原型已对齐 V3，App 尚未完成全部 V3 设计同步。** 详见 [当前脱敏基线](docs/DEVELOPMENT/V0.2_STATUS.md)。实现及兼容性边界记录在 [V0.2 实现说明](docs/DEVELOPMENT/V0.2_IMPLEMENTATION.md)中；候选版本的具体结果、真实 SSH/AI 验证证据及环境限制见 [V0.2 实机验收](docs/DEVELOPMENT/V0.2_LIVE_ACCEPTANCE.md)。
-
-本次 **0.2.6** 收尾与验证范围见 [发布记录](docs/DEVELOPMENT/V0.2.6_RELEASE.md)。
+当前版本为 **0.2.7（插件宿主 API 2）**。实现与交互契约见[设计路线](docs/DESIGN/README.md)、[AI 会话执行设计](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)及[可编辑 V3 原型](docs/UI_V3/README.md)；构建与验证命令见[开发手册](docs/GUIDES/DEVELOPMENT.md)。
 
 - 项目使用 Zig 0.17.0（本地通过 zvm 管理），目标固定为 arm64、macOS 14 或更新版本。
 - P0 配置模型及严格子集 TOML 加载器。
@@ -21,7 +19,7 @@ ZeroWork 是面向 Apple Silicon Mac 的 SSH 终端，架构定义见 [总体架
 - Apple Silicon/macOS 平台契约。
 - Ghostty `libghostty-vt` 是唯一的 VT 解析器，通过 Ghostty C ABI/渲染状态适配器接入；I/O 边界由 worker/kqueue 契约管理。
 
-Zenit 是原生 macOS UI 层，使用已获授权的固定 GPL 修订版本；ZeroWork 不另建 Objective-C/Swift UI 桥接层。应用通过 Zenit `App.runWith` 启动，全部正式 UI 均通过 Zenit 公共 API 构建。历史上独立的单 CAMetalLayer 探针仅保留为 [P0 原生验证文档](docs/DEVELOPMENT/P0_NATIVE_SPIKE.md)，其源码和构建目标已移除。
+Zenit 是原生 macOS UI 层，使用已获授权的固定 GPL 修订版本；ZeroWork 不另建 Objective-C/Swift UI 桥接层。应用通过 Zenit `App.runWith` 启动，全部正式 UI 均通过 Zenit 公共 API 构建。历史上独立的单 CAMetalLayer 探针及其构建目标已移除。
 
 ZeroWork 链接 GPL Zenit 核心，因此按 GPL-3.0-only 分发；参见 [LICENSE](LICENSE) 和 [依赖说明](vendor/DEPENDENCIES.md)。
 

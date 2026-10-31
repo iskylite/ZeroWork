@@ -16,6 +16,10 @@ pub fn assemble(allocator: std.mem.Allocator, app: *App, roster: *Roster, scope:
     for (scope.members.slice()) |id| {
         var found = false;
         for (app.workspace.tabs.items) |tab| if (tab.content_owner == .session and @backingInt(tab.content_owner.session.session_id) == id) {
+            const member = for (group.members.items) |item| {
+                if (item.active and item.pane_id == tab.id) break true;
+            } else false;
+            if (!member) return error.TargetNotAuthorized;
             found = true;
             const owner = tab.content_owner.session;
             const available = !tab.closing and !tab.failed and !tab.archived;

@@ -179,6 +179,8 @@ pub fn assetsCurrent(assets: []const types.Draft, hosts: []const @import("../../
             !std.mem.eql(u8, host.socks_bind, asset.socks_bind) or
             host.scrollback != asset.scrollback or (host.scrollback_explicit or host.scrollback != 25000) != asset.scrollback_explicit or host.keepalive != asset.keepalive or
             host.compression != asset.compression or host.compression_explicit != asset.compression_explicit or
+            host.auto_shell_integration != asset.auto_shell_integration or
+            host.command_info != asset.command_info or
             host.socks_enabled != asset.socks_enabled or
             host.socks_port != asset.socks_port or host.socks_exit != asset.socks_exit or
             host.socks_auto_start != asset.socks_auto_start or host.socks_max_connections != asset.socks_max_connections) return false;

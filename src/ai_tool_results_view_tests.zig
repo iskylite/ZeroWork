@@ -7,6 +7,7 @@ const View = @import("ui/ai_tool_results_view.zig");
 const a = std.testing.allocator;
 test {
     _ = @import("ui/ai_card_scroll.zig");
+    _ = @import("ui/ai_tool_header_projection.zig");
 }
 fn find(node: *ui.Node, id: []const u8) ?*ui.Node {
     if (node.meta.ownership.meta.test_id) |test_id| if (std.mem.eql(u8, test_id, id)) return node;
@@ -92,6 +93,203 @@ test "tool result view shows actual mixed target facts after source ledger destr
     try std.testing.expect(std.mem.indexOf(u8, state.metadata.getText().?.content, "本地句柄") == null);
     try std.testing.expectEqualStrings("远端执行结果待核实", state.feedback.getText().?.content);
     try std.testing.expect(std.mem.startsWith(u8, state.metadata.getText().?.content, "未获退出码"));
+}
+
+test "tool header projection owns long Chinese text across assembled approval and completed step updates" {
+    const Step = @import("ui/ai_step_view.zig");
+    const events = @import("ai/step_events.zig");
+    const command = try std.mem.join(a, "", &@as([240][]const u8, @splat("检查生产目录与部署参数")));
+    defer a.free(command);
+    const raw = try std.json.Stringify.valueAlloc(a, .{ .command = command, .session_ref = "s1:0123456789abcdef0123456789abcdef:101:2", .request_key = "private-call-key" }, .{});
+    defer a.free(raw);
+    var steps: std.ArrayList(events.Step) = .empty;
+    defer {
+        for (steps.items) |*step| step.deinit(a);
+        steps.deinit(a);
+    }
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(332, 480);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .{ .px = 332 }, .height = .fill(), .direction = .column }, .{});
+    var headers: [5]*ui.Node = undefined;
+    const prefixes = [_][]const u8{ "准备中", "", "待确认", "已批准", "已批准" };
+    inline for (.{ .assembling, .running, .approval, .approved, .succeeded }, 0..) |phase, index| {
+        try events.apply(a, &steps, .{ .call_id = "same-call", .name = "host.run_in_terminal", .command = if (index == 0) "{\"command\":\"装配中" else if (index == 1) raw else "", .phase = phase, .at_ms = index * 10 });
+        const step = &steps.items[0];
+        const node = try Step.mount(cx, scope, .{ .title = Step.title(step.name), .tool_name = step.name, .projection = step.command, .decision = step.decision, .detail = "实际详情保持原值", .phase = step.phase, .elapsed_ms = 20, .expanded = &step.expanded });
+        try cx.root.?.appendChild(a, node);
+        headers[index] = find(node, "ai.step.projection").?;
+        const expected = if (index == 0) try a.dupe(u8, "准备中") else if (prefixes[index].len > 0) try std.fmt.allocPrint(a, "{s} · {s}", .{ prefixes[index], command }) else try a.dupe(u8, command);
+        defer a.free(expected);
+        try std.testing.expectEqualStrings(expected, headers[index].getText().?.content);
+    }
+    // Replacing the worker-owned arguments cannot invalidate mounted headers.
+    try events.apply(a, &steps, .{ .call_id = "same-call", .command = "{\"command\":\"后续调用\"}", .phase = .succeeded, .at_ms = 50 });
+    cx.layout();
+    _ = cx.render();
+    for (headers[1..], 1..) |header, index| {
+        const expected = if (prefixes[index].len > 0) try std.fmt.allocPrint(a, "{s} · {s}", .{ prefixes[index], command }) else try a.dupe(u8, command);
+        defer a.free(expected);
+        try std.testing.expectEqualStrings(expected, header.getText().?.content);
+        const bounds = header.globalRect();
+        try std.testing.expect(bounds.w > 0 and bounds.x + bounds.w <= 332);
+        try std.testing.expectEqual(.ellipsis, header.getText().?.text_overflow);
+    }
+    try std.testing.expectEqualStrings("工具调用", Step.title("fixture_private__tool_identity"));
+}
+
+const HeaderSdk = @typeInfo(@typeInfo(@FieldType(ui.Cx, "system_sdk")).optional.child).pointer.child;
+const HeaderBackend = @typeInfo(@FieldType(HeaderSdk, "vtable")).pointer.child;
+const HeaderPump = @typeInfo(@FieldType(HeaderBackend, "pump_events")).pointer.child;
+const HeaderClipboard = struct {
+    copied: ?[]u8 = null,
+    fn deinit(_: *anyopaque, _: std.mem.Allocator) void {}
+    fn pump(_: *anyopaque, _: @typeInfo(HeaderPump).@"fn".param_types[1].?, _: u32) @typeInfo(HeaderPump).@"fn".return_type.? {
+        return .{ .should_continue = true };
+    }
+    fn set(raw: *anyopaque, value: []const u8) error{OutOfMemory}!void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (self.copied) |old| a.free(old);
+        self.copied = try a.dupe(u8, value);
+    }
+    fn get(_: *anyopaque, out: []u8) error{}![]const u8 {
+        return out[0..0];
+    }
+    const vtable: HeaderBackend = .{ .name = "header-copy-test", .deinit = deinit, .pump_events = pump, .clipboard = .{ .set_text = set, .get_text = get } };
+};
+
+test "tool header projection leaves real result arguments and clipboard content unchanged" {
+    const raw = "{\"name\":\"部署检查与生产环境\",\"initial_session_ref\":\"s1:0123456789abcdef0123456789abcdef:101:3\",\"request_key\":\"exact-provider-request\"}";
+    var record: facts.Record = .{ .arena = .init(a), .owner = .{ .session = 101 }, .turn_id = 1, .call_id = "private-provider-call-id", .name = "host.create_group", .arguments = raw, .command = raw, .arguments_hash = @splat(3), .targets = &.{}, .dispatched = true, .decision = true, .expanded = true };
+    defer record.deinit();
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(332, 480);
+    var clipboard: HeaderClipboard = .{};
+    defer if (clipboard.copied) |value| a.free(value);
+    var sdk = HeaderSdk.init(a, &clipboard, &HeaderClipboard.vtable, .{ .clipboard = true });
+    defer sdk.deinit();
+    cx.system_sdk = &sdk;
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const state = try View.State.mount(cx, scope, &record);
+    cx.root = state.root;
+    state.root.setStyleInline(a, .{ .width = .{ .px = 332 } });
+    cx.layout();
+    _ = cx.render();
+    try std.testing.expectEqualStrings("创建会话组", find(state.root, "ai.tool.result.title").?.getText().?.content);
+    try std.testing.expectEqualStrings("已批准 · 部署检查与生产环境", find(state.root, "ai.tool.result.status").?.getText().?.content);
+    try std.testing.expectEqualStrings(raw, find(state.root, "ai.tool.result.command").?.getText().?.content);
+    find(state.root, "ai.tool.result.copy_command").?.behavior.events.on_click.?.invoke();
+    // Preserve the existing clipboard formatting, including every real field;
+    // the compact header must never replace the copied parameter object.
+    try std.testing.expectEqualStrings(
+        "{\n  \"name\": \"部署检查与生产环境\",\n  \"initial_session_ref\": \"s1:0123456789abcdef0123456789abcdef:101:3\",\n  \"request_key\": \"exact-provider-request\"\n}",
+        clipboard.copied.?,
+    );
+    try std.testing.expectEqualStrings(raw, record.arguments);
+    try std.testing.expectEqualStrings(raw, record.command);
+}
+
+test "tool header projection keeps the real group reference type through query capture and provider name encoding" {
+    const host = @import("ai/host_tools.zig");
+    const identity = @import("host/identity.zig");
+    const queries = @import("ai/host_queries.zig");
+    const context: host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .group = 1 }, .binding_revision = 2, .grant_revision = 1 };
+    const reference = try queries.groupRef(a, context, 1);
+    defer a.free(reference);
+    try std.testing.expectEqual(@as(u64, 1), try queries.groupReferenceId(context, reference));
+    const raw = try std.json.Stringify.valueAlloc(a, .{ .group_ref = reference, .limit = @as(u32, 16) }, .{});
+    defer a.free(raw);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, raw, .{});
+    defer parsed.deinit();
+    const snapshot: queries.Snapshot = .{ .context = context, .initial_binding = .{ .session = 1 }, .execution_policy = .{ .execution_mode = .auto, .session_retention = .keep }, .permission_mode = .confirm, .observed_at = 10, .source_revision = 11, .cursor_key = @splat(7), .sessions = &.{}, .groups = &.{.{ .id = 1, .name = "实际空会话组", .membership_revision = 3, .members = &.{} }} };
+    const invocation: host.Invocation = .{ .context = context, .authority = .conversation_context, .operation_id = 1, .turn_id = 4, .call_id = "empty-members", .tool_id = "host.list_group_members", .arguments = parsed.value, .arguments_json = raw, .arguments_hash = @splat(0), .canonical_arguments_hash = try @import("ai/canonical_arguments.zig").digest(a, parsed.value) };
+    const result = try queries.execute(snapshot, invocation, a);
+    var run = loop.Loop.init(a, .{ .owner = context.binding, .members = .{} }, 4, .{});
+    defer run.deinit();
+    var encoded: [64]u8 = undefined;
+    const wire_name = try @import("ai/plugin_tools.zig").encodeName(&encoded, invocation.tool_id);
+    run.records.append(run.arena.allocator(), .{ .key = .{ .owner = context.binding, .turn_id = 4, .call_id = invocation.call_id }, .name = wire_name, .arguments = raw, .arguments_hash = invocation.arguments_hash, .dispatched = true, .host_result = result }) catch |err| {
+        var owned = result;
+        owned.deinit(a);
+        return err;
+    };
+    var store = facts.Store.init(a);
+    defer store.deinit();
+    try std.testing.expect(try store.capture(&run, &.{}));
+    const record = store.records.items[0];
+    try std.testing.expectEqualStrings(raw, record.command);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const view = try View.State.mount(cx, scope, record);
+    cx.root = view.root;
+    try std.testing.expectEqualStrings("列出组成员", find(view.root, "ai.tool.result.title").?.getText().?.content);
+    try std.testing.expectEqualStrings("会话组 #1", find(view.root, "ai.tool.result.status").?.getText().?.content);
+}
+
+test "tool header projection gives real broker approval targets friendly labels without changing the subject hash or copied detail" {
+    const HostView = @import("ui/ai_host_approval_view.zig");
+    const approval = @import("ai/host_approval.zig");
+    const host = @import("ai/host_tools.zig");
+    const identity = @import("host/identity.zig");
+    const context: host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .group = 1 }, .binding_revision = 2, .grant_revision = 1 };
+    const session = try @import("ai/host_queries.zig").sessionRef(a, context, .{ .session_id = @fromBackingInt(101), .generation = 3 });
+    defer a.free(session);
+    const group = try @import("ai/host_queries.zig").groupRef(a, context, 1);
+    defer a.free(group);
+    const run_raw = try std.json.Stringify.valueAlloc(a, .{ .session_ref = session, .command = "printf approved", .request_key = "exact-command" }, .{});
+    defer a.free(run_raw);
+    const rename_raw = try std.json.Stringify.valueAlloc(a, .{ .group_ref = group, .name = "生产检查会话组", .request_key = "exact-rename" }, .{});
+    defer a.free(rename_raw);
+    const close_raw = try std.json.Stringify.valueAlloc(a, .{ .session_ref = session, .request_key = "exact-close" }, .{});
+    defer a.free(close_raw);
+    const Case = struct { kind: approval.SubjectKind, tool: []const u8, raw: []const u8, target: []const u8, detail: []const u8, expected: []const u8 };
+    const cases = [_]Case{
+        .{ .kind = .terminal_command, .tool = "host.run_in_terminal", .raw = run_raw, .target = session, .detail = "printf approved", .expected = "会话 #101" },
+        .{ .kind = .lifecycle, .tool = "host.rename_group", .raw = rename_raw, .target = "host.rename_group", .detail = rename_raw, .expected = "生产检查会话组" },
+        .{ .kind = .lifecycle, .tool = "host.close_session", .raw = close_raw, .target = "host.close_session", .detail = close_raw, .expected = "会话 #101" },
+    };
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    var clipboard: HeaderClipboard = .{};
+    defer if (clipboard.copied) |value| a.free(value);
+    var sdk = HeaderSdk.init(a, &clipboard, &HeaderClipboard.vtable, .{ .clipboard = true });
+    defer sdk.deinit();
+    cx.system_sdk = &sdk;
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    const Callback = struct {
+        fn decide(_: *anyopaque, _: u64, _: [32]u8, _: bool) !void {}
+    };
+    const view = try HostView.View.mount(cx, scope, .{ .context = cx, .on_decision = Callback.decide });
+    cx.root = view.root;
+    for (cases, 1..) |case, index| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, case.raw, .{});
+        defer parsed.deinit();
+        var hash: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(case.raw, &hash, .{});
+        const invocation: host.Invocation = .{ .context = context, .authority = if (case.kind == .lifecycle) .lifecycle else .execution_control, .operation_id = index, .turn_id = 4, .call_id = "exact-approval-call", .tool_id = case.tool, .arguments = parsed.value, .arguments_json = case.raw, .arguments_hash = hash, .canonical_arguments_hash = try @import("ai/canonical_arguments.zig").digest(a, parsed.value) };
+        var broker: approval.Broker = .{};
+        try broker.configure(context, 1);
+        defer broker.stop();
+        _ = try broker.beginSubject(invocation, .{ .kind = case.kind, .target = case.target, .detail = case.detail }, 1, a);
+        const pending = broker.snapshot().?;
+        try view.update(pending);
+        try std.testing.expectEqualStrings(case.expected, view.target.getText().?.content);
+        try std.testing.expectEqualStrings(case.target, pending.target.text());
+        try std.testing.expectEqualStrings(case.detail, pending.detail.text());
+        try std.testing.expectEqualSlices(u8, &hash, &view.arguments_hash);
+        find(view.root, "ai.host_approval.copy").?.behavior.events.on_click.?.invoke();
+        try std.testing.expectEqualStrings(case.detail, clipboard.copied.?);
+        const still_pending = broker.snapshot().?;
+        try std.testing.expectEqualStrings(case.target, still_pending.target.text());
+        try std.testing.expectEqualSlices(u8, &hash, &still_pending.arguments_hash);
+    }
 }
 
 test "tool result view formatting preserves raw inputs and handles incomplete JSON and binary output" {
@@ -309,6 +507,26 @@ test "tool step phases keep icon and title on one header line at narrow width" {
     }
 }
 
+test "tool step waiting approval shows a stable pending label without execution spinner" {
+    const Step = @import("ui/ai_step_view.zig");
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(572, 480);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    var expanded = false;
+    cx.root = try Step.mount(cx, scope, .{ .title = "执行命令", .projection = "待确认 · printf state; false", .detail = "等待你确认", .phase = .approval, .elapsed_ms = 28_400, .expanded = &expanded });
+    for (0..4) |_| {
+        cx.frame_time_ms += 1000;
+        cx.layout();
+        _ = cx.render();
+    }
+    try std.testing.expect(find(cx.root.?, "ai.step.spinner") == null);
+    try std.testing.expectEqualStrings("待确认", find(cx.root.?, "ai.step.elapsed").?.getText().?.content);
+    try std.testing.expectEqual(ui.icons.get("hand").?.icon_id.?, find(cx.root.?, "ai.step.status").?.getIcon().?.icon_id);
+    try std.testing.expectEqualStrings("待确认 · printf state; false", find(cx.root.?, "ai.step.projection").?.getText().?.content);
+}
+
 test "tool titles cover all registered host discovery lifecycle and execution actions" {
     const titles = @import("ui/ai_tool_titles.zig");
     for (@import("ai/host_queries.zig").contributions) |item| try std.testing.expect(titles.title(item.definition.id) != null);
@@ -521,7 +739,8 @@ test "execution input Store to view preserves queued pending cancelled failed an
     const terminal = @import("host/terminal_execution.zig");
     const Stage = @FieldType(terminal.InputReceipt, "stage");
     const Status = @import("ai/plugin_tools.zig").Status;
-    for ([_]struct { stage: ?Stage, status: Status = .succeeded, label: []const u8, failure: bool = false }{
+    for ([_]struct { stage: ?Stage, kind: terminal.InputKind = .host_secret, status: Status = .succeeded, label: []const u8, failure: bool = false }{
+        .{ .stage = .written, .kind = .text, .label = "输入结果 · 输入已写入终端" },
         .{ .stage = .queued, .label = "输入结果 · 输入已排队" },
         .{ .stage = .awaiting_host_secret, .label = "输入结果 · 等待宿主安全输入" },
         .{ .stage = .cancelled_unsent, .label = "输入结果 · 输入未提交 · 已取消" },
@@ -531,7 +750,7 @@ test "execution input Store to view preserves queued pending cancelled failed an
     }) |case| {
         var store = facts.Store.init(a);
         defer store.deinit();
-        const input = try std.json.Stringify.valueAlloc(a, .{ .execution_ref = "x1:0123456789abcdef0123456789abcdef", .input_receipt = if (case.stage) |stage| terminal.InputReceipt{ .input_sequence = 5, .wait_sequence = 3, .kind = .host_secret, .stage = stage } else null, .error_code = if (case.failure) @as(?[]const u8, "InputAcknowledgementUnknown") else null, .text = "PRIVATE_INPUT_SENTINEL", .output = "PRIVATE_INPUT_SENTINEL" }, .{});
+        const input = try std.json.Stringify.valueAlloc(a, .{ .execution_ref = "x1:0123456789abcdef0123456789abcdef", .input_receipt = if (case.stage) |stage| terminal.InputReceipt{ .input_sequence = 5, .wait_sequence = if (case.kind == .text) terminal.stream_wait_sequence else 3, .kind = case.kind, .stage = stage } else null, .error_code = if (case.failure) @as(?[]const u8, "InputAcknowledgementUnknown") else null, .text = "PRIVATE_INPUT_SENTINEL", .output = "PRIVATE_INPUT_SENTINEL" }, .{});
         defer a.free(input);
         const receipt: @import("ai/host_tools.zig").Receipt = .{ .conversation_id = .generate(), .task_id = .generate(), .operation_id = 1, .binding_revision = 1 };
         var run = loop.Loop.init(a, .{ .owner = .{ .group = 7 }, .members = .{} }, 42, .{});
@@ -545,6 +764,7 @@ test "execution input Store to view preserves queued pending cancelled failed an
         defer scope.dispose();
         cx.root = try @import("ui/ai_execution_result_view.zig").mount(cx, scope, &store, store.records.items[0], null, null);
         try std.testing.expectEqualStrings(case.label, find(cx.root.?, "ai.execution.result.summary").?.getText().?.content);
+        if (case.kind == .text) try std.testing.expectEqualStrings("输入序号 5 · 普通终端输入", find(cx.root.?, "ai.execution.result.input_sequence").?.getText().?.content);
         try std.testing.expectEqual(case.failure, find(cx.root.?, "ai.execution.result.failure") != null);
         if (case.failure) try std.testing.expectEqualStrings("InputAcknowledgementUnknown", store.records.items[0].execution.?.failure.?);
         try std.testing.expect(find(cx.root.?, "ai.execution.result.output_label") == null);
@@ -713,8 +933,10 @@ test "execution result preflight refusal shows user readable reason without raw 
 test "execution interval native result separates saved observation foreground failure attribution and handed off running state" {
     const Execution = @import("ui/ai_execution_result_view.zig");
     const terminal = @import("host/terminal_execution.zig");
-    const Case = struct { state: terminal.State = .interval_recorded, attribution: terminal.OutputAttribution, exit: ?u8 = 0, saved: bool = true, failed: bool = false, handed_off: bool = false };
+    const Case = struct { source: terminal.CompletionSource = .private_protocol, state: terminal.State = .interval_recorded, attribution: terminal.OutputAttribution, exit: ?u8 = 0, saved: bool = true, failed: bool = false, handed_off: bool = false };
     for ([_]Case{
+        .{ .source = .shell_reported, .attribution = .unverified },
+        .{ .source = .shell_reported, .attribution = .unverified, .exit = 7 },
         .{ .attribution = .unverified },
         .{ .attribution = .no_concurrent_owner_observed },
         .{ .attribution = .concurrent_observed },
@@ -725,6 +947,7 @@ test "execution interval native result separates saved observation foreground fa
         var record = executionFixture(case.state, "ACTUAL_OBSERVED_BYTES\n");
         defer record.deinit();
         const projection = &record.execution.?;
+        projection.completion_source = case.source;
         projection.output_scope = .session_interval;
         projection.output_attribution = case.attribution;
         projection.output_attribution_reason = if (case.attribution == .concurrent_observed) "BackgroundJobsObserved" else null;
@@ -755,7 +978,7 @@ test "execution interval native result separates saved observation foreground fa
         try std.testing.expect(std.mem.indexOf(u8, find(root, "ai.execution.result.output_limit").?.getText().?.content, "后台输出可能在前台结束后继续") != null);
         try std.testing.expect(std.mem.indexOf(u8, find(root, "ai.execution.result.summary").?.getText().?.content, "封存") == null);
         if (case.exit) |code| {
-            const expected = try std.fmt.allocPrint(a, "前台已结束 · 退出码 {d}", .{code});
+            const expected = try std.fmt.allocPrint(a, "{s} · 退出码 {d}", .{ if (case.source == .shell_reported) "Shell 报告" else "前台已结束", code });
             defer a.free(expected);
             try std.testing.expectEqualStrings(expected, find(root, "ai.execution.result.process").?.getText().?.content);
             if (code != 0 and !case.failed) try std.testing.expect(std.mem.indexOf(u8, find(root, "ai.execution.result.summary").?.getText().?.content, "执行失败") != null);
@@ -881,4 +1104,17 @@ test "PATCH card scroll resets output positions when selecting another original 
     try std.testing.expectEqual(@as(f32, 0), cardScrollState(view.body).scroll_y);
     try std.testing.expectEqual(@as(f32, 0), view.stdout_scroll.scroll_x);
     try std.testing.expectEqual(@as(f32, 0), view.stderr_scroll.scroll_x);
+}
+
+test "tool step undispatched request does not invent an execution duration" {
+    const Step = @import("ui/ai_step_view.zig");
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    var expanded = false;
+    cx.root = try Step.mount(cx, scope, .{ .title = "工具请求", .projection = "已拒绝 · 未执行", .detail = "用户拒绝本次命令。", .phase = .rejected, .elapsed_ms = 0, .show_elapsed = false, .expanded = &expanded });
+    cx.layout();
+    try std.testing.expect(find(cx.root.?, "ai.step.elapsed").?.style.display == .none);
+    try std.testing.expectEqualStrings("工具请求", find(cx.root.?, "ai.step.title").?.getText().?.content);
 }

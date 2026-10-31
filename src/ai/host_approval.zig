@@ -59,6 +59,7 @@ pub const Snapshot = struct {
     network_policy_revision: u64,
     created_at_ms: i64,
     expires_at_ms: i64,
+    expired: bool = false,
 };
 pub const Permit = struct { sequence: u64, arguments_hash: [32]u8 };
 const State = enum { pending, approved, rejected };
@@ -173,7 +174,13 @@ pub const Broker = struct {
         errdefer self.finish(permit);
         while (true) {
             if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
-            if (try self.poll(permit)) return permit;
+            // Expiry keeps this exact call suspended; only the user can renew
+            // or reject it. Never turn a missing decision into a model retry.
+            const approved = self.poll(permit) catch |err| switch (err) {
+                error.ToolApprovalExpired => false,
+                else => return err,
+            };
+            if (approved) return permit;
             @import("retry.zig").wait(10, cancel) catch return error.CancelledBeforeDispatch;
         }
     }
@@ -184,7 +191,13 @@ pub const Broker = struct {
         if (self.stopped) return error.CancelledBeforeDispatch;
         const entry = self.entry orelse return error.ScopeChanged;
         if (!matches(entry.snapshot, permit)) return error.StaleApproval;
-        if (self.now() >= entry.snapshot.expires_at_ms) return error.ToolApprovalExpired;
+        if (entry.state == .rejected) return error.ToolApprovalRejected;
+        if (self.now() >= entry.snapshot.expires_at_ms) {
+            // A decision delivered just before expiry may be observed later.
+            // Keep it visible and require renewal instead of hiding a waiter.
+            if (entry.state == .approved) self.entry.?.state = .pending;
+            return error.ToolApprovalExpired;
+        }
         return switch (entry.state) {
             .pending => false,
             .approved => true,
@@ -196,19 +209,31 @@ pub const Broker = struct {
         self.lock();
         defer self.mutex.unlock();
         const entry = self.entry orelse return null;
-        if (self.stopped or entry.state != .pending or self.now() >= entry.snapshot.expires_at_ms) return null;
-        return entry.snapshot;
+        if (self.stopped or entry.state != .pending) return null;
+        var result = entry.snapshot;
+        result.expired = self.now() >= result.expires_at_ms;
+        return result;
     }
     pub fn decide(self: *Broker, sequence: u64, hash: [32]u8, approved: bool) !void {
         self.lock();
         defer self.mutex.unlock();
         const entry = if (self.entry) |*item| item else return error.StaleApproval;
-        if (self.stopped or entry.state != .pending or entry.snapshot.sequence != sequence or !std.mem.eql(u8, &entry.snapshot.arguments_hash, &hash) or self.now() >= entry.snapshot.expires_at_ms) return error.StaleApproval;
+        if (self.stopped or entry.state != .pending or entry.snapshot.sequence != sequence or !std.mem.eql(u8, &entry.snapshot.arguments_hash, &hash) or (approved and self.now() >= entry.snapshot.expires_at_ms)) return error.StaleApproval;
         if (approved) {
             if (entry.snapshot.route) |route| try self.execution_route.select(entry.snapshot.context, route.choice, entry.snapshot.detail.text(), true);
         }
         if (!approved and entry.snapshot.route != null) self.execution_route.revoke();
         entry.state = if (approved) .approved else .rejected;
+    }
+    /// Explicit renewal never grants approval. The same frozen request must
+    /// still be approved separately and revalidated at dispatch.
+    pub fn renew(self: *Broker, sequence: u64, hash: [32]u8) !void {
+        self.lock();
+        defer self.mutex.unlock();
+        const entry = if (self.entry) |*value| value else return error.StaleApproval;
+        if (self.stopped or entry.state != .pending or entry.snapshot.sequence != sequence or !std.mem.eql(u8, &entry.snapshot.arguments_hash, &hash) or self.now() < entry.snapshot.expires_at_ms) return error.StaleApproval;
+        entry.snapshot.created_at_ms = self.now();
+        entry.snapshot.expires_at_ms = std.math.add(i64, self.now(), lifetime_ms) catch return error.ApprovalSequenceExhausted;
     }
     /// Selection changes the pending card only. One subsequent approve action
     /// binds it to this command; cancel never mints a selection grant.

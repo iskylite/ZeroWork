@@ -10,6 +10,8 @@ test {
 pub const Timeline = struct {
     allocator: std.mem.Allocator,
     frames: std.ArrayList(Entry) = .empty,
+    commands: std.ArrayList(@import("../vt/snapshot.zig").Command) = .empty,
+    command_frames: std.ArrayList(usize) = .empty,
     bytes: usize = 0,
     limit: usize,
     selected: ?usize = null,
@@ -92,6 +94,7 @@ pub const Timeline = struct {
         var result = Timeline.init(self.allocator, self.limit);
         errdefer result.deinit();
         result.history_id = self.history_id;
+        for (self.commands.items, self.command_frames.items) |command, index| try result.recordCommand(command, index);
         for (self.frames.items) |entry| {
             const wire = try result.allocator.dupe(u8, entry.wire);
             errdefer result.allocator.free(wire);
@@ -114,6 +117,34 @@ pub const Timeline = struct {
         result.bytes = self.bytes;
         return result;
     }
+    /// The frame is captured at the native C/D callback, so its row remains
+    /// meaningful even when later resize/scrollback changes the final grid.
+    pub fn commandFrame(self: *const Timeline, id: u64) ?usize {
+        for (self.commands.items, self.command_frames.items) |command, index| if (command.id == id) return @min(index, self.frames.items.len -| 1);
+        return null;
+    }
+    pub fn recordCommand(self: *Timeline, value: @import("../vt/snapshot.zig").Command, frame_index: usize) !void {
+        var command = value;
+        command.command = if (value.command) |text| try self.allocator.dupe(u8, text) else null;
+        errdefer if (command.command) |text| self.allocator.free(text);
+        for (self.commands.items, 0..) |*saved_command, index| if (saved_command.id == value.id) {
+            if (saved_command.command) |text| {
+                self.bytes -= text.len;
+                self.allocator.free(text);
+            }
+            saved_command.* = command;
+            self.command_frames.items[index] = frame_index;
+            self.bytes += if (command.command) |text| text.len else 0;
+            return;
+        };
+        const size = @sizeOf(@import("../vt/snapshot.zig").Command) + @sizeOf(usize) + (if (command.command) |text| text.len else @as(usize, 0));
+        if (self.bytes + size > self.limit) return error.HistoryRecordingTooLarge;
+        try self.commands.ensureUnusedCapacity(self.allocator, 1);
+        try self.command_frames.ensureUnusedCapacity(self.allocator, 1);
+        self.commands.appendAssumeCapacity(command);
+        self.command_frames.appendAssumeCapacity(frame_index);
+        self.bytes += size;
+    }
     pub fn deinit(self: *Timeline) void {
         for (self.frames.items) |*entry| {
             self.allocator.free(entry.wire);
@@ -122,6 +153,9 @@ pub const Timeline = struct {
             if (entry.search) |*document| document.deinit(entry.search_allocator orelse self.allocator);
         }
         self.frames.deinit(self.allocator);
+        for (self.commands.items) |command| if (command.command) |text| self.allocator.free(text);
+        self.commands.deinit(self.allocator);
+        self.command_frames.deinit(self.allocator);
     }
     pub fn append(self: *Timeline, time_ms: i64, wire: []const u8) !void {
         if (text_frame.decode(wire) == null) return error.InvalidFrame;
@@ -139,6 +173,9 @@ pub const Timeline = struct {
         while (self.bytes > self.limit and self.frames.items.len > 1) {
             const remove_index: usize = if (self.selected == 0) (if (self.frames.items.len > 2) 1 else break) else 0;
             const oldest = self.frames.orderedRemove(remove_index);
+            for (self.command_frames.items) |*index| {
+                if (index.* > remove_index) index.* -= 1;
+            }
             self.bytes -= oldest.wire.len;
             self.bytes -= oldest.presentation.len * @sizeOf(PresentationRow);
             self.bytes -= oldest.color_runs.len * @sizeOf(ColorRun);

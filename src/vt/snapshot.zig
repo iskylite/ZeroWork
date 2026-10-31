@@ -72,6 +72,31 @@ pub const Event = struct {
     text: []const u8,
     exit_code: ?i32 = null,
 };
+pub const CommandState = enum { running, succeeded, failed, unknown };
+/// One observed OSC 133 C event, including repeated command lines. Coordinates
+/// are current primary-screen positions, resolved from Ghostty tracked refs;
+/// null means that the location was evicted, reset, or is not the active screen.
+pub const Command = struct {
+    id: u64,
+    ai_execution_id: ?@import("../host/identity.zig").ExecutionId = null,
+    /// Null means that neither the shell nor the retained native input range
+    /// supplied a complete command. An observed empty command stays an empty slice.
+    command: ?[]const u8 = null,
+    start_ms: i64,
+    end_ms: ?i64 = null,
+    /// Monotonic duration, independent of wall-clock changes. Running projection
+    /// copies refresh it on each capture without changing terminal revisions;
+    /// the C observer leaves it null and D fixes the final measured duration.
+    elapsed_ms: ?u64 = null,
+    exit_code: ?i32 = null,
+    state: CommandState = .running,
+    screen_row: ?u32 = null,
+    col: ?u16 = null,
+    input_end_row: ?u32 = null,
+    input_end_col: ?u16 = null,
+    output_start_row: ?u32 = null,
+    output_start_col: ?u16 = null,
+};
 pub const Projection = struct {
     output_sequence: u64 = 0,
     bell_count: u64 = 0,
@@ -94,6 +119,8 @@ pub const Projection = struct {
     events: []const Event = &.{},
     events_truncated: bool = false,
     metadata_truncated: bool = false,
+    commands: []const Command = &.{},
+    commands_truncated: bool = false,
 
     pub fn deinit(self: *Projection, allocator: std.mem.Allocator) void {
         allocator.free(self.visible_rows);
@@ -102,6 +129,8 @@ pub const Projection = struct {
         if (self.reported_cwd) |cwd| allocator.free(cwd);
         for (self.events) |event| allocator.free(event.text);
         allocator.free(self.events);
+        for (self.commands) |command| if (command.command) |text| allocator.free(text);
+        allocator.free(self.commands);
         self.* = undefined;
     }
     pub fn clone(self: Projection, allocator: std.mem.Allocator) !Projection {
@@ -126,6 +155,18 @@ pub const Projection = struct {
             count += 1;
         }
         result.events = events;
+        const commands = try allocator.alloc(Command, self.commands.len);
+        var command_count: usize = 0;
+        errdefer {
+            for (commands[0..command_count]) |command| if (command.command) |text| allocator.free(text);
+            allocator.free(commands);
+        }
+        for (self.commands, 0..) |command, i| {
+            commands[i] = command;
+            commands[i].command = if (command.command) |text| try allocator.dupe(u8, text) else null;
+            command_count += 1;
+        }
+        result.commands = commands;
         return result;
     }
     pub fn grapheme(self: Projection, cell: Cell) []const u8 {

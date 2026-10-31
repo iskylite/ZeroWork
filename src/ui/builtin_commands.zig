@@ -33,6 +33,7 @@ pub const Command = union(enum) {
     pin: void,
     sync: bool,
     timestamp: ?bool,
+    command_history: ?bool,
     /// @log always enters read-only replay; no export path is accepted.
     log: ?[]const u8,
     socks: Socks,
@@ -63,6 +64,7 @@ pub fn parse(line: []const u8) Command {
     if (eq(name, "@grp")) return .{ .group = unquote(args) orelse return invalid(name, .invalid_path) };
     if (eq(name, "@theme")) return .{ .theme = if (args.len == 0) null else unquote(args) orelse return invalid(name, .invalid_path) };
     if (eq(name, "@ts") and args.len == 0) return .{ .timestamp = null };
+    if (eq(name, "@history")) return .{ .command_history = if (args.len == 0) null else parseSwitch(args) orelse return invalid(name, .invalid_switch) };
     if (eq(name, "@sync") or eq(name, "@ts")) {
         const enabled = parseSwitch(args) orelse return invalid(name, .invalid_switch);
         return if (eq(name, "@sync")) .{ .sync = enabled } else .{ .timestamp = enabled };
@@ -82,6 +84,15 @@ pub fn parse(line: []const u8) Command {
     if (eq(name, "@pin")) return .pin;
     if (eq(name, "@log")) return .{ .log = null };
     return .{ .not_command = line };
+}
+
+test "command history builtins stay client local and validate switches" {
+    try std.testing.expect(parse("@history") == .command_history);
+    try std.testing.expect(parse("@history").command_history == null);
+    try std.testing.expectEqual(@as(?bool, true), parse("@history on").command_history);
+    try std.testing.expectEqual(@as(?bool, false), parse("@history off").command_history);
+    try std.testing.expect(parse("@history invalid") == .invalid);
+    try std.testing.expectEqualStrings("@history on", parse("@@history on").literal);
 }
 
 fn eq(a: []const u8, b: []const u8) bool {
@@ -146,7 +157,7 @@ test "download paths and socks port preserve the intended target" {
 }
 
 test "old invented aliases and invalid parameters do not become actions" {
-    try std.testing.expectEqualStrings("@history", parse("@history").not_command);
+    try std.testing.expectEqualStrings("@histories", parse("@histories").not_command);
     try std.testing.expectEqualStrings(" @up", parse(" @up").not_command);
     try std.testing.expectEqualStrings("echo @up", parse("echo @up").not_command);
     try std.testing.expectEqual(Invalid.Reason.unexpected_parameter, parse("@log export.cast").invalid.reason);

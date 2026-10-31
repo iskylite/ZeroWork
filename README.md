@@ -10,9 +10,7 @@ ZeroWork is an Apple Silicon macOS SSH terminal specified in [docs/SPEC/OVERALL_
 
 ## Current baseline
 
-The current version is **0.2 (plugin host API 2)**. **Only the Figma prototype is confirmed aligned with V3; the App has not yet been synchronized with the full V3 design.** See the [current sanitized baseline](docs/DEVELOPMENT/V0.2_STATUS.md). The implementation and compatibility boundaries are recorded in [V0.2 implementation](docs/DEVELOPMENT/V0.2_IMPLEMENTATION.md); candidate-specific results, real SSH/AI evidence, and environment limitations are in [V0.2 live acceptance](docs/DEVELOPMENT/V0.2_LIVE_ACCEPTANCE.md).
-
-The **0.2.6** baseline and validation scope are recorded in the [release notes](docs/DEVELOPMENT/V0.2.6_RELEASE.md).
+The current version is **0.2.7 (plugin host API 2)**. The implementation and interaction contracts are documented in [the design roadmap](docs/DESIGN/README.md), [AI session execution](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md), and the [editable V3 prototypes](docs/UI_V3/README.md). Build and validation commands are in the [development guide](docs/GUIDES/DEVELOPMENT.md).
 
 - Zig 0.17.0 project baseline (managed with local zvm), locked to arm64 macOS 14+
 - P0 configuration model and strict subset TOML loader
@@ -21,7 +19,7 @@ The **0.2.6** baseline and validation scope are recorded in the [release notes](
 - Apple Silicon/macOS platform contract
 - Ghostty `libghostty-vt` is the sole VT parser through the Ghostty C ABI/render-state adapter; worker/kqueue contracts own the I/O boundary
 
-Zenit is the native macOS UI layer and is attached from the authorized fixed GPL revision; ZeroWork does not add a separate Objective-C/Swift UI bridge. The app enters Zenit `App.runWith` and all production UI is built through Zenit public APIs. The historical isolated single-CAMetalLayer probe is retained only as documentation in [docs/DEVELOPMENT/P0_NATIVE_SPIKE.md](docs/DEVELOPMENT/P0_NATIVE_SPIKE.md); its source and build target have been removed.
+Zenit is the native macOS UI layer and is attached from the authorized fixed GPL revision; ZeroWork does not add a separate Objective-C/Swift UI bridge. The app enters Zenit `App.runWith` and all production UI is built through Zenit public APIs. The historical isolated single-CAMetalLayer probe and its build target have been removed.
 
 ZeroWork is distributed under GPL-3.0-only while it links the GPL Zenit core; see [LICENSE](LICENSE) and [vendor/DEPENDENCIES.md](vendor/DEPENDENCIES.md).
 
@@ -125,9 +123,9 @@ To return to a normal build after testing, run `zig build -j2` again. Do not use
 Diagnostic logging uses a dedicated writer with its own IO lifetime. Producers
 copy records into a fixed 256-entry queue (at most 2 KiB per record); 32 entries
 are reserved for warnings/errors. Full queues and lock contention drop records
-without blocking producers, with counters exposed by `applog.snapshot()` and a
+without blocking producers, with counters exposed by `applog.snapshot` and a
 summary written by the owner. Oversized records carry a truncation marker.
-`requestFlush`/`pollFlush` acknowledge accepted records only after file sync;
+`requestFlush`/`pollFlush` acknowledge accepted records only after file sync
 `flush(timeout_ms)` is for bounded CLI/test waits. `shutdownStep` stops admission
 and polls actual resource release; final-process `shutdown` waits approximately
 200 ms at most. A stuck IO retains its writer and prevents replacement writers

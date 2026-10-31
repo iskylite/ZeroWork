@@ -97,7 +97,7 @@ test "transfer conflict view has exact default geometry and no automatic selecti
     try std.testing.expect(f.view.selected.peek() == null);
     try std.testing.expect(f.view.primary_disabled.peek());
     try std.testing.expectApproxEqAbs(@as(f32, 0.4), f.view.primary.getOpacity(), 0.001);
-    try std.testing.expectEqual(theme.current().accent, f.view.primary.getBackground());
+    try std.testing.expectEqual(theme.current().action_accent, f.view.primary.getBackground());
     const primary_label = findText(f.view.primary, "应用选择").?.getText().?;
     try std.testing.expectEqual(@as(f32, 12), primary_label.font_size);
     try std.testing.expectEqual(@as(u16, 500), primary_label.font_weight);
@@ -243,5 +243,5 @@ test "transfer conflict view initialization is independent of a previous Cx fram
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
-    try std.testing.expectEqual(theme.current().accent, f.view.primary.getBackground());
+    try std.testing.expectEqual(theme.current().action_accent, f.view.primary.getBackground());
 }

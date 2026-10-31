@@ -45,7 +45,7 @@ try{
  await scrollBottom();await capture('03-advanced-expanded');
  const advanced=await visible('wizard.advanced.body'),compression=await visible('wizard.compression'),encoding=await visible('wizard.encoding'),startup=await visible('wizard.startup');
  assert.equal(startup.rect.h,80);assert.equal(startup.rect.w,696);assert.equal(encoding.rect.h,34);assert.equal(compression.rect.h,34);
- await writeFile(join(out,'advanced-tree.json'),JSON.stringify(advanced,null,2));assert.equal(advanced.rect.h,310);const summary=await visible('wizard.advanced.toggle'),summaryText=flatten(summary).find(n=>n.text==='高级选项');assert(summaryText);assert.equal(summary.rect.h,18);assert(summaryText.rect.x-summary.rect.x<24);assert.equal(advanced.rect.y-summary.rect.y-summary.rect.h,12);report.summary={rect:summary.rect,text:summaryText.rect};
+ await writeFile(join(out,'advanced-tree.json'),JSON.stringify(advanced,null,2));assert.equal(advanced.rect.h,379.5);const summary=await visible('wizard.advanced.toggle'),summaryText=flatten(summary).find(n=>n.text==='高级选项');assert(summaryText);assert.equal(summary.rect.h,18);assert(summaryText.rect.x-summary.rect.x<24);assert.equal(advanced.rect.y-summary.rect.y-summary.rect.h,12);report.summary={rect:summary.rect,text:summaryText.rect};
  const labelNames=['连接超时（全局默认）','保活间隔（全局默认）','字符编码','启动命令 · 每行一条，连接后依次执行'];
  const labels=flatten(advanced).filter(n=>labelNames.includes(n.text));for(const label of labels){assert.equal(label.rect.h,16.5);}assert.equal(labels.length,4);
  report.geometry={advanced:advanced.rect,compression:compression.rect,encoding:encoding.rect,startup:startup.rect,labels};

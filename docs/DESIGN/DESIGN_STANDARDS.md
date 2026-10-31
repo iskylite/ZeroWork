@@ -14,9 +14,9 @@
 
 **原型只看“V2 · Vanta 设计系统”**，文件`ZeroWork · 交互原型`，记录ID`FOPeYuvmCL86rgev6Niobz`，页`214:329905`。设计节点读写仅用现有本地Figma MCP Bridge，不切换官方MCP、REST或其他设计工具，不核验其他页。Figma原生界面的连接/保存状态检查与本地备份属于辅助验收，不作为节点参数来源。
 
-**当前证据口径（2026-10-24）**：[独立交叉复核](../DEVELOPMENT/V0.2_STATUS.md)覆盖2497个当前项（2496产品UI＋1评审导航），1094根有参数或视觉变化；2756来源总表还包含241历史来源、12已移除指标详情和6原缺失来源，不能当作当前产品项数。后续[实机反馈修复](../DEVELOPMENT/V0.2_STATUS.md)、[设置摘要](../DEVELOPMENT/V0.2_STATUS.md)和[V3本机/外观纠错](../DEVELOPMENT/V0.2_STATUS.md)按其明确节点覆盖对应旧值。原型不要求补Present连线，保留既有有效交互；静态导图验收与Zenit真实窗口、资源和交互验收分别记录。
+**当前证据口径（2026-10-24）**：覆盖2497个当前项（2496产品UI＋1评审导航），1094根有参数或视觉变化；2756来源总表还包含241历史来源、12已移除指标详情和6原缺失来源，不能当作当前产品项数。后续、和按其明确节点覆盖对应旧值。原型不要求补Present连线，保留既有有效交互；静态导图验收与Zenit真实窗口、资源和交互验收分别记录。
 
-[2026-10-18核验清单](../DEVELOPMENT/V0.2_STATUS.md)的基线558状态/569逻辑key、1674三主题场景根和其后5态/15根，以及[逐状态台账](../DEVELOPMENT/V0.2_STATUS.md)、[旧15节点读回](../DEVELOPMENT/V0.2_STATUS.md)、[冲突复核](../DEVELOPMENT/V0.2_STATUS.md)与[292 token](../DEVELOPMENT/V0.2_STATUS.md)均保留作历史来源与业务追踪，不能覆盖后续同ID的当前参数或冒充本次全量复核。云端命名检查点`2413747697384332675`已有历史确认；本次连接状态须单独记录，不能用旧检查点证明后续修改同步完成。
+的基线558状态/569逻辑key、1674三主题场景根和其后5态/15根，以及、、与均保留作历史来源与业务追踪，不能覆盖后续同ID的当前参数或冒充本次全量复核。云端命名检查点`2413747697384332675`已有历史确认；本次连接状态须单独记录，不能用旧检查点证明后续修改同步完成。
 
 用户已确认的产品裁决优先于裁决前原型文字；当前契约、原始证据和待同步节点分别登记，不能因旧键标或退役标本仍存在于快照就继续执行旧规则。快捷键动作与来源统一见V0.1.1§2.3，组关闭见V0.1.6，当前材质字段与旧透明色/浓度退役见V0.1.2§7.3。历史组件只保来源/原文/hash，不自动注册当前schema或新增未画入口；同页最新R24整页没有的已退役入口不得经“高级”或隐藏配置重新开放。
 
@@ -40,9 +40,9 @@
 
 **2026-10-24 验收口径**：本轮以可编辑原型本身符合 V3 为硬指标，原型连线不作为必需交付。按实际导出图核对信息层级、文字与图标比例、Tag居中、按钮位置、渐变与玻璃表面、浮层锚点及留白；跨场景相同组件保持一致。节点数量、布局诊断或连线保存成功均不能替代视觉验收。保留现有有效交互，不为补导航重新组织产品根或增加重复画板；实现说明仍与产品界面分离。
 
-**逐项保留用户要求**：对齐、留白、按钮位置、组件/字体/图标尺寸、顶栏/底栏/侧栏比例、渐变/材质、Tag及图标内文字居中、跨场景一致性、重复内容和说明分离均为独立检查项，不能用“统一V3”一项代替。每项对应实际节点参数和最终图；全清单看图覆盖与控件参数专项测量分别记录。持续对照见[用户要求逐项对照](../DEVELOPMENT/V0.2_STATUS.md)。
+**逐项保留用户要求**：对齐、留白、按钮位置、组件/字体/图标尺寸、顶栏/底栏/侧栏比例、渐变/材质、Tag及图标内文字居中、跨场景一致性、重复内容和说明分离均为独立检查项，不能用“统一V3”一项代替。每项对应实际节点参数和最终图；全清单看图覆盖与控件参数专项测量分别记录。
 
-**全使用位置检查**：同类问题需遍历当前有效原型中全部使用位置，不能仅修发现问题的组件家族或挑代表图。共享源正确仍需核实例覆盖：外层按钮缩高后，内部surface/gradient不得留原高度；有渐变还需核对主题色、覆盖边界及文字层序。共享源同时承载普通、禁用和危险动作时，保持语义区别；源修改后由各域逐使用位置验证继承。最新全使用位置记录见[独立交叉复核](../DEVELOPMENT/V0.2_STATUS.md)，前轮记录保留为历史证据。
+**全使用位置检查**：同类问题需遍历当前有效原型中全部使用位置，不能仅修发现问题的组件家族或挑代表图。共享源正确仍需核实例覆盖：外层按钮缩高后，内部surface/gradient不得留原高度；有渐变还需核对主题色、覆盖边界及文字层序。共享源同时承载普通、禁用和危险动作时，保持语义区别；源修改后由各域逐使用位置验证继承。前轮记录保留为历史证据。
 
 **覆盖、裁切与可见性**：普通临时Popover/Toast可以覆盖背景，但持续提示不得遮住唯一重试、取消或恢复操作；窄pane空间不足时让状态与操作按内容换行，保命中区和终端视口边界。同一静态场景用详细侧栏覆盖壳层的示意，不代表实现时叠建两套侧栏。长列表初始离屏属于正常有界布局，需原生呈现滚动到底的文字和相邻上下文再验收，不能仅看初屏或参数；标题不重复页脚已有数量。应用窗口根应裁切窗口外绘制，保窗口内浮层阴影；局部浮层与内容滚动视口按各自职责设裁切，不能全页一律clip。既定最小阅读视口不能因当前示例文字少而缩低。
 
@@ -117,12 +117,12 @@
 
 | Token | Dark alpha | Light alpha | Sauber alpha |
 | --- | --- | --- | --- |
-| accent-05 / accent-06 | .05 / .06 | .05 / .06 | .05 / .06 |
-| accent-07 | .08 | .08 | .07 |
-| accent-12 | .14 | .13 | .13 |
-| accent-22 | .24 | .22 | .22 |
-| accent-30 | .35 | .32 | .32 |
-| accent-ring | .18 | .16 | .16 |
+| accent-05 / accent-06 |.05 /.06 |.05 /.06 |.05 /.06 |
+| accent-07 |.08 |.08 |.07 |
+| accent-12 |.14 |.13 |.13 |
+| accent-22 |.24 |.22 |.22 |
+| accent-30 |.35 |.32 |.32 |
+| accent-ring |.18 |.16 |.16 |
 
 `build_vanta.py:readable_ui_ink`已为UI语义小字生成比基础token更亮/深的值。原生需在主题适配层保留同等语义槽，不能将HTML的基础ok/warn等直接替换所有文字；以下是当前三主题来源算法的确定结果，未知导入主题须按实际背景重新校验，不能套用别的主题硬值：
 
@@ -367,9 +367,9 @@ chip（如 AI 浮窗底部的 `✋ 确认后执行 ▾` / `Sonnet ▾`，推理�
 
 **尺寸预算**：单行按钮可用内容宽度必须不小于实际字体测得的标签宽度＋图标/指示器槽＋内部gap；外宽另加左右padding/边框。外高至少容纳`max(实际文字行高, 图标槽高)`＋上下padding/边框。整排子项外宽＋gap＋父padding须落在父内容宽度内；固定高度父容器也须核对所有子项高度、margin、gap、padding。不得用UTF-8字节数、字符数×常数或截图估算代替生产字体的度量；无真实字体的单测只证明结构，不能作为像素验收。
 
-**原生文字裁剪**：当前zenit依赖中，布局的`overflow = .hidden`与绘制的`overflow_hidden = true`分别控制不同层面。长路径等文字槽需在自有内容容器设置绘制裁剪，并在创建文字时定义省略；同时保留完整值提示。必须查看真实长文本截图，不能仅凭节点矩形在界内判定无重叠。
+**原生文字裁剪**：当前zenit依赖中，布局的`overflow =.hidden`与绘制的`overflow_hidden = true`分别控制不同层面。长路径等文字槽需在自有内容容器设置绘制裁剪，并在创建文字时定义省略；同时保留完整值提示。必须查看真实长文本截图，不能仅凭节点矩形在界内判定无重叠。
 
-**重复条目与已确认密度（2026-10-27 最新修正）**：传输以共享HTML组件及用户后续修正为准；Figma `320:826473`保留为历史来源，不再沿用52px／54px和折叠式验收。当前所有入口统一76px浅卡片、84px排列节距（卡间距8px）、圆角8px、内距上/下9px与左/右10px；主行24px、元信息16px、组间距7px；会话名、状态、结果／速度统一右对齐。状态76px、结果／速度112px、操作槽102px固定；会话列按同一列表最长名称统一测量宽度，有空间完整显示，优先保留列表最长文件名所需宽度（至少120px），会话名使用剩余空间并在超长时省略；极窄时保留48px会话省略槽，再截断文件名，不能逐条自适应造成列线错位；文件名吸收其余空间；会话专属浮层继续隐藏重复会话名，SFTP窄列沿用既有紧凑列宽及次要列显隐，长值省略并通过详情查看，3px进度轨道始终显示，完成及未知大小任务也保留。默认浏览，点击顶部“管理”才显示复选框与批量操作。状态统计靠左，管理／搜索／筛选靠右，在同一行。会话浮层保持原owner，不显示全部会话切换或底部跳转全局入口。操作按钮一排靠右直接展示，不使用三个点和展开／折叠箭头；上传完成也保留复制远程路径和任务事件。详情仅hover显示，450ms延迟、8px偏移、宽420px受视口约束、内距14px、圆角10px、组距12px；字段顺序为任务编号与归属、文件名、本地路径、远程路径、非空传输选项；不显示动态状态，路径点击复制，允许鼠标移入详情，离开延迟250ms关闭；任务身份使用well底色、8px圆角、7px/8px内距；路径标签与值间距4px，文字11px/16px、路径使用等宽字体并换行。HTML和原生仅展示各自真实任务事实，原型不得用固定成功校验值代替未知结果。独立浮卡基准宽760px并受视口约束；SFTP两列各自采用「文件卡片＋下方独立传输卡片」的兄弟布局，间距6px，按当前会话与上传／下载方向隔离，空时不渲染整块列表；非空最小127px，管理模式最小155px，确保首卡76px及其进度完整可见，后续条目内部滚动，不添加细线分隔。完整值通过hover详情查看；窄列保持按钮可达。
+**重复条目与已确认密度（2026-10-27 最新修正）**：传输以共享HTML组件及用户后续修正为准；Figma `320:826473`保留为历史来源，不再沿用52px／54px和折叠式验收。当前所有入口统一76px浅卡片、84px排列节距（卡间距8px）、圆角8px、内距上/下9px与左/右10px；主行24px、元信息16px、组间距7px；会话名、状态、结果／速度统一右对齐。状态76px、结果／速度112px、操作槽102px固定；会话列按同一列表最长名称统一测量宽度，有空间完整显示，优先保留列表最长文件名所需宽度（至少120px），会话名使用剩余空间并在超长时省略；极窄时保留48px会话省略槽，再截断文件名，不能逐条自适应造成列线错位；文件名吸收其余空间；会话专属浮层继续隐藏重复会话名，SFTP窄列沿用既有紧凑列宽及次要列显隐，长值省略并通过详情查看，3px进度轨道始终显示，完成及未知大小任务也保留。默认浏览，点击顶部“管理”才显示复选框与批量操作。状态统计靠左，管理／搜索／筛选靠右，在同一行。会话浮层保持原owner，不显示全部会话切换或底部跳转全局入口。操作按钮一排靠右直接展示，不使用三个点和展开／折叠箭头；上传完成也保留复制远程路径和任务事件。详情仅hover显示，450ms延迟、8px偏移、宽420px受视口约束、内距14px、圆角10px、组距12px；字段顺序为任务编号与归属、文件名、本地路径、远程路径、非空传输选项；不显示动态状态，路径点击复制，允许鼠标移入详情，离开延迟250ms关闭；任务身份使用well底色、8px圆角、7px/8px内距；路径标签与值间距4px，文字11px/16px、路径使用等宽字体并换行。HTML和原生仅展示各自真实任务事实，原型不得用固定成功校验值代替未知结果。后续条目内部滚动，不添加细线分隔。完整值通过hover详情查看；窄列保持按钮可达。
 
 **状态与嵌套**：检查默认/选中/禁用/加载/错误/完成以及最长受支持标签。加载文案或spinner确实改变内容时，必要时预留最大的内容槽；不向原本没有loading的按钮强加loading需求。修改字号、行高、图标、文案或本地化后，重验父槽和同排兄弟。固定栏需要时设置`flex_shrink=0`；可收缩文字/滚动体设置`min_width=0`/`min_height=0`并沿祖先传递可用尺寸。不能只改最内层的`fit`或`fill`而忽略外层固定槽；不能用overflow hidden掩盖应展示的内容。约束失败时改布局或滚动策略，不缩字掩盖问题。
 
@@ -377,7 +377,7 @@ chip（如 AI 浮窗底部的 `✋ 确认后执行 ▾` / `Sonnet ▾`，推理�
 
 **验收门槛**：本项目用1440×900和最小860×480逻辑窗口检查相关状态；组件另有更小有效viewport时再测该边界。提供至少一个真实长中英文名称/路径、多行错误或可增长列表用例（按被改组件适用项选择），同时验证文字/图形在槽内、相邻控件不重叠、外框在视口内、滚动确实发生、底栏可点击。查看真实Metal截图，不能以编译、节点存在、固定矩形相等或全局裁切代替验证。记录未覆盖的系统选择器、真实输入/远端操作；旧精确尺寸快照必须先与现行设计核对，不可自动改成当前输出。
 
-审计入口：`python3 scripts/audit_ui_constraints.py --out /tmp/ui-constraints.json`盘点源码；`node e2e/button_constraints_native.ts /tmp/ui-button-evidence`检查原生导航和布局；长目录回归加位置参数`path`。静态盘点只列出候选，实际问题由数据、布局和像素共同判定。检查结论见[2026-10-26按钮与尺寸审计](../DEVELOPMENT/UI_CONTROL_AUDIT_20261026.md)。
+审计入口：`python3 scripts/audit_ui_constraints.py --out /tmp/ui-constraints.json`盘点源码；`node e2e/button_constraints_native.ts /tmp/ui-button-evidence`检查原生导航和布局；长目录回归加位置参数`path`。静态盘点只列出候选，实际问题由数据、布局和像素共同判定。
 
 ### 4.3 图标提示与必要文字
 
@@ -445,9 +445,9 @@ Figma节点`bounds`相对直接父级；画板在canvas上的x/y不进入应用�
 | M-SEND `.send` / composer单一主控件 | hover；160ms ease | scale1→1.08，中心缩放；色影`0 3px 10px`→`0 5px 14px accent-30`；无y位移。当前发送/运行/待批/停止图标由业务状态决定，不因hover另增第二按钮 | CSS371–378；V0.1.7 |
 | M-WINDOW `.wc.min/.max/.cls` / AI独立浮窗三态钮（锚定传输管理气泡不适用） | hover；140ms ease | y−1px，fg-3分别→warn/ok/danger，well底不变，不增强阴影 | CSS292–300 |
 | M-TAB `.tab` / 会话与组页签 | hover/on；160ms E | 背景→hover、fg-2→fg-1，无位移；on保留tab-on及shadow-tab；组tab保组tint/组色条，活动底条仍在tab内部。状态点另用M-STATUS | CSS44–70；V0.1.1 |
-| M-TAB-CLOSE `.tab .x` / 页签关闭 | 选中、父hover/focus-within显示；叉hover变色 | opacity0→1直接切换，fg-3→fg-1直接切换；HTML无transition。始终保留20×20槽；隐藏时不接受指针点击，焦点进入tab后显示 | CSS65–67；V0.1.1页签命中 |
+| M-TAB-CLOSE `.tab.x` / 页签关闭 | 选中、父hover/focus-within显示；叉hover变色 | opacity0→1直接切换，fg-3→fg-1直接切换；HTML无transition。始终保留20×20槽；隐藏时不接受指针点击，焦点进入tab后显示 | CSS65–67；V0.1.1页签命中 |
 | M-TAB-ADD `.tab-add` / 新增页签 | hover；150ms ease | 透明→hover、fg-3→accent，无上浮/阴影 | CSS74–79 |
-| M-SIDEBAR `.sb-head .a` / 侧栏新建与折叠 | hover；150ms ease | 透明→hover、fg-3→fg-1，无位移/旋转/阴影 | CSS127–133 |
+| M-SIDEBAR `.sb-head.a` / 侧栏新建与折叠 | hover；150ms ease | 透明→hover、fg-3→fg-1，无位移/旋转/阴影 | CSS127–133 |
 | M-ROW `.hi` / 主机、菜单及选项行 | hover；140ms ease | 只变hover底；选中主机保sel-bg，仍允许行内动作显示；离线不等于disabled。菜单/设置分类沿用该无位移反馈 | CSS170–188；扩展至同类行 |
 | M-HOST-ACTIONS `.hacts/.hact/.hnote` / 行内操作 | 父hover/focus-within；opacity120ms ease | R19固定52×24槽，默认32×20 route＋数字与连接/更多两个24px按钮原位互斥；操作组opacity0→1，无transform，名称视口不变。按钮hover即时well/fg-1，隐藏组不命中/不入Tab；键盘进入后保留操作并以选中底色表达焦点 | CSS186–190为来源；52px/双动作/键盘按V0.1.3补全 |
 | M-NEWHOST `.newhost` / 新建主机虚线井 | hover；160ms ease | 字与虚线颜色→accent，底→sel-bg，无位移/阴影；虚线仍属描边例外① | CSS193–200 |
@@ -460,11 +460,11 @@ Figma节点`bounds`相对直接父级；画板在canvas上的x/y不进入应用�
 
 | 规则ID / 对象 | 时序与关键帧 | 触发、终止与状态含义 | 源码 |
 |---|---|---|---|
-| M-STATUS / 在线tab点 | 2000ms ease-in-out infinite；0/100%=opacity .55、50%=1 | 在线tab启用；重连tab用warn黄点、1000ms同曲线急促呼吸；offline animation:none，fg-3且opacity1。主机/底栏在线点是静态ok点及55%光晕，不套tab脉冲 | CSS60–63、182–183、388 |
-| M-STRIP / AI三点 | 1200ms ease infinite；opacity .35→1→.35；三点delay0/150/300ms | HTML只有该通用序列，正延迟前opacity1。落地按V0.1.7状态机用色：请求中轮转、待批琥珀、失败静态红；待机低亮，成功绿3s后待机。不把演示中持续三点当作请求始终运行 | CSS251–254；V0.1.7 |
+| M-STATUS / 在线tab点 | 2000ms ease-in-out infinite；0/100%=opacity.55、50%=1 | 在线tab启用；重连tab用warn黄点、1000ms同曲线急促呼吸；offline animation:none，fg-3且opacity1。主机/底栏在线点是静态ok点及55%光晕，不套tab脉冲 | CSS60–63、182–183、388 |
+| M-STRIP / AI三点 | 1200ms ease infinite；opacity.35→1→.35；三点delay0/150/300ms | HTML只有该通用序列，正延迟前opacity1。落地按V0.1.7状态机用色：请求中轮转、待批琥珀、失败静态红；待机低亮，成功绿3s后待机。不把演示中持续三点当作请求始终运行 | CSS251–254；V0.1.7 |
 | M-SPINNER / 执行与loading图标 | 1000ms linear infinite，0→360°顺时针，轴心为图标中心 | 仅请求/执行/加载期间旋转，结束后切实际成功/失败图标；标题中的“1.2s”为耗时文案，非旋转周期。普通刷新图标不自行无限旋转 | CSS348–349 |
 | M-CURSOR / 终端光标 | 1100ms steps(1,end) infinite；前550ms opacity1、后550ms0 | 聚焦且可输入时；失焦/回放/IME按终端状态接管，不动画整行或正文 | CSS237–238 |
-| M-FLOAT / 浮窗打开 | 180ms cubic-bezier(.34,1.2,.64,1)，一次；opacity0→1、scale .98→1、y−4→0px | 仅实际打开；translateX(−50%)是HTML居中定位，不作为动画插值。重新排版/增量输出/切换内容不重播 | CSS257–270 |
+| M-FLOAT / 浮窗打开 | 180ms cubic-bezier(.34,1.2,.64,1)，一次；opacity0→1、scale.98→1、y−4→0px | 仅实际打开；translateX(−50%)是HTML居中定位，不作为动画插值。重新排版/增量输出/切换内容不重播 | CSS257–270 |
 | M-FLOAT / 浮窗关闭 | 140ms ease-in（指南补全） | opacity1→0，尺寸及布局不回弹；关闭业务请求立即按V0.1.7执行，视觉退出不能延迟停止请求 | §6；HTML无退出动画 |
 | M-SIDEBAR / 侧栏折叠 | width224⇄48，200ms E | 标题/搜索/分组在边界切换显隐，不把正文文字缩放。HTML仅提供collapsed类、没有事件路由；新建文字在折叠态明确隐藏 | CSS99–113；V0.1.3 |
 | M-DISCLOSURE / 分区与卡片展开 | 160ms E旋转chevron0⇄90°；正文opacity120ms ease（落地补全） | 保持草稿与阅读锚点，思考/工具固定视口按V0.1.7，header不伸缩。HTML分组箭头只有静态pointer，没有旋转定义 | CSS159–162；V0.1.7 |
@@ -477,7 +477,7 @@ Figma节点`bounds`相对直接父级；画板在canvas上的x/y不进入应用�
 
 - 优先级为`disabled/不可用门控 > 正在停止或重复提交门控 > pressed > hover`；selected保留选中身份、hot保留强调外观，两者不被hover刷掉，focus-visible以底色独立表达。离线只表示连接状态，不能一律禁掉查看/复制等本地动作。主按钮active沿用HTML160ms E；HTML未定义按下态的次按钮、图标、chip、send、窗口钮补80ms E回到y0/scale1并收浅投影，释放按仍hover回hover目标，不移动布局。
 - disabled单次降至40%（不得父子叠乘），保持真实禁用原因；不触发hover/pressed/点击，不上浮、不放大、不旋转；必要原因提示仍可由外围focus/help显示。loading只锁重复提交，不能屏蔽本来可用的“停止当前调用/停止回合”。动作成功/失败更换对应状态，不以无限spinner伪装完成。
-- 图标按钮、chip、关闭和行内操作具备可访问名称及键盘语义。键盘focus使用选中底色（输入按M-INPUT150ms、其他操作即时可见），禁止整圈 border / outline / ring，不自动浮起；Enter/Space与鼠标执行同一动作。AI textarea不套ring，caret与IME保持可见。隐藏关闭/行内操作保持布局但指针不命中，focus进入其所属控件后先显现。
+- 图标按钮、chip、关闭和行内操作具备可访问名称及键盘语义。键盘focus使用选中底色（输入按M-INPUT150ms、其他操作即时可见），禁止整圈 border / outline / ring，不自动浮起；Enter/Space与鼠标执行同一动作。隐藏关闭/行内操作保持布局但指针不命中，focus进入其所属控件后先显现。
 - 系统“减少动态效果”启用时，禁用y位移、scale、弹性入场、侧栏连续宽度插值、pulse/blink和无限旋转；用静态可辨状态图标/低亮三点及至多80ms透明度或颜色变化替代。spinner静态仍配“处理中/停止中”可访问状态，不能伪装成功；终端光标常显。用户直接拖动/缩放仍1:1跟随；status、hover、pressed、focus、错误和操作门控不可因此省略。
 - 多个动画在同控件共存时仅父绘制层做hover变换，spinner独立子层绕自身中心旋转，不能覆盖父transform或重复位移。所有循环离开可见区域/生命周期即取消；不中断工具清理、不派发额外请求。Figma静态关键帧及`motion[...]`是规格记录，不添加Present连线、不冒称播放或原生实机动效已验证。
 
@@ -495,7 +495,7 @@ Figma节点`bounds`相对直接父级；画板在canvas上的x/y不进入应用�
 
 动效按M-*逐项recipe，位移仅绘制、不移动命中区；循环随可见/运行生命周期取消。减少动态效果保状态静态呈现。VoiceOver提供控件名称、状态、列表选中/排序和操作结果；真实IME、右中键、拖动捕获、Esc取消、系统文件选择与读屏必须在Zenit运行验收，静态图不证明已接通。
 
-**状态入口、折叠侧栏与终端反馈**：本机及SSH/SFTP底栏状态入口固定112×26，独立于侧栏224/48宽度；点、文字、箭头左坐标为18.5/29.5/79.5，不随折叠漂移。折叠主机详情使用公共Popover，触发图标、连接间隙与portal面板共同保持悬停，允许移入面板操作；移出整体、外部点击或Esc关闭，键盘焦点打开仍可用。当前三行文字加按钮的主机详情为320×135、padding14；外框、背景和阴影随实际内容同步，不能保留旧154高度。终端输入高亮仅保整行底色，隐藏左侧竖条；彩色/加粗SGR文本仍按VT固定列宽advance定位，不能因指定字体走比例定位。对应参数与原生验证见[实机反馈修复](../DEVELOPMENT/V0.2_STATUS.md)。本机身份浮层360×152是另一角色，不能混用主机详情尺寸。
+**状态入口、折叠侧栏与终端反馈**：本机及SSH/SFTP底栏状态入口固定112×26，独立于侧栏224/48宽度；点、文字、箭头左坐标为18.5/29.5/79.5，不随折叠漂移。折叠主机详情使用公共Popover，触发图标、连接间隙与portal面板共同保持悬停，允许移入面板操作；移出整体、外部点击或Esc关闭，键盘焦点打开仍可用。当前三行文字加按钮的主机详情为320×135、padding14；外框、背景和阴影随实际内容同步，不能保留旧154高度。终端输入高亮仅保整行底色，隐藏左侧竖条；彩色/加粗SGR文本仍按VT固定列宽advance定位，不能因指定字体走比例定位。本机身份浮层360×152是另一角色，不能混用主机详情尺寸。
 
 ### 6.1 命中与数据绑定
 
@@ -528,7 +528,7 @@ Figma节点`bounds`相对直接父级；画板在canvas上的x/y不进入应用�
 
 ## 7. Zenit公共能力与必要适配
 
-以下§7.1–7.2保留设计基线时的源码审查与适配职责，表内“当前/未接入/需补”指该次审查快照，不是2026-10-24的逐项未完成结论。现行API始终以实际vendor源码为准；实现与验收状态见[V0.2实现记录](../DEVELOPMENT/V0.2_IMPLEMENTATION.md)，后续正式环境控制验收见[专项记录](../DEVELOPMENT/V0.2_STATUS.md)。
+以下§7.1–7.2保留设计基线时的源码审查与适配职责，表内“当前/未接入/需补”指该次审查快照，不是2026-10-24的逐项未完成结论。
 
 依据本项目`build.zig.zon`指向的`vendor/zenit`、Zig **0.17.0**，已核对整个`vendor/zenit/src/ui/ui.zig`公共面、对应组件实现、Storybook和平台/渲染调用链。旧skill的0.15.2及“所有widget均快照主题”不适用于当前依赖。以下为源码能力及确定的差异，未运行应用、构建、系统面板、PTY或网络请求，不等于实机/VoiceOver/性能验收。本轮仅记录必要落地约束，保留用户已有vendor修改。
 
@@ -606,13 +606,13 @@ UI/Cx/Node/Signal只在主线程访问，worker处理IO与计算，以不可变�
 
 性能目标沿用既有预算：常规刷新≤4ms/帧（M系列）、1MB/s输出下UI CPU≤15%、单会话10万行滚动≤120MB、30会话常驻≤800MB；这些是待测目标，历史数据见迁移证据，不能由类比其他终端推定达标。原始流背压按85%暂停/30%恢复的既定目标接入，运行时若已有不同容量要核定后验证，不把4096示意消息数当真实ABI。
 
-[2026-10-18历史局部诊断](../DEVELOPMENT/V0.2_STATUS.md)扫描1260节点、18项后达上限、complete=false；含阴影/SVG/截断/背景不确定限制，不是零告警或布局全通过。该报告只证明当时诊断边界；Local重复时间装饰后续已修正，当前终端按14/22及倍率11/7执行，不能据旧报告恢复旧样式。
+扫描1260节点、18项后达上限、complete=false；含阴影/SVG/截断/背景不确定限制，不是零告警或布局全通过。该报告只证明当时诊断边界；Local重复时间装饰后续已修正，当前终端按14/22及倍率11/7执行，不能据旧报告恢复旧样式。
 
 ## 10. 扩展范围与资料归档
 
 首版只静态注册Local/SSH/SFTP，设置中未来插件详情、权限、错误、不兼容、重载/获取状态仅为只读规划信息，不触发安装、动态加载或热卸载。FTP/FTPS后续需要文件服务适配，VNC/RDP需要视频输入与纹理服务，KVM/Redfish需要电源与设备服务；保留显式服务扩展点，不按旧LOC/工期估计排进本轮子版本，也不提供可执行入口。
 
-旧按主题排列的01–12已迁入版本正文，旧R*修订流水账不再作为当前执行指令。迁移来源、旧完成记录与性能决策保存在[迁移核对记录](../DEVELOPMENT/V0.2_STATUS.md)；状态台账用于节点追踪，原始读取/图片证据保留。归一化实时读回集中在ZIP归档；链接中`readbacks.zip#roots/ID.json`的`#`后为归档内成员，解压或用zipfile读取，父局部几何与semantic hash不变。基础区1748直属节点已分段完整读取，含1032个Type样式、376个Primary、298个Secondary及其他组件/说明；实施取实际场景实例参数，库内样例标签和画布摆放不作产品数据，通用控件按本规范管理。新增需求优先修订其所属功能版本与状态映射；全局规则只修本文件，避免再增加一份横向补充覆盖前文。
+旧按主题排列的01–12已迁入版本正文，旧R*修订流水账不再作为当前执行指令。迁移来源、旧完成记录与性能决策保存在；状态台账用于节点追踪，原始读取/图片证据保留。归一化实时读回集中在ZIP归档；链接中`readbacks.zip#roots/ID.json`的`#`后为归档内成员，解压或用zipfile读取，父局部几何与semantic hash不变。基础区1748直属节点已分段完整读取，含1032个Type样式、376个Primary、298个Secondary及其他组件/说明；实施取实际场景实例参数，库内样例标签和画布摆放不作产品数据，通用控件按本规范管理。新增需求优先修订其所属功能版本与状态映射；全局规则只修本文件，避免再增加一份横向补充覆盖前文。
 
 ### 10.1 X1逐项来源与可观察验收
 
@@ -620,11 +620,11 @@ UI/Cx/Node/Signal只在主线程访问，worker处理IO与计算，以不可变�
 
 | 来源 | 覆盖动作与状态 | 非UI/失效要求 | 可观察验收 |
 | --- | --- | --- | --- |
-| <a id="case-r3-interaction-feedback"></a>`r3-interaction-feedback` · [274:913755](../DEVELOPMENT/V0.2_STATUS.md) | 查看交互反馈状态板/对应控件操作→default/hover/pressed/focus/disabled/tooltip各独立 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；静态关键帧不表示播放已验收 | disabled不触发hover或点击，焦点有单独的底色反馈；DESIGN_STANDARDS.md §5/§6 |
-| <a id="case-component-motion-buttons"></a>`component-motion-buttons` · [434:175329](../DEVELOPMENT/V0.2_STATUS.md) | 通用按钮/图标/chip/send各变体→按M-PRIMARY160ms等逐项反馈 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；loading仍允许本来有效的停止 | send仅scale1.08无y；危险保短标签；命中区不位移；DESIGN_STANDARDS.md §5/§4.1 |
-| <a id="case-component-motion-navigation"></a>`component-motion-navigation` · [434:176073](../DEVELOPMENT/V0.2_STATUS.md) | tab/主机/侧栏/底栏/静态图标变体→各自M-*曲线及固定尾槽切换 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；focus与hover互不覆盖，隐藏动作不命中 | host52尾槽名称不重排，静态owner/badge不误上浮；DESIGN_STANDARDS.md §5/§6 |
-| <a id="case-component-motion-feedback"></a>`component-motion-feedback` · [434:176637](../DEVELOPMENT/V0.2_STATUS.md) | 在线点/AI三点/spinner/caret/float状态板→2000/1200/1000/1100ms各自生命周期 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；离屏/结束取消循环，不用演示动画假请求 | 光标550显550隐，离线静态，浮卡180ms只打开播；DESIGN_STANDARDS.md §5/§7.2 |
-| <a id="case-component-motion-accessibility"></a>`component-motion-accessibility` · [435:177090](../DEVELOPMENT/V0.2_STATUS.md) | 键盘/tooltip/resize/减少动态效果变体→focus独立、disabled40一次、hover450ms/focus立即、resize1:1 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；Esc拖动还原，不改变owner/call或业务清理 | 禁位移/scale/循环后仍保静态状态和停止操作；DESIGN_STANDARDS.md §5/§6.1 |
+| <a id="case-r3-interaction-feedback"></a>`r3-interaction-feedback` | 查看交互反馈状态板/对应控件操作→default/hover/pressed/focus/disabled/tooltip各独立 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；静态关键帧不表示播放已验收 | disabled不触发hover或点击，焦点有单独的底色反馈；DESIGN_STANDARDS.md §5/§6 |
+| <a id="case-component-motion-buttons"></a>`component-motion-buttons` | 通用按钮/图标/chip/send各变体→按M-PRIMARY160ms等逐项反馈 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；loading仍允许本来有效的停止 | send仅scale1.08无y；危险保短标签；命中区不位移；DESIGN_STANDARDS.md §5/§4.1 |
+| <a id="case-component-motion-navigation"></a>`component-motion-navigation` | tab/主机/侧栏/底栏/静态图标变体→各自M-*曲线及固定尾槽切换 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；focus与hover互不覆盖，隐藏动作不命中 | host52尾槽名称不重排，静态owner/badge不误上浮；DESIGN_STANDARDS.md §5/§6 |
+| <a id="case-component-motion-feedback"></a>`component-motion-feedback` | 在线点/AI三点/spinner/caret/float状态板→2000/1200/1000/1100ms各自生命周期 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；离屏/结束取消循环，不用演示动画假请求 | 光标550显550隐，离线静态，浮卡180ms只打开播；DESIGN_STANDARDS.md §5/§7.2 |
+| <a id="case-component-motion-accessibility"></a>`component-motion-accessibility` | 键盘/tooltip/resize/减少动态效果变体→focus独立、disabled40一次、hover450ms/focus立即、resize1:1 | 单一MotionPolicy/recipes以数值曲线控制visual child，命中wrapper稳定；focus/disabled/selected独立；Esc拖动还原，不改变owner/call或业务清理 | 禁位移/scale/循环后仍保静态状态和停止操作；DESIGN_STANDARDS.md §5/§6.1 |
 
 > 2026-10-21 用户确认：原型未绘制的控件框线不得由 zenit 默认样式补出。默认、hover、focus、selected、错误提示都遵循无外框规则；键盘焦点通过底色、图标/文字和 caret 表达。终端内容自身的下划线、进度条与图标笔画不属于控件边框。
 
@@ -644,7 +644,7 @@ KVM 遵循 [V0.3§11](V0.3_BMC_IKVM.md)：在既有r11内容卡片内，上方44
 - 所有浮层必须保存触发控件与所属窗口。打开二级菜单前先保存触发矩形，不能在原菜单隐藏或销毁后读取。顶部工具向下、底部状态栏与 AI 输入工具向上；空间不足时翻转并限制滚动，距所属窗口至少 12px。不使用页面全局坐标直接冒充局部坐标。
 - 浮层打开、子菜单替换、滚动、窗口缩放、侧栏显隐、会话切换及 AI 拖动后都需检查。触发器消失时关闭，禁止回退到左上角或沿用旧会话坐标。菜单随几何变化关闭，详情浮层重新计算锚点。
 - 卡片不画整圈描边或描边式阴影，配合已有层级底色、留白和对齐表达边界；仅浮层保留必要的柔和投影。浅色设置导航继承设置根材质，选中行仅使用 10% 强调色。
-- 传输共用 `shared/transfer-row.js` / `transfer-row.css`；所有入口复用当前76px浅卡片及直接操作、hover详情契约，详见§4.2.1及[测量记录](../UI_V3/reference/transfer-figma/measurements.json)。暂停、继续/重试、查看、取消按真实状态及能力显示；完整路径可在提示/详情查看。
+- 传输共用 `shared/transfer-row.js` / `transfer-row.css`；所有入口复用当前76px浅卡片及直接操作、hover详情契约，详见§4.2.1及。暂停、继续/重试、查看、取消按真实状态及能力显示；完整路径可在提示/详情查看。
 - 按连接能力显示功能：本地 Shell 不展示 SSH 端口转发与跳板链路；SFTP 不展示终端广播；尚未就绪而可恢复的功能保留禁用态及原因，永久不适用能力直接移除。主机配置不等于会话。
 - 内置主题明确标注“不可删除”；自定义主题才提供删除。侧栏使用“显示/隐藏”，不再使用“折叠”。数据设置可展示配置路径，不提供“打开配置目录”。SSH 使用一个终端窗口图标，不附加 SSH 文字小标。
 

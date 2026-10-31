@@ -78,7 +78,7 @@ pub fn sourceSpec(source: Source, route_buffer: *[8]session.RouteHop, private_op
         .connection_id = source.host.connection_id,
         .config_revision = source.host.revision,
         .protocol = if (source.host.protocol == .ssh) .ssh else .sftp,
-        .immutable_config = .{ .endpoint = endpoint(source.host), .auth = auth(source.host), .totp_secret = source.host.totp_secret, .strict_host_key_checking = source.host.strict_host_key_checking, .terminal_type = if (source.host.terminal_type_explicit) source.host.terminal_type else source.global_config.ssh.term, .startup_commands = source.host.startup_commands, .keepalive_sec = if (source.host.keepalive) source.global_config.ssh.keepalive_sec else 0, .compression = if (source.host.compression_explicit) source.host.compression else source.global_config.ssh.compression },
+        .immutable_config = .{ .endpoint = endpoint(source.host), .auth = auth(source.host), .totp_secret = source.host.totp_secret, .strict_host_key_checking = source.host.strict_host_key_checking, .terminal_type = if (source.host.terminal_type_explicit) source.host.terminal_type else source.global_config.ssh.term, .startup_commands = source.host.startup_commands, .auto_shell_integration = source.host.auto_shell_integration orelse source.global_config.ssh.auto_shell_integration, .keepalive_sec = if (source.host.keepalive) source.global_config.ssh.keepalive_sec else 0, .compression = if (source.host.compression_explicit) source.host.compression else source.global_config.ssh.compression },
         .route_snapshot = route,
         .private_options = private_options,
     } };

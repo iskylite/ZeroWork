@@ -136,11 +136,19 @@ pub const ConnectJob = struct {
         return job.retained_cleanup.request(&job.resource_ledger, @import("../../ui/session_runtime.zig").drainRetainedResources);
     }
 
-    /// Retry only network setup before authentication/shell creation. Each
-    /// successor still receives a fresh host-issued operation and resource ledger.
+    /// Retry only network setup before authentication/shell creation. Ordinary
+    /// successors use host-issued operations; owned retries retain creation.
     pub fn canAutomaticallyRetry(job: *ConnectJob) bool {
-        if (job.connection_attempts >= 3 or job.runtime != null or job.cancelled.load(.acquire)) return false;
-        const failure = job.progress.snapshot().failure orelse return false;
+        if (job.connection_attempts >= 3 or job.runtime != null or job.cancelled.load(.acquire) or job.cleanup_unknown or job.shared_connection != null or job.bootstrap != null) return false;
+        const progress = job.progress.snapshot();
+        if (progress.dropped != 0 or progress.completed) return false;
+        // A downstream transport failure must not replay authentication on an
+        // earlier jump hop. Missing history is insufficient evidence too.
+        for (progress.entries[0..progress.count]) |entry| switch (entry.phase) {
+            .authentication, .shell, .ready => return false,
+            else => {},
+        };
+        const failure = progress.failure orelse return false;
         switch (failure.phase) {
             .transport, .tunnel, .handshake => {},
             else => return false,
@@ -149,6 +157,39 @@ pub const ConnectJob = struct {
             error.ConnectFailed, error.ConnectionRefused, error.HostResolutionFailed, error.ConnectionTimedOut, error.HandshakeFailed, error.SshHandshakeReceiveFailed, error.SshHandshakeSendFailed, error.SshHandshakeDisconnected, error.SshHandshakeBannerFailed, error.SshHandshakeTimedOut => true,
             else => false,
         };
+    }
+
+    pub fn canRetryOwnedTransport(job: *ConnectJob) bool {
+        if (!job.canAutomaticallyRetry()) return false;
+        return switch (job.err.?) {
+            // Generic/protocol banner failures are not positive evidence of
+            // a transient transport error for task-owned creation.
+            error.HandshakeFailed, error.SshHandshakeBannerFailed => false,
+            else => true,
+        };
+    }
+
+    /// Retry native setup inside the same logical owned creation. The worker
+    /// was joined and its complete graph released before the existing backoff
+    /// elapsed; no SessionHost generation, operation or membership is replaced.
+    pub fn retryOwnedTransport(job: *ConnectJob) !void {
+        if (job.thread != null or !job.drained or !job.ready.load(.acquire) or job.automatic_retry_deadline_ns == null or !job.canRetryOwnedTransport()) return error.LifecycleDoesNotAllowRetry;
+        if (!job.resource_ledger.snapshot().released()) return error.CleanupNotReleased;
+        const key = job.operation_key orelse return error.MissingOperation;
+        try job.progress_history.ensureUnusedCapacity(std.heap.c_allocator, 1);
+        try job.retained_cleanup.resetReleased();
+        try job.resource_ledger.beginNextTransport();
+        job.progress_history.appendAssumeCapacity(.{ .key = key, .journal = job.progress.snapshot() });
+        job.progress.restartTransport();
+        job.connection_attempts += 1;
+        job.automatic_retry_deadline_ns = null;
+        job.host_key_bridge.reset();
+        job.auth_bridge.resetForAttempt();
+        job.err = null;
+        job.drained = false;
+        job.ready.store(false, .release);
+        try job.host_key_store.refresh();
+        job.thread = try std.Thread.spawn(.{}, connectThread, .{job});
     }
 };
 

@@ -225,7 +225,7 @@ test "inventory listed cross binding reference cannot upgrade legacy execution o
     const listed = try queries.sessionRef(a, grant.context, outside);
     defer a.free(listed);
     const snapshot: queries.Snapshot = .{ .context = grant.context, .initial_binding = context.binding, .execution_policy = .{ .execution_mode = .auto, .session_retention = .ask }, .permission_mode = .confirm, .observed_at = 100, .source_revision = selection.revision(), .cursor_key = @splat(3), .sessions = &.{ .{ .handle = bound, .title = "bound", .protocol = "local", .state = "ready", .ready = true }, .{ .handle = outside, .title = "other", .protocol = "ssh", .state = "failed", .ready = false, .current_member = false } }, .groups = &.{}, .inventory_grant = grant };
-    try std.testing.expect((try queries.resolveSession(snapshot, listed)).handle.eql(outside));
+    try std.testing.expectError(error.TargetNotAuthorized, queries.resolveSession(snapshot, listed));
     const captured: scope.Scope = .{ .owner = context.binding, .members = .{ .ids = .{4} ++ @as([15]u64, @splat(0)), .len = 1 } };
     const Stub = struct {
         fn handler(_: *anyopaque, _: tools.Invocation, _: std.mem.Allocator) !tools.ToolResult {
@@ -246,7 +246,7 @@ test "inventory listed cross binding reference cannot upgrade legacy execution o
     // Deliberately no ApplicationHost is initialized and no service is held.
     var unavailable_app: @import("ui/application_host.zig").ApplicationHost = undefined;
     const invocation: host.Invocation = .{ .context = grant.context, .authority = .conversation_context, .operation_id = 1, .turn_id = 1, .call_id = "inventory-isolation", .tool_id = "host.read_terminal", .arguments = parsed.value, .arguments_json = arguments, .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
-    try std.testing.expectError(error.TargetOutsideAssistant, @import("ui/ai_host_terminal_queries.zig").execute(&unavailable_app, null, .{ .captured_scope = captured, .captured_handles = &.{bound} }, @splat(3), invocation, a));
+    try std.testing.expectError(error.TargetNotAuthorized, @import("ui/ai_host_terminal_queries.zig").execute(&unavailable_app, null, .{ .captured_scope = captured, .captured_handles = &.{bound} }, @splat(3), invocation, a));
 }
 
 comptime {

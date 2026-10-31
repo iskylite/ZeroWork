@@ -820,7 +820,7 @@ test "production Local controlled helper privately consumes bounded text and Ent
     while (true) {
         try f.tick();
         waiting = try f.awaitSnapshot();
-        if (waiting.input_wait != null) break;
+        if (waiting.input_wait != null and waiting.input_wait.?.kind != .terminal_stream) break;
         if (waiting.failure != null or native.zw_local_monotonic_ms() >= deadline) return error.InputWaitTimeout;
         pause();
     }
@@ -893,7 +893,7 @@ test "production Local controlled helper hands input to user and ordinary child 
     while (true) {
         try f.tick();
         waiting = try f.awaitSnapshot();
-        if (waiting.input_wait != null) break;
+        if (waiting.input_wait != null and waiting.input_wait.?.kind != .terminal_stream) break;
         if (waiting.failure != null or native.zw_local_monotonic_ms() >= deadline) return error.InputWaitTimeout;
         pause();
     }
@@ -936,7 +936,7 @@ test "production Local controlled helper hands input to user and ordinary child 
     try std.testing.expect(std.mem.indexOf(u8, f.output.items, "never-replayed") == null);
     try f.run("builtin read -r REPLY; print -r -- \"ordinary:$REPLY\"");
     const running = try f.wait(.running);
-    try std.testing.expect(running.input_wait == null);
+    try std.testing.expect(running.input_wait != null and running.input_wait.?.kind == .terminal_stream);
     const unsupported: execution.InputRequest = .{ .grant = running.grant.?, .wait_sequence = 99, .input_sequence = 32, .kind = .text, .text = "never-child-input" };
     try f.expectFailure(terminal.Service.executionInput, .{ f.service.?, unsupported }, error.InputNotExpected);
     while (true) {
@@ -985,7 +985,7 @@ test "production Local native secret consumer uses private bytes and reports onl
     while (true) {
         try f.tick();
         waiting = try f.awaitSnapshot();
-        if (waiting.input_wait != null) break;
+        if (waiting.input_wait != null and waiting.input_wait.?.kind != .terminal_stream) break;
         if (waiting.failure != null or native.zw_local_monotonic_ms() >= deadline) return error.SecretWaitTimeout;
         pause();
     }
@@ -1062,7 +1062,7 @@ test "production Local native secret request cancels and loses its exact grant w
         while (true) {
             try f.tick();
             waiting = try f.awaitSnapshot();
-            if (waiting.input_wait != null) break;
+            if (waiting.input_wait != null and waiting.input_wait.?.kind != .terminal_stream) break;
             if (waiting.failure != null or native.zw_local_monotonic_ms() >= deadline) return error.SecretWaitTimeout;
             pause();
         }
@@ -1108,4 +1108,204 @@ test "production Local native secret request cancels and loses its exact grant w
         try f.expectFailure(terminal.Service.executionSecret, .{ f.service.?, execution.SecretAction{ .submit = .{ .request = request, .bytes = "CANCELLED-SECRET-NEVER-SENT" } } }, error.StaleFence);
         try std.testing.expect(std.mem.indexOf(u8, f.output.items, "CANCELLED-SECRET-NEVER-SENT") == null);
     }
+}
+
+test "production Local ordinary builtin read accepts terminal stream bytes and preserves the original shell" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.run("builtin read -r ZW_STREAM_ANSWER; print -r -- \"ordinary-stream:$ZW_STREAM_ANSWER\"");
+    var running = try f.wait(.running);
+    try std.testing.expect(running.completion_source == .private_protocol);
+    try std.testing.expect(running.input_wait != null and running.input_wait.?.kind == .terminal_stream);
+    const grant = running.grant.?;
+    const request: execution.InputRequest = .{ .grant = grant, .wait_sequence = running.input_wait.?.sequence, .input_sequence = 101, .kind = .text, .text = "stream-answer-界" };
+    const deadline = native.zw_local_monotonic_ms() + 5000;
+    while (true) {
+        _ = f.service.?.executionInput(request) catch |err| {
+            if (err != error.WorkerBusy) return err;
+            if (native.zw_local_monotonic_ms() >= deadline) return error.InputQueueTimeout;
+            try f.tick();
+            pause();
+            continue;
+        };
+        break;
+    }
+    while (true) {
+        try f.tick();
+        running = try f.awaitSnapshot();
+        if (running.input_receipt != null and running.input_receipt.?.stage == .written) break;
+        if (running.failure != null or native.zw_local_monotonic_ms() >= deadline) return error.InputWriteTimeout;
+        pause();
+    }
+    try std.testing.expectEqual(request.text.len, running.input_receipt.?.accepted_bytes);
+    // Idempotent retry exposes the same native-write fact without replay.
+    while (true) {
+        const repeated = f.service.?.executionInput(request) catch |err| {
+            if (err != error.WorkerBusy) return err;
+            try f.tick();
+            pause();
+            continue;
+        };
+        try std.testing.expect(repeated.stage == .written);
+        break;
+    }
+    const enter: execution.InputRequest = .{ .grant = grant, .wait_sequence = request.wait_sequence, .input_sequence = 102, .kind = .enter };
+    while (true) {
+        _ = f.service.?.executionInput(enter) catch |err| {
+            if (err != error.WorkerBusy) return err;
+            try f.tick();
+            pause();
+            continue;
+        };
+        break;
+    }
+    const finished = try f.wait(.interval_recorded);
+    try std.testing.expectEqual(@as(?u8, 0), finished.process.?.exit_code);
+    try std.testing.expect(finished.input_receipt.?.stage == .written and finished.input_receipt.?.accepted_bytes == 0);
+    try std.testing.expect(std.mem.indexOf(u8, f.output.items, "ordinary-stream:stream-answer-界") != null);
+    try f.expectFailure(terminal.Service.executionInput, .{ f.service.?, enter }, error.StaleFence);
+    try f.run("print -r -- \"same-shell:$ZW_STREAM_ANSWER\"");
+    _ = try f.wait(.interval_recorded);
+    try std.testing.expect(std.mem.indexOf(u8, f.output.items, "same-shell:stream-answer-界") != null);
+}
+
+test "production Local command history preserves approved AI and manual repeats across archive reopen" {
+    var f = try Fixture.init();
+    defer f.deinit();
+    try f.run("true");
+    const first = try f.wait(.interval_recorded);
+    try f.run("true");
+    const second = try f.wait(.interval_recorded);
+    _ = try f.ready();
+    const deadline = native.zw_local_monotonic_ms() + 5000;
+    var manual_sent = false;
+    while (native.zw_local_monotonic_ms() < deadline) {
+        const status = f.service.?.status() catch {
+            pause();
+            continue;
+        };
+        _ = f.service.?.write(.{ .input_sequence = 1, .mode_revision = status.mode_revision, .bytes = "true\r" }) catch |err| {
+            if (err == error.WorkerBusy) {
+                pause();
+                continue;
+            }
+            return err;
+        };
+        manual_sent = true;
+        break;
+    }
+    try std.testing.expect(manual_sent);
+    var manual_seen = false;
+    while (native.zw_local_monotonic_ms() < deadline) {
+        try f.tick();
+        var snapshot = f.service.?.snapshot(a) catch |err| {
+            if (err == error.WorkerBusy) {
+                pause();
+                continue;
+            }
+            return err;
+        };
+        defer snapshot.deinit(a);
+        var repeated: usize = 0;
+        for (snapshot.projection.commands) |command| if (command.command != null and std.mem.eql(u8, command.command.?, "true") and command.end_ms != null) {
+            if (repeated == 0) try std.testing.expect(command.ai_execution_id.?.eql(first.execution_id.?));
+            if (repeated == 1) try std.testing.expect(command.ai_execution_id.?.eql(second.execution_id.?));
+            if (repeated == 2) {
+                try std.testing.expect(command.ai_execution_id == null);
+                manual_seen = true;
+            }
+            repeated += 1;
+        };
+        if (manual_seen) break;
+        pause();
+    }
+    try std.testing.expect(manual_seen);
+    try f.run("printf '\\033]133;D;0\\007'; false");
+    const private_result = try f.wait(.interval_recorded);
+    try std.testing.expectEqual(@as(?u8, 1), private_result.process.?.exit_code);
+    const metadata_deadline = native.zw_local_monotonic_ms() + 3000;
+    var live_metadata_ready = false;
+    while (native.zw_local_monotonic_ms() < metadata_deadline) {
+        var history = f.service.?.commandHistorySnapshot(a) catch |err| {
+            if (err == error.WorkerBusy) {
+                pause();
+                continue;
+            }
+            return err;
+        };
+        defer history.deinit(a);
+        if (history.pending) {
+            pause();
+            continue;
+        }
+        try std.testing.expect(!history.partial and history.persistent);
+        var true_count: usize = 0;
+        var private_found = false;
+        for (history.records) |record| {
+            if (record.value.command) |command| if (std.mem.eql(u8, command, "true")) {
+                true_count += 1;
+            };
+            if (record.value.ai_execution_id) |id| if (id.eql(private_result.execution_id.?)) {
+                try std.testing.expectEqual(@as(?i32, 1), record.value.exit_code);
+                private_found = true;
+            };
+        }
+        try std.testing.expectEqual(@as(usize, 3), true_count);
+        try std.testing.expect(private_found);
+        live_metadata_ready = true;
+        break;
+    }
+    try std.testing.expect(live_metadata_ready);
+    const close_deadline = native.zw_local_monotonic_ms() + 8000;
+    while (f.adapter.shutdownStep() != .released) {
+        f.tick() catch {};
+        if (native.zw_local_monotonic_ms() >= close_deadline) return error.HistoryCloseTimeout;
+        pause();
+    }
+    var archive: @import("vt/session_archive.zig").Archive = .{ .allocator = a, .io = std.testing.io, .dir = f.tmp.dir };
+    var catalog = try archive.loadCatalog(a);
+    defer catalog.deinit();
+    try std.testing.expectEqual(@as(usize, 1), catalog.entries.items.len);
+    const descriptor = catalog.entries.items[0];
+    const metadata = descriptor.document.?;
+    var count: usize = 0;
+    for (metadata.command_history) |item| if (item.value.command != null and std.mem.eql(u8, item.value.command.?, "true")) {
+        try std.testing.expectEqual(@as(u64, 1), item.recording_generation);
+        try std.testing.expectEqual(@as(?i32, 0), item.value.exit_code);
+        try std.testing.expect(item.value.elapsed_ms != null and item.value.end_ms != null);
+        if (count == 0) try std.testing.expect(item.value.ai_execution_id.?.eql(first.execution_id.?));
+        if (count == 1) try std.testing.expect(item.value.ai_execution_id.?.eql(second.execution_id.?));
+        if (count == 2) try std.testing.expect(item.value.ai_execution_id == null);
+        count += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 3), count);
+    const private_saved = for (metadata.command_history) |item| {
+        if (item.value.ai_execution_id) |id| if (id.eql(private_result.execution_id.?)) {
+            try std.testing.expectEqual(@as(?i32, 1), item.value.exit_code);
+            try std.testing.expectEqual(@import("vt/snapshot.zig").CommandState.failed, item.value.state);
+            break true;
+        };
+    } else false;
+    try std.testing.expect(private_saved);
+    const job = try @import("ui/history_archive.zig").Job.start(archive, descriptor.archive_key, descriptor.manifest_revision, 1);
+    defer job.deinit();
+    job.thread.?.join();
+    job.thread = null;
+    try std.testing.expect(job.failure == null);
+    var reopened: usize = 0;
+    for (job.document.?.timeline.commands.items) |command| if (command.command != null and std.mem.eql(u8, command.command.?, "true")) {
+        if (reopened == 0) try std.testing.expect(command.ai_execution_id.?.eql(first.execution_id.?));
+        if (reopened == 1) try std.testing.expect(command.ai_execution_id.?.eql(second.execution_id.?));
+        if (reopened == 2) try std.testing.expect(command.ai_execution_id == null);
+        try std.testing.expect(job.document.?.timeline.commandFrame(command.id) != null);
+        reopened += 1;
+    };
+    try std.testing.expectEqual(@as(usize, 3), reopened);
+    const private_reopened = for (job.document.?.timeline.commands.items) |command| {
+        if (command.ai_execution_id) |id| if (id.eql(private_result.execution_id.?)) {
+            try std.testing.expectEqual(@as(?i32, 1), command.exit_code);
+            break true;
+        };
+    } else false;
+    try std.testing.expect(private_reopened);
 }

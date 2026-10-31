@@ -60,6 +60,7 @@ pub fn onKey(self: *Surface, key: ui.events.KeyCode, modifiers: ui.events.Modifi
     return .stop;
 }
 fn enqueueKey(self: *Surface, event: terminal.KeyEvent) !void {
+    if (self.control_grant != null) return error.TerminalControlled;
     if (self.snapshot == null or self.snapshot.?.read_only) return error.ReadOnlyTerminal;
     if (self.pending.items.len >= 256) return error.InputQueueFull;
     if (self.timing) |trace| trace.begin(self.next_input + self.pending.items.len);
@@ -228,9 +229,10 @@ pub fn onEvent(self: *Surface, event: ui.events.Event) ui.events.EventResult {
     return .ignored;
 }
 fn reportsMouse(self: *Surface) bool {
-    return self.snapshot != null and !self.snapshot.?.read_only and self.snapshot.?.projection.modes.mouse_tracking != .none;
+    return self.control_grant == null and self.snapshot != null and !self.snapshot.?.read_only and self.snapshot.?.projection.modes.mouse_tracking != .none;
 }
 fn mouseReport(self: *Surface, action: @FieldType(terminal.MouseEvent, "action"), button: @FieldType(terminal.MouseEvent, "button"), x: f32, y: f32, modifiers: ui.events.Modifiers) !void {
+    if (self.control_grant != null) return error.TerminalControlled;
     if (self.snapshot == null or self.pending.items.len >= 256) return error.InputQueueFull;
     const rect = self.root.globalRect();
     const value = self.snapshot.?;
@@ -446,6 +448,7 @@ pub fn pasteClipboard(self: *Surface) void {
     requestPaste(self, text) catch |err| self.showError(err);
 }
 pub fn requestPaste(self: *Surface, text: []const u8) !void {
+    if (self.control_grant != null) return error.TerminalControlled;
     if (self.enhancement) |handler| if (handler.text(handler.context, text)) return;
     if (self.pending_paste != null or self.paste_requested != null) return error.PendingPaste;
     if ((terminal.PastePolicy{}).inspect(text) == .reject) return error.InvalidPaste;
@@ -456,6 +459,10 @@ pub fn requestPaste(self: *Surface, text: []const u8) !void {
     try pumpPaste(self);
 }
 pub fn pumpPaste(self: *Surface) !void {
+    if (self.control_grant != null) {
+        cancelPaste(self);
+        return;
+    }
     if (self.paste_requested) |bytes| {
         if (self.pending.items.len > 0) return;
         self.pending_paste = self.service.preparePaste(self.cx.allocator, bytes) catch |err| {

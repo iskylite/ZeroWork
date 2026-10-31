@@ -7,10 +7,13 @@ const events = @import("../ai/step_events.zig");
 pub const Props = struct {
     title: []const u8,
     projection: []const u8,
+    tool_name: ?[]const u8 = null,
+    decision: ?bool = null,
     detail: []const u8,
     copy_detail: bool = true,
     phase: events.Phase,
     elapsed_ms: u64,
+    show_elapsed: bool = true,
     expanded: *bool,
     test_id: []const u8 = "ai.step",
     on_toggle: ?ui.Handler(void) = null,
@@ -65,7 +68,7 @@ const State = struct {
             follow.update();
             self.rememberScroll();
         };
-        if (self.props.phase != .assembling and self.props.phase != .running and self.props.phase != .approval and self.props.phase != .approved) return .done;
+        if (self.props.phase != .assembling and self.props.phase != .running and self.props.phase != .approved) return .done;
         const now: u64 = @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
         self.cx.scheduleRedrawAfterNs(100 * std.time.ns_per_ms);
         if (now -| self.last_tick_ms < 100) return .done;
@@ -126,15 +129,20 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, props: Props) !*ui.Node {
     title_node.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .max_width = 128, .height = .{ .px = 18 }, .flex_shrink = 0 });
     title_node.meta.ownership.meta.test_id = "ai.step.title";
     try header.appendChild(cx.allocator, title_node);
-    const projection = try ui.text(cx, props.projection, .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = palette.fg_2, .text_overflow = .ellipsis });
+    const status_label: ?[]const u8 = if (props.phase == .assembling) "准备中" else if (props.phase == .approval) "待确认" else if (props.decision) |approved| if (approved) "已批准" else "已拒绝" else null;
+    const projected = if (props.tool_name) |name| try @import("ai_tool_header_projection.zig").projectWithStatus(cx.allocator, name, props.projection, status_label) else null;
+    defer if (projected) |value| cx.allocator.free(value);
+    // The actual zenit text builder copies this temporary into node ownership.
+    const projection = try ui.text(cx, projected orelse props.projection, .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = palette.fg_2, .text_overflow = .ellipsis });
     projection.setStyleInline(cx.allocator, S.headerSummary(cx.tokens));
     projection.meta.ownership.meta.test_id = "ai.step.projection";
     try header.appendChild(cx.allocator, projection);
     var buf: [32]u8 = undefined;
-    const elapsed = if (props.elapsed_ms < 1000) try std.fmt.bufPrint(&buf, "{d}ms", .{props.elapsed_ms}) else try std.fmt.bufPrint(&buf, "{d:.1}s", .{@as(f64, @floatFromInt(props.elapsed_ms)) / 1000});
+    const elapsed = if (props.phase == .approval) "待确认" else if (props.elapsed_ms < 1000) try std.fmt.bufPrint(&buf, "{d}ms", .{props.elapsed_ms}) else try std.fmt.bufPrint(&buf, "{d:.1}s", .{@as(f64, @floatFromInt(props.elapsed_ms)) / 1000});
     const clock = try ui.textStyled(cx, S.elapsed, elapsed);
     clock.setStyleInline(cx.allocator, S.elapsedSlot(cx.tokens));
     clock.meta.ownership.meta.test_id = "ai.step.elapsed";
+    if (!props.show_elapsed) clock.setDisplay(.none);
     try header.appendChild(cx.allocator, clock);
     try root.appendChild(cx.allocator, header);
     // Sibling scopes are disposed in creation order: save the position before
@@ -185,5 +193,5 @@ pub fn title(name: []const u8) []const u8 {
     if (std.mem.eql(u8, name, "read_terminal")) return "读取终端";
     if (std.mem.eql(u8, name, "read_remote_file")) return "读取远程文件";
     if (std.mem.eql(u8, name, "list_remote_files")) return "列出远程文件";
-    return name;
+    return "工具调用";
 }

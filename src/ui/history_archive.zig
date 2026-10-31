@@ -79,7 +79,7 @@ pub const Job = struct {
         const cast = try lease.cast().readAll(self.allocator, 128 * 1024 * 1024);
         defer self.allocator.free(cast);
         if (self.cancel.load(.acquire)) return error.Cancelled;
-        var timeline = try @import("history_cast.zig").loadCancelable(self.allocator, cast, &self.cancel);
+        var timeline = try @import("history_cast.zig").loadWithManifest(self.allocator, cast, &self.cancel, record.descriptor.display, record.descriptor.document);
         errdefer timeline.deinit();
         if (self.cancel.load(.acquire)) return error.Cancelled;
         var reading = try @import("history_reading.zig").Model.init(self.allocator, &timeline);
