@@ -12,12 +12,13 @@
   const records = new Map(), versions = new Map(), listeners = new Set();
   const localKinds = new Set(['feedback','command_failed','ai_progress','ai_complete','ai_failed','cancelled']);
   const attentionKinds = new Set(['connection_failed','transfer_blocked','task_waiting','outcome_unknown','application_risk']);
-  let banner = null, centerVisible = false;
+  let banner = null, centerVisible = false, nextFactOrder = 0;
   const escape = text => String(text ?? '').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   function summary(record) {
-    const members=[...record.members.values()],pending=members.some(m=>!m.resolved),sources=[...new Set(members.map(m=>m.source).filter(Boolean))];
+    const members=[...record.members.values()].sort((a,b)=>a.order-b.order),pending=members.some(m=>!m.resolved),sources=[...new Set(members.map(m=>m.source).filter(Boolean))];
     return {...record,members:undefined,pending,sources,count:members.length};
   }
+  function sourceLabel(record){const sources=summary(record).sources;return sources.length>1?`${sources[0]} 等 ${sources.length} 个来源`:sources[0]||'';}
   function snapshot() {
     const items=[...records.values()].map(summary).reverse();
     return {items,pending:items.filter(r=>r.pending).length,unread:items.filter(r=>!r.seen).length};
@@ -35,6 +36,14 @@
     return context.focused===false?'system':'in_app';
   }
   function locate(record){record.seen=true;changed();record.locate?.();}
+  function reconcile(record){
+    const members=[...record.members.values()].sort((a,b)=>a.order-b.order);
+    // Match the native coordinator: first pending fact, then first fact.
+    const selected=members.find(member=>!member.resolved)||members[0];
+    record.representativeKey=selected.key;
+    for(const field of ['title','detail','severity','locate','target'])record[field]=selected[field];
+    record.updatedAt=Date.now();
+  }
   function publish(event,context={}) {
     if(!event.key||!event.kind||!event.title)throw new Error('Notification needs a stable key, kind and title');
     if(parent!==window&&new URLSearchParams(location.search).has('integrated')) {
@@ -44,30 +53,49 @@
     }
     const revision=event.revision??1;
     if(!Number.isSafeInteger(revision)||revision<1)throw new Error('Invalid notification revision');
-    if((versions.get(event.key)||0)>=revision)return {channel:'duplicate',record:null,node:null};
-    versions.set(event.key,revision);
+    const previousVersion=versions.get(event.key);
+    if((previousVersion?.revision||0)>=revision)return {channel:'duplicate',record:null,node:null};
+    const order=previousVersion?.order??++nextFactOrder;
+    versions.set(event.key,{revision,order});
     const id=event.incidentKey||event.key;
-    let record=records.get(id);
     const channel=decide(event,context);
-    if(channel==='resolved') {
-      if(record){const member=record.members.get(event.key);if(member)member.resolved=true;record.updatedAt=Date.now();if(!summary(record).pending){record.title=event.title;record.detail=event.detail||record.detail;if(banner?.id===id){banner.node.remove();banner=null;}}changed();}
-      return {channel,record:record?summary(record):null,node:null};
+    if(banner&&!banner.node.isConnected)banner=null;
+    const movingBanner=banner?.key===event.key&&banner.id!==id;
+    // A retained banner must never outlive the revision behind its action.
+    // In-app replacements below replace it atomically; other routes expire it.
+    if(banner?.key===event.key&&(channel!=='in_app'||context.quietHours||centerVisible)){
+      banner.node.remove();banner=null;
     }
-    if(channel!=='in_app'&&channel!=='system'){if(record){record.title=event.title;record.detail=event.detail||record.detail;record.updatedAt=Date.now();changed();}return {channel,record:record?summary(record):null,node:null};}
-    const first=!record;
-    if(!record){record={id,title:event.title,detail:event.detail||'',severity:event.severity||'warning',members:new Map(),seen:false,updatedAt:Date.now(),createdAt:Date.now(),locate:event.locate,target:event.target,channel,critical:event.kind==='application_risk',notified:false};records.set(id,record);}
-    record.members.set(event.key,{source:event.source||'',resolved:!event.requiresAction});
-    record.title=event.title;record.detail=event.detail||'';record.updatedAt=Date.now();record.locate=event.locate||record.locate;
+    // A fact has one incident membership even if its incident key changes.
+    let moved=null,movedSeen=false;
+    for(const [otherId,other]of records)if(otherId!==id&&other.members.has(event.key)){
+      moved=other.members.get(event.key);movedSeen=other.seen;other.members.delete(event.key);
+      if(other.members.size){reconcile(other);if(banner?.id===otherId&&banner.key!==event.key)renderer.updateSource(banner.node,sourceLabel(other));}else records.delete(otherId);
+    }
+    let record=records.get(id);
+    const first=!record&&(!moved||movingBanner);
+    if(!record&&!moved&&channel!=='in_app'&&channel!=='system')return {channel,record:null,node:null};
+    if(!record){record={id,title:event.title,detail:event.detail||'',severity:event.severity||'warning',members:new Map(),seen:movedSeen,updatedAt:Date.now(),createdAt:Date.now(),locate:event.locate,target:event.target,channel,critical:event.kind==='application_risk',notified:false};records.set(id,record);}
+    const previous=record.members.get(event.key)||moved;
+    if(channel!=='resolved'||previous){
+      record.members.set(event.key,{key:event.key,order,revision,critical:event.kind==='application_risk',source:event.source??previous?.source??'',resolved:channel==='resolved'||!event.requiresAction,title:event.title,detail:event.detail??previous?.detail??'',severity:event.severity??previous?.severity??'warning',locate:event.locate??previous?.locate,target:event.target??previous?.target});
+      reconcile(record);
+    }
+    if(!summary(record).pending&&banner?.id===id){banner.node.remove();banner=null;}
+    if(channel!=='in_app'&&channel!=='system'){changed();return {channel,record:summary(record),node:null};}
     // An updated incident is one entry. It never regenerates a dismissed banner.
     let node=null;
     if(centerVisible&&context.focused!==false)record.seen=true;
-    if(channel==='in_app'&&!context.quietHours&&!centerVisible&&(first||banner?.id===id)) {
-      if(!banner||banner.id===id||!banner.critical){
-        banner?.node.remove();
-        const item=summary(record),source=item.sources.length>1?`${item.sources[0]} 等 ${item.sources.length} 个来源`:item.sources[0]||'';
-        node=rawShow({text:record.title,detail:record.detail,source,status:item.pending?'待处理':'已完成',severity:record.critical?'error':'warning',scope:'global',action:()=>{if(banner?.id===id)banner=null;locate(record);},actionLabel:'查看来源'});
-        banner={id,node,critical:record.critical};record.notified=true;
-        node.querySelector('[data-feedback-close]').addEventListener('click',()=>{record.seen=true;if(banner?.id===id)banner=null;changed();});
+    if(channel==='in_app'&&!context.quietHours&&!centerVisible&&(first||movingBanner||banner?.id===id)) {
+      if(!banner||banner.id===id||movingBanner||!banner.critical){
+        const item=summary(record),source=sourceLabel(record);
+        const shown=record.members.get(movingBanner?event.key:banner?.id===id?banner.key:event.key)||record.members.get(record.representativeKey);
+        const actionKey=shown.key,actionRevision=shown.revision,actionTarget=shown.locate;
+        const retained=banner?.key===actionKey?banner.node:null;if(!retained)banner?.node.remove();
+        const payload={text:shown.title,detail:shown.detail,source,status:item.pending?'待处理':'已完成',severity:shown.critical?'error':'warning',scope:'global',action:()=>{if(versions.get(actionKey)?.revision!==actionRevision||records.get(id)!==record||banner?.node!==node||!node.isConnected)return;if(banner?.id===id)banner=null;record.seen=true;changed();actionTarget?.();},actionLabel:'查看来源'};
+        if(retained&&banner.id===id&&banner.revision===actionRevision){node=retained;renderer.updateSource(node,source);}else node=retained?renderer.update(retained,payload):rawShow(payload);
+        banner={id,key:actionKey,revision:actionRevision,node,critical:shown.critical};record.notified=true;
+        node.querySelector('[data-feedback-close]').addEventListener('click',()=>{if(banner?.node!==node||banner.id!==id||versions.get(actionKey)?.revision!==actionRevision)return;record.seen=true;banner=null;changed();});
       }
     }
     while(records.size>100){const old=[...records.values()].find(r=>!summary(r).pending);if(!old)break;records.delete(old.id);}

@@ -5,7 +5,7 @@ const ui = @import("ui");
 const S = @import("socks_info_styles.zig");
 const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
 
-pub const State = enum { off, connecting, running, paused, failed };
+pub const State = enum { off, connecting, running, paused, stopping, failed };
 pub const Data = struct {
     mode: @import("../proto/ssh/socks5_listener.zig").ForwardMode = .socks5,
     target_host: []const u8 = "",
@@ -171,7 +171,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     try logs_popup.content.appendChild(cx.allocator, self.logs_owner);
     self.logs_body = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
     self.logs_body.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0 });
-    self.logs_body.container.setStyleInline(cx.allocator, .{ .background = S.theme.popupInset(), .border = .{ .radius = 8, .width = 1, .color = S.theme.current().border } });
+    self.logs_body.container.setStyleInline(cx.allocator, .{ .background = S.theme.popupInset(), .border = .{ .radius = 8, .width = 0, .color = ui.Color.TRANSPARENT } });
     self.logs_body.content.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(12), .flex_shrink = 0 });
     self.logs_text = try text(self, "尚无转发日志", 12, 400, .secondary, true);
     self.logs_text.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .flex_shrink = 0 });
@@ -301,6 +301,7 @@ pub const View = struct {
             .connecting => "启动中",
             .running => "正在监听",
             .paused => "连接已断开",
+            .stopping => "停止中",
             .failed => "启动失败",
         });
         try self.intro.setTextContent(self.cx.allocator, switch (data.state) {
@@ -308,15 +309,16 @@ pub const View = struct {
             .connecting => "正在建立转发，请稍候",
             .failed => "转发未运行，请检查错误后重试",
             .paused => "SSH 连接已断开，等待恢复",
+            .stopping => "正在释放监听与连接，请稍候",
             .off => if (self.has_rule) "配置已就绪，点击启动转发" else "添加规则后启动转发",
         });
         self.test_disabled.set(data.state != .running or data.mode != .socks5);
         self.copy_button.setDisplay(if (self.has_rule and data.mode == .socks5) .flex else .none);
         self.test_button.setDisplay(if (self.has_rule and data.mode == .socks5) .flex else .none);
-        self.control_disabled.set(data.state == .connecting);
+        self.control_disabled.set(data.state == .stopping);
         const active = data.state == .running or data.state == .paused;
-        try self.control_text.setTextContent(self.cx.allocator, if (active) "停止转发" else if (data.state == .connecting) "启动中…" else if (data.state == .failed) "重试" else "启动转发");
-        if (self.control_button.behavior.interaction.a11y) |*attrs| attrs.label = if (active) "停止转发" else "开启转发";
+        try self.control_text.setTextContent(self.cx.allocator, if (active) "停止转发" else if (data.state == .connecting) "取消启动" else if (data.state == .stopping) "停止中…" else if (data.state == .failed) "重试" else "启动转发");
+        if (self.control_button.behavior.interaction.a11y) |*attrs| attrs.label = self.control_text.getText().?.content;
         if (self.config_button.behavior.interaction.a11y) |*attrs| attrs.label = if (self.has_rule) "编辑转发配置" else "添加转发";
         const message = if (data.error_text.len > 0) data.error_text else data.test_result;
         try self.message.setTextContent(self.cx.allocator, message);
@@ -335,7 +337,7 @@ pub const View = struct {
         }
         self.root.setStyleInline(self.cx.allocator, S.panel());
         self.logs_root.setStyleInline(self.cx.allocator, S.panel());
-        self.logs_body.container.setStyleInline(self.cx.allocator, .{ .background = S.theme.popupInset(), .border = .{ .radius = 8, .width = 1, .color = colors.border } });
+        self.logs_body.container.setStyleInline(self.cx.allocator, .{ .background = S.theme.popupInset(), .border = .{ .radius = 8, .width = 0, .color = ui.Color.TRANSPARENT } });
         self.rule.setBackground(S.theme.popupInset());
         self.pointer.setStyleInline(self.cx.allocator, S.pointer());
         _ = self.title_icon.setTint(colors.accent);
@@ -351,23 +353,23 @@ pub const View = struct {
         const c = S.theme.current();
         setColor(self.status, switch (self.state) {
             .running => S.text(.success),
-            .connecting, .paused => S.text(.warning),
+            .connecting, .paused, .stopping => S.text(.warning),
             .failed => S.text(.danger),
             .off => c.fg_2,
         });
-        const active = self.state == .running or self.state == .paused;
-        setColor(self.control_text, if (active) c.danger_ink else if (self.state == .connecting) c.fg_3 else ui.Color.WHITE);
+        const active = self.state == .running or self.state == .paused or self.state == .connecting;
+        setColor(self.control_text, if (active) c.danger_ink else if (self.state == .stopping) c.fg_3 else ui.Color.WHITE);
         setColor(self.config_text, if (self.has_rule) c.fg_2 else ui.Color.WHITE);
         for (self.button_paints[0..self.button_count]) |paint| {
             var style = buttonStyle(paint.action);
             if (paint.action == .config and !self.has_rule) style.background = c.accent;
-            if (paint.action == .start) style.background = if (active or self.state == .connecting) S.theme.popupAction() else c.accent;
+            if (paint.action == .start) style.background = if (active or self.state == .stopping) S.theme.popupAction() else c.accent;
             paint.style.set(style);
             paint.interaction.set(.{ .background = if (paint.action == .start) style.background else c.hover });
         }
         // Publish the settled action color after layout: the widget transition
         // can otherwise retain its previous gray paint in an idle native window.
-        const control_background = if (active or self.state == .connecting) S.theme.popupAction() else c.accent;
+        const control_background = if (active or self.state == .stopping) S.theme.popupAction() else c.accent;
         if (!ui.Color.eql(self.control_button.getBackground(), control_background)) {
             self.control_button.setBackgroundRaw(control_background);
             self.control_button.markRenderDirty();
@@ -478,9 +480,9 @@ pub const View = struct {
             self.closeLogs();
             return;
         }
-        const action = if (requested == .start or requested == .stop) (if (self.state == .running or self.state == .paused) Action.stop else Action.start) else requested;
+        const action = if (requested == .start or requested == .stop) (if (self.state == .running or self.state == .paused or self.state == .connecting) Action.stop else Action.start) else requested;
         if ((action == .test_proxy or action == .copy_export) and self.state != .running) return;
-        if ((action == .start or action == .stop) and self.state == .connecting) return;
+        if ((action == .start or action == .stop) and self.state == .stopping) return;
         self.hooks.action(self.hooks.context, action);
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {

@@ -23,9 +23,9 @@ pub const View = struct {
         const row = try ui.boxStyled(cx, S.notice, .{});
         try root.appendChild(cx.allocator, row);
         const slot = try ui.box(cx, .{ .width = .{ .px = 14 }, .height = .{ .px = 22 }, .flex_shrink = 0, .align_items = .center, .justify = .center }, .{});
-        const rollback_icon = try ui.iconTint(cx, ui.icons.get("undo-2").?, theme.current().fg_2, S.icon());
+        const rollback_icon = try theme.icon(cx, ui.icons.get("undo-2").?, "fg_2", S.icon());
         rollback_icon.meta.ownership.meta.test_id = "ai.feedback.rollback";
-        const warning_icon = try ui.iconTint(cx, ui.icons.get("circle-alert").?, theme.current().warn, S.icon());
+        const warning_icon = try theme.icon(cx, ui.icons.get("circle-alert").?, "warn_ink", S.icon());
         warning_icon.meta.ownership.meta.test_id = "ai.feedback.warning";
         try slot.appendChild(cx.allocator, rollback_icon);
         try slot.appendChild(cx.allocator, warning_icon);
@@ -49,7 +49,7 @@ pub const View = struct {
         self.dismiss_button.setDisplay(if (kind == .rollback) .flex else .none);
         self.root.setDisplay(if (label.len == 0) .none else .flex);
         _ = self.rollback_icon.setTint(theme.current().fg_2);
-        _ = self.warning_icon.setTint(theme.current().warn);
+        _ = self.warning_icon.setTint(theme.current().warn_ink);
         self.root.markRenderDirty();
     }
 

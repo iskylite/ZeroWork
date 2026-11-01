@@ -13,7 +13,12 @@ pub const Callbacks = struct {
     choose_directory: *const fn (*anyopaque, *Controller, Key) void,
 };
 pub const Choice = struct { label: []const u8, value: []const u8 };
-const fonts = [_]Choice{ .{ .label = "JetBrains Mono", .value = "JetBrains Mono" }, .{ .label = "Menlo", .value = "Menlo" }, .{ .label = "Monaco", .value = "Monaco" } };
+const fonts = blk: {
+    const families = @import("appearance_font.zig").families;
+    var result: [families.len]Choice = undefined;
+    for (families, 0..) |family, i| result[i] = .{ .label = family, .value = family };
+    break :blk result;
+};
 const cursors = [_]Choice{ .{ .label = "█ Block", .value = "block" }, .{ .label = "▏ Bar", .value = "bar" }, .{ .label = "▁ Underline", .value = "underline" } };
 const terms = blk: {
     const builtins = @import("../vt/terminal_type.zig").builtin;
@@ -186,7 +191,14 @@ pub const Picker = struct {
         if (r.w <= 0 or r.h <= 0 or p.w <= 0 or p.h <= 0) return .done;
         const width = @max(@as(f32, 1), @min(@as(f32, 220), p.w - 16));
         const natural = self.body.content.globalRect().h + 16;
-        const height = @max(@as(f32, 1), @min(natural, p.h - 16));
+        const below = a.y - p.y + a.h + 4;
+        const available = @max(@as(f32, 0), p.h - 16);
+        const below_space = std.math.clamp(p.h - 8 - below, @as(f32, 0), available);
+        const above_space = std.math.clamp(a.y - p.y - 12, @as(f32, 0), available);
+        // Keep the anchor gap even when neither side fits the natural menu.
+        // The larger side gets a bounded ScrollArea instead of overlapping it.
+        const place_below = natural <= below_space or below_space >= above_space;
+        const height = @max(@as(f32, 1), @min(natural, if (place_below) below_space else above_space));
         if (@abs(r.w - width) > 0.5 or @abs(r.h - height) > 0.5) {
             self.root.style.width = .{ .px = width };
             self.root.style.height = .{ .px = height };
@@ -203,9 +215,8 @@ pub const Picker = struct {
             self.focused = true;
         };
         const left = std.math.clamp(a.x - p.x, @as(f32, 8), @max(@as(f32, 8), p.w - r.w - 8));
-        const below = a.y - p.y + a.h + 4;
         const above = a.y - p.y - r.h - 4;
-        const top = std.math.clamp(if (below + r.h <= p.h - 8) below else above, @as(f32, 8), @max(@as(f32, 8), p.h - r.h - 8));
+        const top = std.math.clamp(if (place_below) below else above, @as(f32, 8), @max(@as(f32, 8), p.h - r.h - 8));
         const ext = self.root.style.ensureExtPanic(self.cx.allocator);
         if (@abs(r.x - p.x - left) <= 0.5 and @abs(r.y - p.y - top) <= 0.5) return .done;
         ext.inset.left = .{ .px = left };

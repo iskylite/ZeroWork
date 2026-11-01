@@ -51,7 +51,7 @@ pub const View = struct {
         try header.appendChild(cx.allocator, title_column);
         const heading_row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 22 }, .direction = .row, .align_items = .center, .gap = 8 }, .{});
         try title_column.appendChild(cx.allocator, heading_row);
-        self.heading_icon = try ui.iconTint(cx, ui.icons.arrow_up_from_line, V3.theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        self.heading_icon = try V3.theme.icon(cx, ui.icons.arrow_up_from_line, "accent_ink", .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
         self.heading_icon.meta.ownership.meta.test_id = "files.copy.heading.icon";
         try heading_row.appendChild(cx.allocator, self.heading_icon);
         self.heading = try v3Label(cx, heading_row, "", 15, 600, false, "files.copy.heading", 22);
@@ -61,9 +61,9 @@ pub const View = struct {
         try header.appendChild(cx.allocator, close);
         const body = try ui.box(cx, V3.body(), .{});
         try self.root.appendChild(cx.allocator, body);
-        const summary = try ui.box(cx, V3.summary(), .{});
+        const summary = try ui.boxStyled(cx, summaryPaint, .{});
         try body.appendChild(cx.allocator, summary);
-        try summary.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.files, V3.theme.current().accent, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .flex_shrink = 0 }));
+        try summary.appendChild(cx.allocator, try V3.theme.icon(cx, ui.icons.files, "accent_ink", .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .flex_shrink = 0 }));
         const summary_text = try ui.box(cx, .{ .width = .fill(), .flex = 1, .height = .{ .px = 32 }, .direction = .column, .gap = 2, .min_width = 0 }, .{});
         try summary.appendChild(cx.allocator, summary_text);
         self.filename = try v3Label(cx, summary_text, "", 12, 500, false, "files.copy.filename", 16);
@@ -83,12 +83,15 @@ pub const View = struct {
         try self.root.appendChild(cx.allocator, actions);
         self.feedback = try v3Label(cx, actions, "", 10.5, 400, true, "files.copy.feedback", 16);
         self.feedback.setStyleInline(cx.allocator, .{ .flex = 1, .min_width = 0 });
-        const cancel = try ui.widgets.Button(.{ .label = "取消", .variant = .secondary, .base_style = V3.button(false), .on_click = cx.on(View, self, dismiss) }).mount(scope, cx);
+        const cancel = try ui.widgets.Button(.{ .label = "取消", .variant = .secondary, .base_style = try V3.theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, V3.button, .{false}), .on_click = cx.on(View, self, dismiss) }).mount(scope, cx);
         cancel.meta.ownership.meta.test_id = "files.copy.cancel";
         try actions.appendChild(cx.allocator, cancel);
-        self.confirm = try ui.widgets.Button(.{ .label = self.primary_label, .variant = .primary, .icon_asset = self.confirm_icon, .icon_size = @as(f32, 14), .base_style = V3.button(true), .on_click = cx.on(View, self, submit) }).mount(scope, cx);
+        self.confirm = try ui.widgets.Button(.{ .label = self.primary_label, .variant = .primary, .icon_asset = self.confirm_icon, .icon_size = @as(f32, 14), .base_style = try V3.theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, V3.button, .{true}), .on_click = cx.on(View, self, submit) }).mount(scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, scope, self.confirm, null);
         self.confirm.meta.ownership.meta.test_id = "files.copy.submit";
         try actions.appendChild(cx.allocator, self.confirm);
+        try S.theme.bindMaterial(cx, scope, modal.dialog, "overlay");
+        try S.theme.bindMaterial(cx, scope, self.root, "overlay");
         return self;
     }
     pub fn open(self: *View, intent: C.FrozenTransfer, defaults: Options) !void {
@@ -110,7 +113,7 @@ pub const View = struct {
         self.md5_value.set(defaults.md5_check);
         const upload = intent.source.endpoint == .local_fs;
         const heading_asset = if (upload) ui.icons.arrow_up_from_line else ui.icons.arrow_down_to_line;
-        if (heading_asset.icon_id) |id| if (heading_asset.pickRep(18)) |rep| self.heading_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = V3.theme.current().accent });
+        if (heading_asset.icon_id) |id| if (heading_asset.pickRep(18)) |rep| self.heading_icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = V3.theme.current().accent_ink });
         try self.heading.setTextContent(self.cx.allocator, if (upload) "上传文件" else "下载文件");
         try self.subtitle.setTextContent(self.cx.allocator, if (upload) "本地文件 → 远端目录" else "远端文件 → 本地保存目录");
         self.primary_label.set(if (upload) "开始上传" else "开始下载");
@@ -138,7 +141,7 @@ pub const View = struct {
         const field = try ui.box(self.cx, V3.field(), .{});
         try parent.appendChild(self.cx.allocator, field);
         caption.* = try v3Label(self.cx, field, "", 11, 500, true, "files.copy.field.label", 16);
-        const well = try ui.box(self.cx, V3.path(), .{});
+        const well = try ui.boxStyled(self.cx, pathPaint, .{});
         try field.appendChild(self.cx.allocator, well);
         const value = try v3Label(self.cx, well, "", 11, 400, false, id, 16);
         if (value.getText()) |props| {
@@ -168,9 +171,17 @@ pub const View = struct {
 };
 fn v3Label(cx: *ui.Cx, parent: *ui.Node, value: []const u8, size: f32, weight: u16, secondary: bool, id: []const u8, height: f32) !*ui.Node {
     const node = try ui.text(cx, "", V3.text(size, weight, secondary));
+    if (secondary) V3.theme.bindInk(node, "fg_2") else V3.theme.bindInk(node, "fg_1");
     try node.setTextContent(cx.allocator, value);
     node.meta.ownership.meta.test_id = id;
     node.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .height = .{ .px = height }, .flex_shrink = 0, .overflow = .hidden, .overflow_hidden = true });
     try parent.appendChild(cx.allocator, node);
     return node;
+}
+
+fn summaryPaint(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return V3.summary();
+}
+fn pathPaint(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return V3.path();
 }

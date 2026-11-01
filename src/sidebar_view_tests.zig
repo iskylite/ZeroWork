@@ -198,11 +198,14 @@ test "sidebar native chrome gives unused action space back to host names" {
     try std.testing.expectApproxEqAbs(@as(f32, 12), v.search_box.globalRect().y, 0.1);
     try std.testing.expectApproxEqAbs(@as(f32, 36), row.node.globalRect().h, 0.1);
     const before = row.name.globalRect().w;
+    const protocol = find(row.node, "sidebar.host.protocol").?;
+    const protocol_width = protocol.globalRect().w;
     const rect = row.node.globalRect();
     h.cx.handleMouseMove(rect.x + 20, rect.y + 12);
     h.frames();
     try std.testing.expectEqual(@as(@TypeOf(row.route.style.display), .flex), row.route.style.display);
-    try std.testing.expectApproxEqAbs(before - (V.styles.action_size * 3 + 4), row.name.globalRect().w, 0.1);
+    try std.testing.expect(protocol.style.display == .none);
+    try std.testing.expectApproxEqAbs(before + protocol_width + 6 - (V.styles.action_size * 3 + 4), row.name.globalRect().w, 0.1);
     h.click(find(row.node, "sidebar.host.connect").?);
     try std.testing.expectEqual(@as(usize, 1), c.connected);
     h.click(find(row.node, "sidebar.host.edit").?);
@@ -213,6 +216,49 @@ test "sidebar native chrome gives unused action space back to host names" {
     try std.testing.expectEqual(@as(usize, 1), c.connected);
     h.click(find(v.root, "sidebar.collapse").?);
     try std.testing.expectEqual(@as(usize, 1), c.collapsed);
+}
+test "sidebar host hover exposes connect copy and edit without activating the row" {
+    const h = try H.init();
+    defer h.deinit();
+    const column = try ui.box(h.cx, .{ .width = .{ .px = 212 }, .height = .fill(), .direction = .column }, .{});
+    try h.root.appendChild(h.cx.allocator, column);
+    var capture: Capture = .{};
+    const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "ScaleX40-AI01", .detail = "root@192.0.2.1:22", .route = "本机 → 跳板 → ScaleX40-AI01", .hops = 1, .online = false }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu, .action = Capture.hostAction });
+    try column.appendChild(h.cx.allocator, row.node);
+    h.frames();
+    const protocol = find(row.node, "sidebar.host.protocol").?;
+    try std.testing.expect(protocol.style.display == .flex);
+    const rect = row.node.globalRect();
+    h.cx.handleMouseMove(rect.x + 10, rect.y + 12);
+    h.frames();
+    try std.testing.expect(row.hot);
+    try std.testing.expect(row.actions.style.display == .flex);
+    try std.testing.expect(protocol.style.display == .none);
+    h.cx.handleMouseMove(800, 700);
+    h.frames();
+    try std.testing.expect(protocol.style.display == .flex);
+    h.cx.handleMouseMove(rect.x + 10, rect.y + 12);
+    h.frames();
+    for ([_][]const u8{ "sidebar.host.connect", "sidebar.host.copy", "sidebar.host.edit" }) |id| {
+        const button = find(row.node, id) orelse return error.MissingHostShortcut;
+        try std.testing.expect(button.globalRect().w >= 24);
+        h.click(button);
+    }
+    try std.testing.expectEqual(@as(usize, 1), capture.connected);
+    try std.testing.expectEqual(@as(usize, 1), capture.copied);
+    try std.testing.expectEqual(@as(usize, 1), capture.edited);
+    try std.testing.expectEqual(@as(usize, 0), capture.menus);
+    try std.testing.expectEqual(@as(usize, 0), capture.selected);
+    h.cx.setFocus(find(row.node, "sidebar.host.copy").?);
+    h.cx.handleKeyDown(.@"return", .{});
+    h.frames();
+    h.cx.setFocus(find(row.node, "sidebar.host.edit").?);
+    h.cx.handleKeyDown(.space, .{});
+    h.frames();
+    try std.testing.expectEqual(@as(usize, 2), capture.copied);
+    try std.testing.expectEqual(@as(usize, 2), capture.edited);
+    try std.testing.expectEqual(@as(usize, 1), capture.connected);
+    try std.testing.expectEqual(@as(usize, 0), capture.selected);
 }
 test "sidebar native group menu freezes revision and never changes persistent collapse before commit" {
     var c: Capture = .{};
@@ -529,7 +575,7 @@ test "main workspace sidebar follows V3 measured group search and footer geometr
         try std.testing.expectApproxEqAbs(@as(f32, 13), row.node.globalRect().x, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 212), row.node.globalRect().w, 0.1);
         try std.testing.expectApproxEqAbs(@as(f32, 36), row.node.globalRect().h, 0.1);
-        try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
+        try std.testing.expectEqualStrings("SSH", find(row.node, "sidebar.host.protocol").?.children.items[0].getText().?.content);
         try std.testing.expectEqualStrings("0", find(row.node, "sidebar.host.hops").?.getText().?.content);
         try std.testing.expectEqual(V.styles.tail_width, row.trailing.globalRect().w);
 
@@ -682,7 +728,7 @@ test "reported input typography and narrow host hover geometry" {
         const actions = row.actions.globalRect();
         const route = row.route.globalRect();
         try std.testing.expect(route.x + route.w + 3.9 <= actions.x);
-        try std.testing.expect(find(row.node, "sidebar.host.protocol") == null);
+        try std.testing.expectEqualStrings("SSH", find(row.node, "sidebar.host.protocol").?.children.items[0].getText().?.content);
         try std.testing.expect(row.route.style.display == .flex);
         try std.testing.expect(row.name.globalRect().w > 0);
         try std.testing.expect(row.name.globalRect().x + row.name.globalRect().w <= route.x + 0.1);

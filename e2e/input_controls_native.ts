@@ -11,7 +11,7 @@ process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
 const app=spawn(resolve(process.env.ZW_INPUT_BINARY||'zig-out/bin/zerowork'),[],{env:{...process.env,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:'inherit'});
 const shown=(n:any)=>n.visible!==false&&n.rect.w>0&&n.rect.h>0;
 const get=async(id:string)=>await h.waitFor(async()=>(await h.query(id)).find(shown)||null,10000);
-const cap=async(name:string)=>{await h.sleep(200);await h.screenshot(join(out,name+'.png'));await writeFile(join(out,name+'.json'),JSON.stringify(await Promise.all(['sidebar.host','sidebar.host.protocol','sidebar.host.hops','sidebar.host.connect','wizard.name','wizard.startup','ai.prompt'].map(async id=>({id,nodes:await h.query(id)}))),null,2));};
+const cap=async(name:string)=>{await h.sleep(200);await h.screenshot(join(out,name+'.png'));await writeFile(join(out,name+'.json'),JSON.stringify(await Promise.all(['sidebar.host','sidebar.host.protocol','sidebar.host.hops','sidebar.host.edit','wizard.name','wizard.startup','ai.prompt'].map(async id=>({id,nodes:await h.query(id)}))),null,2));};
 try {
   await h.waitForServerReady(60000);
   await h.resizeWindow(1440,900);

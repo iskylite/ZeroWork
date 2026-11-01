@@ -250,7 +250,7 @@ pub fn modelMarkerDot() ui.BoxStyle {
 }
 pub fn modelMarkerText() ui.TextStyle {
     var value = text(12, 600, 16, false);
-    value.color = theme.current().accent;
+    value.color = theme.current().accent_ink;
     value.text_align = .center;
     return value;
 }

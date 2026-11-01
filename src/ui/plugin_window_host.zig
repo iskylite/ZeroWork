@@ -18,7 +18,7 @@ const transports = @import("../host/transport_factory.zig");
 const ssh = @import("../proto/ssh/session.zig");
 const trust = @import("../proto/ssh/host_key_store.zig");
 const operation = @import("../host/operation.zig");
-const Entry = struct { owner: identity.SessionHandle, cancel: std.atomic.Value(bool) = .init(false), ended: bool = false, released: bool = false, donor: *Retainer };
+const Entry = struct { owner: identity.SessionHandle, cancel: std.atomic.Value(bool) = .init(false), ended: bool = false, released: bool = false, donor: *Retainer, probe_only: bool = false };
 var windows: [32]?*Host = @splat(null);
 pub const TransferReceipt = struct {
     session: u64,
@@ -57,6 +57,7 @@ pub const Host = struct {
     last_error: ?anyerror = null,
     shutdown_prepared: bool = false,
     closed: bool = false,
+    probes: ?*@import("../host/probe_host.zig").Host = null,
     /// Call after App.mount, once the primary/application window is ready.
     /// The generic App type is bound only here, never part of HostContext.
     pub fn mount(app: anytype, app_host: *application.ApplicationHost, notification_host: ?*notify.Host, notification_window: ?notify.WindowId) !*Host {
@@ -85,6 +86,13 @@ pub const Host = struct {
         self.native_fullscreen = Adapter.request;
         self.native_fullscreen_state = Adapter.state;
         self.content_host = try contents.Host.init(cx, app_host.window_id, .{ .context = self, .request_fullscreen = requestFullscreen, .fullscreen_state = fullscreenState, .transfer = enqueueTransfer, .destinations = destinations }, frame.backendFor(store));
+        self.content_host.setSessionHost(app_host.sessions);
+        if (app_host.domain.frame_budget) |budget| self.content_host.setFrameBudget(budget);
+        var data_paths = try @import("../config/paths.zig").Paths.forApplication(cx.allocator);
+        defer data_paths.deinit();
+        const pin_directory = try std.fs.path.join(cx.allocator, &.{ data_paths.directory, "tls-trust" });
+        defer cx.allocator.free(pin_directory);
+        try app_host.domain.plugin_security.configurePins(pin_directory);
         app_host.workspace.content_services = self.content_host.factory();
         self.retainer = try Retainer.init();
         if (app_host.domain.tasks) |tasks| self.retainer.?.host_keys = try trust.HostKeyStore.load(cx.io, .cwd(), std.heap.c_allocator, tasks.authentication.options.known_hosts_path);
@@ -96,6 +104,14 @@ pub const Host = struct {
         const shared_challenges = try @import("challenge_window_host.zig").Services.mount(cx, app_host.workspace.scope);
         self.challenge_host = &shared_challenges.host;
         self.challenge_presenter = shared_challenges.view;
+        try app_host.domain.probe_hosts.ensureUnusedCapacity(app_host.domain.allocator, 1);
+        const probe_host = try app_host.domain.allocator.create(@import("../host/probe_host.zig").Host);
+        probe_host.* = @import("../host/probe_host.zig").Host.init(app_host.domain.allocator, app_host.sessions);
+        app_host.domain.probe_hosts.appendAssumeCapacity(probe_host);
+        self.probes = probe_host;
+        self.probes.?.context_factory = .{ .context = self, .create = probeContext };
+        self.probes.?.credential_host = if (app_host.domain.editor_credentials) |*credentials_host| credentials_host else null;
+        app_host.window_auxiliary = .{ .context = self, .cancel = cancelProbes, .released = probesReleased };
         const root_scope = cx.root_scope orelse return error.PluginRootScopeUnavailable;
         try root_scope.onCleanup(Host, self, prepareWindowShutdown);
         windows[index] = self;
@@ -114,12 +130,14 @@ pub const Host = struct {
     fn prepareWindowShutdown(self: *Host) void {
         if (self.shutdown_prepared or self.closed) return;
         self.shutdown_prepared = true;
+        cancelProbes(self);
         for (self.entries.items) |entry| {
             entry.cancel.store(true, .release);
             for (self.content_host.entries.items) |content_entry| if (content_entry.input.owner.eql(entry.owner)) content_entry.input.close();
             self.challenge_host.ownerClosed(entry.owner);
         }
         for (self.entries.items) |entry| {
+            if (entry.probe_only) continue;
             var receipt = self.application.sessions.shutdownOwner(entry.owner) catch unreachable;
             // Awaiting is a live controller, never a resource-retention receipt.
             // Keep the Cx/facades alive while that original factory joins. An
@@ -139,11 +157,20 @@ pub const Host = struct {
             };
             if (receipt != .released) std.log.warn("plugin owner native cleanup remains {s} after controller shutdown", .{@tagName(receipt)});
             if (self.notification_host) |host| host.ownerEnded(.{ .session = entry.owner });
+            self.application.domain.plugin_security.revokeOwner(entry.owner);
         }
     }
     pub fn deinit(self: *Host) void {
         if (self.closed) return;
         self.closed = true;
+        if (self.application.window_auxiliary) |tasks| {
+            if (tasks.context == @as(*anyopaque, self)) self.application.window_auxiliary = null;
+        }
+        if (self.probes) |host| {
+            // Facade backing storage outlives all Cx/editor cleanup hooks.
+            // The application domain retires it after window attachments end.
+            host.context_factory = null;
+        }
         self.cx.removeAfterLayoutHook(self);
         for (&windows) |*slot| if (slot.* == self) {
             slot.* = null;
@@ -170,6 +197,13 @@ pub const Host = struct {
             if (self.closed or self.shutdown_prepared or self.application.sessions.queryState(owner) == null) return error.StaleHostContext;
             try self.content_host.authorize(owner, allowed, policy_revision);
             return;
+        };
+        return error.PluginWindowUnavailable;
+    }
+    pub fn acquireAutomation(app_host: *application.ApplicationHost, owner: identity.SessionHandle, policy_revision: u64, cancel: ?*const std.atomic.Value(bool), stopped: ?*const std.atomic.Value(bool), expires_at_ms: u64) !content.AutomationGrant {
+        for (windows) |window| if (window) |self| if (self.application == app_host) {
+            if (self.closed or self.shutdown_prepared or self.application.sessions.queryState(owner) == null) return error.StaleHostContext;
+            return self.content_host.acquireAutomation(owner, policy_revision, cancel, stopped, expires_at_ms);
         };
         return error.PluginWindowUnavailable;
     }
@@ -204,10 +238,69 @@ pub const Host = struct {
         // after window registration, when the complete context is available.
         return .{ .owner = owner, .operation = key, .target = target };
     }
+    fn cancelProbes(raw: *anyopaque) void {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        if (self.probes) |host| for (host.editors.items) |editor| host.cancelParent(editor.id) catch {};
+        self.cx.requestRedraw();
+    }
+    fn probesReleased(raw: *anyopaque) bool {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        if (self.probes) |host| for (host.entries.items) |entry| if (!entry.complete) return false;
+        return true;
+    }
+    fn probeContext(raw: *anyopaque, token: @import("../host/probe_contract.zig").ProbeToken, cancel: *const std.atomic.Value(bool)) !@import("../host/probe_contract.zig").ProbeContext {
+        const self: *Host = @ptrCast(@alignCast(raw));
+        if (self.closed or self.shutdown_prepared or self.application.windowClosePending()) return error.PluginWindowClosed;
+        const spec = for (self.application.sessions.sessions.items) |entry| {
+            if (entry.handle.eql(token.handle) and entry.probe_token != null and entry.probe_token.?.eql(token)) break entry.spec.value;
+        } else return error.StaleProbeContext;
+        if (spec != .plugin) return error.InvalidProbeConfiguration;
+        const envelope = spec.plugin;
+        const security = &self.application.domain.plugin_security;
+        const manifest = self.application.sessions.registry.find(envelope.protocol_id) orelse return error.PluginNotFound;
+        if (manifest.connection) |connection| if (connection.credential_references) |enumerate| {
+            const refs = try enumerate(self.cx.allocator, envelope.payload);
+            defer {
+                for (refs) |reference| self.cx.allocator.free(reference);
+                self.cx.allocator.free(refs);
+            }
+            try security.authorizeReferences(token.handle, token.operation, refs);
+        };
+        var found = false;
+        for (self.entries.items) |entry| if (entry.owner.eql(token.handle)) {
+            found = true;
+            break;
+        };
+        if (!found) for (self.entries.items) |entry| if (entry.probe_only and entry.released and entry.donor == self.retainer.?) {
+            // No renderer can retain a probe context. A released provider has
+            // retired its workers and transport before this token is reused.
+            entry.* = .{ .owner = token.handle, .donor = self.retainer.?, .probe_only = true };
+            found = true;
+            break;
+        };
+        if (!found) {
+            if (self.entries.items.len >= 128 or self.retainer.?.token_count == self.retainer.?.tokens.len) return error.PluginOwnerLimit;
+            const entry = try std.heap.c_allocator.create(Entry);
+            errdefer std.heap.c_allocator.destroy(entry);
+            entry.* = .{ .owner = token.handle, .donor = self.retainer.?, .probe_only = true };
+            try self.entries.append(self.cx.allocator, entry);
+            self.retainer.?.tokens[self.retainer.?.token_count] = entry;
+            self.retainer.?.token_count += 1;
+        }
+        const credentials: transports.Credentials = .{ .context = self, .resolve = credential };
+        var factory: transports.Factory = .{ .allocator = std.heap.c_allocator, .library = &self.retainer.?.library, .credentials = credentials, .operation_key = token.operation, .failed_open_owner = self.retainer.?.facade() };
+        if (self.retainer.?.host_keys) |*keys| factory.host_key_store = keys;
+        return .{ .owner = token.handle, .operation = token.operation, .connection_configs = resolver.Resolver.init(&self.application.workspace.registry), .transports = factory, .credentials = credentials, .secrets = security.secret_store.facade(token.handle), .trust = .{ .ssh_host_keys = if (self.retainer.?.host_keys) |*keys| keys else null, .tls = security.tls_store.facade(token.handle) }, .challenges = self.challenge_host, .cancel = cancel };
+    }
     fn createContext(self: *Host, owner: identity.SessionHandle, key: operation.OperationKey, target: contexts.Target) !contexts.HostContext {
         if (self.closed or self.shutdown_prepared) return error.PluginWindowClosed;
         var current: ?*Entry = null;
         for (self.entries.items) |entry| if (entry.owner.eql(owner)) {
+            current = entry;
+            break;
+        };
+        if (current == null) for (self.entries.items) |entry| if (entry.probe_only and entry.released and entry.donor == self.retainer.?) {
+            entry.* = .{ .owner = owner, .donor = self.retainer.? };
             current = entry;
             break;
         };
@@ -222,6 +315,26 @@ pub const Host = struct {
             current = entry;
         }
         if (current.?.ended) return error.OwnerClosed;
+        const security = &self.application.domain.plugin_security;
+        if (self.application.pending_editor_handoff) |handoff| {
+            const credentials_host = if (self.application.domain.editor_credentials) |*host| host else return error.CredentialHostUnavailable;
+            try credentials_host.authorizeHandoff(handoff, owner, key);
+        }
+        for (self.application.sessions.sessions.items) |entry| if (entry.handle.eql(owner)) {
+            if (entry.spec.value == .plugin) {
+                const envelope = entry.spec.value.plugin;
+                const manifest = self.application.sessions.registry.find(envelope.protocol_id) orelse return error.PluginNotFound;
+                if (manifest.connection) |connection| if (connection.credential_references) |enumerate| {
+                    const refs = try enumerate(self.cx.allocator, envelope.payload);
+                    defer {
+                        for (refs) |reference| self.cx.allocator.free(reference);
+                        self.cx.allocator.free(refs);
+                    }
+                    try security.authorizeReferences(owner, key, refs);
+                };
+            }
+            break;
+        };
         const services = try self.content_host.factory().create(self.content_host, owner);
         const credentials: transports.Credentials = .{ .context = self, .resolve = credential };
         var factory: transports.Factory = .{ .allocator = std.heap.c_allocator, .library = &self.retainer.?.library, .credentials = credentials, .operation_key = key, .failed_open_owner = self.retainer.?.facade() };
@@ -234,7 +347,7 @@ pub const Host = struct {
             if (state.target.window_id == self.application.window_id) try host.bindOwner(notification_owner);
             notification_facade = host.facade(notification_owner);
         };
-        return .{ .owner = owner, .operation = key, .target = target, .connection_configs = resolver.Resolver.init(&self.application.workspace.registry), .transports = factory, .credentials = credentials, .trust = .{ .ssh_host_keys = if (self.retainer.?.host_keys) |*keys| keys else null }, .tasks = .{ .cancel = &current.?.cancel, .operations = &self.application.domain.operation_history }, .notifications = notification_facade, .challenges = self.challenge_host, .preferences = .{ .context = self, .plugin_id = (self.application.sessions.queryState(owner) orelse return error.StaleHostContext).protocol_id, .read_value = preference }, .presentation = .{ .input = services.content_context, .frame_sink = services.frame_sink } };
+        return .{ .owner = owner, .operation = key, .target = target, .connection_configs = resolver.Resolver.init(&self.application.workspace.registry), .transports = factory, .credentials = credentials, .secrets = security.secret_store.facade(owner), .resource_actions = security.action_store.facade(owner), .trust = .{ .ssh_host_keys = if (self.retainer.?.host_keys) |*keys| keys else null, .tls = security.tls_store.facade(owner) }, .tasks = .{ .cancel = &current.?.cancel, .operations = &self.application.domain.operation_history }, .notifications = notification_facade, .challenges = self.challenge_host, .preferences = .{ .context = self, .plugin_id = (self.application.sessions.queryState(owner) orelse return error.StaleHostContext).protocol_id, .read_value = preference }, .presentation = .{ .input = services.content_context, .frame_sink = services.frame_sink } };
     }
     fn requestFullscreen(raw: *anyopaque, enabled: bool) !void {
         const self: *Host = @ptrCast(@alignCast(raw));
@@ -409,6 +522,13 @@ pub const Host = struct {
     }
     pub fn tick(self: *Host, now_ms: u64) !void {
         if (self.closed or self.shutdown_prepared) return;
+        if (self.probes) |host| {
+            if (try host.poll()) self.cx.requestRedraw();
+            for (host.entries.items) |entry| if (!entry.complete) {
+                self.cx.scheduleRedrawAfterNs(10 * std.time.ns_per_ms);
+                break;
+            };
+        }
         self.drainTransfers();
         if (self.notification_host) |host| if (self.notification_window) |window_id| {
             host.setWindowFocus(window_id, self.cx.window_active);
@@ -437,6 +557,7 @@ pub const Host = struct {
                 entry.cancel.store(true, .release);
                 entry.ended = true;
                 self.challenge_host.retireOwner(entry.owner);
+                self.application.domain.plugin_security.revokeOwner(entry.owner);
                 try self.application.domain.operation_history.ownerClosed(entry.owner);
                 if (self.notification_host) |host| host.ownerEnded(.{ .session = entry.owner });
                 for (self.content_host.entries.items) |content_entry| if (content_entry.input.owner.eql(entry.owner)) content_entry.input.close();
@@ -677,6 +798,48 @@ const TransferTestWindow = struct {
     }
 };
 
+test "BMC generic released retry remounts the same tab with the new owner" {
+    const fixture = @import("../plugins/fixture_probe/plugin.zig");
+    const a = std.testing.allocator;
+    const plugin = try fixture.Plugin.init(a);
+    defer plugin.deinit();
+    var manifest = plugin.manifest();
+    manifest.integration.transport_loss = true;
+    const domain = try application.Domain.initWithContributions(a, false, &.{manifest}, &.{plugin.renderer()});
+    defer domain.deinit();
+    var store: TransferTestStore = .{};
+    var window: TransferTestWindow = undefined;
+    try window.init(domain, &store);
+    defer window.deinit();
+    const first = try window.open(plugin, 1101);
+    const tab_id = window.workspace.tabs.items[0].tab_id;
+    const legacy_id = window.workspace.tabs.items[0].id;
+    const old_input = window.host.inputFor(first.handle).?;
+    const old_sink = window.host.framesFor(first.handle).?;
+    const factory = manifest.session_factory.?;
+    try std.testing.expectEqual(@import("../host/session_host.zig").CloseReceipt.released, try factory.vtable.close(factory.context, first.handle, first.operation));
+    try std.testing.expect(try domain.sessions.transportLost(first.handle, first.operation, .{ .domain = .transport, .code = "ReadOnlyFixtureClosed", .safe_message = "fixture closed", .cleanup = .released }));
+    try window.host.tick(1);
+    const next = try domain.sessions.retry(first.handle);
+    _ = try window.app.safeTick();
+    const runtime = plugin.runtimeFor(next.handle).?;
+    try window.host.challenge_host.submitAnswer(next.handle, runtime.challenge_id, next.handle.generation, .{ .secret_input = "controlled-test-only" }, runtime.challenge_deadline - 1);
+    _ = try window.app.safeTick();
+    _ = try window.app.safeTick();
+    try std.testing.expectEqual(@as(usize, 1), window.workspace.tabs.items.len);
+    const tab = window.workspace.tabs.items[0];
+    try std.testing.expectEqual(tab_id, tab.tab_id);
+    try std.testing.expectEqual(legacy_id, tab.id);
+    try std.testing.expect(tab.content_owner.eql(.{ .session = next.handle }));
+    try std.testing.expectEqual(@import("../host/session_host.zig").Lifecycle.attached, domain.sessions.queryState(next.handle).?.lifecycle);
+    try std.testing.expectEqual(@as(usize, 2), plugin.creates);
+    try std.testing.expect(old_input.closed and !old_sink.accepting.load(.acquire));
+    try std.testing.expect(window.host.inputFor(next.handle).? != old_input);
+    try std.testing.expect(window.host.framesFor(next.handle).? != old_sink);
+    _ = try window.app.safeTick();
+    try std.testing.expectEqual(@as(usize, 1), window.workspace.tabs.items.len);
+}
+
 test "fixture production content transfer remounts same owner and preserves donor until destination closes" {
     const fixture = @import("../plugins/fixture_probe/plugin.zig");
     const a = std.testing.allocator;
@@ -881,4 +1044,50 @@ test "fixture generic new window freezes its envelope and tracks target renderer
     try std.testing.expectEqual(@as(usize, 1), plugin.creates);
     try std.testing.expect(!runtime.show_grid);
     try std.testing.expectEqual(@import("../host/session_host.zig").Lifecycle.attached, domain.sessions.queryState(accepted.handle).?.lifecycle);
+}
+
+test "BMC window probe scopes recycle only released presentation-free owner tokens" {
+    const fixture = @import("../plugins/fixture_probe/plugin.zig");
+    const probes = @import("../host/probe_contract.zig");
+    const a = std.testing.allocator;
+    const Probe = struct {
+        fn begin(_: *anyopaque, request: probes.ProbeRequest) !void {
+            try std.testing.expect(request.restricted_context.transports != null);
+            try std.testing.expect(request.restricted_context.secrets != null);
+            try std.testing.expect(request.restricted_context.challenges != null);
+            try std.testing.expect(request.restricted_context.trust.tls != null);
+        }
+        fn poll(_: *anyopaque, _: operation.OperationKey) !?probes.ProbeUpdate {
+            return .{ .result = .{ .outcome = .succeeded, .cleanup = .released } };
+        }
+        fn cancel(_: *anyopaque, _: operation.OperationKey) probes.CloseReceipt {
+            return .released;
+        }
+    };
+    const plugin = try fixture.Plugin.init(a);
+    defer plugin.deinit();
+    var manifest = plugin.manifest();
+    manifest.connection.?.probe_factory = .{ .context = plugin, .begin = Probe.begin, .poll = Probe.poll, .cancel = Probe.cancel };
+    const domain = try application.Domain.initWithContributions(a, false, &.{manifest}, &.{plugin.renderer()});
+    defer domain.deinit();
+    var store: TransferTestStore = .{};
+    var window: TransferTestWindow = undefined;
+    try window.init(domain, &store);
+    defer window.deinit();
+    const host = window.host.probes.?;
+    const editor = try host.bindParent(9017, 1);
+    for (0..136) |index| {
+        const token = try editor.begin(.{ .protocol_id = "fixture_probe", .name = "Read-only owner fixture", .payload_version = 1, .payload = "{}" }, 1);
+        _ = try host.poll();
+        try window.host.tick(@intCast(index));
+        var result = try editor.snapshot(token, a);
+        defer result.deinit();
+        try std.testing.expect(result.value.complete);
+        try std.testing.expectEqual(probes.Outcome.succeeded, result.value.outcome.?);
+        try std.testing.expectEqual(@as(usize, 0), window.host.content_host.entries.items.len);
+        try std.testing.expectEqual(@as(usize, 1), window.host.entries.items.len);
+        try std.testing.expectEqual(@as(usize, 1), window.host.retainer.?.token_count);
+        try std.testing.expect(window.host.entries.items[0].owner.eql(token.handle));
+        try std.testing.expect(window.host.entries.items[0].released);
+    }
 }

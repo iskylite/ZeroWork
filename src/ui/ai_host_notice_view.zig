@@ -12,7 +12,7 @@ pub fn mount(cx: *ui.Cx, parent: *ui.Node, text: []const u8) !*ui.Node {
     const header = try ui.boxStyled(cx, headerStyle, .{});
     header.meta.ownership.meta.test_id = "ai.host_notice.header";
     try root.appendChild(cx.allocator, header);
-    const icon = try ui.iconTint(cx, ui.icons.log_out, theme.current().accent_ink, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+    const icon = try theme.icon(cx, ui.icons.log_out, "accent_ink", .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
     icon.meta.ownership.meta.test_id = "ai.host_notice.icon";
     try header.appendChild(cx.allocator, icon);
     const title = try ui.textStyled(cx, titleStyle, "外部消息");

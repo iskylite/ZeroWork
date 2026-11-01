@@ -237,7 +237,7 @@ pub fn sectionTitle(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn summaryHeader(expanded: bool, has_summary: bool) ui.BoxStyle {
     var style = sectionHeader(undefined);
     style.background = theme.current().surface_2;
-    style.border = .{ .width = 0, .side_widths = .{ 0, 0, if (expanded) @as(f32, 1) else 0, 0 }, .color = theme.current().hover, .radius = 0 };
+    style.border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 0 };
     style.overflow_hidden = true;
     style.height = .{ .fit = .{} };
     style.min_height = if (!expanded and has_summary) geometry.section_summary_header else 48;
@@ -391,7 +391,7 @@ pub fn blockTitle(t: *const ui.ThemeTokens) ui.TextStyle {
     return title(t);
 }
 pub fn modelCapabilityHeading() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 31 }, .margin = .{ .bottom = 4 }, .padding = .{ .bottom = 10 }, .border = .{ .width = 0, .side_widths = .{ 0, 0, 1, 0 }, .color = theme.current().hover }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 31 }, .margin = .{ .bottom = 4 }, .padding = .{ .bottom = 10 }, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT }, .flex_shrink = 0 };
 }
 pub fn modelEffortBody() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .padding = ui.Padding.all(10), .background = theme.current().well, .border = .{ .radius = 7 }, .flex_shrink = 0 };

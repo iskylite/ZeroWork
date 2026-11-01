@@ -91,10 +91,10 @@ pub fn logContent() ui.BoxStyle {
     return result;
 }
 pub fn button(w: f32, h: f32, primary: bool) ui.BoxStyle {
-    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .background = if (primary) theme.current().action_accent else theme.popupAction(), .corner_radius = 8, .border = .{ .radius = 8, .width = if (primary) 0 else 1, .color = if (primary) ui.Color.TRANSPARENT else theme.current().fg_2.withAlpha(36) }, .align_items = .center, .justify = .center, .flex_shrink = 0 };
+    return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .background = if (primary) theme.current().action_accent else theme.popupAction(), .corner_radius = 8, .border = .{ .radius = 8, .width = 0, .color = ui.Color.TRANSPARENT }, .align_items = .center, .justify = .center, .flex_shrink = 0 };
 }
 pub fn focusRing() ui.FocusRingConfig {
-    return .{ .color = theme.current().accent_ink, .width = 1.5, .offset = 2 };
+    return .{ .color = ui.Color.TRANSPARENT, .width = 0, .offset = 0 };
 }
 pub fn ghostHover(pressed: bool) ui.BoxStyle {
     return .{ .background = theme.current().fg_2.withAlpha(if (pressed) 32 else 20) };

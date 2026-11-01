@@ -161,6 +161,59 @@ test "transfer projection theme publication repaints mounted headings and scoped
     try std.testing.expectEqual(theme.current().fg_1, text(p.head, "传输任务").?.getText().?.color);
 }
 const ui = @import("ui");
+test "native transfer semantic paints stay readable and retheme across all builtins" {
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    const h = try H.init(1440, 900);
+    defer h.deinit();
+    var capture: Capture = .{};
+    const p = try h.panel(&capture, .window);
+    try p.update(.{ .revision = 1, .rows = &.{ row(1, 101, .paused), row(2, 101, .failed), row(3, 101, .succeeded) } });
+    p.show();
+    h.frames();
+    for (@import("config/theme_presets.zig").ids) |theme_id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(theme_id));
+        _ = theme.setMaterialParameters(100, 0);
+        h.cx.setTheme(theme.widgetTheme(theme.currentName()));
+        p.retheme();
+        h.frames();
+        try std.testing.expectEqual(theme.current().warn_ink, text(p.root, "已暂停").?.getText().?.color);
+        try std.testing.expectEqual(theme.current().ok_ink, text(p.root, "已完成").?.getText().?.color);
+        for ([_]usize{ 2, 3, 4 }) |index| {
+            const label_ = p.counts_labels[index];
+            const background = label_.parent.?.getBackground();
+            try std.testing.expectEqual(@as(u8, 255), background.a);
+            try std.testing.expect(paintContrast(label_.getText().?.color, background) >= 4.5);
+        }
+        const styles = @import("ui/transfer_styles.zig");
+        const enabled_option = styles.optionTag(true).background.?;
+        try std.testing.expectEqual(@as(u8, 255), enabled_option.a);
+        try std.testing.expect(paintContrast(theme.current().ok_ink, enabled_option) >= 4.5);
+        // The retained task is a derived fill, not a literal palette slot.
+        const task_background = id(p.root, "transfer.task").?.getBackground();
+        try std.testing.expectEqual(theme.popupInset(), task_background);
+        for ([_][]const u8{ "已暂停", "传输失败", "已完成" }) |label_| {
+            try std.testing.expect(paintContrast(text(p.root, label_).?.getText().?.color, task_background) >= 4.5);
+        }
+    }
+}
+fn paintContrast(a_: ui.Color, b_: ui.Color) f64 {
+    const a = paintLuminance(a_);
+    const b = paintLuminance(b_);
+    return (@max(a, b) + 0.05) / (@min(a, b) + 0.05);
+}
+fn paintLuminance(color: ui.Color) f64 {
+    var result: f64 = 0;
+    inline for (.{ "r", "g", "b" }, .{ 0.2126, 0.7152, 0.0722 }) |channel, weight| {
+        const value = @as(f64, @floatFromInt(@field(color, channel))) / 255;
+        result += weight * (if (value <= 0.04045) value / 12.92 else std.math.pow(f64, (value + 0.055) / 1.055, 2.4));
+    }
+    return result;
+}
 const V = @import("ui/transfer_manager_view.zig");
 const backend = @import("transfer/manager.zig");
 const theme = @import("ui/app_theme.zig");

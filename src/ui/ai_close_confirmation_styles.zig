@@ -22,3 +22,7 @@ pub fn actions(_: *const ui.ThemeTokens) ui.BoxStyle {
 pub fn button(primary: bool) ButtonStyle {
     return .{ .width = .{ .fit = .{} }, .height = .{ .px = 28 }, .min_width = 0, .padding = .{ .left = 10, .right = 10 }, .gap = 0, .font_size = 12, .font_weight = 500, .flex_shrink = 0, .corner_radius = 7, .background = if (primary) theme.current().action_accent else theme.popupAction(), .text_color = if (primary) theme.actionForeground(theme.current().action_accent) else theme.current().fg_1 };
 }
+
+pub fn hover() ?ButtonStyle {
+    return .{ .background = theme.popupSelection() };
+}

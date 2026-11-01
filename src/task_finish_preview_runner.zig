@@ -6,7 +6,7 @@ const App = @import("zenit_app").App;
 const finish = @import("ui/ai_task_finish.zig");
 const theme = @import("ui/app_theme.zig");
 const identity = @import("host/identity.zig");
-var selected_theme: theme.Name = .dark;
+var selected_theme: []const u8 = "dark";
 var initial_phase: finish.Phase = .choice;
 var long_target = false;
 var multi_target = false;
@@ -73,8 +73,8 @@ const Preview = struct {
     }
 };
 fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
-    theme.select(selected_theme);
-    cx.setTheme(theme.widgetTheme(selected_theme));
+    theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(selected_theme));
+    cx.setTheme(theme.widgetTheme(theme.currentName()));
     const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = ui.Padding.all(14), .gap = 12, .background = theme.current().surface_1 }, .{});
     root.meta.ownership.meta.test_id = "task_finish.preview";
     const result = try ui.text(cx, "任务收尾 · 原生组件", .{ .font_size = 11, .color = theme.current().fg_2 });
@@ -106,9 +106,14 @@ pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "--theme=")) selected_theme = std.meta.stringToEnum(theme.Name, arg[8..]) orelse return error.InvalidTheme else if (std.mem.startsWith(u8, arg, "--state=")) initial_phase = std.meta.stringToEnum(finish.Phase, arg[8..]) orelse return error.InvalidState else if (std.mem.eql(u8, arg, "--long-target")) long_target = true else if (std.mem.eql(u8, arg, "--multi-target")) multi_target = true else if (std.mem.eql(u8, arg, "--three-targets")) three_targets = true else return error.InvalidOption;
+        if (std.mem.startsWith(u8, arg, "--theme=")) selected_theme = try parseTheme(arg[8..]) else if (std.mem.startsWith(u8, arg, "--state=")) initial_phase = std.meta.stringToEnum(finish.Phase, arg[8..]) orelse return error.InvalidState else if (std.mem.eql(u8, arg, "--long-target")) long_target = true else if (std.mem.eql(u8, arg, "--multi-target")) multi_target = true else if (std.mem.eql(u8, arg, "--three-targets")) three_targets = true else return error.InvalidOption;
     }
     const app = try App.init(std.heap.c_allocator, .{ .io = init.io, .window = .{ .width = 600, .height = 240, .title = "ZeroWork Task Finish Preview", .titlebar = .custom_inset, .titlebar_height = 40 } });
     defer app.deinit();
     try app.runWith(mount);
+}
+
+fn parseTheme(id: []const u8) ![]const u8 {
+    for (@import("config/theme_presets.zig").ids) |known| if (std.mem.eql(u8, id, known)) return known;
+    return error.InvalidTheme;
 }

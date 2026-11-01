@@ -833,7 +833,7 @@ pub const Surface = struct {
             state.setTextColor(commandColor(command.state));
             // Existing content padding provides this gutter. Neither the
             // timestamp column nor the terminal's grid width is changed.
-            try absolute(self.cx, state, -@min(17, self.contentPadding().left - 1), 0, 12, self.options.row_height);
+            try absolute(self.cx, state, -@min(17, self.contentPadding().left - 1) + @import("command_annotation_styles.zig").status_inset, 0, 12, self.options.row_height);
             if (!self.command_info_visible) continue;
             if (row.command_info == null) {
                 const group = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .right = .{ .px = 0 }, .top = .{ .px = 0 } }, .height = .{ .px = self.options.row_height }, .direction = .row, .align_items = .center, .gap = 10, .padding = .{ .left = 12 }, .background = @import("app_theme.zig").current().surface_1.withAlpha(235), .hit_behavior = .pass_through, .z_index = 4 }, .{});
@@ -854,7 +854,7 @@ pub const Surface = struct {
             @import("command_annotation_styles.zig").applyAiTag(self.cx, row.command_ai.?, self.options.family_id, self.options.row_height);
             row.command_info.?.setStyle(self.cx.allocator, .gap, if (command.ai_execution_id != null) @import("command_annotation_styles.zig").ai_metadata_gap else @import("command_annotation_styles.zig").metadata_gap);
             var code_buffer: [32]u8 = undefined;
-            const code = if (command.exit_code) |exit| try std.fmt.bufPrint(&code_buffer, "{s} {d}", .{ annotations.glyph(command.state), exit }) else "—";
+            const code = if (command.exit_code) |exit| try std.fmt.bufPrint(&code_buffer, "{d}", .{exit}) else "—";
             try row.command_code.?.setTextContent(self.cx.allocator, code);
             row.command_code.?.setTextColor(commandColor(command.state));
             var elapsed_buffer: [40]u8 = undefined;

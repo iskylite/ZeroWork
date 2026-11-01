@@ -20,7 +20,9 @@ const shown=(n:any)=>n&&n.hidden!==true&&n.visible!==false&&n.rect?.w>0&&n.rect?
 const visible=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,15000);
 const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)).ok,id);};
 try{
- for(const [theme,t,b] of [['dark',0,0],['light',75,24],['sauber',100,0]] as const){
+ const themes=process.env.ZW_THEME_IDS?.split(',')??Object.keys(JSON.parse(await readFile(new URL('../docs/UI_V3/theme-presets.json',import.meta.url),'utf8')).themes);
+ const transparencies=process.env.ZW_THEME_MATERIAL_TRANSPARENCIES?.split(',').map(Number)??[0,50,100];
+ for(const theme of themes){for(const t of transparencies){const b=0;
   const name=`${theme}-t${t}`,iso=await mkdtemp('/private/tmp/zw-theme-material-'),data=join(iso,'data'),rpc=join(iso,'rpc');await mkdir(data);await mkdir(rpc);
   await writeFile(join(data,'config.toml'),`[ui]\ntheme = "${theme}"\n[ui.materials]\nblur_px = ${b}\n[ui.materials.background]\ntransparency = ${t}\n[ai]\ndefault_provider = "fixture"\n[[ai.providers]]\nid = "fixture"\nkind = "openai_compat"\nendpoint = "http://127.0.0.1:${port}/v1/chat/completions"\nenabled = true\n[[ai.providers.models]]\nname = "material-fixture"\ncontext_window = 32768\ndefault = true\nefforts = []\n`);
   process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
@@ -47,11 +49,11 @@ try{
    await capture('provider',['settings.panel','settings.ai.provider.0.header','settings.ai.provider.0.endpoint','settings.save']);
    await click('settings.nav.appearance');await click('settings.appearance.font.header');await click('settings.field.font_size');await capture('picker',['settings.panel','settings.field.font_size','settings.save']);await h.key('Escape');await click('settings.close');
    await click('terminal.surface');await h.type_('/bin/sleep 30');await h.key('return');await h.sleep(350);
-   await click('tabs.close.1');await visible('local.close.confirmation');await capture('danger',['local.close.confirmation','local.close.accept']);await click('local.close.cancel');await visible('terminal.surface');
+   await click('tabs.close.1');await visible('local.close.confirmation');await capture('danger',['local.close.confirmation','local.close.accept']);await click('local.close.cancel');await visible('terminal.surface');await h.key('c',{ctrl:true});
    item.status='passed';console.log(name+' passed');
   }catch(e){item.status='failed';item.error=String(e);await capture('failure',['settings.panel','ai.panel','tabs.strip']).catch(()=>{});throw e;}
   finally{if(app.exitCode===null&&app.signalCode===null)app.kill('SIGTERM');await ended;await log.close();}
- }
+ }}
  report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);console.error(e);process.exitCode=1;}
 finally{model.close();await writeFile(join(out,'native-report.json'),JSON.stringify(report,null,2));}

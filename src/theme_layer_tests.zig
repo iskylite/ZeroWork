@@ -157,6 +157,16 @@ test "global appearance retained local close follows hidden and visible theme pu
     w.apply(.dark, false);
     try std.testing.expectEqual(theme.current().overlay, view.dialog.getBackground());
     try std.testing.expectEqual(theme.current().fg_1, view.risk_title.getText().?.color);
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        w.publish.publish(w.cx, theme.widgetTheme(theme.currentName()));
+        w.frame();
+        try std.testing.expectEqual(theme.current().overlay, view.dialog.getBackground());
+        try std.testing.expectEqual(theme.current().fg_1, view.identity.getText().?.color);
+        try std.testing.expectEqual(theme.popupAction(), view.risk.getBackground());
+        try std.testing.expectEqual(identity_id, view.identity.id);
+        try std.testing.expectEqual(@as(usize, 0), receipt.calls);
+    }
     view.cancel();
     try std.testing.expectEqual(@as(usize, 1), receipt.calls);
     try std.testing.expectEqual(@as(@import("ui/session_lifecycle.zig").SessionId, 410), receipt.id);
@@ -279,4 +289,66 @@ fn hasRed(node: *ui.Node) bool {
     const props = node.getText() orelse return false;
     for (props.spans) |span| if (span.color) |color| if (ui.Color.eql(color, ui.Color.rgb(255, 0, 0))) return true;
     return false;
+}
+
+fn fixed(comptime T: type, value: []const u8) T {
+    var result: T = std.mem.zeroes(T);
+    @memcpy(result.bytes[0..value.len], value);
+    result.len = value.len;
+    return result;
+}
+const HostApprovalFixture = struct {
+    w: Window,
+    view: *@import("ui/ai_host_approval_view.zig").View,
+    fn ignore(_: *anyopaque, _: u64, _: [32]u8, _: bool) !void {}
+    fn init() !HostApprovalFixture {
+        const w = try Window.init();
+        errdefer w.deinit();
+        const view = try @import("ui/ai_host_approval_view.zig").View.mount(w.cx, w.scope, .{ .context = w.cx, .on_decision = ignore });
+        try w.cx.root.?.appendChild(w.cx.allocator, view.root);
+        const Snapshot = @import("ai/host_approval.zig").Snapshot;
+        const source: Snapshot = .{
+            .kind = .network_url,
+            .sequence = 19,
+            .target = fixed(@FieldType(Snapshot, "target"), "https://example.com/docs"),
+            .detail = fixed(@FieldType(Snapshot, "detail"), "https://example.com/docs?version=1"),
+            .canonical_url = fixed(@FieldType(Snapshot, "canonical_url"), "https://example.com/docs?version=1"),
+            .tool = fixed(@FieldType(Snapshot, "tool"), "host.fetch_url"),
+            .impact = fixed(@FieldType(Snapshot, "impact"), "仅读取本次批准的网页。"),
+            .call = fixed(@FieldType(Snapshot, "call"), "theme-fixture"),
+            .requested_url = fixed(@FieldType(Snapshot, "requested_url"), "https://example.com/docs?version=1"),
+            .context = .{ .conversation_id = .{ .bytes = @splat(1) }, .task_id = .{ .bytes = @splat(2) }, .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 },
+            .authority = .local_network_read,
+            .operation_id = 1,
+            .turn_id = 1,
+            .arguments_hash = @splat(0),
+            .canonical_arguments_hash = @splat(0),
+            .network_policy_revision = 1,
+            .created_at_ms = 0,
+            .expires_at_ms = 120000,
+        };
+        try view.update(source);
+        for (0..5) |_| w.frame();
+        return .{ .w = w, .view = view };
+    }
+};
+test "retained host approval paint matches every builtin without replacing its request" {
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    theme.select(.dark);
+    const retained = try HostApprovalFixture.init();
+    defer retained.w.deinit();
+    const request = retained.view.sequence;
+    const identity = retained.view.url;
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        retained.w.publish.publish(retained.w.cx, theme.widgetTheme(theme.currentName()));
+        for (0..5) |_| retained.w.frame();
+        const fresh = try HostApprovalFixture.init();
+        defer fresh.w.deinit();
+        errdefer std.debug.print("theme={s}\n", .{id});
+        try @import("ui_theme_test_support.zig").expectPaintEqual(retained.view.root, fresh.view.root);
+        try std.testing.expectEqual(request, retained.view.sequence);
+        try std.testing.expectEqual(identity, retained.view.url);
+    }
 }

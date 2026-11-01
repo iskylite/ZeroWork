@@ -21,7 +21,7 @@ pub fn render(cx: *ui.Cx, scope: *ui.Scope, dialog: *ui.Node, body: *ui.Node, pr
     const heading = try ui.box(cx, heading_style, .{});
     heading.meta.ownership.meta.test_id = "groups.close.heading";
     try body.appendChild(cx.allocator, heading);
-    try heading.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.circle_alert, theme.current().warn_ink, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 }));
+    try heading.appendChild(cx.allocator, try theme.icon(cx, ui.icons.circle_alert, "warn_ink", .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 }));
     try label(cx, heading, if (props.plan.phase == .closing) "正在关闭组内会话" else if (props.partial) "部分成员尚未关闭" else "关闭组内全部会话？", .{ .width = .fill(), .min_width = 0 }, styles.title());
     var buf: [512]u8 = undefined;
     const counts = props.plan.counts();
@@ -50,8 +50,11 @@ pub fn render(cx: *ui.Cx, scope: *ui.Scope, dialog: *ui.Node, body: *ui.Node, pr
         }
         if (member.remote_effect_unknown) try line.writer.writeAll(" · 远端后果待核实");
         var text_style = styles.text(true);
-        if (props.partial) text_style.color = if (member.state == .closed) theme.current().ok else theme.current().warn;
+        if (props.partial) text_style.color = if (member.state == .closed) theme.current().ok_ink else theme.current().warn_ink;
         const row = try ui.text(cx, line.writer.buffered(), text_style);
+        if (props.partial) {
+            if (member.state == .closed) theme.bindInk(row, "ok_ink") else theme.bindInk(row, "warn_ink");
+        } else theme.bindInk(row, "fg_1");
         row.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 0 });
         try list.appendChild(cx.allocator, row);
     }
@@ -70,16 +73,27 @@ pub fn render(cx: *ui.Cx, scope: *ui.Scope, dialog: *ui.Node, body: *ui.Node, pr
     cancel.meta.ownership.meta.test_id = "groups.close.cancel";
     try actions.appendChild(cx.allocator, cancel);
     const approve_label = if (props.partial) "重试未关闭项" else try std.fmt.bufPrint(&buf, "关闭全部 {d} 个会话", .{props.plan.approvalCount()});
-    const approve = try ui.widgets.Button(.{ .label = approve_label, .disabled = props.plan.phase == .closing or props.plan.phase == .complete, .variant = @as(ui.widgets.ButtonVariant, if (props.partial) .primary else .danger), .on_click = props.approve }).mount(scope, cx);
+    const approve = try ui.widgets.Button(.{ .label = try scope.createText(approve_label, .{}), .disabled = props.plan.phase == .closing or props.plan.phase == .complete, .variant = @as(ui.widgets.ButtonVariant, if (props.partial) .primary else .danger), .on_click = props.approve }).mount(scope, cx);
+    if (props.partial) try theme.stylePrimary(cx, scope, approve, null);
     approve.setStyleInline(cx.allocator, styles.button(props.partial, true));
     approve.meta.ownership.meta.test_id = "groups.close.accept";
     try actions.appendChild(cx.allocator, approve);
     try body.appendChild(cx.allocator, actions);
+    try scope.createEffect(.{ .cx = cx, .dialog = dialog, .list = list, .cancel = cancel, .approve = approve, .partial = props.partial, .publication = try cx.themeSignal(scope) }, struct {
+        fn paint(ctx: anytype) void {
+            _ = ctx.publication.get();
+            ctx.dialog.setBackground(theme.current().overlay);
+            ctx.list.setBackground(theme.popupInset());
+            ctx.cancel.setBackground(theme.popupAction());
+            ctx.approve.setBackground(if (ctx.partial) theme.current().action_accent else styles.danger());
+        }
+    }.paint);
     try @import("compact_overlay_layout.zig").mount(cx, scope, dialog, scroll.container, scroll.content, if (props.partial) 116 else 114, if (props.partial) 132 else 180, actions, 70);
     return cancel;
 }
 fn label(cx: *ui.Cx, parent: *ui.Node, value: []const u8, box: ui.BoxStyle, text: ui.TextStyle) !void {
     const node = try ui.text(cx, value, text);
+    if (ui.Color.eql(text.color, theme.current().fg_1)) theme.bindInk(node, "fg_1") else theme.bindInk(node, "fg_2");
     node.setStyleInline(cx.allocator, box);
     try parent.appendChild(cx.allocator, node);
 }

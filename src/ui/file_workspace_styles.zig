@@ -40,6 +40,17 @@ pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
 pub fn secondary(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 16.0 / 11.0, .color = theme.current().fg_2, .wrap = .none };
 }
+/// Cached directory data is a warning, independent of the translucent file card.
+pub fn staleText(t: *const ui.ThemeTokens) ui.TextStyle {
+    var value = secondary(t);
+    value.font_size = 10;
+    value.line_height = 1.5;
+    value.color = theme.current().warn_ink;
+    return value;
+}
+pub fn staleNotice() ui.BoxStyle {
+    return .{ .padding = .{ .top = 7, .bottom = 7, .left = 13, .right = 13 }, .background = theme.popupInset(), .flex_shrink = 0 };
+}
 pub fn numeric(t: *const ui.ThemeTokens) ui.TextStyle {
     var value = secondary(t);
     value.font_size = 12;
@@ -104,9 +115,9 @@ pub fn icon(size: f32) ui.Style {
 }
 pub fn repaint(node: *ui.Node, previous: theme.Colors) void {
     node.setBackground(remap(node.getBackground(), previous));
-    if (node.getText()) |text| node.setTextColor(remap(text.color, previous));
-    if (node.getIcon()) |icon_| _ = node.setTint(remap(icon_.tint, previous));
-    if (node.getImage()) |image_| _ = node.setTint(remap(image_.tint, previous));
+    if (node.getText()) |text| node.setTextColor(theme.remapUiInk(text.color, previous));
+    if (node.getIcon()) |icon_| _ = node.setTint(theme.remapUiInk(icon_.tint, previous));
+    if (node.getImage()) |image_| _ = node.setTint(theme.remapUiInk(image_.tint, previous));
     for (node.children.items) |child| repaint(child, previous);
 }
 fn remap(color: ui.Color, previous: theme.Colors) ui.Color {

@@ -35,13 +35,22 @@
 
 `T=clamp(background_transparency/100,0,1)`；L1 的 P=0.04+0.12T，L2 的 P=0.01+0.03T，L3+ 的 P=0；统一用 `round(255×(1−P))` 量化。此处百分比全部表示透明程度，越大越透。最高层允许自身背景完全不透明，不新增底板、不复制背景图片，文字和图标不跟随背景 alpha。
 
+### 可读性下限（2026-11-01）
+
+以上参数是基础曲线，不直接承诺每个主题都按同一 alpha 绘制。文字、占位符、提示和元信息均以实际背景至少 4.5:1 验收，背景派生目标 4.65:1 留出量化余量；前景不整树淡化。
+
+- 有有效图片时，普通 chrome 用图片经过主题基色 veil（alpha=T）后的完整黑至白亮度区间，求保持原角色 RGB 的最小足够 alpha。检查全部七种 UI ink；surface-1 另检查内置主题原始终端默认前景，并覆盖当前输入行既有 action-accent、alpha8=15 的高亮合成结果。源 ANSI 0–15、truecolor 和终端默认前景不改写。
+- L1 overlay 可能覆盖真实终端任意 RGB，始终按未经过 veil 的完整黑至白背景区间检查，即使没有背景图片也相同。L2 取自身基础 alpha 与 L1 可读下限的较大值，保持上层不比父层更透；L3 仍为 255。
+- 每种 ink 必须位于整个合成背景亮度区间同一侧；不能只看黑白两端分别达标而遗漏中灰。按实际 8-bit alpha 合成求最小补偿，缓存包含完整 palette、T 和有效图片状态。
+- 无图时 surface-1/2、well、hover、tab-on 保持上表基础曲线；只有不满足的 overlay 加保护。图片仍随 T 改变可见程度，普通层只在可读性下限处限制透光。局部预览文字使用小块主题材质底，不将整页铺成不透明图片。
+
 父层按触发控件实际所在表面确定；原生 portal 浮层沿 OverlayStack 的存活 trigger 引用回溯父表面，手工定位的现有浮窗以其 overlay 材质边界识别。HTML 中普通嵌套沿表面边界回溯，脱离父 DOM 的弹层通过 `V3Materials.setOwner(surface, anchor)` 声明实际锚点。组件种类、DOM 深度、浮层 tier 和原始 z-index 均不直接选择透明度百分比；它们的排序、定位和交互职责保留。同层的独立浮窗共享 L1，不能按当前已打开窗口的数量升级透明度。
 
 模型示例：工作区 → AI 浮窗 L1 → 模型选择 L2 → 模型说明 L3。同一个 Tooltip 直接由工作区触发时是 L1，放在模型菜单里时是 L3。移动父表面、关闭重开、切换主题或全局材质参数后须重新解析；气泡伸出父浮窗边界也使用同一层级底色。L2/L3 与 L1 同步局部背景模糊 `max(12,B)`，不模糊自身文字。
 
 实现入口：`src/ui/app_theme.zig` 的 `layerAlpha/layerBackground` 和 `src/ui/layer_materials.zig`；原生主窗口与辅助窗口安装同一策略。HTML 对应 `shared/global-background.js`、`theme-tokens.css` 与 `theme-presets.json.materialProjection.floatingLevels`。
 
-最终数值（全局滑块 T=0；alpha 表示不透明度，文字和图标不受影响）：
+基础曲线数值（全局滑块 T=0；实际 alpha 另受上述可读性下限保护，文字和图标不受影响）：
 
 | 表面角色 | 最终基础透明程度 P（量化前） | 实际背景 alpha8 | 实际不透明度 |
 | --- | ---: | ---: | ---: |

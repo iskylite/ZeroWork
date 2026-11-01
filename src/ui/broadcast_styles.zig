@@ -43,3 +43,28 @@ pub fn close() @FieldType(ui.widgets.ControlShellConfig, "style") {
 pub fn controlHover(primary: bool) @FieldType(ui.widgets.ControlShellConfig, "style") {
     return .{ .background = if (primary) theme.current().action_accent else theme.current().hover, .text_color = if (primary) theme.actionForeground(theme.current().action_accent) else theme.current().fg_1 };
 }
+
+pub fn titleText(_: *const ui.ThemeTokens) ui.TextStyle {
+    return text(true);
+}
+pub fn secondaryText(_: *const ui.ThemeTokens) ui.TextStyle {
+    return text(false);
+}
+pub fn noteText(_: *const ui.ThemeTokens) ui.TextStyle {
+    return note();
+}
+pub fn memberPaint(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return member();
+}
+pub fn memberName(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 11, .line_height = 1.5, .font_weight = 500, .color = theme.current().fg_1, .text_overflow = .ellipsis };
+}
+pub fn memberEndpoint(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 9, .line_height = 1.5, .color = theme.current().fg_2, .text_overflow = .ellipsis };
+}
+pub fn memberState(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 8, .color = theme.current().fg_2 };
+}
+pub fn notePaint(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = .{ .left = 10, .right = 10, .top = 9, .bottom = 9 }, .background = theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
+}

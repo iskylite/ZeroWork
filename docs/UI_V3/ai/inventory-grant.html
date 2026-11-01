@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="zh-CN">
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>查看其他会话 · 按需授权</title><link rel="stylesheet" href="../theme-tokens.css">
+<title>查看其他会话 · 按需授权</title><link rel="stylesheet" href="../theme-tokens.css?v=c6c36517b635">
 <style>
 *{box-sizing:border-box}body{margin:0;background:var(--bg-app);font:12px/18px Inter,-apple-system,BlinkMacSystemFont,sans-serif;color:var(--fg)}
 .assistant{width:min(600px,100%);padding:9px 14px;margin:40px auto 0;background:var(--layer-background,var(--overlay));backdrop-filter:blur(var(--overlay-blur));border-radius:11px}
@@ -28,5 +28,5 @@ function sync(){card.hidden=!pending;document.querySelector('.assistant').hidden
 function request(){pending=!persistent;enabled=true;expired=false;result.textContent=persistent?'当前对话已持续允许，无需再次审批':'AI 已请求查看其他会话';sync()}
 for(const [id,decision] of [['deny','拒绝'],['allow-once','仅此一次'],['allow-conversation','持续允许']])document.getElementById(id).onclick=()=>{if(expired){feedback.textContent='请求已失效，请等待新的请求';feedback.hidden=false;buttons.forEach(b=>b.disabled=true);return}persistent=decision==='持续允许';pending=false;result.textContent=decision==='拒绝'?'已拒绝本次读取，AI 可继续处理当前任务':decision==='仅此一次'?'已允许本次调用':'已持续允许当前对话';sync()};
 document.querySelector('#request').onclick=request;document.querySelector('#disable').onclick=()=>{enabled=!enabled;sync()};document.querySelector('#expire').onclick=()=>{expired=true;result.textContent='本次请求已失效'};document.querySelector('#revoke').onclick=()=>{persistent=false;result.textContent='已撤销当前对话的持续允许'};if(p.get('state')==='pending')request();else sync();
-</script><script src="../shared/global-background.js"></script>
+</script><script src="../shared/global-background.js?v=9d6006ea3295"></script>
 </body></html>

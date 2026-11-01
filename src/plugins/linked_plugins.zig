@@ -5,6 +5,17 @@ const plugins = @import("../host/plugin_registry.zig");
 const sessions = @import("../host/session_host.zig");
 const typed = plugins.typed;
 pub const lifecycle_definition = typed.Definition.of(sessions.Adapter.VTable, .{ .name = "lifecycle" });
+/// Public facades that application composition can inject. Plugins must name
+/// these versioned dependencies rather than infer capabilities from IDs.
+pub const supported_apis = [_]plugins.ApiDefinition{
+    .{ .id = "host", .major = plugins.host_api_version },
+    .{ .id = "host.session_service_access" },
+    .{ .id = "host.probes" },
+    .{ .id = "host.tls_trust" },
+    .{ .id = "host.secrets" },
+    .{ .id = "host.resource_actions" },
+    .{ .id = "host.frame_budget" },
+};
 pub const shared_renderers = [_]plugins.RendererDefinition{
     .{ .kind = "terminal", .shared_renderer = true },
     .{ .kind = "file", .shared_renderer = true },
@@ -120,6 +131,7 @@ pub fn registerAll(host: *plugins.PluginHost, adapters: []const sessions.Adapter
 pub fn initRegistry(allocator: std.mem.Allocator, adapters: []const sessions.Adapter, extra_manifests: []const plugins.PluginManifest, extra_renderers: []const plugins.RendererDefinition) !plugins.Registry {
     var host = plugins.PluginHost.init(allocator);
     defer host.deinit();
+    host.apis = &supported_apis;
     try registerAll(&host, adapters);
     for (extra_renderers) |renderer| try host.registerRenderer(renderer);
     for (extra_manifests) |manifest| try host.register(manifest);

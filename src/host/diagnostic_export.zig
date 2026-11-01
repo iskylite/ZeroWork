@@ -264,7 +264,7 @@ fn header(line: []const u8) ?Header {
     return .{ .prefix = line[0 .. end + 1], .message = line[end + 1 ..] };
 }
 fn errorCode(message: []const u8) ?[]const u8 {
-    for ([_][]const u8{ "OutOfMemory", "AccessDenied", "PermissionDenied", "InputOutput", "NoSpaceLeft", "SystemResources", "ConnectionClosed", "ConnectionReset", "ConnectionRefused", "NetworkUnreachable", "AuthenticationFailed", "HostKeyMismatch", "KeyExchangeFailed", "Timeout", "Cancelled", "FileNotFound", "BrokenPipe", "StaleOwner", "TerminalClosed", "NativeDialogUnavailable" }) |code| {
+    for ([_][]const u8{ "OutOfMemory", "AccessDenied", "PermissionDenied", "InputOutput", "NoSpaceLeft", "SystemResources", "ConnectionClosed", "ConnectionReset", "ConnectionRefused", "NetworkUnreachable", "AuthenticationFailed", "IdentityFileUnreadable", "IdentityFileInvalid", "HostKeyMismatch", "KeyExchangeFailed", "Timeout", "Cancelled", "FileNotFound", "BrokenPipe", "StaleOwner", "TerminalClosed", "NativeDialogUnavailable" }) |code| {
         var cursor: usize = 0;
         while (std.mem.indexOfPos(u8, message, cursor, code)) |index| {
             const end = index + code.len;

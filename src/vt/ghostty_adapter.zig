@@ -303,6 +303,7 @@ pub const Adapter = struct {
         defer if (!observed) c.ghostty_tracked_grid_ref_free(metadata_before.native);
         self.bell_seen = false;
         c.ghostty_terminal_vt_write(self.terminal, bytes.ptr, bytes.len);
+        self.command_metadata.invalidateOverwritten(self.terminal);
         if (bytes.len > 0) self.output_sequence +|= 1;
         self.cells_dirty = true;
         if (bytes.len > 0) {

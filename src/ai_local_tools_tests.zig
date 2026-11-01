@@ -702,7 +702,10 @@ test "real group active child observes outer request stop while worker is blocke
     var probe = LocalTools.Bridge.init(a);
     defer probe.deinit();
     const first = try f.prepare(&probe);
-    const second = try prepareSecond(&f, "/tmp");
+    try f.tmp.dir.createDir(std.testing.io, "second", .default_dir);
+    const second_directory = try f.tmp.dir.realPathFileAlloc(std.testing.io, "second", a);
+    defer a.free(second_directory);
+    const second = try prepareSecond(&f, second_directory);
     var roster = @import("ui/group_model.zig").Roster.init(a);
     defer roster.deinit();
     _ = try roster.join("group", f.app.legacyForHandle(first).?, 0);
@@ -710,7 +713,9 @@ test "real group active child observes outer request stop while worker is blocke
     var bridge = GroupTools.Bridge.init(a);
     defer bridge.deinit();
     const ids = [_]u64{ @backingInt(first.session_id), @backingInt(second.session_id) };
-    const call = try groupInvocation(&ids, "sleep 10; printf MUST_NOT_FINISH");
+    // Publish the real child's PID only after fork. A queued exec alone also
+    // reports write risk, but cannot exercise exit/ownership observation races.
+    const call = try groupInvocation(&ids, "sleep 10 & child=$!; printf '%s' \"$child\" > cancel-ready; wait; printf MUST_NOT_FINISH");
     try bridge.prepare(f.app, &roster, call.scope);
     var worker: Worker = .{ .host = bridge.interface(), .invocation = call };
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
@@ -724,11 +729,22 @@ test "real group active child observes outer request stop while worker is blocke
     const approval = bridge.pendingApproval() orelse return error.ApprovalMissing;
     try bridge.decide(approval.sequence, approval.arguments_hash, true);
     const first_child = bridge.children.items[0];
+    var running_child: c_int = 0;
     while (clock.monotonicNs() < deadline) {
+        const ready = f.tmp.dir.readFileAlloc(std.testing.io, "cancel-ready", a, .limited(32)) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        if (ready) |bytes| {
+            defer a.free(bytes);
+            running_child = std.fmt.parseInt(c_int, bytes, 10) catch 0;
+        }
         const execution = first_child.bridge.vtable.impact(first_child.bridge.context, first);
-        if (first_child.bridge.vtable.risk(first_child.bridge.context, first) and std.mem.indexOf(u8, execution.detailText(), "执行中 1") != null) break;
+        if (running_child > 0 and first_child.bridge.vtable.risk(first_child.bridge.context, first) and std.mem.indexOf(u8, execution.detailText(), "执行中 1") != null) break;
         try tickGroup(&f, &bridge);
     }
+    try std.testing.expect(running_child > 0);
+    try std.testing.expectEqual(@as(c_int, 0), std.c.kill(running_child, @fromBackingInt(@intCast(0))));
     try std.testing.expect(first_child.bridge.vtable.risk(first_child.bridge.context, first));
     const execution = first_child.bridge.vtable.impact(first_child.bridge.context, first);
     try std.testing.expect(std.mem.indexOf(u8, execution.detailText(), "执行中 1") != null);
@@ -737,6 +753,7 @@ test "real group active child observes outer request stop while worker is blocke
     try awaitGroup(&f, &bridge, &worker);
     try std.testing.expect(clock.monotonicNs() - started < 5 * std.time.ns_per_s);
     for (worker.outcome.?.targets) |target| {
+        if (target.status != .cancelled) std.debug.print("group cancel status={s} error={s} released={}\n", .{ @tagName(target.status), target.error_code orelse "none", target.local_released });
         try std.testing.expectEqual(Loop.Status.cancelled, target.status);
         try std.testing.expectEqualStrings("", target.stdout);
         try std.testing.expect(target.local_released and !target.remote_effect_unknown);

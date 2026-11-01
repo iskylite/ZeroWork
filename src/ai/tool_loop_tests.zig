@@ -106,7 +106,7 @@ test "round authority handoff preserves old tool pairs and refreshes only the ne
             self.refreshed = true;
             return .{ .table = try tools.cloneTable(self.successor, allocator), .notice = try allocator.dupe(u8, "ZeroWork context notice: original conversation now belongs to group 7; binding revision 2."), .notice_revision = 1 };
         }
-        fn ack(raw: *anyopaque, revision: u64) !void {
+        fn ack(raw: *anyopaque, revision: u64, _: ?*provider.CancelToken) !void {
             try std.testing.expectEqual(@as(u64, 1), revision);
             @as(*@This(), @ptrCast(@alignCast(raw))).acknowledgements += 1;
         }
@@ -125,8 +125,8 @@ test "round authority handoff preserves old tool pairs and refreshes only the ne
     try http.validateToolMessages(request);
     try std.testing.expectEqualStrings("create-original", request.messages[1].tool_call_id.?);
     try std.testing.expectEqual(provider.Role.user, request.messages[2].role);
-    try run.acknowledgeNotice(callbacks);
-    try run.acknowledgeNotice(callbacks);
+    try run.acknowledgeNotice(callbacks, null);
+    try run.acknowledgeNotice(callbacks, null);
     try std.testing.expectEqual(@as(usize, 1), fixture.acknowledgements);
     try run.complete("", &.{.{ .id = "query-successor", .name = request.tools[0].name(), .arguments = "{}" }}, callbacks, .{}, 1, null);
     try std.testing.expect(run.records.items[1].key.owner.eql(next_context.binding));
@@ -143,6 +143,77 @@ test "round authority handoff preserves old tool pairs and refreshes only the ne
     var script: Script = .{ .rounds = &.{} };
     defer script.deinit();
     try std.testing.expectError(error.ToolTurnAlreadyDispatched, manager.run(script.interface(), .{ .model = "test", .system = "", .messages = &.{}, .tool_table = &successor }));
+}
+
+test "tool deadline cancelled authority refresh releases the candidate and keeps the old snapshot" {
+    const tools = @import("plugin_tools.zig");
+    const identity = @import("../host/identity.zig");
+    const context: tools.host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = scope.owner, .binding_revision = 1, .grant_revision = 1 };
+    var table = try tools.RequestTable.initWithHost(a, scope, &.{}, &.{}, context, &.{.{ .authority = .conversation_context, .definition = .{ .id = "host.get_current_context", .schema = "{\"type\":\"object\"}" } }});
+    defer table.deinit();
+    const Fixture = struct {
+        calls: usize = 0,
+        fn execute(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedDispatch;
+        }
+        fn refresh(raw: *anyopaque, previous: *const tools.RequestTable, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !?loop_mod.AuthorityRefresh {
+            @as(*@This(), @ptrCast(@alignCast(raw))).calls += 1;
+            var next = try tools.cloneTable(previous, allocator);
+            errdefer next.deinit();
+            const notice = try allocator.dupe(u8, "cancelled candidate");
+            cancel.?.cancel();
+            return .{ .table = next, .notice = notice, .notice_revision = 1 };
+        }
+    };
+    var fixture: Fixture = .{};
+    var run = loop_mod.Loop.init(a, scope, 1, .{});
+    defer run.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    try run.start(.{ .model = "fixture", .system = "", .messages = &.{}, .tools = wire, .tool_table = &table });
+    var cancel: provider.CancelToken = .{};
+    const callbacks: loop_mod.Host = .{ .context = &fixture, .execute = Fixture.execute, .refresh_authority = Fixture.refresh };
+    try std.testing.expectError(error.Cancelled, run.refreshAuthority(callbacks, &cancel));
+    try std.testing.expectEqual(@as(u64, 0), run.notice_revision);
+    try std.testing.expectEqual(@as(usize, 0), run.messages.items.len);
+    try std.testing.expectEqual(@as(usize, 1), fixture.calls);
+    try std.testing.expectError(error.Cancelled, run.refreshAuthority(callbacks, &cancel));
+    try std.testing.expectEqual(@as(usize, 1), fixture.calls);
+}
+
+test "tool deadline Stop after accepted result skips later notifications without dropping facts" {
+    const tools = @import("plugin_tools.zig");
+    const identity = @import("../host/identity.zig");
+    const context: tools.host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = scope.owner, .binding_revision = 1, .grant_revision = 1 };
+    var table = try tools.RequestTable.initWithHost(a, scope, &.{}, &.{}, context, &.{.{ .authority = .conversation_context, .definition = .{ .id = "host.get_current_context", .schema = "{\"type\":\"object\"}" } }});
+    defer table.deinit();
+    const Fixture = struct {
+        executed: usize = 0,
+        notifications: usize = 0,
+        fn legacy(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedDispatch;
+        }
+        fn invoke(raw: *anyopaque, invocation: tools.host.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !tools.host.Result {
+            @as(*@This(), @ptrCast(@alignCast(raw))).executed += 1;
+            return .{ .status = .succeeded, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision } };
+        }
+        fn accepted(raw: *anyopaque, _: tools.host.Context, _: []const u8, _: *const tools.host.Result, cancel: ?*provider.CancelToken) !void {
+            @as(*@This(), @ptrCast(@alignCast(raw))).notifications += 1;
+            cancel.?.cancel();
+        }
+    };
+    var fixture: Fixture = .{};
+    var run = loop_mod.Loop.init(a, scope, 1, .{});
+    defer run.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    try run.start(.{ .model = "fixture", .system = "", .messages = &.{}, .tools = wire, .tool_table = &table });
+    var cancel: provider.CancelToken = .{};
+    const callbacks: loop_mod.Host = .{ .context = &fixture, .execute = Fixture.legacy, .execute_host = Fixture.invoke, .accepted_host_result = Fixture.accepted };
+    try run.complete("", &.{ .{ .id = "first", .name = wire[0].name(), .arguments = "{}" }, .{ .id = "second", .name = wire[0].name(), .arguments = "{}" } }, callbacks, .{}, 1, &cancel);
+    try std.testing.expectEqual(@as(usize, 2), fixture.executed);
+    try std.testing.expectEqual(@as(usize, 1), fixture.notifications);
+    try std.testing.expectEqual(@as(usize, 2), run.records.items.len);
+    try std.testing.expect(run.records.items[0].host_result != null and run.records.items[1].host_result != null);
+    try http.validateToolMessages(run.request);
 }
 
 test "host tools retain real call pairs and conversation receipts without session targets" {
@@ -795,4 +866,32 @@ test "host uncertain execution blocks a fresh command while preserving exact rea
     try std.testing.expect(!run.records.items[1].dispatched);
     try std.testing.expect(std.mem.indexOf(u8, run.records.items[1].result_body.?, "EarlierToolOutcomeUnknown") != null);
     try http.validateToolMessages(.{ .model = "test", .system = "", .messages = run.messages.items });
+}
+
+test "execution deadline known unsent timeout never becomes an unknown side effect" {
+    const tools = @import("plugin_tools.zig");
+    const identity = @import("../host/identity.zig");
+    const context: tools.host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = scope.owner, .binding_revision = 1, .grant_revision = 1 };
+    var table = try tools.RequestTable.initWithHost(a, scope, &.{}, &.{}, context, &.{.{ .authority = .execution_control, .definition = .{ .id = "host.run_in_terminal", .effect = .resource_write, .schema = "{\"type\":\"object\"}" } }});
+    defer table.deinit();
+    const Fixture = struct {
+        fn legacy(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedDispatch;
+        }
+        fn invoke(_: *anyopaque, _: tools.host.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !tools.host.Result {
+            return error.ExecutionDeadlineBeforeDispatch;
+        }
+    };
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    var run = loop_mod.Loop.init(a, scope, 1, .{});
+    defer run.deinit();
+    try run.start(.{ .model = "fixture", .system = "", .messages = &.{}, .tools = wire, .tool_table = &table });
+    try run.complete("", &.{.{ .id = "expired", .name = wire[0].name(), .arguments = "{}" }}, .{ .context = undefined, .execute = Fixture.legacy, .execute_host = Fixture.invoke }, .{}, 1, null);
+    try std.testing.expect(!run.uncertain and !run.records.items[0].dispatched);
+    var body = try std.json.parseFromSlice(std.json.Value, a, run.records.items[0].result_body.?, .{});
+    defer body.deinit();
+    try std.testing.expectEqualStrings("ExecutionDeadlineBeforeDispatch", body.value.object.get("error_code").?.string);
+    try std.testing.expect(!body.value.object.get("side_effect_started").?.bool);
+    try std.testing.expect(!body.value.object.get("remote_effect_unknown").?.bool);
+    try http.validateToolMessages(run.request);
 }

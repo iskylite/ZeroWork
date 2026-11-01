@@ -252,3 +252,27 @@ test "inventory listed cross binding reference cannot upgrade legacy execution o
 comptime {
     _ = @import("ui/ai_inventory_context.zig");
 }
+
+test "retained ai_inventory_grant_view_tests paint matches a fresh mount in every builtin theme without a new decision" {
+    const support = @import("ui_theme_test_support.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    theme.select(.dark);
+    var retained: Fixture = undefined;
+    try retained.init(600);
+    defer retained.deinit();
+    try retained.request();
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        try support.publish(retained.cx, retained.scope);
+        for (0..6) |_| retained.settle();
+        var fresh: Fixture = undefined;
+        try fresh.init(600);
+        defer fresh.deinit();
+        try support.publish(fresh.cx, fresh.scope);
+        try fresh.request();
+        for (0..6) |_| fresh.settle();
+        errdefer std.debug.print("theme={s}\n", .{id});
+        try support.expectPaintEqual(retained.view.root, fresh.view.root);
+    }
+}

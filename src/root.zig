@@ -1,3 +1,4 @@
+pub const bmc_ikvm = @import("plugins/bmc_ikvm/non_ui.zig");
 pub const config = @import("config/config.zig");
 pub const host_identity = @import("host/identity.zig");
 pub const host_operation = @import("host/operation.zig");
@@ -371,4 +372,8 @@ test {
     _ = @import("platform/data_scope_lock.zig");
     _ = @import("credential_store_tests.zig");
     _ = @import("ai_host_catalog_tests.zig");
+}
+
+comptime {
+    if (@import("builtin").is_test) _ = @import("bmc_tests.zig");
 }

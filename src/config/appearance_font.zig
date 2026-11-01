@@ -5,6 +5,77 @@ const std = @import("std");
 const builtin = @import("builtin");
 const FontRegistry = @import("zenit_app").FontRegistry;
 
+/// Suggested terminal families; bundled faces are process-local, other faces belong to the user.
+/// Custom input also accepts families outside this list, including Nerd Fonts.
+pub const families = [_][]const u8{
+    "JetBrains Mono", "Menlo",          "Monaco",                  "SF Mono",       "Fira Code",
+    "Cascadia Code",  "Cascadia Mono",  "Source Code Pro",         "IBM Plex Mono", "Iosevka",
+    "Hack",           "Inconsolata",    "Ubuntu Mono",             "Roboto Mono",   "Victor Mono",
+    "Maple Mono",     "Sarasa Mono SC", "JetBrainsMono Nerd Font", "MesloLGS NF",   "CommitMono",
+};
+
+/// Bundled fonts are registered from original resources before any window opens.
+pub fn isBundled(family: []const u8) bool {
+    for ([_][]const u8{ "JetBrains Mono", "Fira Code", "Source Code Pro" }) |name| {
+        if (std.mem.eql(u8, family, name)) return true;
+    }
+    return false;
+}
+
+/// Additional installed monospace families, including user-installed Nerd Fonts.
+/// Owns all names; callers may merge these with suggestions and free after copying.
+pub const InstalledFamilies = struct {
+    allocator: std.mem.Allocator,
+    names: [][]u8,
+    pub fn deinit(self: *InstalledFamilies) void {
+        for (self.names) |name| self.allocator.free(name);
+        self.allocator.free(self.names);
+    }
+};
+
+pub fn installedMonospaceFamilies(allocator: std.mem.Allocator) !InstalledFamilies {
+    var result: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (result.items) |name| allocator.free(name);
+        result.deinit(allocator);
+    }
+    if (builtin.os.tag == .macos) {
+        const count = platform.coretext_family_count();
+        if (count > 0) {
+            const names = try allocator.alloc(?[*:0]u8, @intCast(count));
+            defer allocator.free(names);
+            @memset(names, null);
+            const copied = platform.coretext_copy_family_names(names.ptr, count);
+            defer for (names) |name| if (name) |text| platform.coretext_free_c_string(text);
+            for (names[0..@intCast(@max(0, @min(copied, count)))]) |maybe_name| {
+                const native = maybe_name orelse continue;
+                const name = std.mem.span(native);
+                if (name.len == 0 or name.len > family_name_capacity or !std.unicode.utf8ValidateSlice(name)) continue;
+                var info: platform.FamilyInfo = undefined;
+                if (platform.coretext_family_info(native, &info) != 0 or info.classification != 5 or info.has_latin == 0 or info.is_symbolic != 0) continue;
+                const owned = try allocator.dupe(u8, name);
+                errdefer allocator.free(owned);
+                try result.append(allocator, owned);
+            }
+        }
+    }
+    std.mem.sort([]u8, result.items, {}, struct {
+        fn less(_: void, a: []u8, b: []u8) bool {
+            return std.ascii.lessThanIgnoreCase(a, b);
+        }
+    }.less);
+    return .{ .allocator = allocator, .names = try result.toOwnedSlice(allocator) };
+}
+
+pub fn isInstalled(family: []const u8) bool {
+    if (builtin.os.tag != .macos or family.len == 0 or family.len > family_name_capacity or
+        std.mem.indexOfScalar(u8, family, 0) != null) return false;
+    var buffer: [family_name_capacity + 1]u8 = undefined;
+    @memcpy(buffer[0..family.len], family);
+    buffer[family.len] = 0;
+    return platform.coretext_family_exists(@ptrCast(&buffer)) != 0;
+}
+
 pub const Weight = enum(u16) { light = 300, regular = 400, medium = 500, bold = 700 };
 pub const FallbackReason = enum { family_not_installed };
 
@@ -48,6 +119,21 @@ const fallback_family = "Menlo";
 // FontRegistry.intern currently stores at most 64 UTF-8 bytes. Refuse a name
 // it would truncate rather than report that a different family was selected.
 const family_name_capacity = 64;
+
+test "suggested font families report native installation and keep stable valid identities" {
+    for (families, 0..) |family, i| {
+        try std.testing.expect(family.len > 0 and family.len <= family_name_capacity);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(family));
+        for (families[0..i]) |previous| try std.testing.expect(!std.mem.eql(u8, family, previous));
+    }
+    try std.testing.expect(!isInstalled(""));
+    try std.testing.expect(!isInstalled("missing zeroWork terminal family"));
+    try std.testing.expect(!isInstalled("Menlo\x00Other"));
+    if (builtin.os.tag == .macos) {
+        try std.testing.expect(isInstalled("Menlo"));
+        try std.testing.expect(isInstalled("Monaco"));
+    }
+}
 
 /// Validates before looking up a face. An absent family uses explicit Menlo
 /// fallback without overwriting the requested family. A weight absent from the
@@ -161,6 +247,19 @@ fn nativeWeight(font: *anyopaque) ResolveError!Weight {
 const platform = struct {
     const utf8: u32 = 0x08000100; // kCFStringEncodingUTF8
     const number_double: c_int = 13; // kCFNumberDoubleType
+    const FamilyInfo = extern struct {
+        is_symbolic: c_int,
+        can_render_name: c_int,
+        is_variable: c_int,
+        face_count: c_int,
+        classification: c_int,
+        has_latin: c_int,
+        lang: [16]u8,
+    };
+    extern fn coretext_family_count() c_int;
+    extern fn coretext_copy_family_names(out: [*]?[*:0]u8, capacity: c_int) c_int;
+    extern fn coretext_family_info(family: [*:0]const u8, out: *FamilyInfo) c_int;
+    extern fn coretext_free_c_string(text: [*:0]u8) void;
     extern fn coretext_family_exists(family: [*:0]const u8) c_int;
     extern fn coretext_family_weights(family: [*:0]const u8, out: [*]c_int, capacity: c_int) c_int;
     extern "CoreText" fn CTFontCopyFamilyName(font: *const anyopaque) ?*const anyopaque;
@@ -246,4 +345,16 @@ test "appearance font missing family preserves request and reports actual fallba
     try std.testing.expectEqual(FallbackReason.family_not_installed, value.fallback_reason.?);
     const same_face = registry.resolve(try registry.intern("Menlo"), 14, 400, false).?;
     try std.testing.expectEqual(same_face.measureWidth("M"), value.cell_width);
+}
+
+test "installed monospace catalog keeps real native families and owned sorted names" {
+    var installed = try installedMonospaceFamilies(std.testing.allocator);
+    defer installed.deinit();
+    var found_menlo = false;
+    for (installed.names, 0..) |name, i| {
+        try std.testing.expect(isInstalled(name));
+        if (i > 0) try std.testing.expect(!std.ascii.lessThanIgnoreCase(name, installed.names[i - 1]));
+        found_menlo = found_menlo or std.mem.eql(u8, name, "Menlo");
+    }
+    if (builtin.os.tag == .macos) try std.testing.expect(found_menlo);
 }

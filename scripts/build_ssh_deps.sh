@@ -14,10 +14,10 @@ export CC AR RANLIB
 
 test -x "$SSH/configure" || { echo "build_ssh_deps: missing $SSH/configure" >&2; exit 1; }
 
-# Always rebuild both archives from vendored sources. In particular, do not let a
+# Always rebuild the SSH and complete TLS archives from vendored sources. In particular, do not let a
 # stale configure result retain a host compiler or a different crypto backend.
 make -C "$MBED/library" clean >/dev/null
-make -C "$MBED/library" libmbedcrypto.a CC="$CC" AR="$AR" -j"$JOBS"
+make -C "$MBED/library" libmbedcrypto.a libmbedx509.a libmbedtls.a CC="$CC" AR="$AR" -j"$JOBS"
 (
   cd "$SSH"
   if test -f Makefile; then make clean >/dev/null; fi
@@ -28,6 +28,8 @@ make -C "$MBED/library" libmbedcrypto.a CC="$CC" AR="$AR" -j"$JOBS"
 )
 
 test -s "$MBED/library/libmbedcrypto.a"
+test -s "$MBED/library/libmbedx509.a"
+test -s "$MBED/library/libmbedtls.a"
 test -s "$SSH/src/.libs/libssh2.a"
 
 python3 "$ROOT/scripts/verify_ssh_deps.py" --record

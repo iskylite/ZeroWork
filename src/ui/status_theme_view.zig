@@ -84,7 +84,7 @@ pub const View = struct {
         self.fade.setDisplay(.none);
         try self.chrome.appendChild(cx.allocator, self.fade);
         self.header = try ui.box(cx, S.header(), .{});
-        self.header_icon = try ui.iconTint(cx, ui.icons.palette, S.theme.current().accent, S.icon(18));
+        self.header_icon = try ui.iconTint(cx, ui.icons.palette, S.theme.current().accent_ink, S.icon(18));
         try self.header.appendChild(cx.allocator, self.header_icon);
         self.title = try ui.text(cx, "全局主题", S.title());
         self.title.setStyleInline(cx.allocator, .{ .width = .{ .px = 72 }, .height = .{ .px = 20 }, .flex_shrink = 0 });
@@ -122,9 +122,9 @@ pub const View = struct {
         self.manage_label = manage_content.label;
         try self.body.appendChild(cx.allocator, self.manage_button);
         self.feedback_row = try ui.box(cx, S.passiveRow(), .{});
-        self.feedback_icon = try ui.iconTint(cx, ui.icons.get("circle-check").?, S.theme.current().ok, S.icon(14));
+        self.feedback_icon = try ui.iconTint(cx, ui.icons.get("circle-check").?, S.theme.current().ok_ink, S.icon(14));
         try self.feedback_row.appendChild(cx.allocator, self.feedback_icon);
-        self.feedback_failure = try ui.iconTint(cx, ui.icons.circle_alert, S.theme.current().danger, S.icon(14));
+        self.feedback_failure = try ui.iconTint(cx, ui.icons.circle_alert, S.theme.current().danger_ink, S.icon(14));
         self.feedback_failure.setDisplay(.none);
         try self.feedback_row.appendChild(cx.allocator, self.feedback_failure);
         self.feedback_spinner = try ui.widgets.Spinner(.{ .size = 14, .stroke_width = 2, .color = S.theme.current().fg_2 }).mount(popup.scope, cx);
@@ -234,7 +234,7 @@ pub const View = struct {
             self.chrome.setStyleInline(self.cx.allocator, .{ .background = panel_style.background, .shadow = panel_style.shadow });
             self.fade.setStyleInline(self.cx.allocator, S.fade());
             self.title.setTextColor(S.theme.current().fg_1);
-            _ = self.header_icon.setTint(S.theme.current().accent);
+            _ = self.header_icon.setTint(S.theme.current().accent_ink);
             _ = self.close_icon.setTint(S.theme.current().fg_2);
             self.scope_label.setTextColor(S.theme.current().fg_1);
             self.scope_tag.setTextColor(S.theme.current().accent_ink);
@@ -330,8 +330,8 @@ pub const View = struct {
         if (!std.mem.eql(u8, self.feedback_label.getText().?.content, text)) try self.feedback_label.setTextContent(self.cx.allocator, text);
         const color = if (failure) S.theme.current().danger_ink else S.theme.current().fg_1;
         if (!ui.Color.eql(self.feedback_label.getText().?.color, color)) self.feedback_label.setTextColor(color);
-        tint(self.feedback_icon, S.theme.current().ok);
-        tint(self.feedback_failure, S.theme.current().danger);
+        tint(self.feedback_icon, S.theme.current().ok_ink);
+        tint(self.feedback_failure, S.theme.current().danger_ink);
         const pending = !failure and (self.feedback == .pending or self.disabled.peek());
         self.feedback_icon.setDisplay(if (!failure and !pending) .flex else .none);
         self.feedback_failure.setDisplay(if (failure) .flex else .none);

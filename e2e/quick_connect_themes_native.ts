@@ -7,7 +7,7 @@ import {join,resolve} from 'node:path';
 import * as h from '../vendor/zenit/e2e/client.ts';
 const binary=resolve(process.argv[2]??'/tmp/zw-quick-hierarchy/build/bin/zerowork');
 const out=resolve(process.argv[3]??'/tmp/zw-quick-hierarchy/native');
-const themes=(process.argv[4]??'dark,light,sauber,midnight,forest,ocean,plum,ember,graphite,paper,sand,ice,catppuccin-mocha,dracula,dark-pro,solarized-dark,nord').split(',');
+const themes=process.argv[4]?.split(',')??Object.keys(JSON.parse(await readFile(new URL('../docs/UI_V3/theme-presets.json',import.meta.url),'utf8')).themes);
 await mkdir(out,{recursive:true});
 const report:any={status:'running',binary,binary_sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),cases:[],limits:['Synthetic Harness events; no physical keyboard or IME claim.','Fixtures never submit a network connection. SIGTERM cleans up only runner-owned processes.']};
 const shown=(n:any)=>n?.rect&&n.hidden!==true&&n.visible!==false&&n.rect.w>0&&n.rect.h>0;
@@ -32,8 +32,8 @@ try{
    const rows=(await h.query('quick.saved.row')).filter(shown);assert(rows.every((r:any)=>r.rect.h===44));
    const nodes=descendants(rows[0]);const name=nodes.find(n=>n.test_id==='quick.saved.name'),endpoint=nodes.find(n=>n.test_id==='quick.saved.endpoint');assert(name&&endpoint);assert(endpoint.rect.y>=name.rect.y+name.rect.h);assert(name.rect.w>300);assert(endpoint.rect.w>300);
    item.checks.push('520px popup; 44px two-line results; name/endpoint do not overlap');await capture(theme+'-standard');
-   if(['midnight','light','sauber'].includes(theme)){
-    await h.key('down');await h.key('down');await h.key('down');const viewport=await visible('quick.results');await h.waitFor(async()=>{const last=(await h.query('quick.saved.name')).find(n=>n.text==='File-Server');return last&&last.rect.y>=viewport.rect.y&&last.rect.y+last.rect.h<=viewport.rect.y+viewport.rect.h||null});await capture(theme+'-fourth-selected');
+   {
+    const viewport=await visible('quick.results');for(let i=0;i<5;i++){const last=(await h.query('quick.saved.name')).find(n=>n.text==='File-Server');if(last&&last.rect.y>=viewport.rect.y&&last.rect.y+last.rect.h<=viewport.rect.y+viewport.rect.h)break;await h.key('down');await h.sleep(100);}await h.waitFor(async()=>{const last=(await h.query('quick.saved.name')).find(n=>n.text==='File-Server');return last&&last.rect.y>=viewport.rect.y&&last.rect.y+last.rect.h<=viewport.rect.y+viewport.rect.h||null});await capture(theme+'-fourth-selected');
     await input('ScaleX40');await h.waitFor(async()=>(await h.query('quick.saved.row')).filter(shown).length===1||null);await capture(theme+'-single');
     await h.resizeWindow(860,480);await input('ssh root@[2001:db8::1]:70000');await visible('quick.port');
     const temp=await visible('quick.connect'),submit=await visible('quick.submit');assert(temp.rect.y>=0&&temp.rect.y+temp.rect.h<=480);assert(submit.rect.y+submit.rect.h<=temp.rect.y+temp.rect.h);await capture(theme+'-invalid-minimum');

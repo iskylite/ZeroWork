@@ -74,7 +74,7 @@ pub const HostConfig = struct {
         if (trim(self.host).len == 0) return error.MissingHost;
         if (trim(self.user).len == 0) return error.MissingUser;
         if (self.port == 0 or self.socks_port == 0) return error.InvalidPort;
-        if (self.socks_max_connections == 0) return error.InvalidValue;
+        if (!@import("../proto/ssh/forward_limits.zig").validConnections(self.socks_max_connections)) return error.InvalidValue;
         if (trim(self.terminal_type).len == 0 or trim(self.socks_bind).len == 0) return error.InvalidValue;
         if (self.socks_exit) |exit| if (exit >= @max(self.route.len, self.jump_chain.len)) return error.InvalidSocksExit;
         if (self.jump_chain.len > 8 or self.route.len > 8) return error.TooManyJumps;
@@ -921,6 +921,7 @@ test "SOCKS max connections defaults for old hosts and survives clone save reloa
 test "SOCKS max connections rejects zero overflow duplicate and unrelated unknown keys" {
     try std.testing.expectError(error.InvalidValue, Registry.parse(std.testing.allocator, "[[hosts]] name=\"n\";host=\"h\";user=\"u\";socks_max_connections=0"));
     try std.testing.expectError(error.InvalidValue, Registry.parse(std.testing.allocator, "[[hosts]] name=\"n\";host=\"h\";user=\"u\";socks_max_connections=65536"));
+    try std.testing.expectError(error.InvalidValue, Registry.parse(std.testing.allocator, "[[hosts]] name=\"n\";host=\"h\";user=\"u\";socks_max_connections=257"));
     try std.testing.expectError(error.DuplicateKey, Registry.parse(std.testing.allocator, "[[hosts]] name=\"n\";host=\"h\";user=\"u\";socks_max_connections=2;socks_max_connections=3"));
     var future = try Registry.parse(std.testing.allocator, "[[hosts]] name=\"n\";host=\"h\";user=\"u\";socks_unknown_option=3");
     defer future.deinit();

@@ -60,6 +60,7 @@ pub fn build(b: *std.Build) void {
     core.linkFramework("Security", .{});
     core.linkFramework("CoreFoundation", .{});
     addUrlFetchFrameworks(core);
+    addBmcNative(b, core);
     core.addCSourceFile(.{ .file = b.path("src/local/trusted_edit_native.c"), .flags = &.{"-std=c11"} });
     core.addCSourceFile(.{ .file = b.path("src/local/secret_native.c"), .flags = &.{"-std=c11"} });
     core.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
@@ -74,6 +75,7 @@ pub fn build(b: *std.Build) void {
     // libssh2 and Mbed TLS are built as pinned static dependencies by the reproducible
     // scripts/build_ssh_deps.sh step; compile the stable ZeroWork shims here.
     core.addIncludePath(b.path("vendor/libssh2/include"));
+    core.addIncludePath(b.path("vendor/mbedtls/include"));
     core.addIncludePath(b.path("src/proto/ssh"));
     core.addCSourceFiles(.{ .files = &.{
         "src/proto/ssh/libssh2_channel_shim.c",
@@ -320,6 +322,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
     tests.root_module.linkSystemLibrary("ghostty-vt", .{});
     tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+    tests.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
     tests.root_module.addIncludePath(b.path("src/proto/ssh"));
     tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
     tests.root_module.addCSourceFile(.{ .file = b.path("src/platform/data_scope_lock.c"), .flags = &.{"-std=c11"} });
@@ -332,9 +335,38 @@ pub fn build(b: *std.Build) void {
     addUrlFetchFrameworks(tests.root_module);
 
     addCoreTextBridgeForTest(zenit_dep, tests);
+    addBmcNative(b, tests.root_module);
     tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
     tests.root_module.linkFramework("Metal", .{});
     tests.root_module.linkFramework("QuartzCore", .{});
+    const bmc_tests = b.addTest(.{ .filters = if (root_test_filter) |filter| &.{filter} else &.{"BMC "}, .root_module = b.createModule(.{
+        .root_source_file = b.path("src/bmc_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    }) });
+    bmc_tests.root_module.addImport("ui", zenit_dep.module("ui"));
+    bmc_tests.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
+    bmc_tests.root_module.addImport("zenit_app", zenit_dep.module("zenit_app"));
+    bmc_tests.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
+    bmc_tests.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
+    bmc_tests.root_module.addImport("generated_ghostty_vt", ghostty_translate.createModule());
+    bmc_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+    bmc_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
+    bmc_tests.root_module.addCSourceFiles(.{ .files = &.{
+        "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c",
+        "src/platform/macos_credentials.m",     "src/platform/data_scope_lock.c",
+        "src/local/darwin_process.c",           "src/local/trusted_edit_native.c",
+        "src/local/secret_native.c",
+    }, .flags = &.{} });
+    bmc_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
+    bmc_tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
+    bmc_tests.root_module.linkSystemLibrary("ssh2", .{});
+    bmc_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
+    addCoreTextBridgeForTest(zenit_dep, bmc_tests);
+    addBmcNative(b, bmc_tests.root_module);
+    bmc_tests.step.dependOn(&verify_ssh.step);
+    b.step("test-bmc", "Run isolated V0.3 public seams, protocol and UI contract tests").dependOn(&b.addRunArtifact(bmc_tests).step);
+
     const root_test_step = b.step("test", "Run unit and contract tests");
     const root_test_files = b.addWriteFiles();
     const root_test_binary = root_test_files.addCopyFile(tests.getEmittedBin(), "unit-tests");
@@ -377,6 +409,17 @@ pub fn build(b: *std.Build) void {
 
     // Local process/VT integration stays headless and uses isolated test data.
     const local_tests_step = b.step("test-local", "Run real local PTY, terminal controller and adapter tests");
+    // Mock only the OS observation boundary to force exit/ownership races.
+    const close_observation = b.addSystemCommand(&.{ "xcrun", "clang", "-std=c11", "-Wall", "-Wextra", "-Werror" });
+    close_observation.addFileArg(b.path("src/local/darwin_process_tests.c"));
+    close_observation.addFileInput(b.path("src/local/darwin_process.c"));
+    close_observation.addFileInput(b.path("src/local/darwin_process.h"));
+    close_observation.addArg("-o");
+    const close_observation_binary = close_observation.addOutputFileArg("local-close-observation-tests");
+    const close_observation_run = std.Build.Step.Run.create(b, "local-close-observation-tests");
+    close_observation_run.addFileArg(close_observation_binary);
+    local_tests_step.dependOn(&close_observation_run.step);
+    b.step("test-local-close-observation", "Run deterministic Local cleanup ownership and exit races").dependOn(&close_observation_run.step);
     const local_test_filter = b.option([]const u8, "local-test-filter", "Run only matching local terminal tests");
     for ([_][]const u8{ "src/local_process_tests.zig", "src/terminal_controller_tests.zig", "src/local_adapter_tests.zig", "src/local_trusted_edit_tests.zig", "src/terminal_execution_tests.zig" }) |source| {
         const local_tests = b.addTest(.{ .filters = if (local_test_filter) |filter| &.{filter} else &.{}, .root_module = b.createModule(.{
@@ -393,7 +436,7 @@ pub fn build(b: *std.Build) void {
         local_tests.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
         local_tests.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
         local_tests.root_module.link_libc = true;
-        if (std.mem.eql(u8, source, "src/local_adapter_tests.zig") or std.mem.eql(u8, source, "src/local_trusted_edit_tests.zig") or std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) {
+        if (std.mem.eql(u8, source, "src/terminal_controller_tests.zig") or std.mem.eql(u8, source, "src/local_adapter_tests.zig") or std.mem.eql(u8, source, "src/local_trusted_edit_tests.zig") or std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) {
             // SessionHost's registry now contains public UI/service contracts.
             // These runners need the same linked ABI while remaining headless.
             local_tests.root_module.addImport("ui", zenit_dep.module("ui"));
@@ -402,6 +445,7 @@ pub fn build(b: *std.Build) void {
             local_tests.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
             local_tests.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
             local_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+            local_tests.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
             local_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
             local_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c" }, .flags = &.{"-std=c11"} });
             local_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
@@ -411,27 +455,31 @@ pub fn build(b: *std.Build) void {
             local_tests.root_module.linkSystemLibrary("mbedcrypto", .{});
             local_tests.root_module.linkSystemLibrary("z", .{});
             addCoreTextBridgeForTest(zenit_dep, local_tests);
+            addBmcNative(b, local_tests.root_module);
             local_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
             local_tests.root_module.linkFramework("Metal", .{});
             local_tests.root_module.linkFramework("QuartzCore", .{});
         }
-        if (std.mem.eql(u8, source, "src/local_trusted_edit_tests.zig") or std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) {
+        if (!std.mem.eql(u8, source, "src/local_process_tests.zig")) {
             // ZSH resolves its private module beside this isolated test binary,
             // exactly as the installed application does.
             const files = b.addWriteFiles();
-            const runner = files.addCopyFile(local_tests.getEmittedBin(), if (std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) "terminal-execution-tests" else "trusted-edit-tests");
+            const runner_name = if (std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) "terminal-execution-tests" else if (std.mem.eql(u8, source, "src/local_trusted_edit_tests.zig")) "trusted-edit-tests" else if (std.mem.eql(u8, source, "src/local_adapter_tests.zig")) "local-adapter-tests" else "terminal-controller-tests";
+            const runner = files.addCopyFile(local_tests.getEmittedBin(), runner_name);
             _ = files.addCopyFile(zsh_bridge_file, "zw_ipc.so");
             _ = files.addCopyFile(execution_bridge_file, "zw_execution.so");
             _ = files.addCopyFile(secret_consumer_file, "zw_secret_consume.so");
             _ = files.addCopyFile(execution_guard_file, "zw_execution_guard");
-            const trusted_run = std.Build.Step.Run.create(b, "run trusted ZLE tests");
+            const trusted_run = std.Build.Step.Run.create(b, "run local integration tests");
             trusted_run.addFileArg(runner);
             local_tests_step.dependOn(&trusted_run.step);
-            b.step(if (std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) "test-terminal-execution" else "test-trusted-edit", "Run isolated real ZSH integration tests").dependOn(&trusted_run.step);
+            if (std.mem.eql(u8, source, "src/local_trusted_edit_tests.zig") or std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) {
+                b.step(if (std.mem.eql(u8, source, "src/terminal_execution_tests.zig")) "test-terminal-execution" else "test-trusted-edit", "Run isolated real ZSH integration tests").dependOn(&trusted_run.step);
+            }
+            if (std.mem.eql(u8, source, "src/local_adapter_tests.zig")) b.step("test-local-adapter", "Run local PTY adapter regressions").dependOn(&trusted_run.step);
         } else {
             const local_run = b.addRunArtifact(local_tests);
             local_tests_step.dependOn(&local_run.step);
-            if (std.mem.eql(u8, source, "src/local_adapter_tests.zig")) b.step("test-local-adapter", "Run local PTY adapter regressions").dependOn(&local_run.step);
         }
     }
 
@@ -445,6 +493,38 @@ pub fn build(b: *std.Build) void {
     notification_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     notification_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
     b.step("test-notification-preview", "Build isolated native notification acceptance fixture").dependOn(&b.addInstallArtifact(notification_preview, .{}).step);
+    const bmc_preview = b.addExecutable(.{ .name = "bmc-kvm-preview", .root_module = b.createModule(.{ .root_source_file = b.path("src/bmc_kvm_preview_runner.zig"), .target = target, .optimize = optimize }) });
+    zenit.attach(zenit_dep, bmc_preview);
+    bmc_preview.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
+    bmc_preview.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
+    bmc_preview.root_module.addCSourceFile(.{ .file = b.path("src/platform/ui_fonts.m"), .flags = &.{} });
+    bmc_preview.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
+    bmc_preview.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
+    bmc_preview.root_module.addImport("generated_ghostty_vt", ghostty_translate.createModule());
+    addBmcNative(b, bmc_preview.root_module);
+    bmc_preview.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+    bmc_preview.root_module.addSystemIncludePath(.{ .cwd_relative = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include" });
+    bmc_preview.root_module.addLibraryPath(.{ .cwd_relative = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib" });
+    b.step("bmc-kvm-preview", "Build the native KVM renderer acceptance fixture").dependOn(&b.addInstallArtifact(bmc_preview, .{}).step);
+    const bmc_live = b.addExecutable(.{ .name = "bmc-live-readonly", .root_module = b.createModule(.{ .root_source_file = b.path("src/bmc_live_readonly_runner.zig"), .target = target, .optimize = optimize }) });
+    zenit.attach(zenit_dep, bmc_live);
+    bmc_live.root_module.addImport("icon_ir", zenit_dep.module("icon_ir"));
+    bmc_live.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
+    bmc_live.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
+    bmc_live.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
+    bmc_live.root_module.addImport("generated_ghostty_vt", ghostty_translate.createModule());
+    bmc_live.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+    bmc_live.root_module.addIncludePath(b.path("src/proto/ssh"));
+    bmc_live.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/platform/macos_credentials.m", "src/platform/data_scope_lock.c", "src/platform/ui_fonts.m" }, .flags = &.{} });
+    bmc_live.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
+    bmc_live.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
+    bmc_live.root_module.linkSystemLibrary("ssh2", .{});
+    bmc_live.root_module.linkSystemLibrary("ghostty-vt", .{});
+    addBmcNative(b, bmc_live.root_module);
+    bmc_live.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+    bmc_live.root_module.addSystemIncludePath(.{ .cwd_relative = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/include" });
+    bmc_live.root_module.addLibraryPath(.{ .cwd_relative = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/usr/lib" });
+    b.step("bmc-live-readonly", "Build the stdin-only read-only native BMC acceptance runner").dependOn(&b.addInstallArtifact(bmc_live, .{}).step);
     for ([_][]const u8{ "host-approval", "task-finish", "execution-result", "inventory-grant", "close-confirmation", "ai-empty-recent" }, [_][]const u8{ "src/host_approval_preview_runner.zig", "src/task_finish_preview_runner.zig", "src/execution_result_preview_runner.zig", "src/inventory_grant_preview_runner.zig", "src/ai_close_confirmation_preview_runner.zig", "src/ai_empty_recent_preview_runner.zig" }) |name, source| {
         const preview = b.addExecutable(.{ .name = b.fmt("{s}-preview", .{name}), .root_module = b.createModule(.{ .root_source_file = b.path(source), .target = target, .optimize = optimize }) });
         zenit.attach(zenit_dep, preview);
@@ -468,6 +548,8 @@ pub fn build(b: *std.Build) void {
     }) });
     font_tests.root_module.addImport("zenit_app", zenit_dep.module("zenit_app"));
     addCoreTextBridgeForTest(zenit_dep, font_tests);
+    font_tests.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
+    font_tests.root_module.addCSourceFile(.{ .file = b.path("src/platform/ui_fonts.m"), .flags = &.{} });
     b.step("test-font", "Resolve appearance fonts and verify actual native metrics without windows").dependOn(&b.addRunArtifact(font_tests).step);
 
     const appearance_tests = b.addTest(.{ .root_module = b.createModule(.{
@@ -486,6 +568,7 @@ pub fn build(b: *std.Build) void {
     appearance_tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
     appearance_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
     appearance_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+    appearance_tests.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
     appearance_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
     appearance_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
     appearance_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
@@ -496,6 +579,7 @@ pub fn build(b: *std.Build) void {
     appearance_tests.root_module.linkSystemLibrary("z", .{});
 
     addCoreTextBridgeForTest(zenit_dep, appearance_tests);
+    addBmcNative(b, appearance_tests.root_module);
     appearance_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
     appearance_tests.root_module.linkFramework("Metal", .{});
     appearance_tests.root_module.linkFramework("QuartzCore", .{});
@@ -506,7 +590,17 @@ pub fn build(b: *std.Build) void {
     appearance_tests.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
     appearance_tests.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     appearance_tests.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
-    b.step("test-appearance", "Run headless appearance asset, theme and configuration tests").dependOn(&b.addRunArtifact(appearance_tests).step);
+    // Appearance imports collect headless terminal integration tests too. Keep
+    // their private shell modules beside the runner, as for root/UI tests.
+    const appearance_test_files = b.addWriteFiles();
+    const appearance_test_binary = appearance_test_files.addCopyFile(appearance_tests.getEmittedBin(), "appearance-tests");
+    _ = appearance_test_files.addCopyFile(zsh_bridge_file, "zw_ipc.so");
+    _ = appearance_test_files.addCopyFile(execution_bridge_file, "zw_execution.so");
+    _ = appearance_test_files.addCopyFile(secret_consumer_file, "zw_secret_consume.so");
+    _ = appearance_test_files.addCopyFile(execution_guard_file, "zw_execution_guard");
+    const run_appearance_tests = std.Build.Step.Run.create(b, "run appearance tests");
+    run_appearance_tests.addFileArg(appearance_test_binary);
+    b.step("test-appearance", "Run headless appearance asset, theme and configuration tests").dependOn(&run_appearance_tests.step);
 
     // transfer_panel 的整面板装配测试要跑 zenit 布局 → 独立测试模块（zenit
     // 注释警告：C 源挂在被 exe 依赖的模块上会传播，core 挂了会让 exe 里
@@ -528,6 +622,7 @@ pub fn build(b: *std.Build) void {
     ui_tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
     ui_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
     ui_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+    ui_tests.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
     ui_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
     ui_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
     ui_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
@@ -538,6 +633,7 @@ pub fn build(b: *std.Build) void {
     ui_tests.root_module.linkSystemLibrary("z", .{});
 
     addCoreTextBridgeForTest(zenit_dep, ui_tests);
+    addBmcNative(b, ui_tests.root_module);
     ui_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
     ui_tests.root_module.linkFramework("Metal", .{});
     ui_tests.root_module.linkFramework("QuartzCore", .{});
@@ -568,6 +664,7 @@ pub fn build(b: *std.Build) void {
     plugin_tests.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
     plugin_tests.root_module.linkSystemLibrary("ghostty-vt", .{});
     plugin_tests.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+    plugin_tests.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
     plugin_tests.root_module.addIncludePath(b.path("src/proto/ssh"));
     plugin_tests.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c", "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
     plugin_tests.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
@@ -577,6 +674,7 @@ pub fn build(b: *std.Build) void {
     plugin_tests.root_module.linkSystemLibrary("mbedcrypto", .{});
     plugin_tests.root_module.linkSystemLibrary("z", .{});
     addCoreTextBridgeForTest(zenit_dep, plugin_tests);
+    addBmcNative(b, plugin_tests.root_module);
     plugin_tests.root_module.addCSourceFile(.{ .file = zenit_dep.path("native/macos/metal_bridge.m"), .flags = &.{"-fobjc-arc"} });
     plugin_tests.root_module.linkFramework("Metal", .{});
     plugin_tests.root_module.linkFramework("QuartzCore", .{});
@@ -590,6 +688,7 @@ pub fn build(b: *std.Build) void {
     transport_runner.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
     transport_runner.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
     transport_runner.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+    transport_runner.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
     transport_runner.root_module.addIncludePath(b.path("src/proto/ssh"));
     transport_runner.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c" }, .flags = &.{"-std=c11"} });
     transport_runner.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
@@ -617,6 +716,7 @@ pub fn build(b: *std.Build) void {
         runner.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
         runner.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
         runner.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+        runner.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
         runner.root_module.addIncludePath(b.path("src/proto/ssh"));
         runner.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c" }, .flags = &.{"-std=c11"} });
         runner.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
@@ -660,6 +760,7 @@ pub fn build(b: *std.Build) void {
         fixed_forward_runner.root_module.addLibraryPath(b.path("vendor/libghostty-vt"));
         fixed_forward_runner.root_module.linkSystemLibrary("ghostty-vt", .{});
         fixed_forward_runner.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+        fixed_forward_runner.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
         fixed_forward_runner.root_module.addIncludePath(b.path("src/proto/ssh"));
         fixed_forward_runner.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c" }, .flags = &.{"-std=c11"} });
         fixed_forward_runner.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
@@ -671,7 +772,8 @@ pub fn build(b: *std.Build) void {
         fixed_forward_runner.root_module.linkSystemLibrary("mbedcrypto", .{});
         fixed_forward_runner.root_module.linkSystemLibrary("z", .{});
         addCoreTextBridgeForTest(zenit_dep, fixed_forward_runner);
-        if (std.mem.eql(u8, runner.name, "ssh-disconnect-runner") or std.mem.eql(u8, runner.name, "ssh-bootstrap-runner") or std.mem.eql(u8, runner.name, "ssh-shell-execution-runner") or std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner") or std.mem.eql(u8, runner.name, "ssh-shared-connection-runner")) {
+        addBmcNative(b, fixed_forward_runner.root_module);
+        if (std.mem.eql(u8, runner.name, "ssh-disconnect-runner") or std.mem.eql(u8, runner.name, "ssh-bootstrap-runner") or std.mem.eql(u8, runner.name, "ssh-shell-execution-runner") or std.mem.eql(u8, runner.name, "ssh-reconnect-loopback-runner") or std.mem.eql(u8, runner.name, "ssh-shared-connection-runner") or std.mem.eql(u8, runner.name, "socks-worker-host-runner") or std.mem.eql(u8, runner.name, "forward-load-runner")) {
             fixed_forward_runner.root_module.addCSourceFiles(.{ .files = &.{ "src/local/darwin_process.c", "src/local/trusted_edit_native.c", "src/local/secret_native.c" }, .flags = &.{"-std=c11"} });
             fixed_forward_runner.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_credentials.m"), .flags = &.{} });
             fixed_forward_runner.root_module.linkFramework("Security", .{});
@@ -694,6 +796,7 @@ pub fn build(b: *std.Build) void {
     forward_preview.root_module.addImport("generated_ssh_session", ssh_session_translate.createModule());
     forward_preview.root_module.addImport("generated_ssh_channel", ssh_channel_translate.createModule());
     forward_preview.root_module.addIncludePath(b.path("vendor/libssh2/include"));
+    forward_preview.root_module.addIncludePath(b.path("vendor/mbedtls/include"));
     forward_preview.root_module.addIncludePath(b.path("src/proto/ssh"));
     forward_preview.root_module.addCSourceFiles(.{ .files = &.{ "src/proto/ssh/libssh2_channel_shim.c", "src/proto/ssh/libssh2_session_shim.c" }, .flags = &.{"-std=c11"} });
     forward_preview.root_module.addLibraryPath(b.path("vendor/libssh2/src/.libs"));
@@ -754,4 +857,20 @@ fn addCoreTextBridgeForTest(zenit_dep: *std.Build.Dependency, exe: *std.Build.St
 fn addUrlFetchFrameworks(module: *std.Build.Module) void {
     module.linkFramework("CoreFoundation", .{});
     module.linkFramework("CFNetwork", .{});
+}
+
+/// The BMC library and every test consumer use the same pinned crypto/codec ABI.
+fn addBmcNative(b: *std.Build, module: *std.Build.Module) void {
+    module.addIncludePath(b.path("vendor/mbedtls/include"));
+    module.addIncludePath(b.path("src/plugins/bmc_ikvm/protocol"));
+    module.addCSourceFiles(.{ .files = &.{
+        "src/platform/bmc_tls_trust.c",
+        "src/plugins/bmc_ikvm/protocol/tls_shim.c",
+        "src/plugins/bmc_ikvm/protocol/zlib_shim.c",
+        "src/plugins/bmc_ikvm/platform/jpeg.c",
+    }, .flags = &.{"-std=c11"} });
+    module.addLibraryPath(b.path("vendor/mbedtls/library"));
+    for ([_][]const u8{ "mbedtls", "mbedx509", "mbedcrypto", "z" }) |library| module.linkSystemLibrary(library, .{});
+    for ([_][]const u8{ "Security", "CoreFoundation", "CoreGraphics", "ImageIO" }) |framework| module.linkFramework(framework, .{});
+    module.link_libc = true;
 }

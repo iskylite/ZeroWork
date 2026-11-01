@@ -36,7 +36,6 @@ async function set(id:string,value:string){await click(id);await key('a',{cmd:tr
 async function absent(id:string){await waitFor(async()=>!(await query(id)).some(shown)||null,15000);}
 async function connectSavedFixture(){
  const row=(await query('sidebar.host')).find(n=>shown(n)&&text(n).includes('V02 native fixture owner'));assert(row);await clickNode(row);
- const fresh=(await query('sidebar.host')).find(n=>shown(n)&&text(n).includes('V02 native fixture owner'));const connect=nodes(fresh).find(n=>shown(n)&&n.test_id==='sidebar.host.connect');assert(connect);await clickNode(connect);
 }
 async function challengeAnswer(){return waitFor(async()=>{for(const id of ['plugin.challenge.secret','host.challenge.answer','host.challenge.answer.0','plugin.challenge.answer','auth.challenge.answer.0']){const n=(await query(id)).find(shown);if(n){if(opts['--shared-presenter-only']==='1'){const modals=await query('plugin.challenge.modal');assert.equal(modals.length,1);assert.equal((await query('auth.challenge.modal')).length,0);if(report.shared_presenter)assert.equal(report.shared_presenter.node_id,modals[0].id);report.shared_presenter={modal_id:'plugin.challenge.modal',node_id:modals[0].id,registered_instances:1,legacy_auth_view_instances:0,reused_across_challenges:true};}return n;}}return null;},20000);}
 async function traces(){const s=await readFile(logPath,'utf8');return s.slice(0,s.lastIndexOf('\n')+1).split('\n').flatMap((l,i)=>{const at=l.indexOf('AI_TOOL_TRACE ');return at<0?[]:[{...JSON.parse(l.slice(at+14)),log_line:i+1}];});}

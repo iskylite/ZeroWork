@@ -324,6 +324,7 @@ pub const View = struct {
         for (entries) |entry| {
             const cell = try scope.createState(SavedAction, .{ .view = self, .owner = entry.owner });
             const button = try ui.widgets.Button(.{ .label = try scope.createText(entry.name, .{}), .icon_asset = entry.icon, .icon_size = @as(f32, 14), .variant = .ghost, .base_style = S.row(), .hover_style = self.hover_style, .on_click = self.cx.on(SavedAction, cell, SavedAction.choose) }).mount(scope, self.cx);
+            button.setStyleInline(self.cx.allocator, S.row());
             button.meta.ownership.meta.test_id = "session.menu.more.host";
             @import("sidebar_view.zig").setFocusRing(button);
             try self.more_content.appendChild(self.cx.allocator, button);
@@ -560,7 +561,7 @@ test "saved session menu refreshes rows and captures stable owner" {
     try view.setSaved(&.{.{ .owner = .{ .id = @fromBackingInt(99), .revision = 2 }, .name = "Changed config", .icon = ui.icons.folder }});
     try std.testing.expectEqualStrings("Changed config", view.saved_rows.items[0].label.getText().?.content);
     var many: [12]Saved = undefined;
-    for (&many) |*entry| entry.* = .{ .owner = owner, .name = "Saved row", .icon = ui.icons.terminal };
+    for (&many, 0..) |*entry, index| entry.* = .{ .owner = owner, .name = if (index % 2 == 0) "Saved row" else "Long saved host label", .icon = ui.icons.terminal };
     try view.setSaved(&many);
     try view.setAll(&many);
     try std.testing.expectEqual(@as(usize, 12), view.more_rows.items.len);
@@ -573,6 +574,15 @@ test "saved session menu refreshes rows and captures stable owner" {
     }
     try std.testing.expectApproxEqAbs(@as(f32, 99), view.saved_area.globalRect().h, 0.5);
     try std.testing.expect(view.chrome.globalRect().y + view.chrome.globalRect().h <= 472.5);
+    view.openMore();
+    for (0..8) |_| {
+        cx.advanceFrameClock();
+        cx.layout();
+        _ = cx.render();
+    }
+    const icon_x = view.more_rows.items[0].icon.globalRect().x;
+    try std.testing.expectApproxEqAbs(view.more_popup.chrome.globalRect().x + 16, icon_x, 0.5);
+    for (view.more_rows.items) |row| try std.testing.expectApproxEqAbs(icon_x, row.icon.globalRect().x, 0.5);
     view.hide();
     try view.setSaved(&.{});
     try std.testing.expectEqual(@as(usize, 0), view.saved_rows.items.len);

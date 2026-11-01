@@ -14,6 +14,10 @@ long zw_libssh2_channel_read_stderr(LIBSSH2_CHANNEL *channel, unsigned char *buf
     return count == LIBSSH2_ERROR_EAGAIN ? 0 : (long)count;
 }
 int zw_libssh2_channel_eof(LIBSSH2_CHANNEL *channel) { return libssh2_channel_eof(channel); }
+int zw_libssh2_channel_send_eof_step(LIBSSH2_CHANNEL *channel) {
+    int rc = libssh2_channel_send_eof(channel);
+    return rc == LIBSSH2_ERROR_EAGAIN ? 1 : rc;
+}
 int zw_libssh2_channel_exit_status(LIBSSH2_CHANNEL *channel) { return libssh2_channel_get_exit_status(channel); }
 extern int libssh2_channel_get_exit_status_ex(LIBSSH2_CHANNEL *channel, int *status);
 int zw_libssh2_channel_exit_status_received(LIBSSH2_CHANNEL *channel, int *status) { return libssh2_channel_get_exit_status_ex(channel, status); }

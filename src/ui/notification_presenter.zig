@@ -28,6 +28,11 @@ const Slot = struct {
     expanded: bool = false,
     hovered: bool = false,
     obscured: bool = false,
+    fn cancelPress(self: *Slot) void {
+        if (self.presenter.cx.pressed_node) |pressed| {
+            if (pressed == self.root or pressed.isDescendantOf(self.root)) self.presenter.cx.cancelPointerInteractions(.explicit);
+        }
+    }
     fn dismiss(self: *Slot) void {
         if (self.fact_id) |id| self.presenter.host.coordinator.dismissNotification(id);
         self.presenter.cx.requestRedraw();
@@ -193,6 +198,7 @@ pub const Presenter = struct {
         self.root.setStyle(self.cx.allocator, .width, .{ .px = width });
         for (&self.slots, 0..) |*slot, i| {
             if (i >= count or width <= 0) {
+                if (slot.fact_id != null) slot.cancelPress();
                 slot.root.setDisplay(.none);
                 slot.fact_id = null;
                 continue;
@@ -207,6 +213,7 @@ pub const Presenter = struct {
                 action.label.setStyle(self.cx.allocator, .max_width, @max(1, action_width - 20));
             }
             if (theme_changed or slot.fact_id != record.fact_id or slot.revision != record.event.event_revision) {
+                if (slot.fact_id != record.fact_id or slot.revision != record.event.event_revision) slot.cancelPress();
                 if (slot.fact_id != record.fact_id) slot.expanded = false;
                 slot.fact_id = record.fact_id;
                 slot.revision = record.event.event_revision;
@@ -332,7 +339,7 @@ pub fn acknowledgeAt(cx: *ui.Cx, anchor: ui.ComputedRect, message: []const u8) !
     if (anchor.w <= 0 or anchor.h <= 0 or message.len == 0) return error.InvalidAcknowledgmentAnchor;
     const slot = try cx.state(LocalReceiptSlot, std.hash.Wyhash.hash(0, "ZeroWork.localFeedback"), .{});
     if (slot.value == null) {
-        const root = try ui.box(cx, .{ .position = .absolute, .direction = .row, .width = .{ .fit = .{} }, .height = .{ .fit = .{} }, .max_width = 280, .padding = .{ .left = 10, .right = 10, .top = 7, .bottom = 7 }, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 1, .color = theme.current().border, .radius = 9 }, .shadow = .{ .color = theme.current().shadow, .blur = 28, .offset_y = 10 }, .hit_behavior = .pass_through, .z_index = 150 }, .{});
+        const root = try ui.box(cx, .{ .position = .absolute, .direction = .row, .width = .{ .fit = .{} }, .height = .{ .fit = .{} }, .max_width = 280, .padding = .{ .left = 10, .right = 10, .top = 7, .bottom = 7 }, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 9 }, .shadow = .{ .color = theme.current().shadow, .blur = 28, .offset_y = 10 }, .hit_behavior = .pass_through, .z_index = 150 }, .{});
         root.meta.ownership.meta.test_id = "notifications.local";
         root.behavior.interaction.a11y = .{ .role = .status, .live = "polite" };
         const label = try ui.textStyled(cx, S.actionLabel, "");

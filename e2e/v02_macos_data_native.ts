@@ -1,3 +1,4 @@
+import {openSidebarHostMenu} from './sidebar_host_menu.ts';
 /** Frozen real App acceptance with canonical disposable instance storage.
  * Isolated 0600 reference persistence, same-App native credential reuse, VM/Grok consumption,
  * cleanup cancel/current and sibling session gates, erase and reset recovery.
@@ -110,8 +111,6 @@ async function exitNormal(){
 }
 async function connect(){
  const row=(await query('sidebar.host')).find(n=>shown(n)&&text(n).includes('Native Saved VM'));assert(row);await clickNode(row);
- const fresh=(await query('sidebar.host')).find(n=>shown(n)&&text(n).includes('Native Saved VM'));
- await clickNode(flat(fresh).find(n=>n.test_id==='sidebar.host.connect'));
 }
 async function attach(){
  const until=Date.now()+50000;
@@ -211,7 +210,7 @@ try{
  await key('escape');await closeTab(ssh.tab);
  const firstWindow=(await snapshot()).windows[0].window;
  const row=(await query('sidebar.host')).find(n=>shown(n)&&text(n).includes('Native Saved VM'));assert(row);
- await mouseMove(row.rect.x+row.rect.w/2,row.rect.y+row.rect.h/2);await clickNode(row);await click('sidebar.host.more');await click('context.menu.new_window');
+ await mouseMove(row.rect.x+row.rect.w/2,row.rect.y+row.rect.h/2);await clickNode(row);await openSidebarHostMenu(row);await click('context.menu.new_window');
  await waitFor(async()=>(await snapshot()).windows.length===2||null);
  const second=(await snapshot()).windows.find((w:any)=>w.window!==firstWindow).window;
  await request('POST','/zerowork/windows',{action:'select',window:second});const secondSsh=await attach();

@@ -5,6 +5,9 @@ const App = @import("zenit_app").App;
 const V = @import("ui/transfer_manager_view.zig");
 const theme = @import("ui/app_theme.zig");
 const options = @import("preview_options");
+var selected_theme: []const u8 = "dark";
+var transparency: f32 = 0;
+var ai_sessions_scene: bool = false;
 const Fixture = struct {
     panel: ?*V.Panel = null,
     fn reopen(self: *Fixture) void {
@@ -18,10 +21,31 @@ const Fixture = struct {
     }
 };
 fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
-    theme.select(.dark);
+    var registry = try @import("config/theme_registry.zig").Registry.init(cx.allocator);
+    defer registry.deinit();
+    theme.selectTokens((registry.get(selected_theme) orelse return error.UnknownTheme).ui_tokens);
     _ = theme.setMaterialVisible(false);
-    cx.setTheme(theme.widgetTheme(.dark));
-    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .background = theme.current().surface_1 }, .{});
+    _ = theme.setMaterialParameters(transparency, 0);
+    cx.setTheme(theme.widgetTheme(theme.currentName()));
+    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .background = theme.baseColors().app }, .{});
+    if (ai_sessions_scene) {
+        const anchor = try ui.box(cx, .{ .position = .absolute, .inset = .{ .top = .{ .px = 32 }, .left = .{ .px = 160 } }, .width = .{ .px = 24 }, .height = .{ .px = 24 } }, .{});
+        try root.appendChild(cx.allocator, anchor);
+        const context = try scope.createState(u8, 0);
+        const callbacks = struct {
+            fn ignore(_: *anyopaque, _: u64) void {}
+        };
+        const sessions = try @import("ui/ai_sessions_view.zig").View.mount(cx, scope, anchor, .{ .context = context, .select = callbacks.ignore, .request_close = callbacks.ignore, .remove = callbacks.ignore });
+        try root.appendChild(cx.allocator, sessions.root);
+        try sessions.show(&.{
+            .{ .id = 1, .title = "待确认的维护任务", .owner = "当前终端", .phase = .approval, .active = true },
+            .{ .id = 2, .title = "正在检查日志", .owner = "当前终端", .phase = .running },
+            .{ .id = 3, .title = "检查已完成", .owner = "当前终端", .phase = .done },
+            .{ .id = 4, .title = "请求失败", .owner = "当前终端", .phase = .failed },
+            .{ .id = 5, .title = "已停止", .owner = "当前终端", .phase = .stopped },
+        });
+        return root;
+    }
     const fixture = try scope.createState(Fixture, .{});
     const reopen = try ui.widgets.Button(.{ .label = "重新打开传输预览", .on_click = cx.on(Fixture, fixture, Fixture.reopen), .base_style = .{ .position = .absolute, .inset = .{ .left = .{ .px = 20 }, .top = .{ .px = 20 } }, .height = .{ .px = 30 } } }).mount(scope, cx);
     reopen.meta.ownership.meta.test_id = "transfer.preview.reopen";
@@ -62,7 +86,12 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     panel.show();
     return root;
 }
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    var args = init.minimal.args.iterate();
+    _ = args.next();
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--ai-sessions")) ai_sessions_scene = true else if (std.mem.startsWith(u8, arg, "--theme=")) selected_theme = arg[8..] else if (std.mem.startsWith(u8, arg, "--transparency=")) transparency = try std.fmt.parseFloat(f32, arg[15..]) else return error.InvalidFixtureArgument;
+    }
     var io: std.Io.Threaded = .init(std.heap.c_allocator, .{});
     defer io.deinit();
     @import("platform/applog.zig").init(.{}, io.io());

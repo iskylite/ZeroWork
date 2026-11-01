@@ -11,6 +11,7 @@ const FS = @import("file_workspace_styles.zig");
 const Frozen = struct { arena: std.heap.ArenaAllocator, envelope: Files.Envelope, directory: []const u8, badge: []const u8 };
 pub const View = struct {
     cx: *ui.Cx,
+    danger_paint: bool = false,
     pane: *Files.Pane,
     model: *Controller.Controller,
     raw: *ui.Signal([]const u8),
@@ -45,7 +46,7 @@ pub const View = struct {
         try self.editor.appendChild(cx.allocator, try ui.box(cx, FS.column(24), .{}));
         const name = try ui.boxStyled(cx, S.name, .{});
         try self.editor.appendChild(cx.allocator, name);
-        try name.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.folder, S.theme.current().accent, FS.icon(16)));
+        try name.appendChild(cx.allocator, try S.theme.icon(cx, ui.icons.folder, "accent_ink", FS.icon(16)));
         const field = try ui.boxStyled(cx, S.field, .{});
         field.meta.ownership.meta.test_id = "files.mkdir.field";
         try name.appendChild(cx.allocator, field);
@@ -68,10 +69,10 @@ pub const View = struct {
         self.feedback = try label(cx, self.result, FS.secondary, "files.mkdir.feedback");
         const actions = try ui.box(cx, S.actions(), .{});
         try self.result.appendChild(cx.allocator, actions);
-        self.cancel = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 16), .a11y_label = "取消当前操作", .base_style = S.button(), .on_click = cx.on(View, self, dismiss) }).mount(scope, cx);
+        self.cancel = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 16), .a11y_label = "取消当前操作", .base_style = try S.theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.button, .{}), .on_click = cx.on(View, self, dismiss) }).mount(scope, cx);
         self.cancel.meta.ownership.meta.test_id = "files.mkdir.cancel";
         try actions.appendChild(cx.allocator, try tooltip(cx, scope, self.cancel, "取消当前操作"));
-        self.create = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.folder_plus, .icon_size = @as(f32, 16), .a11y_label = "创建文件夹", .base_style = S.button(), .disabled = self.create_disabled, .on_click = cx.on(View, self, submit) }).mount(scope, cx);
+        self.create = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.folder_plus, .icon_size = @as(f32, 16), .a11y_label = "创建文件夹", .base_style = try S.theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.button, .{}), .disabled = self.create_disabled, .on_click = cx.on(View, self, submit) }).mount(scope, cx);
         self.create.meta.ownership.meta.test_id = "files.mkdir.create";
         self.create_wrapper = try tooltip(cx, scope, self.create, "创建文件夹");
         try actions.appendChild(cx.allocator, self.create_wrapper);
@@ -242,6 +243,7 @@ pub const View = struct {
         } else title = try std.fmt.bufPrint(&title_buffer, "新建{s}文件夹{s}{s}", .{ if (self.pane.side == .local) @as([]const u8, "本地") else "远程", if (self.pane.side == .remote and original.badge.len > 0) @as([]const u8, " · ") else "", if (self.pane.side == .remote) original.badge else "" });
         try self.heading.setTextContent(self.cx.allocator, title);
         try self.feedback.setTextContent(self.cx.allocator, feedback);
+        self.danger_paint = danger;
         self.heading.setTextColor(if (danger) S.theme.current().danger_ink else if (self.phase == .succeeded) S.theme.current().ok_ink else S.theme.current().fg_1);
         self.feedback.setTextColor(if (danger) S.theme.current().danger_ink else S.theme.current().fg_2);
         self.cx.requestRedraw();
@@ -249,6 +251,9 @@ pub const View = struct {
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
         if (!self.shown) return .done;
+        const danger = self.danger_paint;
+        self.heading.setTextColor(if (danger) S.theme.current().danger_ink else if (self.phase == .succeeded) S.theme.current().ok_ink else S.theme.current().fg_1);
+        self.feedback.setTextColor(if (danger) S.theme.current().danger_ink else S.theme.current().fg_2);
         var relayout = false;
         if (self.pane.draft_open) {
             const height = self.pane.data_clip.globalRect().h;

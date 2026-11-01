@@ -52,7 +52,7 @@ pub const View = struct {
     copy_label: *ui.Signal([]const u8) = undefined,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
-        const self = try scope.createState(View, .{ .cx = cx, .root = undefined, .card = undefined, .body = undefined, .title = undefined, .target = undefined, .url = undefined, .summary = undefined, .network_row = undefined, .summary_row = undefined, .feedback = undefined, .source = undefined, .accept = undefined, .reject = undefined, .copy = undefined, .network_icon = undefined, .lifecycle_icon = undefined, .terminal_icon = undefined, .callbacks = callbacks, .decision_pending = try scope.createSignal(bool, false), .accept_style = try scope.createSignal(S.ButtonStyle, S.iconButton(true)), .reject_style = try scope.createSignal(S.ButtonStyle, S.iconButton(false)) });
+        const self = try scope.createState(View, .{ .cx = cx, .root = undefined, .card = undefined, .body = undefined, .title = undefined, .target = undefined, .url = undefined, .summary = undefined, .network_row = undefined, .summary_row = undefined, .feedback = undefined, .source = undefined, .accept = undefined, .reject = undefined, .copy = undefined, .network_icon = undefined, .lifecycle_icon = undefined, .terminal_icon = undefined, .callbacks = callbacks, .decision_pending = try scope.createSignal(bool, false), .accept_style = try theme.paintSignal(S.ButtonStyle, cx, scope, S.iconButton, .{true}), .reject_style = try theme.paintSignal(S.ButtonStyle, cx, scope, S.iconButton, .{false}) });
         self.accept_text = try scope.createSignal([]const u8, "批准此调用");
         self.accept_label = try scope.createSignal([]const u8, "批准这次本机网络读取");
         self.reject_label = try scope.createSignal([]const u8, "拒绝这次本机网络读取");
@@ -66,11 +66,11 @@ pub const View = struct {
         try self.root.appendChild(cx.allocator, self.card);
         const header = try ui.boxStyled(cx, S.header, .{});
         try self.card.appendChild(cx.allocator, header);
-        self.network_icon = try ui.iconTint(cx, ui.icons.get("globe").?, theme.current().fg_2, .{ .width = .{ .px = 17 }, .height = .{ .px = 17 }, .flex_shrink = 0 });
+        self.network_icon = try theme.icon(cx, ui.icons.get("globe").?, "fg_2", .{ .width = .{ .px = 17 }, .height = .{ .px = 17 }, .flex_shrink = 0 });
         self.network_icon.meta.ownership.meta.test_id = "ai.host_approval.icon.network";
-        self.lifecycle_icon = try ui.iconTint(cx, ui.icons.get("layers").?, theme.current().fg_2, .{ .width = .{ .px = 17 }, .height = .{ .px = 17 }, .flex_shrink = 0 });
+        self.lifecycle_icon = try theme.icon(cx, ui.icons.get("layers").?, "fg_2", .{ .width = .{ .px = 17 }, .height = .{ .px = 17 }, .flex_shrink = 0 });
         self.lifecycle_icon.meta.ownership.meta.test_id = "ai.host_approval.icon.lifecycle";
-        self.terminal_icon = try ui.iconTint(cx, ui.icons.terminal, theme.current().fg_2, .{ .width = .{ .px = 17 }, .height = .{ .px = 17 }, .flex_shrink = 0 });
+        self.terminal_icon = try theme.icon(cx, ui.icons.terminal, "fg_2", .{ .width = .{ .px = 17 }, .height = .{ .px = 17 }, .flex_shrink = 0 });
         self.terminal_icon.meta.ownership.meta.test_id = "ai.host_approval.icon.terminal";
         try header.appendChild(cx.allocator, self.network_icon);
         try header.appendChild(cx.allocator, self.lifecycle_icon);
@@ -83,7 +83,7 @@ pub const View = struct {
         self.target.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
         self.target.meta.ownership.meta.test_id = "ai.host_approval.target";
         try header.appendChild(cx.allocator, self.target);
-        const state = try ui.text(cx, "待确认", .{ .font_size = 10, .line_height = 1.65, .color = theme.current().fg_2 });
+        const state = try ui.textStyled(cx, stateStyle, "待确认");
         self.state_label = state;
         state.meta.ownership.meta.test_id = "ai.host_approval.state";
         state.setStyleInline(cx.allocator, .{ .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = ui.Color.TRANSPARENT, .corner_radius = 5, .flex_shrink = 0 });
@@ -117,7 +117,7 @@ pub const View = struct {
         try scroll.content.appendChild(cx.allocator, self.route_reason);
         // URLs are addresses, with a single-line horizontal viewport. The copy
         // action remains at the right edge while the full URL can scroll.
-        self.network_row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 38 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 10, .right = 8 }, .background = theme.popupInset(), .corner_radius = 7, .flex_shrink = 0, .margin = .{ .bottom = 8 } }, .{});
+        self.network_row = try ui.boxStyled(cx, networkStyle, .{});
         self.network_row.meta.ownership.meta.test_id = "ai.host_approval.address_bar";
         try scroll.content.appendChild(cx.allocator, self.network_row);
         const address_scroll = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .rubber_band_x = false }).mount(scope, cx);
@@ -125,12 +125,12 @@ pub const View = struct {
         address_scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 38 }, .flex = 1, .min_width = 0, .flex_shrink = 1 });
         address_scroll.container.meta.ownership.meta.test_id = "ai.host_approval.url_viewport";
         address_scroll.content.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 38 }, .direction = .row, .align_items = .center, .flex_shrink = 0 });
-        self.url = try ui.text(cx, "", .{ .font_size = 10.5, .line_height = 17.0 / 10.5, .color = theme.current().fg_1, .use_monospace_font = true, .wrap = .none });
+        self.url = try ui.textStyled(cx, urlStyle, "");
         self.url.setStyleInline(cx.allocator, .{ .width = .{ .fit = .{} }, .height = .{ .px = 17 }, .flex_shrink = 0 });
         self.url.meta.ownership.meta.test_id = "ai.host_approval.url";
         try address_scroll.content.appendChild(cx.allocator, self.url);
         try self.network_row.appendChild(cx.allocator, address_scroll.container);
-        const address_copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制完整请求 URL", .base_style = S.disclosureButton(), .on_click = cx.on(View, self, copyUrl) }).mount(scope, cx);
+        const address_copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制完整请求 URL", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, copyUrl) }).mount(scope, cx);
         address_copy.meta.ownership.meta.test_id = "ai.host_approval.copy_url";
         try self.network_row.appendChild(cx.allocator, address_copy);
         const url_row = try ui.boxStyled(cx, summaryRowStyle, .{});
@@ -139,22 +139,23 @@ pub const View = struct {
         try scroll.content.appendChild(cx.allocator, url_row);
         const url_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
         @import("ai_card_scroll.zig").containVertical(url_scroll);
-        url_scroll.container.setStyleInline(cx.allocator, S.commandViewport(cx.tokens));
-        url_scroll.container.setStyleInline(cx.allocator, .{ .height = .{ .fit = .{ .min = 37, .max = 105 } }, .min_height = 37, .max_height = 105, .overflow_hidden = true });
+        url_scroll.container.setStyleInline(cx.allocator, summaryViewportStyle(cx.tokens));
+        url_scroll.container.meta.per_frame.hooks.on_theme = commandViewportTheme;
         url_scroll.container.meta.ownership.meta.test_id = "ai.host_approval.summary_viewport";
         url_scroll.content.setStyleInline(cx.allocator, S.commandContent(cx.tokens));
+        url_scroll.content.meta.per_frame.hooks.on_theme = commandContentTheme;
         try url_row.appendChild(cx.allocator, url_scroll.container);
         self.summary = try ui.textStyled(cx, S.command, "");
         self.summary.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         self.summary.meta.ownership.meta.test_id = "ai.host_approval.summary";
         try url_scroll.content.appendChild(cx.allocator, self.summary);
-        const copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = self.copy_label, .base_style = S.disclosureButton(), .on_click = cx.on(View, self, copyUrl) }).mount(scope, cx);
+        const copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = self.copy_label, .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, copyUrl) }).mount(scope, cx);
         self.copy = copy;
         copy.meta.ownership.meta.test_id = "ai.host_approval.copy";
         try url_row.appendChild(cx.allocator, copy);
         const impact = try ui.boxStyled(cx, S.impactNotice, .{});
         impact.meta.ownership.meta.test_id = "ai.host_approval.impact_notice";
-        try impact.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("triangle-alert").?, theme.current().warn_ink, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
+        try impact.appendChild(cx.allocator, try theme.icon(cx, ui.icons.get("triangle-alert").?, "warn_ink", .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
         self.feedback = try ui.textStyled(cx, impactTextStyle, impact_copy);
         self.feedback.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1, .flex_shrink = 0 });
         self.feedback.meta.ownership.meta.test_id = "ai.host_approval.impact";
@@ -169,9 +170,16 @@ pub const View = struct {
         reject.meta.ownership.meta.test_id = "ai.host_approval.reject";
         try footer.appendChild(cx.allocator, reject);
         const accept = try ui.widgets.Button(.{ .variant = .primary, .label = self.accept_text, .a11y_label = self.accept_label, .base_style = self.accept_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, acceptCall) }).mount(scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, scope, accept, self.decision_pending);
         self.accept = accept;
         accept.meta.ownership.meta.test_id = "ai.host_approval.accept";
         try footer.appendChild(cx.allocator, accept);
+        try scope.createEffect(.{ .view = self, .publication = try cx.themeSignal(scope) }, struct {
+            fn paint(ctx: anytype) void {
+                _ = ctx.publication.get();
+                for (ctx.view.route_buttons, 0..) |signal, index| signal.set(R.button(index == @backingInt(ctx.view.route_selected)));
+            }
+        }.paint);
         return self;
     }
     pub fn update(self: *View, source: ?approval.Snapshot) !void {
@@ -356,4 +364,32 @@ fn footerStyle(tokens: *const ui.ThemeTokens) ui.BoxStyle {
     var style = S.footer(tokens);
     style.margin = .{ .top = 8 };
     return style;
+}
+
+fn stateStyle(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 10, .line_height = 1.65, .color = theme.current().fg_2 };
+}
+
+fn networkStyle(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 38 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 10, .right = 8 }, .background = theme.popupInset(), .corner_radius = 7, .flex_shrink = 0, .margin = .{ .bottom = 8 } };
+}
+fn urlStyle(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 10.5, .line_height = 17.0 / 10.5, .color = theme.current().fg_1, .use_monospace_font = true, .wrap = .none };
+}
+
+fn commandViewportTheme(node: *ui.Node, tokens: *const ui.ThemeTokens, allocator: std.mem.Allocator) void {
+    node.setStyleInline(allocator, summaryViewportStyle(tokens));
+}
+
+fn summaryViewportStyle(tokens: *const ui.ThemeTokens) ui.BoxStyle {
+    var style = S.commandViewport(tokens);
+    style.height = .{ .fit = .{ .min = 37, .max = 105 } };
+    style.min_height = 37;
+    style.max_height = 105;
+    style.overflow_hidden = true;
+    return style;
+}
+
+fn commandContentTheme(node: *ui.Node, tokens: *const ui.ThemeTokens, allocator: std.mem.Allocator) void {
+    node.setStyleInline(allocator, S.commandContent(tokens));
 }

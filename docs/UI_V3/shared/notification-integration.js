@@ -10,7 +10,7 @@
   function connect(frame,owner){
     const doc=frame.contentDocument;if(!doc?.body||doc.URL==='about:blank'||doc.body.dataset.notificationPolicyConnected)return;
     doc.body.dataset.notificationPolicyConnected='true';
-    const script=doc.createElement('script');script.src=new URL('notification-policy.js?v=global-policy-20261029',base).href;doc.head.append(script);
+    const script=doc.createElement('script');script.src=new URL('notification-policy.js?v=fd7b99434891',base).href;doc.head.append(script);
     const bar=doc.querySelector('.titlebar .title-actions,.titlebar');
     if(bar){const button=doc.createElement('button');button.className='zw-global-notifications';button.dataset.globalNotifications='';button.setAttribute('aria-label','重要提醒');button.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg><i hidden></i>';button.onclick=()=>{center.open(undefined,button);};bar.append(button);}
     syncCounts(V3Feedback.notificationSnapshot());

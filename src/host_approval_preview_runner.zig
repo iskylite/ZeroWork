@@ -11,7 +11,7 @@ const Card = @import("ui/ai_host_approval_view.zig");
 var preview_kind: approval.SubjectKind = .network_url;
 var long_url = false;
 var preview_route = false;
-var preview_theme: theme.Name = .dark;
+var preview_theme: []const u8 = "dark";
 var preview_transparency: f32 = 0;
 const Preview = struct {
     cx: *ui.Cx,
@@ -46,9 +46,9 @@ const Preview = struct {
     }
 };
 fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
-    theme.select(preview_theme);
+    theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(preview_theme));
     _ = theme.setMaterialParameters(preview_transparency, 0);
-    cx.setTheme(theme.widgetTheme(preview_theme));
+    cx.setTheme(theme.widgetTheme(theme.currentName()));
     try @import("ui/layer_materials.zig").Policy.mount(cx, scope);
     const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .background = theme.current().surface_1, .padding = .{ .top = 40 } }, .{});
     root.meta.ownership.meta.test_id = "host_approval.preview";
@@ -95,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
-        if (std.mem.eql(u8, arg, "--route=ask")) preview_route = true else if (std.mem.eql(u8, arg, "--long-url")) long_url = true else if (std.mem.startsWith(u8, arg, "--kind=")) preview_kind = std.meta.stringToEnum(approval.SubjectKind, arg[7..]) orelse return error.InvalidPreviewKind else if (std.mem.startsWith(u8, arg, "--theme=")) preview_theme = std.meta.stringToEnum(theme.Name, arg[8..]) orelse return error.InvalidPreviewTheme else if (std.mem.startsWith(u8, arg, "--transparency=")) {
+        if (std.mem.eql(u8, arg, "--route=ask")) preview_route = true else if (std.mem.eql(u8, arg, "--long-url")) long_url = true else if (std.mem.startsWith(u8, arg, "--kind=")) preview_kind = std.meta.stringToEnum(approval.SubjectKind, arg[7..]) orelse return error.InvalidPreviewKind else if (std.mem.startsWith(u8, arg, "--theme=")) preview_theme = try parseTheme(arg[8..]) else if (std.mem.startsWith(u8, arg, "--transparency=")) {
             preview_transparency = try std.fmt.parseFloat(f32, arg[15..]);
             if (!std.math.isFinite(preview_transparency) or preview_transparency < 0 or preview_transparency > 100) return error.InvalidPreviewTransparency;
         } else return error.InvalidOption;
@@ -103,4 +103,9 @@ pub fn main(init: std.process.Init) !void {
     const app = try App.init(std.heap.c_allocator, .{ .io = init.io, .window = .{ .width = 600, .height = 360, .title = "ZeroWork Host Approval Preview", .titlebar = .custom_inset, .titlebar_height = 40 } });
     defer app.deinit();
     try app.runWith(mount);
+}
+
+fn parseTheme(id: []const u8) ![]const u8 {
+    for (@import("config/theme_presets.zig").ids) |known| if (std.mem.eql(u8, id, known)) return known;
+    return error.InvalidTheme;
 }

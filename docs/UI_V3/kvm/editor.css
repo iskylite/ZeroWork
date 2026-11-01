@@ -1,0 +1,64 @@
+/* Single-page BMC contribution. Shared connection controls/tokens remain authoritative. */
+.bmc-editor-app{background:var(--bg-term);padding:8px}
+.bmc-editor-modal{height:590.5px;max-height:710px;width:760px;flex-shrink:0}
+.bmc-editor-modal>.modal-head{height:52px;padding:14px 20px;flex-shrink:0}
+.bmc-editor-modal>.modal-body{padding:0;flex:1;min-height:0;overflow:auto;overscroll-behavior:contain}
+.bmc-form-content{display:flex;flex-direction:column;gap:12px;padding:0 40px 20px 24px;min-width:0}
+.bmc-form-content>*{flex-shrink:0}
+.bmc-form-content>.protocols{margin:0;height:40.5px;min-height:40.5px}
+.bmc-form-content>.section{height:30px;margin:8px 0 0;flex-shrink:0}
+.bmc-form-content .fields{gap:12px 16px;min-width:0}
+.bmc-form-content .field{min-width:0}
+.bmc-form-content .field>span{font-size:11px;line-height:16.5px}
+.bmc-form-content .field input:not([type=checkbox]):not([type=radio]),.bmc-form-content .field .v3-select-host{height:34px;min-height:34px}
+.bmc-form-content .field input:not([type=checkbox]):not([type=radio]){font-size:11px;line-height:16px;padding:5px 10px}
+.bmc-form-content .field .v3-select-trigger{height:34px;min-height:34px;font-size:11px;line-height:16px}
+.bmc-form-content .auth-options{height:34px;min-height:34px;font-size:11px}
+.bmc-form-content .password-row{display:flex;align-items:flex-end;gap:16px}
+.bmc-form-content .password-row>.credential-choice{height:34px;min-width:66px;flex:none;font-size:11px}
+.bmc-form-content .check input[type=checkbox]{width:14px!important;height:14px!important;min-height:14px!important;margin:0;padding:0;flex:0 0 14px}
+.bmc-form-content .access-options{gap:16px}
+.bmc-form-content .access-choice{height:61px;min-height:61px;padding:12px 14px}
+.bmc-form-content .access-choice strong{font-size:12px;line-height:18px;font-weight:600}
+.bmc-form-content .access-choice small{font-size:10px;line-height:15px;margin-top:4px}
+#route-editor{display:flex;flex-direction:column;gap:12px}
+#route-editor .route-list{gap:6px}
+#route-editor .route-hop{height:51px;min-height:51px;grid-template-columns:24px minmax(160px,1fr) 28px 28px 28px;padding:8px 10px;gap:8px}
+#route-editor .route-hop .v3-select-trigger{height:34px;min-height:34px;font-size:12px;line-height:18px}
+.route-actions{display:flex;gap:16px;align-items:center}
+.route-actions>.button{height:34px;padding:8px 14px;font-size:12px;line-height:18px}
+.bmc-form-content>.route-preview{margin:0;padding:12px 14px;font-size:11px;line-height:19.8px;overflow-wrap:anywhere}
+.bmc-advanced-toggle{align-self:flex-start;min-height:34px;height:34px;padding:8px 14px;font-size:12px;line-height:18px}
+.bmc-advanced-toggle span{margin-left:6px;color:var(--muted)}
+.bmc-advanced-toggle[aria-expanded=true] span{display:inline-block;transform:rotate(180deg)}
+.readonly-choice{height:34px;margin-top:21.5px;font-size:11px}
+#form-result{font-size:11px;line-height:17px;color:var(--muted);overflow-wrap:anywhere}
+.bmc-feedback{display:flex;align-items:center;gap:12px;min-height:34px;padding:4px 24px;flex-shrink:0}
+.bmc-feedback>#form-result{flex:1;min-width:0}
+#probe-log{height:26px;flex-shrink:0;padding:4px 8px;font-size:11px;line-height:17px;color:var(--accent)}
+#probe-log-overlay{z-index:60}
+.bmc-log-modal{width:560px;max-height:420px;border-radius:8px}
+.bmc-log-modal>.modal-head{padding:12px 16px}
+.bmc-log-modal h2{font-size:14px;line-height:24px;font-weight:600}
+.bmc-log-body{display:flex;flex-direction:column;gap:12px;padding:16px;min-height:0}
+.bmc-log-body>p{font-size:11px;line-height:17px}
+#probe-log-scroll{height:200px;min-height:0;overflow:auto;overscroll-behavior:contain}
+#probe-log-entries{margin:0;font:11px/20px var(--mono);white-space:pre-wrap;overflow-wrap:anywhere;color:var(--muted)}
+.bmc-log-actions{display:flex;gap:8px;flex-shrink:0}
+.bmc-log-actions>.button{height:34px;font-size:12px;line-height:18px}
+#form-result .test-result{margin-top:0}
+#form-result.error{color:var(--danger)}
+.field-error{font-size:11px;line-height:16.5px;color:var(--danger)}
+[aria-invalid=true]{background:var(--well)!important;border-color:var(--danger)!important}
+.bmc-editor-modal>.modal-foot{height:62px;min-height:62px;flex-wrap:nowrap;gap:8px;padding:14px 24px}
+.bmc-editor-modal>.modal-foot>.button{height:34px;min-height:34px;flex-shrink:0;padding:8px 14px;font-size:12px;line-height:18px;white-space:nowrap}
+#ssh-child{position:absolute;inset:0;z-index:40;background:var(--bg-term)}
+#ssh-child iframe{display:block;width:100%;height:100%;border:0;background:transparent}
+#closed-state{margin:auto;text-align:center;display:flex;flex-direction:column;gap:12px;align-items:center}
+.bmc-intent-output{font:10.5px/16px var(--mono);white-space:pre-wrap;overflow-wrap:anywhere}
+body.compact .bmc-editor-modal{height:400px!important;max-height:calc(100% - 32px)}
+body.compact .bmc-editor-modal>.modal-head{height:48px;padding:12px 18px}
+body.compact .bmc-editor-modal>.modal-body{padding:0}
+body.compact .bmc-form-content{padding:0 34px 12px 18px}
+body.compact .bmc-feedback{padding:4px 18px}
+body.compact .bmc-editor-modal>.modal-foot{height:54px;min-height:54px;padding:10px 18px}

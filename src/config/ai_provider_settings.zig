@@ -417,7 +417,7 @@ pub const ProviderView = struct {
         try heading.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, try controls.owned(self.render_scope.?, summary)));
         try result.header.appendChild(self.cx.allocator, heading);
         const badge = try ui.text(self.cx, "", .{ .font_size = 10, .line_height = 16.0 / 10.0, .color = if (p.enabled) S.theme.current().ok_ink else S.theme.current().fg_2 });
-        badge.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 52 }, .top = .{ .px = 21 } }, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = if (p.enabled) S.theme.current().ok_ink.withAlpha(26) else S.theme.current().hover, .border = .{ .radius = 5 } });
+        badge.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 52 }, .top = .{ .px = 21 } }, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = if (p.enabled) S.theme.popupInset() else S.theme.current().hover, .border = .{ .radius = 5 } });
         badge.meta.ownership.meta.test_id = try self.id(i, null, "status");
         try self.badges.append(self.scope.allocator, .{ .index = i, .node = badge });
         try result.item.appendChild(self.cx.allocator, badge);
@@ -750,7 +750,7 @@ pub const ProviderView = struct {
         const tip = try self.tooltip(help);
         var style = S.button(size, false);
         style.background = if (active) S.theme.popupSelection() else if (blocked) S.theme.current().well else ui.Color.TRANSPARENT;
-        style.text_color = if (active) S.theme.current().accent else S.theme.current().fg_2;
+        style.text_color = if (active) S.theme.current().accent_ink else S.theme.current().fg_2;
         const state = try scope.allocator.create(ButtonState);
         state.* = .{ .view = self, .action = action, .provider = i, .model = j, .fallback_blocked = blocked, .disabled = try scope.createSignal(bool, blocked or self.disabled.peek()) };
         try scope.onCleanup(ButtonState, state, ButtonState.cleanup);

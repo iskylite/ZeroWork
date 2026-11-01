@@ -30,7 +30,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
     const status = try ui.boxStyled(cx, S.statusRow, .{});
 
     const icon_slot = try ui.box(cx, .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .align_items = .center, .justify = .center, .flex_shrink = 0 }, .{});
-    try icon_slot.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.circle_alert, S.warning(cx.tokens).color, S.icon()));
+    try icon_slot.appendChild(cx.allocator, try @import("app_theme.zig").icon(cx, ui.icons.circle_alert, "warn_ink", S.icon()));
     try status.appendChild(cx.allocator, icon_slot);
     const title = try ui.textStyled(cx, S.title, state.title);
     title.setStyleInline(cx.allocator, .{ .flex_shrink = 0 });
@@ -90,6 +90,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
             button_style.min_width = 53;
         }
         const button = try ui.widgets.Button(.{ .label = if (action == .answer) action_label else if (action == .regenerate) "新计划" else label, .icon_only = false, .icon_asset = null, .icon_size = @as(f32, 12), .a11y_label = label, .variant = @as(ui.widgets.button.ButtonVariant, if (action == .answer) .primary else .secondary), .hover_style = .{ .background = @import("app_theme.zig").current().hover }, .disabled = !enabled, .base_style = button_style, .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+        if (action == .answer) try @import("app_theme.zig").stylePrimary(cx, scope, button, null);
         button.meta.ownership.meta.test_id = id;
         try action_row.appendChild(cx.allocator, button);
     }

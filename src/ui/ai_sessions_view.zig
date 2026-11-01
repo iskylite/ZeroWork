@@ -14,6 +14,8 @@ pub const View = struct {
     content: *ui.Node,
     root: *ui.Node,
     surface: *ui.Node,
+    chrome: *ui.Node,
+    painted_colors: T.Colors,
     scroll: ui.widgets.ScrollAreaResult,
     rows: ?*ui.Scope = null,
     pending: ?u64 = null,
@@ -33,7 +35,7 @@ pub const View = struct {
         scroll.content.setStyleInline(cx.allocator, S.menu());
         scroll.container.meta.ownership.meta.test_id = "ai.sessions.menu";
         try popup.content.appendChild(cx.allocator, scroll.container);
-        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .confirmation = confirmation, .highlighted = try scope.createSignal(u64, 0), .content = scroll.content, .root = popup.wrapper, .surface = scroll.container, .scroll = scroll, .detail = undefined, .dialog = undefined, .control_styles = .{ try scope.createSignal(ui.BoxStyle, S.control(false)), try scope.createSignal(ui.BoxStyle, S.control(true)) } });
+        const self = try scope.createState(View, .{ .cx = cx, .scope = popup.scope, .hooks = hooks, .open = open, .confirmation = confirmation, .highlighted = try scope.createSignal(u64, 0), .content = scroll.content, .root = popup.wrapper, .surface = scroll.container, .chrome = popup.chrome, .painted_colors = T.current(), .scroll = scroll, .detail = undefined, .dialog = undefined, .control_styles = .{ try scope.createSignal(ui.BoxStyle, S.control(false)), try scope.createSignal(ui.BoxStyle, S.control(true)) } });
         const modal = try ui.widgets.Modal(.{ .open = confirmation, .width = 320, .max_height = 220, .background = T.current().overlay }).mount(scope, cx);
         if (!modal.portaled) if (cx.root) |root| try root.appendChild(cx.allocator, modal.overlay);
         self.dialog = modal.dialog;
@@ -57,7 +59,48 @@ pub const View = struct {
         accept.meta.ownership.meta.test_id = "ai.session.close.accept";
         try actions.appendChild(cx.allocator, accept);
         try modal.body.appendChild(cx.allocator, actions);
+        try scope.createEffect(.{ .view = self, .publication = try cx.themeSignal(scope) }, struct {
+            fn apply(ctx: anytype) void {
+                _ = ctx.publication.get();
+                ctx.view.retheme();
+            }
+        }.apply);
         return self;
+    }
+    fn retheme(self: *View) void {
+        const next = T.current();
+        if (@import("std").meta.eql(self.painted_colors, next)) return;
+        repaint(self.content, self.painted_colors);
+        repaint(self.dialog, self.painted_colors);
+        self.chrome.setStyleInline(self.cx.allocator, S.popover());
+        self.dialog.setStyleInline(self.cx.allocator, S.dialog());
+        _ = self.title_icon.setTint(next.warn_ink);
+        self.control_styles[0].set(S.control(false));
+        self.control_styles[1].set(S.control(true));
+        self.painted_colors = next;
+        self.cx.requestRedraw();
+    }
+    fn repaint(node: *ui.Node, previous: T.Colors) void {
+        node.setBackground(remap(node.getBackground(), previous));
+        if (node.getText()) |text| node.setTextColor(T.remapUiInk(text.color, previous));
+        if (node.getIcon()) |icon| {
+            var tint = T.remapUiInk(icon.tint, previous);
+            if (node.meta.ownership.meta.test_id) |id| {
+                inline for ([_]@import("../ai/assistant_store.zig").Phase{ .idle, .running, .approval, .done, .failed, .stopped }) |phase| {
+                    if (@import("std").mem.eql(u8, id, phaseTestId(phase))) tint = phaseColor(phase);
+                }
+            }
+            _ = node.setTint(tint);
+        }
+        for (node.children.items) |child| repaint(child, previous);
+    }
+    fn remap(color: ui.Color, previous: T.Colors) ui.Color {
+        if (T.remapUiSurface(color, previous)) |next| return next;
+        if (ui.Color.eql(color, previous.accent.withAlpha(24))) return T.current().accent.withAlpha(24);
+        inline for (@typeInfo(T.Colors).@"struct".field_names) |field| {
+            if (ui.Color.eql(color, @field(previous, field))) return @field(T.current(), field);
+        }
+        return color;
     }
     fn titleStyle(_: *const ui.ThemeTokens) ui.TextStyle {
         var s = S.text(true);
@@ -163,8 +206,9 @@ pub const View = struct {
             row.behavior.events.on_event = Row.event;
             row.behavior.events.event_context = state;
             const hovered = try ui.hooks.useHover(scope, row);
-            try scope.createEffect(.{ .cx = self.cx, .row = row, .hovered = hovered, .highlighted = self.highlighted, .id = entry.id }, struct {
+            try scope.createEffect(.{ .cx = self.cx, .row = row, .hovered = hovered, .highlighted = self.highlighted, .id = entry.id, .publication = try self.cx.themeSignal(scope) }, struct {
                 fn run(ctx: anytype) void {
+                    _ = ctx.publication.get();
                     ctx.row.setStyleInline(ctx.cx.allocator, S.rowBackground(ctx.highlighted.get() == ctx.id, ctx.hovered.get()));
                     ctx.cx.requestRedraw();
                 }
@@ -188,7 +232,7 @@ pub const View = struct {
             owner.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 130 }, .min_width = 0, .height = .{ .px = 15 }, .flex_shrink = 1 });
             try copy.appendChild(self.cx.allocator, owner);
             const select = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get("arrow-up-right").?, .icon_size = 14, .a11y_label = "继续此 AI 会话", .base_style = @as(ui.BoxStyle, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .font_size = 11, .font_weight = 400, .text_color = T.current().accent_ink }), .hover_style = S.actionHover(false), .on_click = self.cx.on(Row, state, Row.select) }).mount(scope, self.cx);
-            select.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .font_size = 11, .text_color = T.current().accent });
+            select.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = .{}, .font_size = 11, .text_color = T.current().accent_ink });
             state.actions_start = select;
             select.meta.ownership.meta.test_id = try @import("std").fmt.bufPrint(&state.select_id, "ai.session.jump.{d}", .{entry.id});
             try row.appendChild(self.cx.allocator, select);

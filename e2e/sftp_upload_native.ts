@@ -135,7 +135,7 @@ try {
   appEnded=new Promise<void>(done=>app!.once("close",()=>done()));app.once("error",e=>{appError=e;});report.pid=app.pid;
   await waitForServerReady(); assert.equal(Number(JSON.parse(await readFile(join(rpc,"owner.json"),"utf8")).pid),app.pid);
   assert((await resizeWindow(1440,900)).ok); await click("workspace.empty.local");await visible("terminal.surface"); const localTab=(await tabs())[0].test_id;
-  await click("sidebar.host");await click("sidebar.host.connect");await settleSftp();
+  await click("sidebar.host");await settleSftp();
   const attached=await waitFor(async()=>(await traces()).find(t=>t.trace_prefix==="SFTP_WORKSPACE_TRACE"&&t.event==="attached")??null,10000); report.attachment=attached;
   const fileTab=(await tabs()).find(n=>n.test_id!==localTab).test_id;
   const authenticatedHosts=await readFile(join(data,"hosts.toml"),"utf8");

@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "profile_id": "sugon_1_80_oem_rfb",
+  "evidence_date": "2026-11-01",
+  "identity": {
+    "manufacturer": "Sugon",
+    "product": "SuperPod",
+    "processor_vendor": "Hygon",
+    "bmc_chip": "AST2600-A3",
+    "firmware": "1.80",
+    "oem_namespace": "Public",
+    "kvm_login_resource": "/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions",
+    "oem_rfb": true
+  },
+  "public_material": {
+    "source_resource": "/js/app.0bc71eb0.js",
+    "source_sha256": "4470c19b553d1e64cf529c1709843ce334b110501d090b4dc02c2a2e74ca95c7",
+    "public_key_file": "sugon_1_80_rsa2048.pem",
+    "public_key_sha256": "3f3bd3f8a4837161f4dff9c6cce1110d38b2eb1d873d39c6c1d33173eccd71d6",
+    "algorithm": "RSA2048/PKCS#1-v1.5/base64"
+  },
+  "rest_common_headers": {
+    "From": "WebUI",
+    "X-Requested-With": "XMLHttpRequest"
+  },
+  "web_session": {
+    "method": "POST",
+    "resource": "/redfish/v1/SessionService/Sessions",
+    "request_fields": [
+      "UserName",
+      "Password"
+    ],
+    "status": 201,
+    "error_codes": [],
+    "token_header": "X-Auth-Token",
+    "session_location_header": "Location",
+    "session_id_field": "Id"
+  },
+  "kvm_session": {
+    "method": "POST",
+    "resource": "/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions",
+    "request_type": "WEB",
+    "authentication_field": "KvmAuthentication",
+    "authentication_source": "own_web_session_id",
+    "status": 201,
+    "error_codes": [],
+    "token_header": "X-Auth-Token",
+    "session_id_field": "Id"
+  },
+  "websocket": {
+    "path": "/kvm/0",
+    "status": 101,
+    "subprotocol_source": "own_kvm_session_token",
+    "subprotocol_echo": true,
+    "client_binary_preamble_hex": "4b564d20"
+  },
+  "rfb": {
+    "version": "RFB 003.008\n",
+    "oem_server_context": [
+      105,
+      1,
+      0,
+      0
+    ],
+    "oem_client_reply": [
+      106,
+      1,
+      0,
+      0
+    ],
+    "oem_continue": [
+      104,
+      0,
+      0,
+      0
+    ],
+    "selected_security_type": 1,
+    "server_init": {
+      "width": 1024,
+      "height": 768,
+      "bpp": 32,
+      "depth": 32
+    },
+    "raw_first_frame": {
+      "rectangles": 1,
+      "bytes": 3145728,
+      "sha256": "3bb95c8d5adda0e03f4cde703cbf316adbc2642d8ad9012683dfc6ea1ab25eaf"
+    }
+  },
+  "logout": {
+    "web": {
+      "method": "DELETE",
+      "resource_source": "own_web_session_Location",
+      "status": 200,
+      "message_id": "Base.1.19.Success",
+      "severity": "OK"
+    },
+    "kvm": {
+      "method": "DELETE",
+      "resource_template": "/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions/{own_id}",
+      "status": 200,
+      "message_id": "Base.1.19.Success",
+      "severity": "OK"
+    }
+  },
+  "verification_limits": {
+    "management_writes_verified": false,
+    "boot_writes_verified": false,
+    "remote_input_effects_verified": false,
+    "dynamic_tight_verified": false
+  }
+}

@@ -29,7 +29,10 @@ try{
  await h.waitFor(async()=>(await h.query('terminal.command.metadata.code')).find((n:any)=>shown(n)&&text(n).includes('1'))??null,15000);
  assert((await h.query('terminal.command.status')).some(shown));assert(!(await h.query('terminal.command.metadata.ai')).some(shown));await dismissHint();await capture('manual-command-complete');
  report.checks.push('Actual Local command completion exposes independent status gutter, numeric exit1, elapsed; manual source has no AI badge');
- const code=await visible('terminal.command.metadata.code'),surface=await visible('terminal.surface');
+ const code=await visible('terminal.command.metadata.code'),surface=await visible('terminal.surface'),status=await visible('terminal.command.status');
+ assert.equal(text(code),'1','right metadata must contain only the numeric exit code');
+ assert.equal(status.rect.x-surface.rect.x,5,'status gutter must include the added 2pt outer inset');
+ assert.equal(status.rect.y,code.rect.y,'left and right markers must share the command row');
  await h.mouseMove(surface.rect.x+80,code.rect.y+code.rect.h/2);await hidden('terminal.command.metadata');await capture('command-hover-hidden');
  await h.mouseMove(10,10);await visible('terminal.command.metadata');report.checks.push('Pointer over command hides complete right metadata; leaving restores it');
  await submit('false');await h.waitFor(async()=>(await h.query('terminal.command.metadata.code')).filter((n:any)=>shown(n)&&text(n).includes('1')).length>=2||null,15000);
@@ -51,6 +54,27 @@ try{
  await submit(longCommand);await h.waitFor(async()=>(await h.query('terminal.command.metadata.code')).filter((n:any)=>shown(n)&&text(n).includes('0')).length>=2||null,15000);await capture('long-command-first-row');
  const groups=(await h.query('terminal.command.metadata')).filter(shown).sort((a:any,b:any)=>a.rect.y-b.rect.y),last=groups.at(-1);assert(last);const countBefore=groups.length;
  await h.mouseMove(surface.rect.x+80,last.rect.y+last.rect.h+2);await h.waitFor(async()=>(await h.query('terminal.command.metadata')).filter(shown).length===countBefore-1||null,8000);await capture('long-command-continuation-hover');await h.mouseMove(10,10);await h.waitFor(async()=>(await h.query('terminal.command.metadata')).filter(shown).length===countBefore||null,8000);report.checks.push('Actual wrapped long command has a single first-row group; hover on its continuation hides only that command metadata and leaving restores it');
+
+ await submit('clear');await hidden('terminal.command.status');await hidden('terminal.command.metadata');await capture('clear-removes-old-markers');
+ await submit("printf 'ZW_AFTER_CLEAR_A\\nZW_OUTPUT_A\\n'; true");
+ await h.waitFor(async()=>(await h.query('terminal.command.metadata.code')).find((n:any)=>shown(n)&&text(n)==='0')??null,15000);
+ await submit("printf 'ZW_AFTER_CLEAR_B\\nZW_OUTPUT_B\\n'; false");
+ await h.waitFor(async()=>(await h.query('terminal.command.metadata.code')).find((n:any)=>shown(n)&&text(n)==='1')??null,15000);await dismissHint();
+ async function alignedAfterClear(){
+  const statuses=(await h.query('terminal.command.status')).filter(shown).sort((a:any,b:any)=>a.rect.y-b.rect.y);
+  const codes=(await h.query('terminal.command.metadata.code')).filter(shown).sort((a:any,b:any)=>a.rect.y-b.rect.y);
+  assert.equal(statuses.length,2,'only the two retained commands may have status markers');assert.deepEqual(codes.map(text),['0','1']);
+  const rows=[];for(let index=0;index<8;index++)rows.push(...(await h.query(`terminal.surface.row.${index}`)).filter(shown));
+  for(const [i,marker]of statuses.entries()){
+   const row=rows.find((r:any)=>Math.abs(r.rect.y-marker.rect.y)<0.5);assert(row,'marker must align with an actual grid row');
+   const body=(row.children??[]).filter((n:any)=>shown(n)&&n.tag==='text'&&!n.test_id?.startsWith('terminal.command.')).map(text).join('');
+   assert(body.includes(i===0?'ZW_AFTER_CLEAR_A':'ZW_AFTER_CLEAR_B'),'marker must be on the submitted command, not its output or an empty row');
+   assert.equal(marker.rect.y,codes[i].rect.y);
+  }
+  report.clear_geometry={statuses:statuses.map((n:any)=>n.rect),codes:codes.map((n:any)=>({text:text(n),rect:n.rect}))};
+ }
+ await alignedAfterClear();await capture('new-commands-after-clear');await h.resizeWindow(1000,700);await h.sleep(250);await alignedAfterClear();await capture('new-commands-resized');await h.resizeWindow(1280,800);
+ report.checks.push('Clear removes both old decorations while retained history remains; subsequent success/failure markers align with their actual submitted command rows before and after resize');
 
  await click('toolbar.settings');const search=await visible('settings.search');await h.clickAt(search.rect.x+40,search.rect.y+search.rect.h/2);await h.type_('command_info');await click('settings.toggle.command_info');await click('settings.save');await click('settings.close');await h.mouseMove(10,10);await hidden('terminal.command.metadata');assert((await h.query('terminal.command.status')).some(shown));report.checks.push('Saving global command_info=false immediately hides right metadata on the existing Local session while status gutter remains visible');await capture('right-hidden-status-retained');
  assert((await h.request('POST','/quit')).ok);report.exit=await Promise.race([ended,h.sleep(20000).then(()=>null)]);assert(report.exit&&report.exit.code===0&&report.exit.signal===null,'isolated App did not quit cleanly');report.status='passed';

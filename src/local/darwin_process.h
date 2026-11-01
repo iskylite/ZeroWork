@@ -17,12 +17,17 @@ ZW_LOCAL_PROCESS *zw_local_start_pty(const char *cwd, const char *term,
     unsigned short cols, unsigned short rows, ZW_LOCAL_FAILURE *failure);
 ZW_LOCAL_PROCESS *zw_local_start_exec(const char *cwd, const char *command,
     ZW_LOCAL_FAILURE *failure);
+/* Called synchronously after native preparation, immediately before spawn.
+ * Nonzero rejects admission; no child exists and all prepared resources close. */
+typedef int (*zw_local_start_check)(void *context);
+ZW_LOCAL_PROCESS *zw_local_start_exec_checked(const char *cwd, const char *command,
+    ZW_LOCAL_FAILURE *failure, zw_local_start_check check, void *context);
 /* Read: 1 bytes, 0 would-block, 2 EOF, -1 error. Empty buffers do not imply EOF. */
 int zw_local_read(ZW_LOCAL_PROCESS *, int stream, unsigned char *, size_t, size_t *);
 int zw_local_write(ZW_LOCAL_PROCESS *, const unsigned char *, size_t, size_t *);
 int zw_local_resize(ZW_LOCAL_PROCESS *, unsigned short cols, unsigned short rows);
 int zw_local_dimensions(ZW_LOCAL_PROCESS *, unsigned short *cols, unsigned short *rows);
-/* Exit: 0 still running, 1 reaped (kind 1 exit / 2 signal), -1 unknown. */
+/* Exit: 0 exit/ownership pending, 1 reaped (kind 1 exit / 2 signal), -1 unknown. */
 int zw_local_poll_exit(ZW_LOCAL_PROCESS *, ZW_LOCAL_EXIT *);
 int zw_local_foreground(ZW_LOCAL_PROCESS *, ZW_LOCAL_FOREGROUND *);
 int zw_local_interrupt_foreground(ZW_LOCAL_PROCESS *);
@@ -31,8 +36,8 @@ const char *zw_local_initial_cwd(ZW_LOCAL_PROCESS *);
 /* Kernel cwd, not parsed from a prompt. 0 means currently unknown. */
 int zw_local_cwd(ZW_LOCAL_PROCESS *, char *buffer, size_t capacity);
 /* Idempotent. 0 awaiting, 1 released, 2 unknown; HUP / +2s TERM / +2s KILL.
- * A group that exits between the ownership scan and signal verification is
- * re-observed for at most 250ms; no signal uses the invalidated identities.
+ * A leader/group that exits during ownership observation is re-observed for
+ * at most 250ms; no signal uses the invalidated identities or an unproved SID.
  * The consumer must continue draining output through EOF before release. */
 int zw_local_close_step(ZW_LOCAL_PROCESS *, uint64_t monotonic_ms);
 /* Last failed ownership/exit observation; diagnostic evidence, never release. */

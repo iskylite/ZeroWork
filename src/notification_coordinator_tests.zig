@@ -282,6 +282,76 @@ test "notification all three saved event switches suppress real final facts with
     }
 }
 
+test "notification representative uses original fact order and migration preserves visible presentation" {
+    var value = try notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{});
+    defer value.deinit();
+    var first: notifications.NotificationEvent = .{ .definition_id = "host.reconnect", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 1, .event_revision = 1, .phase = .failed, .title = "First source", .attention = .{ .kind = .connection_stopped, .requires_action = true, .time_sensitive = true, .incident_id = 11 } };
+    const first_id = (try value.publishNotification(first, day)).fact_id;
+    var second = first;
+    second.owner.content = other;
+    second.operation_id = 2;
+    second.title = "Second source";
+    second.attention.incident_id = 22;
+    const second_id = (try value.publishNotification(second, day)).fact_id;
+    var visible: [3]*const notifications.NotificationRecord = undefined;
+    _ = value.visibleNotifications(1, 0, true, &visible);
+    const presentation = value.recordFor(second_id).?.presentation;
+    try std.testing.expectEqual(notifications.Presentation.visible, presentation);
+    second.event_revision = 2;
+    second.attention.incident_id = 11;
+    _ = try value.publishNotification(second, day);
+    try std.testing.expectEqual(presentation, value.recordFor(second_id).?.presentation);
+    try std.testing.expect(value.isRepresentative(value.recordFor(first_id).?.*));
+    try std.testing.expect(!value.isRepresentative(value.recordFor(second_id).?.*));
+    second.event_revision = 3;
+    _ = try value.publishNotification(second, day);
+    try std.testing.expect(value.isRepresentative(value.recordFor(first_id).?.*));
+    first.event_revision = 2;
+    first.phase = .succeeded;
+    first.attention.resolved = true;
+    _ = try value.publishNotification(first, day);
+    try std.testing.expect(value.isRepresentative(value.recordFor(second_id).?.*));
+    second.event_revision = 4;
+    second.phase = .succeeded;
+    second.attention.resolved = true;
+    _ = try value.publishNotification(second, day);
+    try std.testing.expect(value.isRepresentative(value.recordFor(first_id).?.*));
+}
+
+test "notification migration retains expired presentation and reconciles undisplayed source membership" {
+    var value = try notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{});
+    defer value.deinit();
+    const target: notifications.NotificationEvent = .{ .definition_id = "host.reconnect", .owner = .{ .window_id = 1, .content = .{ .session = .{ .session_id = @fromBackingInt(22), .generation = 1 } } }, .operation_id = 3, .event_revision = 1, .phase = .failed, .title = "Existing incident", .attention = .{ .kind = .connection_stopped, .requires_action = true, .time_sensitive = true, .app_focused = false, .incident_id = 22 } };
+    _ = try value.publishNotification(target, day);
+    var first = target;
+    first.owner.content = owner;
+    first.operation_id = 1;
+    first.attention.app_focused = true;
+    first.attention.incident_id = 11;
+    const first_id = (try value.publishNotification(first, day)).fact_id;
+    var second = first;
+    second.owner.content = other;
+    second.operation_id = 2;
+    _ = try value.publishNotification(second, day);
+    var visible: [3]*const notifications.NotificationRecord = undefined;
+    try std.testing.expectEqual(@as(usize, 1), value.visibleNotifications(1, 0, true, &visible));
+    try std.testing.expectEqual(first_id, visible[0].fact_id);
+    try std.testing.expectEqual(@as(usize, 2), value.incidentSourceCount(value.recordFor(first_id).?.*));
+    second.event_revision = 2;
+    second.attention.incident_id = 22;
+    _ = try value.publishNotification(second, day);
+    try std.testing.expectEqual(@as(usize, 1), value.incidentSourceCount(value.recordFor(first_id).?.*));
+    try std.testing.expectEqual(@as(usize, 1), value.visibleNotifications(1, 1, true, &visible));
+    try std.testing.expectEqual(first_id, visible[0].fact_id);
+    try std.testing.expectEqual(@as(usize, 0), value.visibleNotifications(1, 5000, true, &visible));
+    try std.testing.expectEqual(notifications.Presentation.expired, value.recordFor(first_id).?.presentation);
+    first.event_revision = 2;
+    first.attention.incident_id = 22;
+    _ = try value.publishNotification(first, day);
+    try std.testing.expectEqual(notifications.Presentation.expired, value.recordFor(first_id).?.presentation);
+    try std.testing.expectEqual(@as(usize, 0), value.visibleNotifications(1, 5001, true, &visible));
+}
+
 test "notification incidents retain partly resolved sources under local history pressure and scope cause IDs" {
     var value = try notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{});
     defer value.deinit();
@@ -319,4 +389,29 @@ test "notification incidents retain partly resolved sources under local history 
     try std.testing.expectEqual(@as(usize, 2), value.historyCount(true));
     value.clearHistory();
     try std.testing.expectEqual(@as(usize, 2), value.historyCount(true));
+}
+
+test "notification visible migration preserves the original remaining deadline" {
+    for ([_]u64{ 22, 33 }) |destination| {
+        var value = try notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{});
+        defer value.deinit();
+        var first: notifications.NotificationEvent = .{ .definition_id = "host.reconnect", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 1, .event_revision = 1, .phase = .failed, .title = "Visible source", .attention = .{ .kind = .connection_stopped, .requires_action = true, .time_sensitive = true, .incident_id = 11 } };
+        var existing = first;
+        existing.owner.content = other;
+        existing.operation_id = 2;
+        existing.attention.app_focused = false;
+        existing.attention.incident_id = 22;
+        _ = try value.publishNotification(existing, day);
+        const id = (try value.publishNotification(first, day)).fact_id;
+        var visible: [3]*const notifications.NotificationRecord = undefined;
+        _ = value.visibleNotifications(1, 0, true, &visible);
+        _ = value.visibleNotifications(1, 3000, true, &visible);
+        try std.testing.expectEqual(@as(u64, 1000), value.recordFor(id).?.remaining_ms);
+        first.event_revision = 2;
+        first.attention.incident_id = destination;
+        _ = try value.publishNotification(first, .{ .monotonic_ms = 3000, .local_minute = 0 });
+        try std.testing.expectEqual(@as(u64, 1000), value.recordFor(id).?.remaining_ms);
+        try std.testing.expectEqual(@as(usize, 1), value.visibleNotifications(1, 3999, true, &visible));
+        try std.testing.expectEqual(@as(usize, 0), value.visibleNotifications(1, 4000, true, &visible));
+    }
 }

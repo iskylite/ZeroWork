@@ -269,6 +269,13 @@ pub const View = struct {
         S.tuneInput(&self.input);
         self.hover_style.set(S.hover());
         self.primary_style.set(S.button(if (self.mode == .created) 96 else 116, 30, true, self.mode == .delete_empty));
+        const paint = @import("shell_styles.zig").emptyButton(true);
+        const show_primary = self.mode != .delete_empty and !self.disabled.peek();
+        self.primary.setStyle(self.cx.allocator, .gradient, if (show_primary) paint.gradient else null);
+        self.primary.setStyleInline(self.cx.allocator, .{
+            .shadow = if (show_primary) paint.shadow else .{ .blur = 0, .color = ui.Color.TRANSPARENT },
+            .inset_shadow = if (show_primary) paint.inset_shadow else .{ .blur = 0, .color = ui.Color.TRANSPARENT },
+        });
         self.secondary_style.set(S.button(if (self.mode == .created) 116 else 84, 30, false, false));
         const title = switch (self.mode) {
             .create => "创建资产分组",

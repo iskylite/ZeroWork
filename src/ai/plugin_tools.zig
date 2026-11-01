@@ -35,6 +35,9 @@ pub const Invocation = struct {
     arguments: std.json.Value,
     arguments_json: []const u8,
     arguments_hash: [32]u8,
+    /// Issued by the generic content host only after approval/preflight. This
+    /// borrowed proof is checked by input services at every effect boundary.
+    automation_proof: ?@import("../host/content_context.zig").AutomationProof = null,
 };
 pub const ToolBinding = struct {
     plugin_id: []const u8,

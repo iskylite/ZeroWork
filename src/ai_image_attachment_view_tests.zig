@@ -92,6 +92,24 @@ test "AI images inline retain escape remove and immutable history use one captur
     try std.testing.expectApproxEqAbs(@as(f32, 800 * 0.78), fixture.view.panel.globalRect().w, 0.1);
     try std.testing.expect(fixture.view.preview_image.globalRect().h > 350);
     try std.testing.expectEqualStrings("/original/captured.png", fixture.view.identity.getText().?.content);
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    const raster = fixture.view.raster;
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        try @import("ui_theme_test_support.zig").publish(cx, scope);
+        try cx.setTestFrameStep(16);
+        for (0..24) |_| {
+            cx.advanceFrameClock();
+            _ = cx.render();
+        }
+        try std.testing.expect(fixture.view.isPreviewOpen());
+        try std.testing.expectEqual(raster, fixture.view.raster);
+        try std.testing.expectEqualStrings("/original/captured.png", fixture.view.identity.getText().?.content);
+        try std.testing.expectEqual(theme.current().fg_1, fixture.view.identity.getText().?.color);
+        try std.testing.expectEqual(@as(usize, 1), fixture.draft.items.items.len);
+    }
     click(cx, fixture.view.keep_button);
     try std.testing.expect(!fixture.view.isPreviewOpen());
     try std.testing.expectEqual(@as(usize, 1), fixture.draft.items.items.len);

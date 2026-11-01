@@ -8,5 +8,5 @@ pub fn bounds(cx: *ui.Cx, content: ?*ui.Node) ui.ComputedRect {
 }
 pub fn panel(rect: ui.ComputedRect, image: bool) ui.BoxStyle {
     const theme = @import("app_theme.zig");
-    return .{ .position = .absolute, .inset = .{ .left = .{ .px = rect.x }, .top = .{ .px = rect.y } }, .width = .{ .px = rect.w }, .height = .{ .px = rect.h }, .max_height = rect.h, .padding = .{}, .gap = 0, .direction = .column, .flex_shrink = 0, .background = theme.current().overlay.withAlpha(if (image) 51 else 245), .glass = theme.overlayGlass(), .border = .{ .width = 1, .color = theme.current().border, .radius = 14 }, .shadow = .{ .offset_y = 16, .blur = 40, .color = theme.current().shadow }, .overflow = .hidden };
+    return .{ .position = .absolute, .inset = .{ .left = .{ .px = rect.x }, .top = .{ .px = rect.y } }, .width = .{ .px = rect.w }, .height = .{ .px = rect.h }, .max_height = rect.h, .padding = .{}, .gap = 0, .direction = .column, .flex_shrink = 0, .background = theme.current().overlay.withAlpha(if (image) 51 else 245), .glass = theme.overlayGlass(), .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 14 }, .shadow = .{ .offset_y = 16, .blur = 40, .color = theme.current().shadow }, .overflow = .hidden };
 }

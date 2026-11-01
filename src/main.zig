@@ -65,10 +65,11 @@ const ProcessWindows = struct {
         nav.app_runtime = app;
         try nav.loadEmptyLogo();
         if (nav.settings) |settings| settings.app_runtime = app;
-        _ = @import("ui/plugin_window_host.zig").Host.mount(app, nav.application_host orelse return error.MissingApplicationController, process_notifications, if (nav.ai) |ai| ai.notification_window else null) catch |err| {
+        const plugin_window = @import("ui/plugin_window_host.zig").Host.mount(app, nav.application_host orelse return error.MissingApplicationController, process_notifications, if (nav.ai) |ai| ai.notification_window else null) catch |err| {
             applog.err(.app, "plugin window services initialization: {s}", .{@errorName(err)});
             return err;
         };
+        if (nav.wizard) |wizard| wizard.probe_host = plugin_window.probes.?;
         if (nav.ai) |ai| if (ai.images_view) |view| {
             view.app = app;
         };
@@ -2049,7 +2050,7 @@ const AiHost = struct {
                 break :blk @import("ui/ai_message_view.zig").mountWithWidth(cx, self.live_scope.?, view.body, if (self.card_box) |box| @max(160, box.globalRect().w - 30) else 540) catch return;
             } else if (view.kind == .text) self.markdown(view.body) catch return else ui.text(cx, view.body, .{
                 .font_size = if (is_code) 11 else @import("ui/ai_assistant_styles.zig").body_font_size,
-                .color = if (is_code) app_theme.current().ok else app_theme.current().fg_1,
+                .color = if (is_code) app_theme.current().ok_ink else app_theme.current().fg_1,
                 .wrap = .word,
                 .line_height = if (is_code) 1.5 else @import("ui/ai_assistant_styles.zig").body_line_height,
                 .use_monospace_font = is_code,
@@ -3641,7 +3642,7 @@ const AiHost = struct {
         try bridge.callController(&refresh_state, Refresh.run, cancel);
         return refresh_state.result;
     }
-    fn acknowledgeHostNotice(raw: *anyopaque, revision: u64) !void {
+    fn acknowledgeHostNotice(raw: *anyopaque, revision: u64, cancel: ?*ai_provider.CancelToken) !void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         const runtime = if (self.lifecycle_runtime) |*value| value else return;
         try runtime.acknowledgeNotice(self.request_host_context orelse return, revision);
@@ -3657,7 +3658,7 @@ const AiHost = struct {
             }
         };
         var ack: Acknowledge = .{ .host = self, .revision = revision };
-        try self.tool_bridge.callController(&ack, Acknowledge.run, &self.request_cancel);
+        try self.tool_bridge.callController(&ack, Acknowledge.run, cancel);
     }
     fn captureSubmittedHistory(self: *AiHost, conversation_id: @import("host/identity.zig").ConversationId) void {
         const driver = self.execution_driver orelse return;
@@ -3675,7 +3676,7 @@ const AiHost = struct {
         }
     }
 
-    fn acceptedHostResult(raw: *anyopaque, context: @import("ai/host_tools.zig").Context, name: []const u8, result: *const @import("ai/host_tools.zig").Result) !void {
+    fn acceptedHostResult(raw: *anyopaque, context: @import("ai/host_tools.zig").Context, name: []const u8, result: *const @import("ai/host_tools.zig").Result, cancel: ?*ai_provider.CancelToken) !void {
         const self: *AiHost = @ptrCast(@alignCast(raw));
         const active = self.request_host_context orelse return error.ScopeChanged;
         if (!active.conversation_id.eql(context.conversation_id) or !active.task_id.eql(context.task_id)) return error.ScopeChanged;
@@ -3706,7 +3707,7 @@ const AiHost = struct {
                 }
             };
             var capture: Capture = .{ .host = self, .context = context, .run = run };
-            try self.tool_bridge.callController(&capture, Capture.apply, &self.request_cancel);
+            try self.tool_bridge.callController(&capture, Capture.apply, cancel);
         }
         if (result.status != .succeeded) return;
         var decoded: [64]u8 = undefined;
@@ -3723,7 +3724,7 @@ const AiHost = struct {
                 }
             };
             var capture: CaptureRecording = .{ .host = self, .context = context };
-            try self.tool_bridge.callController(&capture, CaptureRecording.run, &self.request_cancel);
+            try self.tool_bridge.callController(&capture, CaptureRecording.run, cancel);
         }
         if (!std.mem.eql(u8, logical, "host.close_session")) return;
         for (result.blocks) |block| {
@@ -5788,6 +5789,8 @@ const SettingsHost = struct {
     navigation: ?*ui.Node = null,
     header_title: ?*ui.Node = null,
     header_icon: ?*ui.Node = null,
+    identity_label: ?*ui.Node = null,
+    identity_icon: ?*ui.Node = null,
     layout: ?*ui.Node = null,
     /// Right content column (rebuilt on page switch / save / discard).
     content: *ui.Node = undefined,
@@ -6450,10 +6453,12 @@ const SettingsHost = struct {
             discard_button.meta.ownership.meta.test_id = "settings.confirmation.discard";
             try actions.appendChild(self.allocator, discard_button);
             const save_button = try ui.widgets.Button(.{ .label = "保存关闭", .variant = .primary, .on_click = self.cx.on(SettingsHost, self, saveAndClose) }).mount(self.scope, self.cx);
+            try app_theme.stylePrimary(self.cx, self.scope, save_button, null);
             save_button.setStyleInline(self.allocator, .{ .width = .{ .px = 104 }, .height = .{ .px = 34 } });
             save_button.meta.ownership.meta.test_id = "settings.confirmation.save";
             try actions.appendChild(self.allocator, save_button);
             const reset = try ui.widgets.Button(.{ .label = "恢复", .variant = .primary, .on_click = self.cx.on(SettingsHost, self, confirmReset) }).mount(self.scope, self.cx);
+            try app_theme.stylePrimary(self.cx, self.scope, reset, null);
             reset.setStyleInline(self.allocator, .{ .width = .{ .px = 96 }, .height = .{ .px = 34 } });
             reset.meta.ownership.meta.test_id = "settings.confirmation.reset";
             try actions.appendChild(self.allocator, reset);
@@ -6631,6 +6636,23 @@ const SettingsHost = struct {
         }
     }
 
+    fn contentOwnsFocus(self: *SettingsHost, focused: *ui.Node) bool {
+        if (focused.isDescendantOf(self.content)) return true;
+        for (self.picker_nodes.items) |picker| if (focused.isDescendantOf(picker)) return true;
+        if (self.picker) |picker| if (focused.isDescendantOf(picker)) return true;
+        const content_scope = self.content_scope orelse return false;
+        // Portaled widget inputs may live outside the content node tree, but
+        // their bound Scope still belongs to the page being replaced.
+        var ancestor: ?*ui.Node = focused;
+        while (ancestor) |node| : (ancestor = node.parent) {
+            var owner = node.meta.ownership.scope.scope;
+            while (owner) |scope| : (owner = scope.parent) {
+                if (scope == content_scope) return true;
+            }
+        }
+        return false;
+    }
+
     fn rebuildContent(self: *SettingsHost) !void {
         var focus: ?settings_content_view.FocusSnapshot = null;
         if (self.mounted_page) |page| {
@@ -6638,6 +6660,11 @@ const SettingsHost = struct {
         }
         defer if (focus) |*snapshot| snapshot.deinit(self.allocator);
         self.rememberScroll();
+        // Deliver blur before page callbacks are released, while retaining
+        // focus in persistent controls such as the settings search field.
+        if (self.cx.focus_manager.current_focus) |focused| {
+            if (self.contentOwnsFocus(focused)) self.cx.setFocus(null);
+        }
         self.mounted_page = null;
         self.dismissPicker();
         self.providers = null;
@@ -8008,7 +8035,8 @@ const AppNavHost = struct {
             .key_down => |key| {
                 if (self.workspace) |workspace| workspace.setCommandHeld(key.modifiers.super);
                 if (self.ime_composing) return .ignored;
-                if (key.key == .b and key.modifiers.super and key.modifiers.shift and !key.modifiers.alt and !key.modifiers.ctrl) {
+                const configured_action = if (self.workspace) |workspace| workspace.app_config.keys.match(key.key, key.modifiers) else null;
+                if (configured_action == null and key.key == .b and key.modifiers.super and key.modifiers.shift and !key.modifiers.alt and !key.modifiers.ctrl) {
                     if (self.command_history) |history| history.toggle();
                     return .handled;
                 }
@@ -8055,7 +8083,7 @@ const AppNavHost = struct {
                     }
                     if (!(key.modifiers.super and key.key == .comma)) return .ignored;
                 };
-                if (((key.key == .tab and key.modifiers.ctrl) or (key.key == .r and key.modifiers.super and key.modifiers.shift)) and self.recentTabBlocked()) return .ignored;
+                if (((key.key == .tab and key.modifiers.ctrl) or (configured_action == null and key.key == .r and key.modifiers.super and key.modifiers.shift)) and self.recentTabBlocked()) return .ignored;
                 if (self.workspace) |workspace| {
                     const handled = workspace.handleTabKey(key.key, key.modifiers);
                     if (handled != .ignored) return handled;
@@ -8118,7 +8146,7 @@ const AppNavHost = struct {
                 }
                 if (!key.modifiers.super) return .ignored;
                 if (self.workspace) |workspace| {
-                    if (workspace.app_config.keys.match(key.key, key.modifiers)) |action| switch (action) {
+                    if (configured_action) |action| switch (action) {
                         .new_tab => {
                             self.showSessionMenu();
                             return .handled;
@@ -8146,6 +8174,22 @@ const AppNavHost = struct {
                         },
                         .search => {
                             if (self.menu_host) |menu| if (menu.activeTerminal()) |terminal| terminal.openSearch();
+                            return .handled;
+                        },
+                        .completion => {
+                            if (self.focusedTextEditor()) return .ignored;
+                            if (self.menu_host) |menu| if (menu.activeTerminal()) |terminal| {
+                                _ = terminal.openCompletion();
+                            };
+                            return .handled;
+                        },
+                        .reconnect => {
+                            const index = workspace.active_tab orelse return .handled;
+                            workspace.reconnectTab(index) catch |err| workspace.statusFailure(@errorName(err));
+                            return .handled;
+                        },
+                        .broadcast => {
+                            openBroadcastStatus(self);
                             return .handled;
                         },
                         .upload => {
@@ -8488,6 +8532,10 @@ const AppNavHost = struct {
         if (self.settings) |settings| if (settings.header_title) |title| title.setTextColor(c.fg_1);
         if (self.settings) |settings| if (settings.header_icon) |icon| {
             _ = icon.setTint(c.accent);
+        };
+        if (self.settings) |settings| if (settings.identity_label) |label| label.setTextColor(c.fg_2);
+        if (self.settings) |settings| if (settings.identity_icon) |icon| {
+            _ = icon.setTint(c.fg_2);
         };
         if (self.settings) |settings| if (settings.search_input) |input| settings_content_view.styles.paintSearch(self.cx, &input);
         if (self.chrome.toolbar_tint) |tint| tint.set(c.fg_2);
@@ -9997,6 +10045,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const ai_send_base = try scope.createSignal(ai_styles.ButtonStyle, ai_styles.primary());
     ai_host.send_base = ai_send_base;
     const ai_stop_btn = try ui.widgets.Button(.{ .a11y_label = "停止生成", .variant = .primary, .base_style = ai_send_base, .on_click = cx.on(AiHost, ai_host, AiHost.stop) }).mount(scope, cx);
+    try app_theme.stylePrimary(cx, scope, ai_stop_btn, null);
     try ai_stop_btn.appendChild(cx.allocator, try ui.boxStyled(cx, ai_styles.stopIcon, .{}));
     ai_stop_btn.meta.ownership.meta.test_id = "ai.stop";
     ai_stop_btn.setOpacityRaw(0);
@@ -10006,6 +10055,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const ai_send_disabled = try scope.createSignal(bool, true);
     ai_host.send_disabled = ai_send_disabled;
     const ai_send = try ui.widgets.Button(.{ .variant = .primary, .a11y_label = "发送问题", .base_style = ai_send_base, .disabled = ai_send_disabled, .on_click = cx.on(AiHost, ai_host, AiHost.sendPrompt) }).mount(scope, cx);
+    try app_theme.stylePrimary(cx, scope, ai_send, ai_send_disabled);
     ai_send.meta.ownership.meta.test_id = "ai.send";
     ai_host.send_button = ai_send;
     try ai_send.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("arrow-up").?, app_theme.current().fg_1, ai_styles.icon()));
@@ -10054,8 +10104,12 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     settings_nav_list.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 5 });
     try settings_nav.appendChild(cx.allocator, settings_nav_scroll.container);
     const settings_identity = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 24 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6 }, .{});
-    try settings_identity.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.lock, p.fg_secondary, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
-    try settings_identity.appendChild(cx.allocator, try ui.text(cx, "本地设置", .{ .font_size = 11, .color = p.fg_secondary }));
+    const settings_identity_icon = try ui.iconTint(cx, ui.icons.lock, app_theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
+    settings_identity_icon.meta.ownership.meta.test_id = "settings.identity.icon";
+    try settings_identity.appendChild(cx.allocator, settings_identity_icon);
+    const settings_identity_label = try ui.text(cx, "本地设置", .{ .font_size = 11, .color = app_theme.current().fg_2 });
+    settings_identity_label.meta.ownership.meta.test_id = "settings.identity.label";
+    try settings_identity.appendChild(cx.allocator, settings_identity_label);
     try settings_nav.appendChild(cx.allocator, settings_identity);
     const settings_right = try ui.boxStyled(cx, shell_styles.settingsContent, .{});
     settings_right.setStyle(cx.allocator, .padding, ui.Padding{ .right = 4 });
@@ -10069,6 +10123,8 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     settings_host.navigation = settings_nav;
     settings_host.header_title = settings_header_title;
     settings_host.header_icon = settings_header_icon;
+    settings_host.identity_label = settings_identity_label;
+    settings_host.identity_icon = settings_identity_icon;
     settings_host.layout = settings_body;
     settings_host.content = settings_content;
     settings_host.card = settings_card;
@@ -10487,7 +10543,9 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     wiz_host.* = .{ .allocator = cx.allocator, .workspace = workspace, .wizard = wiz, .application_host = application_host, .cx_ptr = cx, .probe_controller = @import("ui/wizard_probe.zig").Controller.init(cx.allocator, &application_host.sessions.journal) };
     wiz.setRegistry(application_host.registry());
     wiz.connection_configs = @import("host/connection_config_resolver.zig").Resolver.init(&workspace.registry);
+    wiz.credential_host = if (application_host.domain.editor_credentials) |*host| host else null;
     wiz.on_envelope = WizardHost.submitEnvelope;
+    wiz.on_envelope_with_secret = WizardHost.submitEnvelopeWithSecret;
     wiz.envelope_context = wiz_host;
     wiz.on_editor_mounted = WizardHost.configureEditor;
     wiz.editor_mounted_context = wiz_host;
@@ -10607,6 +10665,14 @@ const WizardHost = struct {
                 return;
             };
         }
+    }
+
+    fn submitEnvelopeWithSecret(raw: *anyopaque, value: @import("config/connection_envelope.zig").Envelope, intent: @import("host/plugin_ui_contract.zig").SubmitIntent, handoff: @import("host/editor_credentials.zig").Handoff) !void {
+        const self: *WizardHost = @ptrCast(@alignCast(raw));
+        if (self.application_host.pending_editor_handoff != null) return error.CredentialHandoffBusy;
+        self.application_host.pending_editor_handoff = handoff;
+        defer self.application_host.pending_editor_handoff = null;
+        try submitEnvelope(raw, value, intent);
     }
 
     fn saveEnvelope(raw: *anyopaque, value: @import("config/connection_envelope.zig").Envelope) !@import("host/identity.zig").AssetOwner {
@@ -12854,9 +12920,11 @@ pub fn main() !void {
     defer notifications.destroy();
     process_notifications = notifications;
     defer process_notifications = null;
-    var contributions = try @import("plugins/application_plugins.zig").Bundle(@import("application_options").plugin_fixture).init(std.heap.c_allocator);
-    defer contributions.deinit();
+    var contributions = try @import("plugins/application_plugins.zig").Bundle(@import("application_options").plugin_fixture).init(std.heap.c_allocator, io_threaded.io(), data_paths.directory);
+    defer contributions.deinit() catch |err| applog.warn(.app, "plugin resources retained: {s}", .{@errorName(err)});
     const domain = try application_host_mod.Domain.initWithContributions(std.heap.c_allocator, true, contributions.manifests(), contributions.renderers());
+    domain.frame_budget = contributions.frameBudget();
+    domain.editor_credentials = @import("host/editor_credentials.zig").Host.init(std.heap.c_allocator, io_threaded.io(), &domain.plugin_security.secret_store);
     for (domain.sessions.registry.manifests()) |manifest| for (manifest.notifications) |definition| try notifications.registerDefinition(definition);
     var windows = MultiWindowApp.init(std.heap.c_allocator, .{ .shared_gpu = true });
     var process: ProcessWindows = .{ .runtime = &windows, .domain = domain, .io = io_threaded.io(), .data_paths = &data_paths };
@@ -12892,10 +12960,11 @@ pub fn main() !void {
     nav.app_runtime = app;
     try nav.loadEmptyLogo();
     if (nav.settings) |settings| settings.app_runtime = app;
-    _ = @import("ui/plugin_window_host.zig").Host.mount(app, nav.application_host orelse return error.MissingApplicationController, process_notifications, if (nav.ai) |ai| ai.notification_window else null) catch |err| {
+    const plugin_window = @import("ui/plugin_window_host.zig").Host.mount(app, nav.application_host orelse return error.MissingApplicationController, process_notifications, if (nav.ai) |ai| ai.notification_window else null) catch |err| {
         applog.err(.app, "plugin window services initialization: {s}", .{@errorName(err)});
         return err;
     };
+    if (nav.wizard) |wizard| wizard.probe_host = plugin_window.probes.?;
     if (nav.ai) |ai| if (ai.images_view) |view| {
         view.app = app;
     };

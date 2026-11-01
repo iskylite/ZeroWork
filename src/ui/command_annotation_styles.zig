@@ -8,6 +8,7 @@ pub const ai_padding: f32 = 4;
 pub const ai_radius: f32 = 4;
 pub const ai_font_size: f32 = 10;
 pub const metadata_gap: f32 = 10;
+pub const status_inset: f32 = 2;
 /// The two narrower gaps compensate the tag's 8px horizontal padding, keeping
 /// the first-row group as compact as its preceding plain-text AI treatment.
 pub const ai_metadata_gap: f32 = 6;

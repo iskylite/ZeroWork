@@ -176,8 +176,9 @@ fn iconButton(cx: *ui.Cx, scope: *ui.Scope, bound: *binding.Binding, kind: Click
 fn textAction(cx: *ui.Cx, bound: *binding.Binding, kind: Click.Kind, stable_id: []const u8, label: []const u8, tooltip: []const u8, test_id: []const u8, danger: bool, is_disabled: bool) !*ui.Node {
     const action = try Click.create(bound.scope, bound, kind, stable_id);
     const tip = try ui.widgets.Tooltip(.{ .text = tooltip, .open_delay_ms = 450 }).mount(bound.scope, cx);
-    const button = try ui.widgets.Button(.{ .label = label, .variant = .ghost, .disabled = is_disabled, .on_click = cx.on(Click, action, Click.activate), .base_style = .{ .height = .{ .px = 28 }, .padding = .{ .top = 5, .bottom = 5 }, .font_size = 11, .font_weight = 400, .text_color = if (danger) S.theme.current().danger_ink else S.theme.current().accent_ink }, .hover_style = S.base.buttonHover() }).mount(bound.scope, cx);
+    const button = try ui.widgets.Button(.{ .label = label, .variant = .ghost, .disabled = is_disabled, .on_click = cx.on(Click, action, Click.activate), .base_style = .{ .height = .{ .px = 28 }, .padding = .{ .top = 5, .bottom = 5 }, .font_size = 11, .font_weight = 400, .text_color = if (is_disabled) S.theme.current().fg_3 else if (danger) S.theme.current().danger_ink else S.theme.current().accent_ink, .opacity = 1 }, .hover_style = S.base.buttonHover() }).mount(bound.scope, cx);
     button.meta.ownership.meta.test_id = test_id;
+    button.addBeforeRender(explanationOpacity);
     try tip.trigger.appendChild(cx.allocator, button);
     return tip.wrapper;
 }
@@ -232,8 +233,19 @@ fn themeSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     try row.appendChild(cx.allocator, try textAction(cx, bound, .import_theme, "", "导入 .itermcolors", "仅支持 iTerm2 .itermcolors 主题文件", "settings.theme.import", false, host == null or disabled(bound)));
     if (host) |h| try section.body.appendChild(cx.allocator, try themeStrip(cx, bound, h));
     try section.body.appendChild(cx.allocator, row);
+    if (record) |selected| try section.body.appendChild(cx.allocator, try terminalPalette(cx, selected));
     if (c.theme_library.problem) |problem| try section.body.appendChild(cx.allocator, try notice(cx, themeProblem(problem), true));
     return section.root;
+}
+
+fn terminalPalette(cx: *ui.Cx, record: *const themes.Record) !*ui.Node {
+    const root = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 6, .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 }, .margin = .{ .top = 4, .bottom = 6 }, .background = rgba(record.theme.bg), .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
+    root.meta.ownership.meta.test_id = "settings.theme.ansi";
+    try root.appendChild(cx.allocator, try ui.text(cx, "终端配色 · ANSI 16", .{ .font_size = 10, .line_height = 1.4, .color = rgba(record.theme.fg) }));
+    const strip = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 12 }, .direction = .row, .gap = 4, .flex_shrink = 0 }, .{});
+    for (record.theme.ansi) |color| try strip.appendChild(cx.allocator, try ui.box(cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .fill(), .background = rgba(color), .border = .{ .radius = 2 } }, .{}));
+    try root.appendChild(cx.allocator, strip);
+    return root;
 }
 
 /// V3 keeps all theme choices in the card; legacy library state cannot replace it.
@@ -640,6 +652,15 @@ const Field = struct {
         self.refresh();
         self.syncSlider();
         self.bound.valuesChanged();
+        self.refreshFontPreview();
+    }
+    fn refreshFontPreview(self: *Field) void {
+        if (!std.mem.eql(u8, self.key.section, "ui")) return;
+        if (!std.mem.eql(u8, self.key.key, "font_family") and !std.mem.eql(u8, self.key.key, "font_size") and !std.mem.eql(u8, self.key.key, "line_height")) return;
+        self.edited = false;
+        // The host schedules its rebuild at the safe layout hook. Never destroy
+        // this input's Scope from its own submit/blur callback or during IME.
+        changed(self.bound);
     }
     fn syncSlider(self: *Field) void {
         if (self.slider) |slider| if (values.read(self.bound.controller.model.value, self.key.section, self.key.key)) |value| switch (value) {
@@ -672,7 +693,12 @@ const Field = struct {
     }
     fn onEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
         const self: *Field = @ptrCast(@alignCast(raw orelse return .ignored));
-        if (event != .key_down or self.input.state.imeIsComposing()) return .ignored;
+        if (self.input.state.imeIsComposing()) return .ignored;
+        if (event == .blur) {
+            if (self.edited) self.refreshFontPreview();
+            return .ignored;
+        }
+        if (event != .key_down) return .ignored;
         if (event.key_down.key == .escape) {
             self.escape();
             return .stop;
@@ -804,7 +830,7 @@ fn fontSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
                 }
             }
         } else {
-            const control = try chooser(cx, bound, .{ .section = "ui", .key = "font_family" }, c.model.value.ui.font_family, &.{ .{ .label = "JetBrains Mono", .value = "JetBrains Mono" }, .{ .label = "Menlo", .value = "Menlo" }, .{ .label = "Monaco", .value = "Monaco" }, .{ .label = "自定义字体…", .value = "custom" } }, 220, 158, 10, 6, 30);
+            const control = try fontChooser(cx, bound);
             try section.body.appendChild(cx.allocator, try fieldRow(cx, bound, "字体族", "未安装所选字体时将使用替代字体；缺失字符由系统补足。", control));
         }
     }
@@ -831,6 +857,91 @@ fn fontSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     try section.body.appendChild(cx.allocator, status);
     bound.refreshFooter();
     return section.root;
+}
+
+const FontChoice = struct {
+    bound: *binding.Binding,
+    selected: *ui.Signal(?[]const u8),
+    options: [64]ui.widgets.SelectOption = undefined,
+    fn cleanup(self: *FontChoice) void {
+        self.bound.scope.allocator.destroy(self);
+    }
+    fn propose(self: *FontChoice, value: ?[]const u8) void {
+        // Search clearing is a proposal, not a font change. Keeping the saved
+        // choice here lets Escape restore the selected label without a rebuild.
+        if (value != null) self.selected.set(value);
+    }
+    fn change(self: *FontChoice, selected: ?[]const u8) void {
+        const family = selected orelse return; // Typing only filters; it does not edit the draft.
+        if (disabled(self.bound)) return;
+        if (std.mem.eql(u8, family, "custom")) {
+            if (self.bound.hooks.appearance) |host| {
+                host.custom_font_edit = true;
+                host.focus_custom_font = true;
+            }
+        } else {
+            self.bound.controller.editKey("ui", "font_family", .{ .text = family }) catch return;
+            if (self.bound.hooks.appearance) |host| host.send(.validate_font);
+            self.bound.valuesChanged();
+        }
+        changed(self.bound);
+    }
+};
+
+fn fontChooser(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
+    const fonts = @import("../appearance_font.zig");
+    // Any valid edit replaces the controller's snapshot while this Select can
+    // remain mounted. Optional-slice Signals and Select options borrow bytes.
+    const selected = try owned(bound.scope, bound.controller.model.value.ui.font_family);
+    const state = try bound.scope.allocator.create(FontChoice);
+    state.* = .{ .bound = bound, .selected = try bound.scope.createSignal(?[]const u8, selected) };
+    try bound.scope.onCleanup(FontChoice, state, FontChoice.cleanup);
+    var found = false;
+    var count: usize = 0;
+    for (fonts.families) |family| {
+        found = found or std.mem.eql(u8, selected, family);
+        const label = if (fonts.isBundled(family) or !fonts.isInstalled(family)) blk: {
+            const text = try std.fmt.allocPrint(bound.scope.allocator, "{s} · {s}", .{ family, if (fonts.isBundled(family)) "内置" else "未安装" });
+            defer bound.scope.allocator.free(text);
+            break :blk try owned(bound.scope, text);
+        } else family;
+        state.options[count] = .{ .value = family, .label = label, .test_id = try id(bound.scope, "settings.option.font_family.", family) };
+        count += 1;
+    }
+    // Select's public limit is 64 options. Reserve slots for the current custom
+    // family and custom input; all remaining installed names remain enterable.
+    var installed = try fonts.installedMonospaceFamilies(bound.scope.allocator);
+    defer installed.deinit();
+    for (installed.names) |family| {
+        if (count >= state.options.len - 2) break;
+        var duplicate = false;
+        for (state.options[0..count]) |option| duplicate = duplicate or std.mem.eql(u8, family, option.value);
+        if (duplicate) continue;
+        const name = try owned(bound.scope, family);
+        state.options[count] = .{ .value = name, .label = name, .test_id = try id(bound.scope, "settings.option.font_family.", name) };
+        found = found or std.mem.eql(u8, selected, family);
+        count += 1;
+    }
+    if (!found) {
+        state.options[count] = .{ .value = selected, .label = selected };
+        count += 1;
+    }
+    state.options[count] = .{ .value = "custom", .label = "自定义字体…", .test_id = "settings.option.font_family.custom" };
+    count += 1;
+    const result = try ui.widgets.Select(.{ .options = state.options[0..count], .value = ui.split(state.selected, cx.on(FontChoice, state, FontChoice.propose)), .width = @as(f32, 220), .dropdown_width = @as(f32, 280), .max_dropdown_height = @as(f32, 240), .searchable = true, .placeholder = "搜索字体…", .disabled = disabled(bound), .on_change = cx.on(FontChoice, state, FontChoice.change) }).mount(bound.scope, cx);
+    result.wrapper.setStyleInline(cx.allocator, .{ .width = .{ .px = 220 }, .flex_shrink = 0, .min_width = 0 });
+    result.trigger.setStyleInline(cx.allocator, S.base.fieldControl(undefined));
+    result.trigger.meta.ownership.meta.test_id = "settings.field.font_family";
+    if (result.search_input) |input| input.meta.ownership.meta.test_id = "settings.font.search";
+    S.base.tuneSelect(result);
+    try result.scope.createEffect(.{ .chrome = result.chrome, .publication = try cx.themeSignal(bound.scope) }, struct {
+        fn paint(args: anytype) void {
+            _ = args.publication.get();
+            args.chrome.setBackground(S.theme.current().overlay);
+        }
+    }.paint);
+    if (result.open) |open| try bound.registerTooltip(open);
+    return result.wrapper;
 }
 
 const cursor_options = [_]ui.widgets.checkbox.RadioOption{
@@ -874,7 +985,7 @@ fn cursorField(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         // Preserve the widget-owned circle: selection effects still refer to it.
         // The cursor sample communicates shape, while the circle communicates choice.
         const circle = radio.children.items[0];
-        circle.setStyleInline(cx.allocator, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .background = if (selected) S.theme.current().accent_ink else ui.Color.TRANSPARENT, .border = .{ .width = 1.5, .color = if (selected) S.theme.current().accent_ink else S.theme.current().fg_2, .radius = 6 } });
+        circle.setStyleInline(cx.allocator, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .background = if (selected) S.theme.current().action_accent else cx.tokens.tokens.color.checkbox_bg, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 6 } });
         const label = radio.children.items[1];
         if (label.getText()) |old| {
             var props = old;
@@ -913,14 +1024,25 @@ fn fontPreview(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const line_height = @as(f32, @floatFromInt(setting.font_size)) * setting.line_height;
     const weight: u16 = if (std.mem.eql(u8, setting.font_weight, "bold")) 700 else if (std.mem.eql(u8, setting.font_weight, "medium")) 500 else if (std.mem.eql(u8, setting.font_weight, "light")) 300 else 400;
     const first = try ui.text(cx, "user@ZeroWork ~", .{ .font_size = @floatFromInt(setting.font_size), .font_weight = weight, .font_family = family, .use_monospace_font = family == 0, .line_height = setting.line_height, .color = S.theme.current().ok_ink });
+    first.meta.ownership.meta.test_id = "settings.font.preview.prompt";
     try code.appendChild(cx.allocator, first);
     const command = try ui.box(cx, .{ .height = .{ .px = line_height }, .direction = .row, .align_items = .center, .gap = 2 }, .{});
-    try command.appendChild(cx.allocator, try ui.text(cx, "$ ssh prod-web-01", .{ .font_size = @floatFromInt(setting.font_size), .font_weight = weight, .font_family = family, .use_monospace_font = family == 0, .line_height = setting.line_height, .color = S.theme.current().fg_1 }));
+    const command_text = try ui.text(cx, "$ ssh prod-web-01", .{ .font_size = @floatFromInt(setting.font_size), .font_weight = weight, .font_family = family, .use_monospace_font = family == 0, .line_height = setting.line_height, .color = S.theme.current().fg_1 });
+    command_text.meta.ownership.meta.test_id = "settings.font.preview.command";
+    try command.appendChild(cx.allocator, command_text);
     const caret = try cursorShape(cx, setting.cursor_style);
+    // Preview cursor uses the same selected font measurement and row pitch as
+    // terminal text, so changing size/family does not leave a fixed 9×16 cursor.
+    const run = cx.text.shapeText(.{ .text = "M", .font_family = actual, .font_family_id = family, .font_size = @floatFromInt(setting.font_size), .font_weight = weight, .use_monospace = family == 0 }) catch null;
+    const cell_width: f32 = if (run) |shaped| shaped.total_advance else @as(f32, @floatFromInt(setting.font_size)) * 0.6;
+    caret.setStyleInline(cx.allocator, .{ .width = .{ .px = if (std.mem.eql(u8, setting.cursor_style, "bar")) 2 else cell_width }, .height = .{ .px = if (std.mem.eql(u8, setting.cursor_style, "underline")) 2 else line_height } });
     caret.meta.ownership.meta.test_id = "settings.font.preview.caret";
     try CursorBlink.mount(cx, bound.scope, root, caret);
     try command.appendChild(cx.allocator, caret);
     try code.appendChild(cx.allocator, command);
+    const multilingual = try ui.text(cx, "中文终端 · Aa 0O 1Il", .{ .font_size = @floatFromInt(setting.font_size), .font_weight = weight, .font_family = family, .use_monospace_font = family == 0, .line_height = setting.line_height, .color = S.theme.current().fg_2 });
+    multilingual.meta.ownership.meta.test_id = "settings.font.preview.multilingual";
+    try code.appendChild(cx.allocator, multilingual);
     try root.appendChild(cx.allocator, code);
     return root;
 }
@@ -1095,13 +1217,13 @@ fn materialInlinePreview(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         try root.appendChild(cx.allocator, material);
     };
     const title = try ui.textStyled(cx, S.note, "背景预览");
-    title.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 11 }, .top = .{ .px = 9 } } });
+    title.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .left = .{ .px = 11 }, .top = .{ .px = 9 } }, .background = S.theme.current().overlay, .padding = .{ .left = 4, .right = 4 }, .border = .{ .radius = 4 } });
     try root.appendChild(cx.allocator, title);
-    const code = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 12 }, .bottom = .{ .px = 14 } }, .direction = .column, .gap = 0 }, .{});
+    const code = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 12 }, .bottom = .{ .px = 14 } }, .direction = .column, .gap = 0, .background = S.theme.current().overlay, .padding = ui.Padding.all(4), .border = .{ .radius = 5 } }, .{});
     for ([_][]const u8{ "user@ZeroWork ~", "$ ssh prod-web-01" }) |line| try code.appendChild(cx.allocator, try ui.text(cx, line, .{ .font_size = 12, .use_monospace_font = true, .line_height = 20.0 / 12.0, .color = S.theme.current().fg_1 }));
     try root.appendChild(cx.allocator, code);
     const preview = try textAction(cx, bound, .preview_material, "", "全窗口预览", "使用整个工作区预览当前材质草稿", "settings.materials.preview.full", false, disabled(bound));
-    preview.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 11 }, .top = .{ .px = 4 } } });
+    preview.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 11 }, .top = .{ .px = 4 } }, .background = S.theme.current().overlay, .padding = .{ .left = 4, .right = 4 }, .border = .{ .radius = 5 } });
     try root.appendChild(cx.allocator, preview);
     return root;
 }
@@ -1255,9 +1377,13 @@ fn appIconSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     for (group.children.items, app_icon_options) |radio, option| {
         const selected = std.mem.eql(u8, option.value, @tagName(bound.controller.model.value.ui.icon_background));
         radio.setStyleInline(cx.allocator, .{ .height = .{ .px = 40 }, .gap = 8, .align_items = .center, .flex_shrink = 0 });
-        radio.children.items[0].setStyleInline(cx.allocator, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .background = if (selected) S.theme.current().accent_ink else ui.Color.TRANSPARENT, .border = .{ .width = 1.5, .color = if (selected) S.theme.current().accent_ink else S.theme.current().fg_2, .radius = 9 } });
+        radio.children.items[0].setStyleInline(cx.allocator, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .background = if (selected) S.theme.current().action_accent else cx.tokens.tokens.color.checkbox_bg, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 9 } });
     }
     try row.appendChild(cx.allocator, group);
     try section.body.appendChild(cx.allocator, row);
     return section.root;
+}
+
+fn explanationOpacity(node: *ui.Node) void {
+    if (node.getOpacity() != 1) node.setStyle(null, .opacity, @as(f32, 1));
 }

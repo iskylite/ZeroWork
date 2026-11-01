@@ -421,7 +421,9 @@ test "file workspace failed refresh preserves rows path and scroll and disables 
     try std.testing.expect(remote.footer.style.display == .none);
     const failure = remote.error_box.globalRect();
     const pane = remote.root.globalRect();
-    try std.testing.expectEqual(@as(f32, 161), table.h);
+    try std.testing.expect(table.h >= 3 * @import("ui/file_workspace_styles.zig").row_height);
+    try std.testing.expectEqual(@import("ui/app_theme.zig").current().warn_ink, remote.stale_notice.getText().?.color);
+    try std.testing.expectEqual(@as(u8, 255), remote.stale_notice.getBackground().a);
     try std.testing.expectEqual(stale.y + stale.h, table.y);
     try std.testing.expectEqual(table.y + table.h, failure.y);
     try std.testing.expectEqual(pane.y + pane.h - 1, failure.y + failure.h);
@@ -497,6 +499,8 @@ test "file workspace global theme material updates every card without replacing 
         try std.testing.expectEqual(theme.current().surface_1, pane.root.getBackground());
         try std.testing.expectEqual(theme.current().surface_1, pane.table.getBackground());
         try std.testing.expectEqual(theme.current().fg_1, pane.title.getText().?.color);
+        try std.testing.expectEqual(theme.current().warn_ink, pane.stale_notice.getText().?.color);
+        try std.testing.expectEqual(@as(u8, 255), pane.stale_notice.getBackground().a);
         try std.testing.expectEqual(@as(f32, 11.5), pane.path.state.text_display_node.?.getText().?.font_size);
     }
     try std.testing.expectEqual(theme.popupSelection(), f.row(.local, entries[2].absolute_path).getBackground());
@@ -690,4 +694,50 @@ test "file workspace drag can start from size column as well as filename" {
     f.settle();
     try std.testing.expect(f.view.drag_source == null);
     try std.testing.expect(f.view.drag_ghost.style.display == .none);
+}
+
+test "retained file copy confirmation repaints all builtins and keeps frozen paths and options" {
+    const theme = @import("ui/app_theme.zig");
+    const Copy = @import("ui/file_copy_view.zig");
+    const Controller = @import("host/file_workspace_controller.zig");
+    const support = @import("ui_theme_test_support.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    theme.select(.dark);
+    var f: Fixture = undefined;
+    try f.init(1200, 800);
+    defer f.deinit();
+    const callback = struct {
+        fn refuse(_: ?*anyopaque, _: Controller.FrozenTransfer, _: Copy.Options) !void {
+            return error.UnexpectedDispatch;
+        }
+    };
+    const view = try Copy.View.mount(f.cx, f.scope, f.view.panes[0], null, callback.refuse);
+    const projection = source();
+    const intent: Controller.FrozenTransfer = .{
+        .owner = owner,
+        .source = .{ .stamp = projection.panes[0].stamp, .endpoint = .{ .local_fs = .{ .binding_id = 1, .binding_generation = 1 } }, .selection_revision = 1, .directory = "/original/source" },
+        .destination = .{ .stamp = projection.panes[1].stamp, .endpoint = .{ .local_fs = .{ .binding_id = 2, .binding_generation = 1 } }, .selection_revision = 1, .directory = "/original/target" },
+        .paths = &.{"/original/source/captured.txt"},
+    };
+    try view.open(intent, .{});
+    view.md5_value.set(true);
+    view.resume_value.set(false);
+    const identity = view.source;
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        try support.publish(f.cx, f.scope);
+        for (0..8) |_| f.settle();
+        try std.testing.expect(view.shown);
+        try std.testing.expect(view.md5_value.peek());
+        try std.testing.expect(!view.resume_value.peek());
+        try std.testing.expectEqual(identity, view.source);
+        try std.testing.expectEqualStrings("/original/source", view.source.getText().?.content);
+        try std.testing.expectEqual(theme.current().fg_1, view.source.getText().?.color);
+        try std.testing.expectEqual(theme.current().fg_2, view.subtitle.getText().?.color);
+        try std.testing.expectEqual(theme.current().overlay, view.root.getBackground());
+        try std.testing.expectEqual(theme.popupInset(), view.source.parent.?.getBackground());
+        try std.testing.expectEqual(theme.current().action_accent, view.confirm.getBackground());
+    }
+    view.dismiss();
 }

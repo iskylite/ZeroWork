@@ -285,6 +285,7 @@ pub const View = struct {
         self.preview_reselect = try self.previewButton(scope, footer, "ai.attachment.preview.reselect", "重新选择本地文本", ui.icons.get("folder-open").?, reselectPreview);
         self.preview_remove = try self.previewButton(scope, footer, "ai.attachment.preview.remove", "移除附件", ui.icons.x, removePreview);
         self.preview_primary = try ui.widgets.Button(.{ .label = "关闭", .variant = .primary, .base_style = @as(ui.BoxStyle, .{ .width = .{ .px = 52 }, .height = .{ .px = 34.5 }, .padding = .{ .left = 14, .right = 14, .top = 9, .bottom = 9 }, .font_size = 12, .font_weight = 500, .corner_radius = 8 }), .on_click = cx.on(View, self, confirmPreview) }).mount(scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, scope, self.preview_primary, null);
         self.preview_primary.meta.ownership.meta.test_id = "ai.attachment.preview.keep";
         try footer.appendChild(cx.allocator, self.preview_primary);
         self.preview_primary_check = try ui.box(cx, .{ .display = .none }, .{});

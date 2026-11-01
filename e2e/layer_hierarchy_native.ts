@@ -6,7 +6,7 @@ import {mkdir,mkdtemp,writeFile,readFile,open,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import * as h from '../vendor/zenit/e2e/client.ts';
 const binary=resolve(process.argv[2]),out=resolve(process.argv[3]);
-const themes=(process.argv[4]??'dark,light,sauber,midnight,forest,ocean,plum,ember,graphite,paper,sand,ice,catppuccin-mocha,dracula,dark-pro,solarized-dark,nord').split(',');await mkdir(out,{recursive:true});
+const themes=process.argv[4]?.split(',')??Object.keys(JSON.parse(await readFile(new URL('../docs/UI_V3/theme-presets.json',import.meta.url),'utf8')).themes);await mkdir(out,{recursive:true});
 const shown=(n:any)=>n?.rect&&n.hidden!==true&&n.visible!==false&&n.rect.w>0&&n.rect.h>0;
 const visible=(id:string)=>h.waitFor(async()=>(await h.query(id)).find(shown)??null,10000);
 const click=async(id:string)=>{await visible(id);assert((await h.clickTestId(id)).ok,id);};

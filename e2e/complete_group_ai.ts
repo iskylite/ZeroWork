@@ -82,7 +82,7 @@ try{
   card=await revealResult(call.call_id,call.turn_id);const body=flat(card).find(n=>n.test_id==='ai.tool.result.details'),stderr=flat(card).find(n=>n.test_id==='ai.tool.result.stderr_scroll');assert(stderr.rect.y>=body.rect.y-.5&&stderr.rect.y+stderr.rect.h<=body.rect.y+body.rect.h+.5);await capture('42-local-stderr-internal-scroll');await clickNode(flat(card).find(n=>n.test_id==='ai.tool.result.copy_stderr'));await waitFor(async()=>text(await resultCard(call.call_id,call.turn_id)).includes('已复制 stderr')||null,5000);await capture('42-local-stderr-native-copy');check('final42 standard result560 and header fixed slots with actual Local stdout/stderr and native copy',{events,card_rect:card.rect,panel_width:600,stderr_viewport:stderr.rect});
  }else{
  let localTab='';await capture('01-initial-real-host-registry');
- await click('sidebar.host');await click('sidebar.host.connect');await waitFor(async()=>{await auth();return !(await query('connection.progress')).some(shown)&&!(await query('auth.challenge.modal')).some(shown)&&(await query('status.connection.identity')).some(shown)||null},40000);
+ await click('sidebar.host');await waitFor(async()=>{await auth();return !(await query('connection.progress')).some(shown)&&!(await query('auth.challenge.modal')).some(shown)&&(await query('status.connection.identity')).some(shown)||null},40000);
  const sshOriginalTab=(await tabs())[0].test_id;
  // Production Cmd+D builds a group from an SSH source and a separate SSH
  // clone. Close only that clone, then join the existing Local via trusted @.

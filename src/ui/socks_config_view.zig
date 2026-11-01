@@ -428,6 +428,11 @@ pub const View = struct {
             self.setError("并发上限必须为正整数");
             return;
         };
+        if (!forwarding.limits.validConnections(self.draft.max_connections)) {
+            var limit_text: [96]u8 = undefined;
+            self.setError(std.fmt.bufPrint(&limit_text, "并发上限必须为 1–{d}", .{forwarding.limits.max_connections}) catch unreachable);
+            return;
+        }
         self.draft.bind = self.bind_signal.get();
         if (!std.mem.eql(u8, self.draft.bind, "127.0.0.1") and !std.mem.eql(u8, self.draft.bind, "0.0.0.0")) {
             self.setError("绑定地址仅支持 127.0.0.1 或 0.0.0.0");
@@ -524,6 +529,7 @@ fn button(self: *View, parent: *ui.Node, label: []const u8, action: View.Action,
     self.button_paints[self.button_count] = .{ .style = paint, .primary = action == .save, .width = width, .mode = mode };
     self.button_count += 1;
     const node = try ui.widgets.Button(.{ .label = if (mode != null) "" else label, .a11y_label = label, .block = mode != null, .variant = @as(ui.widgets.button.ButtonVariant, if (action == .save) .primary else .secondary), .base_style = paint, .on_click = self.cx.on(Click, click, Click.run) }).mount(self.scope, self.cx);
+    if (action == .save) try S.theme.stylePrimary(self.cx, self.scope, node, null);
     node.meta.ownership.meta.test_id = id;
     if (mode == null) node.setStyleInline(self.cx.allocator, S.action(action == .save, width)) else node.setStyleInline(self.cx.allocator, .{ .flex = 1, .min_width = 0, .flex_shrink = 1 });
     try parent.appendChild(self.cx.allocator, node);

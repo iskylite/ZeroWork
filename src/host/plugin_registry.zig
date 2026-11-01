@@ -94,6 +94,10 @@ pub const ConnectionContribution = struct {
     encode: ?*const fn (std.mem.Allocator, @import("../config/connection_envelope.zig").Envelope) anyerror!@import("../config/connection_envelope.zig").Envelope = null,
     decode: ?*const fn (std.mem.Allocator, @import("../config/connection_envelope.zig").Envelope) anyerror!@import("../config/connection_envelope.zig").Envelope = null,
     migrate: ?*const fn (std.mem.Allocator, @import("../config/connection_envelope.zig").Envelope, u32) anyerror!@import("../config/connection_envelope.zig").Envelope = null,
+    probe_factory: ?@import("probe_contract.zig").ProbeFactory = null,
+    /// The caller owns both the returned slice and every reference string.
+    /// This enumerates opaque plugin payloads without host protocol branches.
+    credential_references: ?*const fn (std.mem.Allocator, []const u8) anyerror![]const []const u8 = null,
 };
 /// A non-persistent creation entry (for example a native process). It has no
 /// remote asset/editor and uses the same session factory and owner lifecycle.
@@ -127,6 +131,9 @@ pub const PluginManifest = struct {
     session_factory: ?@import("session_host.zig").SessionFactory = null,
     workspace_kind: []const u8,
     content_renderer: []const u8,
+    /// Explicit frame consumers require the shared application budget. Null
+    /// preserves the legacy unbudgeted sink and its 32 MiB per-frame limit.
+    frame_limits: ?@import("frame_texture_sink.zig").Limits = null,
     services: []const ServiceDefinition = &.{},
     required_services: []const ServiceRequirement = &.{},
     notifications: []const @import("notification_coordinator.zig").NotificationDefinition = &.{},

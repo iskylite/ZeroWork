@@ -40,7 +40,7 @@ pub const View = struct {
     reject_style: *ui.Signal(S.ButtonStyle),
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, callbacks: Callbacks) !*View {
-        const self = try scope.createState(View, .{ .cx = cx, .root = undefined, .card = undefined, .body = undefined, .footer = undefined, .group_footer = undefined, .target_copy = undefined, .tail = undefined, .identity = undefined, .header_identity = undefined, .title = undefined, .command_copy = undefined, .command = undefined, .feedback = undefined, .callbacks = callbacks, .decision_pending = try scope.createSignal(bool, false), .accept_style = try scope.createSignal(S.ButtonStyle, S.iconButton(true)), .reject_style = try scope.createSignal(S.ButtonStyle, S.iconButton(false)) });
+        const self = try scope.createState(View, .{ .cx = cx, .root = undefined, .card = undefined, .body = undefined, .footer = undefined, .group_footer = undefined, .target_copy = undefined, .tail = undefined, .identity = undefined, .header_identity = undefined, .title = undefined, .command_copy = undefined, .command = undefined, .feedback = undefined, .callbacks = callbacks, .decision_pending = try scope.createSignal(bool, false), .accept_style = try theme.paintSignal(S.ButtonStyle, cx, scope, S.iconButton, .{true}), .reject_style = try theme.paintSignal(S.ButtonStyle, cx, scope, S.iconButton, .{false}) });
         self.accept_text = try scope.createSignal([]const u8, "批准此调用");
         try scope.onCleanup(View, self, cleanup);
         self.root = try ui.boxStyled(cx, S.wrapper, .{});
@@ -50,7 +50,7 @@ pub const View = struct {
         try self.root.appendChild(cx.allocator, self.card);
         const header = try ui.boxStyled(cx, S.header, .{});
         try self.card.appendChild(cx.allocator, header);
-        const disclosure = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.terminal, .icon_size = @as(f32, 17), .a11y_label = "查看待批准调用详情", .base_style = S.disclosureButton(), .on_click = cx.on(View, self, toggle) }).mount(scope, cx);
+        const disclosure = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.terminal, .icon_size = @as(f32, 17), .a11y_label = "查看待批准调用详情", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, toggle) }).mount(scope, cx);
         disclosure.meta.ownership.meta.test_id = "ai.approval.disclosure";
         try header.appendChild(cx.allocator, disclosure);
         self.title = try ui.textStyled(cx, S.title, "工具调用");
@@ -61,12 +61,12 @@ pub const View = struct {
         self.header_identity.meta.ownership.meta.test_id = "ai.approval.target";
         self.header_identity.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
         try header.appendChild(cx.allocator, self.header_identity);
-        const state = try ui.text(cx, "待确认", .{ .font_size = 10, .line_height = 1.65, .color = theme.current().fg_2 });
+        const state = try ui.textStyled(cx, stateStyle, "待确认");
         self.state_label = state;
         state.meta.ownership.meta.test_id = "ai.approval.state";
         state.setStyleInline(cx.allocator, .{ .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = ui.Color.TRANSPARENT, .corner_radius = 5, .flex_shrink = 0 });
         try header.appendChild(cx.allocator, state);
-        self.target_copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制全部目标信息", .base_style = S.disclosureButton(), .on_click = cx.on(View, self, copyTargets) }).mount(scope, cx);
+        self.target_copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 14), .a11y_label = "复制全部目标信息", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, copyTargets) }).mount(scope, cx);
         self.target_copy.meta.ownership.meta.test_id = "ai.approval.copy_targets";
         self.target_copy.setDisplay(.none);
         try header.appendChild(cx.allocator, self.target_copy);
@@ -86,20 +86,22 @@ pub const View = struct {
         const command_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .height = 27 }).mount(scope, cx);
         @import("ai_card_scroll.zig").containVertical(command_scroll);
         command_scroll.container.setStyleInline(cx.allocator, S.commandViewport(cx.tokens));
+        command_scroll.container.meta.per_frame.hooks.on_theme = commandViewportTheme;
         command_scroll.container.meta.ownership.meta.test_id = "ai.approval.command_scroll";
         command_scroll.content.setStyleInline(cx.allocator, S.commandContent(cx.tokens));
+        command_scroll.content.meta.per_frame.hooks.on_theme = commandContentTheme;
         try command_row.appendChild(cx.allocator, command_scroll.container);
         self.command = try ui.textStyled(cx, S.command, "");
         self.command.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         self.command.meta.ownership.meta.test_id = "ai.approval.command";
         try command_scroll.content.appendChild(cx.allocator, self.command);
-        const copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 16), .a11y_label = "复制完整命令", .base_style = S.disclosureButton(), .on_click = cx.on(View, self, copyCommand) }).mount(scope, cx);
+        const copy = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.copy, .icon_size = @as(f32, 16), .a11y_label = "复制完整命令", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.disclosureButton, .{}), .on_click = cx.on(View, self, copyCommand) }).mount(scope, cx);
         self.command_copy = copy;
         copy.meta.ownership.meta.test_id = "ai.approval.copy";
         try command_row.appendChild(cx.allocator, copy);
         const impact = try ui.boxStyled(cx, S.impactNotice, .{});
         impact.meta.ownership.meta.test_id = "ai.approval.impact_notice";
-        try impact.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("triangle-alert").?, theme.current().warn_ink, .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
+        try impact.appendChild(cx.allocator, try theme.icon(cx, ui.icons.get("triangle-alert").?, "warn_ink", .{ .width = .{ .px = 12 }, .height = .{ .px = 12 }, .flex_shrink = 0 }));
         self.feedback = try ui.textStyled(cx, S.impact, "影响 · 尚未核实");
         self.feedback.meta.ownership.meta.test_id = "ai.approval.impact";
         self.feedback.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex = 1, .flex_shrink = 0 });
@@ -113,16 +115,18 @@ pub const View = struct {
         reject.meta.ownership.meta.test_id = "ai.approval.reject";
         try footer.appendChild(cx.allocator, reject);
         const accept = try ui.widgets.Button(.{ .variant = .primary, .label = self.accept_text, .a11y_label = self.accept_text, .base_style = self.accept_style, .disabled = self.decision_pending, .on_click = cx.on(View, self, acceptCall) }).mount(scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, scope, accept, self.decision_pending);
         accept.meta.ownership.meta.test_id = "ai.approval.accept";
         try footer.appendChild(cx.allocator, accept);
         self.group_footer = try ui.boxStyled(cx, S.groupFooter, .{});
         self.group_footer.setDisplay(.none);
         try self.card.appendChild(cx.allocator, self.group_footer);
         try self.group_footer.appendChild(cx.allocator, try ui.spacer(cx));
-        const group_reject = try ui.widgets.Button(.{ .label = "拒绝", .variant = .secondary, .a11y_label = "拒绝此组调用", .base_style = S.groupButton(false), .disabled = self.decision_pending, .on_click = cx.on(View, self, rejectCall) }).mount(scope, cx);
+        const group_reject = try ui.widgets.Button(.{ .label = "拒绝", .variant = .secondary, .a11y_label = "拒绝此组调用", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.groupButton, .{false}), .disabled = self.decision_pending, .on_click = cx.on(View, self, rejectCall) }).mount(scope, cx);
         group_reject.meta.ownership.meta.test_id = "ai.approval.group.reject";
         try self.group_footer.appendChild(cx.allocator, group_reject);
-        const group_accept = try ui.widgets.Button(.{ .label = "批准执行", .variant = .primary, .a11y_label = "批准此组调用全部目标", .base_style = S.groupButton(true), .disabled = self.decision_pending, .on_click = cx.on(View, self, acceptCall) }).mount(scope, cx);
+        const group_accept = try ui.widgets.Button(.{ .label = "批准执行", .variant = .primary, .a11y_label = "批准此组调用全部目标", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.groupButton, .{true}), .disabled = self.decision_pending, .on_click = cx.on(View, self, acceptCall) }).mount(scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, scope, group_accept, self.decision_pending);
         group_accept.meta.ownership.meta.test_id = "ai.approval.group.accept";
         try self.group_footer.appendChild(cx.allocator, group_accept);
         self.tail = try ui.boxStyled(cx, S.tail, .{});
@@ -231,3 +235,15 @@ pub const View = struct {
         if (self.command_owned) |owned| self.cx.allocator.free(owned);
     }
 };
+
+fn stateStyle(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 10, .line_height = 1.65, .color = theme.current().fg_2 };
+}
+
+fn commandViewportTheme(node: *ui.Node, tokens: *const ui.ThemeTokens, allocator: std.mem.Allocator) void {
+    node.setStyleInline(allocator, S.commandViewport(tokens));
+}
+
+fn commandContentTheme(node: *ui.Node, tokens: *const ui.ThemeTokens, allocator: std.mem.Allocator) void {
+    node.setStyleInline(allocator, S.commandContent(tokens));
+}

@@ -12,6 +12,7 @@ const ssh = @import("../proto/ssh/session.zig");
 const hosts = @import("../config/hosts.zig");
 const Info = @import("socks_info_view.zig");
 const Config = @import("socks_config_view.zig");
+const Exposure = @import("socks_exposure_confirm.zig");
 const Probe = @import("../proto/ssh/socks_proxy_probe.zig");
 const applog = @import("../platform/applog.zig");
 const Desired = struct { legacy: ws.SessionId, mode: routes.listener.ForwardMode, target: routes.listener.Target };
@@ -34,8 +35,8 @@ pub const Host = struct {
     config: ?*Config.View = null,
     config_host_id: ?ws.HostId = null,
     config_session_id: ?ws.SessionId = null,
-    exposure_owner: ?identity.SessionHandle = null,
-    exposure_request_owner: ?identity.SessionHandle = null,
+    exposure_approval: ?Exposure.ApprovalScope = null,
+    exposure_request: ?Exposure.ApprovalScope = null,
     exposure: ?*@import("socks_exposure_confirm.zig").View = null,
     exposure_for_start: bool = false,
     pending_start: ?ws.SessionId = null,
@@ -320,18 +321,21 @@ pub const Host = struct {
     pub fn confirmExposure(raw: *anyopaque, bind: []const u8) bool {
         const self: *Host = @ptrCast(@alignCast(raw));
         const owner = self.application.ownerForLegacy(self.config_session_id orelse return false) orelse return false;
-        if (self.exposure_owner) |approved| if (approved.eql(owner)) return true;
-        self.exposure_request_owner = owner;
-        if (self.exposure) |view| view.show(bind) catch {};
+        const draft = (self.config orelse return false).draft;
+        const request: Exposure.ApprovalScope = .{ .owner = owner, .mode = draft.mode, .exit_index = draft.exit, .port = draft.port, .target = if (draft.mode == .socks5) .{} else routes.listener.Target.init(draft.target_host, draft.target_port) catch return false };
+        if (self.exposure_approval) |approved| if (approved.eql(request)) return true;
+        self.exposure_request = request;
+        self.exposure_for_start = false;
+        if (self.exposure) |view| view.showScoped(bind, request, self.exposureExitName(request)) catch {};
         return false;
     }
     pub fn exposureConfirmed(raw: *anyopaque, _: []const u8) void {
         const self: *Host = @ptrCast(@alignCast(raw));
-        const requested = self.exposure_request_owner orelse return;
+        const requested = self.exposure_request orelse return;
         const current = self.application.ownerForLegacy(self.config_session_id orelse return) orelse return;
-        if (!requested.eql(current)) return;
-        self.exposure_owner = requested;
-        self.exposure_request_owner = null;
+        if (!requested.owner.eql(current)) return;
+        self.exposure_approval = requested;
+        self.exposure_request = null;
         if (self.exposure_for_start) {
             self.exposure_for_start = false;
             const legacy = self.pending_start orelse return;
@@ -346,7 +350,16 @@ pub const Host = struct {
         self.pending_start = null;
         self.pending_port = null;
         self.exposure_for_start = false;
-        self.exposure_request_owner = null;
+        self.exposure_request = null;
+    }
+    fn exposureExitName(self: *Host, request: Exposure.ApprovalScope) []const u8 {
+        const spec = self.application.sessions.engineSpec(request.owner) orelse return "—";
+        const selected = routes.selectExit(spec, request.exit_index) catch return "—";
+        return switch (selected) {
+            .saved => |saved| saved.immutable_config.endpoint.host,
+            .temporary_ssh => |temporary| temporary.structured_endpoint.host,
+            else => "—",
+        };
     }
     pub fn showInfo(self: *Host) void {
         const info = self.info orelse return;
@@ -373,7 +386,8 @@ pub const Host = struct {
         const state: Info.State = if (value) |snapshot| switch (snapshot.phase) {
             .ready => .running,
             .connecting => .connecting,
-            .paused, .closing => .paused,
+            .paused => .paused,
+            .closing => .stopping,
             .failed, .cleanup_unknown => .failed,
             .closed => if (snapshot.failure != null) .failed else .off,
         } else .off;
@@ -444,14 +458,16 @@ pub const Host = struct {
             self.workspace.status("转发绑定地址无效");
             return;
         }
-        const exposed = if (self.exposure_owner) |approved| approved.eql(owner) else false;
+        const desired = self.desiredForward(legacy);
+        const request: Exposure.ApprovalScope = .{ .owner = owner, .mode = if (desired) |d| d.mode else .socks5, .exit_index = host.socks_exit, .port = host.socks_port, .target = if (desired) |d| d.target else .{} };
+        const exposed = if (self.exposure_approval) |approved| approved.eql(request) else false;
         if (!std.mem.eql(u8, host.socks_bind, "127.0.0.1") and !exposed) {
             self.pending_start = legacy;
             self.pending_port = requested_port;
             self.config_session_id = legacy;
-            self.exposure_request_owner = owner;
+            self.exposure_request = request;
             self.exposure_for_start = true;
-            if (self.exposure) |view| view.show(host.socks_bind) catch {};
+            if (self.exposure) |view| view.showScoped(host.socks_bind, request, self.exposureExitName(request)) catch {};
             return;
         }
         self.backend.options.presentation = if (self.workspace.app_config.ssh.otp_modal) .otp_modal else .protected_form;
@@ -459,7 +475,6 @@ pub const Host = struct {
         self.backend.options.totp_autofill = self.workspace.app_config.ssh.totp_autofill;
         self.backend.options.timeout_ms = @as(u32, self.workspace.app_config.ssh.connect_timeout_sec) * 1000;
         self.bindings.ensureUnusedCapacity(self.allocator, 1) catch return;
-        const desired = self.desiredForward(legacy);
         _ = self.backend.start(owner, .{ .exit_index = host.socks_exit, .listener = .{ .mode = if (desired) |d| d.mode else .socks5, .target = if (desired) |d| d.target else .{}, .requested_port = host.socks_port, .bind127 = std.mem.eql(u8, host.socks_bind, "127.0.0.1"), .exposure_confirmed = exposed, .max_connections = host.socks_max_connections } }) catch |err| {
             self.workspace.statusFailure(@errorName(err));
             return;

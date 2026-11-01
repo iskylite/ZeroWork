@@ -59,5 +59,5 @@ pub fn exitInk(code: i32) ui.Color {
 pub fn exitTagFor(code: i32) ui.BoxStyle {
     const c = theme.current();
     const color = if (code == 0) c.ok else if (code == 130 or code == 143) c.warn else c.danger;
-    return .{ .height = .{ .px = 20 }, .padding = .{ .left = 6, .right = 6 }, .align_items = .center, .justify = .center, .background = color.withAlpha(23), .border = .{ .radius = 4, .width = 1, .color = color.withAlpha(64) }, .flex_shrink = 0 };
+    return .{ .height = .{ .px = 20 }, .padding = .{ .left = 6, .right = 6 }, .align_items = .center, .justify = .center, .background = color.withAlpha(23), .border = .{ .radius = 4, .width = 0, .color = ui.Color.TRANSPARENT }, .flex_shrink = 0 };
 }

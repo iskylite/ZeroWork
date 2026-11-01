@@ -60,6 +60,7 @@ pub const SshExecBridge = struct {
         return self.submit(command, opts, false);
     }
     fn submit(self: *SshExecBridge, command: []const u8, opts: bridge.ExecOpts, diagnostic_call: bool) !bridge.ExecHandle {
+        const accepted_ms = nowMs();
         if (command.len == 0) return error.EmptyCommand;
         if (command.len > std.math.maxInt(u16) - 1 or std.mem.indexOfScalar(u8, command, 0) != null) return error.InvalidCommand;
         if (opts.capture_cap == 0 or opts.capture_cap > max_capture) return error.InvalidCaptureLimit;
@@ -95,7 +96,7 @@ pub const SshExecBridge = struct {
         const index = empty orelse return error.ExecQueueFull;
         const item = try self.allocator.create(Command);
         errdefer self.allocator.destroy(item);
-        item.* = try Command.init(self, call_id, key, binding, command, opts);
+        item.* = try Command.init(self, call_id, key, binding, command, opts, accepted_ms);
         self.commands[index] = item;
         if (!diagnostic_call) {
             if (call_id == std.math.maxInt(u64) - 1) self.exhausted = true else self.next_call_id = call_id + 1;
@@ -303,7 +304,7 @@ pub const SshExecBridge = struct {
         logged_unknown: bool = false,
         logged_finished: bool = false,
 
-        fn init(owner: *SshExecBridge, call_id: u64, key: ?operation.OperationKey, binding: ?ServiceHandle, text: []const u8, opts: bridge.ExecOpts) !Command {
+        fn init(owner: *SshExecBridge, call_id: u64, key: ?operation.OperationKey, binding: ?ServiceHandle, text: []const u8, opts: bridge.ExecOpts, accepted_ms: i64) !Command {
             const allocator = owner.allocator;
             const command = try allocator.dupeSentinel(u8, text, 0);
             errdefer allocator.free(command);
@@ -322,7 +323,7 @@ pub const SshExecBridge = struct {
             // sent; OOM cannot lose bookkeeping for an already running command.
             try stdout.ensureTotalCapacity(allocator, opts.capture_cap);
             try stderr.ensureTotalCapacity(allocator, opts.capture_cap);
-            return .{ .owner = owner, .call_id = call_id, .key = key, .binding = binding, .command = command, .wire_command = wire, .cwd = cwd, .cap = opts.capture_cap, .timeout_ms = opts.timeout_ms, .started_ms = nowMs(), .stdout = stdout, .stderr = stderr };
+            return .{ .owner = owner, .call_id = call_id, .key = key, .binding = binding, .command = command, .wire_command = wire, .cwd = cwd, .cap = opts.capture_cap, .timeout_ms = opts.timeout_ms, .started_ms = accepted_ms, .stdout = stdout, .stderr = stderr };
         }
         fn terminal(self: *const Command) bool {
             return switch (self.status) {
@@ -354,7 +355,12 @@ pub const SshExecBridge = struct {
         }
         fn checkStop(self: *Command) void {
             if (self.terminal()) return;
+            if (self.owner.close_requested.load(.acquire)) self.cancel_requested.store(true, .release);
             if (self.cancel_requested.load(.acquire)) self.stop(.cancelled, null) else if (self.timeout_ms != 0 and elapsed(self.started_ms) >= self.timeout_ms) self.stop(.timed_out, "Timeout");
+        }
+        fn requestAllowed(self: *Command) bool {
+            self.checkStop();
+            return self.state == .requesting;
         }
         fn step(self: *Command) void {
             const session = self.owner.session;
@@ -389,7 +395,7 @@ pub const SshExecBridge = struct {
                 self.state = if (self.terminal()) .closing else .requesting;
                 self.diagnostics.phase = if (self.terminal()) .closing else .requesting;
             }
-            if (self.state == .requesting) {
+            if (self.requestAllowed()) {
                 self.request_started = true;
                 self.diagnostics.request_started = true;
                 self.effect = .unknown;
@@ -591,6 +597,40 @@ test "exec options preserve timeout capture and safe explicit cwd" {
     const text = try commandAtCwd(std.testing.allocator, "/tmp/a'b\n$(touch nope)", "printf ok");
     defer std.testing.allocator.free(text);
     try std.testing.expectEqualStrings("cd '/tmp/a'\\''b\n$(touch nope)' && printf ok", text);
+}
+
+test "ssh exec rechecks Stop and original deadline before requesting execution" {
+    var session: Session = .{ .state = .active };
+    var mailbox = SshExecBridge.init(&session, std.testing.allocator);
+    const accepted = nowMs() - 100;
+    var item = try SshExecBridge.Command.init(&mailbox, 1, null, null, "printf forbidden", .{ .timeout_ms = 10 }, accepted);
+    defer item.deinit();
+    try std.testing.expectEqual(accepted, item.started_ms);
+    // Model channel-open completing after the outer worker checked Stop.
+    item.state = .requesting;
+    item.status = .opening;
+    item.diagnostics.phase = .requesting;
+    try std.testing.expect(!item.requestAllowed());
+    try std.testing.expectEqual(bridge.Status.timed_out, item.status);
+    try std.testing.expect(!item.request_started and item.effect == .none);
+    try std.testing.expectEqual(operation.Cleanup.releasing, item.cleanup);
+
+    var stopped = try SshExecBridge.Command.init(&mailbox, 2, null, null, "printf forbidden", .{ .timeout_ms = 0 }, nowMs());
+    defer stopped.deinit();
+    stopped.state = .requesting;
+    stopped.status = .opening;
+    stopped.cancel_requested.store(true, .release);
+    try std.testing.expect(!stopped.requestAllowed());
+    try std.testing.expectEqual(bridge.Status.cancelled, stopped.status);
+    try std.testing.expect(!stopped.request_started and stopped.effect == .none);
+
+    var closing = try SshExecBridge.Command.init(&mailbox, 3, null, null, "printf forbidden", .{ .timeout_ms = 0 }, nowMs());
+    defer closing.deinit();
+    closing.state = .requesting;
+    closing.status = .opening;
+    mailbox.close();
+    try std.testing.expect(!closing.requestAllowed());
+    try std.testing.expectEqual(bridge.Status.cancelled, closing.status);
 }
 
 test "OS diagnostic does not consume caller exec call IDs" {

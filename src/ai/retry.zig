@@ -18,19 +18,37 @@ pub fn isRetryable(err: anyerror) bool {
     };
 }
 
+pub const Clock = struct {
+    pub fn now(_: @This()) i128 {
+        return @import("../platform/realtime.zig").monotonicNs();
+    }
+    pub fn sleep(_: @This(), ns: u64) void {
+        const duration: std.c.timespec = .{ .sec = 0, .nsec = @intCast(ns) };
+        // Recompute both deadlines and check Stop after every wake, including
+        // interrupted sleeps. Requested sleep time is not elapsed time.
+        _ = std.c.nanosleep(&duration, null);
+    }
+};
+
 /// Short waits keep Stop/close cancellation responsive during rate limiting.
-/// Interrupted sleeps repeat their remaining duration rather than retry early.
 pub fn wait(delay_ms: u32, token: ?*@import("provider.zig").CancelToken) !void {
-    var remaining = delay_ms;
+    return waitWithTiming(delay_ms, token, null, Clock{});
+}
+
+/// The optional request deadline is absolute and shared by all attempts.
+/// Nanosecond precision also keeps Retry-After from rounding down a wait.
+pub fn waitWithTiming(delay_ms: u32, token: ?*@import("provider.zig").CancelToken, deadline_ns: ?i128, timing: anytype) !void {
+    const until = timing.now() + @as(i128, delay_ms) * std.time.ns_per_ms;
     while (true) {
         if (token) |cancel| if (cancel.isCancelled()) return error.Cancelled;
-        if (remaining == 0) return;
-        const step: u32 = @min(remaining, 50);
-        var duration = std.c.timespec{ .sec = 0, .nsec = @intCast(step * std.time.ns_per_ms) };
-        while (std.c.nanosleep(&duration, &duration) != 0) {
-            if (token) |cancel| if (cancel.isCancelled()) return error.Cancelled;
+        const now = timing.now();
+        if (deadline_ns) |deadline| if (now >= deadline) return error.Timeout;
+        if (now >= until) return;
+        var remaining = until - now;
+        if (deadline_ns) |deadline| {
+            remaining = @min(remaining, deadline - now);
         }
-        remaining -= step;
+        timing.sleep(@intCast(@min(remaining, 50 * std.time.ns_per_ms)));
     }
 }
 test "provider retry policy backs off and exhausts" {
@@ -53,4 +71,60 @@ test "invalid tool wire requests never retry an unchanged payload" {
         try std.testing.expect(!isRetryable(err));
     }
     try std.testing.expect(isRetryable(error.RequestRejected));
+}
+
+const TestTiming = struct {
+    ns: i128 = 0,
+    advance_ns: u64,
+    sleeps: usize = 0,
+    last_sleep_ns: u64 = 0,
+    stop: ?*@import("provider.zig").CancelToken = null,
+    fn now(self: *@This()) i128 {
+        return self.ns;
+    }
+    fn sleep(self: *@This(), ns: u64) void {
+        self.sleeps += 1;
+        self.last_sleep_ns = ns;
+        self.ns += self.advance_ns;
+        if (self.stop) |token| token.cancel();
+    }
+};
+test "retry deadline delayed wakes count elapsed time instead of requested sleeps" {
+    var timing: TestTiming = .{ .advance_ns = 125 * std.time.ns_per_ms };
+    try waitWithTiming(200, null, null, &timing);
+    try std.testing.expectEqual(@as(usize, 2), timing.sleeps);
+    try std.testing.expectEqual(@as(i128, 250 * std.time.ns_per_ms), timing.ns);
+}
+test "retry deadline early interrupted wakes cannot retry before Retry-After" {
+    var timing: TestTiming = .{ .advance_ns = 10 * std.time.ns_per_ms };
+    try waitWithTiming(100, null, null, &timing);
+    try std.testing.expectEqual(@as(i128, 100 * std.time.ns_per_ms), timing.ns);
+    try std.testing.expectEqual(@as(usize, 10), timing.sleeps);
+}
+test "retry deadline wait checks total budget after an overslept wake" {
+    var timing: TestTiming = .{ .advance_ns = 125 * std.time.ns_per_ms };
+    try std.testing.expectError(error.Timeout, waitWithTiming(60, null, 70 * std.time.ns_per_ms, &timing));
+    try std.testing.expectEqual(@as(usize, 1), timing.sleeps);
+}
+test "retry deadline Stop interrupts a long wait at the first wake" {
+    var token: @import("provider.zig").CancelToken = .{};
+    var timing: TestTiming = .{ .advance_ns = 1, .stop = &token };
+    try std.testing.expectError(error.Cancelled, waitWithTiming(60_000, &token, 120_000 * std.time.ns_per_ms, &timing));
+    try std.testing.expectEqual(@as(usize, 1), timing.sleeps);
+    try std.testing.expectEqual(@as(u64, 50 * std.time.ns_per_ms), timing.last_sleep_ns);
+}
+test "retry deadline zero waits and Stop retain deadline priority without sleeping" {
+    var timing: TestTiming = .{ .advance_ns = 0 };
+    try waitWithTiming(0, null, null, &timing);
+    try std.testing.expectError(error.Timeout, waitWithTiming(0, null, 0, &timing));
+    var token: @import("provider.zig").CancelToken = .{};
+    token.cancel();
+    try std.testing.expectError(error.Cancelled, waitWithTiming(0, &token, 0, &timing));
+    try std.testing.expectEqual(@as(usize, 0), timing.sleeps);
+}
+test "retry deadline submillisecond remaining wait is not rounded down" {
+    var timing: TestTiming = .{ .advance_ns = std.time.ns_per_ms - 1 };
+    try waitWithTiming(1, null, null, &timing);
+    try std.testing.expectEqual(@as(usize, 2), timing.sleeps);
+    try std.testing.expectEqual(@as(u64, 1), timing.last_sleep_ns);
 }

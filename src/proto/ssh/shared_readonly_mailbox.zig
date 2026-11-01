@@ -34,6 +34,7 @@ pub const Mailbox = struct {
     work: ?*Work = null,
     startup: ?readonly.OwnedResult = null,
     initialized: bool = false,
+    startup_pending: bool = false,
     results: std.ArrayList(readonly.OwnedResult) = .empty,
     closing: bool = false,
     parent_released: bool = false,
@@ -101,12 +102,12 @@ pub const Mailbox = struct {
     pub fn closeReceipt(self: *Mailbox) readonly.ReleaseReceipt {
         self.lock();
         defer self.unlock();
-        return if (self.parent_released) .released else if (self.cleanup_unknown) .unknown else if (self.closing and self.work == null) .released else .awaiting;
+        return if (self.parent_released) .released else if (self.cleanup_unknown) .unknown else if (self.closing and self.work == null and !self.startup_pending) .released else .awaiting;
     }
     pub fn deinit(self: *Mailbox) !void {
         self.lock();
         defer self.unlock();
-        if (!self.closing or self.work != null or self.cleanup_unknown and !self.parent_released) return error.Busy;
+        if (!self.closing or self.work != null or self.startup_pending or self.cleanup_unknown and !self.parent_released) return error.Busy;
         for (self.results.items) |*result| result.deinit();
         self.results.clearRetainingCapacity();
         if (self.startup) |*startup| startup.deinit();
@@ -121,25 +122,26 @@ pub const Mailbox = struct {
     pub fn hasPending(self: *Mailbox) bool {
         self.lock();
         defer self.unlock();
-        return self.work != null or !self.initialized and !self.closing;
+        return self.work != null or self.startup_pending or !self.initialized and !self.closing;
     }
     /// A pinned native retry can only be abandoned by releasing its parent.
     pub fn retryExpired(self: *Mailbox, now: i128) bool {
         self.lock();
         defer self.unlock();
-        if (!self.initialized and !self.closing and now >= self.startup_deadline) return true;
+        if (!self.initialized and (!self.closing or self.startup_pending) and now >= self.startup_deadline) return true;
         const work = self.work orelse return false;
         return work.retry and now >= work.deadline;
     }
     pub fn canReleaseParent(self: *Mailbox) bool {
         self.lock();
         defer self.unlock();
-        return self.work == null and self.consumer_released;
+        return self.work == null and !self.startup_pending and self.consumer_released;
     }
     pub fn sessionReleased(self: *Mailbox) void {
         self.lock();
         defer self.unlock();
         self.parent_released = true;
+        self.startup_pending = false;
         self.closing = true;
         if (self.startup) |*startup| {
             startup.value.body = .{ .failure = .connection };
@@ -164,12 +166,20 @@ pub const Mailbox = struct {
     pub fn step(self: *Mailbox, session: *ssh.Session) bool {
         self.lock();
         defer self.unlock();
-        if (!self.initialized and !self.closing) {
+        if (!self.initialized and (!self.closing or self.startup_pending)) {
             session.sftpReadonlyInit() catch |err| {
-                if (err == error.WouldBlock or err == error.ChannelOpenBusy) return true;
+                if (err == error.WouldBlock) {
+                    self.startup_pending = true;
+                    return true;
+                }
+                if (err == error.ChannelOpenBusy) return false; // No native init was admitted.
                 self.startup.?.value.body = .{ .failure = readonly.classify(err) };
                 self.closing = true;
             };
+            // A cancelled init must settle the same native call before its
+            // mailbox can release; it must never publish a late ready event.
+            self.startup_pending = false;
+            if (self.closing and self.startup.?.value.body == .ready) self.startup.?.value.body = .closed;
             self.initialized = true;
             self.results.appendAssumeCapacity(self.startup.?);
             self.startup = null;
@@ -182,9 +192,13 @@ pub const Mailbox = struct {
         }
         if (w.phase == .directory and self.results.items.len >= 32) return false;
         self.advance(w, session) catch |err| {
-            if (err == error.WouldBlock or err == error.ChannelOpenBusy) {
+            if (err == error.WouldBlock) {
                 w.retry = true;
                 return true;
+            }
+            if (err == error.ChannelOpenBusy) {
+                w.retry = false;
+                return false;
             }
             w.retry = false;
             w.result.value.body = .{ .failure = readonly.classify(err) };
@@ -341,4 +355,51 @@ test "readonly retry deadline covers native EAGAIN without releasing its work" {
     try std.testing.expect(mailbox.retryExpired(mailbox.work.?.deadline));
     try std.testing.expectEqual(readonly.ReleaseReceipt.awaiting, mailbox.closeReceipt());
     try std.testing.expect(mailbox.work != null);
+}
+
+test "readonly cancelled startup retains native retry and its original deadline" {
+    const identity = @import("../../host/identity.zig");
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(502), .generation = 1 };
+    const endpoint: readonly.EndpointRef = .{ .binding_id = 1, .binding_generation = 1, .resource_owner = .{ .session = owner }, .origin_session = owner };
+    const mailbox = try Mailbox.init(std.testing.allocator, endpoint, .{ .owner = .{ .session = owner }, .operation_id = 1 });
+    defer {
+        mailbox.sessionReleased();
+        mailbox.deinit() catch unreachable;
+        mailbox.destroy();
+    }
+    const deadline = mailbox.startup_deadline;
+    mailbox.startup_pending = true;
+    mailbox.requestClose();
+    try std.testing.expect(mailbox.hasPending());
+    try std.testing.expect(!mailbox.canReleaseParent());
+    try std.testing.expectEqual(readonly.ReleaseReceipt.awaiting, mailbox.closeReceipt());
+    try std.testing.expectError(error.Busy, mailbox.deinit());
+    try std.testing.expect(!mailbox.retryExpired(deadline - 1));
+    try std.testing.expect(mailbox.retryExpired(deadline));
+    try std.testing.expectEqual(deadline, mailbox.startup_deadline);
+    mailbox.sessionReleased();
+    try std.testing.expect(!mailbox.hasPending());
+    try std.testing.expectEqual(readonly.ReleaseReceipt.released, mailbox.closeReceipt());
+}
+
+test "readonly channel-open contention never pins an unstarted mailbox" {
+    const identity = @import("../../host/identity.zig");
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(503), .generation = 1 };
+    const endpoint: readonly.EndpointRef = .{ .binding_id = 1, .binding_generation = 1, .resource_owner = .{ .session = owner }, .origin_session = owner };
+    const mailbox = try Mailbox.init(std.testing.allocator, endpoint, .{ .owner = .{ .session = owner }, .operation_id = 1 });
+    defer {
+        mailbox.requestClose();
+        if (!mailbox.consumer_released) mailbox.deinit() catch unreachable;
+        mailbox.destroy();
+    }
+    var session: ssh.Session = .{ .state = .active, .channel_open = .{ .kind = .exec, .id = 1 } };
+    // true would retain readonly_retry even though the consumer can close
+    // and the provider can destroy this mailbox before the next IO step.
+    try std.testing.expect(!mailbox.step(&session));
+    try std.testing.expect(mailbox.hasPending() and !mailbox.startup_pending);
+    mailbox.requestClose();
+    try std.testing.expect(!mailbox.hasPending());
+    try std.testing.expectEqual(readonly.ReleaseReceipt.released, mailbox.closeReceipt());
+    try mailbox.deinit();
+    try std.testing.expect(mailbox.canReleaseParent());
 }

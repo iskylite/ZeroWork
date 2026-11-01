@@ -163,7 +163,9 @@ pub const Broker = struct {
         errdefer self.finish(ticket);
         while (true) {
             if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
-            if (try self.poll(ticket)) return;
+            const polled = self.poll(ticket);
+            if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
+            if (try polled) return;
             @import("retry.zig").wait(10, cancel) catch return error.CancelledBeforeDispatch;
         }
     }

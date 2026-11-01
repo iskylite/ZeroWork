@@ -563,11 +563,19 @@ pub const Binding = struct {
         style.text_color = if (primary) styles.theme.actionForeground(styles.theme.current().action_accent) else styles.theme.current().fg_2;
         const node = try ui.widgets.Button(.{ .label = label, .icon_asset = if (action == .reset_defaults) null else icon, .icon_size = @as(f32, 14), .icon_tint = if (primary) self.save_tint else try self.scope.createSignal(?ui.Color, styles.theme.current().fg_2), .a11y_label = label, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .secondary), .disabled = if (primary) self.save_disabled else if (action == .revert) self.revert_disabled else self.saving, .loading = if (primary) self.saving else try self.scope.createSignal(bool, false), .on_click = cx.on(ActionClick, click, ActionClick.activate), .base_style = @as(ui.Source(styles.ButtonStyle), if (primary) .{ .signal = self.save_style } else .{ .value = style }), .hover_style = @as(?ui.BoxStyle, if (primary) .{ .background = styles.theme.current().action_accent } else styles.buttonHover()), .pressed_style = @as(?ui.BoxStyle, if (primary) .{ .background = styles.theme.current().action_accent } else null) }).mount(self.scope, cx);
         node.meta.ownership.meta.test_id = id;
-        if (primary) try self.scope.createEffect(.{ .bound = self, .node = node }, struct {
+        if (primary) try self.scope.createEffect(.{ .bound = self, .node = node, .hovered = try ui.hooks.useHover(self.scope, node), .pressed = try ui.hooks.usePressed(self.scope, cx, node), .publication = try cx.themeSignal(self.scope) }, struct {
             fn run(args: anytype) void {
+                _ = args.publication.get();
                 const disabled = args.bound.save_disabled.get();
+                const hovered = args.hovered.get();
+                const pressed = args.pressed.get();
                 const theme = styles.theme.current();
-                args.node.setStyleInline(args.bound.cx.allocator, .{ .background = theme.action_accent, .gradient = .{ .from = theme.action_accent, .to = theme.action_accent_2, .direction = .diagonal }, .opacity = if (disabled) @as(f32, 0.4) else @as(f32, 1) });
+                const foreground = styles.theme.actionForeground(theme.action_accent);
+                const pole = if (ui.Color.eql(foreground, ui.Color.WHITE)) ui.Color.BLACK else ui.Color.WHITE;
+                const amount: f32 = if (disabled) 0 else if (pressed and hovered) 0.18 else if (hovered) 0.09 else 0;
+                const from = ui.Color.lerp(theme.action_accent, pole, amount);
+                const to = ui.Color.lerp(theme.action_accent_2, pole, amount);
+                args.node.setStyleInline(args.bound.cx.allocator, .{ .background = from, .gradient = .{ .from = from, .to = to, .direction = .diagonal }, .opacity = if (disabled) @as(f32, 0.4) else @as(f32, 1) });
             }
         }.run);
         try tip.trigger.appendChild(cx.allocator, node);

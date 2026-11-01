@@ -724,7 +724,7 @@ pub const View = struct {
                 try slot.tip_label.setTextContent(self.cx.allocator, "本机\n连接起点");
                 slot.tip_content.behavior.interaction.a11y.?.label = slot.tip_label.getText().?.content;
                 try slot.status.setTextContent(self.cx.allocator, if (source.local_ready) "已就绪" else "准备中");
-                slot.status.setTextColor(if (source.local_ready) S.theme.current().ok else S.theme.current().fg_2);
+                slot.status.setTextColor(if (source.local_ready) S.theme.current().ok_ink else S.theme.current().fg_2);
                 setMarker(slot.marker, if (source.local_ready) ui.icons.circle_check else ui.icons.get("circle").?, if (source.local_ready) S.theme.current().ok else S.theme.current().fg_2);
             }
             slot.skin.set(card_style);
@@ -859,7 +859,7 @@ pub const View = struct {
         self.copy_disabled.set(self.logCount() == 0);
         if (self.copy_result) |success| {
             try self.log_help.setTextContent(self.cx.allocator, if (success) "已复制阶段日志" else "复制失败，请重试");
-            self.log_help.setTextColor(if (success) S.theme.current().ok else S.theme.current().danger_ink);
+            self.log_help.setTextColor(if (success) S.theme.current().ok_ink else S.theme.current().danger_ink);
             return;
         }
         self.log_help.setTextColor(S.theme.current().fg_2);
@@ -1024,7 +1024,7 @@ pub const View = struct {
     fn copyFeedback(self: *View, success: bool) void {
         self.copy_result = success;
         self.log_help.setTextContent(self.cx.allocator, if (success) "已复制阶段日志" else "复制失败，请重试") catch {};
-        self.log_help.setTextColor(if (success) S.theme.current().ok else S.theme.current().danger_ink);
+        self.log_help.setTextColor(if (success) S.theme.current().ok_ink else S.theme.current().danger_ink);
         self.cx.requestRedraw();
     }
     fn openChanged(self: *View, value: bool) void {
@@ -1133,6 +1133,8 @@ fn cleanupText(cleanup: operations.Cleanup) []const u8 {
 pub fn failureText(err: ?anyerror) []const u8 {
     return if (err) |failure| switch (failure) {
         error.AuthenticationFailed, error.AgentIdentityNotAccepted => "服务器未接受认证信息",
+        error.IdentityFileUnreadable => "无法读取私钥文件，请检查路径与权限",
+        error.IdentityFileInvalid => "私钥文件格式无效、已损坏或当前不支持",
         error.ConnectionTimedOut, error.ConnectionTimeout, error.ConnectTimeout, error.Timeout => "连接超时",
         error.ConnectFailed => "无法建立 TCP 连接，请检查地址、端口与网络",
         error.ConnectionRefused => "连接被拒绝",

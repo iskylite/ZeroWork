@@ -1,8 +1,9 @@
 <!doctype html>
 <html lang="zh-CN">
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>宿主操作审批</title><link rel="stylesheet" href="../theme-tokens.css">
+<title>宿主操作审批</title><link rel="stylesheet" href="../theme-tokens.css?v=c6c36517b635">
 <style>
+/* Parameter height stays intrinsic (37–105px) across every theme publication. */
 *{box-sizing:border-box}body{margin:0;background:var(--bg-app);font:11px/1.65 Inter,-apple-system,BlinkMacSystemFont,sans-serif;color:var(--fg)}
 .assistant{width:min(600px,100%);padding:9px 14px;margin:40px auto;background:var(--layer-background,var(--overlay));backdrop-filter:blur(var(--overlay-blur));border-radius:11px}
 .approval{height:auto;background:var(--popup-action);border:0;border-radius:9px;padding:11px;display:flex;flex-direction:column;overflow:hidden}
@@ -32,5 +33,5 @@ function approvalState(){document.querySelector('.state').textContent=expired?'�
 approvalState();
 document.querySelectorAll('[data-decision]').forEach(button=>button.onclick=()=>{if(button.dataset.decision==='approve'&&expired){expired=false;approvalState();return;}document.querySelector('.state').textContent=button.dataset.decision==='approve'?'已批准':'已拒绝';document.querySelectorAll('[data-decision]').forEach(node=>node.disabled=true)});
 if(params.has('measure'))addEventListener('DOMContentLoaded',()=>{const data={viewport:{width:innerWidth,height:innerHeight,dpr:devicePixelRatio}};for(const selector of ['.assistant','.approval','.approval-head','.subject-icon','.body','.url-row','.url','.summary-scroll','.route-row','.route-reason','.route-row button','.impact','.footer','.footer button']){const node=document.querySelector(selector),style=getComputedStyle(node),rect=node.getBoundingClientRect();data[selector]={x:rect.x,y:rect.y,width:rect.width,height:rect.height,font:style.font,padding:style.padding,gap:style.gap,background:style.backgroundColor,border:style.border,outline:style.outline};}const output=document.createElement('section');output.id='approval-measurements';for(const [key,value]of Object.entries(data)){const row=document.createElement('pre');row.textContent=key+' '+JSON.stringify(value);row.style.cssText='white-space:pre-wrap;overflow-wrap:anywhere;font:11px/16px monospace;margin:10px';output.append(row)}document.body.append(output)});
-</script><script src="../shared/global-background.js"></script>
+</script><script src="../shared/global-background.js?v=9d6006ea3295"></script>
 </body></html>

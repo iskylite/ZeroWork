@@ -108,7 +108,7 @@ pub const Service = struct {
         if (self.published.origin == null or !self.published.origin.?.eql(origin)) return error.StaleForwardOrigin;
         if (self.pending != null or (self.published.phase != .off and self.published.phase != .paused and self.published.phase != .failed)) return error.ForwardServiceBusy;
         if (!options.bind127 and !options.exposure_confirmed) return error.ExposureConfirmationRequired;
-        if (options.max_connections == 0) return error.InvalidForwardLimit;
+        if (!socks.limits.validConnections(options.max_connections)) return error.InvalidForwardLimit;
         if (self.published.phase == .paused and !std.meta.eql(self.published.options, options)) return error.ForwardOptionsRequireStop;
         self.pending = .{ .origin = origin, .binding = binding, .key = key, .options = options };
         self.published.binding = binding;

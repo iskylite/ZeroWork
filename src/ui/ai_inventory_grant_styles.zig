@@ -48,3 +48,7 @@ pub fn primaryPaint(enabled: bool) ui.BoxStyle {
         .inset_shadow = if (enabled) value.inset_shadow else .{ .blur = 0, .color = ui.Color.TRANSPARENT },
     };
 }
+
+pub fn hover() ?ButtonStyle {
+    return .{ .background = theme.popupSelection() };
+}

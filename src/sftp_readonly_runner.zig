@@ -240,6 +240,7 @@ pub fn main(init: std.process.Init) !void {
                 return error.RequestFailed;
             },
             .closed => return error.ServiceClosedEarly,
+            .created => return error.UnexpectedMutation,
         }
         if (response.final and response.request_id != 0) complete[response.request_id - 1] = true;
     }

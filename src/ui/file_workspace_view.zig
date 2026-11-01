@@ -214,7 +214,11 @@ pub const View = struct {
     pub fn retheme(self: *View) void {
         S.repaint(self.root, self.paint_colors);
         self.paint_colors = S.theme.current();
-        for (self.panes) |pane| pane.paint.set(pane.paint.peek() +% 1);
+        for (self.panes) |pane| {
+            pane.stale_notice.setTextColor(S.theme.current().warn_ink);
+            pane.stale_notice.setStyleInline(self.cx.allocator, S.staleNotice());
+            pane.paint.set(pane.paint.peek() +% 1);
+        }
         self.cx.requestRedraw();
     }
     fn dropMarker(_: *View, _: ui.HandlerRef.DropPayload) void {}
@@ -540,7 +544,9 @@ pub const Pane = struct {
         try filter_field.appendChild(cx.allocator, self.filter.node);
         _ = try self.button(filter_row, "plus", "新建文件夹", .new_folder, self.mkdir_disabled, 24);
         self.context_button = try self.button(filter_row, "ellipsis", "当前文件操作", .context, null, 24);
-        self.stale_notice = try label(cx, self.root, S.secondary, "上次列表 · 已过期");
+        self.stale_notice = try label(cx, self.root, S.staleText, "上次列表 · 已过期");
+        self.stale_notice.meta.ownership.meta.test_id = "files.stale.notice";
+        self.stale_notice.setStyleInline(cx.allocator, S.staleNotice());
         self.stale_notice.setDisplay(.none);
         self.table = try ui.boxStyled(cx, S.table, .{});
         try self.root.appendChild(cx.allocator, self.table);
@@ -1462,7 +1468,7 @@ fn matchesFilter(entry: Entry, query: []const u8) bool {
 }
 
 // Keep the native widget's keyboard, accessibility and controlled model behavior.
-// Only the file-table frame follows the HTML's compact outlined checkbox.
+// Compact checkboxes share the filled control semantics; no decorative frame.
 fn styleFileCheckbox(cx: *ui.Cx, scope: *ui.Scope, root: *ui.Node, checked: *ui.Signal(bool), mixed: ?*ui.Signal(bool), disabled: bool) !void {
     const CheckboxPaint = struct {
         cx: *ui.Cx,
@@ -1475,7 +1481,7 @@ fn styleFileCheckbox(cx: *ui.Cx, scope: *ui.Scope, root: *ui.Node, checked: *ui.
             _ = self.publication.get();
             const on = self.checked.get() or (if (self.mixed) |value| value.get() else false);
             const color = if (on) S.theme.current().action_accent else S.theme.current().fg_2;
-            self.box.setStyleInline(self.cx.allocator, .{ .background = if (on) color else ui.Color.TRANSPARENT, .border = .{ .width = 1, .radius = 2, .color = color }, .opacity = if (self.disabled) 0.5 else 1 });
+            self.box.setStyleInline(self.cx.allocator, .{ .background = if (on) color else self.cx.tokens.tokens.color.checkbox_bg, .border = .{ .width = 0, .radius = 2, .color = ui.Color.TRANSPARENT }, .opacity = if (self.disabled) 0.5 else 1 });
         }
     };
     const state = try scope.createState(CheckboxPaint, .{ .cx = cx, .box = root.children.items[0], .checked = checked, .mixed = mixed, .disabled = disabled, .publication = try cx.themeSignal(scope) });

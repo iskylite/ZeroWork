@@ -628,3 +628,28 @@ test "host approval content sizing survives theme replay and bounds long argumen
         }
     }
 }
+
+test "retained ai_tool_approval_view_tests paint matches a fresh mount in every builtin theme without a new decision" {
+    const theme = @import("ui/app_theme.zig");
+    const support = @import("ui_theme_test_support.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    theme.select(.dark);
+    var retained: Fixture = undefined;
+    try retained.init();
+    defer retained.deinit();
+    try retained.show(8, "pwd; git status --short");
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        try support.publish(retained.cx, retained.scope);
+        for (0..6) |_| retained.settle();
+        var fresh: Fixture = undefined;
+        try fresh.init();
+        defer fresh.deinit();
+        try support.publish(fresh.cx, fresh.scope);
+        try fresh.show(8, "pwd; git status --short");
+        for (0..6) |_| fresh.settle();
+        errdefer std.debug.print("theme={s}\n", .{id});
+        try support.expectPaintEqual(retained.view.root, fresh.view.root);
+    }
+}

@@ -92,9 +92,9 @@ pub const Bridge = struct {
             .host_key_unknown, .host_key_changed => .trust_material,
             else => .secret_input,
         };
-        if (details.host_key) |key| {
+        if (request.kind == .host_key_unknown or request.kind == .host_key_changed) if (details.host_key) |key| {
             payload.material = try std.fmt.allocPrint(allocator, "{s}\n{s}\n{s}{s}{s}\n记录路径：{s}", .{ key.algorithmSlice(), key.fingerprintSlice(), if (request.kind == .host_key_changed) "原密钥：" else "", key.old_algorithm[0..key.old_algorithm_len], key.old_fingerprint[0..key.old_fingerprint_len], key.store_path[0..key.store_path_len] });
-        }
+        };
         switch (request.kind) {
             .host_key_unknown => {
                 payload.detail = "请通过可信渠道核对指纹。仅本次信任不写记录；保存并继续会记录本次核对的密钥。";
@@ -112,7 +112,7 @@ pub const Bridge = struct {
                     fields[i] = .{ .label = prompt.text, .secret = !prompt.echo, .max_bytes = auth.InteractiveBridge.max_answer };
                 }
                 payload.fields = fields[0..request.prompt_count];
-                if (request.kind == .private_key_passphrase) payload.detail = try std.fmt.allocPrint(allocator, "私钥：{s}\n密码短语仅用于本次解锁。", .{details.private_key_path});
+                if (request.kind == .private_key_passphrase) payload.detail = try std.fmt.allocPrint(allocator, "私钥：{s}\n{s}", .{ details.private_key_path, if (request.state == .failed) "密码短语不正确，请重新输入；取消会停止本次连接。" else "密码短语仅用于本次解锁。" });
             },
         }
         const deadline: u64 = if (request.expires_at_ns) |expiry| @intCast(@max(1, @divTrunc(expiry, std.time.ns_per_ms))) else std.math.maxInt(u64);

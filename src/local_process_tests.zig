@@ -110,6 +110,114 @@ fn finishCommand(command: *exec.Command) !void {
     try command.deinit();
 }
 
+const StopOnAllocation = struct {
+    flag: *std.atomic.Value(bool),
+    fn memory(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{ .alloc = alloc, .resize = std.mem.Allocator.noResize, .remap = std.mem.Allocator.noRemap, .free = free } };
+    }
+    fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        const bytes = allocator.rawAlloc(len, alignment, ra) orelse return null;
+        self.flag.store(true, .release);
+        return bytes;
+    }
+    fn free(_: *anyopaque, bytes: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        allocator.rawFree(bytes, alignment, ra);
+    }
+};
+
+test "native exec admission rejects Stop after preparing cwd and pipes" {
+    var sandbox = try Sandbox.init();
+    defer sandbox.deinit();
+    const Gate = struct {
+        called: bool = false,
+        fn reject(raw: *anyopaque) callconv(.c) c_int {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.called = true;
+            return 1;
+        }
+    };
+    var gate: Gate = .{};
+    var failure: native.Failure = .{};
+    if (native.zw_local_start_exec_checked(sandbox.path.ptr, "touch forbidden", &failure, Gate.reject, &gate)) |process| {
+        // Even a regressed admission check must reap its actual child.
+        const until = native.zw_local_monotonic_ms() + 6500;
+        while (true) {
+            var bytes: [4096]u8 = undefined;
+            _ = try native.read(process, 0, &bytes);
+            _ = try native.read(process, 1, &bytes);
+            _ = try native.pollExit(process);
+            if (native.closeStep(process) == .released) break;
+            if (native.zw_local_monotonic_ms() >= until) return error.UnexpectedNativeChildNotReleased;
+            pause();
+        }
+        try std.testing.expectEqual(@as(c_int, 0), native.zw_local_destroy(process));
+        return error.SpawnedAfterNativeStop;
+    }
+    try std.testing.expect(gate.called);
+    try std.testing.expectEqual(native.Stage.spawn, failure.stage);
+    try std.testing.expectError(error.FileNotFound, sandbox.tmp.dir.access(std.testing.io, "forbidden", .{}));
+}
+
+test "local exec rechecks command and parent Stop after capture preparation" {
+    var sandbox = try Sandbox.init();
+    defer sandbox.deinit();
+    // Trigger Stop inside actual preparation, after the entry gate passed.
+    for ([_]bool{ false, true }) |parent| {
+        var cancelled = std.atomic.Value(bool).init(false);
+        var closing = std.atomic.Value(bool).init(false);
+        var stop: StopOnAllocation = .{ .flag = if (parent) &closing else &cancelled };
+        var failure: native.Failure = .{};
+        if (exec.Command.startPending(stop.memory(), owner(80), key(80), 1, "touch forbidden", sandbox.path, .{}, &failure, native.zw_local_monotonic_ms(), &cancelled, &closing)) |value| {
+            var unexpected = value;
+            defer finishCommand(&unexpected) catch @panic("unexpected child cleanup incomplete");
+            return error.SpawnedAfterPreparationStop;
+        } else |err| try std.testing.expectEqual(error.CancelledBeforeStart, err);
+        try std.testing.expect(stop.flag.load(.acquire));
+    }
+    try std.testing.expectError(error.FileNotFound, sandbox.tmp.dir.access(std.testing.io, "forbidden", .{}));
+}
+
+test "local queued exec never spawns after Stop or its original deadline" {
+    var sandbox = try Sandbox.init();
+    defer sandbox.deinit();
+    var failure: native.Failure = .{};
+    var cancelled = std.atomic.Value(bool).init(true);
+    const accepted = native.zw_local_monotonic_ms();
+    if (exec.Command.startPending(allocator, owner(81), key(81), 1, "touch forbidden", sandbox.path, .{}, &failure, accepted, &cancelled, null)) |value| {
+        var unexpected = value;
+        defer finishCommand(&unexpected) catch @panic("unexpected child cleanup incomplete");
+        return error.SpawnedAfterStop;
+    } else |err| try std.testing.expectEqual(error.CancelledBeforeStart, err);
+    cancelled.store(false, .release);
+    if (exec.Command.startPending(allocator, owner(81), key(81), 2, "touch forbidden", sandbox.path, .{ .timeout_ms = 10 }, &failure, accepted -| 10, &cancelled, null)) |value| {
+        var unexpected = value;
+        defer finishCommand(&unexpected) catch @panic("unexpected child cleanup incomplete");
+        return error.SpawnedAfterDeadline;
+    } else |err| try std.testing.expectEqual(error.TimeoutBeforeStart, err);
+    try std.testing.expectError(error.FileNotFound, sandbox.tmp.dir.access(std.testing.io, "forbidden", .{}));
+}
+
+test "real exec keeps queue budget and releases only after native reaping" {
+    var sandbox = try Sandbox.init();
+    defer sandbox.deinit();
+    var failure: native.Failure = .{};
+    var cancelled = std.atomic.Value(bool).init(false);
+    const accepted = native.zw_local_monotonic_ms() -| 100;
+    var command = try exec.Command.startPending(allocator, owner(82), key(82), 1, "printf READY; sleep 60", sandbox.path, .{ .timeout_ms = 1000 }, &failure, accepted, &cancelled, null);
+    defer finishCommand(&command) catch @panic("queued command cleanup incomplete");
+    try std.testing.expectEqual(accepted, command.started_ms);
+    const pid = try command.pid();
+    try std.testing.expect(pid > 0);
+    try std.testing.expectError(error.CleanupIncomplete, command.deinit());
+    // Let the real original deadline expire. No new timeout starts at spawn.
+    const result = try completeCommand(&command);
+    try std.testing.expect(result.timed_out and result.cancelled);
+    try std.testing.expectEqualStrings("READY", result.stdout);
+    try std.testing.expect(result.exit != null and result.cleanup == .released);
+    try std.testing.expectEqual(@as(c_int, -1), std.c.kill(pid, @fromBackingInt(@intCast(0))));
+}
+
 test "real login PTYs have independent owners, cwd, winsize, EAGAIN and reaped tail output" {
     var sandbox = try Sandbox.init();
     defer sandbox.deinit();
@@ -254,9 +362,12 @@ test "PTY close reobserves a foreground group exiting after interrupt" {
         const id: u64 = 200 + iteration;
         var session = try pty.Session.start(allocator, owner(id), key(id), .{ .initial_cwd = sandbox.path }, &failure);
         defer finishSession(&session) catch @panic("interrupted PTY cleanup incomplete");
-        try writeAll(&session, "stty -echo; sleep 60\r");
+        try writeAll(&session, "stty -echo; /bin/zsh -f -c 'printf \"\\111\\116\\124\\105\\122\\122\\125\\120\\124\\055\\122\\105\\101\\104\\131\\012\"; exec sleep 60'\r");
         var output: std.ArrayList(u8) = .empty;
         defer output.deinit(allocator);
+        // stty briefly owns a foreground group too. Its handoff is not proof
+        // that the long-running child is ready to receive the interrupt.
+        try waitText(&session, &output, "INTERRUPT-READY");
         const until = native.zw_local_monotonic_ms() + 4000;
         while (true) {
             _ = try drain(&session, &output);

@@ -33,6 +33,12 @@ pub const View = struct {
         self.root = popup.wrapper;
         self.chrome = popup.chrome;
         self.content = popup.content;
+        try scope.createEffect(.{ .view = self, .publication = try cx.themeSignal(scope) }, struct {
+            fn paint(ctx: anytype) void {
+                _ = ctx.publication.get();
+                ctx.view.chrome.setStyleInline(ctx.view.cx.allocator, S.panel(ctx.view.history));
+            }
+        }.paint);
         return self;
     }
     fn anchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
@@ -93,7 +99,7 @@ pub const View = struct {
         if (self.history) {
             const header = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 6, .flex_shrink = 0 }, .{});
             try self.content.appendChild(self.cx.allocator, header);
-            try header.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.history, S.theme.current().accent, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
+            try header.appendChild(self.cx.allocator, try S.theme.icon(self.cx, ui.icons.history, "accent_ink", .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
             const heading = try ui.textStyled(self.cx, S.heading, if (self.pane.side == .local) "本地路径历史" else "远程路径历史");
             heading.setStyleInline(self.cx.allocator, .{ .height = .{ .px = 24 }, .flex_shrink = 0 });
             try header.appendChild(self.cx.allocator, heading);
@@ -176,7 +182,7 @@ pub const View = struct {
             .mkdir => ui.icons.folder_plus,
             else => ui.icons.pencil,
         };
-        const button = try ui.widgets.Button(.{ .label = label, .icon_asset = icon, .icon_size = @as(f32, 14), .variant = .ghost, .disabled = disabled, .base_style = S.row(self.history), .hover_style = S.hover(), .on_click = self.cx.on(Action, action, Action.click) }).mount(scope, self.cx);
+        const button = try ui.widgets.Button(.{ .label = label, .icon_asset = icon, .icon_size = @as(f32, 14), .variant = .ghost, .disabled = disabled, .base_style = try S.theme.paintSignal(S.ButtonStyle, self.cx, scope, S.row, .{self.history}), .hover_style = try S.theme.paintSignal(?S.ButtonStyle, self.cx, scope, S.hover, .{}), .on_click = self.cx.on(Action, action, Action.click) }).mount(scope, self.cx);
         action.node = button;
         button.meta.ownership.meta.test_id = id;
         button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = if (self.history) 320 else 212 }, .height = .{ .px = if (self.history) 28 else 34 }, .direction = .row, .justify = .start, .gap = 10, .padding = .{ .left = 10, .right = 10 }, .flex_shrink = 0 });

@@ -101,3 +101,28 @@ test "broadcast view follows its actual anchor through resize and closes when th
 test {
     _ = @import("ui/broadcast_controller.zig");
 }
+
+test "retained broadcast_view_tests paint matches a fresh mount in every builtin theme without a new decision" {
+    const theme = @import("ui/app_theme.zig");
+    const support = @import("ui_theme_test_support.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    theme.select(.dark);
+    var retained: Fixture = undefined;
+    try retained.init();
+    defer retained.deinit();
+    try retained.show(3);
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        try support.publish(retained.cx, retained.scope);
+        for (0..6) |_| retained.frame();
+        var fresh: Fixture = undefined;
+        try fresh.init();
+        defer fresh.deinit();
+        try support.publish(fresh.cx, fresh.scope);
+        try fresh.show(3);
+        for (0..6) |_| fresh.frame();
+        errdefer std.debug.print("theme={s}\n", .{id});
+        try support.expectPaintEqual(retained.view.root, fresh.view.root);
+    }
+}

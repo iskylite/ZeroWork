@@ -7,6 +7,7 @@ const TextSlot = @import("vt/text_slot.zig").TextSlot;
 const text_frame = @import("vt/text_frame.zig");
 
 test {
+    _ = @import("command_metadata_tests.zig");
     _ = @import("vt/worker_io.zig");
     _ = @import("proto/ssh/relay_pump.zig");
 }

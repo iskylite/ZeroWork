@@ -21,6 +21,7 @@ import paramiko
 
 logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 TEXT = b'NAME="Loopback read only"\nID=fixture\n' * 4
+OS_PROBE = 'sh -c "uname -s; cat /etc/os-release" || cmd /c ver'
 
 
 class State:
@@ -33,6 +34,7 @@ class State:
         self.writes = []
         self.shells = 0
         self.execs = 0
+        self.exec_commands = []
         self.changed = False
         self.errors = []
 
@@ -138,6 +140,7 @@ class Server(paramiko.ServerInterface):
 
     def check_channel_exec_request(self, channel, command):
         self.state.execs += 1
+        self.state.exec_commands.append(command.decode("utf-8", errors="replace"))
         return False
 
 
@@ -210,10 +213,13 @@ def main():
     text = "".join(output)
     (args.output_dir / "loopback.log").write_text(text)
     report = {
-        "passed": code == 0 and gate_ok and "PASS fixture_errors=true" in text and not state.errors and not state.writes and state.shells == 0 and state.execs == 0 and sorted(state.opens) == sorted(state.closes),
+        # The service issues exactly one bounded OS metadata probe. Reject it
+        # at the peer, and reject any additional or different exec packet.
+        "passed": code == 0 and gate_ok and "PASS fixture_errors=true" in text and not state.errors and not state.writes and state.shells == 0 and state.exec_commands == [OS_PROBE] and sorted(state.opens) == sorted(state.closes),
         "exit_code": code, "real_blocked_read_cancel_gate": gate_ok,
         "reads_opened": state.opens, "reads_closed": state.closes,
         "write_operations": state.writes, "shell_requests": state.shells, "exec_requests": state.execs,
+        "only_expected_os_probe": state.exec_commands == [OS_PROBE],
         "same_file_open_close_multiset": sorted(state.opens) == sorted(state.closes),
         "errors": state.errors,
     }

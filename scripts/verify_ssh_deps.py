@@ -16,6 +16,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 RECEIPT = ROOT / 'vendor/.ssh-build-receipt.json'
 ARTIFACTS = ('vendor/libssh2/src/.libs/libssh2.a', 'vendor/mbedtls/library/libmbedcrypto.a',
+             'vendor/mbedtls/library/libmbedx509.a', 'vendor/mbedtls/library/libmbedtls.a',
              'vendor/libssh2/src/libssh2_config.h')
 DEFAULTS = {'CC': 'xcrun clang -arch arm64 -mmacosx-version-min=14.0',
             'AR': 'xcrun ar', 'RANLIB': 'xcrun ranlib'}

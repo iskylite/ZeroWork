@@ -90,14 +90,27 @@ static int scan_members(ZW_LOCAL_PROCESS *p) {
         struct proc_bsdinfo info;
         if (!process_info(pids[i], &info)) {
             int metadata_error = errno;
-            if (kill(pids[i], 0) == 0 || errno != ESRCH) { pid_t pid = pids[i]; free(pids); free(members); return observation_failed(p, 4, metadata_error, pid); }
+            if (kill(pids[i], 0) == 0 || errno != ESRCH) {
+                pid_t pid = pids[i]; free(pids); free(members);
+                observation_failed(p, 4, metadata_error, pid);
+                /* A dying member can remain visible to signal-zero after
+                 * its metadata disappears. No identity is inferred from it. */
+                return metadata_error == ESRCH ? -2 : -1;
+            }
             continue;
         }
         if (info.pbi_status == SZOMB) continue;
         members[count++] = member_info(&info);
     }
     free(pids);
-    if (count && !trusted) { free(members); return observation_failed(p, 5, ESTALE, p->pid); }
+    if (count && !trusted) {
+        free(members);
+        observation_failed(p, 5, ESTALE, p->pid);
+        /* A dying leader can lose its metadata before waitid exposes its
+         * unreaped exit. Keep the previous birth identities and re-observe;
+         * neither this untrusted set nor its SID authorizes a signal. */
+        return -2;
+    }
     free(p->members);
     p->members = members;
     p->member_count = count;
@@ -222,7 +235,8 @@ static int spawn_pty(pid_t *pid, int slave, int cwd_fd, char **argv, char **env,
 }
 
 static ZW_LOCAL_PROCESS *start(const char *cwd, const char *term, const char *command,
-                             unsigned short cols, unsigned short rows, const char *bootstrap, ZW_LOCAL_FAILURE *failure) {
+                             unsigned short cols, unsigned short rows, const char *bootstrap, ZW_LOCAL_FAILURE *failure,
+                             zw_local_start_check check, void *check_context) {
     ZW_LOCAL_PROCESS *p = calloc(1, sizeof(*p));
     if (!p) { *failure = (ZW_LOCAL_FAILURE){ 1, ENOMEM }; return NULL; }
     p->fd = p->error_fd = -1;
@@ -294,6 +308,7 @@ static ZW_LOCAL_PROCESS *start(const char *cwd, const char *term, const char *co
     }
     char *interactive[] = { "/bin/zsh", "-l", "-i", NULL };
     char *exec_args[] = { "/bin/zsh", "-l", "-c", (char *)command, NULL };
+    if (check && check(check_context)) { saved_error = ECANCELED; goto fail; }
     saved_error = p->pty ? spawn_pty(&p->pid, slave, cwd_fd, interactive, environment, &stage) :
         posix_spawn(&p->pid, "/bin/zsh", &actions, &attr, exec_args, environment);
     if (saved_error) goto fail;
@@ -323,13 +338,17 @@ fail:
 }
 
 ZW_LOCAL_PROCESS *zw_local_start_pty(const char *cwd, const char *term, unsigned short cols, unsigned short rows, ZW_LOCAL_FAILURE *failure) {
-    return start(cwd, term, NULL, cols, rows, NULL, failure);
+    return start(cwd, term, NULL, cols, rows, NULL, failure, NULL, NULL);
 }
 ZW_LOCAL_PROCESS *zw_local_start_pty_edit(const char *cwd, const char *term, unsigned short cols, unsigned short rows, const char *bootstrap, ZW_LOCAL_FAILURE *failure) {
-    return start(cwd, term, NULL, cols, rows, bootstrap, failure);
+    return start(cwd, term, NULL, cols, rows, bootstrap, failure, NULL, NULL);
 }
 ZW_LOCAL_PROCESS *zw_local_start_exec(const char *cwd, const char *command, ZW_LOCAL_FAILURE *failure) {
-    return start(cwd, NULL, command, 0, 0, NULL, failure);
+    return zw_local_start_exec_checked(cwd, command, failure, NULL, NULL);
+}
+ZW_LOCAL_PROCESS *zw_local_start_exec_checked(const char *cwd, const char *command, ZW_LOCAL_FAILURE *failure,
+                                            zw_local_start_check check, void *context) {
+    return start(cwd, NULL, command, 0, 0, NULL, failure, check, context);
 }
 int zw_local_read(ZW_LOCAL_PROCESS *p, int stream, unsigned char *buffer, size_t len, size_t *count) {
     if (p->closed) { errno = EBADF; return -1; }
@@ -367,7 +386,7 @@ int zw_local_dimensions(ZW_LOCAL_PROCESS *p, unsigned short *cols, unsigned shor
     if (!p->pty || p->closed || ioctl(p->fd, TIOCGWINSZ, &value) < 0) return -1;
     *cols = value.ws_col; *rows = value.ws_row; return 0;
 }
-int zw_local_poll_exit(ZW_LOCAL_PROCESS *p, ZW_LOCAL_EXIT *out) {
+static int poll_exit(ZW_LOCAL_PROCESS *p, ZW_LOCAL_EXIT *out) {
     if (p->reaped) { *out = p->exit; return 1; }
     siginfo_t pending = {0};
     int probe;
@@ -381,7 +400,8 @@ int zw_local_poll_exit(ZW_LOCAL_PROCESS *p, ZW_LOCAL_EXIT *out) {
     /* Freeze surviving members after exit is observable but while the zombie
      * leader still proves the session identity. A pre-exit scan races a final
      * fork and must not be used as the only ownership evidence after reap. */
-    if (scan_members(p) < 0) return -1;
+    int scan = scan_members(p);
+    if (scan < 0) return scan;
     int status;
     pid_t result;
     do { result = waitpid(p->pid, &status, WNOHANG); } while (result < 0 && errno == EINTR);
@@ -391,6 +411,12 @@ int zw_local_poll_exit(ZW_LOCAL_PROCESS *p, ZW_LOCAL_EXIT *out) {
     else if (WIFSIGNALED(status)) p->exit = (ZW_LOCAL_EXIT){ 2, WTERMSIG(status) };
     else return observation_failed(p, 7, ECHILD, p->pid);
     p->reaped = 1; *out = p->exit; return 1;
+}
+int zw_local_poll_exit(ZW_LOCAL_PROCESS *p, ZW_LOCAL_EXIT *out) {
+    int result = poll_exit(p, out);
+    /* The exit remains pending until its ownership scan can finish. Close
+     * uses the internal result to enforce the bounded re-observation budget. */
+    return result == -2 ? 0 : result;
 }
 int zw_local_foreground(ZW_LOCAL_PROCESS *p, ZW_LOCAL_FOREGROUND *out) {
     if (!p->pty || p->closed || p->reaped || !still_owned(p, &p->leader)) return 0;
@@ -439,25 +465,33 @@ int zw_local_cwd(ZW_LOCAL_PROCESS *p, char *buffer, size_t capacity) {
     if (len == 0 || len >= capacity || !still_owned(p, &p->leader)) return 0;
     memcpy(buffer, paths.pvi_cdir.vip_path, len); buffer[len] = 0; return 1;
 }
+static int retry_close_observation(ZW_LOCAL_PROCESS *p, uint64_t now) {
+    if (!p->close_retry) { p->close_retry = 1; p->close_retry_ms = now; }
+    /* Re-observation is bounded and never weakens ownership verification. */
+    return now - p->close_retry_ms < 250 ? 0 : 2;
+}
 int zw_local_close_step(ZW_LOCAL_PROCESS *p, uint64_t now) {
     if (p->closed) return 1;
     p->close_started = 1;
     ZW_LOCAL_EXIT status;
-    if (zw_local_poll_exit(p, &status) < 0) return 2;
-    if (scan_members(p) < 0) return 2;
+    int exited = poll_exit(p, &status);
+    if (exited == -2) return retry_close_observation(p, now);
+    if (exited < 0) return 2;
+    int scan = scan_members(p);
+    if (scan == -2) return retry_close_observation(p, now);
+    if (scan < 0) return 2;
     if (!p->close_phase || (p->member_count && p->close_phase < 3 && now - p->signal_ms >= 2000)) {
         int result = signal_groups(p, !p->close_phase ? SIGHUP : p->close_phase == 1 ? SIGTERM : SIGKILL);
         if (result == -2) {
-            if (!p->close_retry) { p->close_retry = 1; p->close_retry_ms = now; }
             /* The owner, birth identities and SID stay unchanged. A fresh
              * scan must verify ownership before any later signal/release.
              * Persistent uncertainty remains unknown after this small budget. */
-            return now - p->close_retry_ms < 250 ? 0 : 2;
+            return retry_close_observation(p, now);
         }
         if (result < 0) return 2;
-        p->close_retry = 0;
         ++p->close_phase; p->signal_ms = now;
     }
+    p->close_retry = 0;
     if (p->reaped && p->member_count == 0 && p->eof && p->error_eof) {
         close_fd(&p->fd); close_fd(&p->error_fd); p->closed = 1; return 1;
     }

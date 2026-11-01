@@ -96,6 +96,7 @@ pub const Backend = struct {
 };
 const Entry = struct {
     context: host.Context,
+    invocation_id: u64 = 0,
     id: identity.ExecutionId,
     target: identity.SessionHandle,
     journal: journal_mod.Handle,
@@ -333,7 +334,7 @@ pub const Controller = struct {
         try self.entries.ensureUnusedCapacity(self.allocator, 1);
         const target = self.backend.authorize(self.backend.context, invocation, ref, command, hash) catch |err| {
             if (err == error.WorkerBusy or err == error.ApprovalRequired) return err;
-            try self.journal.update(operation, record.revision, .{ .stage = .rejected });
+            try self.journal.update(operation, record.revision, .{ .stage = if (err == error.CancelledBeforeDispatch) .cancelled_unsent else .rejected });
             return err;
         };
         self.tick(now);
@@ -357,7 +358,7 @@ pub const Controller = struct {
             self.allocator.free(index_command);
             return err;
         };
-        self.entries.appendAssumeCapacity(.{ .context = invocation.context, .id = id, .target = target.handle, .journal = operation, .journal_revision = record.revision + 1, .journal_stage = .dispatch_started, .snapshot = .{ .owner = target.handle, .state = .preparing, .completion_source = snapshot.completion_source, .interactive_execution = true, .input_ready = true, .local_released = true, .output_scope = .session_interval }, .next_renew_at = now + execution.renew_ms, .submitted_command = index_command, .dispatch_pending = .{ .execution_id = id, .task_id = invocation.context.task_id, .expected_input_epoch = snapshot.input_epoch, .ownership_revision = target.ownership_revision, .command = frozen_command, .command_hash = hash } });
+        self.entries.appendAssumeCapacity(.{ .context = invocation.context, .invocation_id = invocation.operation_id, .id = id, .target = target.handle, .journal = operation, .journal_revision = record.revision + 1, .journal_stage = .dispatch_started, .snapshot = .{ .owner = target.handle, .state = .preparing, .completion_source = snapshot.completion_source, .interactive_execution = true, .input_ready = true, .local_released = true, .output_scope = .session_interval }, .next_renew_at = now + execution.renew_ms, .submitted_command = index_command, .dispatch_pending = .{ .execution_id = id, .task_id = invocation.context.task_id, .expected_input_epoch = snapshot.input_epoch, .ownership_revision = target.ownership_revision, .command = frozen_command, .command_hash = hash } });
         // Retry only a mailbox's explicit WorkerBusy/zero-admission response.
         // Any accepted, partial or unknown dispatch permanently clears pending.
         self.dispatchPending(self.entries.items.len - 1) catch {};
@@ -427,7 +428,8 @@ pub const Controller = struct {
         } else self.terminalCall(service, .{ .input = request })) catch |err| {
             self.inputs.items[input_index].failure = err;
             if (err == error.WorkerBusy) return err;
-            try self.journal.update(operation, record.revision + 1, .{ .stage = .outcome_unknown, .execution = entry.id, .remote_effect_unknown = true });
+            const unsent = err == error.CancelledBeforeDispatch;
+            try self.journal.update(operation, record.revision + 1, .{ .stage = if (unsent) .failed else .outcome_unknown, .execution = entry.id, .remote_effect_unknown = !unsent });
             return err;
         };
         if (response != .input or response.input.input_sequence != sequence or response.input.wait_sequence != wait.sequence or response.input.kind != payload.kind or (response.input.kind == .host_secret and response.input.stage == .written)) {
@@ -805,20 +807,25 @@ test "execution interval publication retains durable receipt before next input p
 }
 
 test "execution input request key preserves controlled consumption through revocation and recovery without replay" {
-    try testInputReceiptRecovery(false);
+    try testInputReceiptRecovery(false, false);
 }
 
 test "execution input request key preserves terminal written receipt through revocation and recovery without replay" {
-    try testInputReceiptRecovery(true);
+    try testInputReceiptRecovery(true, false);
 }
 
-fn testInputReceiptRecovery(stream: bool) !void {
+test "execution deadline cancelled input admission records a known unsent failure without replay" {
+    try testInputReceiptRecovery(false, true);
+}
+
+fn testInputReceiptRecovery(stream: bool, cancel_before_input: bool) !void {
     const Mock = struct {
         snapshot: execution.Snapshot,
         input_calls: usize = 0,
         secret_prompts: usize = 0,
         busy_once: bool = true,
         allowed: bool = true,
+        cancel_before_input: bool = false,
         fn authorize(_: *anyopaque, _: host.Invocation, _: []const u8, _: []const u8, _: [32]u8) !Target {
             return error.NotAuthorized;
         }
@@ -842,6 +849,7 @@ fn testInputReceiptRecovery(stream: bool) !void {
             return switch (action) {
                 .snapshot => .{ .snapshot = self.snapshot },
                 .input => |request| blk: {
+                    if (self.cancel_before_input) return error.CancelledBeforeDispatch;
                     if (self.busy_once) {
                         self.busy_once = false;
                         return error.WorkerBusy;
@@ -874,6 +882,7 @@ fn testInputReceiptRecovery(stream: bool) !void {
     try journal.update(original, 1, .{ .stage = .dispatch_started, .execution = id });
     var mock: Mock = .{ .snapshot = .{ .owner = target, .execution_id = id, .execution_fence = 2, .execution_input_epoch = 1, .state = .running, .completion_source = if (stream) .shell_reported else .private_protocol, .grant = grant, .input_wait = .{ .sequence = if (stream) execution.stream_wait_sequence else 7, .kind = if (stream) .terminal_stream else .controlled_line }, .submit_sent = true } };
     var controller = Controller.init(a, &journal, .{ .context = &mock, .authorize = Mock.authorize, .resolve = Mock.resolve, .terminal_call = Mock.call, .authorize_input = Mock.inputAuthorize, .request_secret = Mock.secretRequest });
+    mock.cancel_before_input = cancel_before_input;
     defer controller.deinit();
     try controller.entries.append(a, .{ .context = context, .id = id, .target = target, .journal = original, .journal_revision = 2, .journal_stage = .dispatch_started, .snapshot = mock.snapshot, .next_renew_at = std.math.maxInt(i64) });
     const reference = try std.fmt.allocPrint(a, "x1:{s}", .{std.fmt.bytesToHex(id.bytes, .lower)});
@@ -883,6 +892,17 @@ fn testInputReceiptRecovery(stream: bool) !void {
     var args = try std.json.parseFromSlice(std.json.Value, a, json, .{});
     defer args.deinit();
     const invocation: host.Invocation = .{ .context = context, .authority = .execution_control, .operation_id = 9, .turn_id = 1, .call_id = "input", .tool_id = "host.send_execution_input", .arguments = args.value, .arguments_json = json, .arguments_hash = execution.digest(json), .canonical_arguments_hash = try @import("canonical_arguments.zig").digest(a, args.value) };
+    if (cancel_before_input) {
+        try std.testing.expectError(error.CancelledBeforeDispatch, controller.execute(invocation, 9));
+        const operation = try controller.beginJournal(invocation);
+        var record = try journal.snapshot(a, operation);
+        defer record.deinit(a);
+        try std.testing.expectEqual(journal_mod.Stage.failed, record.stage);
+        try std.testing.expect(!record.remote_effect_unknown);
+        try std.testing.expectError(error.CancelledBeforeDispatch, controller.execute(invocation, 10));
+        try std.testing.expectEqual(@as(usize, 0), mock.input_calls);
+        return;
+    }
     try std.testing.expectError(error.WorkerBusy, controller.execute(invocation, 9));
     var response = try controller.execute(invocation, 10);
     defer response.result.deinit(a);

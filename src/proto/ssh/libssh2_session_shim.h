@@ -95,6 +95,7 @@ int zw_libssh2_auth_keyboard_interactive_batch(LIBSSH2_SESSION *session, const c
 int zw_libssh2_last_error_code(LIBSSH2_SESSION *session);
 int zw_libssh2_transport_failed(LIBSSH2_SESSION *session);
 const char *zw_libssh2_last_error(LIBSSH2_SESSION *session);
+enum { ZW_SSH_KEY_INVALID = -1102, ZW_SSH_KEY_UNREADABLE = -1103, ZW_SSH_KEY_PASSPHRASE = -1104 };
 int zw_libssh2_auth_private_key(LIBSSH2_SESSION *session, const char *user, const char *private_key_path, const char *passphrase);
 int zw_libssh2_auth_methods_driven(LIBSSH2_SESSION *session, const char *user, char *methods, size_t capacity, size_t *length, const ZW_SSH_DRIVE *drive);
 int zw_libssh2_auth_password_driven(LIBSSH2_SESSION *session, const char *user, const char *password, const ZW_SSH_DRIVE *drive);

@@ -14,6 +14,10 @@ pub const EditorEvents = struct {
     context: *anyopaque,
     changed: *const fn (*anyopaque) void,
     submit: *const fn (*anyopaque, envelope.Envelope, SubmitIntent) anyerror!void,
+    /// The host commits staging only after its existing config transaction
+    /// succeeds. The opaque receipt never contains password bytes or a fake
+    /// session owner; temporary credentials go to the real create operation.
+    submit_with_secret: ?*const fn (*anyopaque, envelope.Envelope, SubmitIntent, @import("editor_credentials.zig").Handoff) anyerror!void = null,
     dismiss: ?*const fn (*anyopaque) void = null,
     cancelled: ?*const fn (*anyopaque) void = null,
 };
@@ -34,6 +38,8 @@ pub const EditorMount = struct {
     events: EditorEvents,
     editor_host: ?*@import("content_context.zig").EditorHost = null,
     editor_id: u64 = 0,
+    credentials: ?@import("editor_credentials.zig").Facade = null,
+    probes: ?@import("probe_contract.zig").EditorProbes = null,
     connection_configs: ?@import("connection_config_resolver.zig").Resolver = null,
 };
 pub const ModalPresentation = struct {
@@ -77,6 +83,7 @@ pub const ContentMount = struct {
     connection: envelope.Envelope,
     content_context: ?*@import("content_context.zig").Context = null,
     frame_sink: ?*@import("frame_texture_sink.zig").Sink = null,
+    service_access: ?@import("session_service_access.zig").SessionServiceAccess = null,
 };
 pub const ContentUpdate = struct {
     owner: identity.SessionHandle,
@@ -91,7 +98,14 @@ pub const RendererInstance = struct {
         update: *const fn (*anyopaque, ContentUpdate) anyerror!void,
         focus_changed: *const fn (*anyopaque, bool) void,
         unmount: *const fn (*anyopaque) void,
+        /// Presentation readiness does not imply an online remote service.
+        /// Labels are borrowed for the synchronous host projection only.
+        connection_status: ?*const fn (*anyopaque) ConnectionStatus = null,
     };
+};
+pub const ConnectionStatus = struct {
+    state: enum { connecting, online, degraded, ended },
+    label: []const u8,
 };
 pub const RendererDefinition = struct {
     kind: []const u8,
@@ -105,6 +119,7 @@ pub const RendererDefinition = struct {
 pub const ContentServices = struct {
     content_context: ?*@import("content_context.zig").Context = null,
     frame_sink: ?*@import("frame_texture_sink.zig").Sink = null,
+    service_access: ?@import("session_service_access.zig").SessionServiceAccess = null,
 };
 pub const ContentServicesFactory = struct {
     context: *anyopaque,

@@ -11,6 +11,29 @@ test {
     _ = @import("tool_loop_tests.zig");
 }
 
+fn RequestBudget(comptime Timing: type) type {
+    return struct {
+        timing: Timing,
+        deadline_ns: i128,
+        stop: ?*provider.CancelToken,
+        fn reason(self: *const @This()) ?anyerror {
+            const now = self.timing.now();
+            if (self.stop) |token| if (token.isCancelled()) return error.Cancelled;
+            return if (now >= self.deadline_ns) error.Timeout else null;
+        }
+        fn check(self: *const @This()) !void {
+            if (self.reason()) |err| return err;
+        }
+        fn cancelled(raw: *const anyopaque) bool {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            return self.reason() != null;
+        }
+        fn childToken(self: *const @This()) provider.CancelToken {
+            return .{ .source = .{ .context = self, .poll = cancelled } };
+        }
+    };
+}
+
 /// 将 Provider 的增量事件汇聚为可消费的 CardStream，并维护一次 Turn 的生命周期。
 pub const Manager = struct {
     pub const Observer = struct {
@@ -92,6 +115,17 @@ pub const Manager = struct {
     }
 
     pub fn run(self: *Manager, p: provider.Provider, request: provider.ChatRequest) !provider.ChatStats {
+        return self.runWithTiming(p, request, retry.Clock{});
+    }
+
+    fn runWithTiming(self: *Manager, p: provider.Provider, request: provider.ChatRequest, timing: anytype) !provider.ChatStats {
+        const budget: RequestBudget(@TypeOf(timing)) = .{ .timing = timing, .deadline_ns = timing.now() + @as(i128, request.timeout_ms) * std.time.ns_per_ms, .stop = request.cancel };
+        var cancel = budget.childToken();
+        return self.runWithinBudget(p, request, &budget, &cancel) catch |err| return budget.reason() orelse err;
+    }
+
+    fn runWithinBudget(self: *Manager, p: provider.Provider, request: provider.ChatRequest, budget: anytype, cancel: *provider.CancelToken) !provider.ChatStats {
+        try budget.check();
         if (self.tool_run) |previous| {
             // Only a retry of the same turn inherits its dispatch ledger.
             // A later tools-free turn keeps historical tool messages as
@@ -107,9 +141,12 @@ pub const Manager = struct {
                 }
             };
         }
+        errdefer self.turn.abort();
         if (self.observer) |observer| {
             if (observer.round_start) |notify| notify(observer.context);
+            try budget.check();
             observer.reset(observer.context);
+            try budget.check();
         }
         try self.turn.resetForRun();
         self.last_error = null;
@@ -123,7 +160,6 @@ pub const Manager = struct {
         try self.turn.begin();
         try self.turn.stream();
 
-        errdefer self.turn.abort();
         if (self.tool_host != null or (self.scope != null and request.tools.len == 0)) {
             const scope = self.scope orelse return error.ToolScopeUnavailable;
             const loop = try self.allocator.create(tool_loop.Loop);
@@ -140,10 +176,16 @@ pub const Manager = struct {
         const frozen_policy_revision = self.policy_revision;
         var total: provider.ChatStats = .{};
         while (true) {
-            const current = if (self.tool_run) |loop| try loop.nextRequest() else request;
+            try budget.check();
+            var current = if (self.tool_run) |loop| try loop.nextRequest() else request;
+            // Keep only the caller's token in the retained snapshot. This
+            // bounded token borrows the active run and must never escape it.
+            current.cancel = cancel;
             self.turn.state = .streaming;
-            const stats = try self.runRound(p, current);
-            if (self.tool_run) |loop| if (self.tool_host) |host| try loop.acknowledgeNotice(host);
+            const stats = try self.runRoundUntil(p, current, budget.deadline_ns, budget.timing);
+            try budget.check();
+            if (self.tool_run) |loop| if (self.tool_host) |host| try loop.acknowledgeNotice(host, cancel);
+            try budget.check();
             total.input_tokens +|= stats.input_tokens;
             total.output_tokens +|= stats.output_tokens;
             total.usage_reported = total.usage_reported and stats.usage_reported;
@@ -153,9 +195,10 @@ pub const Manager = struct {
                 return total;
             }
             try self.completeTools(current.cancel, frozen_policy, frozen_policy_revision);
-            if (current.cancel) |token| if (token.isCancelled()) return error.Cancelled;
+            try budget.check();
             if (self.tool_run.?.uncertain) return error.ToolOutcomeUnknown;
             if (self.tool_host) |host| try self.tool_run.?.refreshAuthority(host, current.cancel);
+            try budget.check();
         }
     }
 
@@ -163,8 +206,23 @@ pub const Manager = struct {
     /// and completed-call ledger. It exposes no tools and cannot dispatch new
     /// effects, even if a misbehaving provider returns a tool call anyway.
     pub fn resumeAnswer(self: *Manager, p: provider.Provider, cancel: ?*provider.CancelToken) !provider.ChatStats {
-        if (self.cooldownRemainingMs() != 0) return error.ProviderCoolingDown;
+        return self.resumeAnswerWithTiming(p, cancel, retry.Clock{});
+    }
+
+    fn resumeAnswerWithTiming(self: *Manager, p: provider.Provider, stop: ?*provider.CancelToken, timing: anytype) !provider.ChatStats {
+        if (stop) |token| if (token.isCancelled()) return error.Cancelled;
+        const started = timing.now();
         const loop = self.tool_run orelse return error.NoToolTurnToResume;
+        // A user-initiated answer retry is a fresh attempt, not an automatic
+        // continuation. It keeps the original snapshot and dispatch ledger.
+        const budget: RequestBudget(@TypeOf(timing)) = .{ .timing = timing, .deadline_ns = started + @as(i128, loop.request.timeout_ms) * std.time.ns_per_ms, .stop = stop };
+        var cancel = budget.childToken();
+        return self.resumeAnswerWithinBudget(p, loop, &budget, &cancel) catch |err| return budget.reason() orelse err;
+    }
+
+    fn resumeAnswerWithinBudget(self: *Manager, p: provider.Provider, loop: *tool_loop.Loop, budget: anytype, cancel: *provider.CancelToken) !provider.ChatStats {
+        try budget.check();
+        if (self.cooldownRemainingMs() != 0) return error.ProviderCoolingDown;
         if (loop.uncertain) return error.ToolOutcomeUnknown;
         if (self.turn_id != loop.turn_id or self.scope == null or !tool_scope.Owner.eql(self.scope.?.owner, loop.scope.owner)) return error.ToolOwnerChanged;
         if (self.turn.state != .idle) return error.InvalidTransition;
@@ -173,7 +231,9 @@ pub const Manager = struct {
         errdefer self.turn.abort();
         if (self.observer) |observer| {
             if (observer.round_start) |notify| notify(observer.context);
+            try budget.check();
             observer.reset(observer.context);
+            try budget.check();
         }
         var resumed = loop.request;
         resumed.messages = loop.messages.items;
@@ -181,7 +241,9 @@ pub const Manager = struct {
         resumed.cancel = cancel;
         // Do not mutate the original request/token snapshot to retry it.
         try loop.checkRequestBudget();
-        const stats = try self.runRound(p, resumed);
+        try budget.check();
+        const stats = try self.runRoundUntil(p, resumed, budget.deadline_ns, budget.timing);
+        try budget.check();
         if (self.pending_tools.items.len != 0) return error.ToolInvocationDuringAnswerRetry;
         try self.turn.done();
         try self.audit_log.append(.{ .timestamp_ms = self.timestamp_ms, .turn_id = loop.turn_id, .command = self.command, .verdict = "answer_retry_done", .target = resumed.model });
@@ -215,7 +277,12 @@ pub const Manager = struct {
 
     /// Retries only this provider round. Tool dispatch is outside the retry
     /// region; already completed calls and their transcript never run again.
-    fn runRound(self: *Manager, p: provider.Provider, request: provider.ChatRequest) !provider.ChatStats {
+    fn runRoundWithTiming(self: *Manager, p: provider.Provider, request: provider.ChatRequest, timing: anytype) !provider.ChatStats {
+        const deadline_ns = timing.now() + @as(i128, request.timeout_ms) * std.time.ns_per_ms;
+        return self.runRoundUntil(p, request, deadline_ns, timing);
+    }
+
+    fn runRoundUntil(self: *Manager, p: provider.Provider, request: provider.ChatRequest, deadline_ns: i128, timing: anytype) !provider.ChatStats {
         if (self.observer) |observer| if (observer.round_start) |notify| notify(observer.context);
         self.clearPending();
         self.round_text.clearRetainingCapacity();
@@ -227,7 +294,6 @@ pub const Manager = struct {
 
         var attempt: u8 = 0;
         self.retry_attempt = 0;
-        const started_ms = monotonicMs();
         while (true) {
             if (request.cancel) |token| if (token.isCancelled()) {
                 self.turn.abort();
@@ -237,24 +303,29 @@ pub const Manager = struct {
             const audit_start = self.audit_log.len();
             var retry_after_ms: ?u32 = null;
             var attempt_request = request;
-            const elapsed_ms = monotonicMs() -| started_ms;
-            attempt_request.timeout_ms = request.timeout_ms -| @as(u32, @intCast(@min(elapsed_ms, std.math.maxInt(u32))));
-            if (attempt_request.timeout_ms == 0) {
+            const remaining_ns = deadline_ns - timing.now();
+            if (remaining_ns <= 0) {
                 self.turn.abort();
                 try self.recordFailure(request.model);
                 return error.Timeout;
             }
+            // The transport accepts milliseconds; round up its local limit,
+            // then enforce the exact shared deadline again on completion.
+            attempt_request.timeout_ms = @intCast(@divTrunc(remaining_ns + std.time.ns_per_ms - 1, std.time.ns_per_ms));
             attempt_request.retry_after_ms = &retry_after_ms;
             self.retry_attempt = attempt;
             const result = p.chat(p.ctx, attempt_request, receive, self);
             if (retry_after_ms) |delay| self.cooldown_deadline_ms = monotonicMs() +| delay;
+            // Stop wins on both success and failure. Providers and their
+            // epilogues must also stay within the original retry budget.
+            const cancelled = if (request.cancel) |token| token.isCancelled() else false;
+            if (cancelled or timing.now() >= deadline_ns) {
+                self.audit_log.truncate(audit_start);
+                self.turn.abort();
+                try self.recordFailure(request.model);
+                return if (cancelled) error.Cancelled else error.Timeout;
+            }
             if (result) |stats| {
-                if (request.cancel) |token| if (token.isCancelled()) {
-                    self.audit_log.truncate(audit_start);
-                    self.turn.abort();
-                    try self.recordFailure(request.model);
-                    return error.Cancelled;
-                };
                 if (self.last_error != null or !self.saw_done) {
                     self.audit_log.truncate(audit_start);
                     self.turn.abort();
@@ -273,13 +344,12 @@ pub const Manager = struct {
                     const actual_delay = @max(delay_ms, retry_after_ms orelse 0);
                     // Do not retry ahead of Retry-After or wait indefinitely
                     // when the server asks for a delay beyond this turn's budget.
-                    const spent_ms = monotonicMs() -| started_ms;
-                    if (actual_delay >= request.timeout_ms -| @as(u32, @intCast(@min(spent_ms, std.math.maxInt(u32))))) {
+                    if (@as(i128, actual_delay) * std.time.ns_per_ms >= deadline_ns - timing.now()) {
                         self.turn.abort();
                         try self.recordFailure(request.model);
                         return error.Timeout;
                     }
-                    retry.wait(actual_delay, request.cancel) catch |wait_err| {
+                    retry.waitWithTiming(actual_delay, request.cancel, deadline_ns, timing) catch |wait_err| {
                         self.turn.abort();
                         try self.recordFailure(request.model);
                         return wait_err;
@@ -390,10 +460,10 @@ pub const Manager = struct {
         const execute_host = host.execute_host orelse return error.ToolNotAvailable;
         return execute_host(host.context, invocation, allocator, cancel);
     }
-    fn acceptedHostResult(raw: *anyopaque, context: @import("host_tools.zig").Context, name: []const u8, result: *const @import("host_tools.zig").Result) !void {
+    fn acceptedHostResult(raw: *anyopaque, context: @import("host_tools.zig").Context, name: []const u8, result: *const @import("host_tools.zig").Result, cancel: ?*provider.CancelToken) !void {
         const self: *Manager = @ptrCast(@alignCast(raw));
         const host = self.tool_host orelse return error.ToolHostUnavailable;
-        if (host.accepted_host_result) |accepted| try accepted(host.context, context, name, result);
+        if (host.accepted_host_result) |accepted| try accepted(host.context, context, name, result, cancel);
     }
 
     fn completeTools(self: *Manager, cancel: ?*provider.CancelToken, policy: permission.Engine, policy_revision: u64) !void {
@@ -533,6 +603,494 @@ fn monotonicMs() u64 {
     var ts: std.c.timespec = undefined;
     if (std.c.clock_gettime(.MONOTONIC, &ts) != 0) return 0;
     return @as(u64, @intCast(ts.sec)) * 1000 + @as(u64, @intCast(ts.nsec)) / std.time.ns_per_ms;
+}
+
+const TestRetryTiming = struct {
+    ns: i128 = 0,
+    oversleep_ns: ?u64 = null,
+    sleeps: usize = 0,
+    stop_on_wake: ?*provider.CancelToken = null,
+    pub fn now(self: *@This()) i128 {
+        return self.ns;
+    }
+    pub fn sleep(self: *@This(), ns: u64) void {
+        self.sleeps += 1;
+        self.ns += self.oversleep_ns orelse ns;
+        if (self.stop_on_wake) |token| token.cancel();
+    }
+};
+const TestRetryProvider = struct {
+    const Step = struct { work_ms: u32 = 0, err: ?anyerror = null, hint_ms: ?u32 = null, stop: bool = false };
+    timing: *TestRetryTiming,
+    steps: []const Step,
+    calls: usize = 0,
+    budgets: [4]u32 = @splat(0),
+    fn chat(raw: *anyopaque, request: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, ctx: *anyopaque) !provider.ChatStats {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (self.calls >= self.steps.len or self.calls >= self.budgets.len) return error.UnexpectedRetry;
+        self.budgets[self.calls] = request.timeout_ms;
+        const step = self.steps[self.calls];
+        self.calls += 1;
+        self.timing.ns += @as(i128, step.work_ms) * std.time.ns_per_ms;
+        if (step.hint_ms) |hint| request.retry_after_ms.?.* = hint;
+        if (step.stop) request.cancel.?.cancel();
+        if (step.err) |err| return err;
+        sink(ctx, .done);
+        return .{ .output_tokens = 1 };
+    }
+    fn models(_: *anyopaque, allocator: std.mem.Allocator) ![]provider.ModelInfo {
+        return allocator.alloc(provider.ModelInfo, 0);
+    }
+    fn interface(self: *@This()) provider.Provider {
+        return .{ .ctx = self, .chat = chat, .models = models };
+    }
+};
+test "retry deadline attempts share provider work and Retry-After wait budget" {
+    var timing: TestRetryTiming = .{};
+    var scripted: TestRetryProvider = .{ .timing = &timing, .steps = &.{
+        .{ .work_ms = 20, .err = error.RequestRejected, .hint_ms = 10 },
+        .{ .work_ms = 30, .err = error.Transient },
+        .{},
+    } };
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    manager.retry_policy = .{ .delays_ms = .{ 5, 15, 0 } };
+    _ = try manager.runRoundWithTiming(scripted.interface(), .{ .model = "fixture", .system = "", .messages = &.{}, .timeout_ms = 100 }, &timing);
+    try std.testing.expectEqual(@as(usize, 3), scripted.calls);
+    try std.testing.expectEqualSlices(u32, &.{ 100, 70, 25 }, scripted.budgets[0..3]);
+    try std.testing.expectEqual(@as(usize, 2), timing.sleeps);
+}
+test "retry deadline overslept backoff stops at the original request budget" {
+    var timing: TestRetryTiming = .{ .oversleep_ns = 125 * std.time.ns_per_ms };
+    var scripted: TestRetryProvider = .{ .timing = &timing, .steps = &.{.{ .work_ms = 20, .err = error.RequestRejected, .hint_ms = 60 }} };
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    manager.retry_policy = .{ .delays_ms = .{ 0, 0, 0 } };
+    try std.testing.expectError(error.Timeout, manager.runRoundWithTiming(scripted.interface(), .{ .model = "fixture", .system = "", .messages = &.{}, .timeout_ms = 100 }, &timing));
+    try std.testing.expectEqual(@as(usize, 1), timing.sleeps);
+    try std.testing.expectEqual(@as(usize, 1), scripted.calls);
+    try std.testing.expectEqual(turn_model.State.idle, manager.turn.state);
+}
+test "retry deadline delayed backoff wake does not spend its nominal delay again" {
+    var timing: TestRetryTiming = .{ .oversleep_ns = 125 * std.time.ns_per_ms };
+    var scripted: TestRetryProvider = .{ .timing = &timing, .steps = &.{ .{ .work_ms = 20, .err = error.Transient }, .{} } };
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    manager.retry_policy = .{ .delays_ms = .{ 60, 0, 0 } };
+    _ = try manager.runRoundWithTiming(scripted.interface(), .{ .model = "fixture", .system = "", .messages = &.{}, .timeout_ms = 500 }, &timing);
+    try std.testing.expectEqualSlices(u32, &.{ 500, 355 }, scripted.budgets[0..2]);
+    try std.testing.expectEqual(@as(usize, 1), timing.sleeps);
+}
+test "retry deadline Stop racing failure wins over fatal exhausted and oversized backoff paths" {
+    for ([_]anyerror{ error.ProviderFailure, error.RequestRejected, error.Timeout, error.Transient }) |failure| {
+        var token: provider.CancelToken = .{};
+        var timing: TestRetryTiming = .{};
+        var scripted: TestRetryProvider = .{ .timing = &timing, .steps = &.{.{ .err = failure, .hint_ms = 2000, .stop = true }} };
+        var manager = Manager.init(std.testing.allocator);
+        defer manager.deinit();
+        manager.retry_policy = .{ .max_attempts = if (failure == error.RequestRejected) 3 else 0 };
+        try std.testing.expectError(error.Cancelled, manager.runRoundWithTiming(scripted.interface(), .{ .model = "fixture", .system = "", .messages = &.{}, .timeout_ms = 100, .cancel = &token }, &timing));
+        try std.testing.expectEqual(@as(usize, 1), scripted.calls);
+        try std.testing.expectEqual(@as(usize, 0), timing.sleeps);
+    }
+}
+test "retry deadline late success or exhausted failure cannot escape the total budget" {
+    for ([_]?anyerror{ null, error.Transient }) |failure| {
+        var timing: TestRetryTiming = .{};
+        var scripted: TestRetryProvider = .{ .timing = &timing, .steps = &.{.{ .work_ms = 70, .err = failure }} };
+        var manager = Manager.init(std.testing.allocator);
+        defer manager.deinit();
+        manager.retry_policy.max_attempts = 0;
+        try std.testing.expectError(error.Timeout, manager.runRoundWithTiming(scripted.interface(), .{ .model = "fixture", .system = "", .messages = &.{}, .timeout_ms = 70 }, &timing));
+        try std.testing.expectEqual(@as(usize, 1), scripted.calls);
+        try std.testing.expectEqual(turn_model.State.idle, manager.turn.state);
+    }
+}
+test "retry deadline Stop during backoff prevents a second provider call" {
+    var token: provider.CancelToken = .{};
+    var timing: TestRetryTiming = .{ .stop_on_wake = &token };
+    var scripted: TestRetryProvider = .{ .timing = &timing, .steps = &.{.{ .err = error.RequestRejected, .hint_ms = 60_000 }} };
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    try std.testing.expectError(error.Cancelled, manager.runRoundWithTiming(scripted.interface(), .{ .model = "fixture", .system = "", .messages = &.{}, .timeout_ms = 120_000, .cancel = &token }, &timing));
+    try std.testing.expectEqual(@as(usize, 1), scripted.calls);
+    try std.testing.expectEqual(@as(usize, 1), timing.sleeps);
+}
+test "retry deadline valid predeadline completion remains successful" {
+    var timing: TestRetryTiming = .{};
+    var scripted: TestRetryProvider = .{ .timing = &timing, .steps = &.{.{ .work_ms = 69 }} };
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    const stats = try manager.runRoundWithTiming(scripted.interface(), .{ .model = "fixture", .system = "", .messages = &.{}, .timeout_ms = 70 }, &timing);
+    try std.testing.expectEqual(@as(u32, 1), stats.output_tokens);
+    try std.testing.expect(manager.saw_done);
+}
+
+test "retry deadline native HTTP 429 long backoff can be stopped and joined" {
+    const Fixture = struct {
+        server: std.Io.net.Server,
+        fn serve(self: *@This()) !void {
+            const connection = try self.server.accept(std.testing.io);
+            defer connection.close(std.testing.io);
+            var buffer: [4096]u8 = undefined;
+            var reader = connection.reader(std.testing.io, &buffer);
+            var length: usize = 0;
+            while (true) {
+                const line = try reader.interface.takeDelimiterInclusive('\n');
+                if (std.ascii.startsWithIgnoreCase(line, "content-length:")) length = try std.fmt.parseInt(usize, std.mem.trim(u8, line[15..], " \r\n"), 10);
+                if (std.mem.eql(u8, line, "\r\n")) break;
+            }
+            try reader.interface.discardAll(length);
+            var writer = connection.writer(std.testing.io, &.{});
+            try writer.interface.writeAll("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            try writer.interface.flush();
+        }
+    };
+    const LiveTiming = struct {
+        sleeping: std.atomic.Value(bool) = .init(false),
+        max_sleep_ns: u64 = 0,
+        pub fn now(_: *@This()) i128 {
+            return (retry.Clock{}).now();
+        }
+        pub fn sleep(self: *@This(), ns: u64) void {
+            self.max_sleep_ns = @max(self.max_sleep_ns, ns);
+            self.sleeping.store(true, .release);
+            (retry.Clock{}).sleep(ns);
+        }
+    };
+    const Worker = struct {
+        manager: *Manager,
+        p: provider.Provider,
+        request: provider.ChatRequest,
+        timing: *LiveTiming,
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) !provider.ChatStats {
+            defer self.done.store(true, .release);
+            return self.manager.runRoundWithTiming(self.p, self.request, self.timing);
+        }
+    };
+    const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+    var fixture: Fixture = .{ .server = try address.listen(std.testing.io, .{}) };
+    defer fixture.server.deinit(std.testing.io);
+    var serving = try std.Io.concurrent(std.testing.io, Fixture.serve, .{&fixture});
+    defer _ = serving.cancel(std.testing.io) catch {};
+    var endpoint_buffer: [128]u8 = undefined;
+    const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}/v1/chat/completions", .{fixture.server.socket.address.getPort()});
+    const transport = @import("provider_transport.zig");
+    var context: transport.NativeContext = .{ .io = std.testing.io };
+    var client = @import("provider_client.zig").Client.native(std.testing.allocator, &context, .openai_compat);
+    var binding = @import("provider_client.zig").Client.Binding{ .client = &client, .config = @import("provider_config.zig").defaults(.openai_compat) };
+    binding.config.endpoint = endpoint;
+    binding.config.auth = .none;
+    var manager = Manager.init(std.testing.allocator);
+    defer manager.deinit();
+    var token: provider.CancelToken = .{};
+    var timing: LiveTiming = .{};
+    var worker: Worker = .{ .manager = &manager, .p = binding.asProvider(), .request = .{ .model = "fixture", .system = "", .messages = &.{}, .timeout_ms = 120_000, .cancel = &token }, .timing = &timing };
+    var running = try std.Io.concurrent(std.testing.io, Worker.run, .{&worker});
+    defer {
+        token.cancel();
+        _ = running.cancel(std.testing.io) catch {};
+    }
+    const started = (retry.Clock{}).now();
+    while (!timing.sleeping.load(.acquire) and !worker.done.load(.acquire) and (retry.Clock{}).now() - started < 5 * std.time.ns_per_s) try retry.wait(1, null);
+    if (!timing.sleeping.load(.acquire) and worker.done.load(.acquire)) _ = try running.await(std.testing.io);
+    try std.testing.expect(timing.sleeping.load(.acquire));
+    const stopped = (retry.Clock{}).now();
+    token.cancel();
+    try std.testing.expectError(error.Cancelled, running.await(std.testing.io));
+    const stop_ms = @divTrunc((retry.Clock{}).now() - stopped, std.time.ns_per_ms);
+    try serving.await(std.testing.io);
+    try std.testing.expect(timing.max_sleep_ns <= 50 * std.time.ns_per_ms);
+    try std.testing.expectEqual(@as(u8, 0), manager.retry_attempt);
+    try std.testing.expectEqual(turn_model.State.idle, manager.turn.state);
+    std.debug.print("native HTTP backoff Stop joined in {d}ms\n", .{stop_ms});
+}
+
+const TestMultiRun = struct {
+    const Step = struct { work_ms: u32 = 0, calls: []const []const u8 = &.{}, err: ?anyerror = null };
+    const scope: tool_scope.Scope = .{ .owner = .{ .session = 101 }, .members = .{ .ids = .{101} ++ @as([15]u64, @splat(0)), .len = 1 } };
+    timing: *TestRetryTiming,
+    steps: []const Step,
+    provider_calls: usize = 0,
+    host_calls: usize = 0,
+    budgets: [8]u32 = @splat(0),
+    tool_work_ms: u32 = 20,
+    wait_for_cancel: bool = false,
+    stop_in_tool: ?*provider.CancelToken = null,
+    stop_in_ack: ?*provider.CancelToken = null,
+    notice_manager: ?*Manager = null,
+
+    fn chat(raw: *anyopaque, request: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, ctx: *anyopaque) !provider.ChatStats {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (self.provider_calls >= self.steps.len) return error.UnexpectedRound;
+        self.budgets[self.provider_calls] = request.timeout_ms;
+        const step = self.steps[self.provider_calls];
+        self.provider_calls += 1;
+        self.timing.ns += @as(i128, step.work_ms) * std.time.ns_per_ms;
+        if (step.err) |err| return err;
+        for (step.calls, 0..) |id, index| sink(ctx, .{ .tool_plan = .{ .call_id = id, .name = "read_terminal", .index = @intCast(index), .arguments = "{\"session_ids\":[101]}" } });
+        sink(ctx, .done);
+        return .{ .output_tokens = 1 };
+    }
+    fn execute(raw: *anyopaque, _: tool_loop.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !tool_loop.Outcome {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.host_calls += 1;
+        self.timing.ns += @as(i128, self.tool_work_ms) * std.time.ns_per_ms;
+        if (self.wait_for_cancel) {
+            var ticks: usize = 0;
+            while (!cancel.?.isCancelled() and ticks < 100) : (ticks += 1) self.timing.ns += 10 * std.time.ns_per_ms;
+            if (!cancel.?.isCancelled()) return error.DeadlineNotPropagated;
+        }
+        if (self.stop_in_tool) |token| token.cancel();
+        if (self.notice_manager) |manager| manager.tool_run.?.notice_revision = 1;
+        return tool_loop.Outcome.copy(allocator, &.{.{ .session_id = 101, .status = if (self.wait_for_cancel) .cancelled else .succeeded, .stdout = "retained exact result", .exit = if (self.wait_for_cancel) null else 0 }});
+    }
+    fn acknowledge(raw: *anyopaque, _: u64, _: ?*provider.CancelToken) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (self.stop_in_ack) |token| token.cancel();
+    }
+    fn interface(self: *@This()) provider.Provider {
+        return .{ .ctx = self, .chat = chat, .models = TestRetryProvider.models };
+    }
+    fn makeManager(self: *@This()) Manager {
+        var result = Manager.init(std.testing.allocator);
+        result.scope = scope;
+        result.turn_id = 91;
+        result.tool_host = .{ .context = self, .execute = execute, .acknowledge_notice = acknowledge };
+        result.retry_policy = .{ .delays_ms = .{ 0, 0, 0 } };
+        return result;
+    }
+    fn makeRequest(stop: ?*provider.CancelToken, ms: u32) provider.ChatRequest {
+        return .{ .model = "fixture", .system = "", .messages = &.{}, .tools = &.{.{ .tool = .read_terminal, .session_ids = &.{101} }}, .timeout_ms = ms, .cancel = stop };
+    }
+};
+const TestRunSetup = struct {
+    timing: *TestRetryTiming,
+    work_ms: u32,
+    resets: usize = 0,
+    fn reset(raw: *anyopaque) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (self.resets == 0) self.timing.ns += @as(i128, self.work_ms) * std.time.ns_per_ms;
+        self.resets += 1;
+    }
+    fn delta(_: *anyopaque, _: provider.Delta) !void {}
+    fn observer(self: *@This()) Manager.Observer {
+        return .{ .context = self, .reset = reset, .delta = delta };
+    }
+};
+test "tool deadline provider and tool rounds consume one automatic run budget" {
+    var timing: TestRetryTiming = .{};
+    var fixture: TestMultiRun = .{ .timing = &timing, .tool_work_ms = 10, .steps = &.{
+        .{ .work_ms = 30, .calls = &.{"first"} },
+        .{ .work_ms = 40, .calls = &.{"second"} },
+        .{ .work_ms = 5 },
+    } };
+    var manager = fixture.makeManager();
+    defer manager.deinit();
+    var stop: provider.CancelToken = .{};
+    _ = try manager.runWithTiming(fixture.interface(), TestMultiRun.makeRequest(&stop, 100), &timing);
+    try std.testing.expectEqualSlices(u32, &.{ 100, 60, 10 }, fixture.budgets[0..3]);
+    try std.testing.expectEqual(@as(usize, 2), fixture.host_calls);
+    try std.testing.expectEqual(@as(usize, 2), manager.tool_run.?.records.items.len);
+    try std.testing.expectEqual(&stop, manager.tool_run.?.request.cancel.?);
+    try std.testing.expect(!stop.isCancelled());
+}
+test "tool deadline a late followup cannot receive a fresh original timeout" {
+    var timing: TestRetryTiming = .{};
+    var fixture: TestMultiRun = .{ .timing = &timing, .steps = &.{ .{ .work_ms = 40, .calls = &.{"first"} }, .{ .work_ms = 50 } } };
+    var manager = fixture.makeManager();
+    defer manager.deinit();
+    try std.testing.expectError(error.Timeout, manager.runWithTiming(fixture.interface(), TestMultiRun.makeRequest(null, 100), &timing));
+    try std.testing.expectEqual(@as(u32, 40), fixture.budgets[1]);
+    try std.testing.expectEqual(@as(usize, 1), fixture.host_calls);
+    try std.testing.expectEqualStrings("retained exact result", manager.tool_run.?.records.items[0].outcome.?.targets[0].stdout);
+    try std.testing.expectEqual(turn_model.State.idle, manager.turn.state);
+}
+test "tool deadline expiry after a known result prevents remaining batch dispatch" {
+    var timing: TestRetryTiming = .{};
+    var fixture: TestMultiRun = .{ .timing = &timing, .tool_work_ms = 60, .steps = &.{.{ .work_ms = 40, .calls = &.{ "first", "second" } }} };
+    var manager = fixture.makeManager();
+    defer manager.deinit();
+    try std.testing.expectError(error.Timeout, manager.runWithTiming(fixture.interface(), TestMultiRun.makeRequest(null, 100), &timing));
+    const run = manager.tool_run.?;
+    try std.testing.expectEqual(@as(usize, 1), fixture.host_calls);
+    try std.testing.expectEqual(@as(usize, 1), fixture.provider_calls);
+    try std.testing.expect(run.records.items[0].dispatched);
+    try std.testing.expect(!run.records.items[1].dispatched);
+    try std.testing.expectEqual(@as(?i32, 0), run.records.items[0].outcome.?.targets[0].exit);
+    try @import("provider_http.zig").validateToolMessages(run.request);
+}
+test "tool deadline blocked tool observes expiry without cancelling the caller Stop token" {
+    var timing: TestRetryTiming = .{};
+    var fixture: TestMultiRun = .{ .timing = &timing, .wait_for_cancel = true, .steps = &.{.{ .calls = &.{"waiting"} }} };
+    var manager = fixture.makeManager();
+    defer manager.deinit();
+    var stop: provider.CancelToken = .{};
+    try std.testing.expectError(error.Timeout, manager.runWithTiming(fixture.interface(), TestMultiRun.makeRequest(&stop, 100), &timing));
+    try std.testing.expect(!stop.isCancelled());
+    try std.testing.expectEqual(tool_loop.Status.cancelled, manager.tool_run.?.records.items[0].outcome.?.targets[0].status);
+    try std.testing.expectEqual(@as(usize, 1), fixture.host_calls);
+}
+test "tool deadline external Stop preserves the completed result and wins before continuation" {
+    var stop: provider.CancelToken = .{};
+    var timing: TestRetryTiming = .{};
+    var fixture: TestMultiRun = .{ .timing = &timing, .stop_in_tool = &stop, .steps = &.{.{ .calls = &.{"completed"} }} };
+    var manager = fixture.makeManager();
+    defer manager.deinit();
+    try std.testing.expectError(error.Cancelled, manager.runWithTiming(fixture.interface(), TestMultiRun.makeRequest(&stop, 100), &timing));
+    try std.testing.expectEqual(tool_loop.Status.succeeded, manager.tool_run.?.records.items[0].outcome.?.targets[0].status);
+    try std.testing.expectEqual(@as(usize, 1), fixture.provider_calls);
+}
+test "tool deadline initial preparation belongs to the original run budget" {
+    var timing: TestRetryTiming = .{};
+    var fixture: TestMultiRun = .{ .timing = &timing, .steps = &.{.{}} };
+    var manager = fixture.makeManager();
+    defer manager.deinit();
+    try manager.turn.begin();
+    try manager.turn.stream();
+    try manager.turn.done();
+    var setup: TestRunSetup = .{ .timing = &timing, .work_ms = 100 };
+    manager.observer = setup.observer();
+    try std.testing.expectError(error.Timeout, manager.runWithTiming(fixture.interface(), TestMultiRun.makeRequest(null, 100), &timing));
+    try std.testing.expectEqual(@as(usize, 0), fixture.provider_calls);
+    try std.testing.expectEqual(turn_model.State.idle, manager.turn.state);
+}
+test "tool deadline Stop during notice acknowledgement cannot finish the run" {
+    var stop: provider.CancelToken = .{};
+    var timing: TestRetryTiming = .{};
+    var fixture: TestMultiRun = .{ .timing = &timing, .stop_in_ack = &stop, .steps = &.{ .{ .calls = &.{"completed"} }, .{} } };
+    var manager = fixture.makeManager();
+    defer manager.deinit();
+    fixture.notice_manager = &manager;
+    try std.testing.expectError(error.Cancelled, manager.runWithTiming(fixture.interface(), TestMultiRun.makeRequest(&stop, 100), &timing));
+    try std.testing.expectEqual(@as(u64, 0), manager.tool_run.?.wire_notice_revision);
+    try std.testing.expectEqual(turn_model.State.idle, manager.turn.state);
+}
+test "tool deadline manual answer retry gets one fresh budget including setup and automatic retries" {
+    var timing: TestRetryTiming = .{};
+    var fixture: TestMultiRun = .{ .timing = &timing, .steps = &.{ .{ .work_ms = 40, .calls = &.{"completed"} }, .{ .err = error.Transient }, .{ .work_ms = 20, .err = error.Transient }, .{ .work_ms = 2 } } };
+    var manager = fixture.makeManager();
+    defer manager.deinit();
+    manager.retry_policy.max_attempts = 0;
+    var original_stop: provider.CancelToken = .{};
+    try std.testing.expectError(error.Transient, manager.runWithTiming(fixture.interface(), TestMultiRun.makeRequest(&original_stop, 100), &timing));
+    const saved = manager.tool_run.?;
+    original_stop.cancel();
+    timing.ns += 10_000 * std.time.ns_per_ms;
+    var setup: TestRunSetup = .{ .timing = &timing, .work_ms = 70 };
+    manager.observer = setup.observer();
+    manager.retry_policy = .{ .max_attempts = 1, .delays_ms = .{ 5, 0, 0 } };
+    var resumed_stop: provider.CancelToken = .{};
+    _ = try manager.resumeAnswerWithTiming(fixture.interface(), &resumed_stop, &timing);
+    try std.testing.expectEqualSlices(u32, &.{ 30, 5 }, fixture.budgets[2..4]);
+    try std.testing.expectEqual(@as(usize, 1), fixture.host_calls);
+    try std.testing.expectEqual(saved, manager.tool_run.?);
+    try std.testing.expectEqual(&original_stop, saved.request.cancel.?);
+    try std.testing.expect(!resumed_stop.isCancelled());
+}
+test "tool deadline manual answer retry cannot restart its budget after preparation" {
+    var timing: TestRetryTiming = .{};
+    var fixture: TestMultiRun = .{ .timing = &timing, .steps = &.{ .{ .calls = &.{"completed"} }, .{ .err = error.Transient }, .{} } };
+    var manager = fixture.makeManager();
+    defer manager.deinit();
+    manager.retry_policy.max_attempts = 0;
+    try std.testing.expectError(error.Transient, manager.runWithTiming(fixture.interface(), TestMultiRun.makeRequest(null, 100), &timing));
+    var setup: TestRunSetup = .{ .timing = &timing, .work_ms = 100 };
+    manager.observer = setup.observer();
+    try std.testing.expectError(error.Timeout, manager.resumeAnswerWithTiming(fixture.interface(), null, &timing));
+    try std.testing.expectEqual(@as(usize, 2), fixture.provider_calls);
+    try std.testing.expectEqual(@as(usize, 1), fixture.host_calls);
+    try std.testing.expectEqual(turn_model.State.idle, manager.turn.state);
+}
+test "tool deadline cancelled answer retry wins over cooldown without touching the ledger" {
+    var timing: TestRetryTiming = .{};
+    var fixture: TestMultiRun = .{ .timing = &timing, .steps = &.{.{ .err = error.Transient }} };
+    var manager = fixture.makeManager();
+    defer manager.deinit();
+    manager.retry_policy.max_attempts = 0;
+    try std.testing.expectError(error.Transient, manager.runWithTiming(fixture.interface(), TestMultiRun.makeRequest(null, 100), &timing));
+    const saved = manager.tool_run.?;
+    manager.cooldown_deadline_ms = monotonicMs() + 60_000;
+    var stop: provider.CancelToken = .{};
+    stop.cancel();
+    try std.testing.expectError(error.Cancelled, manager.resumeAnswerWithTiming(fixture.interface(), &stop, &timing));
+    try std.testing.expectEqual(saved, manager.tool_run.?);
+    try std.testing.expectEqual(@as(usize, 1), fixture.provider_calls);
+}
+
+test "tool deadline native pending controller acknowledgement exits on Stop and total timeout" {
+    const Bridge = @import("../ui/ai_tools.zig").Bridge;
+    const Fixture = struct {
+        bridge: *Bridge,
+        manager: *Manager,
+        chats: usize = 0,
+        executions: usize = 0,
+        fn chat(raw: *anyopaque, _: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, ctx: *anyopaque) !provider.ChatStats {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.chats += 1;
+            if (self.chats == 1) sink(ctx, .{ .tool_plan = .{ .call_id = "completed", .name = "read_terminal", .arguments = "{\"session_ids\":[101]}" } });
+            sink(ctx, .done);
+            return .{};
+        }
+        fn execute(raw: *anyopaque, _: tool_loop.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !tool_loop.Outcome {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.executions += 1;
+            self.manager.tool_run.?.notice_revision = 1;
+            return tool_loop.Outcome.copy(allocator, &.{.{ .session_id = 101, .status = .succeeded, .exit = 0, .stdout = "native retained fact" }});
+        }
+        fn unexpected(_: *anyopaque) !void {
+            return error.UnexpectedControllerDispatch;
+        }
+        fn acknowledge(raw: *anyopaque, _: u64, cancel: ?*provider.CancelToken) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try self.bridge.callController(self, unexpected, cancel);
+        }
+    };
+    const Worker = struct {
+        manager: *Manager,
+        p: provider.Provider,
+        request: provider.ChatRequest,
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) !provider.ChatStats {
+            defer self.done.store(true, .release);
+            return self.manager.run(self.p, self.request);
+        }
+    };
+    for ([_]bool{ true, false }) |explicit_stop| {
+        var bridge = Bridge.init(std.testing.allocator);
+        defer bridge.deinit();
+        var manager = Manager.init(std.testing.allocator);
+        defer manager.deinit();
+        manager.scope = TestMultiRun.scope;
+        var fixture: Fixture = .{ .bridge = &bridge, .manager = &manager };
+        manager.tool_host = .{ .context = &fixture, .execute = Fixture.execute, .acknowledge_notice = Fixture.acknowledge };
+        var stop: provider.CancelToken = .{};
+        var worker: Worker = .{ .manager = &manager, .p = .{ .ctx = &fixture, .chat = Fixture.chat, .models = TestRetryProvider.models }, .request = TestMultiRun.makeRequest(&stop, if (explicit_stop) 10_000 else 500) };
+        var running = try std.Io.concurrent(std.testing.io, Worker.run, .{&worker});
+        defer {
+            stop.cancel();
+            _ = running.cancel(std.testing.io) catch {};
+        }
+        const start = (retry.Clock{}).now();
+        while (bridge.quiescent() != false and !worker.done.load(.acquire) and (retry.Clock{}).now() - start < 5 * std.time.ns_per_s) try retry.wait(1, null);
+        try std.testing.expectEqual(@as(?bool, false), bridge.quiescent());
+        const stop_at = (retry.Clock{}).now();
+        if (explicit_stop) stop.cancel();
+        // A failed deadline implementation must fail instead of hanging this
+        // fixture. The cleanup token is never mistaken for a passed timeout.
+        while (!worker.done.load(.acquire) and (retry.Clock{}).now() - start < 5 * std.time.ns_per_s) try retry.wait(1, null);
+        if (!worker.done.load(.acquire)) stop.cancel();
+        try std.testing.expectError(if (explicit_stop) error.Cancelled else error.Timeout, running.await(std.testing.io));
+        const elapsed = @divTrunc((retry.Clock{}).now() - if (explicit_stop) stop_at else start, std.time.ns_per_ms);
+        try std.testing.expectEqual(@as(?bool, true), bridge.quiescent());
+        try std.testing.expectEqual(@as(usize, 1), fixture.executions);
+        try std.testing.expectEqual(@as(usize, 2), fixture.chats);
+        try std.testing.expectEqual(@as(u64, 0), manager.tool_run.?.wire_notice_revision);
+        try std.testing.expectEqualStrings("native retained fact", manager.tool_run.?.records.items[0].outcome.?.targets[0].stdout);
+        if (!explicit_stop) try std.testing.expect(!stop.isCancelled());
+        std.debug.print("native tool controller {s} joined in {d}ms\n", .{ if (explicit_stop) "Stop" else "deadline", elapsed });
+    }
 }
 
 test "turn manager maps provider deltas into cards and audit" {
@@ -926,7 +1484,7 @@ test "turn manager forwards accepted host results only after the entire batch cl
             blocks[0] = .{ .structured = try allocator.dupe(u8, "{}") };
             return .{ .status = .succeeded, .blocks = blocks, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision } };
         }
-        fn acceptedResult(raw: *anyopaque, context: tools.host.Context, name: []const u8, result: *const tools.host.Result) !void {
+        fn acceptedResult(raw: *anyopaque, context: tools.host.Context, name: []const u8, result: *const tools.host.Result, _: ?*provider.CancelToken) !void {
             const self: *@This() = @ptrCast(@alignCast(raw));
             try std.testing.expect(context.eql(self.authority));
             try std.testing.expectEqualStrings(self.name, name);

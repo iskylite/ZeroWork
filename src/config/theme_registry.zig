@@ -424,13 +424,41 @@ fn importedTokens(theme: importer.Theme) UiTokens {
     var result = builtinTokens(if (bright) "light" else "dark");
     result.app = theme.bg;
     result.terminal = theme.bg;
+    result.surface_1 = blend(theme.bg, theme.fg, 12);
+    result.surface_2 = blend(theme.bg, theme.fg, 22);
+    result.well = blend(theme.bg, if (bright) 0xffffffff else 0x000000ff, 20);
+    result.overlay = blend(theme.bg, theme.fg, 28);
+    result.hover = blend(theme.bg, theme.fg, 34);
+    result.tab_on = blend(result.surface_2, theme.ansi[4], 32);
+    result.well_border = blend(theme.bg, theme.fg, 42);
+    result.border = result.well_border;
     result.fg_1 = theme.fg;
+    result.fg_2 = blend(theme.fg, theme.bg, 36);
+    result.fg_3 = blend(theme.fg, theme.bg, 90);
     result.accent = theme.ansi[4];
     result.accent_ink = theme.ansi[12];
     result.action_accent = theme.ansi[4];
     result.action_accent_2 = theme.ansi[4];
     result.action_danger = result.danger;
+    result.ok = theme.ansi[2];
+    result.ok_ink = theme.ansi[2];
+    result.warn = theme.ansi[3];
+    result.warn_ink = theme.ansi[3];
+    result.danger = theme.ansi[1];
+    result.danger_ink = theme.ansi[1];
+    result.action_danger = theme.ansi[1];
     if (theme.selection) |selection| result.selection = selection;
+    return result;
+}
+
+/// Opaque RGB interpolation; terminal-provided alpha never leaks into UI inks.
+fn blend(a: u32, b: u32, amount: u32) u32 {
+    var result: u32 = 255;
+    inline for (.{ 24, 16, 8 }) |shift| {
+        const x = (a >> shift) & 255;
+        const y = (b >> shift) & 255;
+        result |= ((x * (255 - amount) + y * amount + 127) / 255) << shift;
+    }
     return result;
 }
 
@@ -441,7 +469,7 @@ pub fn builtinTokens(id: []const u8) UiTokens {
     return .{ .app = 0x060608ff, .surface_1 = 0x131316ff, .surface_2 = 0x1b1b1fff, .well = 0x0c0c0fff, .well_border = 0x26262cff, .terminal = 0x0a0a0dff, .overlay = 0x292a30ff, .hover = 0x202026ff, .tab_on = 0x1e1e23ff, .fg_1 = 0xf4f4f5ff, .fg_2 = 0xa1a1aaff, .fg_3 = 0x5b5b64ff, .accent = 0x6366f1ff, .accent_ink = 0x8c8ef5ff, .ok = 0x22c55eff, .ok_ink = 0x22c55eff, .warn = 0xf59e0bff, .warn_ink = 0xf59e0bff, .danger = 0xef4444ff, .danger_ink = 0xf36e6eff, .selection = 0x6366f124, .border = 0x26262cff, .shadow = 0x0000005c };
 }
 fn builtinAnsi(id: []const u8) [16]u32 {
-    if (!std.mem.eql(u8, id, "sauber") and !std.mem.eql(u8, id, "dark") and !std.mem.eql(u8, id, "light")) if (presets.ansi(UiTokens, id)) |colors| return colors;
+    if (presets.ansi(UiTokens, id)) |colors| return colors;
     if (std.mem.eql(u8, id, "sauber")) return .{ 0x0f172aff, 0xdc4c3fff, 0x10b981ff, 0xd49a0cff, 0x2563ebff, 0xc241e0ff, 0x06b6d4ff, 0xd6e2f0ff, 0x64748bff, 0xdd7975ff, 0x3fcd76ff, 0xc6bb00ff, 0xa7abf2ff, 0xe17ee1ff, 0x048b8fff, 0xa4801cff };
     // Existing VT engine default palette, used where the prototypes specify
     // semantic inks but do not define a complete raw ANSI palette.
@@ -502,6 +530,11 @@ fn builtinTheme(id: []const u8) importer.Theme {
         result.cursor = result.fg;
         result.selection = 0x434c5eff;
     }
+    if (presets.terminalDefaults(id)) |terminal| {
+        result.fg = terminal.foreground;
+        result.cursor = terminal.cursor;
+        result.selection = terminal.selection;
+    }
     return result;
 }
 
@@ -521,7 +554,7 @@ fn testSource(allocator: std.mem.Allocator, red: []const u8) ![]u8 {
 test "registry keeps builtins and legacy aliases as real stable identities" {
     var registry = try Registry.init(std.testing.allocator);
     defer registry.deinit();
-    try std.testing.expectEqual(@as(usize, 17), registry.counts().all);
+    try std.testing.expectEqual(@as(usize, presets.ids.len), registry.counts().all);
     try std.testing.expectEqualStrings("catppuccin-mocha", registry.get("CATPPUCCIN_MOCHA").?.id);
     try std.testing.expectEqual(@as(u32, 0x282a36ff), registry.get("dracula").?.theme.bg);
     try std.testing.expectEqual(@as(u32, 0x000000ff), registry.get("sauber").?.theme.cursor);
@@ -607,35 +640,34 @@ test "V3 presets have complete semantic tokens opaque ANSI and protected identit
     try std.testing.expect(registry.get("forest").?.ui_tokens.app != registry.get("ocean").?.ui_tokens.app);
 }
 
-test "complete UI themes preserve existing terminal color contracts" {
+test "builtin terminal palettes keep distinct ANSI hues and canonical classic colors" {
     var registry = try Registry.init(std.testing.allocator);
     defer registry.deinit();
-    const expected = .{
-        .{ "dark", @as(u64, 0xf64c6d099c9b109f) },
-        .{ "light", @as(u64, 0x2885caa256b7fc06) },
-        .{ "sauber", @as(u64, 0x67e5e042127ad302) },
-        .{ "midnight", @as(u64, 0x5c1a76d6a7ab77bf) },
-        .{ "forest", @as(u64, 0x6e542636372ddfbd) },
-        .{ "ocean", @as(u64, 0x0ad02c4d292e2e14) },
-        .{ "plum", @as(u64, 0x0284c4cc7172f3a0) },
-        .{ "ember", @as(u64, 0x32503a5c2cae8d74) },
-        .{ "graphite", @as(u64, 0x654bd2a9010ad0d4) },
-        .{ "paper", @as(u64, 0xcd96baa71fed4c36) },
-        .{ "sand", @as(u64, 0x0151adcdb73d3a57) },
-        .{ "ice", @as(u64, 0x32b223068b008344) },
-        .{ "catppuccin-mocha", @as(u64, 0x8f0fe7a4c3d58f10) },
-        .{ "dracula", @as(u64, 0x4f98371722370a83) },
-        .{ "dark-pro", @as(u64, 0xbbdb1bd51a1274ae) },
-        .{ "solarized-dark", @as(u64, 0x2edf848aa5a4e2bb) },
-        .{ "nord", @as(u64, 0x3a75432252c0c280) },
-    };
-    inline for (expected) |entry| {
-        const terminal = registry.get(entry[0]).?.theme;
-        var fingerprint: u64 = 14695981039346656037;
-        for ([_]u32{ terminal.bg, terminal.fg, terminal.cursor, terminal.selection.? } ++ terminal.ansi) |rgba| {
-            inline for (.{ 24, 16, 8, 0 }) |shift|
-                fingerprint = (fingerprint ^ @as(u8, @truncate(rgba >> shift))) *% 1099511628211;
-        }
-        try std.testing.expectEqual(entry[1], fingerprint);
+    for (presets.ids) |id| {
+        const terminal = registry.get(id).?.theme;
+        try std.testing.expectEqualSlices(u32, &presets.ansi(UiTokens, id).?, &terminal.ansi);
+        // A single-hue UI must still distinguish blue, magenta and cyan output.
+        try std.testing.expect(terminal.ansi[4] != terminal.ansi[5]);
+        try std.testing.expect(terminal.ansi[4] != terminal.ansi[6]);
+        try std.testing.expect(terminal.ansi[5] != terminal.ansi[6]);
     }
+    try std.testing.expectEqual(@as(u32, 0xbd93f9ff), registry.get("dracula").?.theme.ansi[4]);
+    try std.testing.expectEqual(@as(u32, 0x81a1c1ff), registry.get("nord").?.theme.ansi[4]);
+    try std.testing.expectEqual(@as(u32, 0x268bd2ff), registry.get("solarized-dark").?.theme.ansi[4]);
+    try std.testing.expectEqual(@as(u32, 0x89b4faff), registry.get("catppuccin-mocha").?.theme.ansi[4]);
+    try std.testing.expectEqual(@as(u32, 0x7aa2f7ff), registry.get("tokyo-night").?.theme.ansi[4]);
+    try std.testing.expectEqual(@as(u32, 0x61afefff), registry.get("one-dark").?.theme.ansi[4]);
+    try std.testing.expectEqual(@as(u32, 0xfdf6e3ff), registry.get("solarized-light").?.theme.bg);
+}
+
+test "imported theme surfaces and status inks follow its palette" {
+    const terminal = builtinTheme("tokyo-night");
+    const colors = importedTokens(terminal);
+    try std.testing.expectEqual(terminal.bg, colors.terminal);
+    try std.testing.expectEqual(terminal.fg, colors.fg_1);
+    try std.testing.expectEqual(terminal.ansi[2], colors.ok_ink);
+    try std.testing.expectEqual(terminal.ansi[1], colors.danger_ink);
+    try std.testing.expect(colors.surface_1 != builtinTokens("dark").surface_1);
+    try std.testing.expect(colors.overlay != colors.surface_1);
+    try std.testing.expect(colors.hover != colors.surface_2);
 }

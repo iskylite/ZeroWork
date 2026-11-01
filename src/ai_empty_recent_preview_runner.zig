@@ -6,7 +6,7 @@ const V = @import("ui/ai_empty_view.zig");
 const theme = @import("ui/app_theme.zig");
 const Fixture = enum { mixed, wide, unbroken };
 var fixture: Fixture = .mixed;
-var selected_theme: theme.Name = .dark;
+var selected_theme: []const u8 = "dark";
 var logo_texture: ?u32 = null;
 const titles = [_][]const u8{
     "请检查 Nginx 服务的 error 日志，解释这个 SSH 连接超时问题，并给出每一步的排查方法与处理建议 Please inspect the complete application error log and explain the connection timeout in detail",
@@ -15,6 +15,7 @@ const titles = [_][]const u8{
 };
 const Preview = struct {
     cx: *ui.Cx,
+    publication: @import("ui/shell_styles.zig").ThemePublication = .{},
     result: *ui.Node,
     fn select(raw: *anyopaque, id: u64) void {
         const self: *Preview = @ptrCast(@alignCast(raw));
@@ -25,19 +26,19 @@ const Preview = struct {
     }
     fn ignore(_: *anyopaque) void {}
     fn replay(self: *Preview) void {
-        selected_theme = switch (selected_theme) {
-            .dark => .light,
-            .light => .sauber,
-            .sauber => .dark,
+        const ids = @import("config/theme_presets.zig").ids;
+        for (ids, 0..) |id, index| if (std.mem.eql(u8, id, selected_theme)) {
+            selected_theme = ids[(index + 1) % ids.len];
+            break;
         };
-        theme.select(selected_theme);
-        self.cx.setTheme(theme.widgetTheme(selected_theme));
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(selected_theme));
+        self.publication.publish(self.cx, theme.widgetTheme(theme.currentName()));
         self.cx.requestRedraw();
     }
 };
 fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
-    theme.select(selected_theme);
-    cx.setTheme(theme.widgetTheme(selected_theme));
+    theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(selected_theme));
+    cx.setTheme(theme.widgetTheme(theme.currentName()));
     const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{ .top = 40 }, .background = theme.baseColors().app }, .{});
     const content = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 276 }, .direction = .column, .padding = .{ .left = 14, .right = 14 }, .flex_shrink = 0 }, .{});
     content.meta.ownership.meta.test_id = "ai.empty.preview.content";
@@ -57,7 +58,7 @@ pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "--theme=")) selected_theme = std.meta.stringToEnum(theme.Name, arg[8..]) orelse return error.InvalidTheme else if (std.mem.startsWith(u8, arg, "--fixture=")) fixture = std.meta.stringToEnum(Fixture, arg[10..]) orelse return error.InvalidFixture else return error.InvalidOption;
+        if (std.mem.startsWith(u8, arg, "--theme=")) selected_theme = try parseTheme(arg[8..]) else if (std.mem.startsWith(u8, arg, "--fixture=")) fixture = std.meta.stringToEnum(Fixture, arg[10..]) orelse return error.InvalidFixture else return error.InvalidOption;
     }
     try @import("platform/ui_fonts.zig").register();
     const app = try App.init(std.heap.c_allocator, .{ .io = init.io, .font = .{ .fallback_families = @import("platform/ui_fonts.zig").families }, .window = .{ .width = 600, .height = 400, .title = "ZeroWork Recent Conversation Preview", .titlebar = .custom_inset, .titlebar_height = 40 } });
@@ -67,4 +68,9 @@ pub fn main(init: std.process.Init) !void {
     logo_texture = try app.renderer.image_renderer.loadTexture(image.width, image.height, image.pixels);
     defer if (logo_texture) |id| app.renderer.image_renderer.unloadTexture(id);
     try app.runWith(mount);
+}
+
+fn parseTheme(id: []const u8) ![]const u8 {
+    for (@import("config/theme_presets.zig").ids) |known| if (std.mem.eql(u8, id, known)) return known;
+    return error.InvalidTheme;
 }

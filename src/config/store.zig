@@ -1,6 +1,19 @@
 const std = @import("std");
 const config = @import("config.zig");
 pub const credentials = @import("credential_store.zig");
+pub const plugin_credential_references = @import("plugin_credential_references.zig");
+pub const CleanupStatus = plugin_credential_references.CleanupStatus;
+
+/// Paths identify the other owned file in the same credential scope. Legacy
+/// callers use config.toml/hosts.toml beside the file being saved. A provider is
+/// borrowed only for this operation and may be omitted before plugin bootstrap.
+pub const CredentialOptions = struct {
+    provider: ?plugin_credential_references.Provider = null,
+    config_path: ?[]const u8 = null,
+    hosts_path: ?[]const u8 = null,
+};
+
+pub const SavedConfig = struct { value: config.Config, cleanup: CleanupStatus };
 
 pub const max_config_bytes = 256 * 1024;
 pub const private_permissions: std.Io.File.Permissions = @fromBackingInt(@intCast(0o600));
@@ -8,15 +21,25 @@ pub const private_permissions: std.Io.File.Permissions = @fromBackingInt(@intCas
 /// Writes a complete configuration snapshot and atomically replaces the old file.
 /// The temporary and final file are owner read/write only, independent of umask.
 pub fn save(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, value: config.Config) !void {
+    observeCleanup(try saveWithOptions(io, dir, sub_path, value, .{}));
+}
+
+pub fn saveWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, value: config.Config, options: CredentialOptions) !CleanupStatus {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
-    _ = try saveWithCredentialRefs(io, dir, sub_path, value, arena.allocator());
+    return (try saveWithCredentialRefsWithOptions(io, dir, sub_path, value, arena.allocator(), options)).cleanup;
 }
 
 /// Returns the committed provider slice and credential refs in allocator;
 /// other configuration fields borrow value. Returned ownership is allocated
 /// before the atomic replacement.
 pub fn saveWithCredentialRefs(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, value: config.Config, allocator: std.mem.Allocator) !config.Config {
+    const saved = try saveWithCredentialRefsWithOptions(io, dir, sub_path, value, allocator, .{});
+    observeCleanup(saved.cleanup);
+    return saved.value;
+}
+
+pub fn saveWithCredentialRefsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, value: config.Config, allocator: std.mem.Allocator, options: CredentialOptions) !SavedConfig {
     try value.validate();
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
@@ -42,10 +65,15 @@ pub fn saveWithCredentialRefs(io: std.Io, dir: std.Io.Dir, sub_path: []const u8,
         }
         provider.api_key_ref = try tx.stage(io, allocator, if (provider.api_key.len != 0) provider.api_key else null, old);
     }
-    if (baseline) |old| for (old.ai.providers[0..old.ai.provider_count]) |provider| {
-        if (provider.api_key_ref) |reference| if (!configHasReference(disk, reference)) try tx.retire(reference);
-    };
-    for (disk.ai.providers[0..disk.ai.provider_count]) |provider| if (provider.api_key_ref) |reference| tx.retain(reference);
+    var previous = plugin_credential_references.References.init(a);
+    defer previous.deinit();
+    if (baseline) |old| try addConfigReferences(&previous, old);
+    var keep = plugin_credential_references.References.init(a);
+    defer keep.deinit();
+    try addConfigReferences(&keep, disk);
+    const hosts_path = options.hosts_path orelse try siblingPath(a, sub_path, "hosts.toml");
+    try addHostFileReferences(io, dir, hosts_path, &keep, options.provider);
+    const cleanup = try finishCredentialStaging(&tx, &previous, &keep);
     const encoded_buffer = try std.heap.page_allocator.alloc(u8, max_config_bytes);
     defer std.heap.page_allocator.free(encoded_buffer);
     const encoded = try disk.format(encoded_buffer);
@@ -64,12 +92,16 @@ pub fn saveWithCredentialRefs(io: std.Io, dir: std.Io.Dir, sub_path: []const u8,
     try atomic.file.sync(io);
     try atomic.replace(io);
     tx.commit();
-    return disk;
+    return .{ .value = disk, .cleanup = cleanup };
 }
 
 /// Loads and validates one configuration snapshot. The returned config borrows
 /// strings from source, which the caller owns and must retain while using it.
 pub fn load(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8) !LoadedConfig {
+    return loadWithOptions(io, dir, allocator, sub_path, .{});
+}
+
+pub fn loadWithOptions(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8, options: CredentialOptions) !LoadedConfig {
     const source = try dir.readFileAlloc(io, sub_path, allocator, std.Io.Limit.limited(max_config_bytes));
     errdefer allocator.free(source);
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -83,8 +115,8 @@ pub fn load(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path:
         } else if (provider.api_key.len != 0) migrate = true;
     }
     if (migrate) {
-        try save(io, dir, sub_path, value);
-        const migrated = try load(io, dir, allocator, sub_path);
+        observeCleanup(try saveWithOptions(io, dir, sub_path, value, options));
+        const migrated = try loadWithOptions(io, dir, allocator, sub_path, options);
         arena.deinit();
         allocator.free(source);
         return migrated;
@@ -106,13 +138,17 @@ pub const LoadedConfig = struct {
 
 /// Atomically writes the host registry with the same private permissions as config.toml.
 pub fn saveHosts(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, registry: config.hosts.Registry) !void {
+    observeCleanup(try saveHostsWithOptions(io, dir, sub_path, registry, .{}));
+}
+
+pub fn saveHostsWithOptions(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, registry: config.hosts.Registry, options: CredentialOptions) !CleanupStatus {
     var staged = try registry.clone(std.heap.page_allocator);
     defer staged.deinit();
     var tx = try credentials.Transaction.init();
     defer tx.deinit();
     var baseline = try readHostBaseline(io, dir, sub_path);
     defer if (baseline) |*old| old.deinit();
-    try stageHosts(io, &tx, &staged, if (baseline) |*old| old else null);
+    const cleanup = try stageHosts(io, dir, sub_path, &tx, &staged, if (baseline) |*old| old else null, options);
     const encoded = try staged.encode(std.heap.page_allocator);
     defer std.heap.page_allocator.free(encoded);
     if (encoded.len > max_config_bytes) return error.HostRegistryTooLarge;
@@ -120,6 +156,7 @@ pub fn saveHosts(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, registry: co
     defer lock.close(io);
     try writeHostsEncoded(io, dir, sub_path, encoded, null);
     tx.commit();
+    return cleanup;
 }
 
 const HostBaseline = struct { hash: ?config.hosts.Digest };
@@ -179,6 +216,10 @@ pub const HostsTransaction = struct {
     }
 
     pub fn commit(self: *HostsTransaction, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, live: *config.hosts.Registry) !void {
+        observeCleanup(try self.commitWithOptions(io, dir, sub_path, live, .{}));
+    }
+
+    pub fn commitWithOptions(self: *HostsTransaction, io: std.Io, dir: std.Io.Dir, sub_path: []const u8, live: *config.hosts.Registry, options: CredentialOptions) !CleanupStatus {
         const candidate = if (self.candidate) |*value| value else return error.TransactionConsumed;
         if (live.revision != self.baseline_revision or !std.meta.eql(live.source_hash, self.baseline_hash)) return error.RevisionConflict;
         var next = try candidate.clone(candidate.arena.child_allocator);
@@ -187,7 +228,7 @@ pub const HostsTransaction = struct {
         next.needs_migration = false;
         var tx = try credentials.Transaction.init();
         defer tx.deinit();
-        try stageHosts(io, &tx, &next, live);
+        const cleanup = try stageHosts(io, dir, sub_path, &tx, &next, live, options);
         const encoded = try next.encode(std.heap.page_allocator);
         defer std.heap.page_allocator.free(encoded);
         if (encoded.len > max_config_bytes) return error.HostRegistryTooLarge;
@@ -202,18 +243,22 @@ pub const HostsTransaction = struct {
         live.* = next;
         candidate.deinit();
         self.candidate = null;
+        return cleanup;
     }
 };
 
 /// Loads hosts.toml into an owned registry. The source buffer is discarded after parsing.
 pub fn loadHosts(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8) !config.hosts.Registry {
-    return loadHostsInternal(io, dir, allocator, sub_path, true);
+    return loadHostsWithOptions(io, dir, allocator, sub_path, .{});
+}
+pub fn loadHostsWithOptions(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8, options: CredentialOptions) !config.hosts.Registry {
+    return loadHostsInternal(io, dir, allocator, sub_path, true, options);
 }
 /// Import sources are read-only. Persistence happens when the registry is saved.
 pub fn loadHostsForImport(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8) !config.hosts.Registry {
-    return loadHostsInternal(io, dir, allocator, sub_path, false);
+    return loadHostsInternal(io, dir, allocator, sub_path, false, .{});
 }
-fn loadHostsInternal(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8, migrate_plaintext: bool) anyerror!config.hosts.Registry {
+fn loadHostsInternal(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, sub_path: []const u8, migrate_plaintext: bool, options: CredentialOptions) anyerror!config.hosts.Registry {
     const source = try dir.readFileAlloc(io, sub_path, allocator, std.Io.Limit.limited(max_config_bytes));
     defer allocator.free(source);
     var registry = try config.hosts.Registry.parse(allocator, source);
@@ -229,24 +274,14 @@ fn loadHostsInternal(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, 
         try host.validate();
     }
     if (migrate and migrate_plaintext) {
-        try saveHosts(io, dir, sub_path, registry);
-        const migrated = try loadHosts(io, dir, allocator, sub_path);
+        observeCleanup(try saveHostsWithOptions(io, dir, sub_path, registry, options));
+        const migrated = try loadHostsWithOptions(io, dir, allocator, sub_path, options);
         registry.deinit();
         return migrated;
     }
     return registry;
 }
 
-fn configHasReference(value: config.Config, reference: []const u8) bool {
-    for (value.ai.providers[0..value.ai.provider_count]) |p| if (p.api_key_ref) |r| if (std.mem.eql(u8, r, reference)) return true;
-    return false;
-}
-fn hostsHasReference(value: *const config.hosts.Registry, reference: []const u8) bool {
-    for (value.hosts) |host| inline for (.{ "password_ref", "key_passphrase_ref", "totp_secret_ref" }) |field| {
-        if (@field(host, field)) |r| if (std.mem.eql(u8, r, reference)) return true;
-    };
-    return false;
-}
 fn readHostBaseline(io: std.Io, dir: std.Io.Dir, path: []const u8) !?config.hosts.Registry {
     const source = dir.readFileAlloc(io, path, std.heap.page_allocator, std.Io.Limit.limited(max_config_bytes)) catch |err| switch (err) {
         error.FileNotFound => return null,
@@ -255,7 +290,7 @@ fn readHostBaseline(io: std.Io, dir: std.Io.Dir, path: []const u8) !?config.host
     defer std.heap.page_allocator.free(source);
     return try config.hosts.Registry.parse(std.heap.page_allocator, source);
 }
-fn stageHosts(io: std.Io, tx: *credentials.Transaction, next: *config.hosts.Registry, baseline: ?*const config.hosts.Registry) !void {
+fn stageHosts(io: std.Io, dir: std.Io.Dir, sub_path: []const u8, tx: *credentials.Transaction, next: *config.hosts.Registry, baseline: ?*const config.hosts.Registry, options: CredentialOptions) !CleanupStatus {
     const a = next.arena.allocator();
     for (next.hosts) |*host| {
         var old: ?config.hosts.HostConfig = null;
@@ -270,33 +305,47 @@ fn stageHosts(io: std.Io, tx: *credentials.Transaction, next: *config.hosts.Regi
             @field(host, fields[1]) = try tx.stage(io, a, @field(host, fields[0]), reference);
         }
     }
-    for (next.hosts) |host| inline for (.{ "password_ref", "key_passphrase_ref", "totp_secret_ref" }) |field| {
-        if (@field(host, field)) |reference| tx.retain(reference);
-    };
-    if (baseline) |previous| for (previous.hosts) |host| {
-        inline for (.{ "password_ref", "key_passphrase_ref", "totp_secret_ref" }) |field| {
-            if (@field(host, field)) |reference| if (!hostsHasReference(next, reference)) try tx.retire(reference);
-        }
-    };
+    var previous = plugin_credential_references.References.init(a);
+    defer previous.deinit();
+    if (baseline) |old| try previous.addRegistry(old, options.provider);
+    var keep = plugin_credential_references.References.init(a);
+    defer keep.deinit();
+    try keep.addRegistry(next, options.provider);
+    const config_path = options.config_path orelse try siblingPath(a, sub_path, "config.toml");
+    try addConfigFileReferences(io, dir, config_path, &keep);
+    return finishCredentialStaging(tx, &previous, &keep);
 }
 /// Union of the two owned files' refs, used only after both loads succeed.
 pub fn reconcileCredentials(value: config.Config, registry: *const config.hosts.Registry) !void {
+    observeCleanup(try reconcileCredentialsWithProvider(value, registry, null));
+}
+
+pub fn reconcileCredentialsWithProvider(value: config.Config, registry: *const config.hosts.Registry, provider: ?plugin_credential_references.Provider) !CleanupStatus {
     var arena: std.heap.ArenaAllocator = .init(std.heap.page_allocator);
     defer arena.deinit();
-    var keep: std.ArrayList([]const u8) = .empty;
-    const a = arena.allocator();
-    for (value.ai.providers[0..value.ai.provider_count]) |p| if (p.api_key_ref) |r| try keep.append(a, r);
-    for (registry.hosts) |host| inline for (.{ "password_ref", "key_passphrase_ref", "totp_secret_ref" }) |field| {
-        if (@field(host, field)) |r| try keep.append(a, r);
-    };
-    try credentials.reconcileScope(keep.items);
+    var keep = plugin_credential_references.References.init(arena.allocator());
+    defer keep.deinit();
+    try addConfigReferences(&keep, value);
+    try keep.addRegistry(registry, provider);
+    if (keep.status == .complete) try credentials.reconcileScope(keep.items.items);
+    return keep.status;
 }
 
 /// Bootstrap must call this after filesystem migration and scope initialization,
-/// before mounting windows. Missing files are empty; every other error is fatal.
+/// before mounting windows. Unknown payloads defer cleanup while still allowing
+/// startup; source-file, credential-access, and migration failures remain errors.
 pub fn prepareCredentials(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, config_path: []const u8, hosts_path: []const u8) !void {
+    observeCleanup(try prepareCredentialsWithOptions(io, dir, allocator, config_path, hosts_path, .{}));
+}
+
+pub fn prepareCredentialsWithOptions(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, config_path: []const u8, hosts_path: []const u8, options: CredentialOptions) !CleanupStatus {
+    var paths = options;
+    paths.config_path = config_path;
+    paths.hosts_path = hosts_path;
+    var cleanup: CleanupStatus = .complete;
     // Validate both source files before collecting unreferenced crash leftovers.
-    // Cleanup refusal blocks new staging, even across repeated failed startups.
+    // A backend cleanup failure still blocks staging; an unavailable payload
+    // enumerator instead preserves the scope until a registry is available.
     {
         var arena: std.heap.ArenaAllocator = .init(allocator);
         defer arena.deinit();
@@ -308,19 +357,79 @@ pub fn prepareCredentials(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Alloca
         const raw_config: config.Config = if (source) |text| try config.Config.parseWithAllocator(a, text) else .{};
         var raw_hosts = (try readHostBaseline(io, dir, hosts_path)) orelse try config.hosts.Registry.parse(allocator, "");
         defer raw_hosts.deinit();
-        try reconcileCredentials(raw_config, &raw_hosts);
+        cleanup = try reconcileCredentialsWithProvider(raw_config, &raw_hosts, paths.provider);
     }
-    var loaded: ?LoadedConfig = load(io, dir, allocator, config_path) catch |err| switch (err) {
+    var loaded: ?LoadedConfig = loadWithOptions(io, dir, allocator, config_path, paths) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
     };
     defer if (loaded) |*value| value.deinit(allocator);
-    var registry = loadHosts(io, dir, allocator, hosts_path) catch |err| switch (err) {
+    var registry = loadHostsWithOptions(io, dir, allocator, hosts_path, paths) catch |err| switch (err) {
         error.FileNotFound => try config.hosts.Registry.parse(allocator, ""),
         else => return err,
     };
     defer registry.deinit();
-    try reconcileCredentials(if (loaded) |value| value.value else .{}, &registry);
+    const final_cleanup = try reconcileCredentialsWithProvider(if (loaded) |value| value.value else .{}, &registry, paths.provider);
+    return if (cleanup == .deferred or final_cleanup == .deferred) .deferred else .complete;
+}
+
+fn observeCleanup(status: CleanupStatus) void {
+    if (status == .deferred) std.log.warn("credential cleanup deferred: reference enumeration is incomplete", .{});
+}
+
+fn siblingPath(allocator: std.mem.Allocator, path: []const u8, sibling: []const u8) ![]const u8 {
+    return std.fs.path.join(allocator, &.{ std.fs.path.dirname(path) orelse ".", sibling });
+}
+
+fn addConfigReferences(references: *plugin_credential_references.References, value: config.Config) !void {
+    for (value.ai.providers[0..value.ai.provider_count]) |provider| if (provider.api_key_ref) |reference| try references.add(reference);
+}
+
+fn addHostFileReferences(io: std.Io, dir: std.Io.Dir, path: []const u8, references: *plugin_credential_references.References, provider: ?plugin_credential_references.Provider) !void {
+    var registry = readHostBaseline(io, dir, path) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            references.deferCleanup();
+            return;
+        },
+    };
+    defer if (registry) |*value| value.deinit();
+    if (registry) |*value| try references.addRegistry(value, provider);
+}
+
+fn addConfigFileReferences(io: std.Io, dir: std.Io.Dir, path: []const u8, references: *plugin_credential_references.References) !void {
+    const allocator = references.allocator;
+    const source = dir.readFileAlloc(io, path, allocator, .limited(max_config_bytes)) catch |err| switch (err) {
+        error.FileNotFound => return,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            references.deferCleanup();
+            return;
+        },
+    };
+    defer allocator.free(source);
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const value = config.Config.parseWithAllocator(arena.allocator(), source) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            references.deferCleanup();
+            return;
+        },
+    };
+    try addConfigReferences(references, value);
+}
+
+fn finishCredentialStaging(tx: *credentials.Transaction, previous: *const plugin_credential_references.References, keep: *const plugin_credential_references.References) !CleanupStatus {
+    if (previous.status == .deferred or keep.status == .deferred) {
+        // stage() also queues replaced structured secrets. With an incomplete
+        // union, even those may still belong to an opaque plugin payload.
+        while (tx.retired.items.len != 0) tx.retain(tx.retired.items[0]);
+        return .deferred;
+    }
+    for (previous.items.items) |reference| if (!keep.contains(reference)) try tx.retire(reference);
+    for (keep.items.items) |reference| tx.retain(reference);
+    return .complete;
 }
 
 test "config persistence is atomic private and round trips" {

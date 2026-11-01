@@ -1,3 +1,4 @@
+import {openSidebarHostMenu} from './sidebar_host_menu.ts';
 /** Real production main / two native Metal windows. Creates the fixture through
  * its public editor and the second window through the ordinary asset menu.
  * Transfer is dispatched through the generic test route to ContentContext;
@@ -10,7 +11,7 @@ import {mkdir,mkdtemp,open,readFile,writeFile,rm,chmod} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {cleanupOwnedBridgeDirectories} from './native_owned_cleanup.ts';
-import {request,waitForServerReady,waitFor,query,clickAt,key,type_,resizeWindow,screenshot,sleep,focused} from '../vendor/zenit/e2e/client.ts';
+import {request,waitForServerReady,waitFor,query,clickAt,key,type_,resizeWindow,screenshot,sleep,focused,mouseMove} from '../vendor/zenit/e2e/client.ts';
 
 const opts:Record<string,string>={};
 for(let i=2;i<process.argv.length;i+=2){assert(['--binary','--sha','--out','--skip-fullscreen','--foreground','--second-window-ssh','--desktop-pause'].includes(process.argv[i])&&process.argv[i+1]);opts[process.argv[i]]=process.argv[i+1];}
@@ -45,7 +46,7 @@ async function select(window:number){assert((await request('POST','/zerowork/win
 async function capture(name:string){await sleep(200);const snapshot=await state();const tree=Object.fromEntries(await Promise.all(['workspace.shell','workspace.titlebar','sidebar.host','tabs.strip','fixture.canvas','fixture.rgba','plugin.challenge.modal','workspace.empty'].map(async id=>[id,await query(id)])));await writeFile(join(out,name+'.json'),redact(JSON.stringify({snapshot,tree},null,2)));assert((await screenshot(join(out,name+'.png'))).ok);report.stages.push({name,snapshot});await writeFile(join(out,'report.in-progress.json'),redact(JSON.stringify(report,null,2)));console.log(name);if(opts['--desktop-pause']==='1'&&['01-source-owner-ready','01b-native-fullscreen-on','01c-native-fullscreen-off-geometry-restored'].includes(name)){await writeFile(join(out,'desktop-stage.json'),JSON.stringify({name,pid:app.pid}));await waitFor(async()=>{try{await readFile(join(out,name+'.continue'));return true;}catch{return null;}},120000);}}
 const assetName='V02 native two-window transfer';
 async function assetRow(name=assetName){return waitFor(async()=>(await query('sidebar.host')).find(n=>shown(n)&&text(n).includes(name))??null);}
-async function assetAction(id:string,name=assetName){await clickNode(await assetRow(name));const target=nodes(await assetRow(name)).find(n=>shown(n)&&n.test_id===id);assert(target);await clickNode(target);}
+async function assetAction(id:string,name=assetName){const row=await assetRow(name);if(id==='sidebar.host'){await clickNode(row);return}await mouseMove(row.rect.x+10,row.rect.y+row.rect.h/2);await sleep(100);const target=nodes(await assetRow(name)).find(n=>shown(n)&&n.test_id===id);assert(target);await clickNode(target);}
 async function cancelExtraOwner(){
  if(opts['--second-window-ssh']==='1'){await visible('connection.progress.close');await click('connection.progress.close');}else{await visible('plugin.challenge.modal');assert.equal((await query('plugin.challenge.modal')).length,1);await click('plugin.challenge.cancel');await absent('plugin.challenge.modal');}
  const tab=(await query('tabs.strip')).flatMap(nodes).find(n=>shown(n)&&/^tabs\.tab\.\d+$/.test(n.test_id??''));if(tab){await click(tab.test_id);await click(tab.test_id.replace('tabs.tab.','tabs.close.'));if((await query('session.close.accept')).some(shown))await click('session.close.accept');await absent(tab.test_id);}await absent('fixture.canvas');
@@ -55,7 +56,7 @@ try{
  await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);await resizeWindow(1440,900);
  const initial=await state();assert.equal(initial.windows.length,1);const source=initial.windows[0];report.source=source;
  await click('sidebar.empty.new');await click('wizard.protocol');await click('wizard.protocol.fixture_probe');await visible('fixture.editor');await set('fixture.name',assetName);await set('fixture.destination','synthetic.invalid');await click('wizard.save_only');await absent('fixture.editor');
- await assetAction('sidebar.host.connect');await visible('plugin.challenge.secret');assert.equal((await query('plugin.challenge.modal')).length,1);assert.equal((await query('auth.challenge.modal')).length,0);await capture('00-source-shared-challenge-before-answer');await click('plugin.challenge.secret');await type_(secret);await click('plugin.challenge.submit');await visible('fixture.canvas');await visible('fixture.rgba');
+ await assetAction('sidebar.host');await visible('plugin.challenge.secret');assert.equal((await query('plugin.challenge.modal')).length,1);assert.equal((await query('auth.challenge.modal')).length,0);await capture('00-source-shared-challenge-before-answer');await click('plugin.challenge.secret');await type_(secret);await click('plugin.challenge.submit');await visible('fixture.canvas');await visible('fixture.rgba');
  const ready=await waitFor(async()=>{const s=await state();return s.sessions.find((v:any)=>v.window===source.window&&v.plugin==='external'&&v.lifecycle==='attached')??null;});report.original_owner=ready;await capture('01-source-owner-ready');
  if(opts['--skip-fullscreen']==='1'){report.fullscreen={status:'skipped_partial_diagnostic'};report.limits.push('Partial diagnostic skips fullscreen after a separately preserved failure; cannot pass complete WindowFacade acceptance.');}else{
  await select(source.window);const normalRect=(await visible('workspace.shell')).rect;const normalTabs=await visible('tabs.strip'),normalTitle=await visible('workspace.titlebar'),normalFocus=await focused();assert.equal(ready.fullscreen,false);assert.equal(normalTabs.rect.x,90);report.fullscreen_titlebar={normal:{tabs:normalTabs,titlebar:normalTitle,focus:normalFocus}};
@@ -69,7 +70,7 @@ try{
   secondWindowAsset='V02 diagnostic loopback refused SSH';report.limits.push('Partial diagnostic obtains the second window from a separately saved ordinary SSH asset at 127.0.0.1:1; the fixture asset new-window failure is preserved separately and is not passed here.');
   await click('sidebar.new');await click('sidebar.new.host');await click('wizard.protocol');await click('wizard.protocol.ssh');await visible('wizard.name');await set('wizard.name',secondWindowAsset);await set('wizard.host','127.0.0.1');await set('wizard.user','v02-owned');await set('wizard.port','1');await click('wizard.next.identity');await click('wizard.next.route');await click('wizard.save_only');await absent('wizard.name');
  }
- await assetAction('sidebar.host.more',secondWindowAsset);await capture('01d-new-window-asset-menu');await click('context.menu.new_window');
+ await openSidebarHostMenu(await assetRow(secondWindowAsset));await capture('01d-new-window-asset-menu');await click('context.menu.new_window');
  const two=await waitFor(async()=>{const s=await state();return s.windows.length===2?s:null;},20000);assert.equal(two.native_count,2);const target=two.windows.find((w:any)=>w.window!==source.window);assert(target);assert.notEqual(source.workspace,target.workspace);assert.notEqual(source.native_window,target.native_window);report.target=target;
  await select(target.window);await cancelExtraOwner();assert.equal((await visible('workspace.titlebar')).rect.x,8);report.target_window_titlebar=await visible('workspace.titlebar');await capture('02-target-window-empty-after-extra-attempt-cancel');await select(source.window);await visible('fixture.canvas');
  const requested=await request('POST','/zerowork/windows',{action:'transfer_content',window:source.window,session:ready.session,generation:ready.generation,destination:target.window});assert(requested.ok,JSON.stringify(requested));

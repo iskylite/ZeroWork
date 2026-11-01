@@ -311,7 +311,7 @@ fn infoButton(cx: *ui.Cx, bound: *binding.Binding, details: *Info, entry: regist
     }
     var style = if (icon_only) S.button(30, false) else S.textButton();
     style.background = ui.Color.TRANSPARENT;
-    style.text_color = if (icon_only) S.theme.current().fg_2 else S.theme.current().accent;
+    style.text_color = if (icon_only) S.theme.current().fg_2 else S.theme.current().accent_ink;
     style.font_size = 11;
     const button = try ui.widgets.Button(.{ .label = label, .icon_asset = if (icon_only) ui.icons.info else null, .icon_only = icon_only, .icon_size = @as(f32, 16), .variant = .ghost, .a11y_label = title, .base_style = style, .hover_style = S.buttonHover(), .on_click = cx.on(InfoAction, state, InfoAction.show) }).mount(bound.scope, cx);
     button.meta.ownership.meta.test_id = try pluginId(bound.scope, entry.id, suffix);

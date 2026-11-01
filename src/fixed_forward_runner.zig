@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
     const fingerprint = args.next() orelse return error.MissingFingerprint;
     const port = try std.fmt.parseInt(u16, args.next() orelse return error.MissingPort, 10);
     const target_port = try std.fmt.parseInt(u16, args.next() orelse "4242", 10);
-    const forward_mode: @import("proto/ssh/socks5_listener.zig").ForwardMode = if (std.mem.eql(u8, mode, "remote") or std.mem.eql(u8, mode, "denied")) .remote else if (std.mem.eql(u8, mode, "local")) .local else .socks5;
+    const forward_mode: @import("proto/ssh/socks5_listener.zig").ForwardMode = if (std.mem.startsWith(u8, mode, "remote") or std.mem.eql(u8, mode, "denied")) .remote else if (std.mem.startsWith(u8, mode, "local")) .local else .socks5;
     const forward_options: ForwardOptions = .{ .mode = forward_mode, .requested_port = 0, .target = if (forward_mode == .socks5) .{} else try @import("proto/ssh/socks5_listener.zig").Target.init(if (forward_mode == .remote) "127.0.0.1" else "shared.fixture", target_port) };
     if (!std.fs.path.isAbsolute(controls)) return error.OwnedControlsRequired;
     const reconnect = std.mem.eql(u8, mode, "reconnect");
@@ -123,6 +123,9 @@ pub fn main(init: std.process.Init) !void {
         service.deinitLocal() catch {};
     };
     try submit(service, accepted.operation, binding, key, forward_options);
+    const startup_cancel = std.mem.eql(u8, mode, "remote-cancel");
+    var published_phase: ?Forward.Phase = null;
+    var published_failure: ?anyerror = null;
     var ready = false;
     var paused = false;
     var resumed = false;
@@ -177,6 +180,12 @@ pub fn main(init: std.process.Init) !void {
         if (rtt_contention) try session.stepRtt(clock.monotonicNs());
         try service.step(&session);
         const value = service.snapshot();
+        if (published_phase == null or published_phase.? != value.phase or !std.meta.eql(published_failure, value.failure)) {
+            const status = try std.json.Stringify.valueAlloc(a, .{ .phase = @tagName(value.phase), .failure = if (value.failure) |err| @errorName(err) else "none", .cleanup = @tagName(value.cleanup), .port = value.port }, .{});
+            try write(init.io, try std.fs.path.join(a, &.{ controls, "status.json" }), status);
+            published_phase = value.phase;
+            published_failure = value.failure;
+        }
         if (rtt_contention and !rtt_done) {
             if (rtt_started) |started| {
                 const snapshot = try details.snapshot(accepted.operation);
@@ -213,7 +222,7 @@ pub fn main(init: std.process.Init) !void {
             try write(init.io, paused_path, try std.fmt.allocPrint(a, "{{\"local_port\":{d}}}\n", .{service.snapshot().port}));
             continue;
         }
-        if (ready and !stopping and exists(init.io, stop_path)) {
+        if (!stopping and exists(init.io, stop_path)) {
             stopping = true;
             stop_started = clock.monotonicNs();
             _ = service.requestStop(binding);
@@ -223,7 +232,7 @@ pub fn main(init: std.process.Init) !void {
         pause();
     }
     const final = service.snapshot();
-    if (!ready or !stopping or final.cleanup != .released or final.stats.connections_active != 0 or shell_bytes == 0 or heartbeats == 0 or (reconnect and !resumed) or (rtt_contention and !rtt_done)) return error.SharedForwardIncomplete;
+    if ((!ready and !startup_cancel) or !stopping or final.cleanup != .released or final.stats.connections_active != 0 or shell_bytes == 0 or heartbeats == 0 or (reconnect and !resumed) or (rtt_contention and !rtt_done)) return error.SharedForwardIncomplete;
     const stop_ms = @divTrunc(clock.monotonicNs() - stop_started, std.time.ns_per_ms);
     // A stopped SOCKS listener must not close, deauthenticate or replace the PTY.
     const marker = "AFTER_SOCKS_STOP\n";
@@ -243,6 +252,7 @@ pub fn main(init: std.process.Init) !void {
         pause();
     }
     if (std.mem.indexOf(u8, tail[0..tail_len], marker) == null or session.state != .active or session.channel == null) return error.ParentPtyNotUsable;
+    if (!ready) _ = try domain.journal.publish(key, .cancelled, "Forward startup cancelled", null);
     _ = try domain.journal.publish(key, .cleanup_released, "SOCKS children actually released", null);
     try domain.journal.retire(key, .resources_released);
     _ = try domain.requestClose(accepted.handle, .{});

@@ -71,6 +71,7 @@ test "socks route host rejects unavailable stale or invalid authority before nat
     try std.testing.expect(try domain.ready(accepted.handle, accepted.operation, plugins.builtin_descriptors[1].services));
     try std.testing.expectError(error.InvalidSocksExit, host.start(accepted.handle, .{ .exit_index = 3 }));
     try std.testing.expectError(error.ExposureConfirmationRequired, host.start(accepted.handle, .{ .listener = .{ .bind127 = false } }));
+    try std.testing.expectError(error.InvalidForwardLimit, host.start(accepted.handle, .{ .listener = .{ .max_connections = socks.listener.limits.max_connections + 1 } }));
     // A disabled library reaches the production SourceFactory, yet cannot do
     // network IO. Its failure/cleanup pair uses the domain's original owner.
     try std.testing.expectError(error.LibraryNotInitialized, host.start(accepted.handle, .{}));
@@ -104,6 +105,7 @@ test "shared forward rejects foreign generations and a queued stop never creates
     try std.testing.expectError(error.StaleForwardOrigin, service.start(stale, binding, key, .{}));
     try std.testing.expectError(error.ExposureConfirmationRequired, service.start(original, binding, key, .{ .bind127 = false }));
     try std.testing.expectError(error.InvalidForwardLimit, service.start(original, binding, key, .{ .max_connections = 0 }));
+    try std.testing.expectError(error.InvalidForwardLimit, service.start(original, binding, key, .{ .max_connections = socks.listener.limits.max_connections + 1 }));
     try service.start(original, binding, key, .{});
     try std.testing.expectEqual(ssh.ReleaseReceipt.released, service.requestStop(wrong));
     try std.testing.expect(!service.stop_requested.load(.acquire));

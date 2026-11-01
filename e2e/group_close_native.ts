@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import {cleanupOwnedBridgeDirectories} from './native_owned_cleanup.ts';
 import {spawn,execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {copyFile,mkdir,mkdtemp,open,readFile,readdir,writeFile,rm} from 'node:fs/promises';
+import {copyFile,mkdir,mkdtemp,open,readFile,readdir,realpath,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {dirname,join,resolve} from 'node:path';
 import {waitForServerReady,waitFor,query as rawQuery,clickAt,key,type_,screenshot,sleep,resizeWindow,screenPos,focused,mouseMove,scrollAt} from '../zig-out/share/zenit/harness/client.ts';
@@ -15,11 +15,11 @@ const args:Record<string,string>={};for(let i=2;i<process.argv.length;i+=2){asse
 assert(args['--binary']&&args['--out']&&/^[a-f0-9]{64}$/.test(args['--expected-sha']??''));
 const localCount=Number(args['--local-count']??4);assert(Number.isInteger(localCount)&&localCount>=2&&localCount<=4);const sshEnabled=args['--ssh']!=='0';const totalCount=localCount+(sshEnabled?1:0);
 const output=resolve(args['--out']);await mkdir(output,{recursive:true});assert.equal((await readdir(output)).length,0);
-const binary=join(output,'zerowork-frozen');await copyFile(resolve(args['--binary']),binary);await copyFile(join(dirname(resolve(args['--binary'])),'zw_ipc.so'),join(output,'zw_ipc.so'));assert.equal(createHash('sha256').update(await readFile(binary)).digest('hex'),args['--expected-sha']);
-const isolated=await mkdtemp(join(tmpdir(),'zw-group-close-')),rpc=join(isolated,'rpc'),data=join(isolated,'data');await Promise.all([mkdir(rpc),mkdir(data)]);const shellConfig=join(isolated,'shell-config');await mkdir(shellConfig);await writeFile(join(shellConfig,'.zshrc'),"bindkey -e\nPS1='ZeroWork-acceptance%# '\n");
+const binary=join(output,'zerowork-frozen');await copyFile(resolve(args['--binary']),binary);for(const artifact of ['zw_ipc.so','zw_execution.so','zw_secret_consume.so','zw_execution_guard']) await copyFile(join(dirname(resolve(args['--binary'])),artifact),join(output,artifact));assert.equal(createHash('sha256').update(await readFile(binary)).digest('hex'),args['--expected-sha']);
+const isolated=await realpath(await mkdtemp(join(tmpdir(),'zw-group-close-'))),rpc=join(isolated,'rpc'),data=join(isolated,'data');await Promise.all([mkdir(rpc),mkdir(data)]);const shellConfig=join(isolated,'shell-config');await mkdir(shellConfig);await writeFile(join(shellConfig,'.zshrc'),"bindkey -e\nPS1='ZeroWork-acceptance%# '\n");
 const privateConfig=sshEnabled?JSON.parse(await readFile(args['--config']??'/tmp/zerowork-next-acceptance-20261021.json','utf8')).direct:{host:'local-only.invalid',port:22,user:'tester',password:''};
 const q=(x:any)=>JSON.stringify(x);
-await writeFile(join(data,'hosts.toml'),`[[hosts]]\nname = "Close acceptance SSH"\nhost = ${q(privateConfig.host)}\nport = ${privateConfig.port}\nuser = ${q(privateConfig.user)}\nauth_mode = "password"\nauth = { password = ${q(privateConfig.password)} }\noptions = { strict_host_key = true }\n`,{mode:0o600});
+await writeFile(join(data,'hosts.toml'),sshEnabled?`[[hosts]]\nname = "Close acceptance SSH"\nhost = ${q(privateConfig.host)}\nport = ${privateConfig.port}\nuser = ${q(privateConfig.user)}\nauth_mode = "password"\nauth = { password = ${q(privateConfig.password)} }\noptions = { strict_host_key = true }\n`:'',{mode:0o600});
 await writeFile(join(data,'config.toml'),'[meta]\nconfig_revision = 1\n[ui]\ntheme = "dark"\nfont_family = "Menlo"\nfont_size = 14\n');
 process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;const log=await open(join(output,'app.log'),'w');
 const app=spawn(binary,[],{cwd:process.cwd(),env:{...process.env,ZDOTDIR:shellConfig,ZENIT_E2E_FILE_RPC_DIR:rpc,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1',OPENAI_API_KEY:'',ANTHROPIC_API_KEY:''},stdio:['ignore',log.fd,log.fd]});
@@ -83,8 +83,7 @@ try{
  if(sshEnabled){
   // Real SSH -> production Cmd+D -> group + actual duplicate SSH. The
   // duplicate is closed normally; the original live SSH remains in its group.
-  await click('sidebar.host');await click('sidebar.host.connect');
-  await authenticateUntil(async()=>{return (await query('status.connection.identity')).some(shown)&&!(await query('connection.progress')).some(shown)});
+  await click('sidebar.host');await authenticateUntil(async()=>{return (await query('status.connection.identity')).some(shown)&&!(await query('connection.progress')).some(shown)});
   sshTab=(await tabNodes())[0].test_id;await press('d',{cmd:true});await press('modifiers_released');await groupVisible();
   await authenticateUntil(async()=>(await sessionIds()).length===2);
   const holder=await visible('groups.tab');const title=flat(holder).map(n=>n.text??'').find(t=>t.startsWith('组 · '));assert(title);groupName=title.slice('组 · '.length);assert(groupName.length>0);

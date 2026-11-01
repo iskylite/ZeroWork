@@ -23,6 +23,34 @@ const Call = struct {
         self.parsed.deinit();
     }
 };
+test "execution deadline Stop racing approved or denied inventory does not consume a grant" {
+    const Race = struct {
+        broker: *approval.Broker,
+        ticket: approval.Ticket,
+        allow: bool,
+        polls: std.atomic.Value(usize) = .init(0),
+        fn stopped(raw: *const anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(raw)));
+            const index = self.polls.fetchAdd(1, .acq_rel);
+            if (index == 0) self.broker.decide(self.ticket, if (self.allow) .allow_once else .deny) catch unreachable;
+            return index > 0;
+        }
+    };
+    for ([_]bool{ true, false }) |allow| {
+        var broker: approval.Broker = .{};
+        const ctx = context();
+        try broker.configure(ctx, 1);
+        var call = try Call.init(ctx, "{\"scope\":\"workspace\"}");
+        defer call.deinit();
+        const frozen = try selection();
+        const ticket = try broker.begin(call.invocation, frozen, 1, std.testing.allocator);
+        var race: Race = .{ .broker = &broker, .ticket = ticket, .allow = allow };
+        var cancel: @import("provider.zig").CancelToken = .{ .source = .{ .context = &race, .poll = Race.stopped } };
+        try std.testing.expectError(error.CancelledBeforeDispatch, broker.wait(ticket, &cancel));
+        try std.testing.expect(broker.entry == null);
+        try std.testing.expect(broker.grantForInvocation(call.invocation, frozen, 1) == null);
+    }
+}
 test "inventory on-demand owns pending snapshot and rejects stale or forged decisions" {
     var broker: approval.Broker = .{};
     const ctx = context();

@@ -89,6 +89,7 @@ pub const Host = struct {
     /// Memory-only preparation. Service authority and the immutable request
     /// come from the original SessionHost, never the selected tab/asset editor.
     pub fn start(self: *Host, owner: identity.SessionHandle, options: StartOptions) !operations.OperationKey {
+        if (!listener.limits.validConnections(options.listener.max_connections)) return error.InvalidForwardLimit;
         if (self.options.shared_provider) |provider| return self.startShared(owner, options, provider);
         return self.startIndependent(owner, options);
     }

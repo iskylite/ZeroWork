@@ -362,6 +362,7 @@ pub const View = struct {
         const context = try self.action(scope, kind);
         context.asset_owner = owner;
         const button = try ui.widgets.Button(.{ .label = name, .variant = @as(ui.widgets.ButtonVariant, if (primary_action) .primary else .secondary), .base_style = S.chainAction(width, primary_action), .hover_style = .{ .background = if (primary_action) S.theme.current().accent else S.theme.current().hover }, .disabled = disabled, .on_click = self.cx.on(Action, context, Action.click) }).mount(scope, self.cx);
+        if (primary_action) try S.theme.stylePrimary(self.cx, scope, button, null);
         button.meta.ownership.meta.test_id = test_id;
         return button;
     }
@@ -395,7 +396,7 @@ pub const View = struct {
         try row.appendChild(self.cx.allocator, try ui.iconTint(self.cx, asset, if (online) S.theme.current().ok else S.theme.current().fg_2, S.icon(16)));
         const first = try label(self.cx, row, primary, S.infoText(false), S.infoLabel());
         const last = try label(self.cx, row, tail, S.infoText(true), S.trailing());
-        if (online) last.setTextColor(S.theme.current().ok);
+        if (online) last.setTextColor(S.theme.current().ok_ink);
         try parent.appendChild(self.cx.allocator, row);
         return .{ .root = row, .primary = first, .trailing = last };
     }
@@ -500,6 +501,7 @@ pub const View = struct {
         try footer.appendChild(self.cx.allocator, try ui.spacer(self.cx));
         const close_context = try self.action(scope, .close_node);
         const close = try ui.widgets.Button(.{ .label = "关闭详情", .variant = .primary, .base_style = S.primary(), .on_click = self.cx.on(Action, close_context, Action.click) }).mount(scope, self.cx);
+        try @import("app_theme.zig").stylePrimary(self.cx, scope, close, null);
         close.meta.ownership.meta.test_id = "connection.details.node-done";
         try footer.appendChild(self.cx.allocator, close);
         try body.appendChild(self.cx.allocator, footer);

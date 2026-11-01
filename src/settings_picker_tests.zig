@@ -80,6 +80,18 @@ test "picker measured height flips above bottom anchor and follows resized card"
     const next = p.root.globalRect();
     try std.testing.expect(next.x + next.w <= 252.5);
     try std.testing.expect(next.y >= 7.5 and next.y + next.h <= 172.5);
+    try std.testing.expect(next.y + next.h <= a.globalRect().y - 3.5);
+    // Neither side fits the expanded font catalog. Moving the anchor upward
+    // must use the larger lower space and retain the four-pixel anchor gap.
+    a.style.ensureExtPanic(cx.allocator).inset.top = .{ .px = 75 };
+    a.markLayoutDirty();
+    cx.frame_count += 1;
+    cx.frame_time_ms += 16;
+    _ = cx.render();
+    const lower = p.root.globalRect();
+    try std.testing.expect(lower.y >= a.globalRect().y + a.globalRect().h + 3.5);
+    try std.testing.expect(lower.y + lower.h <= 172.5);
+    try std.testing.expect(p.body.state.maxScrollY() > 0);
 }
 
 test "V3 key recorder uses a centered 390px Modal independent of the shortcut anchor" {
@@ -132,17 +144,21 @@ test "short picker scroll exposes final choice and numeric input receives focus"
         _ = cx.render();
     }
     try std.testing.expect(p.root.globalRect().h <= 84.5);
-    const choice = p.body.content.children.items[2];
-    ui.widgets.setScrollY(p.body.state, p.body.content, p.body.state.maxScrollY());
+    const font_choices = picker.choices(.{ .section = "ui", .key = "font_family" });
+    const last = font_choices.len - 1;
+    const choice = p.body.content.children.items[last];
+    try std.testing.expectEqualStrings(font_choices[last].label, choice.children.items[0].getText().?.content);
+    ui.widgets.scrollIntoView(p.body.state, p.body.content, choice, .nearest);
     cx.frame_count += 1;
     cx.frame_time_ms += 16;
     _ = cx.render();
     const cr = choice.globalRect();
     const vr = p.body.container.globalRect();
-    try std.testing.expect(cr.y + cr.h > vr.y and cr.y < vr.y + vr.h);
+    try std.testing.expect(p.body.state.scroll_y > 0);
+    try std.testing.expect(cr.y >= vr.y - 0.5 and cr.y + cr.h <= vr.y + vr.h + 0.5);
     const click = choice.behavior.events.on_click.?;
     click.callback(click.context);
-    try std.testing.expectEqualStrings("Monaco", c.model.value.ui.font_family);
+    try std.testing.expectEqualStrings(font_choices[last].value, c.model.value.ui.font_family);
     const numeric = try picker.mount(cx, scope, root, anchor, &c, .{ .section = "ui", .key = "font_size" }, .{ .context = &context, .committed = call, .dismiss = call, .choose_directory = dir });
     try root.appendChild(cx.allocator, numeric.root);
     for (0..3) |_| {

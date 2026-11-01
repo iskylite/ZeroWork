@@ -136,7 +136,17 @@ pub const Store = struct {
         // markers must not close a command belonging to the primary screen.
         if (native_view.alternate(terminal)) return;
         switch (kind) {
-            .cwd, .prompt_start => {},
+            .cwd => {},
+            .prompt_start => {
+                // A prompt redrawn over a previous input range replaces that
+                // command's presentation, even when the next text is identical.
+                const point = cursor(terminal, rows) orelse return;
+                for (self.entries.items) |*entry| {
+                    const first = entry.input_start.resolve(terminal, cols) orelse continue;
+                    const last = entry.input_end.resolve(terminal, cols) orelse first;
+                    if (point.row >= first.row and less(point, last)) clearLocation(entry);
+                }
+            },
             .input_start => {
                 const point = cursor(terminal, rows) orelse return;
                 // PS2 carries another B, but it belongs to the same command.
@@ -164,6 +174,27 @@ pub const Store = struct {
                     break;
                 };
             },
+        }
+    }
+
+    /// Tracked refs follow grid positions through reflow; erasing/overwriting
+    /// those positions does not invalidate them. Only retain a decoration while
+    /// its last input cell still belongs to native shell input. History stays.
+    pub fn invalidateOverwritten(self: *Store, terminal: c.GhosttyTerminal) void {
+        if (native_view.alternate(terminal)) return;
+        for (self.entries.items) |*entry| {
+            if (entry.input_end.native == null) continue;
+            var ref: c.GhosttyGridRef = .{ .size = @sizeOf(c.GhosttyGridRef) };
+            var cell: c.GhosttyCell = 0;
+            var has_text = false;
+            var semantic: c.GhosttyCellSemanticContent = 0;
+            if (c.ghostty_tracked_grid_ref_snapshot(entry.input_end.native, &ref) == c.GHOSTTY_SUCCESS and
+                c.ghostty_grid_ref_cell(&ref, &cell) == c.GHOSTTY_SUCCESS)
+            {
+                _ = c.ghostty_cell_get(cell, c.GHOSTTY_CELL_DATA_HAS_TEXT, @ptrCast(&has_text));
+                _ = c.ghostty_cell_get(cell, c.GHOSTTY_CELL_DATA_SEMANTIC_CONTENT, @ptrCast(&semantic));
+            }
+            if (!has_text or semantic != c.GHOSTTY_CELL_SEMANTIC_INPUT) clearLocation(entry);
         }
     }
 
@@ -246,6 +277,12 @@ pub const Store = struct {
         return commands;
     }
 };
+
+fn clearLocation(entry: *Entry) void {
+    entry.input_start.deinit();
+    entry.input_end.deinit();
+    entry.output_start.deinit();
+}
 
 fn projected(entry: Entry, terminal: c.GhosttyTerminal, cols: u16) model.Command {
     var command = entry.value;

@@ -31,6 +31,7 @@ pub const Cleanup = enum { awaiting, released, unknown };
 pub extern fn zw_local_start_pty(?[*:0]const u8, [*:0]const u8, u16, u16, *Failure) ?*Process;
 pub extern fn zw_local_start_pty_edit(?[*:0]const u8, [*:0]const u8, u16, u16, ?[*:0]const u8, *Failure) ?*Process;
 pub extern fn zw_local_start_exec(?[*:0]const u8, [*:0]const u8, *Failure) ?*Process;
+pub extern fn zw_local_start_exec_checked(?[*:0]const u8, [*:0]const u8, *Failure, *const fn (*anyopaque) callconv(.c) c_int, *anyopaque) ?*Process;
 pub extern fn zw_local_read(*Process, c_int, [*]u8, usize, *usize) c_int;
 pub extern fn zw_local_write(*Process, [*]const u8, usize, *usize) c_int;
 pub extern fn zw_local_resize(*Process, u16, u16) c_int;

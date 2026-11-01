@@ -3163,7 +3163,7 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
         list.container_node.setStyleInline(w.alloc, .{ .padding = .{ .left = 11, .right = 11, .top = 9, .bottom = 9 } });
     }
     textarea.state.dirty = true;
-    textarea.input.setStyleInline(w.alloc, .{ .border = .{ .radius = 8, .width = 1, .color = ui.Color.TRANSPARENT } });
+    textarea.input.setStyleInline(w.alloc, .{ .border = .{ .radius = 8, .width = 0, .color = ui.Color.TRANSPARENT } });
     textarea.wrapper.setStyleInline(w.alloc, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
     w.startup_textarea = textarea;
     try commands.appendChild(w.alloc, textarea.wrapper);

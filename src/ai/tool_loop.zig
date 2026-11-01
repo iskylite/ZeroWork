@@ -101,8 +101,8 @@ pub const Host = struct {
     /// grants before dispatch. It never receives a fabricated SessionHandle.
     execute_host: ?*const fn (*anyopaque, dynamic.host.Invocation, std.mem.Allocator, ?*provider.CancelToken) anyerror!dynamic.host.Result = null,
     refresh_authority: ?*const fn (*anyopaque, *const dynamic.RequestTable, std.mem.Allocator, ?*provider.CancelToken) anyerror!?AuthorityRefresh = null,
-    acknowledge_notice: ?*const fn (*anyopaque, u64) anyerror!void = null,
-    accepted_host_result: ?*const fn (*anyopaque, dynamic.host.Context, []const u8, *const dynamic.host.Result) anyerror!void = null,
+    acknowledge_notice: ?*const fn (*anyopaque, u64, ?*provider.CancelToken) anyerror!void = null,
+    accepted_host_result: ?*const fn (*anyopaque, dynamic.host.Context, []const u8, *const dynamic.host.Result, ?*provider.CancelToken) anyerror!void = null,
 };
 pub const AuthorityRefresh = struct { table: dynamic.RequestTable, notice: []const u8 = "", notice_revision: u64 = 0 };
 
@@ -213,12 +213,14 @@ pub const Loop = struct {
     /// Called only after every call/result pair in the old provider batch is
     /// complete. Historical keys keep their original owner and call IDs.
     pub fn refreshAuthority(self: *Loop, host: Host, cancel: ?*provider.CancelToken) !void {
+        if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
         const refresh = host.refresh_authority orelse return;
         const previous = if (self.tool_table) |*table| table else return;
         var next = (try refresh(host.context, previous, self.allocator, cancel)) orelse return;
         var accepted = false;
         defer if (!accepted) next.table.deinit();
         defer self.allocator.free(next.notice);
+        if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
         const old_context = previous.host_context orelse return error.InvalidHostAuthority;
         const context = next.table.host_context orelse return error.InvalidHostAuthority;
         try context.validate();
@@ -255,9 +257,11 @@ pub const Loop = struct {
         self.request.messages = self.messages.items;
         try self.checkBudget();
     }
-    pub fn acknowledgeNotice(self: *Loop, host: Host) !void {
+    pub fn acknowledgeNotice(self: *Loop, host: Host, cancel: ?*provider.CancelToken) !void {
+        if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
         if (self.notice_revision <= self.wire_notice_revision) return;
-        if (host.acknowledge_notice) |acknowledge| try acknowledge(host.context, self.notice_revision);
+        if (host.acknowledge_notice) |acknowledge| try acknowledge(host.context, self.notice_revision, cancel);
+        if (cancel) |token| if (token.isCancelled()) return error.Cancelled;
         self.wire_notice_revision = self.notice_revision;
     }
     pub fn checkRequestBudget(self: *const Loop) !void {
@@ -288,8 +292,9 @@ pub const Loop = struct {
         if (host.accepted_host_result) |accepted| if (!(if (cancel) |token| token.isCancelled() else false)) {
             const context = if (self.tool_table) |table| table.host_context else null;
             if (context) |captured| for (owned_calls) |call| {
+                if (cancel) |token| if (token.isCancelled()) break;
                 for (self.records.items) |record| if (std.mem.eql(u8, record.key.call_id, call.id)) {
-                    if (record.host_result) |*result| try accepted(host.context, captured, record.name, result);
+                    if (record.host_result) |*result| try accepted(host.context, captured, record.name, result, cancel);
                     break;
                 };
             };
@@ -400,7 +405,7 @@ pub const Loop = struct {
         if (operation_id == 0 or operation_id == std.math.maxInt(u64)) return error.IdentityExhausted;
         record.dispatched = true;
         const result = execute(host.context, .{ .context = context, .authority = parsed.entry.authority, .operation_id = operation_id, .turn_id = self.turn_id, .call_id = call.id, .tool_id = parsed.entry.definition.id, .arguments = parsed.json.value, .arguments_json = call.arguments, .arguments_hash = parsed.arguments_hash, .canonical_arguments_hash = parsed.canonical_arguments_hash orelse return error.InvalidHostAuthority }, self.allocator, cancel) catch |err| {
-            const preflight = err == error.InvalidHostAuthority or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ScopeChanged or err == error.PermissionDenied or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ToolNotAvailable or err == error.TargetOutsideScope;
+            const preflight = err == error.InvalidHostAuthority or err == error.ToolApprovalRequired or err == error.ToolApprovalRejected or err == error.ToolApprovalExpired or err == error.ToolApprovalChanged or err == error.StaleToolAuthority or err == error.ScopeChanged or err == error.PermissionDenied or err == error.ToolExecutionDenied or err == error.CancelledBeforeDispatch or err == error.ExecutionDeadlineBeforeDispatch or err == error.ToolNotAvailable or err == error.TargetOutsideScope;
             record.dispatched = !preflight;
             if (!preflight and affecting) self.uncertain = true;
             record.result_body = try std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = if (preflight) dynamic.Status.rejected else if (!affecting) dynamic.Status.failed else dynamic.Status.outcome_unknown, .error_code = @errorName(err), .conversation_id = context.conversation_id, .task_id = context.task_id, .operation_id = operation_id, .side_effect_started = !preflight and affecting, .request_sent = if (parsed.entry.authority == .local_network_read and preflight) @as(?bool, false) else null, .local_released = preflight or !affecting, .remote_effect_unknown = !preflight and affecting }, .{});

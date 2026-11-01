@@ -21,22 +21,23 @@ const key: P.OperationKey = .{ .owner = .{ .session = .{ .session_id = @fromBack
 const direct = [_]P.Hop{.{ .name = "DB", .host = "db.example", .user = "admin" }};
 const route = [_]P.Hop{ .{ .name = "Bastion-01", .host = "b1.example", .user = "ops" }, .{ .name = "Bastion-02", .host = "b2.example", .user = "ops" }, direct[0] };
 
-test "connection progress button focus does not turn a log disclosure into a filled action" {
+test "connection progress focus uses a filled surface without control outlines" {
     var f: Fixture = undefined;
     try f.init();
     defer f.deinit();
+    f.cx.setTheme(theme.widgetTheme(theme.currentName()));
     try f.show(f.snapshot(&direct));
     f.cx.focus_manager.setFocusWithReason(f.view.toggle_button, .click);
     _ = f.cx.render();
-    try std.testing.expectEqual(ui.Color.TRANSPARENT, f.view.toggle_button.getBackground());
+    try std.testing.expectEqual(f.cx.tokens.tokens.color.bg_active, f.view.toggle_button.getBackground());
     f.cx.focus_manager.setFocusWithReason(f.view.toggle_button, .tab);
     _ = f.cx.render();
-    try std.testing.expect(f.view.toggle_button.style.outline() != null);
-    try std.testing.expectEqual(ui.Color.TRANSPARENT, f.view.toggle_button.getBackground());
+    try std.testing.expect(f.view.toggle_button.style.outline() == null);
+    try std.testing.expectEqual(f.cx.tokens.tokens.color.bg_active, f.view.toggle_button.getBackground());
     f.record(0, 1, .transport, .started);
     try f.show(f.snapshot(&direct));
     _ = f.cx.render();
-    try std.testing.expectEqual(ui.Color.TRANSPARENT, f.view.toggle_button.getBackground());
+    try std.testing.expectEqual(f.cx.tokens.tokens.color.bg_active, f.view.toggle_button.getBackground());
     try std.testing.expect(!ui.Color.eql(f.view.cancel_button.?.getBackground(), f.view.footer.getBackground()));
     try std.testing.expectEqual(@as(f32, 96), f.view.cancel_button.?.globalRect().w);
     try std.testing.expectEqual(@as(f32, 32), f.view.cancel_button.?.globalRect().h);

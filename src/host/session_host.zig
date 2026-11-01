@@ -5,6 +5,8 @@ const plugins = @import("plugin_registry.zig");
 const typed = @import("plugin_services.zig");
 const envelopes = @import("../config/connection_envelope.zig");
 const contexts = @import("host_context.zig");
+const probes = @import("probe_contract.zig");
+const access = @import("session_service_access.zig");
 const Snapshot = @import("../ui/session_lifecycle.zig").Snapshot;
 
 pub const SessionHandle = identity.SessionHandle;
@@ -20,6 +22,7 @@ pub const AuthOptions = union(enum) {
 };
 pub const RemoteProtocol = enum { ssh, sftp };
 pub const SessionPurpose = enum { interactive, socks_background };
+pub const PresentationPolicy = enum { interactive, background, probe };
 
 pub fn backgroundServices() plugins.Services {
     return plugins.Services.of(&.{ .lifecycle, .auth, .route, .forward });
@@ -152,6 +155,19 @@ const LegacyBindingContext = struct {
     }
 };
 
+const ServiceAccessContext = struct {
+    host: *SessionHost,
+    owner: SessionHandle,
+    fn facade(self: *ServiceAccessContext) access.SessionServiceAccess {
+        return .{ .context = self, .owner = self.owner, .lookup_fn = lookup };
+    }
+    fn lookup(raw: *anyopaque, owner: SessionHandle, definition: typed.Definition) !?typed.Binding {
+        const self: *ServiceAccessContext = @ptrCast(@alignCast(raw));
+        if (!self.owner.eql(owner)) return error.OwnerMismatch;
+        return self.host.queryBinding(owner, definition);
+    }
+};
+
 pub const ServiceQuery = union(enum) {
     available: ServiceHandle,
     temporarily_unavailable: []const u8,
@@ -159,7 +175,7 @@ pub const ServiceQuery = union(enum) {
 };
 
 pub const CloseStep = enum { pause_transfers, stop_ai, release_forwards, close_protocol, release_content };
-pub const CloseReceipt = enum { released, awaiting, unknown };
+pub const CloseReceipt = probes.CloseReceipt;
 pub const CreateRequest = struct { handle: SessionHandle, key: OperationKey, target: AttachmentTarget, spec: SessionCreateSpec, purpose: SessionPurpose = .interactive, context: ?contexts.HostContext = null };
 
 /// Adapters must enqueue asynchronous completions for the controller thread;
@@ -206,6 +222,7 @@ pub const SessionSnapshot = struct {
     plugin_id: plugins.PluginId,
     protocol_id: []const u8 = "",
     purpose: SessionPurpose = .interactive,
+    presentation_policy: PresentationPolicy = .interactive,
     lifecycle: Lifecycle,
     target: AttachmentTarget,
     attachment: ?Attachment,
@@ -218,6 +235,8 @@ const Entry = struct {
     handle: SessionHandle,
     manifest_id: []const u8,
     purpose: SessionPurpose = .interactive,
+    presentation_policy: PresentationPolicy = .interactive,
+    probe_token: ?probes.ProbeToken = null,
     spec: Snapshot(SessionCreateSpec),
     legacy_spec: ?Snapshot(SessionCreateSpec) = null,
     target: AttachmentTarget,
@@ -306,6 +325,7 @@ pub const SftpDirectoryRecovery = struct {
 /// keeps factories, immutable requests, operation ordering and service bindings.
 pub const SessionHost = struct {
     allocator: std.mem.Allocator,
+    owner_thread: std.Thread.Id,
     /// Scoped controller reservation: factories remain untouched until the
     /// durable journal owner explicitly authorizes dispatchPrepared.
     defer_create_start: bool = false,
@@ -316,6 +336,7 @@ pub const SessionHost = struct {
     sessions: std.ArrayList(Entry) = .empty,
     open_requests: std.ArrayList(OpenRequest) = .empty,
     legacy_binding_contexts: std.ArrayList(*LegacyBindingContext) = .empty,
+    service_access_contexts: std.ArrayList(*ServiceAccessContext) = .empty,
     session_ids: identity.Allocator(identity.SessionId) = .{},
     retained_transfers: std.ArrayList(RetainedTransfer) = .empty,
     auxiliary_transfers: std.ArrayList(AuxiliaryTransfer) = .empty,
@@ -342,7 +363,7 @@ pub const SessionHost = struct {
         errdefer registry.deinit();
         const registrations = try allocator.alloc(plugins.AdapterRegistration, adapters.len);
         for (adapters, registrations) |adapter, *registration| registration.* = adapter.registration;
-        return .{ .allocator = allocator, .registry = registry, .adapters = owned_adapters, .registrations = registrations, .journal = operations.Journal.init(allocator) };
+        return .{ .allocator = allocator, .owner_thread = std.Thread.getCurrentId(), .registry = registry, .adapters = owned_adapters, .registrations = registrations, .journal = operations.Journal.init(allocator) };
     }
 
     /// Call only after adapters have stopped producing events and closed their
@@ -361,6 +382,8 @@ pub const SessionHost = struct {
         self.open_requests.deinit(self.allocator);
         for (self.legacy_binding_contexts.items) |context| self.allocator.destroy(context);
         self.legacy_binding_contexts.deinit(self.allocator);
+        for (self.service_access_contexts.items) |context| self.allocator.destroy(context);
+        self.service_access_contexts.deinit(self.allocator);
         self.registry.deinit();
         for (self.retained_transfers.items) |*retained| {
             retained.spec.deinit();
@@ -380,6 +403,109 @@ pub const SessionHost = struct {
     /// different immutable request is an error, including after failure/close.
     pub fn open(self: *SessionHost, envelope: envelopes.Envelope, intent: OpenIntent) !Accepted {
         return self.openEnvelope(envelope, intent, false);
+    }
+
+    /// Reserve a real session and operation using the ordinary application ID
+    /// allocator. The probe host alone dispatches its restricted factory; no
+    /// normal controller, renderer, tab or export is created for this entry.
+    pub fn openProbeScope(self: *SessionHost, envelope: envelopes.Envelope, parent_editor_operation: OperationKey, draft_revision: u64) !probes.ProbeToken {
+        if (std.Thread.getCurrentId() != self.owner_thread) return error.ProbeOffMainThread;
+        if (draft_revision == 0 or parent_editor_operation.operation_id == 0) return error.InvalidProbeEditor;
+        try envelope.validate();
+        const manifest_value = self.registry.find(envelope.protocol_id) orelse return error.AdapterNotConnected;
+        const contribution = manifest_value.connection orelse return error.ConnectionNotSupported;
+        if (contribution.probe_factory == null) return error.ProbeNotSupported;
+        if (envelope.payload_version != contribution.payload_version) return error.UnsupportedPayloadVersion;
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const decoded = try (contribution.decode orelse return error.MissingConnectionCodec)(arena.allocator(), envelope);
+        if (!std.mem.eql(u8, decoded.protocol_id, envelope.protocol_id) or decoded.id != envelope.id or decoded.revision != envelope.revision or decoded.group_id != envelope.group_id or !std.mem.eql(u8, decoded.name, envelope.name)) return error.CodecChangedEnvelopeIdentity;
+        try contribution.validate_payload(decoded.payload);
+        var owned = try Snapshot(SessionCreateSpec).init(self.allocator, .{ .plugin = decoded });
+        errdefer owned.deinit();
+        try self.sessions.ensureUnusedCapacity(self.allocator, 1);
+        const handle: SessionHandle = .{ .session_id = try self.session_ids.allocate() };
+        const operation = try self.journal.begin(.{ .session = handle }, 1);
+        const token: probes.ProbeToken = .{ .handle = handle, .operation = operation, .parent_editor_operation = parent_editor_operation, .draft_revision = draft_revision };
+        self.sessions.appendAssumeCapacity(.{ .handle = handle, .manifest_id = manifest_value.id, .presentation_policy = .probe, .probe_token = token, .spec = owned, .target = .{ .window_id = @fromBackingInt(0), .workspace_id = @fromBackingInt(0) }, .create_operation = operation });
+        return token;
+    }
+
+    /// Probe scopes retain cleanup_unknown entries until the same real child
+    /// owner supplies a released receipt. Business results appear only then.
+    pub fn probeScopeReceipt(self: *SessionHost, token: probes.ProbeToken, outcome: ?probes.Outcome, receipt: CloseReceipt, safe_message: []const u8) !bool {
+        if (std.Thread.getCurrentId() != self.owner_thread) return error.ProbeOffMainThread;
+        const entry = self.find(token.handle) orelse return false;
+        if (entry.presentation_policy != .probe or entry.probe_token == null or !entry.probe_token.?.eql(token)) return false;
+        if (entry.state == .closed) return false;
+        if (receipt == .released and outcome == null) return error.MissingProbeOutcome;
+        _ = try self.journal.publish(token.operation, switch (receipt) {
+            .released => .cleanup_released,
+            .awaiting => .cleanup_progress,
+            .unknown => .cleanup_unknown,
+        }, "probe", null);
+        entry.creation_ended = true;
+        entry.create_cleanup = switch (receipt) {
+            .released => .released,
+            .awaiting => .releasing,
+            .unknown => .unknown,
+        };
+        if (receipt == .released) {
+            _ = try self.journal.publish(token.operation, switch (outcome.?) {
+                .succeeded => .completed,
+                .failed => .failed,
+                .cancelled => .cancelled,
+            }, safe_message, null);
+            entry.state = .closed;
+        } else entry.state = if (receipt == .unknown) .cleanup_unknown else .closing;
+        return true;
+    }
+
+    pub fn allowsContent(self: *SessionHost, handle: SessionHandle) bool {
+        const entry = self.find(handle) orelse return false;
+        return entry.presentation_policy == .interactive and (entry.state == .creating or entry.state == .ready or entry.state == .attached);
+    }
+
+    pub fn serviceAccess(self: *SessionHost, owner: SessionHandle) !access.SessionServiceAccess {
+        if (std.Thread.getCurrentId() != self.owner_thread) return error.ServiceLookupOffMainThread;
+        const entry = self.find(owner) orelse return error.StaleSession;
+        if (entry.presentation_policy != .interactive) return error.ContentPresentationForbidden;
+        for (self.service_access_contexts.items) |context| if (context.owner.eql(owner)) return context.facade();
+        const context = try self.allocator.create(ServiceAccessContext);
+        errdefer self.allocator.destroy(context);
+        context.* = .{ .host = self, .owner = owner };
+        try self.service_access_contexts.append(self.allocator, context);
+        return context.facade();
+    }
+
+    /// Dynamic typed lookup for renderer facades. The returned value must be
+    /// borrowed with the same Definition and revalidated by its provider.
+    pub fn queryBinding(self: *SessionHost, owner: SessionHandle, definition: typed.Definition) !?typed.Binding {
+        if (std.Thread.getCurrentId() != self.owner_thread) return error.ServiceLookupOffMainThread;
+        const entry = self.find(owner) orelse return error.StaleSession;
+        if (entry.presentation_policy == .probe) return error.ContentPresentationForbidden;
+        if (entry.state != .ready and entry.state != .attached) return error.ServiceNotReady;
+        if (entry.purpose == .socks_background) {
+            var allowed = false;
+            inline for (comptime std.meta.tags(ServiceKind)) |kind| if (backgroundServices().has(kind) and definition.key.eql(.{ .name = @tagName(kind) })) {
+                allowed = true;
+            };
+            if (!allowed) return null;
+        }
+        var declared = false;
+        for (self.manifest(entry).services) |service| if (service.key.eql(definition.key)) {
+            if (service.type_token != definition.type_token) return error.ServiceTypeMismatch;
+            declared = true;
+            break;
+        };
+        if (!declared) return null;
+        for (entry.typed_bindings.items) |binding| if (binding.definition.matches(definition)) {
+            if (!binding.owner.eql(owner) or binding.generation != owner.generation) return error.StaleBinding;
+            if (!binding.authorized) return error.ServiceDenied;
+            if (!self.bindingAvailable(entry, binding)) return error.ServiceNotReady;
+            return binding;
+        };
+        return error.ServiceNotReady;
     }
 
     /// Quick creation never allocates or writes an asset. Registry membership,
@@ -490,6 +616,7 @@ pub const SessionHost = struct {
             self.releaseStale(handle, key);
             return false;
         };
+        if (entry.presentation_policy == .probe) return error.ContentPresentationForbidden;
         if (entry.ready_accepted and entry.create_operation.eql(key)) return false;
         if (entry.state != .creating or !entry.create_operation.eql(key)) {
             self.releaseStale(handle, key);
@@ -527,6 +654,7 @@ pub const SessionHost = struct {
     }
     pub fn queryTypedService(self: *SessionHost, handle: SessionHandle, comptime Interface: type, service_key: typed.ServiceKey) typed.Query(Interface) {
         const entry = self.find(handle) orelse return .{ .temporarily_unavailable = .{ .reason = "会话已失效", .revision = 0 } };
+        if (entry.presentation_policy == .probe) return .unsupported;
         if (entry.purpose == .socks_background) {
             var allowed = false;
             inline for (comptime std.meta.tags(ServiceKind)) |kind| if (backgroundServices().has(kind) and service_key.eql(.{ .name = @tagName(kind) })) {
@@ -557,6 +685,7 @@ pub const SessionHost = struct {
     /// Borrowed only until the next host mutation; asynchronous clients copy it.
     pub fn typedBindingsFor(self: *SessionHost, handle: SessionHandle) ?[]const typed.Binding {
         const entry = self.find(handle) orelse return null;
+        if (entry.presentation_policy == .probe) return null;
         if (entry.state != .ready and entry.state != .attached) return null;
         entry.available_bindings.clearRetainingCapacity();
         entry.available_bindings.ensureTotalCapacity(self.allocator, entry.typed_bindings.items.len) catch return null;
@@ -575,7 +704,7 @@ pub const SessionHost = struct {
         entry.capability_states.clearRetainingCapacity();
         try entry.capability_states.ensureTotalCapacity(self.allocator, manifest_value.services.len);
         for (manifest_value.services) |definition| {
-            var declared = true;
+            var declared = entry.presentation_policy != .probe;
             if (entry.purpose == .socks_background) {
                 declared = false;
                 inline for (comptime std.meta.tags(ServiceKind)) |kind| if (backgroundServices().has(kind) and definition.matches(plugins.legacyServiceDefinition(kind))) {
@@ -601,6 +730,7 @@ pub const SessionHost = struct {
     }
     pub fn typedBindingIsLive(self: *SessionHost, binding: typed.Binding) bool {
         const entry = self.find(binding.owner) orelse return false;
+        if (entry.presentation_policy == .probe) return false;
         if (entry.state != .ready and entry.state != .attached) return false;
         for (entry.typed_bindings.items) |current| if (current.definition.matches(binding.definition) and current.owner.eql(binding.owner) and current.generation == binding.generation and current.revision == binding.revision and current.context == binding.context and current.vtable == binding.vtable) return current.authorized and self.bindingAvailable(entry, current);
         return false;
@@ -614,6 +744,7 @@ pub const SessionHost = struct {
     /// a fresh revision so revocation/rebinding never revives a captured binding.
     pub fn bindTypedService(self: *SessionHost, handle: SessionHandle, operation: OperationKey, proposed: typed.Binding) !typed.Binding {
         const entry = self.find(handle) orelse return error.StaleSession;
+        if (entry.presentation_policy == .probe) return error.ContentPresentationForbidden;
         if (!entry.create_operation.eql(operation) or (entry.state != .ready and entry.state != .attached)) return error.StaleCreateOperation;
         if (!proposed.owner.eql(handle) or proposed.generation != handle.generation) return error.StaleBinding;
         if (!self.manifest(entry).supports(proposed.definition)) return error.ServiceNotRegistered;
@@ -702,7 +833,7 @@ pub const SessionHost = struct {
         try self.sessions.ensureUnusedCapacity(self.allocator, 1);
         const handle: SessionHandle = .{ .session_id = try self.session_ids.allocate() };
         const key = try self.journal.begin(.{ .session = handle }, 1);
-        self.sessions.appendAssumeCapacity(.{ .handle = handle, .manifest_id = selected_manifest.id, .purpose = purpose, .spec = owned, .target = target, .create_operation = key });
+        self.sessions.appendAssumeCapacity(.{ .handle = handle, .manifest_id = selected_manifest.id, .purpose = purpose, .presentation_policy = if (purpose == .socks_background) .background else .interactive, .spec = owned, .target = target, .create_operation = key });
         transferred = true;
         // Ownership has transferred to the entry; the request can now safely
         // outlive its caller, including all tagged-union auth and route fields.
@@ -732,6 +863,7 @@ pub const SessionHost = struct {
     /// after cleanup. Reopening an exited Local uses create, not failed/retry.
     pub fn retry(self: *SessionHost, handle: SessionHandle) !Accepted {
         const entry = self.find(handle) orelse return error.StaleSession;
+        if (entry.presentation_policy == .probe) return error.ContentPresentationForbidden;
         if (entry.shutdown_receipt != null) return error.SessionShuttingDown;
         if (entry.state != .failed and !(entry.state == .ended and self.manifest(entry).integration.retry_after_end)) return error.LifecycleDoesNotAllowRetry;
         if (entry.create_cleanup != .released) return error.CleanupNotReleased;
@@ -754,6 +886,7 @@ pub const SessionHost = struct {
 
     pub fn cancel(self: *SessionHost, key: OperationKey) !bool {
         const entry = self.findKey(key) orelse return false;
+        if (entry.presentation_policy == .probe) return error.ProbeHostRequired;
         if (entry.state != .creating and entry.state != .ready) return false;
         if (entry.state == .ready and entry.purpose == .socks_background) return false;
         _ = try self.journal.publish(key, .cancelled, "", null);
@@ -777,6 +910,7 @@ pub const SessionHost = struct {
     /// ready. Repeated calls on the same create operation return the same ID.
     pub fn reserveService(self: *SessionHost, handle: SessionHandle, key: OperationKey, kind: ServiceKind) !ServiceHandle {
         const entry = self.find(handle) orelse return error.StaleSession;
+        if (entry.presentation_policy == .probe) return error.ContentPresentationForbidden;
         if (!entry.create_operation.eql(key)) return error.StaleCreateOperation;
         if (entry.state != .creating or self.journal.isTerminal(key)) return error.SessionNotCreating;
         if (entry.purpose == .socks_background and !backgroundServices().has(kind)) return error.UnsupportedSessionService;
@@ -821,6 +955,7 @@ pub const SessionHost = struct {
             self.releaseStale(handle, key);
             return false;
         };
+        if (entry.presentation_policy == .probe) return error.ContentPresentationForbidden;
         if (entry.prepared_start) return false;
         // Repeated delivery of the current ready receipt owns no new resource.
         // Releasing it would tear down the still-live current service bindings.
@@ -886,7 +1021,7 @@ pub const SessionHost = struct {
 
     pub fn attached(self: *SessionHost, handle: SessionHandle, attachment: Attachment) !bool {
         const entry = self.find(handle) orelse return false;
-        if (entry.purpose != .interactive) return false;
+        if (entry.presentation_policy != .interactive) return false;
         if (entry.state != .ready or !std.meta.eql(entry.target, attachment.target) or @backingInt(attachment.tab_id) == 0) return false;
         _ = try self.journal.publish(entry.create_operation, .completed, "attached", null);
         entry.attachment = attachment;
@@ -981,12 +1116,13 @@ pub const SessionHost = struct {
 
     pub fn queryState(self: *SessionHost, handle: SessionHandle) ?SessionSnapshot {
         const entry = self.find(handle) orelse return null;
-        return .{ .handle = entry.handle, .plugin_id = if (self.manifest(entry).legacy_descriptor) |descriptor| descriptor.plugin_id else .external, .protocol_id = entry.manifest_id, .purpose = entry.purpose, .lifecycle = entry.state, .target = entry.target, .attachment = entry.attachment, .create_operation = entry.create_operation, .close_operation = entry.close_operation, .create_cleanup = entry.create_cleanup };
+        return .{ .handle = entry.handle, .plugin_id = if (self.manifest(entry).legacy_descriptor) |descriptor| descriptor.plugin_id else .external, .protocol_id = entry.manifest_id, .purpose = entry.purpose, .presentation_policy = entry.presentation_policy, .lifecycle = entry.state, .target = entry.target, .attachment = entry.attachment, .create_operation = entry.create_operation, .close_operation = entry.close_operation, .create_cleanup = entry.create_cleanup };
     }
 
     /// Compatibility engine API consumes the same typed bindings as new clients.
     pub fn queryService(self: *SessionHost, handle: SessionHandle, kind: ServiceKind) ServiceQuery {
         const entry = self.find(handle) orelse return .{ .temporarily_unavailable = "会话已失效" };
+        if (entry.presentation_policy == .probe) return .unsupported;
         if (entry.purpose == .socks_background and !backgroundServices().has(kind)) return .unsupported;
         if (kind == .lifecycle) return switch (self.queryTypedService(handle, Adapter.VTable, .{ .name = "lifecycle" })) {
             .available => self.queryLegacyService(handle, kind),
@@ -1493,6 +1629,7 @@ pub const SessionHost = struct {
     /// Services are gated immediately, before any asynchronous hook runs.
     pub fn requestClose(self: *SessionHost, handle: SessionHandle, hooks: CloseHooks) !OperationKey {
         const entry = self.find(handle) orelse return error.StaleSession;
+        if (entry.presentation_policy == .probe) return error.ProbeHostRequired;
         if (entry.close_operation) |key| {
             if (entry.close_resources_released and entry.state != .closed) try self.finishClose(entry);
             return key;
@@ -1513,6 +1650,7 @@ pub const SessionHost = struct {
     /// only: Cx still owns and releases the content tree afterwards.
     pub fn shutdownOwner(self: *SessionHost, handle: SessionHandle) !CloseReceipt {
         const entry = self.find(handle) orelse return .released;
+        if (entry.presentation_policy == .probe) return if (entry.state == .closed) .released else error.ProbeHostRequired;
         if (entry.state == .closed or entry.shutdown_receipt == .released) return .released;
         if (entry.prepared_start) {
             _ = try self.cancel(entry.create_operation);
@@ -1644,6 +1782,7 @@ pub const SessionHost = struct {
 
     fn releaseStale(self: *SessionHost, handle: SessionHandle, key: OperationKey) void {
         for (self.sessions.items) |entry| if (entry.handle.session_id == handle.session_id) {
+            if (entry.presentation_policy == .probe) return;
             const adapter = self.factory(&entry);
             adapter.vtable.release_stale(adapter.context, handle, key);
             return;

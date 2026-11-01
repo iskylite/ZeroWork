@@ -92,8 +92,7 @@ finally:
  await writeFile(join(data,'config.toml'),'[meta]\nconfig_revision=1\n[ui]\ntheme="dark"\nfont_family="Menlo"\nfont_size=14\n[log]\nring_mb=8\ncheckpoint_sec=1\n');
  app=spawn(binary,[],{env:{...process.env,ZENIT_E2E_FILE_RPC_DIR:rpc,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',appLog.fd,appLog.fd]});appEnd=new Promise(r=>app.once('close',r));report.pid=app.pid;
  await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);await resizeWindow(1200,800);
- if(mode==='ssh'){await clickTestId('sidebar.host');await sleep(200);}
- assert((await clickTestId('sidebar.host.connect')).ok);
+ assert((await clickTestId('sidebar.host')).ok);
  if(mode==='ssh')await waitFor(async()=>{
   const modal=await visible('plugin.challenge.modal');
   if(modal){

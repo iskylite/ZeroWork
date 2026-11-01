@@ -158,7 +158,7 @@ fn progressFillWidth(done: u64, total: u64) f32 {
 fn progressPctColor(state: transfer.State) ui.Color {
     return switch (state) {
         .failed, .cancelled => T.current().danger_ink,
-        else => T.current().ok,
+        else => T.current().ok_ink,
     };
 }
 
@@ -398,6 +398,7 @@ pub const Panel = struct {
         try inner.appendChild(cx.allocator, self.footer);
         _ = try self.iconButton(self.footer, scope, "取消传输", "transfer.confirmation.cancel", "x", close);
         self.primary = try ui.widgets.Button(.{ .label = self.primary_label, .variant = .primary, .disabled = self.disabled, .base_style = self.primary_style, .on_click = cx.on(Panel, self, handleSubmit) }).mount(scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, scope, self.primary, self.disabled);
         self.primary.meta.ownership.meta.test_id = "transfer.confirmation.submit";
         try self.footer.appendChild(cx.allocator, self.primary);
         try cx.addAfterLayoutHook(self, afterLayout);

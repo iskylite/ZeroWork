@@ -1,3 +1,4 @@
+import {openSidebarHostMenu} from './sidebar_host_menu.ts';
 /** Native main-app visual acceptance. Owned loopback HTTP only; no provider mock,
  * user configuration, real credentials, external network or remote commands. */
 import assert from 'node:assert/strict';
@@ -43,7 +44,7 @@ try{for(const theme of themes){
  async function capture(name:string,ids:string[]){await sleep(200);const nodes=Object.fromEntries(await Promise.all(ids.map(async id=>[id,await query(id)])));await writeFile(join(dir,name+'.json'),JSON.stringify(nodes,null,2));assert((await screenshot(join(dir,name+'.png'))).ok);run.stages.push({name,nodes:ids});return nodes;}
  try{
   await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
-  await resizeWindow(1440,900);await click('sidebar.host');await click('sidebar.host.more');await click('context.menu.history');
+  await resizeWindow(1440,900);await click('sidebar.host');await openSidebarHostMenu();await click('context.menu.history');
   await visible('history.empty');assert.equal((await visible('history.empty')).text,'还没有会话历史');
   await capture('history-empty-wide',['history.panel','history.empty']);
   await resizeWindow(860,480);await capture('history-empty-compact',['history.panel','history.empty']);await click('history.close');

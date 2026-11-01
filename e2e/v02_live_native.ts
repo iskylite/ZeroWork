@@ -270,12 +270,12 @@ try {
  await resizeWindow(1440,900);
  if(sharedChallenge){
   const cancelledRow=(await query("sidebar.host")).find(n=>shown(n)&&text(n).includes(sshName));assert(cancelledRow);await clickNode(cancelledRow,"Select SSH asset for real authentication cancellation");
-  const cancelConnect=byId((await query("sidebar.host")).find(n=>shown(n)&&text(n).includes(sshName)),"sidebar.host.connect")[0];assert(cancelConnect);await clickNode(cancelConnect,"Connect exact SSH row for cancellation");await trustAndAwaitWorkspace(true,true);
+  await trustAndAwaitWorkspace(true,true);
   report.checks.push("Real shared password challenge cancellation leaves the same App alive and releases all attempt TCP connections");
  }
  const sshRow = (await query("sidebar.host")).find(n => shown(n) && text(n).includes(sshName));
  assert(sshRow); await clickNode(sshRow,"Select independent SSH asset");
- const sshControl=byId((await query("sidebar.host")).find(n=>shown(n)&&text(n).includes(sshName)),"sidebar.host.connect")[0];assert(sshControl);await clickNode(sshControl,"Connect exact SSH row"); await trustAndAwaitWorkspace(true);
+ await trustAndAwaitWorkspace(true);
  const sshTab = (await tabs()).at(-1)!; assert(sshTab);
  await click("terminal.input"); await type_("id; test -t 0 && printf 'V02_SSH_%s_OK\\n' OWNER"); await key("return");
  await waitFor(async()=>{const rendered=text((await query("workspace.pane")).find(shown));return rendered.includes(controlledLoopback?"uid=":"uid=0(root)")&&rendered.includes("V02_SSH_OWNER_OK")||null;},15000);
@@ -299,7 +299,7 @@ try {
  const initialSockets = execFileSync("/usr/sbin/lsof",["-nP","-a","-p",String(child.pid),"-iTCP","-Fn"],{encoding:"utf8"}).split("\n").filter(s=>s.startsWith("n"));
  const sftpRow = (await query("sidebar.host")).find(n => shown(n) && text(n).includes(sftpName));
  assert(sftpRow); await clickNode(sftpRow,"Select separate SFTP asset");
- const sftpControl=byId((await query("sidebar.host")).find(n=>shown(n)&&text(n).includes(sftpName)),"sidebar.host.connect")[0];assert(sftpControl);await clickNode(sftpControl,"Connect exact SFTP row"); await trustAndAwaitWorkspace();
+ await trustAndAwaitWorkspace();
  const twoOwnerSockets = execFileSync("/usr/sbin/lsof",["-nP","-a","-p",String(child.pid),"-iTCP","-Fn"],{encoding:"utf8"}).split("\n").filter(s=>s.startsWith("n"));
  assert(twoOwnerSockets.length > initialSockets.length,"Independent SFTP owner opens additional TCP connection while SSH remains alive");
  const owners = await tabs(); assert.equal(owners.length,2); report.independent_owners={ssh_tab:sshTab.test_id,sftp_tab:owners.find(t=>t.test_id!==sshTab.test_id)!.test_id,ssh_sockets:initialSockets,both_sockets:twoOwnerSockets};

@@ -15,6 +15,65 @@ fn time(raw: ?*anyopaque) i64 {
     return @as(*i64, @ptrCast(@alignCast(raw.?))).*;
 }
 
+test "execution deadline Stop racing approved or rejected host approval clears the permit" {
+    const Race = struct {
+        broker: *approval.Broker,
+        allow: bool,
+        polls: std.atomic.Value(usize) = .init(0),
+        fn stopped(raw: *const anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(raw)));
+            const index = self.polls.fetchAdd(1, .acq_rel);
+            if (index == 1) {
+                const pending = self.broker.snapshot().?;
+                self.broker.decide(pending.sequence, pending.arguments_hash, self.allow) catch unreachable;
+            }
+            return index >= 2;
+        }
+    };
+    for ([_]bool{ true, false }) |allow| {
+        var broker: approval.Broker = .{};
+        const ctx = context();
+        try broker.configure(ctx, 4);
+        var args = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{\"url\":\"https://example.test/\"}", .{});
+        defer args.deinit();
+        const call = try invocation(ctx, args.value, "{\"url\":\"https://example.test/\"}");
+        var race: Race = .{ .broker = &broker, .allow = allow };
+        var cancel: provider.CancelToken = .{ .source = .{ .context = &race, .poll = Race.stopped } };
+        try std.testing.expectError(error.CancelledBeforeDispatch, broker.request(call, "https://example.test/", 4, std.testing.allocator, &cancel));
+        try std.testing.expect(broker.entry == null);
+        try std.testing.expectEqual(@as(usize, 3), race.polls.load(.acquire));
+    }
+}
+
+test "execution deadline native host approval wait observes expiry and releases pending storage" {
+    const Deadline = struct {
+        expires_ms: std.atomic.Value(i64) = .init(0),
+        polls: std.atomic.Value(usize) = .init(0),
+        fn milliseconds() i64 {
+            return @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
+        }
+        fn stopped(raw: *const anyopaque) bool {
+            const self: *@This() = @ptrCast(@alignCast(@constCast(raw)));
+            if (self.polls.fetchAdd(1, .acq_rel) == 1) self.expires_ms.store(milliseconds() + 70, .release);
+            const expires = self.expires_ms.load(.acquire);
+            return expires != 0 and milliseconds() >= expires;
+        }
+    };
+    var broker: approval.Broker = .{};
+    const ctx = context();
+    try broker.configure(ctx, 4);
+    var args = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, "{\"url\":\"https://example.test/\"}", .{});
+    defer args.deinit();
+    const call = try invocation(ctx, args.value, "{\"url\":\"https://example.test/\"}");
+    var deadline: Deadline = .{};
+    var cancel: provider.CancelToken = .{ .source = .{ .context = &deadline, .poll = Deadline.stopped } };
+    const started = Deadline.milliseconds();
+    try std.testing.expectError(error.CancelledBeforeDispatch, broker.request(call, "https://example.test/", 4, std.testing.allocator, &cancel));
+    try std.testing.expect(deadline.expires_ms.load(.acquire) != 0);
+    try std.testing.expect(broker.entry == null);
+    std.debug.print("native approval deadline released in {d}ms\n", .{Deadline.milliseconds() - started});
+}
+
 test "host approval freezes URL call authority expiry and sequence without session targets" {
     const a = std.testing.allocator;
     const ctx = context();

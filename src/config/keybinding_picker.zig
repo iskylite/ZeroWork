@@ -47,7 +47,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, _: *ui.Node, _: *ui.Node, map: *keys.
     well.setFocusable(true);
     self.focus_node = well;
     try body.content.appendChild(cx.allocator, well);
-    self.status = try ui.text(cx, "", .{ .font_size = 12, .line_height = 20.0 / 12.0, .color = c.danger, .wrap = .word });
+    self.status = try ui.text(cx, "", .{ .font_size = 12, .line_height = 20.0 / 12.0, .color = c.danger_ink, .wrap = .word });
     self.status.style.width = .fill();
     self.status.setDisplay(.none);
     self.status.meta.ownership.meta.test_id = "settings.keybinding.error";
@@ -115,9 +115,17 @@ pub const Recorder = struct {
         self.focus();
     }
     fn button(self: *Recorder, scope: *ui.Scope, label: []const u8, comptime id: []const u8, comptime action: *const fn (*Recorder) void, primary: bool, disabled: bool) !*ui.Node {
-        const c = theme.current();
         const is_close = comptime std.mem.eql(u8, id, "settings.keybinding.close");
-        const n = try ui.widgets.Button(.{ .label = if (is_close) "" else label, .icon_only = is_close, .icon_asset = @as(?ui.SvgAsset, if (is_close) ui.icons.x else null), .icon_size = @as(f32, 16), .a11y_label = if (is_close) "关闭快捷键录制" else label, .variant = @as(ui.widgets.ButtonVariant, if (is_close) .ghost else if (primary) .primary else .secondary), .disabled = if (primary) ui.Source(bool){ .signal = self.invalid } else ui.Source(bool){ .value = disabled }, .on_click = self.cx.on(Recorder, self, action), .base_style = .{ .height = .{ .px = if (is_close) 30 else 32 }, .width = if (is_close) .{ .px = 30 } else .{ .fit = .{} }, .padding = .{ .left = if (is_close) 0 else 10, .right = if (is_close) 0 else 10 }, .font_size = 12, .border = .{ .radius = 8, .width = 0 }, .background = if (is_close) ui.Color.TRANSPARENT else if (primary) c.accent else c.hover, .text_color = if (primary) ui.Color.WHITE else c.fg_1 } }).mount(scope, self.cx);
+        const ButtonStyle = @FieldType(ui.widgets.ControlShellConfig, "style");
+        const paint = try scope.createSignal(ButtonStyle, .{});
+        try scope.createEffect(.{ .paint = paint, .invalid = self.invalid, .primary = primary, .disabled = disabled }, struct {
+            fn update(ctx: anytype) void {
+                const unavailable = if (ctx.primary) ctx.invalid.get() else ctx.disabled;
+                const colors = theme.current();
+                ctx.paint.set(.{ .height = .{ .px = if (is_close) 30 else 32 }, .width = if (is_close) .{ .px = 30 } else .{ .fit = .{} }, .padding = .{ .left = if (is_close) 0 else 10, .right = if (is_close) 0 else 10 }, .font_size = 12, .border = .{ .radius = 8, .width = 0 }, .background = if (is_close) ui.Color.TRANSPARENT else if (unavailable) theme.popupAction() else if (ctx.primary) colors.action_accent else colors.hover, .text_color = if (unavailable) colors.fg_3 else if (ctx.primary) theme.actionForeground(colors.action_accent) else colors.fg_1, .opacity = 1 });
+            }
+        }.update);
+        const n = try ui.widgets.Button(.{ .label = if (is_close) "" else label, .icon_only = is_close, .icon_asset = @as(?ui.SvgAsset, if (is_close) ui.icons.x else null), .icon_size = @as(f32, 16), .a11y_label = if (is_close) "关闭快捷键录制" else label, .variant = @as(ui.widgets.ButtonVariant, if (is_close) .ghost else if (primary) .primary else .secondary), .disabled = if (primary) ui.Source(bool){ .signal = self.invalid } else ui.Source(bool){ .value = disabled }, .on_click = self.cx.on(Recorder, self, action), .base_style = @as(ui.Source(ButtonStyle), .{ .signal = paint }) }).mount(scope, self.cx);
         n.meta.ownership.meta.test_id = id;
         return n;
     }

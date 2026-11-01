@@ -15,6 +15,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include "private_key.h"
 
 /* Interrupt this owned connection without recycling its descriptor. The
    ordinary Session cleanup remains responsible for the one final close. */
@@ -616,13 +617,18 @@ int zw_libssh2_transport_failed(LIBSSH2_SESSION *session) {
 const char *zw_libssh2_last_error(LIBSSH2_SESSION *session) { int code = 0; char *message = NULL; libssh2_session_last_error(session, &message, &code, 0); return message ? message : ""; }
 int zw_libssh2_auth_private_key(LIBSSH2_SESSION *session, const char *user, const char *private_key_path, const char *passphrase) {
     libssh2_userauth_result_reset(session);
+    /* Legacy one-step API retains caller-owned file arguments across EAGAIN.
+       The production driven API below owns its prepared key until completion. */
     return libssh2_userauth_publickey_fromfile(session, user, NULL, private_key_path, passphrase);
 }
 int zw_libssh2_auth_private_key_driven(LIBSSH2_SESSION *session, const char *user, const char *path, const char *passphrase, const ZW_SSH_DRIVE *options) {
     struct zw_drive_wait wait = drive_begin(options);
     int rc;
     libssh2_userauth_result_reset(session);
-    DRIVE_STEP(rc, libssh2_userauth_publickey_fromfile(session, user, NULL, path, passphrase), session, &wait);
+    zw_private_key key = {0};
+    rc = zw_private_key_prepare(session, path, passphrase, &key);
+    if (!rc) DRIVE_STEP(rc, libssh2_userauth_publickey_frommemory(session, user, strlen(user), NULL, 0, (const char *)key.data, key.length, passphrase), session, &wait);
+    zw_private_key_free(&key);
     return rc;
 }
 int zw_ssh_private_key_readable(const char *path) {

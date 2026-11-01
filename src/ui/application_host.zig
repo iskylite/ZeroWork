@@ -171,6 +171,7 @@ const Mapping = struct {
     connected_received: bool = false,
     ready_published: bool = false,
     attached_published: bool = false,
+    plugin_connection_state: ?@FieldType(@import("../host/plugin_ui_contract.zig").ConnectionStatus, "state") = null,
     failed_received: bool = false,
     failed_published: bool = false,
     cleanup_received: bool = false,
@@ -210,6 +211,10 @@ pub const Domain = struct {
     local_adapter: *local_mod.Service,
     dispatcher: commands.Dispatcher,
     operation_history: @import("../host/operation_store.zig").Store,
+    plugin_security: @import("../host/plugin_security_host.zig").Services,
+    frame_budget: ?*@import("../host/frame_budget.zig").Budget = null,
+    editor_credentials: ?@import("../host/editor_credentials.zig").Host = null,
+    probe_hosts: std.ArrayList(*@import("../host/probe_host.zig").Host) = .empty,
     attachments: std.ArrayList(*ApplicationHost) = .empty,
     idle_memory: @import("../platform/idle_memory.zig").Policy = .{},
     idle_trimmed_bytes: usize = 0,
@@ -231,6 +236,7 @@ pub const Domain = struct {
         self.* = .{
             .allocator = allocator,
             .operation_history = @import("../host/operation_store.zig").Store.init(allocator),
+            .plugin_security = @import("../host/plugin_security_host.zig").Services.init(allocator),
             .windows = .{ .allocator = allocator },
             .sessions = try session.SessionHost.initWithPlugins(allocator, adapters[0..if (has_file_plugin) @as(usize, 3) else 2], manifests, renderers),
             .local_adapter = local,
@@ -266,9 +272,19 @@ pub const Domain = struct {
             host.deinit() catch return;
             self.backgrounds = null;
         }
+        while (self.probe_hosts.items.len != 0) {
+            const host = self.probe_hosts.items[0];
+            host.deinit() catch return;
+            _ = self.probe_hosts.orderedRemove(0);
+            self.allocator.destroy(host);
+        }
+        self.probe_hosts.deinit(self.allocator);
+        self.probe_hosts = .empty;
         self.local_adapter.deinit() catch return;
         self.operation_history.deinit();
         self.sessions.deinit();
+        if (self.editor_credentials) |*credentials| credentials.deinit();
+        self.plugin_security.deinit();
         self.windows.deinit();
         self.dispatcher.deinit();
         self.attachments.deinit(self.allocator);
@@ -436,6 +452,12 @@ pub const ApplicationHost = struct {
         publish: *const fn (*anyopaque, identity.SessionHandle, []const u8) void,
     } = null,
     plugin_attempts: std.ArrayList(session.Accepted) = .empty,
+    pending_editor_handoff: ?@import("../host/editor_credentials.zig").Handoff = null,
+    window_auxiliary: ?struct {
+        context: *anyopaque,
+        cancel: *const fn (*anyopaque) void,
+        released: *const fn (*anyopaque) bool,
+    } = null,
     background_previous_auth: ?workspace_mod.ExternalAuthentication = null,
     lifecycle_supervisor: lifecycle.Supervisor,
     owned_sources: std.ArrayList(PendingOwnedSource) = .empty,
@@ -486,12 +508,14 @@ pub const ApplicationHost = struct {
         };
         domain.attachments.appendAssumeCapacity(self);
         workspace.plugins = self.sessions.registry;
+        workspace.credential_provider = .{ .context = &self.sessions.registry, .resolve = resolveCredentialReferences };
         workspace.configureIdentity(self.window_id, self.workspace_id);
         return self;
     }
 
     pub fn install(self: *ApplicationHost) void {
         if (self.installed) return;
+        self.workspace.credential_provider = .{ .context = &self.sessions.registry, .resolve = resolveCredentialReferences };
         self.previous_sessions = self.workspace.session_bridge;
         self.previous_close = self.workspace.close_bridge;
         self.previous_window_close = self.workspace.window_close_bridge;
@@ -505,6 +529,9 @@ pub const ApplicationHost = struct {
     }
 
     pub fn uninstall(self: *ApplicationHost) void {
+        if (self.workspace.credential_provider) |provider| {
+            if (provider.context == @as(*const anyopaque, &self.sessions.registry)) self.workspace.credential_provider = null;
+        }
         if (!self.installed) return;
         if (self.workspace.session_bridge.context == @as(?*anyopaque, self)) self.workspace.session_bridge = self.previous_sessions;
         if (self.workspace.close_bridge.context == @as(?*anyopaque, self)) self.workspace.close_bridge = self.previous_close;
@@ -1468,6 +1495,7 @@ pub const ApplicationHost = struct {
 
     pub fn requestWindowClose(self: *ApplicationHost) !OperationKey {
         if (self.windowClosePending()) return self.window_close.?.key;
+        if (self.window_auxiliary) |tasks| tasks.cancel(tasks.context);
         const revision = @max(self.workspace.model.order_revision, 1);
         const decision = try self.dispatcher.submit(.{ .command_id = try self.dispatcher.issue(), .kind = .request_close_window, .owner = .app, .view_revision = revision, .payload = .{ .number = @backingInt(self.window_id) } }, .{
             .owner = .app,
@@ -1487,6 +1515,7 @@ pub const ApplicationHost = struct {
 
     pub fn windowCloseReady(self: *const ApplicationHost) bool {
         const close = self.window_close orelse return false;
+        if (self.window_auxiliary) |tasks| if (!tasks.released(tasks.context)) return false;
         return close.state == .ready and !close.cancel_requested;
     }
 
@@ -1896,18 +1925,61 @@ pub const ApplicationHost = struct {
         if (self.domain.tasks) |tasks| shared_pending = try tasks.tick(@intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms)), self.workspace.app_config.transfer.max_tasks);
         const controller_pending = try self.sessions.pollControllers();
         self.domain.retireClosedOperations();
+        // A provider may retry its released generation from its safe poll.
+        // Discover new ready owners through the registry, preserving the tab.
+        for (self.sessions.sessions.items) |entry| {
+            const state = self.sessions.queryState(entry.handle) orelse continue;
+            if (state.lifecycle != .ready or state.target.window_id != self.window_id or state.target.workspace_id != self.workspace_id or self.findHandle(entry.handle) != null) continue;
+            const manifest = self.sessions.manifestFor(entry.handle) orelse continue;
+            const renderer = self.sessions.registry.renderer(manifest.content_renderer) orelse continue;
+            if (renderer.mount == null) continue;
+            var tracked = false;
+            for (self.plugin_attempts.items) |*attempt| if (attempt.handle.session_id == entry.handle.session_id) {
+                attempt.* = .{ .handle = entry.handle, .operation = state.create_operation };
+                tracked = true;
+                break;
+            };
+            if (!tracked) try self.plugin_attempts.append(self.allocator, .{ .handle = entry.handle, .operation = state.create_operation });
+        }
         for (self.plugin_attempts.items) |attempt| {
             const state = self.sessions.queryState(attempt.handle) orelse continue;
             if (state.lifecycle != .ready or self.findHandle(attempt.handle) != null) continue;
             const manifest = self.sessions.manifestFor(attempt.handle) orelse continue;
             const renderer = self.sessions.registry.renderer(manifest.content_renderer) orelse continue;
             const connection = self.sessions.connectionEnvelope(attempt.handle) orelse continue;
+            var remounted = false;
+            for (self.mappings.items) |*mapping| if (mapping.handle.session_id == attempt.handle.session_id and mapping.handle.generation < attempt.handle.generation) {
+                if (self.workspace.sessionTab(mapping.legacy_id)) |tab| if (tab.plugin_renderer != null) {
+                    try self.workspace.remountPluginSession(mapping.legacy_id, mapping.handle, attempt.handle, connection, renderer.*);
+                    mapping.handle = attempt.handle;
+                    mapping.create_operation = attempt.operation;
+                    mapping.legacy_generation = attempt.handle.generation;
+                    mapping.owner = .{ .session = attempt.handle };
+                    mapping.ready_published = true;
+                    mapping.attached_published = true;
+                    _ = try self.sessions.attached(attempt.handle, .{ .target = self.target(), .tab_id = tab.tab_id });
+                    remounted = true;
+                };
+                break;
+            };
+            if (remounted) continue;
             try self.mappings.ensureUnusedCapacity(self.allocator, 1);
             const id = try self.workspace.createPluginSession(attempt.handle, connection, renderer.*);
             const tab = self.workspace.sessionTab(id).?;
             self.mappings.appendAssumeCapacity(.{ .handle = attempt.handle, .create_operation = attempt.operation, .legacy_id = id, .legacy_generation = tab.generation, .tab_id = tab.tab_id, .owner = tab.content_owner, .source = null, .ready_published = true, .attached_published = true });
             _ = try self.sessions.attached(attempt.handle, .{ .target = self.target(), .tab_id = tab.tab_id });
         }
+        for (self.mappings.items) |*mapping| if (self.workspace.sessionTab(mapping.legacy_id)) |tab| if (tab.plugin_renderer) |renderer| if (renderer.vtable.connection_status) |project| {
+            const projection = project(renderer.context);
+            if (mapping.plugin_connection_state == null or mapping.plugin_connection_state.? != projection.state) {
+                mapping.plugin_connection_state = projection.state;
+                self.workspace.rebuildTabBar() catch {};
+                if (self.workspace.active_tab) |index| if (index < self.workspace.tabs.items.len and self.workspace.tabs.items[index].id == mapping.legacy_id) {
+                    if (self.workspace.status_node) |node| node.setTextContent(self.allocator, projection.label) catch {};
+                };
+                self.workspace.cx.requestRedraw();
+            }
+        };
         var file_pending = false;
         if (self.file_plugin) |plugin| file_pending = try plugin.tick(plugin.context, self.sessions);
         for (self.mappings.items) |mapping| if (self.supportsIntegration(mapping.handle, "transport_loss") and mapping.source != null) {
@@ -2089,6 +2161,8 @@ pub const ApplicationHost = struct {
     pub fn fileFailureText(code: []const u8) []const u8 {
         const pairs = .{
             .{ "AuthenticationFailed", "服务器未接受认证信息" },
+            .{ "IdentityFileUnreadable", "无法读取私钥文件，请检查路径与权限" },
+            .{ "IdentityFileInvalid", "私钥文件格式无效、已损坏或当前不支持" },
             .{ "ConnectionRefused", "连接被拒绝，请检查端口和服务" },
             .{ "ConnectFailed", "无法建立 TCP 连接，请检查地址、端口与网络" },
             .{ "ConnectionTimedOut", "连接超时" },
@@ -3503,8 +3577,21 @@ test "task finish real Local records observed intervals and retains unverified a
             try std.testing.expect(current.process != null and current.process.?.foreground_finished);
             try std.testing.expect(!current.remote_effect_unknown);
             if (case.control != .takeover) {
-                const idle = try app.ownedIdleEvidence(owner, context.task_id);
-                try std.testing.expect(!idle.confirmed and idle.recording_settled and !idle.foreground_active);
+                // This independent live probe may race the worker guard and
+                // conservatively report unknown even after the prior snapshot
+                // settled. Await its evidence within the same case deadline.
+                while (true) {
+                    const idle: ?lifecycle.IdleEvidence = app.ownedIdleEvidence(owner, context.task_id) catch |err| switch (err) {
+                        error.WorkerBusy => null,
+                        else => return err,
+                    };
+                    if (idle) |value| {
+                        try std.testing.expect(!value.confirmed);
+                        if (value.recording_settled and !value.foreground_active) break;
+                    }
+                    if (@import("../platform/realtime.zig").monotonicNs() >= until) return error.IdleEvidenceUnavailable;
+                    try fixture.tick();
+                }
             }
         }
         try std.testing.expectEqual(@as(usize, if (case.control == .stop) 1 else 0), facts.stops);
@@ -3525,7 +3612,13 @@ test "task finish real Local records observed intervals and retains unverified a
         }
         gates.approvals = 0;
         _ = try controller.tick(app, execution_source, gate_source);
-        try std.testing.expect(controller.receiptFor(context) != null);
+        // Releasing the gate does not make the independent worker snapshot
+        // synchronous. Await the receipt within the original case deadline.
+        while (controller.receiptFor(context) == null) {
+            try fixture.tick();
+            _ = try controller.tick(app, execution_source, gate_source);
+            if (@import("../platform/realtime.zig").monotonicNs() >= until) return error.FinishReceiptUnavailable;
+        }
         if (case.choice) |choice| {
             const snapshot = controller.snapshotFor(context).?;
             try std.testing.expectEqual(finish.Phase.choice, snapshot.phase);
@@ -4222,4 +4315,12 @@ test "repeated close retries the original unknown step and resumes safe polling"
     try std.testing.expect(mapping.waiting.?.step == .stop_ai and !mapping.waiting.?.unknown);
     try app.retryUnknownClose(&mapping);
     try std.testing.expectEqual(@as(usize, 1), extension.calls);
+}
+
+/// The contribution codec, rather than a public consumer, understands secret refs.
+fn resolveCredentialReferences(raw: *const anyopaque, protocol_id: []const u8, payload_version: u32) ?@import("../config/plugin_credential_references.zig").Enumerator {
+    const registry: *const plugins.Registry = @ptrCast(@alignCast(raw));
+    const connection = (registry.find(protocol_id) orelse return null).connection orelse return null;
+    if (connection.payload_version != payload_version) return null;
+    return connection.credential_references;
 }

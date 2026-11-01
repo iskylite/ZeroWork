@@ -4,7 +4,7 @@ const ui = @import("ui");
 const App = @import("zenit_app").App;
 const V = @import("ui/ai_close_confirmation_view.zig");
 const theme = @import("ui/app_theme.zig");
-var selected_theme: theme.Name = .dark;
+var selected_theme: []const u8 = "dark";
 const Preview = struct {
     cx: *ui.Cx,
     view: ?*V.View = null,
@@ -54,8 +54,8 @@ const Preview = struct {
     }
 };
 fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
-    theme.select(selected_theme);
-    cx.setTheme(theme.widgetTheme(selected_theme));
+    theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(selected_theme));
+    cx.setTheme(theme.widgetTheme(theme.currentName()));
     const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{ .top = 40, .left = 16, .right = 16 }, .gap = 16, .background = theme.baseColors().app }, .{});
     root.meta.ownership.meta.test_id = "ai.close.preview";
     const header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
@@ -91,10 +91,15 @@ pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "--theme=")) selected_theme = std.meta.stringToEnum(theme.Name, arg[8..]) orelse return error.InvalidTheme else return error.InvalidOption;
+        if (std.mem.startsWith(u8, arg, "--theme=")) selected_theme = try parseTheme(arg[8..]) else return error.InvalidOption;
     }
     try @import("platform/ui_fonts.zig").register();
     const app = try App.init(std.heap.c_allocator, .{ .io = init.io, .font = .{ .fallback_families = @import("platform/ui_fonts.zig").families }, .window = .{ .width = 320, .height = 360, .title = "ZeroWork Close Confirmation Preview", .titlebar = .custom_inset, .titlebar_height = 40 } });
     defer app.deinit();
     try app.runWith(mount);
+}
+
+fn parseTheme(id: []const u8) ![]const u8 {
+    for (@import("config/theme_presets.zig").ids) |known| if (std.mem.eql(u8, id, known)) return known;
+    return error.InvalidTheme;
 }

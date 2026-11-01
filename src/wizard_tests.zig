@@ -1204,7 +1204,7 @@ test "wizard revised browser field typography and advanced host policy geometry"
     try std.testing.expectApproxEqAbs(@as(f32, 34), name.globalRect().h, 0.01);
     try std.testing.expectEqual(@as(f32, 11), name.style.padding.left);
     try std.testing.expectEqual(@as(f32, 6), name.style.padding.top);
-    try std.testing.expectEqual(@as(f32, 1), name.style.border.width);
+    try std.testing.expectEqual(@as(f32, 0), name.style.border.width);
     for (f.wizard.field_feedback.items) |feedback| if (feedback.input.input_container == name) {
         try std.testing.expectEqual(@as(f32, 11), feedback.input.state.font_size);
         try std.testing.expectEqual(@as(f32, 16), feedback.input.state.line_height);

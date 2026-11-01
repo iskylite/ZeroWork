@@ -339,6 +339,13 @@ pub const Driver = struct {
         if (request.cancelled.load(.acquire)) return true;
         return if (request.cancel) |token| token.isCancelled() else false;
     }
+    fn requestFailure(request: *Request, clock: i64) ?anyerror {
+        if (cancelled(request)) return error.CancelledBeforeDispatch;
+        // A wait returns a bounded observation at its deadline; it is not a
+        // new effect. Its window is capped when it enters the waiting set.
+        if (request.wait == null and clock >= request.deadline) return error.Timeout;
+        return null;
+    }
     fn process(self: *Driver, request: *Request, clock: i64) bool {
         switch (request.kind) {
             .stop_target => |value| {
@@ -402,15 +409,15 @@ pub const Driver = struct {
             .execute => |invocation| {
                 self.active_request = request;
                 defer self.active_request = null;
-                if (cancelled(request)) {
-                    self.controller.stopTask(invocation.context);
-                    self.complete(request, error.CancelledBeforeDispatch);
+                if (requestFailure(request, clock)) |failure| {
+                    if (failure == error.CancelledBeforeDispatch) self.controller.stopTask(invocation.context);
+                    self.complete(request, if (failure == error.Timeout) error.ExecutionDeadlineBeforeDispatch else failure);
                     return true;
                 }
                 if (request.wait) |wait| {
                     const result = self.controller.pollWait(wait, clock) catch |err| {
-                        if (err == error.WorkerBusy) return false;
-                        self.complete(request, err);
+                        if (err == error.WorkerBusy and now() < wait.deadline) return false;
+                        self.complete(request, if (err == error.WorkerBusy) error.Timeout else err);
                         return true;
                     };
                     if (result) |value| {
@@ -421,8 +428,9 @@ pub const Driver = struct {
                     return false;
                 }
                 const response = self.controller.execute(invocation, clock) catch |err| {
-                    if (err == error.WorkerBusy and clock < request.deadline) return false;
-                    self.complete(request, err);
+                    const failure = requestFailure(request, now()) orelse err;
+                    if (failure == error.WorkerBusy) return false;
+                    self.complete(request, if (failure == error.Timeout and (err == error.WorkerBusy or err == error.CancelledBeforeDispatch)) error.ExecutionDeadlineBeforeDispatch else failure);
                     return true;
                 };
                 switch (response) {
@@ -433,7 +441,9 @@ pub const Driver = struct {
                         return true;
                     },
                     .wait => |wait| {
-                        request.wait = wait;
+                        var bounded = wait;
+                        bounded.deadline = @min(wait.deadline, request.deadline);
+                        request.wait = bounded;
                         return false;
                     },
                 }
@@ -442,9 +452,8 @@ pub const Driver = struct {
     }
     fn run(self: *Driver) void {
         while (!self.stopping.load(.acquire)) {
-            const clock = now();
             while (self.take()) |request| {
-                if (!self.process(request, clock)) {
+                if (!self.process(request, now())) {
                     var admitted = false;
                     for (&self.waiting) |*slot| if (slot.* == null) {
                         slot.* = request;
@@ -455,9 +464,9 @@ pub const Driver = struct {
                 }
             }
             for (&self.waiting) |*slot| if (slot.*) |request| {
-                if (self.process(request, clock)) slot.* = null;
+                if (self.process(request, now())) slot.* = null;
             };
-            self.controller.tick(clock);
+            self.controller.tick(now());
             self.publishEvidence();
             var count: usize = 0;
             for (self.waiting) |slot| if (slot != null) {
@@ -593,8 +602,24 @@ pub const Driver = struct {
         self.evidence_mutex.unlock();
         if (changed) @import("../platform/presentation_wakeup.zig").notify();
     }
-    fn scheduled(self: *Driver, raw: *anyopaque, function: *const fn (*anyopaque) anyerror!void) !void {
-        try self.scheduler.call(self.scheduler.context, raw, function, &self.scheduler_cancel);
+    fn scheduled(self: *Driver, raw: *anyopaque, function: *const fn (*anyopaque) anyerror!void, admission: bool) !void {
+        const Scope = struct {
+            driver: *Driver,
+            request: ?*Request,
+            fn stopped(context: *const anyopaque) bool {
+                const state: *const @This() = @ptrCast(@alignCast(context));
+                return state.driver.scheduler_cancel.isCancelled() or if (state.request) |request| requestFailure(request, now()) != null else false;
+            }
+        };
+        // Admission borrows the current caller through scheduler completion.
+        // Lease release, snapshots and owner cleanup must remain available
+        // after caller cancellation, using only the driver's shutdown token.
+        const scope: Scope = .{ .driver = self, .request = if (admission) self.active_request else null };
+        var cancel: provider.CancelToken = .{ .source = .{ .context = &scope, .poll = Scope.stopped } };
+        try self.scheduler.call(self.scheduler.context, raw, function, &cancel);
+    }
+    fn checkAdmission(self: *Driver) !void {
+        if (self.active_request) |request| if (requestFailure(request, now()) != null) return error.CancelledBeforeDispatch;
     }
     fn authorize(raw: *anyopaque, invocation: host.Invocation, reference: []const u8, command: []const u8, hash: [32]u8) !execution.Target {
         const self: *Driver = @ptrCast(@alignCast(raw));
@@ -611,7 +636,8 @@ pub const Driver = struct {
             }
         };
         var exchange: Exchange = .{ .driver = self, .invocation = invocation, .reference = reference, .command = command, .hash = hash };
-        try self.scheduled(&exchange, Exchange.invoke);
+        try self.scheduled(&exchange, Exchange.invoke, true);
+        try self.checkAdmission();
         return exchange.result orelse error.InvalidControllerReceipt;
     }
     fn authorizeRead(raw: *anyopaque, context: host.Context, original: host.Context, owner: identity.SessionHandle, id: identity.ExecutionId) !void {
@@ -633,7 +659,8 @@ pub const Driver = struct {
             }
         };
         var exchange: Exchange = .{ .driver = self, .current = context, .original = original, .owner = owner, .id = id, .callback = authorize_read };
-        try self.scheduled(&exchange, Exchange.invoke);
+        try self.scheduled(&exchange, Exchange.invoke, true);
+        try self.checkAdmission();
     }
     fn authorizeInput(raw: *anyopaque, invocation: host.Invocation, owner: identity.SessionHandle, id: identity.ExecutionId, request: terminal.execution.InputRequest) !void {
         const self: *Driver = @ptrCast(@alignCast(raw));
@@ -650,7 +677,8 @@ pub const Driver = struct {
             }
         };
         var exchange: Exchange = .{ .driver = self, .invocation = invocation, .owner = owner, .id = id, .request = request };
-        try self.scheduled(&exchange, Exchange.invoke);
+        try self.scheduled(&exchange, Exchange.invoke, true);
+        try self.checkAdmission();
     }
     fn requestSecret(raw: *anyopaque, invocation: host.Invocation, owner: identity.SessionHandle, id: identity.ExecutionId, request: terminal.execution.InputRequest) !terminal.execution.InputReceipt {
         const self: *Driver = @ptrCast(@alignCast(raw));
@@ -668,7 +696,7 @@ pub const Driver = struct {
             }
         };
         var exchange: Exchange = .{ .driver = self, .invocation = invocation, .owner = owner, .id = id, .request = request };
-        try self.scheduled(&exchange, Exchange.invoke);
+        try self.scheduled(&exchange, Exchange.invoke, true);
         return exchange.result orelse error.InvalidControllerReceipt;
     }
     fn resolve(raw: *anyopaque, context: host.Context, owner: identity.SessionHandle) !terminal.Service {
@@ -684,7 +712,7 @@ pub const Driver = struct {
             }
         };
         var exchange: Exchange = .{ .driver = self, .context = context, .owner = owner };
-        try self.scheduled(&exchange, Exchange.invoke);
+        try self.scheduled(&exchange, Exchange.invoke, false);
         return exchange.result orelse error.InvalidControllerReceipt;
     }
     fn handedToUser(raw: *anyopaque, owner: identity.SessionHandle) !void {
@@ -699,7 +727,7 @@ pub const Driver = struct {
             }
         };
         var exchange: Exchange = .{ .driver = self, .owner = owner };
-        try self.scheduled(&exchange, Exchange.invoke);
+        try self.scheduled(&exchange, Exchange.invoke, true);
     }
     fn shouldCancel(raw: *anyopaque) bool {
         const self: *Driver = @ptrCast(@alignCast(raw));
@@ -718,7 +746,20 @@ pub const Driver = struct {
             }
         };
         var exchange: Exchange = .{ .driver = self, .service = service, .action = action };
-        try self.scheduled(&exchange, Exchange.invoke);
+        const admission = switch (action) {
+            .input => true,
+            .request => |pending| match: {
+                const active = self.active_request orelse break :match false;
+                // run() may also tick previously submitted commands. Their
+                // owner work must not inherit this caller's deadline.
+                for (self.controller.entries.items) |entry| if (entry.id.eql(pending.execution_id)) {
+                    break :match entry.invocation_id == active.kind.execute.operation_id and entry.context.task_id.eql(active.kind.execute.context.task_id) and entry.context.conversation_id.eql(active.kind.execute.context.conversation_id);
+                };
+                break :match false;
+            },
+            else => false,
+        };
+        try self.scheduled(&exchange, Exchange.invoke, admission);
         return exchange.result orelse error.InvalidControllerReceipt;
     }
 };
@@ -751,4 +792,159 @@ fn targetIndex(values: *[128]?TargetEvidence, target: identity.SessionHandle) ?u
 }
 test {
     _ = @import("host_execution_driver_tests.zig");
+}
+
+const AdmissionTest = struct {
+    request: *Request,
+    mode: enum { none, stop, expire, expire_after, busy } = .none,
+    effects: usize = 0,
+    snapshot: terminal.execution.Snapshot = .{ .owner = .{ .session_id = @fromBackingInt(1), .generation = 1 }, .state = .running, .revision = 1, .interactive_execution = true },
+    fn schedule(raw: *anyopaque, context: *anyopaque, function: *const fn (*anyopaque) anyerror!void, cancel: ?*provider.CancelToken) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        switch (self.mode) {
+            .none, .expire_after => {},
+            .busy => return error.WorkerBusy,
+            .stop => self.request.cancelled.store(true, .release),
+            .expire => self.request.deadline = 0,
+        }
+        if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
+        try function(context);
+        if (self.mode == .expire_after) self.request.deadline = 0;
+    }
+    fn authorize(raw: *anyopaque, _: host.Invocation, _: []const u8, _: []const u8, _: [32]u8) !execution.Target {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.effects += 1;
+        if (self.mode == .expire_after) return .{ .handle = self.snapshot.owner, .service = try resolve(raw, undefined, self.snapshot.owner), .ownership_revision = 1 };
+        return error.UnexpectedDispatch;
+    }
+    fn resolve(raw: *anyopaque, _: host.Context, _: identity.SessionHandle) !terminal.Service {
+        return .{ .context = raw, .binding = undefined, .vtable = undefined };
+    }
+    fn call(raw: *anyopaque, _: terminal.Service, action: execution.TerminalAction) !execution.TerminalResult {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return switch (action) {
+            .snapshot => .{ .snapshot = self.snapshot },
+            .output => |value| .{ .output = .{ .bytes = try value.allocator.alloc(u8, 0), .start_cursor = 0, .next_cursor = 0, .gap = false, .truncated = false } },
+            else => result: {
+                self.effects += 1;
+                break :result .done;
+            },
+        };
+    }
+    fn driver(self: *@This()) Driver {
+        const backend: execution.Backend = .{ .context = self, .authorize = authorize, .resolve = resolve, .terminal_call = call };
+        return .{ .allocator = std.testing.allocator, .journal_owner = undefined, .scheduler = .{ .context = self, .call = schedule }, .backend = backend, .controller = .{ .allocator = std.testing.allocator, .journal = undefined, .backend = undefined }, .wake = undefined, .active_request = self.request };
+    }
+    fn invocation() host.Invocation {
+        return .{ .context = .{ .conversation_id = .{ .bytes = @splat(1) }, .task_id = .{ .bytes = @splat(2) }, .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 }, .authority = .execution_control, .operation_id = 9, .turn_id = 1, .call_id = "fixture", .tool_id = "host.run_in_terminal", .arguments = .null, .arguments_json = "", .arguments_hash = @splat(0), .canonical_arguments_hash = @splat(0) };
+    }
+};
+test "execution deadline admission scheduler observes Stop and elapsed budget before effects" {
+    for ([_]AdmissionTest{ .{ .request = undefined, .mode = .stop }, .{ .request = undefined, .mode = .expire } }) |mode| {
+        var request: Request = .{ .kind = .{ .execute = AdmissionTest.invocation() }, .deadline = std.math.maxInt(i64) };
+        var fixture = mode;
+        fixture.request = &request;
+        var driver = fixture.driver();
+        try std.testing.expectError(error.CancelledBeforeDispatch, Driver.authorize(&driver, request.kind.execute, "0", "true", @splat(0)));
+        try std.testing.expectEqual(@as(usize, 0), fixture.effects);
+    }
+}
+test "execution deadline owner revoke survives caller cancellation but respects driver shutdown" {
+    var request: Request = .{ .kind = .{ .execute = AdmissionTest.invocation() }, .deadline = 0 };
+    request.cancelled.store(true, .release);
+    var fixture: AdmissionTest = .{ .request = &request };
+    var driver = fixture.driver();
+    const service = try AdmissionTest.resolve(&fixture, request.kind.execute.context, fixture.snapshot.owner);
+    const grant: terminal.execution.Grant = .{ .execution_id = .{ .bytes = @splat(3) }, .task_id = request.kind.execute.context.task_id, .fence = 1, .input_epoch = 1, .ownership_revision = 1 };
+    _ = try Driver.terminalCall(&driver, service, .{ .revoke = .{ .grant = grant, .takeover = false } });
+    try std.testing.expectEqual(@as(usize, 1), fixture.effects);
+    driver.scheduler_cancel.cancel();
+    try std.testing.expectError(error.CancelledBeforeDispatch, Driver.terminalCall(&driver, service, .{ .revoke = .{ .grant = grant, .takeover = false } }));
+    try std.testing.expectEqual(@as(usize, 1), fixture.effects);
+}
+test "execution deadline queued expired request cannot enter the controller" {
+    var request: Request = .{ .kind = .{ .execute = AdmissionTest.invocation() }, .deadline = 70, .wake = try Wakeup.init() };
+    defer request.wake.?.deinit();
+    var fixture: AdmissionTest = .{ .request = &request };
+    var driver = fixture.driver();
+    try std.testing.expect(driver.process(&request, 70));
+    try std.testing.expectEqual(error.ExecutionDeadlineBeforeDispatch, request.failure.?);
+    try std.testing.expect(request.completed.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), fixture.effects);
+}
+test "execution deadline terminal admission belongs only to its original invocation" {
+    for (0..4) |case| {
+        const same_invocation = case == 0;
+        var request: Request = .{ .kind = .{ .execute = AdmissionTest.invocation() }, .deadline = 0 };
+        var fixture: AdmissionTest = .{ .request = &request };
+        var driver = fixture.driver();
+        const id: identity.ExecutionId = .{ .bytes = @splat(3) };
+        var original_context = request.kind.execute.context;
+        if (case == 2) original_context.task_id.bytes[0] += 1;
+        if (case == 3) original_context.conversation_id.bytes[0] += 1;
+        try driver.controller.entries.append(std.testing.allocator, .{ .context = original_context, .invocation_id = if (case == 1) 10 else 9, .id = id, .target = fixture.snapshot.owner, .journal = undefined, .journal_revision = 1, .journal_stage = .running, .snapshot = fixture.snapshot, .next_renew_at = std.math.maxInt(i64) });
+        defer driver.controller.entries.deinit(std.testing.allocator);
+        const service = try AdmissionTest.resolve(&fixture, request.kind.execute.context, fixture.snapshot.owner);
+        const action: execution.TerminalAction = .{ .request = .{ .execution_id = id, .task_id = request.kind.execute.context.task_id, .expected_input_epoch = 1, .ownership_revision = 1, .command = "true", .command_hash = @splat(0) } };
+        if (same_invocation) {
+            try std.testing.expectError(error.CancelledBeforeDispatch, Driver.terminalCall(&driver, service, action));
+            try std.testing.expectEqual(@as(usize, 0), fixture.effects);
+        } else {
+            _ = try Driver.terminalCall(&driver, service, action);
+            try std.testing.expectEqual(@as(usize, 1), fixture.effects);
+        }
+    }
+}
+test "execution deadline wait observation spends queue time and retains the running execution" {
+    var request: Request = .{ .kind = .{ .execute = AdmissionTest.invocation() }, .deadline = 70, .wake = try Wakeup.init() };
+    defer request.wake.?.deinit();
+    var fixture: AdmissionTest = .{ .request = &request };
+    var driver = fixture.driver();
+    driver.controller.backend = .{ .context = &driver, .authorize = Driver.authorize, .resolve = Driver.resolve, .terminal_call = Driver.terminalCall };
+    const id: identity.ExecutionId = .{ .bytes = @splat(3) };
+    fixture.snapshot.execution_id = id;
+    try driver.controller.entries.append(std.testing.allocator, .{ .context = request.kind.execute.context, .id = id, .target = fixture.snapshot.owner, .journal = undefined, .journal_revision = 1, .journal_stage = .running, .snapshot = fixture.snapshot, .next_renew_at = std.math.maxInt(i64) });
+    defer driver.controller.entries.deinit(std.testing.allocator);
+    var json: [256]u8 = undefined;
+    const wire = try std.fmt.bufPrint(&json, "{{\"execution_ref\":\"x1:{s}\",\"wait_ms\":100,\"after_revision\":1}}", .{std.fmt.bytesToHex(id.bytes, .lower)});
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, wire, .{});
+    defer parsed.deinit();
+    request.kind.execute.tool_id = "host.wait_execution";
+    request.kind.execute.arguments = parsed.value;
+    try std.testing.expect(!driver.process(&request, 60));
+    try std.testing.expectEqual(@as(i64, 70), request.wait.?.deadline);
+    try std.testing.expect(driver.process(&request, 70));
+    try std.testing.expect(request.failure == null);
+    var result = request.result.?;
+    defer result.deinit(std.testing.allocator);
+    var body = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, result.blocks[0].structured, .{});
+    defer body.deinit();
+    try std.testing.expect(body.value.object.get("timed_out").?.bool);
+    try std.testing.expectEqualStrings("running", body.value.object.get("state").?.string);
+    try std.testing.expectEqual(@as(usize, 0), fixture.effects);
+}
+
+test "execution deadline completed authorization cannot publish a late admission" {
+    var request: Request = .{ .kind = .{ .execute = AdmissionTest.invocation() }, .deadline = std.math.maxInt(i64) };
+    var fixture: AdmissionTest = .{ .request = &request, .mode = .expire_after };
+    var driver = fixture.driver();
+    // Do not format the deliberately unbound service on an unexpected success.
+    if (Driver.authorize(&driver, request.kind.execute, "0", "true", @splat(0))) |_| return error.TestExpectedError else |err| try std.testing.expectEqual(error.CancelledBeforeDispatch, err);
+    try std.testing.expectEqual(@as(usize, 1), fixture.effects);
+}
+
+test "execution deadline expired busy observation cannot retry forever or stop the command" {
+    var request: Request = .{ .kind = .{ .execute = AdmissionTest.invocation() }, .deadline = 70, .wake = try Wakeup.init() };
+    defer request.wake.?.deinit();
+    var fixture: AdmissionTest = .{ .request = &request, .mode = .busy };
+    var driver = fixture.driver();
+    driver.controller.backend = .{ .context = &driver, .authorize = Driver.authorize, .resolve = Driver.resolve, .terminal_call = Driver.terminalCall };
+    const id: identity.ExecutionId = .{ .bytes = @splat(3) };
+    try driver.controller.entries.append(std.testing.allocator, .{ .context = request.kind.execute.context, .id = id, .target = fixture.snapshot.owner, .journal = undefined, .journal_revision = 1, .journal_stage = .running, .snapshot = fixture.snapshot, .next_renew_at = std.math.maxInt(i64) });
+    defer driver.controller.entries.deinit(std.testing.allocator);
+    request.wait = .{ .context = request.kind.execute.context, .operation_id = 9, .index = 0, .after_revision = 1, .deadline = 70, .output_cursor = 0, .max_bytes = 128 };
+    try std.testing.expect(driver.process(&request, 70));
+    try std.testing.expectEqual(error.Timeout, request.failure.?);
+    try std.testing.expectEqual(@as(usize, 0), fixture.effects);
+    try std.testing.expectEqual(terminal.execution.State.running, driver.controller.entries.items[0].snapshot.state);
 }

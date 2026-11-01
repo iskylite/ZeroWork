@@ -483,6 +483,9 @@ const NativeAuthBackend = struct {
         if (self.callback_error) |err| return err;
         try checkDriveResult(rc);
         if (rc == -1000) return error.InvalidChallengePrompt;
+        if (rc == c.ZW_SSH_KEY_UNREADABLE) return error.IdentityFileUnreadable;
+        if (rc == c.ZW_SSH_KEY_INVALID) return error.IdentityFileInvalid;
+        if (rc == c.ZW_SSH_KEY_PASSPHRASE) return .{ .outcome = .failure, .key_unlock_failed = true };
         var partial: c_int = 0;
         var methods: [1024]u8 = undefined;
         var length: usize = 0;
@@ -491,13 +494,9 @@ const NativeAuthBackend = struct {
             2 => .{ .outcome = .success },
             1 => .{ .outcome = if (partial != 0) .partial else .failure, .remaining = try auth_flow.parseMethods(methods[0..length]) },
             0 => blk: {
-                // Only a readable local key which failed before a server
-                // response can enter the passphrase recovery challenge.
-                // A server denial is never described as an unlock failure.
-                const code = c.zw_libssh2_last_error_code(self.handle);
-                const key_error = auth == .private_key and keyUnlockError(code);
-                if (key_error and c.zw_ssh_private_key_readable(auth.private_key.path.ptr) == 0) return error.IdentityFileUnreadable;
-                break :blk .{ .outcome = .failure, .key_unlock_failed = key_error };
+                // Local preparation returns typed errors above. Neither a
+                // generic native FILE error nor a server denial is an unlock.
+                break :blk .{ .outcome = .failure };
             },
             else => error.InvalidAuthenticationResult,
         };
@@ -554,12 +553,6 @@ const NativeAuthBackend = struct {
         }
     };
 };
-
-fn keyUnlockError(code: c_int) bool {
-    // PUBLICKEY_UNVERIFIED (-19) also means a transport/server failure;
-    // only local key-file/unlock errors justify a passphrase challenge.
-    return code == -16 or code == -48;
-}
 
 /// Process-level libssh2 owner. It must outlive every Session created from it.
 ///
@@ -1629,14 +1622,6 @@ test "session strict policy only skips confirmed changed keys for that attempt" 
     defer coexist.deinit();
     options.host_key_store = &coexist;
     try std.testing.expectEqual(HostKeyAcceptance.known_match, (try verifyHostKey(options, new_key, fp.slice())).acceptance);
-}
-
-test "session key unlock recovery does not mistake transport refusal for a passphrase error" {
-    try std.testing.expect(keyUnlockError(-16));
-    try std.testing.expect(keyUnlockError(-48));
-    try std.testing.expect(!keyUnlockError(-19));
-    try std.testing.expect(!keyUnlockError(-18));
-    try std.testing.expect(!keyUnlockError(-9));
 }
 
 test "cancelled connect is rejected before opening a socket" {

@@ -60,10 +60,17 @@ pub fn main(init: std.process.Init) !void {
     const binding = domain.queryService(accepted.handle, .forward).available;
     const service = try worker.forwardService(binding, null);
     const operation = try domain.journal.begin(.{ .session = accepted.handle }, accepted.operation.attempt_id);
-    try service.start(accepted.operation, binding, operation, .{ .requested_port = 0 });
+    const ForwardOptions = @import("proto/ssh/socks5_listener.zig");
+    const mode_text = init.environ_map.get("ZW_LOAD_FORWARD_MODE") orelse "socks5";
+    const mode: ForwardOptions.ForwardMode = if (std.mem.eql(u8, mode_text, "socks5")) .socks5 else if (std.mem.eql(u8, mode_text, "local")) .local else if (std.mem.eql(u8, mode_text, "remote")) .remote else return error.InvalidForwardMode;
+    const listen_port = try std.fmt.parseInt(u16, init.environ_map.get("ZW_LOAD_LISTEN_PORT") orelse "0", 10);
+    const fixed_target: ForwardOptions.Target = if (mode == .socks5) .{} else try ForwardOptions.Target.init(init.environ_map.get("ZW_LOAD_TARGET_HOST") orelse return error.MissingTargetHost, try std.fmt.parseInt(u16, init.environ_map.get("ZW_LOAD_TARGET_PORT") orelse return error.MissingTargetPort, 10));
+    try service.start(accepted.operation, binding, operation, .{ .mode = mode, .target = fixed_target, .requested_port = listen_port });
     const stop_path = try std.fs.path.join(a, &.{ controls, "stop" });
     const frames = try a.alloc(u8, @import("vt/text_slot.zig").TextSlot.default_capacity);
     var generation: u64 = 0;
+    var published_phase: ?@import("proto/ssh/forward_service.zig").Phase = null;
+    var published_failure: ?anyerror = null;
     var ready = false;
     var sample_index: usize = 0;
     var pending: ?struct { id: u64, started: i128 } = null;
@@ -72,6 +79,12 @@ pub fn main(init: std.process.Init) !void {
         if (thread.hasFailed()) return error.WorkerFailed;
         if (try worker.text.take(generation, frames)) |frame| generation = frame.generation;
         const state = service.snapshot();
+        if (published_phase == null or published_phase.? != state.phase or !std.meta.eql(published_failure, state.failure)) {
+            const status = try std.json.Stringify.valueAlloc(a, .{ .phase = @tagName(state.phase), .failure = if (state.failure) |err| @errorName(err) else "none", .cleanup = @tagName(state.cleanup), .port = state.port }, .{});
+            try write(init.io, try std.fs.path.join(a, &.{ controls, "status.json" }), status);
+            published_phase = state.phase;
+            published_failure = state.failure;
+        }
         if (!ready and state.phase == .running) {
             const snap = details.snapshot(accepted.operation) catch {
                 pause();

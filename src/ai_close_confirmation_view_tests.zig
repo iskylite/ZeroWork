@@ -225,3 +225,31 @@ test "AI close confirmation replay of absent and unchanged snapshots does not re
     f.view.dismiss();
     try std.testing.expect(!f.cx.needs_redraw);
 }
+
+test "retained AI close confirmation follows every builtin theme and keeps the captured ticket" {
+    const support = @import("ui_theme_test_support.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    theme.select(.dark);
+    var retained: Fixture = undefined;
+    try retained.init(600);
+    defer retained.deinit();
+    const ticket = try retained.show(8, 2, true, true);
+    const confirm = retained.view.confirm;
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        try support.publish(retained.cx, retained.scope);
+        for (0..6) |_| retained.frame();
+        var fresh: Fixture = undefined;
+        try fresh.init(600);
+        defer fresh.deinit();
+        try support.publish(fresh.cx, fresh.scope);
+        _ = try fresh.show(8, 2, true, true);
+        for (0..6) |_| fresh.frame();
+        errdefer std.debug.print("theme={s}\n", .{id});
+        try support.expectPaintEqual(retained.view.panel, fresh.view.panel);
+        try std.testing.expect(ticket.eql(retained.view.snapshot.?.ticket));
+        try std.testing.expectEqual(confirm, retained.view.confirm);
+        try std.testing.expectEqual(@as(usize, 0), retained.confirms + retained.cancels);
+    }
+}

@@ -171,6 +171,7 @@ pub const Editor = struct {
         var save_style = S.modelDialogButton(true);
         save_style.width = .{ .px = 72 };
         const save = try ui.widgets.Button(.{ .label = if (index == null) "添加模型" else "保存模型", .variant = .primary, .base_style = save_style, .on_click = cx.on(Editor, self, commit) }).mount(scope, cx);
+        try @import("../ui/app_theme.zig").stylePrimary(cx, scope, save, null);
         self.save_button = save;
         save.meta.ownership.meta.test_id = "settings.ai.model.save";
         try footer.appendChild(cx.allocator, save);
@@ -610,7 +611,7 @@ const SourceIndicator = struct {
         tip.trigger.behavior.events.on_blur = .{ .callback = blur, .context = self };
         const assets = [_]ui.SvgAsset{ ui.icons.circle_check, ui.icons.pencil, ui.icons.circle_alert };
         const colors = S.theme.current();
-        for (assets, [_]ui.Color{ colors.ok, colors.fg_2, colors.warn_ink }, 0..) |asset, color, i| {
+        for (assets, [_]ui.Color{ colors.ok_ink, colors.fg_2, colors.warn_ink }, 0..) |asset, color, i| {
             self.icons[i] = try ui.iconTint(cx, asset, color, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 });
             try tip.trigger.appendChild(cx.allocator, self.icons[i]);
         }

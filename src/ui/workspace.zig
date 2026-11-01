@@ -67,8 +67,8 @@ pub const Palette = struct {
             .fg_muted = colors.fg_3,
             .accent = colors.accent,
             .border = colors.border,
-            .green = colors.ok,
-            .red = colors.danger,
+            .green = colors.ok_ink,
+            .red = colors.danger_ink,
             .status_bg = colors.surface_1,
             .terminal_bg = colors.terminal,
         };
@@ -88,12 +88,12 @@ pub fn dot(cx: *ui.Cx, size: f32, color: ui.Color) !*ui.Node {
     }, .{});
 }
 
-pub fn separator(cx: *ui.Cx, p: Palette) !*ui.Node {
+pub fn separator(cx: *ui.Cx, _: Palette) !*ui.Node {
     return ui.box(cx, .{
         .width = .{ .px = 1 },
         .height = .{ .px = 14 },
         .margin = .{ .top = 0, .right = 6, .bottom = 0, .left = 6 },
-        .background = p.border,
+        .background = ui.Color.TRANSPARENT,
     }, .{});
 }
 
@@ -354,6 +354,7 @@ pub const Workspace = struct {
     registry: hosts_mod.Registry,
     identities: lifecycle.Identities = .{},
     hosts_path: []const u8,
+    credential_provider: ?store.plugin_credential_references.Provider = null,
 
     sidebar_list: *ui.Node,
     sidebar_bridge: sidebar_view.Bridge = .{},
@@ -923,7 +924,7 @@ pub const Workspace = struct {
     fn saveHostSlice(self: *Workspace, hosts: []hosts_mod.HostConfig) !void {
         var candidate = self.registry;
         candidate.hosts = hosts;
-        try store.saveHosts(self.io, std.Io.Dir.cwd(), self.hosts_path, candidate);
+        _ = try store.saveHostsWithOptions(self.io, std.Io.Dir.cwd(), self.hosts_path, candidate, .{ .provider = self.credential_provider });
     }
 
     fn refreshAssetPositions(self: *Workspace, selected: ?HostId) void {
@@ -933,7 +934,7 @@ pub const Workspace = struct {
 
     /// 把当前注册表原子写回 hosts.toml（菜单 clone/pin/delete 持久化共用）。
     pub fn saveRegistry(self: *Workspace) !void {
-        try store.saveHosts(self.io, std.Io.Dir.cwd(), self.hosts_path, self.registry);
+        _ = try store.saveHostsWithOptions(self.io, std.Io.Dir.cwd(), self.hosts_path, self.registry, .{ .provider = self.credential_provider });
     }
 
     pub const StatusKind = enum { info, failure };
@@ -1381,7 +1382,11 @@ pub const Workspace = struct {
             tab_box.behavior.events.on_focus = .{ .callback = tabFocus, .context = select_ctx };
             tab_box.behavior.events.on_blur = .{ .callback = tabLeave, .context = select_ctx };
             const icon_slot = try ui.box(self.cx, tab_styles.iconSlot(), .{});
-            const connection_color = if (group_id != null) app_theme.current().fg_2 else if (tab.?.failed) self.palette.red else if (tab.?.plugin_renderer != null) (if (tab.?.content_ready) self.palette.green else self.palette.fg_muted) else if (tab.?.terminal == null) (if (tab.?.file_ready) self.palette.green else self.palette.fg_muted) else if (tab.?.terminal.?.tombstone.state != .active) self.palette.fg_muted else if (tab.?.runtime != null or (tab.?.local and tab.?.local_state == .running)) self.palette.green else self.palette.fg_muted;
+            const connection_color = if (group_id != null) app_theme.current().fg_2 else if (tab.?.failed) self.palette.red else if (tab.?.plugin_renderer != null) switch (pluginConnectionState(tab.?)) {
+                .online => self.palette.green,
+                .degraded => self.palette.red,
+                else => self.palette.fg_muted,
+            } else if (tab.?.terminal == null) (if (tab.?.file_ready) self.palette.green else self.palette.fg_muted) else if (tab.?.terminal.?.tombstone.state != .active) self.palette.fg_muted else if (tab.?.runtime != null or (tab.?.local and tab.?.local_state == .running)) self.palette.green else self.palette.fg_muted;
             const type_icon = try ui.iconTint(self.cx, if (group_id != null) ui.icons.get("panels-top-left").? else self.tabIcon(tab.?), connection_color, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } });
             try icon_slot.appendChild(self.cx.allocator, type_icon);
             const number = try ui.text(self.cx, "", .{ .font_size = 10, .font_weight = 500, .color = app_theme.current().fg_2, .selectable = false });
@@ -1410,6 +1415,7 @@ pub const Workspace = struct {
             try tab_box.appendChild(self.cx.allocator, close);
             if (active) {
                 const underline = try ui.box(self.cx, tab_styles.underline(width), .{});
+                underline.meta.ownership.meta.test_id = "tabs.active_underline";
                 try tab_box.appendChild(self.cx.allocator, underline);
             }
             try tooltip.trigger.appendChild(self.cx.allocator, tab_box);
@@ -1524,6 +1530,10 @@ pub const Workspace = struct {
         if (self.model.active == id) return "当前";
         return self.tabStatus(id);
     }
+    fn pluginConnectionState(tab: *const SessionTab) @FieldType(plugin_ui.ConnectionStatus, "state") {
+        if (tab.plugin_renderer) |renderer| if (renderer.vtable.connection_status) |project| return project(renderer.context).state;
+        return if (tab.content_ready) .online else .connecting;
+    }
     fn tabStatus(self: *Workspace, id: identity.TabId) []const u8 {
         if (self.groupIdByTab(id)) |group| {
             return if (self.groupClosing(group)) "关闭中" else "终端组";
@@ -1537,7 +1547,10 @@ pub const Workspace = struct {
             .starting => "连接中",
             .exited, .failed, .closing, .cleanup_unknown => "离线",
         };
-        if (tab.plugin_renderer != null) return if (tab.content_ready) "在线" else "连接中";
+        if (tab.plugin_renderer) |renderer| {
+            if (renderer.vtable.connection_status) |project| return project(renderer.context).label;
+            return if (tab.content_ready) "在线" else "连接中";
+        }
         if (tab.terminal == null) return if (tab.file_ready) "在线" else "连接中";
         if (tab.terminal.?.tombstone.state != .active) return "离线";
         return if (tab.runtime != null) "在线" else "连接中";
@@ -1575,6 +1588,7 @@ pub const Workspace = struct {
         }
         const rename_chord = host_actions.descriptor(.rename_tab).default_chord.?;
         if (keybindings.fromKey(key) == rename_chord.key and modifiers.super == rename_chord.command and modifiers.ctrl == rename_chord.control and modifiers.alt == rename_chord.option and modifiers.shift == rename_chord.shift) {
+            if (self.app_config.keys.match(key, modifiers) != null) return .ignored;
             if (self.confirming_id != null or self.host_key_job != null or self.auth_job != null) return .ignored;
             if (self.model.active) |id| if (self.groupIdByTab(id)) |group| {
                 if (self.groupClosing(group)) return .ignored;
@@ -1857,7 +1871,7 @@ pub const Workspace = struct {
                 failed = failed or tab.failed;
             }
         };
-        return if (pending) app_theme.current().warn else if (failed) self.palette.red else self.palette.fg_muted;
+        return if (pending) app_theme.current().warn_ink else if (failed) self.palette.red else self.palette.fg_muted;
     }
 
     pub fn activateTabId(self: *Workspace, id: identity.TabId) void {
@@ -2265,7 +2279,7 @@ pub const Workspace = struct {
             broadcast_style.width = .{ .px = 24 };
             broadcast_style.height = .{ .px = 24 };
             broadcast_style.background = ui.Color.TRANSPARENT;
-            const broadcast_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.radio, .icon_size = @as(f32, 14), .icon_tint = if (broadcasting) app_theme.current().accent else app_theme.current().fg_2, .disabled = !online, .a11y_label = if (!online) "广播 · 连接未就绪" else if (broadcasting) "广播 · 已开启" else "广播 · 已关闭", .base_style = broadcast_style, .on_click = self.cx.on(GroupCell, broadcast_cell, GroupCell.act) }).mount(scope, self.cx);
+            const broadcast_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.radio, .icon_size = @as(f32, 14), .icon_tint = if (broadcasting) app_theme.current().ok_ink else app_theme.current().fg_2, .disabled = !online, .a11y_label = if (!online) "广播 · 连接未就绪" else if (broadcasting) "广播 · 已开启" else "广播 · 已关闭", .base_style = broadcast_style, .on_click = self.cx.on(GroupCell, broadcast_cell, GroupCell.act) }).mount(scope, self.cx);
             broadcast_button.meta.ownership.meta.test_id = try std.fmt.bufPrint(&broadcast_cell.test_id, "groups.broadcast.{d}", .{tab.id});
             if (broadcast_button.behavior.interaction.a11y) |*a11y| a11y.pressed = broadcasting;
             try header.appendChild(self.allocator, try sidebar_view.hint(self.cx, scope, broadcast_button, if (!online) "连接未就绪" else if (broadcasting) "广播已开启" else "广播已关闭", .bottom));
@@ -3036,6 +3050,7 @@ pub const Workspace = struct {
             .variant = .primary,
             .on_click = cx.on(Workspace, self, trustHostKeySave),
         }).mount(self.scope, cx);
+        try app_theme.stylePrimary(cx, self.scope, remember_button, null);
         try buttons.appendChild(cx.allocator, remember_button);
         try card.appendChild(cx.allocator, buttons);
         card.behavior.interaction.focusable = true;
@@ -3264,7 +3279,7 @@ pub const Workspace = struct {
         host.password = password;
         host.auth_mode = .password;
         _ = try candidate.update(owner, host);
-        try transaction.commit(self.io, std.Io.Dir.cwd(), self.hosts_path, &self.registry);
+        _ = try transaction.commitWithOptions(self.io, std.Io.Dir.cwd(), self.hosts_path, &self.registry, .{ .provider = self.credential_provider });
     }
 
     pub fn submitAuthentication(self: *Workspace, request: auth_challenge.RequestIdentity, reply: auth_challenge.Reply) !void {
@@ -3752,6 +3767,7 @@ pub const Workspace = struct {
         }
         local_scope = try self.scope.childScope();
         terminal.completion_enabled = self.app_config.completion.enabled;
+        terminal.keymap = &self.app_config.keys;
         terminal.palette_observer = self.command_bridge;
         terminal.input_observer = self.input_bridge;
         terminal.setThemeColors(self.palette.fg, self.palette.border, self.palette.accent);
@@ -3815,6 +3831,42 @@ pub const Workspace = struct {
         self.cx.requestRedraw();
     }
 
+    /// Replace a released generation in the same tab after a registered plugin
+    /// retries. The new renderer is prepared before replacing the old owner.
+    pub fn remountPluginSession(self: *Workspace, id: SessionId, expected: identity.SessionHandle, owner: identity.SessionHandle, value: envelopes.Envelope, renderer: plugin_ui.RendererDefinition) !void {
+        const tab = self.sessionTab(id) orelse return error.StaleSession;
+        if (tab.closing or tab.plugin_renderer == null or !tab.content_owner.eql(.{ .session = expected }) or expected.session_id != owner.session_id or expected.generation >= owner.generation) return error.StaleSession;
+        const mount_renderer = renderer.mount orelse return error.ContentRendererUnavailable;
+        const scope = try self.scope.childScope();
+        errdefer scope.dispose();
+        const pane = try ui.box(self.cx, local_styles.pane(), .{});
+        errdefer self.cx.destroyDetached(pane);
+        pane.meta.ownership.meta.test_id = "workspace.plugin.content";
+        const services = if (self.content_services) |factory| try factory.create(factory.context, owner) else plugin_ui.ContentServices{};
+        const instance = try mount_renderer(renderer.context, .{ .cx = self.cx, .scope = scope, .slot = pane, .owner = owner, .connection = value, .content_context = services.content_context, .frame_sink = services.frame_sink, .service_access = services.service_access });
+        errdefer instance.vtable.unmount(instance.context);
+        try self.terminal_area.appendChild(self.allocator, pane);
+        errdefer self.cx.detachChild(self.terminal_area, pane);
+        try self.model.replaceOwner(tab.tab_id, tab.content_owner, .{ .session = owner });
+        const old_root = tab.root;
+        const old_scope = tab.file_scope;
+        const old_renderer = tab.plugin_renderer.?;
+        tab.root = pane;
+        tab.file_scope = scope;
+        tab.plugin_renderer = instance;
+        tab.content_owner = .{ .session = owner };
+        tab.generation = owner.generation;
+        tab.content_ready = true;
+        tab.failed = false;
+        tab.setTitle(value.name);
+        old_renderer.vtable.unmount(old_renderer.context);
+        if (old_root.parent) |parent| self.cx.detachChild(parent, old_root);
+        if (old_scope) |previous| previous.dispose();
+        self.cx.destroyDetached(old_root);
+        if (self.model.active) |active| self.presentTabId(active);
+        self.cx.requestRedraw();
+    }
+
     pub fn createPluginSession(self: *Workspace, owner: identity.SessionHandle, value: envelopes.Envelope, renderer: plugin_ui.RendererDefinition) !SessionId {
         if (self.shutting_down) return error.WorkspaceClosed;
         const mount_renderer = renderer.mount orelse return error.ContentRendererUnavailable;
@@ -3829,7 +3881,7 @@ pub const Workspace = struct {
         const protocol_id = try self.allocator.dupe(u8, value.protocol_id);
         errdefer self.allocator.free(protocol_id);
         const services = if (self.content_services) |factory| try factory.create(factory.context, owner) else plugin_ui.ContentServices{};
-        const instance = try mount_renderer(renderer.context, .{ .cx = self.cx, .scope = scope, .slot = pane, .owner = owner, .connection = value, .content_context = services.content_context, .frame_sink = services.frame_sink });
+        const instance = try mount_renderer(renderer.context, .{ .cx = self.cx, .scope = scope, .slot = pane, .owner = owner, .connection = value, .content_context = services.content_context, .frame_sink = services.frame_sink, .service_access = services.service_access });
         errdefer instance.vtable.unmount(instance.context);
         const ticket = self.identities.newTicket();
         tab.* = .{ .id = ticket.session_id, .tab_id = try tab_ids.allocate(), .content_owner = .{ .session = owner }, .generation = owner.generation, .host_id = @backingInt(value.id), .host_index = self.registry.indexOf(value.id) orelse removed_host_index, .host_snapshot = null, .root = pane, .file_scope = scope, .plugin_renderer = instance, .plugin_protocol_id = protocol_id, .content_ready = true };
@@ -3909,11 +3961,13 @@ pub const Workspace = struct {
         tab.local_close = close;
         try banner.appendChild(self.allocator, close);
         const retry = try ui.widgets.Button(.{ .label = "重试启动", .variant = .primary, .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500 }, .on_click = self.cx.on(ClickCtx, cell, retryLocalStart) }).mount(tab.local_scope.?, self.cx);
+        try @import("app_theme.zig").stylePrimary(self.cx, tab.local_scope.?, retry, null);
         retry.setStyleInline(self.allocator, local_styles.action());
         retry.meta.ownership.meta.test_id = "local.start.retry";
         tab.local_retry = retry;
         try banner.appendChild(self.allocator, retry);
         const new = try ui.widgets.Button(.{ .label = "新建终端", .variant = .primary, .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500 }, .on_click = self.cx.on(ClickCtx, cell, newLocalFromEnded) }).mount(tab.local_scope.?, self.cx);
+        try @import("app_theme.zig").stylePrimary(self.cx, tab.local_scope.?, new, null);
         new.setStyleInline(self.allocator, local_styles.action());
         new.meta.ownership.meta.test_id = "local.ended.new";
         tab.local_new = new;
@@ -4206,6 +4260,7 @@ pub const Workspace = struct {
         var terminal = try TerminalViewNode.mount(self.cx);
         terminal.setTerminalTakeoverHandler(self.terminal_takeover_handler);
         terminal.completion_enabled = self.app_config.completion.enabled;
+        terminal.keymap = &self.app_config.keys;
         errdefer {
             terminal.releaseBuffers(self.cx);
             self.cx.destroyDetached(terminal.root);
@@ -4497,6 +4552,7 @@ pub const Workspace = struct {
             if (!terminal_attached) self.cx.destroyDetached(terminal.root);
         }
         terminal.completion_enabled = self.app_config.completion.enabled;
+        terminal.keymap = &self.app_config.keys;
         terminal.palette_observer = self.command_bridge;
         terminal.input_observer = self.input_bridge;
         terminal.root.setBackground(self.palette.terminal_bg);

@@ -1,6 +1,46 @@
 const ui = @import("ui");
 const V = @import("ui/ai_remote_picker.zig");
 
+test "remote authentication presentation keeps host fingerprints out of private key prompts" {
+    const std = @import("std");
+    const auth = @import("proto/ssh/auth_challenge.zig");
+    const Adapter = @import("plugins/remote/challenge_bridge.zig");
+    const shared = @import("host/challenge_host.zig");
+    const Callbacks = struct {
+        fn submit(_: *anyopaque, _: auth.RequestIdentity, _: auth.Reply) !void {}
+        fn cancel(_: *anyopaque, _: auth.RequestIdentity) void {}
+    };
+    var context: u8 = 0;
+    var host = shared.Host.init(std.testing.allocator);
+    defer host.deinit();
+    var adapter: Adapter.Bridge = .{};
+    defer adapter.clear();
+    var key: @import("ui/host_key_confirmation.zig").Request = .{};
+    @memcpy(key.algorithm[0..7], "ssh-rsa");
+    key.algorithm_len = 7;
+    @memcpy(key.fingerprint[0..14], "SHA256:fixture");
+    key.fingerprint_len = 14;
+    for ([_]auth.Kind{ .host_key_unknown, .private_key_passphrase, .password }) |kind| {
+        var mailbox: auth.InteractiveBridge = .{};
+        _ = try mailbox.offerChallenge(.{
+            .key = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(71), .generation = 1 } }, .operation_id = 8, .attempt_id = 1 },
+            .hop_index = 0,
+            .kind = kind,
+            .endpoint_identity = .{ .host = "fixture", .user = "operator" },
+            .prompts = if (kind == .host_key_unknown) &.{} else &.{.{ .text = "Secret" }},
+            .presentation_config_revision = 1,
+        });
+        try adapter.sync(&host, mailbox.snapshot(), .{ .host_key = key, .private_key_path = "/fixture/key" }, .{ .context = &context, .submit = Callbacks.submit, .cancel = Callbacks.cancel }, 1);
+        const view = host.snapshot(0, null).?;
+        if (kind == .host_key_unknown) {
+            try std.testing.expect(std.mem.indexOf(u8, view.payload.material, "SHA256:fixture") != null);
+        } else {
+            try std.testing.expectEqualStrings("", view.payload.material);
+        }
+        adapter.clear();
+    }
+}
+
 test "AI remote filename button stays inside its bounded table cell" {
     const std = @import("std");
     const Probe = struct {

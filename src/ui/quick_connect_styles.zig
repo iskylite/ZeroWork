@@ -81,20 +81,18 @@ pub fn text(size: f32, weight: u16, secondary: bool) ui.TextStyle {
 }
 pub fn repaint(node: *ui.Node, previous: theme.Colors) void {
     const background = node.getBackground();
-    inline for (@typeInfo(theme.Colors).@"struct".field_names) |color_name| {
-        if (ui.Color.eql(node.getBackground(), @field(previous, color_name))) node.setBackground(@field(theme.current(), color_name));
-        if (node.getText()) |value| if (ui.Color.eql(value.color, @field(previous, color_name))) node.setTextColor(@field(theme.current(), color_name));
-        if (node.getImage()) |value| {
-            if (ui.Color.eql(value.tint, @field(previous, color_name))) _ = node.setTint(@field(theme.current(), color_name));
+    if (theme.remapUiSurface(background, previous)) |next| {
+        node.setBackground(next);
+    } else {
+        inline for (@typeInfo(theme.Colors).@"struct".field_names) |role| {
+            if (ui.Color.eql(background, @field(previous, role))) {
+                node.setBackground(@field(theme.current(), role));
+                break;
+            }
         }
     }
-    // Derived inset/action surfaces have their own identities, independent of material alpha.
-    const previous_inset = ui.Color.lerp(previous.overlay.withAlpha(255), previous.well.withAlpha(255), 0.3);
-    const previous_action = ui.Color.lerp(previous.overlay.withAlpha(255), previous.fg_2.withAlpha(255), 0.12);
-    const was_dark = @as(u32, previous.app.r) * 299 + @as(u32, previous.app.g) * 587 + @as(u32, previous.app.b) * 114 < 128000;
-    const previous_selection = ui.Color.lerp(previous.overlay.withAlpha(255), previous.accent, if (was_dark) 0.16 else 0.10);
-    if (ui.Color.eql(background, previous_inset)) node.setBackground(theme.popupInset());
-    if (ui.Color.eql(background, previous_action)) node.setBackground(theme.popupAction());
-    if (ui.Color.eql(background, previous_selection)) node.setBackground(theme.popupSelection());
+    if (node.getText()) |value| node.setTextColor(theme.remapUiInk(value.color, previous));
+    if (node.getIcon()) |value| _ = node.setTint(theme.remapUiInk(value.tint, previous));
+    if (node.getImage()) |value| _ = node.setTint(theme.remapUiInk(value.tint, previous));
     for (node.children.items) |child| repaint(child, previous);
 }

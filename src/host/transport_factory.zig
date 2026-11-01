@@ -33,12 +33,24 @@ pub const Factory = struct {
     host_key_observer: ?ssh.HostKeyObserver = null,
     auth_interaction: ?ssh.AuthInteraction = null,
     timeout_ms: u32 = 15_000,
+    /// Explicit protocol owners may retain existing streams after operation
+    /// cancellation for bounded remote cleanup. Cancellation still prevents
+    /// ordinary connects/stream opens; close() remains mandatory.
+    keep_established_until_close: bool = false,
+    /// Explicit cleanup capability, frozen at prepare. Only an endpoint that
+    /// already admitted a normal stream may receive at most two cleanup dials
+    /// on this live transport. Ordinary cancellation rules remain unchanged.
+    cleanup_destination: ?Destination = null,
     operation_key: ?@import("operation.zig").OperationKey = null,
     failed_open_owner: ?FailedOpenOwner = null,
 
     pub fn prepareOwned(self: Factory, owner: identity.ResourceOwner, route: *const resolution.FrozenRoute, purpose: Purpose, cancel: ?*const std.atomic.Value(bool)) !*OwnedTransport {
         if (route.hops.len > resolution.max_jumps) return error.TooManyJumps;
         if (cancel) |token| if (token.load(.acquire)) return error.Cancelled;
+        if (self.cleanup_destination) |destination| {
+            if (!self.keep_established_until_close) return error.InvalidCleanupPolicy;
+            try validateTcpDestination(destination);
+        }
         if (self.operation_key) |key| switch (owner) {
             .session => |handle| if (key.owner != .session or !key.owner.session.eql(handle)) return error.InvalidOperationOwner,
             .retained_transfer => |id| if (key.owner != .transfer_owner or key.owner.transfer_owner.id != id) return error.InvalidOperationOwner,
@@ -57,6 +69,11 @@ pub const Factory = struct {
         const transport = try self.allocator.create(OwnedTransport);
         errdefer self.allocator.destroy(transport);
         transport.* = .{ .factory = self, .owner = owner, .purpose = purpose, .external_cancel = cancel, .arena = .init(self.allocator), .reserved_cleanup = self.failed_open_owner != null };
+        if (self.cleanup_destination) |destination| {
+            @memcpy(transport.cleanup_host[0..destination.host.len], destination.host);
+            transport.cleanup_host_len = destination.host.len;
+            transport.cleanup_port = destination.port;
+        }
         transport.arena = .init(ZeroingAllocator.wrap(&transport.factory.allocator));
         errdefer transport.arena.deinit();
         const a = transport.arena.allocator();
@@ -99,6 +116,7 @@ const Slot = struct {
     relay: ?*c.ZW_SSH_RELAY = null,
     failure: ?anyerror = null,
     open_deadline_ns: i128 = 0,
+    cleanup_only: bool = false,
 };
 pub const OwnedStream = struct {
     transport: *OwnedTransport,
@@ -137,9 +155,15 @@ pub const OwnedTransport = struct {
     next_slot: usize = 0,
     opening: ?usize = null,
     native_session_identity: std.atomic.Value(usize) = .init(0),
+    cleanup_host: [256:0]u8 = @splat(0),
+    cleanup_host_len: usize = 0,
+    cleanup_port: u16 = 0,
+    cleanup_admitted: bool = false,
+    cleanup_open_count: u8 = 0,
 
     pub fn start(self: *OwnedTransport) !void {
         if (self.started) return error.TransportAlreadyStarted;
+        if (self.cancelled()) return error.Cancelled;
         self.started = true;
         self.thread = std.Thread.spawn(.{}, run, .{self}) catch |err| {
             self.failure = err;
@@ -174,11 +198,35 @@ pub const OwnedTransport = struct {
         retainer.release(retainer.context);
     }
     pub fn openTcpStream(self: *OwnedTransport, destination: Destination) !OwnedStream {
-        if (destination.host.len == 0 or destination.host.len > 255 or std.mem.indexOfAny(u8, destination.host, "\x00\r\n") != null or destination.port == 0) return error.InvalidDestination;
+        return self.openStream(destination, false);
+    }
+    /// No destination argument and no native-session start/reconnect. The
+    /// caller may use the returned fd only for its already-owned remote cleanup.
+    pub fn openCleanupTcpStream(self: *OwnedTransport) !OwnedStream {
+        if (self.cleanup_host_len == 0) return error.CleanupStreamForbidden;
+        return self.openStream(.{ .host = self.cleanup_host[0..self.cleanup_host_len], .port = self.cleanup_port }, true);
+    }
+    fn openStream(self: *OwnedTransport, destination: Destination, cleanup_only: bool) !OwnedStream {
+        try validateTcpDestination(destination);
         self.mutex.lock();
+        if (!cleanup_only and self.externalCancelled()) {
+            self.mutex.unlock();
+            return error.Cancelled;
+        }
+        if (cleanup_only and (!self.factory.keep_established_until_close or !self.started or !self.ready.load(.acquire) or !self.cleanup_admitted)) {
+            self.mutex.unlock();
+            return error.CleanupStreamForbidden;
+        }
         if (self.closing.load(.acquire) or self.done.load(.acquire)) {
             self.mutex.unlock();
             return error.TransportClosed;
+        }
+        if (cleanup_only) {
+            if (self.cleanup_open_count >= 2) {
+                self.mutex.unlock();
+                return error.CleanupStreamLimit;
+            }
+            self.cleanup_open_count += 1;
         }
         var selected: ?usize = null;
         for (&self.slots, 0..) |*slot, i| if (slot.state == .free or slot.state == .ended) {
@@ -191,15 +239,23 @@ pub const OwnedTransport = struct {
         };
         const slot = &self.slots[index];
         const generation = slot.generation + 1;
-        slot.* = .{ .generation = generation, .state = .pending, .port = destination.port, .host_len = destination.host.len, .open_deadline_ns = @import("../platform/realtime.zig").monotonicNs() + @as(i128, self.factory.timeout_ms) * std.time.ns_per_ms };
+        slot.* = .{ .generation = generation, .state = .pending, .port = destination.port, .host_len = destination.host.len, .cleanup_only = cleanup_only, .open_deadline_ns = @import("../platform/realtime.zig").monotonicNs() + @as(i128, if (cleanup_only) 1000 else self.factory.timeout_ms) * std.time.ns_per_ms };
         @memcpy(slot.host[0..destination.host.len], destination.host);
         self.mutex.unlock();
         while (true) {
             self.mutex.lock();
+            if (self.closing.load(.acquire) or (!cleanup_only and self.externalCancelled())) {
+                // A just-opened stream must not escape a cancelled request.
+                // Its worker retains sole ownership of native release.
+                if (slot.state == .pending or slot.state == .active) slot.state = .closing;
+                self.mutex.unlock();
+                return if (self.closing.load(.acquire)) error.TransportClosed else error.Cancelled;
+            }
             const state = slot.state;
             const fd = slot.fd;
             const failure = slot.failure;
             if (state == .failed) slot.state = .free;
+            if (state == .active and !cleanup_only and destination.port == self.cleanup_port and std.mem.eql(u8, destination.host, self.cleanup_host[0..self.cleanup_host_len])) self.cleanup_admitted = true;
             self.mutex.unlock();
             if (state == .active) return .{ .transport = self, .index = index, .generation = generation, .fd = fd };
             if (state == .failed) return failure orelse error.StreamOpenFailed;
@@ -239,7 +295,10 @@ pub const OwnedTransport = struct {
         self.factory.allocator.destroy(self);
     }
     fn cancelled(self: *const OwnedTransport) bool {
-        return self.closing.load(.acquire) or (if (self.external_cancel) |token| token.load(.acquire) else false);
+        return self.closing.load(.acquire) or self.externalCancelled();
+    }
+    fn externalCancelled(self: *const OwnedTransport) bool {
+        return if (self.external_cancel) |token| token.load(.acquire) else false;
     }
     fn run(self: *OwnedTransport) void {
         self.connect() catch |err| {
@@ -249,7 +308,7 @@ pub const OwnedTransport = struct {
             return;
         };
         self.ready.store(true, .release);
-        while (!self.cancelled()) {
+        while (!self.closing.load(.acquire) and (self.factory.keep_established_until_close or !self.externalCancelled())) {
             self.mutex.lock();
             self.step();
             self.mutex.unlock();
@@ -258,6 +317,7 @@ pub const OwnedTransport = struct {
         self.releaseNative();
     }
     fn connect(self: *OwnedTransport) !void {
+        if (self.cancelled()) return error.Cancelled;
         if (self.options.len == 0) return;
         if (self.options.len == 1) self.session = try ssh.Session.connect(self.factory.library, self.options[0]) else {
             self.route = try ssh.JumpTransport.Route.connect(self.factory.allocator, self.factory.library, self.options);
@@ -284,6 +344,19 @@ pub const OwnedTransport = struct {
             if (slot.state == .closing) self.releaseSlot(slot);
         }
         self.next_slot = (self.next_slot + 1) % max_streams;
+        if (self.cancelled()) {
+            // Cancellation blocks every ordinary pending channel. Only the
+            // separately admitted, fixed-endpoint cleanup dials may proceed.
+            for (&self.slots) |*slot| if (slot.state == .pending and (self.closing.load(.acquire) or !slot.cleanup_only)) {
+                slot.failure = error.Cancelled;
+                slot.state = .closing;
+                self.releaseSlot(slot);
+                slot.state = .failed;
+            };
+            if (self.opening) |index| if (self.slots[index].state != .pending) {
+                self.opening = null;
+            };
+        }
         if (self.opening == null) for (self.slots, 0..) |slot, i| if (slot.state == .pending) {
             self.opening = i;
             break;
@@ -314,8 +387,8 @@ pub const OwnedTransport = struct {
     fn openSlot(self: *OwnedTransport, slot: *Slot) !void {
         const host: [:0]const u8 = slot.host[0..slot.host_len :0];
         const session = self.nativeSession() orelse {
-            const fd = c.zw_ssh_socket_connect_cancellable(host.ptr, slot.port, self.factory.timeout_ms, isCancelled, self);
-            if (fd < 0) return if (self.cancelled()) error.Cancelled else error.TcpConnectFailed;
+            const fd = c.zw_ssh_socket_connect_cancellable(host.ptr, slot.port, if (slot.cleanup_only) 1000 else self.factory.timeout_ms, if (slot.cleanup_only) isCleanupCancelled else isCancelled, self);
+            if (fd < 0) return if (self.closing.load(.acquire) or (!slot.cleanup_only and self.externalCancelled())) error.Cancelled else error.TcpConnectFailed;
             slot.fd = fd;
             return;
         };
@@ -380,7 +453,14 @@ pub const OwnedTransport = struct {
         const self: *OwnedTransport = @ptrCast(@alignCast(context.?));
         return @intFromBool(self.cancelled());
     }
+    fn isCleanupCancelled(context: ?*anyopaque) callconv(.c) c_int {
+        const self: *OwnedTransport = @ptrCast(@alignCast(context.?));
+        return @intFromBool(self.closing.load(.acquire));
+    }
 };
+fn validateTcpDestination(destination: Destination) !void {
+    if (destination.host.len == 0 or destination.host.len > 255 or std.mem.indexOfAny(u8, destination.host, "\x00\r\n") != null or destination.port == 0) return error.InvalidDestination;
+}
 fn pause() void {
     var fds: [1]std.c.pollfd = undefined;
     _ = std.c.poll(&fds, 0, 2);
@@ -464,4 +544,103 @@ test "transport retained unknown cleanup remains unknown on repeated close" {
     defer transport.arena.deinit();
     try std.testing.expectEqual(ReleaseReceipt.unknown, transport.close());
     try std.testing.expectEqual(ReleaseReceipt.unknown, transport.close());
+}
+
+const CleanupLoopback = struct {
+    fd: c_int,
+    port: u16,
+    fn init() !CleanupLoopback {
+        const fd = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
+        if (fd < 0) return error.SocketFailed;
+        errdefer _ = std.c.close(fd);
+        var address: std.c.sockaddr.in = .{ .port = 0, .addr = std.mem.nativeToBig(u32, 0x7f000001) };
+        if (std.c.bind(fd, @ptrCast(&address), @sizeOf(@TypeOf(address))) != 0 or std.c.listen(fd, 8) != 0) return error.ListenFailed;
+        var len: std.c.socklen_t = @sizeOf(@TypeOf(address));
+        if (std.c.getsockname(fd, @ptrCast(&address), &len) != 0) return error.AddressFailed;
+        return .{ .fd = fd, .port = std.mem.bigToNative(u16, address.port) };
+    }
+    fn deinit(self: CleanupLoopback) void {
+        _ = std.c.close(self.fd);
+    }
+    fn destination(self: CleanupLoopback) Destination {
+        return .{ .host = "127.0.0.1", .port = self.port };
+    }
+    fn acceptAndClose(self: CleanupLoopback) !void {
+        var fds = [_]std.c.pollfd{.{ .fd = self.fd, .events = std.c.POLL.IN, .revents = 0 }};
+        if (std.c.poll(&fds, 1, 1000) <= 0) return error.AcceptTimeout;
+        const fd = std.c.accept(self.fd, null, null);
+        if (fd < 0) return error.AcceptFailed;
+        _ = std.c.close(fd);
+    }
+};
+
+test "BMC transport cleanup defaults to forbidden without widening ordinary cancellation" {
+    const listener = try CleanupLoopback.init();
+    defer listener.deinit();
+    var library: ssh.Library = .{ .active = false };
+    var route: resolution.FrozenRoute = .{ .arena = .init(std.testing.allocator), .store_revision = 1, .hops = &.{} };
+    defer route.deinit();
+    var cancel: std.atomic.Value(bool) = .init(false);
+    var factory: Factory = .{ .allocator = std.testing.allocator, .library = &library, .keep_established_until_close = true };
+    const owner: identity.ResourceOwner = .{ .session = .{ .session_id = @fromBackingInt(907) } };
+    const owned = try factory.prepareOwned(owner, &route, .connection, &cancel);
+    defer owned.deinit() catch unreachable;
+    try std.testing.expectError(error.CleanupStreamForbidden, owned.openCleanupTcpStream());
+    try owned.start();
+    var stream = try owned.openTcpStream(listener.destination());
+    defer stream.close();
+    try listener.acceptAndClose();
+    cancel.store(true, .release);
+    try std.testing.expectError(error.CleanupStreamForbidden, owned.openCleanupTcpStream());
+    try std.testing.expectError(error.Cancelled, owned.openTcpStream(listener.destination()));
+    try std.testing.expectError(error.Cancelled, factory.prepareOwned(owner, &route, .connection, &cancel));
+    cancel.store(false, .release);
+    factory.keep_established_until_close = false;
+    factory.cleanup_destination = listener.destination();
+    try std.testing.expectError(error.InvalidCleanupPolicy, factory.prepareOwned(owner, &route, .connection, &cancel));
+}
+
+test "BMC transport cleanup freezes its admitted endpoint permits two cancelled dials and never reopens a closed owner" {
+    const target = try CleanupLoopback.init();
+    defer target.deinit();
+    const other = try CleanupLoopback.init();
+    defer other.deinit();
+    var library: ssh.Library = .{ .active = false };
+    var route: resolution.FrozenRoute = .{ .arena = .init(std.testing.allocator), .store_revision = 1, .hops = &.{} };
+    defer route.deinit();
+    var cancel: std.atomic.Value(bool) = .init(false);
+    var host = "127.0.0.1".*;
+    var factory: Factory = .{ .allocator = std.testing.allocator, .library = &library, .keep_established_until_close = true, .cleanup_destination = .{ .host = &host, .port = target.port } };
+    const owner: identity.ResourceOwner = .{ .session = .{ .session_id = @fromBackingInt(908) } };
+    const owned = try factory.prepareOwned(owner, &route, .connection, &cancel);
+    defer owned.deinit() catch unreachable;
+    const unstarted = try factory.prepareOwned(owner, &route, .connection, &cancel);
+    defer unstarted.deinit() catch unreachable;
+    host[0] = '9';
+    factory.cleanup_destination = other.destination();
+    owned.factory.cleanup_destination = other.destination();
+    try std.testing.expectError(error.CleanupStreamForbidden, owned.openCleanupTcpStream());
+    try owned.start();
+    // A successful ordinary stream to another endpoint grants no cleanup
+    // authority, even if the caller tries to replace the prepared policy.
+    var unrelated = try owned.openTcpStream(other.destination());
+    defer unrelated.close();
+    try other.acceptAndClose();
+    try std.testing.expectError(error.CleanupStreamForbidden, owned.openCleanupTcpStream());
+    var admitted = try owned.openTcpStream(target.destination());
+    defer admitted.close();
+    try target.acceptAndClose();
+    cancel.store(true, .release);
+    try std.testing.expectError(error.Cancelled, unstarted.start());
+    try std.testing.expectError(error.CleanupStreamForbidden, unstarted.openCleanupTcpStream());
+    try std.testing.expectError(error.Cancelled, owned.openTcpStream(target.destination()));
+    for (0..2) |_| {
+        var cleanup = try owned.openCleanupTcpStream();
+        try target.acceptAndClose();
+        cleanup.close();
+    }
+    try std.testing.expectEqual(@as(u8, 2), owned.cleanup_open_count);
+    try std.testing.expectError(error.CleanupStreamLimit, owned.openCleanupTcpStream());
+    try std.testing.expectEqual(ReleaseReceipt.released, owned.close());
+    try std.testing.expectError(error.TransportClosed, owned.openCleanupTcpStream());
 }

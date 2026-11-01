@@ -6,12 +6,12 @@ import {mkdir,mkdtemp,writeFile,readFile,open,rm} from 'node:fs/promises';
 import {join,resolve} from 'node:path';
 import * as h from '../vendor/zenit/e2e/client.ts';
 const binary=resolve(process.argv[2]),out=resolve(process.argv[3]);await mkdir(out,{recursive:true});
-const themes=(process.argv[4]??'dark,light,sauber,midnight,forest,ocean,plum,ember,graphite,paper,sand,ice,catppuccin-mocha,dracula,dark-pro,solarized-dark,nord').split(',');
+const themes=process.argv[4]?.split(',')??Object.keys(JSON.parse(await readFile(new URL('../docs/UI_V3/theme-presets.json',import.meta.url),'utf8')).themes);
 const shown=(n:any)=>n?.rect&&n.visible!==false&&n.hidden!==true&&n.rect.w>0&&n.rect.h>0;
 const flat=(n:any):any[]=>[n,...(n.children??[]).flatMap(flat)];
 const text=(n:any):string=>(n.text??'')+(n.children??[]).map(text).join('');
 const report:any={status:'running',binary,sha256:createHash('sha256').update(await readFile(binary)).digest('hex'),cases:[],limits:['Production View in a native component fixture; explicit local and remote UI data, no filesystem or SFTP service.','Public synthetic Harness input; physical input, IME and VoiceOver are outside this check.']};
-try{for(const theme of themes){for(const state of ['normal',...(['dark','paper','solarized-dark'].includes(theme)?['empty','failed']:[])]){
+try{for(const theme of themes){for(const state of ['normal','empty','failed']){
  const iso=await mkdtemp('/private/tmp/zw-theme-files-'),rpc=join(iso,'rpc');await mkdir(rpc);process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;
  const log=await open(join(out,theme+'-'+state+'.log'),'w');const app=spawn(binary,['--theme='+theme,'--state='+state],{env:{...process.env,ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',log.fd,log.fd]});const ended=new Promise(r=>app.once('close',r));const item:any={theme,state};report.cases.push(item);
  try{

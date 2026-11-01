@@ -674,3 +674,93 @@ test "execution command index copies only exact conversation generation and host
     defer empty.deinit(a);
     try std.testing.expectEqual(@as(usize, 0), empty.records.len);
 }
+
+test "execution deadline native queued authorization is interruptible and releases its owner" {
+    const provider = @import("provider.zig");
+    const Deadline = struct {
+        expires_ms: std.atomic.Value(i64) = .init(0),
+        fn stopped(raw: *const anyopaque) bool {
+            const self: *const @This() = @ptrCast(@alignCast(raw));
+            const expires = self.expires_ms.load(.acquire);
+            return expires != 0 and now() >= expires;
+        }
+    };
+    const Worker = struct {
+        driver: *driver_mod.Driver,
+        invocation: host.Invocation,
+        cancel: *provider.CancelToken,
+        result: ?host.Result = null,
+        failure: ?anyerror = null,
+        done: std.atomic.Value(bool) = .init(false),
+        fn run(self: *@This()) void {
+            defer self.done.store(true, .release);
+            self.result = self.driver.execute(self.invocation, self.cancel) catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+    };
+    for ([_]bool{ true, false }) |explicit_stop| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        const path = try tmp.dir.realPathFileAlloc(std.testing.io, ".", a);
+        defer a.free(path);
+        const journal = try runtime.ProcessJournal.acquire(.{ .data_root = path, .path = "cancelled-admission.json", .dir = tmp.dir, .io = std.testing.io });
+        defer journal.release();
+        var pump: Pump = .{};
+        var backend: Backend = .{ .ui_thread = std.Thread.getCurrentId(), .targets = undefined };
+        for (&backend.targets, 0..) |*target, index| target.* = .{ .snapshot = .{ .owner = .{ .session_id = @fromBackingInt(index + 1), .generation = 1 }, .state = .idle, .interactive_execution = true, .input_epoch = 1 } };
+        const driver = try driver_mod.Driver.start(a, journal, .{ .context = &pump, .call = Pump.schedule }, .{ .context = &backend, .authorize = Backend.authorize, .resolve = Backend.resolve, .terminal_call = Backend.call });
+        defer {
+            driver.requestShutdown();
+            while (!driver.shutdownReady()) {
+                pump.pump();
+                pause();
+            }
+            driver.finish() catch unreachable;
+        }
+        const context: host.Context = .{ .conversation_id = .generate(), .task_id = .generate(), .binding = .{ .session = 1 }, .binding_revision = 1, .grant_revision = 1 };
+        const wire = "{\"session_ref\":\"0\",\"command\":\"true\",\"request_key\":\"cancelled-admission\"}";
+        var parsed = try std.json.parseFromSlice(std.json.Value, a, wire, .{});
+        defer parsed.deinit();
+        var deadline: Deadline = .{};
+        var cancel: provider.CancelToken = .{ .source = .{ .context = &deadline, .poll = Deadline.stopped } };
+        var worker: Worker = .{ .driver = driver, .cancel = &cancel, .invocation = .{ .context = context, .authority = .execution_control, .operation_id = 1, .turn_id = 1, .call_id = "cancelled-admission", .tool_id = "host.run_in_terminal", .arguments = parsed.value, .arguments_json = wire, .arguments_hash = @splat(1), .canonical_arguments_hash = @splat(2) } };
+        defer if (worker.result) |*result| result.deinit(a);
+        const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
+        defer {
+            cancel.cancel();
+            driver.requestShutdown();
+            while (!worker.done.load(.acquire)) {
+                pump.pump();
+                pause();
+            }
+            thread.join();
+        }
+        const until = now() + 5000;
+        var pending = false;
+        while (!worker.done.load(.acquire) and now() < until) {
+            pump.lock();
+            pending = pump.pending != null;
+            pump.mutex.unlock();
+            if (pending) break;
+            pause();
+        }
+        try std.testing.expect(pending);
+        const started = now();
+        if (explicit_stop) cancel.cancel() else deadline.expires_ms.store(started + 70, .release);
+        while (!worker.done.load(.acquire) and now() < until) pause();
+        try std.testing.expect(worker.done.load(.acquire));
+        try std.testing.expectEqual(error.CancelledBeforeDispatch, worker.failure.?);
+        try std.testing.expect(worker.result == null);
+        pump.lock();
+        const empty = pump.pending == null;
+        pump.mutex.unlock();
+        try std.testing.expect(empty);
+        for (backend.targets) |target| try std.testing.expectEqual(@as(usize, 0), target.request_count);
+        const stored = try tmp.dir.readFileAlloc(std.testing.io, "cancelled-admission.json", a, .limited(1024 * 1024));
+        defer a.free(stored);
+        try std.testing.expect(std.mem.indexOf(u8, stored, "cancelled_unsent") != null);
+        std.debug.print("native driver admission {s} released in {d}ms\n", .{ if (explicit_stop) "Stop" else "deadline", now() - started });
+    }
+}

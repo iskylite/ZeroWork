@@ -67,6 +67,7 @@ pub const View = struct {
         try root.appendChild(cx.allocator, actions);
         try actions.appendChild(cx.allocator, exit_tag);
         const open = try ui.widgets.Button(.{ .variant = .primary, .a11y_label = "在原会话 AI 助手中分析失败命令", .base_style = S.open(cx.tokens), .hover_style = S.openHover(), .on_click = cx.on(View, self, activate) }).mount(scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, scope, open, null);
         open.setStyleInline(cx.allocator, S.open(cx.tokens));
         open.meta.ownership.meta.test_id = "terminal.ai-error-hint.open";
         const open_text = try ui.textStyled(cx, S.actionText, "询问 AI");

@@ -74,7 +74,7 @@
 :is(#patch-root,[data-execution-patch]) .mode-option .check{width:14px;color:var(--accent);font-size:13px}
 :is(#patch-root,[data-execution-patch]) .mode-option.selected{background:var(--popup-selected)}
 :is(#patch-root,[data-execution-patch]) .mode-option small{font:11px/16px Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
-:is(#patch-root,[data-execution-patch]) .menu-divider{height:1px;background:var(--line);margin:5px 6px}
+:is(#patch-root,[data-execution-patch]) .menu-divider{height:1px;background:transparent;margin:5px 6px}
 :is(#patch-root,[data-execution-patch]) .menu-policy{padding:2px 8px 5px}
 :is(#patch-root,[data-execution-patch]) .menu-policy label{display:block;font-size:10.5px;color:var(--muted);margin-bottom:5px}
 :is(#patch-root,[data-execution-patch]) .menu-policy select{background:var(--control-bg);border:0;border-radius:6px;padding:6px;width:100%;font-size:11px}

@@ -7,6 +7,74 @@ pub const RevokeReason = enum { released, owner_changed, lost_focus, owner_close
 var next_context_instance: std.atomic.Value(u64) = .init(1);
 pub const TransferState = union(enum) { idle, pending: identity.WindowId, completed: identity.WindowId, failed: anyerror };
 pub const Lease = struct { context_instance: u64, window_id: identity.WindowId, id: u64, owner: identity.SessionHandle, kind: LeaseKind, authorization_revision: u64 };
+/// Borrowed, host-issued proof. Workers validate only this synchronized guard;
+/// they never inspect the main-thread Context or infer authority from focus.
+/// The content host keeps the backing guard alive until its workers retire.
+pub const AutomationProof = struct {
+    lease: Lease,
+    context: *anyopaque,
+    validate: *const fn (*anyopaque, Lease) bool,
+    pub fn valid(self: AutomationProof) bool {
+        return self.lease.kind == .automation and self.validate(self.context, self.lease);
+    }
+};
+pub const AutomationGrant = struct {
+    input: *Context,
+    proof: AutomationProof,
+    /// Main-thread release, after Task cancellation or completion. Queuing an
+    /// asynchronous input operation does not itself release its authority.
+    pub fn release(self: AutomationGrant) void {
+        self.input.endAutomation(self.proof.lease);
+    }
+};
+const AutomationGuard = struct {
+    mutex: std.atomic.Mutex = .unlocked,
+    lease: ?Lease = null,
+    cancel: ?*const std.atomic.Value(bool) = null,
+    stopped: ?*const std.atomic.Value(bool) = null,
+    expires_at_ms: u64 = std.math.maxInt(u64),
+    task_bound: bool = false,
+    fn lock(self: *AutomationGuard) void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
+    }
+    fn set(self: *AutomationGuard, lease: ?Lease, cancel: ?*const std.atomic.Value(bool), stopped: ?*const std.atomic.Value(bool), expires_at_ms: u64) void {
+        self.lock();
+        defer self.mutex.unlock();
+        self.lease = lease;
+        self.cancel = cancel;
+        self.stopped = stopped;
+        self.expires_at_ms = expires_at_ms;
+        self.task_bound = false;
+    }
+    fn bindTask(self: *AutomationGuard, lease: Lease, cancel: ?*const std.atomic.Value(bool), stopped: ?*const std.atomic.Value(bool), expires_at_ms: u64) !void {
+        self.lock();
+        defer self.mutex.unlock();
+        if (self.lease == null or !std.meta.eql(self.lease.?, lease)) return error.StaleInputLease;
+        if (self.task_bound) {
+            if (self.cancel != cancel or self.stopped != stopped) return error.AutomationTaskActive;
+            // A repeated acquisition in the same Task cannot extend its budget.
+            self.expires_at_ms = @min(self.expires_at_ms, expires_at_ms);
+            return;
+        }
+        self.cancel = cancel;
+        self.stopped = stopped;
+        self.expires_at_ms = expires_at_ms;
+        self.task_bound = true;
+    }
+    fn validate(raw: *anyopaque, lease: Lease) bool {
+        const self: *AutomationGuard = @ptrCast(@alignCast(raw));
+        self.lock();
+        defer self.mutex.unlock();
+        const live = self.lease orelse return false;
+        if (lease.kind != .automation or !std.meta.eql(live, lease)) return false;
+        if (self.cancel) |flag| if (flag.load(.acquire)) return false;
+        if (self.stopped) |flag| if (flag.load(.acquire)) return false;
+        return monotonicMs() < self.expires_at_ms;
+    }
+};
+fn monotonicMs() u64 {
+    return @intCast(@divTrunc(@import("../platform/realtime.zig").monotonicNs(), std.time.ns_per_ms));
+}
 pub const Revocation = struct { lease: Lease, reason: RevokeReason };
 pub const Input = union(enum) {
     key: struct { code: u32, down: bool, modifiers: u16 = 0 },
@@ -34,6 +102,7 @@ pub const Context = struct {
     authorization_revision: u64 = 1,
     human: ?Lease = null,
     automation: ?Lease = null,
+    automation_guard: AutomationGuard = .{},
     next_lease: u64 = 1,
     context_instance: u64 = 0,
     transfer_state: TransferState = .idle,
@@ -64,8 +133,39 @@ pub const Context = struct {
         try self.ensureIdentity();
         const lease: Lease = .{ .context_instance = self.context_instance, .window_id = self.window_id, .id = self.next_lease, .owner = self.owner, .kind = kind, .authorization_revision = self.authorization_revision };
         self.next_lease += 1;
-        if (kind == .human_focus) self.human = lease else self.automation = lease;
+        if (kind == .human_focus) self.human = lease else {
+            self.automation = lease;
+            self.automation_guard.set(lease, null, null, std.math.maxInt(u64));
+        }
         return lease;
+    }
+    /// Called only by the host after generic approval and owner preflight.
+    /// Cancellation flags belong to the same Task and outlive grant.release.
+    pub fn acquireAutomation(self: *Context, authorization_revision: u64, cancel: ?*const std.atomic.Value(bool), stopped: ?*const std.atomic.Value(bool), expires_at_ms: u64) !AutomationGrant {
+        if (expires_at_ms <= monotonicMs()) return error.AutomationLeaseExpired;
+        if (cancel) |flag| if (flag.load(.acquire)) return error.CancelledBeforeDispatch;
+        if (stopped) |flag| if (flag.load(.acquire)) return error.CancelledBeforeDispatch;
+        // Never reactivate an old proof by rebinding a cancelled/expired lease
+        // to a new Task's cancellation flag or deadline.
+        self.expireAutomation();
+        const lease = try self.acquire(.automation, authorization_revision);
+        try self.automation_guard.bindTask(lease, cancel, stopped, expires_at_ms);
+        return .{ .input = self, .proof = .{ .lease = lease, .context = &self.automation_guard, .validate = AutomationGuard.validate } };
+    }
+    /// Existing native capture paths may take over without consuming an AI
+    /// permission grant. Their own transport gates still authorize human input.
+    pub fn takeHumanControl(self: *Context) void {
+        self.revoke(.automation, .takeover);
+    }
+    pub fn expireAutomation(self: *Context) void {
+        if (self.automation) |lease| if (!AutomationGuard.validate(&self.automation_guard, lease)) self.revoke(.automation, .permission_changed);
+    }
+    fn endAutomation(self: *Context, lease: Lease) void {
+        if (lease.kind != .automation or !self.matches(lease)) return;
+        self.revoke(.automation, .released);
+        // A completed Task must not leave ambient permission for a later
+        // acquire. A human takeover already removed this lease and is untouched.
+        self.authorized = false;
     }
     pub fn ensureIdentity(self: *Context) !void {
         if (self.context_instance == 0) {
@@ -167,6 +267,7 @@ pub const Context = struct {
     fn revoke(self: *Context, kind: LeaseKind, reason: RevokeReason) void {
         const slot = if (kind == .human_focus) &self.human else &self.automation;
         if (slot.*) |lease| {
+            if (kind == .automation) self.automation_guard.set(null, null, null, 0);
             // Acquire reserves a notification slot for every live lease.
             std.debug.assert(self.revocation_count < self.revocations.len);
             self.revocations[self.revocation_count] = .{ .lease = lease, .reason = reason };
@@ -258,14 +359,19 @@ pub const EditorHost = struct {
     allocator: std.mem.Allocator,
     context: *anyopaque,
     open_registered: *const fn (*anyopaque, ChildRequest) anyerror!void,
+    probes: ?@import("probe_contract.zig").EditorProbes = null,
+    probe_host: ?*@import("probe_host.zig").Host = null,
     parents: std.ArrayList(struct {
         id: u64,
         revision: u64,
+        probes: ?@import("probe_contract.zig").EditorProbes = null,
         delivery: ?struct { context: *anyopaque, callback: *const fn (*anyopaque, ChildCompletion) void } = null,
     }) = .empty,
     pending: std.ArrayList(ChildRequest) = .empty,
     next_request: u64 = 1,
     pub fn deinit(self: *EditorHost) void {
+        if (self.probes) |probes| probes.destroy();
+        for (self.parents.items) |parent| if (parent.probes) |probes| probes.destroy();
         for (self.pending.items) |item| self.allocator.free(item.contribution_id);
         self.pending.deinit(self.allocator);
         self.parents.deinit(self.allocator);
@@ -274,11 +380,27 @@ pub const EditorHost = struct {
         if (parent_editor_id == 0 or revision == 0) return error.InvalidEditor;
         for (self.parents.items) |*parent| if (parent.id == parent_editor_id) {
             if (revision < parent.revision) return error.StaleDraft;
+            if (self.probes) |probes| if (probes.editor_id == parent_editor_id) try probes.setDraftRevision(revision);
+            if (parent.probes == null) if (self.probe_host) |host| {
+                parent.probes = try host.bindParent(parent_editor_id, revision);
+            };
+            if (parent.probes) |probes| try probes.setDraftRevision(revision);
             parent.revision = revision;
             return;
         };
         if (self.parents.items.len == capacity) return error.EditorQueueFull;
-        try self.parents.append(self.allocator, .{ .id = parent_editor_id, .revision = revision });
+        try self.parents.ensureUnusedCapacity(self.allocator, 1);
+        const bound = if (self.probe_host) |host| try host.bindParent(parent_editor_id, revision) else null;
+        self.parents.appendAssumeCapacity(.{ .id = parent_editor_id, .revision = revision, .probes = bound });
+        if (self.probes) |probes| if (probes.editor_id == parent_editor_id) try probes.setDraftRevision(revision);
+    }
+    pub fn probesFor(self: *const EditorHost, parent_editor_id: u64) ?@import("probe_contract.zig").EditorProbes {
+        for (self.parents.items) |parent| if (parent.id == parent_editor_id) {
+            if (parent.probes) |probes| return probes;
+            break;
+        };
+        if (self.probes) |probes| if (probes.editor_id == parent_editor_id) return probes;
+        return null;
     }
     pub fn setParentDelivery(self: *EditorHost, parent_editor_id: u64, context: *anyopaque, callback: *const fn (*anyopaque, ChildCompletion) void) !void {
         for (self.parents.items) |*parent| if (parent.id == parent_editor_id) {
@@ -298,7 +420,12 @@ pub const EditorHost = struct {
         return false;
     }
     pub fn destroyParent(self: *EditorHost, parent_editor_id: u64) void {
+        if (self.probes) |probes| if (probes.editor_id == parent_editor_id) {
+            probes.destroy();
+            self.probes = null;
+        };
         for (self.parents.items, 0..) |parent, i| if (parent.id == parent_editor_id) {
+            if (parent.probes) |probes| probes.destroy();
             _ = self.parents.orderedRemove(i);
             break;
         };

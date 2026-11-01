@@ -193,6 +193,7 @@ pub const View = struct {
         self.middle_spacer = try ui.spacer(cx);
         try footer.appendChild(cx.allocator, self.middle_spacer);
         self.primary = try ui.widgets.Button(.{ .label = self.primary_label, .variant = .primary, .disabled = self.disabled, .base_style = S.button(true, false), .on_click = cx.on(View, self, primaryClicked) }).mount(popup.scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, popup.scope, self.primary, self.disabled);
         self.primary.meta.ownership.meta.test_id = "quick.submit";
         try footer.appendChild(cx.allocator, self.primary);
         self.failure = try label(cx, self.body, "", 11, 400, true);

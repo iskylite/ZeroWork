@@ -232,7 +232,8 @@ pub fn emptyButton(primary: bool) ui.BoxStyle {
 }
 
 pub fn cardHighlight() @typeInfo(@FieldType(ui.BoxStyle, "inset_shadow")).optional.child {
-    return .{ .offset_y = 1, .blur = 0, .color = ui.Color.WHITE.withAlpha(if (theme.currentName() == .dark) 23 else 46) };
+    // Keep the outer shell shadow, without a hard one-pixel highlight rim.
+    return .{ .offset_y = 0, .blur = 0, .color = ui.Color.TRANSPARENT };
 }
 pub fn cardShadow() @typeInfo(@FieldType(ui.BoxStyle, "shadow")).optional.child {
     return .{ .blur = 4.4, .offset_y = 2, .color = theme.current().shadow };

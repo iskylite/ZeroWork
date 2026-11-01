@@ -59,10 +59,11 @@ pub const View = struct {
         try body.appendChild(cx.allocator, self.detail);
         const actions = try ui.boxStyled(cx, S.actions, .{});
         try body.appendChild(cx.allocator, actions);
-        self.cancel = try ui.widgets.Button(.{ .variant = .secondary, .label = "取消", .base_style = S.button(false), .hover_style = .{ .background = theme.popupSelection() }, .on_click = cx.on(View, self, cancelRequest) }).mount(popup.scope, cx);
+        self.cancel = try ui.widgets.Button(.{ .variant = .secondary, .label = "取消", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.button, .{false}), .hover_style = try theme.paintSignal(?S.ButtonStyle, cx, scope, S.hover, .{}), .on_click = cx.on(View, self, cancelRequest) }).mount(popup.scope, cx);
         self.cancel.meta.ownership.meta.test_id = "ai.close.confirmation.cancel";
         try actions.appendChild(cx.allocator, self.cancel);
-        self.confirm = try ui.widgets.Button(.{ .variant = .primary, .label = self.confirm_label, .disabled = self.disabled, .base_style = S.button(true), .on_click = cx.on(View, self, confirmRequest) }).mount(popup.scope, cx);
+        self.confirm = try ui.widgets.Button(.{ .variant = .primary, .label = self.confirm_label, .disabled = self.disabled, .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.button, .{true}), .on_click = cx.on(View, self, confirmRequest) }).mount(popup.scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, popup.scope, self.confirm, self.disabled);
         self.confirm.meta.ownership.meta.test_id = "ai.close.confirmation.confirm";
         try actions.appendChild(cx.allocator, self.confirm);
         try popup.scope.onCleanup(View, self, cleanup);

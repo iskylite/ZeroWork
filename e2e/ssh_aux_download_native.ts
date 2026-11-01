@@ -209,8 +209,7 @@ try {
   assert((await resizeWindow(1440, 900)).ok);
   await click("workspace.empty.local"); await visible("terminal.surface");
   const originals = await tabs(); assert.equal(originals.length, 1); const localTab = originals[0].test_id;
-  await click("sidebar.host"); await click("sidebar.host.connect");
-  await settleAuthentication(async () => !(await query("connection.progress")).some(shown) && text((await query("workspace.pane")).find(shown)).includes("ZW_AUX_SOURCE_READY"), "01-original-ssh");
+  await click("sidebar.host"); await settleAuthentication(async () => !(await query("connection.progress")).some(shown) && text((await query("workspace.pane")).find(shown)).includes("ZW_AUX_SOURCE_READY"), "01-original-ssh");
   const attached = await tabs(); assert.equal(attached.length, 2);
   const sshTab = attached.find(n => n.test_id !== localTab)?.test_id; assert(sshTab);
   await capture("02-original-ssh-terminal");

@@ -8,6 +8,8 @@ const identity = @import("../host/identity.zig");
 const plugins = @import("../host/plugin_registry.zig");
 const plugin_ui = @import("../host/plugin_ui_contract.zig");
 const envelope_mod = @import("../config/connection_envelope.zig");
+const editor_credentials = @import("../host/editor_credentials.zig");
+const editor_probes = @import("../host/probe_contract.zig");
 // Compatibility value types are owned by the remote provider. Existing probe
 // and persistence adapters may still exchange these; the shell never reads them.
 const remote_types = @import("../plugins/remote/editor.zig");
@@ -31,7 +33,12 @@ pub const Wizard = struct {
     plugin_registry: plugins.Registry = .{},
     connection_configs: ?@import("../host/connection_config_resolver.zig").Resolver = null,
     editor_host: ?*@import("../host/content_context.zig").EditorHost = null,
+    credential_host: ?*editor_credentials.Host = null,
+    probe_host: ?*@import("../host/probe_host.zig").Host = null,
+    credentials: ?editor_credentials.Facade = null,
+    probes: ?editor_probes.EditorProbes = null,
     protocol_id: []const u8 = "",
+    queued_protocol: ?[]const u8 = null,
     protocol_options: []ui.widgets.SelectOption = &.{},
     owned_ids: std.ArrayList([]u8) = .empty,
     plugin_slot: ?*ui.Node = null,
@@ -43,6 +50,7 @@ pub const Wizard = struct {
     plugin_editor: ?plugin_ui.EditorInstance = null,
     plugin_error: ?*ui.Node = null,
     on_envelope: ?*const fn (*anyopaque, envelope_mod.Envelope, plugin_ui.SubmitIntent) anyerror!void = null,
+    on_envelope_with_secret: ?*const fn (*anyopaque, envelope_mod.Envelope, plugin_ui.SubmitIntent, editor_credentials.Handoff) anyerror!void = null,
     envelope_context: ?*anyopaque = null,
     on_editor_mounted: ?*const fn (*anyopaque, plugin_ui.EditorInstance) anyerror!void = null,
     editor_mounted_context: ?*anyopaque = null,
@@ -200,6 +208,7 @@ pub const Wizard = struct {
             editor.vtable.unmount(editor.context);
         }
         self.plugin_editor = null;
+        self.releaseEditorCapabilities();
         // Provider node cleanup callbacks may borrow scope-owned editor state.
         // Destroy the slot subtree while that state is still alive.
         self.destroyEditorNodes();
@@ -210,9 +219,17 @@ pub const Wizard = struct {
             editor.vtable.unmount(editor.context);
         }
         self.plugin_editor = null;
+        self.releaseEditorCapabilities();
         if (self.plugin_scope) |scope| scope.dispose();
         self.plugin_scope = null;
         self.destroyEditorNodes();
+    }
+    fn releaseEditorCapabilities(self: *Wizard) void {
+        if (self.credentials) |credentials| credentials.destroy();
+        self.credentials = null;
+        if (self.probes) |probes| probes.destroy();
+        self.probes = null;
+        if (self.editor_host) |host| host.destroyParent(self.draft_id);
     }
     fn mountContributedEditor(self: *Wizard, initial: ?envelope_mod.Envelope) !void {
         self.releaseContributedEditor();
@@ -222,7 +239,16 @@ pub const Wizard = struct {
         const scope = try self.scope.childScope();
         self.plugin_scope = scope;
         errdefer self.releaseContributedEditor();
-        self.plugin_editor = try mount_editor(connection.editor_factory.context, .{ .cx = self.cx, .scope = scope, .slot = self.plugin_slot.?, .protocol_id = manifest.id, .protocol_picker = .{ .context = self, .mount = mountProtocolPicker }, .initial = initial, .draft_revision = self.draft_revision, .events = .{ .context = self, .changed = editorChanged, .submit = editorSubmit, .dismiss = editorDismiss, .cancelled = editorCancelled }, .editor_host = self.editor_host, .editor_id = self.draft_id, .connection_configs = self.connection_configs });
+        if (self.credential_host) |host| self.credentials = try host.bindEditor(self.draft_id, self.draft_revision);
+        if (self.editor_host) |host| {
+            if (self.probe_host) |probes| host.probe_host = probes;
+            try host.setParentRevision(self.draft_id, self.draft_revision);
+            self.probes = host.probesFor(self.draft_id);
+        }
+        if (self.probes == null) if (self.probe_host) |host| {
+            self.probes = try host.bindParent(self.draft_id, self.draft_revision);
+        };
+        self.plugin_editor = try mount_editor(connection.editor_factory.context, .{ .cx = self.cx, .scope = scope, .slot = self.plugin_slot.?, .protocol_id = manifest.id, .protocol_picker = .{ .context = self, .mount = mountProtocolPicker }, .initial = initial, .draft_revision = self.draft_revision, .events = .{ .context = self, .changed = editorChanged, .submit = editorSubmit, .submit_with_secret = editorSubmitWithSecret, .dismiss = editorDismiss, .cancelled = editorCancelled }, .editor_host = self.editor_host, .editor_id = self.draft_id, .credentials = self.credentials, .probes = self.probes, .connection_configs = self.connection_configs });
         try scope.onCleanup(Wizard, self, releasePluginScope);
         if (self.on_editor_mounted) |hook| try hook(self.editor_mounted_context orelse return error.EditorHookUnavailable, self.plugin_editor.?);
         if (self.plugin_error) |node| node.setDisplay(.none);
@@ -231,6 +257,10 @@ pub const Wizard = struct {
     fn editorChanged(raw: *anyopaque) void {
         const self: *Wizard = @ptrCast(@alignCast(raw));
         self.draft_revision = std.math.add(u64, self.draft_revision, 1) catch 0;
+        if (self.credentials) |credentials| credentials.setDraftRevision(self.draft_revision) catch {};
+        if (self.probes) |probes| probes.setDraftRevision(self.draft_revision) catch {};
+        if (self.probe_host) |host| host.cancelParent(self.draft_id) catch {};
+        if (self.editor_host) |host| host.setParentRevision(self.draft_id, self.draft_revision) catch {};
         self.cx.requestRedraw();
     }
     fn editorDismiss(raw: *anyopaque) void {
@@ -244,17 +274,9 @@ pub const Wizard = struct {
     }
     fn editorSubmit(raw: *anyopaque, value: envelope_mod.Envelope, intent: plugin_ui.SubmitIntent) !void {
         const self: *Wizard = @ptrCast(@alignCast(raw));
-        if (!std.mem.eql(u8, value.protocol_id, self.protocol_id)) return error.ProtocolMismatch;
-        const manifest = self.plugin_registry.find(value.protocol_id) orelse return error.UnknownPlugin;
-        const connection = manifest.connection orelse return error.ConnectionEditorUnavailable;
-        try value.validate();
-        if (value.payload_version != connection.payload_version) return error.UnsupportedPayloadVersion;
-        try connection.validate_payload(value.payload);
-        const encode = connection.encode orelse return error.ConnectionCodecUnavailable;
         var arena = std.heap.ArenaAllocator.init(self.alloc);
         defer arena.deinit();
-        const encoded = try encode(arena.allocator(), value);
-        try encoded.validate();
+        const encoded = try self.encodeSubmission(arena.allocator(), value);
         if (self.saving) return error.SaveInProgress;
         const submit = self.on_envelope orelse return error.ConnectionSubmitUnavailable;
         self.saving = true;
@@ -265,6 +287,38 @@ pub const Wizard = struct {
         }
         try submit(self.envelope_context orelse return error.ConnectionSubmitUnavailable, encoded, intent);
         if (intent != .probe) self.hide();
+    }
+    fn editorSubmitWithSecret(raw: *anyopaque, value: envelope_mod.Envelope, intent: plugin_ui.SubmitIntent, handoff: editor_credentials.Handoff) !void {
+        const self: *Wizard = @ptrCast(@alignCast(raw));
+        const credentials = self.credentials orelse return error.EditorCredentialsUnavailable;
+        try credentials.requireHandoff(handoff);
+        errdefer credentials.rollback(handoff);
+        var arena = std.heap.ArenaAllocator.init(self.alloc);
+        defer arena.deinit();
+        const encoded = try self.encodeSubmission(arena.allocator(), value);
+        if (self.saving) return error.SaveInProgress;
+        const submit = self.on_envelope_with_secret orelse return error.ConnectionSubmitUnavailable;
+        self.saving = true;
+        self.locked.?.set(true);
+        defer {
+            self.saving = false;
+            self.locked.?.set(false);
+        }
+        try submit(self.envelope_context orelse return error.ConnectionSubmitUnavailable, encoded, intent, handoff);
+        if (intent == .save or intent == .save_and_open) try credentials.commit(handoff) else credentials.rollback(handoff);
+        if (intent != .probe) self.hide();
+    }
+    fn encodeSubmission(self: *Wizard, allocator: std.mem.Allocator, value: envelope_mod.Envelope) !envelope_mod.Envelope {
+        if (!std.mem.eql(u8, value.protocol_id, self.protocol_id)) return error.ProtocolMismatch;
+        const manifest = self.plugin_registry.find(value.protocol_id) orelse return error.UnknownPlugin;
+        const connection = manifest.connection orelse return error.ConnectionEditorUnavailable;
+        try value.validate();
+        if (value.payload_version != connection.payload_version) return error.UnsupportedPayloadVersion;
+        try connection.validate_payload(value.payload);
+        const encode = connection.encode orelse return error.ConnectionCodecUnavailable;
+        const encoded = try encode(allocator, value);
+        try encoded.validate();
+        return encoded;
     }
     fn saveOnly(self: *Wizard) void {
         self.saveContributed(true);
@@ -313,7 +367,10 @@ pub const Wizard = struct {
             const wizard = self.wizard;
             const selected = wizard.protocol_options[self.index].value;
             if (std.mem.eql(u8, selected, wizard.protocol_id)) return;
-            wizard.selectContribution(selected) catch |err| wizard.showError(err);
+            // The picker belongs to the current provider scope. Replacing it
+            // here would destroy the node/context whose handler is executing.
+            wizard.queued_protocol = selected;
+            wizard.cx.requestRedraw();
         }
     };
     fn refreshAppearance(self: *Wizard) void {
@@ -354,6 +411,8 @@ pub const Wizard = struct {
             editor.vtable.clear_secrets(editor.context);
             if (editor.vtable.visibility_changed) |changed| changed(editor.context, false);
         }
+        if (!self.saving) if (self.credentials) |credentials| credentials.clear();
+        if (self.probe_host) |host| host.cancelParent(self.draft_id) catch {};
         self.open.?.set(false);
         root.setHitTestVisible(false);
         root.setDisplay(.none);
@@ -429,6 +488,11 @@ pub const Wizard = struct {
     }
     fn viewportHook(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *Wizard = @ptrCast(@alignCast(raw));
+        if (self.queued_protocol) |selected| {
+            self.queued_protocol = null;
+            self.selectContribution(selected) catch |err| self.showError(err);
+            return .needs_layout;
+        }
         return if (self.updateViewport()) .needs_layout else .done;
     }
     fn cleanup(self: *Wizard) void {

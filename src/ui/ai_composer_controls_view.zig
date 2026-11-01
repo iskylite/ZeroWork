@@ -1340,13 +1340,15 @@ fn prepareCustomButton(button: *ui.Node, justify: ui.JustifyContent, allocator: 
     // A label-less native Button retains an empty content slot. Hide that
     // slot before adding the custom row, preserving its scope and behavior.
     for (button.children.items) |child| child.setDisplay(.none);
-    // The native Button recipe centers its frame regardless of base_style.
-    button.setStyleInline(allocator, .{ .justify = justify });
+    // Custom labels/icons already use fg_3 for unavailable choices. Keep those
+    // explanations readable instead of fading them a second time as a subtree.
+    // Disabled Button events and accessibility state remain owned by the widget.
+    button.setStyleInline(allocator, .{ .justify = justify, .opacity = 1 });
 }
 fn repaint(node: *ui.Node, old: S.theme.Colors) void {
     node.setBackground(remap(node.getBackground(), old));
-    if (node.getText()) |text_value| node.setTextColor(remap(text_value.color, old));
-    if (node.getIcon()) |icon| _ = node.setTint(remap(icon.tint, old));
+    if (node.getText()) |text_value| node.setTextColor(S.theme.remapUiInk(text_value.color, old));
+    if (node.getIcon()) |icon| _ = node.setTint(S.theme.remapUiInk(icon.tint, old));
     for (node.children.items) |child| repaint(child, old);
 }
 fn remap(value: ui.Color, old: S.theme.Colors) ui.Color {

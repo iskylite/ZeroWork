@@ -15,5 +15,5 @@ pub fn heading(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 13, .font_weight = 700, .line_height = 18.0 / 13.0, .color = theme.current().fg_1 };
 }
 pub fn feedback(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = theme.current().danger, .wrap = .word };
+    return .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = theme.current().danger_ink, .wrap = .word };
 }

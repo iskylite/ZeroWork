@@ -8,7 +8,7 @@ const scope_mod = @import("../ai/tool_scope.zig");
 const S = @import("ai_remote_picker_styles.zig");
 /// Own the filename content while retaining native Button focus and events.
 pub fn filenameButton(scope: *ui.Scope, cx: *ui.Cx, name: []const u8, on_click: ?ui.Handler(void)) !struct { button: *ui.Node, label: *ui.Node } {
-    const button_node = try ui.widgets.Button(.{ .a11y_label = name, .variant = .ghost, .base_style = S.option(), .hover_style = S.hover(), .on_click = on_click }).mount(scope, cx);
+    const button_node = try ui.widgets.Button(.{ .a11y_label = name, .variant = .ghost, .base_style = try S.theme.paintSignal(S.ButtonStyle, cx, scope, S.option, .{}), .hover_style = try S.theme.paintSignal(?S.ButtonStyle, cx, scope, S.hover, .{}), .on_click = on_click }).mount(scope, cx);
     const label = try ui.textStyled(cx, S.filename, name);
     label.setStyleInline(cx.allocator, S.filenameLabel());
     label.meta.ownership.meta.test_id = "ai.remote.filename";
@@ -88,12 +88,12 @@ pub const View = struct {
         self.surface.setStyleInline(cx.allocator, .{ .width = .fill(), .direction = .column, .gap = 8, .padding = ui.Padding.all(20) });
         const heading = try ui.boxStyled(cx, S.row, .{});
         heading.setStyleInline(cx.allocator, .{ .gap = 8 });
-        const title_icon = try ui.iconTint(cx, ui.icons.file_search, S.theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        const title_icon = try S.theme.icon(cx, ui.icons.file_search, "accent_ink", .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
         title_icon.meta.ownership.meta.test_id = "ai.remote.title.icon";
         try heading.appendChild(cx.allocator, title_icon);
         try heading.appendChild(cx.allocator, try ui.textStyled(cx, S.heading, "引用远程文件"));
         try heading.appendChild(cx.allocator, try ui.box(cx, .{ .width = .fill() }, .{}));
-        const close_button = try ui.widgets.Button(.{ .label = "关闭", .variant = .ghost, .size = .sm, .base_style = S.closeButton(), .hover_style = S.hover(), .on_click = cx.on(View, self, close) }).mount(scope, cx);
+        const close_button = try ui.widgets.Button(.{ .label = "关闭", .variant = .ghost, .size = .sm, .base_style = try S.theme.paintSignal(S.ButtonStyle, cx, scope, S.closeButton, .{}), .hover_style = try S.theme.paintSignal(?S.ButtonStyle, cx, scope, S.hover, .{}), .on_click = cx.on(View, self, close) }).mount(scope, cx);
         close_button.meta.ownership.meta.test_id = "ai.remote.close";
         try heading.appendChild(cx.allocator, close_button);
         try self.surface.appendChild(cx.allocator, heading);
@@ -160,10 +160,11 @@ pub const View = struct {
         self.status.meta.ownership.meta.test_id = "ai.remote.status";
         self.status.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try footer.appendChild(cx.allocator, self.status);
-        const preview = try ui.widgets.Button(.{ .label = "预览文件", .variant = .secondary, .size = .sm, .base_style = S.button(), .disabled = self.read_disabled, .on_click = cx.on(View, self, readSelected) }).mount(scope, cx);
+        const preview = try ui.widgets.Button(.{ .label = "预览文件", .variant = .secondary, .size = .sm, .base_style = try S.theme.paintSignal(S.ButtonStyle, cx, scope, S.button, .{}), .disabled = self.read_disabled, .on_click = cx.on(View, self, readSelected) }).mount(scope, cx);
         preview.meta.ownership.meta.test_id = "ai.remote.read";
         try footer.appendChild(cx.allocator, preview);
-        const attach = try ui.widgets.Button(.{ .label = "附加文件", .variant = .primary, .size = .sm, .base_style = S.primary(), .disabled = self.attach_disabled, .on_click = cx.on(View, self, attachSelected) }).mount(scope, cx);
+        const attach = try ui.widgets.Button(.{ .label = "附加文件", .variant = .primary, .size = .sm, .base_style = try S.theme.paintSignal(S.ButtonStyle, cx, scope, S.primary, .{}), .disabled = self.attach_disabled, .on_click = cx.on(View, self, attachSelected) }).mount(scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, scope, attach, self.attach_disabled);
         attach.meta.ownership.meta.test_id = "ai.remote.attach";
         try footer.appendChild(cx.allocator, attach);
         try self.surface.appendChild(cx.allocator, footer);
@@ -174,7 +175,7 @@ pub const View = struct {
         if (!value and self.open_state) self.close();
     }
     fn button(self: *View, label: []const u8, id: []const u8, comptime handler: *const fn (*View) void) !*ui.Node {
-        const button_node = try ui.widgets.Button(.{ .label = label, .variant = .secondary, .size = .sm, .base_style = S.button(), .hover_style = S.hover(), .on_click = self.cx.on(View, self, handler) }).mount(self.scope, self.cx);
+        const button_node = try ui.widgets.Button(.{ .label = label, .variant = .secondary, .size = .sm, .base_style = try S.theme.paintSignal(S.ButtonStyle, self.cx, self.scope, S.button, .{}), .hover_style = try S.theme.paintSignal(?S.ButtonStyle, self.cx, self.scope, S.hover, .{}), .on_click = self.cx.on(View, self, handler) }).mount(self.scope, self.cx);
         button_node.meta.ownership.meta.test_id = id;
         return button_node;
     }
@@ -442,11 +443,12 @@ pub const View = struct {
             break;
         };
         const container = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 43 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 8, .right = 8 }, .background = if (selected) S.theme.popupSelection() else ui.Color.TRANSPARENT, .flex_shrink = 0 }, .{});
+        if (selected) container.meta.per_frame.hooks.on_theme = selectedTheme;
         const checked = try scope.createSignal(bool, selected);
         const checkbox = if (entry.attributes.kind == .file) try ui.widgets.Checkbox(.{ .checked = ui.split(checked, cx.on(Row, row, Row.check)), .box_size = @as(f32, 14), .label = "" }).mount(scope, cx) else try ui.box(cx, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 }, .flex_shrink = 0 }, .{});
         checkbox.meta.ownership.meta.test_id = "ai.remote.entry";
         try container.appendChild(cx.allocator, checkbox);
-        const icon = if (entry.attributes.kind == .directory) try ui.iconTint(cx, ui.icons.folder, S.theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }) else try ui.iconTint(cx, @import("file_workspace_icons.zig").asset(entry.display_name), @import("file_workspace_icons.zig").color(entry.display_name), .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } });
+        const icon = if (entry.attributes.kind == .directory) try S.theme.icon(cx, ui.icons.folder, "fg_2", .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }) else try ui.iconTint(cx, @import("file_workspace_icons.zig").asset(entry.display_name), @import("file_workspace_icons.zig").color(entry.display_name), .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } });
         try container.appendChild(cx.allocator, icon);
         const filename = try filenameButton(scope, cx, entry.display_name, cx.on(Row, row, Row.choose));
         const button_node = filename.button;
@@ -556,3 +558,7 @@ pub const View = struct {
         return self.readers.items.len == 0;
     }
 };
+
+fn selectedTheme(node: *ui.Node, _: *const ui.ThemeTokens, _: std.mem.Allocator) void {
+    node.setBackground(S.theme.popupSelection());
+}

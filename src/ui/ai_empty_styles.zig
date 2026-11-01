@@ -8,7 +8,7 @@ pub fn row(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .max_width = 440, .direction = .row, .align_items = .center, .gap = 8 };
 }
 pub fn status(configured: bool) ui.TextStyle {
-    return .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = if (configured) theme.current().accent else theme.current().warn };
+    return .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = if (configured) theme.current().accent_ink else theme.current().warn_ink };
 }
 pub fn action(configured: bool, primary: bool) ui.BoxStyle {
     return .{ .width = if (configured) .fill() else .{ .px = 144 }, .height = .{ .px = if (configured) 30 else 28 }, .flex = if (configured) 1 else 0, .flex_shrink = 0, .padding = .{ .left = 10, .right = 8 }, .corner_radius = 8, .background = if (primary) theme.current().action_accent else if (configured) theme.current().surface_2 else theme.current().well, .font_size = if (configured) 11.5 else 12 };

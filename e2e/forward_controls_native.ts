@@ -27,6 +27,11 @@ def identify_os(self,channel,command):
  self.calls.append({'UNEXPECTED_EXEC':command.decode('utf-8','replace')})
  return False
 Connection.check_channel_exec_request=identify_os
+original_listen=Connection.check_port_forward_request
+def delayed_listen(self,address,port):
+ if (out/'delay-remote').exists():time.sleep(2)
+ return original_listen(self,address,port)
+Connection.check_port_forward_request=delayed_listen
 out=Path(sys.argv[1]);peer=Peer();peer.deny_remote=False;peer.remote_cancelled=threading.Event();echo=Echo();peer.thread.start();stop=threading.Event()
 signal.signal(signal.SIGTERM,lambda *_:stop.set())
 signal.signal(signal.SIGINT,lambda *_:stop.set())
@@ -46,9 +51,9 @@ const flat=(n:any):any[]=>n?[n,...(n.children??[]).flatMap(flat)]:[];
 const text=(n:any)=>flat(n).map(x=>x.text??'').join(' ');
 const vis=(id:string)=>waitFor(async()=>{const nodes=await query(id);assert(Array.isArray(nodes),JSON.stringify(nodes));return nodes.find(shown)??null},12000);
 const hidden=(id:string)=>waitFor(async()=>!(await query(id)).some(shown)||null,12000);
-async function click(id:string){const n=await vis(id);await mouseMove(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2);assert((await clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2)).ok)}
+async function click(id:string){report.last_action=id;const n=await vis(id);await mouseMove(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2);assert((await clickAt(n.rect.x+n.rect.w/2,n.rect.y+n.rect.h/2)).ok)}
 async function edit(id:string,value:string){await click(id);await key('a',{cmd:true});await type_(value)}
-async function cap(name:string,keepPointer=false){if(!keepPointer)await mouseMove(20,80);await sleep(180);assert((await screenshot(join(out,name+'.png'))).ok);const ids=['socks.info','socks.info.rule','socks.info.empty','socks.info.status','socks.config.card','socks.config.error','forward.mode.local','forward.mode.remote','forward.mode.socks5','forward.exposure.card'];await writeFile(join(out,name+'.json'),JSON.stringify(Object.fromEntries(await Promise.all(ids.map(async id=>[id,await query(id)]))),null,2));report.captures.push(name)}
+async function cap(name:string,keepPointer=false){if(!keepPointer)await mouseMove(20,80);await sleep(180);assert((await screenshot(join(out,name+'.png'))).ok);const ids=['socks.info.logs.content','socks.logs.close','socks.info.control','socks.info','socks.info.rule','socks.info.empty','socks.info.status','socks.config.card','socks.config.error','forward.mode.local','forward.mode.remote','forward.mode.socks5','forward.exposure.card'];await writeFile(join(out,name+'.json'),JSON.stringify(Object.fromEntries(await Promise.all(ids.map(async id=>[id,await query(id)]))),null,2));report.captures.push(name)}
 async function freePort(){const s=net.createServer();await new Promise<void>((r,j)=>{s.once('error',j);s.listen(0,'127.0.0.1',r)});const port=(s.address() as net.AddressInfo).port;await new Promise<void>(r=>s.close(()=>r()));return port}
 async function dial(port:number){const socket=net.createConnection({host:'127.0.0.1',port});socket.setTimeout(5000,()=>socket.destroy(new Error('owned socket timeout')));await new Promise<void>((r,j)=>{socket.once('connect',r);socket.once('error',j)});return socket}
 async function exchange(port:number,socks:boolean){const socket=await dial(port);let data=Buffer.alloc(0),failure:any;socket.on('data',x=>data=Buffer.concat([data,x]));socket.on('error',e=>failure=e);const take=async(n:number)=>{await waitFor(()=>{if(failure)throw failure;return data.length>=n?true:null},6000);const result=data.subarray(0,n);data=data.subarray(n);return result};try{if(socks){socket.write(Buffer.from([5,1,0]));assert.deepEqual(await take(2),Buffer.from([5,0]));const host=Buffer.from('shared.fixture');socket.write(Buffer.concat([Buffer.from([5,1,0,3,host.length]),host,Buffer.from([16,146])]));const reply=await take(10);assert.equal(reply[1],0)}const payload=randomBytes(8192);socket.write(payload);assert.deepEqual(await take(payload.length),payload);await sleep(100);assert.equal(data.length,0);return payload.length}finally{socket.destroy()}}
@@ -56,7 +61,7 @@ let ready:any;
 try{
  ready=await waitFor(async()=>{try{return JSON.parse(await readFile(join(peerDir,'ready.json'),'utf8'))}catch{return null}},12000);
  await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="${theme}"\nfont_family="Menlo"\nfont_size=14\n`);
- await writeFile(join(data,'hosts.toml'),`[registry]\nschema_version=2\nrevision=1\nnext_connection_id=2\nnext_group_id=1\n[[hosts]]\nconnection_id=1\nrevision=1\nprotocol="ssh"\nauth_mode="password"\noptions={strict_host_key=true}\nname="Forwarding owned peer"\nhost="127.0.0.1"\nport=${ready.port}\nuser="${ready.user}"\n`);
+ await writeFile(join(data,'hosts.toml'),`[registry]\nschema_version=2\nrevision=1\nnext_connection_id=2\nnext_group_id=1\n[[hosts]]\nconnection_id=1\nrevision=1\nprotocol="ssh"\nauto_shell_integration=false\ncommand_info=false\nauth_mode="password"\noptions={strict_host_key=true}\nname="Forwarding owned peer"\nhost="127.0.0.1"\nport=${ready.port}\nuser="${ready.user}"\n`);
  const sourceEvidence=process.argv[4]?JSON.parse(await readFile(process.argv[4],'utf8')):null;const sourceBinary=sourceEvidence?join(sourceEvidence.isolated,'zerowork'):resolve('zig-out/bin/zerowork');await copyFile(sourceBinary,join(iso,'zerowork'));await copyFile(join(dirname(sourceBinary),'zw_ipc.so'),join(iso,'zw_ipc.so'));report.sha256=createHash('sha256').update(await readFile(join(iso,'zerowork'))).digest('hex');
  process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;app=spawn(join(iso,'zerowork'),[],{env:{...process.env,ZENIT_E2E_FILE_RPC_DIR:rpc,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',log.fd,log.fd]});appEnd=new Promise(r=>app.once('close',r));report.pid=app.pid;
  await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);await resizeWindow(1440,900);
@@ -68,11 +73,28 @@ try{
  const transfer=await vis('status.transfer');assert(text(transfer).includes('传输 · 空闲'));await mouseMove(transfer.rect.x+transfer.rect.w/2,transfer.rect.y+transfer.rect.h/2);const preview=await vis('transfer.session');await sleep(150);assert.equal((await vis('transfer.session')).rect.w,760);await cap('00c-transfer-hover',true);await mouseMove(preview.rect.x+preview.rect.w/2,preview.rect.y+preview.rect.h/2);await sleep(250);await vis('transfer.session');await mouseMove(20,80);await hidden('transfer.session');
  await click('status.transfer');await vis('transfer.session');await mouseMove(20,80);await sleep(350);await vis('transfer.session');await click('transfer.window.close');await hidden('transfer.session');await cap('00d-transfer-pinned-closed');
  await click('status.connection.forward');const empty=await vis('socks.info.empty');assert(text(empty).includes('没有转发规则'));assert.equal((await vis('socks.info')).rect.w,380);await cap('01-forward-empty');
+ // Applying an exposure approval does not start a listener. A mode change
+ // on the same owner must ask again before applying the new exposure scope.
+ const approvalPort=await freePort();
+ await click('socks.info.config');await click('forward.mode.local');
+ await edit('socks.config.port',String(approvalPort));await edit('socks.config.bind','0.0.0.0');
+ await edit('forward.target.host','shared.fixture');await edit('forward.target.port','4242');
+ await click('socks.config.save');await vis('forward.exposure.card');await click('forward.exposure.confirm');await hidden('socks.config');
+ await assert.rejects(()=>dial(approvalPort));
+ await click('status.connection.forward');await click('socks.info.config');await click('forward.mode.remote');
+ await edit('forward.target.host','127.0.0.1');await edit('forward.target.port',String(ready.echo_port));
+ await click('socks.config.save');const remoteExposure=await vis('forward.exposure.card');
+ assert(text(remoteExposure).includes('SSH 端监听'));assert(text(remoteExposure).includes('GatewayPorts'));
+ await cap('01b-remote-exposure-scope');await click('forward.exposure.cancel');await hidden('forward.exposure');
+ await edit('socks.config.bind','127.0.0.1');await click('socks.config.save');await hidden('socks.config');
+ await click('status.connection.forward');await vis('socks.info.rule');
+ report.checks.push({exposure_scope:'Local approval cannot authorize Remote on the same owner',listener_started:false});
  const ports:any={};
  for(const mode of ['local','remote','socks5']){
   await click('socks.info.config');await vis('socks.config.card');assert(!(await query('socks.info')).some(shown));await click('socks.config.exit');await key('escape');await vis('socks.config.card');await click('forward.mode.'+mode);await sleep(120);const configText=text(await vis('socks.config.card'));assert(configText.includes(mode==='remote'?'SSH端监听 → 本机目标':mode==='local'?'本机监听 → SSH端目标':'本机监听 · 动态目标'));const port=await freePort();ports[mode]=port;await edit('socks.config.port',String(port));await edit('socks.config.bind','127.0.0.1');
   if(mode!=='socks5'){await edit('forward.target.host',mode==='local'?'shared.fixture':'127.0.0.1');await edit('forward.target.port',mode==='local'?'4242':String(ready.echo_port))}
   if(mode==='local'){await edit('socks.config.port','0');await click('socks.config.save');assert(text(await vis('socks.config.error')).includes('不能为空'));await edit('socks.config.port',String(port));
+   await edit('socks.config.max','257');await click('socks.config.save');assert(text(await vis('socks.config.error')).includes('1–256'));await edit('socks.config.max','64');
    await edit('socks.config.bind','0.0.0.0');await click('socks.config.save');await vis('forward.exposure.card');await key('return');assert((await query('forward.exposure.card')).some(shown));await assert.rejects(()=>dial(port));await cap('02-exposure-confirmation-only');await click('forward.exposure.cancel');await hidden('forward.exposure');await vis('socks.config.card');await edit('socks.config.bind','127.0.0.1');
   }
   await resizeWindow(860,480);await sleep(150);const card=await vis('socks.config.card');assert.equal(card.rect.w,480);assert.equal((await vis('socks.config.owner')).rect.x-card.rect.x,22);assert.equal((await vis('socks.config.save')).rect.x+(await vis('socks.config.save')).rect.w,card.rect.x+card.rect.w-22);assert(card.rect.x>=16&&card.rect.y>=16&&card.rect.x+card.rect.w<=844&&card.rect.y+card.rect.h<=464.5);await cap('02-config-'+mode+'-minimum');
@@ -86,20 +108,29 @@ try{
   await click('socks.info.close');await mouseMove(20,80);await cap('03a-statusbar-running-'+mode);assert(!(await query('socks.info')).some(shown));assert.equal(text(await vis('status.connection.chain.state')).trim(),'连接链路');await click('status.connection.forward');await vis('socks.info');
   if(mode==='socks5'){const a=(await vis('socks.info.copy')).rect,b=(await vis('socks.info.logs')).rect;assert(Math.abs(a.x+a.w-b.x-b.w)<1,'Copy and logs icons align at the right edge')}
   const bytes=await exchange(port,mode==='socks5');report.checks.push({mode,bytes,roundtrip:'exact 8192 random bytes'});await sleep(250);await cap('03-running-'+mode);
-  await click('socks.info.logs');await waitFor(async()=>text(await vis('socks.info.logs.content')).includes('通道建立完成')||text(await vis('socks.info.logs.content')).includes('TCP 连接完成')||null,5000);assert(text(await vis('socks.info.logs.content')).includes('ms'));await cap('03b-logs-'+mode);await click('socks.info.logs.back');await sleep(150);
+  await click('socks.info.logs');await waitFor(async()=>text(await vis('socks.info.logs.content')).includes('接受本机连接')||text(await vis('socks.info.logs.content')).includes('收到远端转发连接')||null,5000);assert(text(await vis('socks.info.logs.content')).includes('ms'));await cap('03b-logs-'+mode);await click('socks.logs.close');await click('status.connection.forward');await sleep(150);
   const info=await vis('socks.info'),anchor=await vis('status.connection.forward');assert(info.rect.x>=8&&info.rect.y>=8&&info.rect.x+info.rect.w<=852&&info.rect.y+info.rect.h<=anchor.rect.y);
   await click('socks.info.control');await waitFor(async()=>text(await vis('socks.info.status')).includes('未开启')||null,15000);await assert.rejects(()=>dial(port));await cap('04-stopped-'+mode);assert.equal(text(await vis('status.connection.forward.state')).trim(),'端口转发');
+  if(mode==='remote'){
+   await writeFile(join(peerDir,'delay-remote'),'delay');await click('socks.info.control');
+   await waitFor(async()=>text(await vis('socks.info.status')).trim()==='启动中'||null,5000);
+   assert(text(await vis('socks.info.control')).includes('取消启动'));await cap('04a-remote-starting');
+   await click('socks.info.control');await waitFor(async()=>text(await vis('socks.info.status')).trim()==='停止中'||null,5000);await cap('04b-remote-stopping');
+   await waitFor(async()=>text(await vis('socks.info.status')).includes('未开启')||null,10000);
+   await rm(join(peerDir,'delay-remote'));await assert.rejects(()=>dial(port));
+   report.checks.push({startup_cancel:'Remote cancelled while tcpip-forward reply was pending',cleanup:'listener released'});
+  }
   if(mode==='socks5'){
    await click('socks.info.config');await vis('socks.config.card');await edit('socks.config.port','65535');await click('socks.config.save');await hidden('socks.config');await click('status.connection.forward');
    const occupied=net.createServer();await new Promise<void>((r,j)=>{occupied.once('error',j);occupied.listen(65535,'127.0.0.1',r)});
-   try{await click('socks.info.control');await waitFor(async()=>text(await vis('socks.info.status')).includes('失败')||null,15000);assert(text(await vis('socks.info.status')).includes('失败'));assert(text(await vis('socks.info.control')).includes('重试'));await click('socks.info.close');await cap('05a-statusbar-failed');assert.equal(text(await vis('status.connection.forward.state')).trim(),'端口转发');await click('status.connection.forward');await click('socks.info.logs');assert(text(await vis('socks.info.logs.content')).includes('监听失败'));await cap('05-listen-failed');await click('socks.info.logs.back');await sleep(150)}finally{await new Promise<void>(r=>occupied.close(()=>r()))}
+   try{await click('socks.info.control');await waitFor(async()=>text(await vis('socks.info.status')).includes('失败')||null,15000);assert(text(await vis('socks.info.status')).includes('失败'));assert(text(await vis('socks.info.control')).includes('重试'));await click('socks.info.close');await cap('05a-statusbar-failed');assert.equal(text(await vis('status.connection.forward.state')).trim(),'端口转发');await click('status.connection.forward');await click('socks.info.logs');assert(text(await vis('socks.info.logs.content')).includes('监听失败'));await cap('05-listen-failed');await click('socks.logs.close');await sleep(150)}finally{await new Promise<void>(r=>occupied.close(()=>r()))}
    await click('socks.info.control');await waitFor(async()=>text(await vis('socks.info.status')).includes('正在监听')||null,15000);await click('socks.info.control');
   }
  }
  await click('socks.info.close');await mouseMove(20,80);peer.kill('SIGTERM');await peerEnd;await waitFor(async()=>text(await vis('status.connection.identity')).includes('已断开')||null,15000);await cap('06-statusbar-disconnected');
  report.ports=ports;report.status='passed';
 }catch(e){report.status='failed';report.error=String(e);await cap('failure').catch(()=>{});process.exitCode=1}
-finally{if(app&&app.exitCode===null&&app.signalCode===null){app.kill('SIGTERM');await Promise.race([appEnd,sleep(3000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await appEnd}}if(peer.exitCode===null&&peer.signalCode===null){peer.kill('SIGTERM');await Promise.race([peerEnd,sleep(3000)]);if(peer.exitCode===null&&peer.signalCode===null){peer.kill('SIGKILL');await peerEnd}}await log.close();await peerLog.close();try{const final=JSON.parse(await readFile(join(peerDir,'report.json'),'utf8'));report.peer=final;assert(!JSON.stringify(final.calls).includes('UNEXPECTED_EXEC'),'Only the exact read-only OS probe may use exec');if(report.status==='passed'){assert.equal(final.calls.length,1,'One host activation must create exactly one SSH transport');assert.equal(final.calls[0].filter((x:any)=>x==='auth').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='pty').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='shell').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='session').length,3,'PTY, OS identification and the chain inspector sample channel');assert.equal(final.calls[0].filter((x:any)=>x&&typeof x==='object'&&x.os_probe).length,1);assert.equal(final.forward_bytes[0],16384);assert.equal(final.echo_bytes,8192)} }catch(e){report.cleanup_error=String(e);report.status='failed';process.exitCode=1}report.isolated=iso;await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({status:report.status,error:report.error,out}))}
+finally{if(app&&app.exitCode===null&&app.signalCode===null){app.kill('SIGTERM');await Promise.race([appEnd,sleep(3000)]);if(app.exitCode===null&&app.signalCode===null){app.kill('SIGKILL');await appEnd}}if(peer.exitCode===null&&peer.signalCode===null){peer.kill('SIGTERM');await Promise.race([peerEnd,sleep(3000)]);if(peer.exitCode===null&&peer.signalCode===null){peer.kill('SIGKILL');await peerEnd}}await log.close();await peerLog.close();try{const final=JSON.parse(await readFile(join(peerDir,'report.json'),'utf8'));report.peer=final;assert(!JSON.stringify(final.calls).includes('UNEXPECTED_EXEC'),'Only the exact read-only OS probe may use exec');if(report.status==='passed'){assert.equal(final.calls.length,1,'One host activation must create exactly one SSH transport');assert.equal(final.calls[0].filter((x:any)=>x==='auth').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='pty').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='shell').length,1);assert.equal(final.calls[0].filter((x:any)=>x==='session').length,4,'PTY, OS identification and two chain inspector samples');assert.equal(final.calls[0].filter((x:any)=>x&&typeof x==='object'&&x.os_probe).length,1);assert.equal(final.forward_bytes[0],16384);assert.equal(final.echo_bytes,8192)} }catch(e){report.cleanup_error=String(e);report.status='failed';process.exitCode=1}report.isolated=iso;await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify({status:report.status,error:report.error,out}))}
 } finally {
  await rm(iso,{recursive:true,force:true});
 }

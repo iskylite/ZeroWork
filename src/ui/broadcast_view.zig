@@ -56,10 +56,10 @@ pub const View = struct {
         try cx.root.?.appendChild(cx.allocator, popup.wrapper);
         self.root.meta.ownership.meta.test_id = "group.broadcast.card";
         const head = try ui.box(cx, S.header(), .{});
-        try head.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("radio").?, S.theme.current().accent, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
-        try head.appendChild(cx.allocator, try ui.text(cx, "输入广播", S.text(true)));
+        try head.appendChild(cx.allocator, try S.theme.icon(cx, ui.icons.get("radio").?, "accent_ink", .{ .width = .{ .px = 16 }, .height = .{ .px = 16 } }));
+        try head.appendChild(cx.allocator, try ui.textStyled(cx, S.titleText, "输入广播"));
         try head.appendChild(cx.allocator, try ui.spacer(cx));
-        const close = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.x, .variant = .ghost, .a11y_label = "收起广播信息", .base_style = S.close(), .hover_style = S.controlHover(false), .on_click = cx.on(View, self, hide) }).mount(self.scope, cx);
+        const close = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.x, .variant = .ghost, .a11y_label = "收起广播信息", .base_style = try S.theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, self.scope, S.close, .{}), .hover_style = try S.theme.paintSignal(?@FieldType(ui.widgets.ControlShellConfig, "style"), cx, self.scope, S.controlHover, .{false}), .on_click = cx.on(View, self, hide) }).mount(self.scope, cx);
         close.meta.ownership.meta.test_id = "group.broadcast.close";
         try head.appendChild(cx.allocator, close);
         try self.root.appendChild(cx.allocator, head);
@@ -71,14 +71,23 @@ pub const View = struct {
         try self.root.appendChild(cx.allocator, scroll.container);
         const footer = try ui.box(cx, S.row(), .{});
         footer.meta.ownership.meta.test_id = "group.broadcast.footer";
-        const minimum = try ui.text(cx, "至少 2 个在线会话", S.text(false));
+        const minimum = try ui.textStyled(cx, S.secondaryText, "至少 2 个在线会话");
         minimum.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 16 } });
         try footer.appendChild(cx.allocator, minimum);
         self.control = try ui.widgets.Button(.{ .label = self.control_label, .variant = .primary, .base_style = self.control_style, .hover_style = self.control_hover, .disabled = self.disabled, .on_click = cx.on(View, self, accept) }).mount(self.scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, self.scope, self.control, self.disabled);
         self.control.meta.ownership.meta.test_id = "group.broadcast.accept";
         try footer.appendChild(cx.allocator, self.control);
         try self.root.appendChild(cx.allocator, footer);
         try @import("compact_overlay_layout.zig").mount(cx, self.scope, self.root, scroll.container, scroll.content, S.fixed_height, S.maximum_height - S.fixed_height, null, 0);
+        try scope.createEffect(.{ .view = self, .publication = try cx.themeSignal(scope) }, struct {
+            fn paint(ctx: anytype) void {
+                _ = ctx.publication.get();
+                ctx.view.root.setStyleInline(ctx.view.cx.allocator, S.panel());
+                ctx.view.control_style.set(S.control(true));
+                ctx.view.control_hover.set(S.controlHover(true));
+            }
+        }.paint);
         try cx.addAfterLayoutHook(self, afterLayout);
         return self;
     }
@@ -151,13 +160,13 @@ pub const View = struct {
         for (snapshot.members) |member| if (member.selected) {
             count += 1;
         };
-        const summary = try ui.text(self.cx, try std.fmt.allocPrint(self.current.?.arena.allocator(), "{s} · {s} · {d} 个参与会话", .{ snapshot.name, if (snapshot.running) @as([]const u8, "已开启") else "已关闭", count }), S.text(false));
+        const summary = try ui.textStyled(self.cx, S.secondaryText, try std.fmt.allocPrint(self.current.?.arena.allocator(), "{s} · {s} · {d} 个参与会话", .{ snapshot.name, if (snapshot.running) @as([]const u8, "已开启") else "已关闭", count }));
         summary.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0 });
         summary.meta.ownership.meta.test_id = "group.broadcast.summary";
         try self.content.appendChild(self.cx.allocator, summary);
         const members = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 7, .flex_shrink = 0 }, .{});
         for (snapshot.members) |member| {
-            const row = try ui.box(self.cx, S.member(), .{});
+            const row = try ui.boxStyled(self.cx, S.memberPaint, .{});
             row.meta.ownership.meta.test_id = try std.fmt.allocPrint(self.current.?.arena.allocator(), "group.broadcast.member.{d}", .{member.id});
             const action = try scope.createState(Selection, .{ .view = self, .group = snapshot.group, .owner = member.owner, .id = member.id });
             const selected = try scope.createSignal(bool, member.selected);
@@ -165,18 +174,19 @@ pub const View = struct {
             check.meta.ownership.meta.test_id = try std.fmt.allocPrint(self.current.?.arena.allocator(), "group.broadcast.member.{d}.select", .{member.id});
             if (check.behavior.interaction.a11y) |*attrs| attrs.label = member.name;
             try row.appendChild(self.cx.allocator, check);
-            const dot = try ui.box(self.cx, .{ .width = .{ .px = 5 }, .height = .{ .px = 5 }, .background = if (member.available) S.theme.current().ok else S.theme.current().fg_3, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
+            const dot = try ui.box(self.cx, .{ .width = .{ .px = 5 }, .height = .{ .px = 5 }, .background = if (member.available) S.theme.current().ok_ink else S.theme.current().fg_3, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
+            dot.meta.per_frame.hooks.on_theme = if (member.available) onlineDot else unavailableDot;
             try row.appendChild(self.cx.allocator, dot);
             const identity = try ui.box(self.cx, .{ .width = .fill(), .flex = 1, .min_width = 0, .direction = .column, .gap = 3 }, .{});
-            const name = try ui.text(self.cx, member.name, .{ .font_size = 11, .line_height = 1.5, .font_weight = 500, .color = S.theme.current().fg_1, .text_overflow = .ellipsis });
+            const name = try ui.textStyled(self.cx, S.memberName, member.name);
             name.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 16 }, .min_width = 0 });
             try identity.appendChild(self.cx.allocator, name);
-            const endpoint = try ui.text(self.cx, member.endpoint, .{ .font_size = 9, .line_height = 1.5, .color = S.theme.current().fg_2, .text_overflow = .ellipsis });
+            const endpoint = try ui.textStyled(self.cx, S.memberEndpoint, member.endpoint);
             endpoint.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 14 }, .min_width = 0 });
             try identity.appendChild(self.cx.allocator, endpoint);
             try row.appendChild(self.cx.allocator, identity);
             const state = if (!member.available) member.unavailable_reason else if (member.source) "当前输入" else if (member.selected) "参与" else "未参与";
-            try row.appendChild(self.cx.allocator, try ui.text(self.cx, state, .{ .font_size = 8, .color = S.theme.current().fg_2 }));
+            try row.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.memberState, state));
             try members.appendChild(self.cx.allocator, row);
             if (self.focus_member == member.id) {
                 self.cx.setFocus(check);
@@ -184,8 +194,8 @@ pub const View = struct {
             }
         }
         try self.content.appendChild(self.cx.allocator, members);
-        const note_box = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = .{ .left = 10, .right = 10, .top = 9, .bottom = 9 }, .background = S.theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 }, .{});
-        const note = try ui.text(self.cx, "在当前输入会话发送的 Shell 输入会同步到参与会话。内置指令不广播；新增或重连成员需重新开启确认。", S.note());
+        const note_box = try ui.boxStyled(self.cx, S.notePaint, .{});
+        const note = try ui.textStyled(self.cx, S.noteText, "在当前输入会话发送的 Shell 输入会同步到参与会话。内置指令不广播；新增或重连成员需重新开启确认。");
         note.setStyleInline(self.cx.allocator, .{ .width = .fill() });
         try note_box.appendChild(self.cx.allocator, note);
         try self.content.appendChild(self.cx.allocator, note_box);
@@ -238,3 +248,10 @@ pub const View = struct {
         return null;
     }
 };
+
+fn onlineDot(node: *ui.Node, _: *const ui.ThemeTokens, _: std.mem.Allocator) void {
+    node.setBackground(S.theme.current().ok_ink);
+}
+fn unavailableDot(node: *ui.Node, _: *const ui.ThemeTokens, _: std.mem.Allocator) void {
+    node.setBackground(S.theme.current().fg_3);
+}

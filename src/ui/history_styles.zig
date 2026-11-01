@@ -55,8 +55,8 @@ pub fn durationLabel(buffer: []u8, duration_ms: u64) []const u8 {
 
 pub fn repaint(node: *ui.Node, previous: theme.Colors) void {
     node.setBackground(remap(node.getBackground(), previous));
-    if (node.getText()) |value| node.setTextColor(remap(value.color, previous));
-    if (node.getIcon()) |value| _ = node.setTint(remap(value.tint, previous));
+    if (node.getText()) |value| node.setTextColor(theme.remapUiInk(value.color, previous));
+    if (node.getIcon()) |value| _ = node.setTint(theme.remapUiInk(value.tint, previous));
     for (node.children.items) |child| repaint(child, previous);
 }
 fn remap(value: ui.Color, previous: theme.Colors) ui.Color {

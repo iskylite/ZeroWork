@@ -42,6 +42,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, configured: bool, actions: Actions) !
     for (labels, handlers, ids, 0..) |label, run, id, i| {
         const click = try scope.createState(Click, .{ .context = actions.context, .run = run });
         const button = try ui.widgets.Button(.{ .label = label, .block = configured, .variant = @as(ui.widgets.button.ButtonVariant, if (!configured and i == 0) .primary else .secondary), .base_style = S.action(configured, !configured and i == 0), .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+        if (!configured and i == 0) try @import("app_theme.zig").stylePrimary(cx, scope, button, null);
         button.meta.ownership.meta.test_id = id;
         if (configured) {
             // Shared V3 starter: icon, left-aligned label and the source help icon.
@@ -151,6 +152,7 @@ fn mountSetup(cx: *ui.Cx, scope: *ui.Scope, actions: Actions) !*ui.Node {
     try root.appendChild(cx.allocator, try ui.text(cx, "添加并启用一个模型服务提供方。", S.setupDescription()));
     const click = try scope.createState(Click, .{ .context = actions.context, .run = actions.settings });
     const button = try ui.widgets.Button(.{ .label = "配置 AI 服务", .variant = .primary, .base_style = S.setupAction(true), .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+    try @import("app_theme.zig").stylePrimary(cx, scope, button, null);
     button.meta.ownership.meta.test_id = "ai.empty.settings";
     try root.appendChild(cx.allocator, button);
     const layout = try scope.createState(SetupLayout, .{ .cx = cx, .root = root, .logo = logo });

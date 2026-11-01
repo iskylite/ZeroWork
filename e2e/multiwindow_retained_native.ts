@@ -1,3 +1,4 @@
+import {openSidebarHostMenu} from './sidebar_host_menu.ts';
 /** Own immutable loopback peer + own isolated native app. Requires root's
  * frozen test binary. Writes only the fresh local test target and fixtures. */
 import assert from 'node:assert/strict';
@@ -42,8 +43,8 @@ try{
  appEnded=new Promise<void>(done=>app!.once('close',()=>done()));
  await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
  const firstWindow=(await resourceSnapshot()).windows[0].window;
- await click('sidebar.host');await click('sidebar.host.connect');await settle();
- const host=(await query('sidebar.host')).find(shown);assert(host);await mouseMove(host.rect.x+host.rect.w/2,host.rect.y+host.rect.h/2);await sleep(150);await click('sidebar.host.more');await click('context.menu.new_window');
+ await click('sidebar.host');await settle();
+ const host=(await query('sidebar.host')).find(shown);assert(host);await mouseMove(host.rect.x+host.rect.w/2,host.rect.y+host.rect.h/2);await sleep(150);await openSidebarHostMenu(host);await click('context.menu.new_window');
  const second=await waitFor(async()=>{const s=await resourceSnapshot();return s.windows.find((w:any)=>w.window!==firstWindow)??null},20000);await selectResourceWindow(second.window);await settle();
  const result=await exerciseRetainedTransfer({firstWindow,secondWindow:second.window,sourceName:'release.txt',targetDirectory:await realpath(target),expectedSha256:ready.sha256,output,authenticate});
  report.retained=result;

@@ -157,6 +157,7 @@ pub const Presenter = struct {
         self.submit_disabled = try scope.createSignal(bool, true);
         self.submit_label = try scope.createText("确认", .{});
         self.submit_button = try ui.widgets.Button(.{ .label = self.submit_label, .disabled = self.submit_disabled, .variant = .primary, .on_click = cx.on(Presenter, self, submit) }).mount(scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, scope, self.submit_button, self.submit_disabled);
         self.submit_button.meta.ownership.meta.test_id = "plugin.challenge.submit";
         try footer.appendChild(cx.allocator, self.submit_button);
         return self;

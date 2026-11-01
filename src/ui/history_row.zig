@@ -16,6 +16,7 @@ const Click = struct {
 pub fn mount(cx: *ui.Cx, scope: *ui.Scope, context: *anyopaque, callback: Callback, index: usize, action: Action) !*ui.Node {
     const click = try scope.createState(Click, .{ .context = context, .callback = callback, .index = index, .action = action });
     const node = try ui.widgets.Button(.{ .label = if (action == .replay) "回放" else "导出", .variant = @as(ui.widgets.button.ButtonVariant, if (action == .replay) .primary else .secondary), .size = .sm, .base_style = @import("history_styles.zig").button(), .on_click = .{ .callback = Click.clicked, .context = @as(*anyopaque, @ptrCast(click)) } }).mount(scope, cx);
+    if (action == .replay) try @import("app_theme.zig").stylePrimary(cx, scope, node, null);
     node.meta.ownership.meta.test_id = if (action == .replay) "history.record.replay" else "history.record.export";
     return node;
 }

@@ -10,6 +10,9 @@ bool zw_register_ui_font(const unsigned char *bytes, size_t length) {
     if (!font) return false;
     CFErrorRef error = NULL;
     bool ok = CTFontManagerRegisterGraphicsFont(font, &error);
+    // Repeated startup/test registration, or an identical installed face, is
+    // already usable. Other failures must still stop startup explicitly.
+    if (!ok && error && CFErrorGetCode(error) == kCTFontManagerErrorAlreadyRegistered) ok = true;
     if (error) CFRelease(error);
     CGFontRelease(font);
     return ok;

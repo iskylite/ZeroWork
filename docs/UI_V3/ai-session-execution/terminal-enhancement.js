@@ -33,7 +33,7 @@ let dialogType='global',draftGlobal=true;
 const metadataVisible=()=>mode==='local'?preferences.global:(preferences.host??preferences.global);
 function renderMetadata(){
  const layer=$('command-metadata-layer');layer.hidden=!metadataVisible();
- layer.innerHTML=commands.map(c=>`<span class="command-metadata" data-meta="${c.id}">${c.ai?'<span class="meta-ai">AI</span>':''}<span class="meta-code ${c.status}">${icon(c.status==='success'?'check':c.status)}${c.code===null?'—':c.code}</span><span>${c.duration}</span></span>`).join('');
+ layer.innerHTML=commands.map(c=>`<span class="command-metadata" data-meta="${c.id}">${c.ai?'<span class="meta-ai">AI</span>':''}<span class="meta-code ${c.status}">${c.code===null?'—':c.code}</span><span>${c.duration}</span></span>`).join('');
 }
 
 function row(text,time='',command=null,kind='output',html=null){rows.push({text,time,command,kind,html});}

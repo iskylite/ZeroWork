@@ -26,12 +26,16 @@ pub const Host = struct {
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, parent: *wizard_mod.Wizard, source: registry.Registry, save_asset: SaveAsset) !struct { host: *Host, root: *ui.Node } {
         const self = try scope.createState(Host, .{ .cx = cx, .parent = parent, .save_asset = save_asset, .facade = .{ .allocator = cx.allocator, .context = undefined, .open_registered = queue } });
         self.facade.context = self;
+        self.facade.probe_host = parent.probe_host;
         try scope.onCleanup(Host, self, cleanup);
         self.child.setRegistry(source);
         self.child.connection_configs = parent.connection_configs;
+        self.child.credential_host = parent.credential_host;
+        self.child.probe_host = parent.probe_host;
         self.child.on_cancel = cancelled;
         self.child.cancel_context = self;
         self.child.on_envelope = submitEnvelope;
+        self.child.on_envelope_with_secret = submitEnvelopeWithSecret;
         self.child.envelope_context = self;
         self.child.editor_host = &self.facade;
         const root = try self.child.mount(cx, scope);
@@ -107,5 +111,10 @@ pub const Host = struct {
         if (intent == .probe or intent == .temporary) return error.ChildEditorSaveRequired;
         const owner = try self.save_asset.save(self.save_asset.context, value);
         self.complete(.{ .saved = .{ .asset_id = owner.id, .revision = owner.revision } });
+    }
+    fn submitEnvelopeWithSecret(raw: *anyopaque, value: envelopes.Envelope, intent: @import("../host/plugin_ui_contract.zig").SubmitIntent, _: @import("../host/editor_credentials.zig").Handoff) !void {
+        // Nested editors save an asset only. The child's Wizard commits its
+        // credential transaction after this same application save succeeds.
+        try submitEnvelope(raw, value, intent);
     }
 };

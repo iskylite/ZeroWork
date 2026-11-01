@@ -534,7 +534,9 @@ fn showPasteModal(self: *Surface) !void {
         try modal.body.appendChild(self.cx.allocator, scroll.container);
         const buttons = try ui.hstack(self.cx, .{ .gap = 8 }, .{});
         try buttons.appendChild(self.cx.allocator, try ui.widgets.Button(.{ .label = "取消", .on_click = self.cx.on(Surface, self, cancelClick) }).mount(scope, self.cx));
-        try buttons.appendChild(self.cx.allocator, try ui.widgets.Button(.{ .label = "确认插入", .variant = .primary, .on_click = self.cx.on(Surface, self, approveClick) }).mount(scope, self.cx));
+        const approve = try ui.widgets.Button(.{ .label = "确认插入", .variant = .primary, .on_click = self.cx.on(Surface, self, approveClick) }).mount(scope, self.cx);
+        try @import("app_theme.zig").stylePrimary(self.cx, scope, approve, null);
+        try buttons.appendChild(self.cx.allocator, approve);
         try modal.body.appendChild(self.cx.allocator, buttons);
         if (!modal.portaled) try self.host.appendChild(self.cx.allocator, modal.overlay);
         self.modal_scope = scope;

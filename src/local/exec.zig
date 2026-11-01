@@ -37,11 +37,17 @@ pub const Command = struct {
     /// command is explicit shell text; cwd travels only through fchdir and can
     /// never become part of the command. Permissions belong to the caller.
     pub fn start(allocator: std.mem.Allocator, owner: identity.SessionHandle, key: operation.OperationKey, call_id: u64, command: []const u8, cwd: ?[]const u8, limits: Limits, failure: *native.Failure) !Command {
+        return startPending(allocator, owner, key, call_id, command, cwd, limits, failure, native.zw_local_monotonic_ms(), null, null);
+    }
+    /// Queueing and preparation consume the same budget as the child. Check
+    /// Stop again at the last boundary before admitting a native spawn.
+    pub fn startPending(allocator: std.mem.Allocator, owner: identity.SessionHandle, key: operation.OperationKey, call_id: u64, command: []const u8, cwd: ?[]const u8, limits: Limits, failure: *native.Failure, accepted_ms: u64, cancel_requested: ?*const std.atomic.Value(bool), parent_closing: ?*const std.atomic.Value(bool)) !Command {
         try native.validateOwner(owner, key);
         if (call_id == 0) return error.InvalidIdentity;
         if (command.len == 0) return error.EmptyCommand;
         if (command.len > 1024 * 1024 or limits.capture_bytes == 0 or limits.capture_bytes > 16 * 1024 * 1024) return error.InvalidLimits;
         try native.validateString(command);
+        try checkStart(accepted_ms, limits.timeout_ms, cancel_requested, parent_closing);
         const cwd_z = try native.cwdZ(allocator, cwd);
         defer if (cwd_z) |value| allocator.free(value);
         const text = try allocator.dupeSentinel(u8, command, 0);
@@ -54,9 +60,31 @@ pub const Command = struct {
         errdefer stderr.deinit(allocator);
         try stdout.ensureTotalCapacity(allocator, limits.capture_bytes);
         try stderr.ensureTotalCapacity(allocator, limits.capture_bytes);
-        const process = native.zw_local_start_exec(if (cwd_z) |value| value.ptr else null, text.ptr, failure) orelse return error.StartFailed;
-        return .{ .allocator = allocator, .owner = owner, .operation_key = key, .call_id = call_id, .process = process, .limits = limits, .started_ms = native.zw_local_monotonic_ms(), .stdout = stdout, .stderr = stderr };
+        try checkStart(accepted_ms, limits.timeout_ms, cancel_requested, parent_closing);
+        var gate: StartGate = .{ .accepted_ms = accepted_ms, .timeout_ms = limits.timeout_ms, .cancel_requested = cancel_requested, .parent_closing = parent_closing };
+        const process = native.zw_local_start_exec_checked(if (cwd_z) |value| value.ptr else null, text.ptr, failure, StartGate.check, &gate) orelse return gate.failure orelse error.StartFailed;
+        return .{ .allocator = allocator, .owner = owner, .operation_key = key, .call_id = call_id, .process = process, .limits = limits, .started_ms = accepted_ms, .stdout = stdout, .stderr = stderr };
     }
+    fn checkStart(accepted_ms: u64, timeout_ms: u32, cancel_requested: ?*const std.atomic.Value(bool), parent_closing: ?*const std.atomic.Value(bool)) !void {
+        if (cancel_requested) |flag| if (flag.load(.acquire)) return error.CancelledBeforeStart;
+        if (parent_closing) |flag| if (flag.load(.acquire)) return error.CancelledBeforeStart;
+        if (timeout_ms != 0 and native.zw_local_monotonic_ms() -| accepted_ms >= timeout_ms) return error.TimeoutBeforeStart;
+    }
+    const StartGate = struct {
+        accepted_ms: u64,
+        timeout_ms: u32,
+        cancel_requested: ?*const std.atomic.Value(bool),
+        parent_closing: ?*const std.atomic.Value(bool),
+        failure: ?anyerror = null,
+        fn check(raw: *anyopaque) callconv(.c) c_int {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            checkStart(self.accepted_ms, self.timeout_ms, self.cancel_requested, self.parent_closing) catch |err| {
+                self.failure = err;
+                return 1;
+            };
+            return 0;
+        }
+    };
     pub fn pid(self: *const Command) !i32 {
         return native.zw_local_pid(self.process orelse return error.CommandReleased);
     }
@@ -98,7 +126,7 @@ pub const Command = struct {
         try self.drain(0);
         try self.drain(1);
         self.exit = try native.pollExit(process);
-        if (self.limits.timeout_ms != 0 and native.zw_local_monotonic_ms() - self.started_ms >= self.limits.timeout_ms) {
+        if (self.limits.timeout_ms != 0 and native.zw_local_monotonic_ms() -| self.started_ms >= self.limits.timeout_ms) {
             self.timed_out = true;
             self.cancelled = true;
         }

@@ -97,6 +97,39 @@ fn inputEvent(state: *ui.widgets.input.TextInputState, event: ui.events.Event) v
     _ = ui.widgets.input.inputEventHandler(event, state);
 }
 
+test "provider enabled status stays readable in every builtin at maximum transparency" {
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        _ = theme.setMaterialParameters(100, 0);
+        var f: Fixture = undefined;
+        try f.init(true);
+        defer f.deinit();
+        const badge = byId(f.mounted.root, "settings.ai.provider.0.status").?;
+        const background = badge.getBackground();
+        try std.testing.expectEqual(@as(u8, 255), background.a);
+        const ink = badge.getText().?.color;
+        const low = @min(statusLuminance(ink), statusLuminance(background));
+        const high = @max(statusLuminance(ink), statusLuminance(background));
+        try std.testing.expect((high + 0.05) / (low + 0.05) >= 4.5);
+        try std.testing.expectEqualStrings("已启用", badge.getText().?.content);
+    }
+}
+fn statusLuminance(c: ui.Color) f64 {
+    var result: f64 = 0;
+    inline for (.{ "r", "g", "b" }, .{ 0.2126, 0.7152, 0.0722 }) |field, weight| {
+        const channel = @as(f64, @floatFromInt(@field(c, field))) / 255;
+        result += weight * (if (channel <= 0.04045) channel / 12.92 else std.math.pow(f64, (channel + 0.055) / 1.055, 2.4));
+    }
+    return result;
+}
+
 // The configured fixture reproduces the prototype's single model and collapsed connection details.
 test "native provider cards use V3 header field grid and a single model row" {
     var f: Fixture = undefined;

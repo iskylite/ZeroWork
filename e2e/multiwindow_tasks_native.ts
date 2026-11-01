@@ -1,3 +1,4 @@
+import {openSidebarHostMenu} from './sidebar_host_menu.ts';
 /** Shared-task native acceptance helpers. Import into the process-owning
  * multiwindow runner after its two windows and real SFTP workspace are ready.
  * Every mutation below is a production control; /zerowork/windows is read-only
@@ -81,7 +82,7 @@ export async function exerciseSharedBackground(options:BackgroundOptions):Promis
  // Open the saved-host production menu. The caller's fixture has one direct
  // SSH asset; the normal action freezes its saved source and allocates owner.
  const host=await visible('sidebar.host');await mouseMove(host.rect.x+host.rect.w/2,host.rect.y+host.rect.h/2);await sleep(120);
- await click('sidebar.host.more');await click('context.menu.start_background_socks');
+ await openSidebarHostMenu(host);await click('context.menu.start_background_socks');
  const owner=await waitFor(async()=>{if(options.authenticate)await options.authenticate();const s=await resourceSnapshot();return s.backgrounds.find((b:any)=>b.asset===options.asset&&b.phase==='listening'&&b.local_port>0)??null},90000);
  const before=await resourceSnapshot();
  if(options.closeFirst){assert((await request('POST','/zerowork/windows',{action:'close',window:options.firstWindow})).ok);await waitFor(async()=>{await approveClose();return !(await resourceSnapshot()).windows.some((w:any)=>w.window===options.firstWindow)||null},60000)}

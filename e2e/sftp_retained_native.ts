@@ -216,8 +216,7 @@ try {
   const originalTabs = await tabs(); assert.equal(originalTabs.length, 1);
   const localTab = originalTabs[0].test_id;
   report.original_local_tab = localTab;
-  await click("sidebar.host"); await click("sidebar.host.connect");
-  await authenticateUntil("original", async () => (await query("files.workspace")).some(shown));
+  await click("sidebar.host"); await authenticateUntil("original", async () => (await query("files.workspace")).some(shown));
   const openedTabs = await tabs(); assert.equal(openedTabs.length, 2);
   const fileTab = openedTabs.find(value => value.test_id !== localTab).test_id;
   report.original_file_tab = fileTab;

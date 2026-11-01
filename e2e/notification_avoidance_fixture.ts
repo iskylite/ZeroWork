@@ -30,7 +30,7 @@ async function click(id:string){assert((await clickTestId(id)).ok,id);}
 try{
  await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
  await resizeWindow(1440,900);await click('workspace.empty.local');await sleep(700);
- await click('sidebar.host');await click('sidebar.host.connect');await sleep(1000);
+ await click('sidebar.host');await sleep(1000);
  const toast=(await query('notifications.toast.0')).find(shown);assert(toast,'actual connection status published by host');await mouseMove(toast.rect.x+20,toast.rect.y+20);
  await key('escape');await sleep(200);await click('connection.progress.close');await sleep(200);
  await click('toolbar.transfers');await sleep(200);

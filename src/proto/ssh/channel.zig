@@ -11,6 +11,11 @@ pub const Channel = struct {
     pub fn writer(self: *Channel) channel_pump.ChannelWriter {
         return .{ .ctx = self, .write_fn = write };
     }
+    pub fn sendEof(self: *Channel) !bool {
+        const rc = c.zw_libssh2_channel_send_eof_step(self.handle);
+        if (rc < 0) return error.ChannelSendEofFailed;
+        return rc == 0;
+    }
     pub fn resize(self: *Channel, cols: u16, rows: u16) !void {
         if (c.zw_libssh2_channel_resize(self.handle, cols, rows) != 0) return error.ResizeFailed;
     }

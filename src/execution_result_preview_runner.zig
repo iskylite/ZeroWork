@@ -10,7 +10,7 @@ const identity = @import("host/identity.zig");
 const Execution = @import("ui/ai_execution_result_view.zig");
 const Fixture = enum { running, sealed, failed, interval_recorded, interval_unverified, interval_concurrent, interval_failed, input_consumed, input_unknown, recording_failed, unknown, handed_off, sealing, cancelled, missing, refused };
 var fixture: Fixture = .running;
-var preview_theme: theme.Name = .dark;
+var preview_theme: []const u8 = "dark";
 var transparency: f32 = 0;
 var long_output = false;
 const Preview = struct {
@@ -31,9 +31,9 @@ const Preview = struct {
     }
 };
 fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
-    theme.select(preview_theme);
+    theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(preview_theme));
     _ = theme.setMaterialParameters(transparency, 0);
-    cx.setTheme(theme.widgetTheme(preview_theme));
+    cx.setTheme(theme.widgetTheme(theme.currentName()));
     try @import("ui/layer_materials.zig").Policy.mount(cx, scope);
     const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{ .left = 14, .right = 14, .top = 48 }, .background = theme.current().overlay, .gap = 8 }, .{});
     root.meta.ownership.meta.test_id = "execution_result.preview";
@@ -103,7 +103,7 @@ pub fn main(init: std.process.Init) !void {
     var args = init.minimal.args.iterate();
     _ = args.next();
     while (args.next()) |arg| {
-        if (std.mem.startsWith(u8, arg, "--theme=")) preview_theme = std.meta.stringToEnum(theme.Name, arg[8..]) orelse return error.InvalidTheme else if (std.mem.startsWith(u8, arg, "--state=")) fixture = std.meta.stringToEnum(Fixture, arg[8..]) orelse return error.InvalidState else if (std.mem.eql(u8, arg, "--long-output")) long_output = true else if (std.mem.startsWith(u8, arg, "--transparency=")) {
+        if (std.mem.startsWith(u8, arg, "--theme=")) preview_theme = try parseTheme(arg[8..]) else if (std.mem.startsWith(u8, arg, "--state=")) fixture = std.meta.stringToEnum(Fixture, arg[8..]) orelse return error.InvalidState else if (std.mem.eql(u8, arg, "--long-output")) long_output = true else if (std.mem.startsWith(u8, arg, "--transparency=")) {
             transparency = try std.fmt.parseFloat(f32, arg[15..]);
             if (!std.math.isFinite(transparency) or transparency < 0 or transparency > 100) return error.InvalidTransparency;
         } else return error.InvalidOption;
@@ -111,4 +111,9 @@ pub fn main(init: std.process.Init) !void {
     const app = try App.init(std.heap.c_allocator, .{ .io = init.io, .window = .{ .width = 600, .height = 420, .title = "ZeroWork Execution Result Preview", .titlebar = .custom_inset, .titlebar_height = 40 } });
     defer app.deinit();
     try app.runWith(mount);
+}
+
+fn parseTheme(id: []const u8) ![]const u8 {
+    for (@import("config/theme_presets.zig").ids) |known| if (std.mem.eql(u8, id, known)) return known;
+    return error.InvalidTheme;
 }

@@ -227,6 +227,91 @@ fn inputFor(mounted: view.Mounted, id: []const u8) *ui.widgets.input.TextInputSt
     unreachable;
 }
 
+test "appearance font chooser retains its family while another input replaces the draft" {
+    for ([_][]const u8{ "Fira Code", "ZeroWork Draft Custom Mono" }) |family| {
+        var f: AppearanceFixture = undefined;
+        try f.init();
+        defer f.deinit();
+        f.controller.folded_sections = 0;
+        try f.controller.editKey("ui", "font_family", .{ .text = family });
+        const mounted = try f.mount();
+        const trigger = byId(mounted.root, "settings.field.font_family").?;
+        const select: *ui.widgets.select.SelectState = @ptrCast(@alignCast(trigger.behavior.events.event_context.?));
+        const label = if (std.mem.eql(u8, family, "Fira Code")) "Fira Code · 内置" else family;
+
+        // Real input edits replace the complete owned draft without remounting
+        // this Select. Its initial selection and custom row must outlive that draft.
+        const size = inputFor(mounted, "settings.field.font_size");
+        inputEvent(size, .{ .key_down = .{ .key = .a, .modifiers = .{ .super = true } } });
+        inputEvent(size, .{ .text_input = .{ .text = "19" } });
+        try std.testing.expectEqual(@as(u16, 19), f.controller.model.value.ui.font_size);
+        try std.testing.expectEqualStrings(family, select.value.?.peek().?);
+
+        _ = trigger.behavior.events.on_event.?(.{ .click = .{ .x = 0, .y = 0 } }, trigger.behavior.events.event_context);
+        const search = select.input_state.?;
+        inputEvent(search, .{ .key_down = .{ .key = .a, .modifiers = .{ .super = true } } });
+        inputEvent(search, .{ .text_input = .{ .text = "unselected search" } });
+        try std.testing.expect(mounted.consumeEscape());
+        try std.testing.expectEqualStrings(label, search.getText());
+        try std.testing.expectEqualStrings(family, f.controller.model.value.ui.font_family);
+
+        // Commit a different row, then the retained original row. This exercises
+        // both its label and its value after multiple snapshot replacements.
+        for ([_][]const u8{ "Menlo", family }) |next| {
+            var chosen = false;
+            for (select.options, select.option_nodes) |option, node| {
+                if (!std.mem.eql(u8, option.value, next)) continue;
+                if (std.mem.eql(u8, next, family)) try std.testing.expectEqualStrings(label, option.label);
+                _ = node.behavior.events.on_event.?(.{ .click = .{ .x = 0, .y = 0 } }, node.behavior.events.event_context);
+                chosen = true;
+                break;
+            }
+            try std.testing.expect(chosen);
+            try std.testing.expectEqualStrings(next, f.controller.model.value.ui.font_family);
+        }
+        try std.testing.expectEqualStrings(label, search.getText());
+    }
+}
+
+test "appearance font chooser keeps the overlay surface through theme and material publication" {
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    const was_visible = theme.materialVisible();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialVisible(was_visible);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    theme.select(.dark);
+    _ = theme.setMaterialVisible(false);
+    _ = theme.setMaterialParameters(0, 0);
+    var f: AppearanceFixture = undefined;
+    try f.init();
+    defer f.deinit();
+    const publication = try f.cx.bindState(@import("ui/shell_styles.zig").ThemePublication, .{});
+    publication.publish(f.cx, theme.widgetTheme(.dark));
+    f.controller.folded_sections = 0;
+    const mounted = try f.mount();
+    const trigger = byId(mounted.root, "settings.field.font_family").?;
+    const select: *ui.widgets.select.SelectState = @ptrCast(@alignCast(trigger.behavior.events.event_context.?));
+    const retained_panel = select.panel.id;
+    _ = f.cx.render();
+    try std.testing.expectEqual(theme.current().overlay, select.panel.getBackground());
+
+    theme.select(.light);
+    publication.publish(f.cx, theme.widgetTheme(.light));
+    _ = f.cx.render();
+    try std.testing.expectEqual(retained_panel, select.panel.id);
+    try std.testing.expectEqual(theme.current().overlay, select.panel.getBackground());
+    _ = theme.setMaterialVisible(true);
+    _ = theme.setMaterialParameters(75, 0);
+    publication.publish(f.cx, theme.widgetTheme(.light));
+    _ = f.cx.render();
+    try std.testing.expectEqual(retained_panel, select.panel.id);
+    try std.testing.expectEqual(theme.current().overlay, select.panel.getBackground());
+}
+
 test "settings material remount restores the same input focus cursor and reversed selection after IME commit" {
     const theme = @import("ui/app_theme.zig");
     theme.select(.dark);
@@ -358,7 +443,9 @@ test "appearance V3 inline preview and theme import expose real capability" {
     try std.testing.expectApproxEqAbs(@as(f32, 116), preview.globalRect().h, 0.1);
     try std.testing.expect(byId(mounted.root, "settings.materials.preview.full") != null);
     const remove = byId(mounted.root, "settings.theme.remove.current").?;
+    _ = f.cx.render();
     try std.testing.expect(remove.behavior.interaction.a11y.?.disabled);
+    try std.testing.expectEqual(@as(f32, 1), remove.getOpacity());
     try std.testing.expect(byId(mounted.root, "settings.theme.import") != null);
     try std.testing.expect(byId(mounted.root, "settings.font.preview.caret") != null);
 }
@@ -614,7 +701,8 @@ test "global material settings keep flat sections and shared chooser roles while
         const family_rect = family.globalRect();
         f.cx.handleMouseDown(family_rect.x + 8, family_rect.y + 8, .{});
         f.cx.handleMouseUp(family_rect.x + 8, family_rect.y + 8);
-        try std.testing.expectEqual(theme.current().overlay, byId(f.cx.root.?, "settings.chooser.font_family").?.getBackground());
+        const select: *ui.widgets.select.SelectState = @ptrCast(@alignCast(family.behavior.events.event_context.?));
+        try std.testing.expectEqual(theme.current().overlay, select.panel.getBackground());
         try std.testing.expect(mounted.consumeEscape());
         try std.testing.expectEqual(theme.current().action_accent, mounted.save_button.getBackground());
         try std.testing.expectEqual(@as(u8, 255), mounted.save_button.getBackground().a);

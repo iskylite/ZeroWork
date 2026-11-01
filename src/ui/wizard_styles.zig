@@ -67,7 +67,7 @@ pub fn field(w: ?f32) ui.BoxStyle {
 }
 // zenit draws borders inside the box; include the CSS 1px border in content insets.
 pub fn input() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 34 }, .padding = .{ .left = 11, .right = 11, .top = 6, .bottom = 6 }, .background = theme.popupInset(), .border = .{ .radius = 8, .width = 1, .color = ui.Color.TRANSPARENT }, .font_size = 11 };
+    return .{ .width = .fill(), .height = .{ .px = 34 }, .padding = .{ .left = 11, .right = 11, .top = 6, .bottom = 6 }, .background = theme.popupInset(), .border = .{ .radius = 8, .width = 0, .color = ui.Color.TRANSPARENT }, .font_size = 11 };
 }
 pub fn button(w: f32, h: f32, primary: bool) ui.BoxStyle {
     return .{ .width = .{ .px = w }, .height = .{ .px = h }, .padding = .{}, .direction = .row, .align_items = .center, .justify = .center, .gap = 6, .background = if (primary) theme.current().action_accent else theme.popupInset(), .gradient = if (primary) .{ .from = theme.current().action_accent, .to = theme.current().action_accent_2, .direction = .diagonal } else null, .border = .{ .radius = 8 }, .flex_shrink = 0 };
@@ -117,7 +117,7 @@ pub fn accessChoice(selected: bool) ButtonStyle {
     return .{ .width = .fill(), .height = .{ .px = 61 }, .flex = 1, .min_width = 0, .flex_shrink = 0, .background = if (selected) theme.popupSelection() else theme.popupInset(), .corner_radius = 8, .border_width = 0, .padding = .{} };
 }
 pub fn routeHop() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 51 }, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .gap = 8, .background = ui.Color.TRANSPARENT, .border_bottom_width = 1, .border_bottom_color = theme.current().border, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 51 }, .direction = .row, .align_items = .center, .padding = .{ .left = 10, .right = 10, .top = 8, .bottom = 8 }, .gap = 8, .background = ui.Color.TRANSPARENT, .border_bottom_width = 0, .border_bottom_color = ui.Color.TRANSPARENT, .flex_shrink = 0 };
 }
 pub fn routeNode(_: bool) ui.BoxStyle {
     return .{ .width = .{ .px = 146 }, .height = .{ .px = 76 }, .padding = ui.Padding.all(10), .direction = .column, .gap = 2, .background = theme.popupInset(), .border = .{ .radius = 9 }, .flex_shrink = 0 };

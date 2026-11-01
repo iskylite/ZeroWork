@@ -62,6 +62,7 @@ const ExecJob = struct {
     command_text: []u8,
     cwd: ?[]u8,
     limits: exec.Limits,
+    accepted_ms: u64,
     command: ?exec.Command = null, // worker only
     pid: ?i32 = null,
     started: bool = false,
@@ -585,6 +586,7 @@ pub const LocalAdapter = struct {
         return .{ .owner = handle, .process_state = entry.process_state, .shell_pid = entry.pid, .foreground = if (fresh) entry.foreground else null, .foreground_state = foreground_state, .observed_monotonic_ms = entry.metadata_observed_ms, .active_exec = try jobs.toOwnedSlice(allocator), .unknown = unknown };
     }
     pub fn startExec(self: *LocalAdapter, binding: host.ServiceHandle, request: ExecRequest) !ExecHandle {
+        const accepted_ms = native.zw_local_monotonic_ms();
         const entry = try self.resolve(binding, .exec, true);
         try native.validateOwner(entry.handle, request.operation);
         if (request.call_id == 0 or request.command.len == 0 or request.command.len > 1024 * 1024 or request.limits.capture_bytes == 0 or request.limits.capture_bytes > 16 * 1024 * 1024) return error.InvalidExec;
@@ -609,7 +611,7 @@ pub const LocalAdapter = struct {
         errdefer self.allocator.free(command_text);
         const cwd = if (request.cwd) |value| try self.allocator.dupe(u8, value) else null;
         errdefer if (cwd) |value| self.allocator.free(value);
-        job.* = .{ .handle = .{ .owner = entry.handle, .operation = request.operation, .call_id = request.call_id }, .command_text = command_text, .cwd = cwd, .limits = request.limits };
+        job.* = .{ .handle = .{ .owner = entry.handle, .operation = request.operation, .call_id = request.call_id }, .command_text = command_text, .cwd = cwd, .limits = request.limits, .accepted_ms = accepted_ms };
         errdefer job.stdout.deinit(self.allocator);
         errdefer job.stderr.deinit(self.allocator);
         try job.stdout.ensureTotalCapacity(self.allocator, request.limits.capture_bytes);
@@ -1608,7 +1610,14 @@ fn pollExec(entry: *Entry, job: *ExecJob, closing: bool) void {
             return;
         }
         var failure: native.Failure = .{};
-        job.command = exec.Command.start(entry.allocator, entry.handle, job.handle.operation, job.handle.call_id, job.command_text, job.cwd, job.limits, &failure) catch {
+        job.command = exec.Command.startPending(entry.allocator, entry.handle, job.handle.operation, job.handle.call_id, job.command_text, job.cwd, job.limits, &failure, job.accepted_ms, &job.cancel_requested, &entry.close_requested) catch |err| {
+            if (err == error.CancelledBeforeStart or err == error.TimeoutBeforeStart) {
+                job.cancelled = true;
+                job.timed_out = err == error.TimeoutBeforeStart;
+                job.done = true;
+                job.cleanup = .released; // No native child was admitted.
+                return;
+            }
             job.failure = failure.hostFailure();
             job.cleanup = if (job.failure.?.cleanup == .released) .released else .unknown;
             job.done = true;

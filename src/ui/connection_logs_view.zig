@@ -234,6 +234,7 @@ pub const View = struct {
         try self.footer.appendChild(self.cx.allocator, self.bottom_button);
         const copy_context = try self.action(scope, .copy);
         self.copy_button = try ui.widgets.Button(.{ .label = "复制日志", .variant = .primary, .disabled = self.copy_disabled, .base_style = S.button(112, 34, true), .on_click = self.cx.on(Action, copy_context, Action.click) }).mount(scope, self.cx);
+        try @import("app_theme.zig").stylePrimary(self.cx, scope, self.copy_button, self.copy_disabled);
         self.copy_button.meta.ownership.meta.test_id = "connection.logs.copy";
         try self.footer.appendChild(self.cx.allocator, self.copy_button);
         const done_context = try self.action(scope, .close);
@@ -390,6 +391,8 @@ fn resultText(entry: Progress.progress.Journal.Entry) []const u8 {
         .cancelled => "已取消",
         .failed => if (entry.failure) |failure| switch (failure) {
             error.AuthenticationFailed, error.AgentIdentityNotAccepted => "服务器未接受认证信息",
+            error.IdentityFileUnreadable => "无法读取私钥文件，请检查路径与权限",
+            error.IdentityFileInvalid => "私钥文件格式无效、已损坏或当前不支持",
             error.ConnectionTimeout, error.Timeout => "连接超时",
             error.ConnectionRefused => "连接被拒绝",
             error.Cancelled => "已取消",

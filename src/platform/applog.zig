@@ -53,9 +53,14 @@ pub const Stats = struct {
 };
 const Record = struct { bytes: [record_bytes]u8 = undefined, len: usize = 0, level: Level = .info, sequence: u64 = 0 };
 // Failure/slow-IO injection exists only in test binaries, with no production hook.
+const TestClock = struct {
+    context: *anyopaque,
+    now: *const fn (*anyopaque) i64,
+};
 const TestHooks = if (builtin.is_test) struct {
     context: *anyopaque,
     before_write: ?*const fn (*anyopaque, std.Io.File) void = null,
+    clock: ?TestClock = null,
 } else void;
 const Logger = struct {
     wake: Wakeup,
@@ -85,6 +90,10 @@ const Logger = struct {
     stop_deadline_ms: i64 = 0, // published by stopping's release store
     done: std.atomic.Value(bool) = .init(false),
     test_hooks: ?*const TestHooks = null,
+    fn monotonic(self: *const Logger) i64 {
+        if (builtin.is_test) if (self.test_hooks) |hooks| if (hooks.clock) |clock| return clock.now(clock.context);
+        return monotonicMs();
+    }
     fn notify(self: *Logger) void {
         // One best-effort nonblocking syscall; even EINTR cannot make a
         // producer loop. The writer's bounded poll is a fallback wakeup.
@@ -277,7 +286,7 @@ pub fn shutdownStep() CloseReceipt {
         state.active = null;
         state.closing = logger;
         state.enabled.store(false, .release);
-        logger.stop_deadline_ms = monotonicMs() + close_budget_ms;
+        logger.stop_deadline_ms = logger.monotonic() + close_budget_ms;
         logger.stopping.store(true, .release);
         logger.notify();
     }
@@ -290,9 +299,24 @@ pub fn shutdownStep() CloseReceipt {
 /// Final-process best effort, bounded even when a kernel call never returns.
 /// The detached owner retains its own Io/resources; no cancellation/free race.
 pub fn shutdown() void {
-    for (0..close_budget_ms) |_| {
-        if (shutdownStep() == .released) return;
+    shutdownWithTiming(WaitTiming{});
+}
+const WaitTiming = struct {
+    fn now(_: @This()) i64 {
+        return monotonicMs();
+    }
+    fn wait(_: @This()) void {
         pause();
+    }
+};
+fn shutdownWithTiming(timing: anytype) void {
+    const started = timing.now();
+    while (true) {
+        if (shutdownStep() == .released) return;
+        // A 1ms sleep is a minimum, not a scheduling guarantee. Count elapsed
+        // monotonic time so delayed wakes cannot multiply the close budget.
+        if (timing.now() - started >= close_budget_ms) return;
+        timing.wait();
     }
 }
 
@@ -319,22 +343,33 @@ pub fn pollFlush(ticket: FlushTicket) FlushResult {
 }
 /// Optional bounded wait for CLI/tests; UI uses requestFlush/pollFlush instead.
 pub fn flush(timeout_ms: u32) FlushResult {
+    return flushWithTiming(timeout_ms, WaitTiming{});
+}
+fn flushWithTiming(timeout_ms: u32, timing: anytype) FlushResult {
+    const started = timing.now();
     var ticket: ?FlushTicket = null;
-    for (0..@as(usize, timeout_ms) + 1) |i| {
+    var first_attempt = true;
+    // A zero budget still permits one nonblocking attempt. An existing ticket
+    // may report completion after a delayed wake; acquiring a new one must
+    // remain within the original budget, including time spent on contention.
+    while (true) {
+        const expired = timing.now() - started >= timeout_ms;
         if (ticket == null) {
+            if (!first_attempt and expired) return .pending;
             ticket = requestFlush();
             if (ticket == null) {
                 const current = snapshot();
                 if (!current.busy and !current.active) return .closed;
             }
         }
+        first_attempt = false;
         if (ticket) |value| {
             const result = pollFlush(value);
             if (result != .pending) return result;
         }
-        if (i != timeout_ms) pause();
+        if (expired or timing.now() - started >= timeout_ms) return .pending;
+        timing.wait();
     }
-    return .pending;
 }
 pub fn snapshot() Stats {
     if (!state.mutex.tryLock()) return .{ .busy = true };
@@ -461,7 +496,7 @@ fn runOwned(logger: *Logger, io: std.Io) void {
     sink.emit(&record);
     var reported: [5]u64 = @splat(0);
     while (true) {
-        if (logger.stopping.load(.acquire) and monotonicMs() >= logger.stop_deadline_ms) {
+        if (logger.stopping.load(.acquire) and logger.monotonic() >= logger.stop_deadline_ms) {
             if (!logger.mutex.tryLock()) {
                 pause();
                 continue;
@@ -595,6 +630,38 @@ const Gate = struct {
         return error.GateNotEntered;
     }
 };
+const OversleptShutdown = struct {
+    elapsed_ms: std.atomic.Value(i64) = .init(0),
+    waits: usize = 0,
+    fn now(self: *const @This()) i64 {
+        return self.elapsed_ms.load(.acquire);
+    }
+    fn wait(self: *@This()) void {
+        _ = self.elapsed_ms.fetchAdd(125, .release);
+        self.waits += 1;
+    }
+    fn sample(raw: *anyopaque) i64 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        return self.now();
+    }
+    fn clock(self: *@This()) TestClock {
+        return .{ .context = self, .now = sample };
+    }
+};
+test "timing regression log shutdown counts elapsed time after delayed wakes" {
+    var dir = try TestDir.init();
+    defer dir.deinit();
+    var gate: Gate = .{};
+    var timing: OversleptShutdown = .{};
+    const hooks: TestHooks = .{ .context = &gate, .before_write = Gate.block, .clock = timing.clock() };
+    start(dir.config(), &hooks);
+    defer releaseWriter(&gate);
+    try gate.wait();
+    shutdownWithTiming(&timing);
+    try std.testing.expect(timing.now() < 500);
+    try std.testing.expectEqual(@as(usize, 2), timing.waits);
+    try std.testing.expectEqual(CloseReceipt.awaiting, shutdownStep());
+}
 fn waitFlush(ticket: FlushTicket) !void {
     for (0..2000) |_| {
         switch (pollFlush(ticket)) {
@@ -664,7 +731,8 @@ test "async logger shutdown has a deadline retains blocked IO and never uses cal
     var dir = try TestDir.init();
     defer dir.deinit();
     var gate: Gate = .{};
-    const hooks: TestHooks = .{ .context = &gate, .before_write = Gate.block };
+    var timing: OversleptShutdown = .{};
+    const hooks: TestHooks = .{ .context = &gate, .before_write = Gate.block, .clock = timing.clock() };
     var caller_io = std.Io.Threaded.init(allocator, .{});
     start(dir.config(), &hooks); // same start as init, with a controlled disk gate
     init(dir.config(), caller_io.io()); // duplicate init cannot replace the owner
@@ -674,9 +742,9 @@ test "async logger shutdown has a deadline retains blocked IO and never uses cal
     info(.ui, "pending at exit", .{});
     const ticket = requestFlush().?;
     const generation = testSnapshot().generation;
-    const started = monotonicMs();
-    shutdown();
-    try std.testing.expect(monotonicMs() - started < 500);
+    shutdownWithTiming(&timing);
+    try std.testing.expect(timing.now() < 500);
+    try std.testing.expectEqual(@as(usize, 2), timing.waits);
     try std.testing.expectEqual(CloseReceipt.awaiting, shutdownStep());
     try std.testing.expectEqual(FlushResult.pending, pollFlush(ticket));
     try std.testing.expect(testSnapshot().closing);
@@ -807,13 +875,13 @@ fn fillPipe() ![2]c_int {
     _ = std.c.fcntl(fds[1], std.c.F.SETFL, flags);
     return fds;
 }
-fn startWithStderr(config: Config, fd: c_int) !void {
+fn startWithStderr(config: Config, fd: c_int, hooks: ?*const TestHooks) !void {
     const original = std.c.dup(std.c.STDERR_FILENO);
     if (original < 0) return error.DupFailed;
     defer _ = std.c.close(original);
     if (std.c.dup2(fd, std.c.STDERR_FILENO) < 0) return error.DupFailed;
     defer _ = std.c.dup2(original, std.c.STDERR_FILENO);
-    init(config, std.testing.io); // writer owns its own duplicate
+    start(config, hooks); // writer owns its own duplicate
 }
 
 test "async log full stderr pipe cannot block producers flush polling or shutdown" {
@@ -827,7 +895,9 @@ test "async log full stderr pipe cannot block producers flush polling or shutdow
     defer _ = std.c.close(pipe[1]);
     var config = dir.config();
     config.mirror_stderr = true;
-    try startWithStderr(config, pipe[1]);
+    var timing: OversleptShutdown = .{};
+    const hooks: TestHooks = .{ .context = &timing, .clock = timing.clock() };
+    try startWithStderr(config, pipe[1], &hooks);
     var released = false;
     defer if (!released) {
         _ = std.c.close(pipe[0]);
@@ -841,11 +911,14 @@ test "async log full stderr pipe cannot block producers flush polling or shutdow
     }
     try std.testing.expectEqual(Stage.stderr, testSnapshot().stage);
     const ticket = requestFlush().?;
-    const started = monotonicMs();
     for (0..1000) |_| info(.ui, "UI continues", .{});
     try std.testing.expectEqual(FlushResult.pending, pollFlush(ticket));
-    shutdown();
-    try std.testing.expect(monotonicMs() - started < 500);
+    // Keep the real pipe blocked while forcing 125ms scheduler delays. The
+    // 500ms assertion covers the close budget, not unrelated producer work
+    // or how quickly the host happens to schedule a real 1ms sleep.
+    shutdownWithTiming(&timing);
+    try std.testing.expect(timing.now() < 500);
+    try std.testing.expectEqual(@as(usize, 2), timing.waits);
     try std.testing.expectEqual(CloseReceipt.awaiting, shutdownStep());
     // Drain enough of the real pipe for the blocked write to complete.
     var bytes: [4096]u8 = undefined;
@@ -870,7 +943,7 @@ test "async log closed stderr reader does not raise SIGPIPE or prevent disk flus
     defer _ = std.c.close(pipe[1]);
     var config = dir.config();
     config.mirror_stderr = true;
-    try startWithStderr(config, pipe[1]);
+    try startWithStderr(config, pipe[1], null);
     err(.ssh, "closed output pipe", .{});
     try std.testing.expectEqual(FlushResult.complete, flush(1000));
     try std.testing.expect(testSnapshot().stderr_failed);
@@ -959,4 +1032,115 @@ test "async log in-flight producer cannot publish into a replacement generation"
     joined = true;
     try std.testing.expectEqual(FlushResult.complete, flush(1000));
     try std.testing.expectEqual(@as(u64, 0), testSnapshot().accepted);
+}
+
+test "deadline regression flush delayed wakes retain the owner and pending ticket" {
+    var dir = try TestDir.init();
+    defer dir.deinit();
+    var gate: Gate = .{};
+    const hooks: TestHooks = .{ .context = &gate, .before_write = Gate.block };
+    start(dir.config(), &hooks);
+    defer releaseWriter(&gate);
+    try gate.wait();
+    info(.ui, "flush-owned record", .{});
+    const ticket = requestFlush().?;
+    var timing: OversleptShutdown = .{};
+    try std.testing.expectEqual(FlushResult.pending, flushWithTiming(200, &timing));
+    try std.testing.expectEqual(@as(usize, 2), timing.waits);
+    try std.testing.expect(testSnapshot().active);
+    try std.testing.expectEqual(FlushResult.pending, pollFlush(ticket));
+    gate.released.store(true, .release);
+    try waitFlush(ticket);
+}
+test "deadline regression flush zero timeout makes one nonblocking attempt" {
+    var timing: OversleptShutdown = .{};
+    try std.testing.expectEqual(FlushResult.closed, flushWithTiming(0, &timing));
+    var dir = try TestDir.init();
+    defer dir.deinit();
+    var gate: Gate = .{};
+    const hooks: TestHooks = .{ .context = &gate, .before_write = Gate.block };
+    start(dir.config(), &hooks);
+    defer releaseWriter(&gate);
+    try gate.wait();
+    try std.testing.expectEqual(FlushResult.pending, flushWithTiming(0, &timing));
+    try std.testing.expectEqual(@as(usize, 0), timing.waits);
+    try std.testing.expect(state.active.?.flush_pending);
+}
+test "deadline regression flush lock contention consumes the same deadline" {
+    var dir = try TestDir.init();
+    defer dir.deinit();
+    var gate: Gate = .{};
+    const hooks: TestHooks = .{ .context = &gate, .before_write = Gate.block };
+    start(dir.config(), &hooks);
+    defer releaseWriter(&gate);
+    try gate.wait();
+    const logger = state.active.?;
+    for ([_]*std.atomic.Mutex{ &state.mutex, &logger.mutex }) |mutex| {
+        try std.testing.expect(mutex.tryLock());
+        defer mutex.unlock();
+        var timing: OversleptShutdown = .{};
+        try std.testing.expectEqual(FlushResult.pending, flushWithTiming(200, &timing));
+        try std.testing.expectEqual(@as(usize, 2), timing.waits);
+    }
+}
+test "deadline regression flush does not acquire a new ticket after expiry" {
+    var dir = try TestDir.init();
+    defer dir.deinit();
+    var gate: Gate = .{};
+    const hooks: TestHooks = .{ .context = &gate, .before_write = Gate.block };
+    start(dir.config(), &hooks);
+    defer releaseWriter(&gate);
+    try gate.wait();
+    const UnlockTiming = struct {
+        clock: OversleptShutdown = .{},
+        mutex: ?*std.atomic.Mutex,
+        fn now(self: *@This()) i64 {
+            return self.clock.now();
+        }
+        fn wait(self: *@This()) void {
+            self.clock.wait();
+            if (self.mutex) |mutex| {
+                mutex.unlock();
+                self.mutex = null;
+            }
+        }
+    };
+    try std.testing.expect(state.mutex.tryLock());
+    var timing: UnlockTiming = .{ .mutex = &state.mutex };
+    defer if (timing.mutex) |mutex| mutex.unlock();
+    try std.testing.expectEqual(FlushResult.pending, flushWithTiming(70, &timing));
+    try std.testing.expectEqual(@as(usize, 1), timing.clock.waits);
+    try std.testing.expect(!state.active.?.flush_pending);
+}
+
+test "deadline regression flush observes an existing ticket completed during delayed wake" {
+    var dir = try TestDir.init();
+    defer dir.deinit();
+    var gate: Gate = .{};
+    const hooks: TestHooks = .{ .context = &gate, .before_write = Gate.block };
+    start(dir.config(), &hooks);
+    defer releaseWriter(&gate);
+    try gate.wait();
+    info(.ui, "already flushing", .{});
+    const ticket = requestFlush().?;
+    const CompletingTiming = struct {
+        clock: OversleptShutdown = .{},
+        gate: *Gate,
+        ticket: FlushTicket,
+        failure: ?anyerror = null,
+        fn now(self: *@This()) i64 {
+            return self.clock.now();
+        }
+        fn wait(self: *@This()) void {
+            self.clock.wait();
+            self.gate.released.store(true, .release);
+            waitFlush(self.ticket) catch |wait_error| {
+                self.failure = wait_error;
+            };
+        }
+    };
+    var timing: CompletingTiming = .{ .gate = &gate, .ticket = ticket };
+    try std.testing.expectEqual(FlushResult.complete, flushWithTiming(70, &timing));
+    try std.testing.expect(timing.failure == null);
+    try std.testing.expectEqual(@as(usize, 1), timing.clock.waits);
 }

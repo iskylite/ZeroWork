@@ -103,6 +103,11 @@ test "config owns routes and draft, validates inputs, resizes and cancels locall
     try std.testing.expectEqual(@as(usize, 0), c.saved);
     try std.testing.expect(v.error_label.style.display == .flex);
     v.port_signal.set("2345");
+    v.max_signal.set("257");
+    v.act(.save);
+    try std.testing.expectEqual(@as(usize, 0), c.saved);
+    try std.testing.expectEqualStrings("并发上限必须为 1–256", v.error_label.getText().?.content);
+    v.max_signal.set("256");
     v.act(.test_proxy);
     try std.testing.expectEqual(@as(usize, 1), c.tested);
     for (0..4) |_| {

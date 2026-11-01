@@ -83,7 +83,7 @@ fn appendTable(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, lines: []const []
         const row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .row, .flex_shrink = 0 }, .{});
         var cells = std.mem.splitScalar(u8, std.mem.trim(u8, line, " \t\r|"), '|');
         for (0..columns) |_| {
-            const cell = try ui.box(cx, .{ .width = .{ .px = column_width }, .height = .{ .px = row_height }, .padding = .{ .left = 8, .right = 8, .top = 6, .bottom = 6 }, .border = .{ .width = 1, .color = @import("app_theme.zig").current().border }, .background = if (index == 0) @import("app_theme.zig").current().well else ui.Color.TRANSPARENT, .overflow = .hidden, .flex_shrink = 0 }, .{});
+            const cell = try ui.box(cx, .{ .width = .{ .px = column_width }, .height = .{ .px = row_height }, .padding = .{ .left = 8, .right = 8, .top = 6, .bottom = 6 }, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT }, .background = if (index == 0) @import("app_theme.zig").current().well else ui.Color.TRANSPARENT, .overflow = .hidden, .flex_shrink = 0 }, .{});
             const value = std.mem.trim(u8, cells.next() orelse "", " \t\r");
             const text = try ui.widgets.Markdown(.{ .text = try scope.createText(value, .{}), .options = S.markdownOptions() }).mount(scope, cx);
             try compact(cx, scope, text);

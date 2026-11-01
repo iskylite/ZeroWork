@@ -35,11 +35,11 @@ pub fn icon(size: f32) ui.Style {
 pub fn action(size: f32) ui.BoxStyle {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .flex_shrink = 0 };
 }
-pub fn badge(width: f32, color: ui.Color) ui.BoxStyle {
-    return .{ .width = .{ .px = width }, .height = .{ .px = 22 }, .padding = .{ .left = 8, .right = 8 }, .align_items = .center, .justify = .center, .background = color.withAlpha(25), .border = .{ .radius = 6 }, .flex_shrink = 0 };
+pub fn badge(width: f32, _: ui.Color) ui.BoxStyle {
+    return .{ .width = .{ .px = width }, .height = .{ .px = 22 }, .padding = .{ .left = 8, .right = 8 }, .align_items = .center, .justify = .center, .background = theme.popupInset(), .border = .{ .radius = 6 }, .flex_shrink = 0 };
 }
 pub fn task(selected: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .column, .gap = 7, .padding = .{ .top = 9, .left = 10, .right = 10, .bottom = 9 }, .background = if (selected) theme.popupSelection() else theme.popupAction(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .column, .gap = 7, .padding = .{ .top = 9, .left = 10, .right = 10, .bottom = 9 }, .background = if (selected) theme.popupSelection() else theme.popupInset(), .border = .{ .radius = 8 }, .flex_shrink = 0 };
 }
 pub fn detail() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 120 }, .direction = .column, .gap = 4, .padding = .{ .top = 8, .left = 10, .right = 10, .bottom = 8 }, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 8 }, .flex_shrink = 0, .overflow = .hidden };
@@ -63,11 +63,20 @@ pub fn errorLine() ui.BoxStyle {
 
 pub fn repaint(node: *ui.Node, previous: theme.Colors) void {
     node.setBackground(remap(node.getBackground(), previous));
-    if (node.getText()) |text_value| node.setTextColor(remap(text_value.color, previous));
-    if (node.getIcon()) |icon_value| _ = node.setTint(remap(icon_value.tint, previous));
+    if (node.getText()) |text_value| node.setTextColor(remapInk(text_value.color, previous));
+    if (node.getIcon()) |icon_value| _ = node.setTint(remapInk(icon_value.tint, previous));
     for (node.children.items) |child| repaint(child, previous);
 }
+fn remapInk(color: ui.Color, previous: theme.Colors) ui.Color {
+    // Some dark palettes share the base and readable ink RGB; preserve the
+    // foreground role when the next light palette separates those colors.
+    inline for (.{ "fg_1", "fg_2", "fg_3", "accent_ink", "ok_ink", "warn_ink", "danger_ink" }) |field| {
+        if (ui.Color.eql(color, @field(previous, field))) return @field(theme.current(), field);
+    }
+    return remap(color, previous);
+}
 fn remap(color: ui.Color, previous: theme.Colors) ui.Color {
+    if (theme.remapUiSurface(color, previous)) |next| return next;
     const next = theme.current();
     inline for (@typeInfo(theme.Colors).@"struct".field_names) |field| {
         if (ui.Color.eql(color, @field(previous, field))) return @field(next, field);
@@ -183,7 +192,7 @@ pub fn hoverDetailIdentity() ui.BoxStyle {
 }
 
 pub fn optionTag(enabled: bool) ui.BoxStyle {
-    return .{ .height = .{ .px = 24 }, .padding = .{ .left = 8, .right = 8, .top = 3, .bottom = 3 }, .background = (if (enabled) theme.current().ok else theme.current().fg_2).withAlpha(28), .border = .{ .radius = 5 }, .flex_shrink = 0 };
+    return .{ .height = .{ .px = 24 }, .padding = .{ .left = 8, .right = 8, .top = 3, .bottom = 3 }, .background = if (enabled) theme.popupInset() else theme.popupAction(), .border = .{ .radius = 5 }, .flex_shrink = 0 };
 }
 
 // V3 compact scope chip and menu share the session-menu density.

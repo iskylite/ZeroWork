@@ -37,12 +37,12 @@ try{
  await writeFile(join(data,'hosts.toml'),fixture);await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="${theme}"\nfont_family="Menlo"\nfont_size=14\n`);
  app=spawn(binary,[],{env:{...process.env,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_FILE_RPC_DIR:rpc,ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',log.fd,log.fd]});ended=new Promise<void>(r=>app.once('close',()=>r()));
  await waitForServerReady(30000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);await resizeWindow(1440,900);await click('workspace.empty.local');await visible('terminal.surface');
- await click('sidebar.host');await click('sidebar.host.connect');await passwordPrompt();await capture('01-password-empty');
+ await click('sidebar.host');await passwordPrompt();await capture('01-password-empty');
  const first=await modal();assert.equal(first.rect.w,430);assert(first.rect.h<=380);assert(!text(first).includes('本次认证不保存凭据'));
  assert(text(first).includes('凭据仅用于当前认证'));await click('auth.challenge.answer.0');await type_(ready.password);assert(!text(await modal()).includes(ready.password));
  await capture('02-password-masked');await click('auth.challenge.reveal.0');await waitFor(async()=>text(await modal()).includes(ready.password)||null);await click('auth.challenge.reveal.0');
  await click('auth.challenge.cancel');await waitFor(async()=>!(await modal())||null);await waitFor(async()=>JSON.parse(await readFile(join(peerOut,'state.json'),'utf8')).active_connections===0||null,15000);
- await click('sidebar.host');await click('sidebar.host.connect');await passwordPrompt();await resizeWindow(860,480);await capture('03-password-compact');
+ await click('sidebar.host');await passwordPrompt();await resizeWindow(860,480);await capture('03-password-compact');
  const compact=await modal();assert(compact.rect.y>=0&&compact.rect.y+compact.rect.h<=480);const actions=await visible('auth.challenge.actions');assert(actions.rect.y+actions.rect.h<=480);
  await click('auth.challenge.answer.0');await type_(ready.password);await click('auth.challenge.submit');
  let subsequent=0;

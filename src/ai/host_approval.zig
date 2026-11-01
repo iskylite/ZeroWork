@@ -176,7 +176,9 @@ pub const Broker = struct {
             if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
             // Expiry keeps this exact call suspended; only the user can renew
             // or reject it. Never turn a missing decision into a model retry.
-            const approved = self.poll(permit) catch |err| switch (err) {
+            const polled = self.poll(permit);
+            if (cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
+            const approved = polled catch |err| switch (err) {
                 error.ToolApprovalExpired => false,
                 else => return err,
             };

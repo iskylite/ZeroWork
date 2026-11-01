@@ -1,3 +1,4 @@
+import {openSidebarHostMenu} from './sidebar_host_menu.ts';
 /** Scoped native regression: anchored short operations, never transcripts. */
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
@@ -29,7 +30,7 @@ const click=async(id:string)=>{await visible(id);await sleep(120);assert((await 
 const edit=async(id:string,value:string)=>{await click(id);await key('a',{cmd:true});await type_(value);};
 const cap=async(name:string)=>{await sleep(180);assert((await screenshot(join(out,name+'.png'))).ok);const ids=['asset.action','asset.group.dialog','tabs.rename','ai.model.menu','ai.composer.model','sidebar.host','sidebar.new','sidebar.group.more','ai.permission.menu','local.close.confirmation'];await writeFile(join(out,name+'.json'),JSON.stringify(Object.fromEntries(await Promise.all(ids.map(async id=>[id,await query(id)]))),null,2));report.captures.push(name);};
 const within=(n:any,w:number,h:number)=>{assert(n.rect.x>=7&&n.rect.y>=7);assert(n.rect.x+n.rect.w<=w-7);assert(n.rect.y+n.rect.h<=h-7);};
-async function hostMenu(){await sleep(180);const host=await visible('sidebar.host');await mouseMove(host.rect.x+host.rect.w-18,host.rect.y+host.rect.h/2);const more=await visible('sidebar.host.more');await mouseMove(more.rect.x+more.rect.w/2,more.rect.y+more.rect.h/2);assert((await clickAt(more.rect.x+more.rect.w/2,more.rect.y+more.rect.h/2)).ok);await visible('context.menu');return host;}
+async function hostMenu(){await sleep(180);const host=await visible('sidebar.host');await openSidebarHostMenu(host);return host;}
 try{
  await waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);await resizeWindow(1440,900);
  const before=await readFile(join(data,'hosts.toml'),'utf8');

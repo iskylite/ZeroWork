@@ -112,7 +112,7 @@ pub const View = struct {
 
         const heading = try ui.boxStyled(cx, S.heading, .{});
         try self.modal.body.appendChild(cx.allocator, heading);
-        const title_icon = try ui.iconTint(cx, ui.icons.image, S.theme.current().accent, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+        const title_icon = try S.theme.icon(cx, ui.icons.image, "accent_ink", .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
         title_icon.meta.ownership.meta.test_id = "ai.image.preview.title.icon";
         try heading.appendChild(cx.allocator, title_icon);
         const title = try ui.textStyled(cx, S.headingText, "图片预览");
@@ -288,9 +288,9 @@ pub const View = struct {
         if (self.callbacks.on_error) |callback| callback(self.callbacks.context, err);
     }
     fn button(self: *View, parent: *ui.Node, id: []const u8, label: []const u8, asset: ui.SvgAsset, on_click: ui.Handler(void)) !*ui.Node {
-        const button_node = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = label, .base_style = S.iconButton(), .on_click = on_click }).mount(self.scope, self.cx);
+        const button_node = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = label, .base_style = try S.theme.paintSignal(S.ButtonStyle, self.cx, self.scope, S.iconButton, .{}), .on_click = on_click }).mount(self.scope, self.cx);
         button_node.meta.ownership.meta.test_id = id;
-        try button_node.appendChild(self.cx.allocator, try ui.iconTint(self.cx, asset, S.theme.current().fg_2, .{ .width = .{ .px = S.icon_size }, .height = .{ .px = S.icon_size } }));
+        try button_node.appendChild(self.cx.allocator, try S.theme.icon(self.cx, asset, "fg_2", .{ .width = .{ .px = S.icon_size }, .height = .{ .px = S.icon_size } }));
         try parent.appendChild(self.cx.allocator, button_node);
         return button_node;
     }

@@ -8,6 +8,7 @@ pub const host_height: f32 = 36;
 pub const group_height: f32 = 26;
 pub const tail_width: f32 = 36;
 pub const action_size: f32 = 24;
+pub const host_icon_size: f32 = 14;
 
 pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = expanded_width }, .height = .fill(), .direction = .column, .flex_shrink = 0, .background = theme.current().surface_1, .shadow = @import("shell_styles.zig").cardShadow(), .inset_shadow = @import("shell_styles.zig").cardHighlight(), .border = .{ .radius = 11 }, .overflow = .hidden };
@@ -78,7 +79,7 @@ pub fn tail() ui.BoxStyle {
     return .{ .width = .{ .px = tail_width }, .height = .{ .px = action_size }, .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .flex_shrink = 0 };
 }
 pub fn route() ui.BoxStyle {
-    return .{ .width = .{ .px = 28 }, .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .flex_shrink = 0 };
+    return .{ .width = .{ .px = host_icon_size + 4 + 12 }, .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .justify = .end, .gap = 4, .flex_shrink = 0 };
 }
 pub fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };
@@ -135,9 +136,9 @@ pub fn repaint(node: *ui.Node, old: theme.Colors) void {
     if (node.meta.ownership.meta.component_name) |name| if (std.mem.eql(u8, name, "Button")) return;
     node.setBackground(remap(node.getBackground(), old));
     node.setBorderColor(remap(node.style.border.color, old));
-    if (node.getText()) |value| node.setTextColor(remap(value.color, old));
-    if (node.getIcon()) |value| _ = node.setTint(remap(value.tint, old));
-    if (node.getImage()) |value| _ = node.setTint(remap(value.tint, old));
+    if (node.getText()) |value| node.setTextColor(theme.remapUiInk(value.color, old));
+    if (node.getIcon()) |value| _ = node.setTint(theme.remapUiInk(value.tint, old));
+    if (node.getImage()) |value| _ = node.setTint(theme.remapUiInk(value.tint, old));
     for (node.children.items) |child| repaint(child, old);
 }
 fn remap(value: ui.Color, old: theme.Colors) ui.Color {

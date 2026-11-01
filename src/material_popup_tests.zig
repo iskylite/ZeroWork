@@ -24,6 +24,41 @@ fn contains(rect: ui.ComputedRect, x: f32, y: f32) bool {
     return x > rect.x and y > rect.y and x < rect.x + rect.w and y < rect.y + rect.h;
 }
 
+test "AI sessions retained native rows follow every builtin theme publication" {
+    const Sessions = @import("ui/ai_sessions_view.zig");
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(1000, 700);
+    try cx.setTestFrameStep(16);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const anchor = try ui.box(cx, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 } }, .{});
+    try cx.root.?.appendChild(a, anchor);
+    var context: u8 = 0;
+    const callbacks = struct {
+        fn ignore(_: *anyopaque, _: u64) void {}
+    };
+    const list = try Sessions.View.mount(cx, scope, anchor, .{ .context = &context, .select = callbacks.ignore, .request_close = callbacks.ignore, .remove = callbacks.ignore });
+    try cx.root.?.appendChild(a, list.root);
+    try list.show(&.{ .{ .id = 1, .title = "等待审批", .owner = "当前终端", .active = true, .phase = .approval }, .{ .id = 2, .title = "正在运行", .owner = "当前终端", .phase = .running } });
+    const row = findTestId(list.content, "ai.session.row.1").?;
+    const publication = try cx.bindState(shell.ThemePublication, .{});
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        publication.publish(cx, theme.widgetTheme(theme.currentName()));
+        _ = frame(cx);
+        try std.testing.expect(list.open.peek());
+        try std.testing.expectEqual(row, findTestId(list.content, "ai.session.row.1").?);
+        try std.testing.expectEqual(theme.current().overlay, list.chrome.getBackground());
+        try std.testing.expectEqual(theme.current().warn_ink, findTestId(list.content, "ai.session.status.approval").?.getIcon().?.tint);
+        try std.testing.expectEqual(theme.current().accent_ink, findTestId(list.content, "ai.session.status.running").?.getIcon().?.tint);
+    }
+}
+
 test "production AI permission popover reveals the single global material in the final paint stream" {
     const saved_parameters = theme.materialParameters();
     defer _ = theme.setMaterialParameters(saved_parameters.transparency, saved_parameters.blur);
@@ -244,7 +279,7 @@ test "production auth content inherits modal and inline material across retheme 
     }
 }
 
-test "global material component roles preserve theme action hues and material alpha" {
+test "global material component roles preserve readable bubble paints and material alpha" {
     const saved_colors = theme.baseColors();
     const saved_parameters = theme.materialParameters();
     defer {
@@ -267,9 +302,13 @@ test "global material component roles preserve theme action hues and material al
             _ = theme.setMaterialParameters(transparency, transparency * 0.48);
             const c = theme.current();
             const user = bubble.userBubble(572);
-            try std.testing.expectEqual(c.action_accent.withAlpha(c.overlay.a), user.background);
-            try std.testing.expectEqual(c.action_accent.withAlpha(c.overlay.a), user.gradient.?.from);
-            try std.testing.expectEqual(c.action_accent_2.withAlpha(c.overlay.a), user.gradient.?.to);
+            const paint = theme.userBubblePaint();
+            try std.testing.expectEqual(paint.from, user.background);
+            try std.testing.expectEqual(paint.from, user.gradient.?.from);
+            try std.testing.expectEqual(paint.to, user.gradient.?.to);
+            try std.testing.expectEqual(paint.foreground, bubble.userBubbleForeground());
+            try std.testing.expectEqual(c.overlay.a, paint.from.a);
+            try std.testing.expectEqual(c.overlay.a, paint.to.a);
             try std.testing.expectEqual(ui.Color.TRANSPARENT, recent.recent().background);
             try std.testing.expectEqual(c.surface_2, strip.lip(theme.widgetTheme(theme.currentName())).background);
             try std.testing.expectEqual(@max(12, theme.materialParameters().blur), strip.lip(theme.widgetTheme(theme.currentName())).glass.?.backdrop_blur);
@@ -344,5 +383,47 @@ test "material retained tab and recorder overlays update alpha and blur independ
         try std.testing.expectEqual(ink, label.getText().?.color);
         try std.testing.expectEqual(ids, .{ color.chrome.id, rename.dialog.id, dialog.id });
         try std.testing.expectEqual(theme.popupAction(), @import("ui/notification_history_styles.zig").policy().background);
+    }
+}
+
+test "native foreground aliases preserve readable ink roles through every builtin publication" {
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    theme.select(.dark);
+    const old = theme.current();
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        inline for (.{ "fg_1", "fg_2", "fg_3", "accent_ink", "warn_ink", "ok_ink", "danger_ink" }) |role| {
+            try std.testing.expectEqual(@field(theme.current(), role), theme.remapUiInk(@field(old, role), old));
+        }
+    }
+}
+
+test "native primary paint follows all builtins and removes emphasis while disabled" {
+    const previous = theme.currentName();
+    defer theme.select(previous);
+    const a = std.testing.allocator;
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 600);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const disabled = try scope.createSignal(bool, false);
+    const button = try ui.widgets.Button(.{ .label = "确认", .variant = .primary, .disabled = disabled }).mount(scope, cx);
+    try theme.stylePrimary(cx, scope, button, disabled);
+    try cx.root.?.appendChild(a, button);
+    const publication = try cx.bindState(shell.ThemePublication, .{});
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        publication.publish(cx, theme.widgetTheme(theme.currentName()));
+        disabled.set(false);
+        _ = frame(cx);
+        try std.testing.expectEqual(theme.current().action_accent, button.style.gradient().?.from);
+        try std.testing.expectEqual(theme.current().action_accent_2, button.style.gradient().?.to);
+        disabled.set(true);
+        _ = frame(cx);
+        try std.testing.expect(button.style.gradient() == null);
+        try std.testing.expect(button.behavior.interaction.a11y.?.disabled);
     }
 }

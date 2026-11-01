@@ -40,7 +40,7 @@ pub const View = struct {
         const header = try ui.boxStyled(cx, S.header, .{});
         header.meta.ownership.meta.test_id = "ai.inventory_grant.header";
         try self.root.appendChild(cx.allocator, header);
-        const icon = try ui.iconTint(cx, ui.icons.get("layout-grid").?, theme.current().fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
+        const icon = try theme.icon(cx, ui.icons.get("layout-grid").?, "fg_2", .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
         icon.meta.ownership.meta.test_id = "ai.inventory_grant.icon";
         try header.appendChild(cx.allocator, icon);
         const title = try ui.textStyled(cx, S.title, "查看其他会话");
@@ -55,15 +55,21 @@ pub const View = struct {
         const actions = try ui.boxStyled(cx, S.actions, .{});
         actions.meta.ownership.meta.test_id = "ai.inventory_grant.actions";
         try self.root.appendChild(cx.allocator, actions);
-        self.deny = try ui.widgets.Button(.{ .variant = .secondary, .label = "拒绝", .a11y_label = "拒绝本次查看其他会话", .base_style = S.button(false), .disabled = self.disabled, .hover_style = .{ .background = theme.popupSelection() }, .on_click = cx.on(View, self, denyRequest) }).mount(scope, cx);
+        self.deny = try ui.widgets.Button(.{ .variant = .secondary, .label = "拒绝", .a11y_label = "拒绝本次查看其他会话", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.button, .{false}), .disabled = self.disabled, .hover_style = try theme.paintSignal(?@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.hover, .{}), .on_click = cx.on(View, self, denyRequest) }).mount(scope, cx);
         self.deny.meta.ownership.meta.test_id = "ai.inventory_grant.deny";
         try actions.appendChild(cx.allocator, self.deny);
         self.allow_once = try ui.widgets.Button(.{ .variant = .primary, .label = "仅此一次", .a11y_label = "仅本次调用允许查看其他会话", .base_style = self.primary_style, .disabled = self.disabled, .on_click = cx.on(View, self, allowOnce) }).mount(scope, cx);
         self.allow_once.meta.ownership.meta.test_id = "ai.inventory_grant.allow_once";
         try actions.appendChild(cx.allocator, self.allow_once);
-        self.allow_conversation = try ui.widgets.Button(.{ .variant = .secondary, .label = "持续允许", .a11y_label = "当前对话持续允许查看其他会话，可撤销", .base_style = S.button(false), .disabled = self.disabled, .hover_style = .{ .background = theme.popupSelection() }, .on_click = cx.on(View, self, allowConversation) }).mount(scope, cx);
+        self.allow_conversation = try ui.widgets.Button(.{ .variant = .secondary, .label = "持续允许", .a11y_label = "当前对话持续允许查看其他会话，可撤销", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.button, .{false}), .disabled = self.disabled, .hover_style = try theme.paintSignal(?@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.hover, .{}), .on_click = cx.on(View, self, allowConversation) }).mount(scope, cx);
         self.allow_conversation.meta.ownership.meta.test_id = "ai.inventory_grant.allow_conversation";
         try actions.appendChild(cx.allocator, self.allow_conversation);
+        try scope.createEffect(.{ .view = self, .publication = try cx.themeSignal(scope) }, struct {
+            fn paint(ctx: anytype) void {
+                _ = ctx.publication.get();
+                ctx.view.refreshActionPaint();
+            }
+        }.paint);
         return self;
     }
     fn copy(self: *View, id: []const u8, value: []const u8, secondary: bool) !*ui.Node {

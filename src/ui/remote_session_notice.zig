@@ -104,7 +104,7 @@ pub const View = struct {
         const root = try ui.box(cx, S.banner(false), .{});
         root.meta.ownership.meta.test_id = "remote.notice";
         try parent.appendChild(cx.allocator, root);
-        const icon = try ui.iconTint(cx, ui.icons.terminal, theme.current().fg_2, S.icon());
+        const icon = try theme.icon(cx, ui.icons.terminal, "fg_2", S.icon());
         try root.appendChild(cx.allocator, icon);
         const spinner_color = try scope.createSignal(?ui.Color, theme.current().fg_2);
         const spinner = try ui.widgets.Spinner(.{ .size = 20, .stroke_width = 2, .color = spinner_color }).mount(scope, cx);
@@ -129,6 +129,7 @@ pub const View = struct {
     }
     fn button(self: *View, scope: *ui.Scope, label: []const u8, id: []const u8, comptime primary: bool, comptime callback: fn (*View) void) !*ui.Node {
         const node = try ui.widgets.Button(.{ .label = label, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .ghost), .size = .sm, .base_style = .{ .font_size = 12, .font_weight = 500 }, .on_click = self.cx.on(View, self, callback) }).mount(scope, self.cx);
+        if (primary) try theme.stylePrimary(self.cx, scope, node, null);
         node.setStyleInline(self.cx.allocator, S.action());
         node.meta.ownership.meta.test_id = id;
         try self.root.appendChild(self.cx.allocator, node);

@@ -62,6 +62,50 @@ test "command metadata reads B to C across feeds and preserves shell-provided co
     try std.testing.expectEqualStrings("echo truth  ", result.commands[1].command.?);
 }
 
+test "command metadata clears erased locations without deleting command history" {
+    var adapter = try Adapter.init(allocator, 6, 40);
+    defer adapter.destroy();
+    _ = try adapter.feed("\x1b]133;A\x07$ \x1b]133;B\x07old\r\n\x1b]133;C\x07output\r\n\x1b]133;D;1\x07");
+    _ = try adapter.feed("\x1b[H\x1b[2J");
+    var cleared = try adapter.copyProjection(allocator);
+    defer cleared.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), cleared.commands.len);
+    try std.testing.expectEqualStrings("old", cleared.commands[0].command.?);
+    try std.testing.expectEqual(@as(?i32, 1), cleared.commands[0].exit_code);
+    try std.testing.expectEqual(@as(?u32, null), cleared.commands[0].screen_row);
+    try std.testing.expectEqual(@as(?u32, null), cleared.commands[0].input_end_row);
+    try std.testing.expectEqual(@as(?u32, null), cleared.commands[0].output_start_row);
+    _ = try adapter.feed("\x1b]133;A\x07$ \x1b]133;B\x07old\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
+    var repeated = try adapter.copyProjection(allocator);
+    defer repeated.deinit(allocator);
+    try std.testing.expectEqual(@as(?u32, null), repeated.commands[0].screen_row);
+    try std.testing.expectEqual(@as(?u32, 0), repeated.commands[1].screen_row);
+}
+
+test "command metadata does not attach old status to a prompt redrawn in one feed" {
+    var adapter = try Adapter.init(allocator, 6, 40);
+    defer adapter.destroy();
+    _ = try adapter.feed("\x1b]133;A\x07$ \x1b]133;B\x07same\r\n\x1b]133;C\x07\x1b]133;D;1\x07");
+    _ = try adapter.feed("\x1b[H\x1b[2J\x1b]133;A\x07$ \x1b]133;B\x07same\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
+    var result = try adapter.copyProjection(allocator);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), result.commands.len);
+    try std.testing.expectEqual(@as(?u32, null), result.commands[0].screen_row);
+    try std.testing.expectEqual(@as(?u32, 0), result.commands[1].screen_row);
+    try std.testing.expectEqual(@as(?i32, 0), result.commands[1].exit_code);
+}
+
+test "command metadata drops a location overwritten by output" {
+    var adapter = try Adapter.init(allocator, 6, 40);
+    defer adapter.destroy();
+    _ = try adapter.feed("\x1b]133;A\x07$ \x1b]133;B\x07old\r\n\x1b]133;C\x07\x1b]133;D;0\x07");
+    _ = try adapter.feed("\x1b[Hreplacement output");
+    var result = try adapter.copyProjection(allocator);
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(?u32, null), result.commands[0].screen_row);
+    try std.testing.expectEqualStrings("old", result.commands[0].command.?);
+}
+
 test "command metadata tracks wrap and resize without repeating a command" {
     var adapter = try Adapter.init(allocator, 4, 10);
     defer adapter.destroy();

@@ -37,13 +37,13 @@ pub const View = struct {
         const body = try ui.box(cx, .{ .width = .fill(), .direction = .column, .gap = 12 }, .{});
         try popup.content.appendChild(cx.allocator, body);
         const heading = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 26 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .top = 2 }, .flex_shrink = 0 }, .{});
-        try heading.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("palette").?, theme.current().accent, .{ .width = .{ .px = 17 }, .height = .{ .px = 17 }, .flex_shrink = 0 }));
-        self.title = try ui.text(cx, "页签颜色", .{ .font_size = 13, .font_weight = 700, .line_height = 20.0 / 13.0, .color = theme.current().fg_1 });
+        try heading.appendChild(cx.allocator, try theme.icon(cx, ui.icons.get("palette").?, "accent_ink", .{ .width = .{ .px = 17 }, .height = .{ .px = 17 }, .flex_shrink = 0 }));
+        self.title = try ui.textStyled(cx, titleStyle, "页签颜色");
         try heading.appendChild(cx.allocator, self.title);
         try heading.appendChild(cx.allocator, try ui.box(cx, .{ .width = .fill() }, .{}));
         const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "关闭页签颜色", .base_style = .{ .width = .{ .px = 24 }, .height = .{ .px = 24 }, .padding = ui.Padding.all(5), .border = .{ .radius = 7 }, .flex_shrink = 0 }, .on_click = cx.on(View, self, hide) }).mount(popup.scope, cx);
         close.meta.ownership.meta.test_id = "tabs.color.close";
-        try close.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.x, theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
+        try close.appendChild(cx.allocator, try theme.icon(cx, ui.icons.x, "fg_2", .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
         try heading.appendChild(cx.allocator, close);
         try body.appendChild(cx.allocator, heading);
         const choices = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 38 }, .direction = .row, .gap = 10, .padding = ui.Padding.all(5), .flex_shrink = 0 }, .{});
@@ -110,4 +110,8 @@ fn find(node: *ui.Node, id: u32) ?*ui.Node {
 // Match the shared HTML popover: 14px padding without an outline.
 fn panel() ui.BoxStyle {
     return .{ .width = .{ .px = 344 }, .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(14), .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = 11 }, .shadow = .{ .blur = 24, .offset_y = 8, .color = theme.current().shadow } };
+}
+
+fn titleStyle(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 13, .font_weight = 700, .line_height = 20.0 / 13.0, .color = theme.current().fg_1 };
 }

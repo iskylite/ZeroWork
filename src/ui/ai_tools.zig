@@ -9,6 +9,7 @@ const scope = @import("../ai/tool_scope.zig");
 const tools = @import("../ai/plugin_tools.zig");
 const legacy = @import("../ai/legacy_adapter.zig");
 const typed = @import("../host/plugin_services.zig");
+const content = @import("../host/content_context.zig");
 const operations = @import("../host/operation_store.zig");
 const approvals = @import("../ai/host_approval.zig");
 const routing = approvals.routing;
@@ -20,8 +21,8 @@ pub const HostBinding = struct {
     invoke_worker: ?*const fn (*anyopaque, *Bridge, host_tools.Invocation, std.mem.Allocator, ?*provider.CancelToken) anyerror!host_tools.Result = null,
     contributions: []const host_tools.Contribution,
     refresh: ?*const fn (*anyopaque, *Bridge, *const tools.RequestTable, std.mem.Allocator, ?*provider.CancelToken) anyerror!?loop.AuthorityRefresh = null,
-    acknowledge_notice: ?*const fn (*anyopaque, u64) anyerror!void = null,
-    accepted_result: ?*const fn (*anyopaque, host_tools.Context, []const u8, *const host_tools.Result) anyerror!void = null,
+    acknowledge_notice: ?*const fn (*anyopaque, u64, ?*provider.CancelToken) anyerror!void = null,
+    accepted_result: ?*const fn (*anyopaque, host_tools.Context, []const u8, *const host_tools.Result, ?*provider.CancelToken) anyerror!void = null,
 };
 pub const Approval = legacy.Approval;
 const Child = struct {
@@ -30,6 +31,10 @@ const Child = struct {
     invocation_context: legacy.InvocationContext = undefined,
     member: tools.Member,
     live_services: std.ArrayList(typed.Binding) = .empty,
+    automation: ?content.AutomationGrant = null,
+    automation_started_ms: u64 = 0,
+    automation_steps: u8 = 0,
+    automation_interrupted: bool = false,
 };
 const ApprovalExchange = struct { invocation: tools.DynamicInvocation, ticket: *tools.ApprovalTicket, sequence: u64, decision: enum { pending, approved, rejected } = .pending };
 const ControllerExchange = struct {
@@ -106,6 +111,7 @@ pub const Bridge = struct {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
     }
     pub fn configurePolicy(self: *Bridge, engine: @import("../ai/permission.zig").Engine, revision: u64) void {
+        if (revision != self.policy_revision) for (self.children.items) |child| releaseAutomation(child, true);
         self.policy = .{ .engine = engine, .full_control = engine.mode == .auto };
         self.policy_revision = revision;
     }
@@ -338,15 +344,15 @@ pub const Bridge = struct {
         const refresh_fn = binding.refresh orelse return null;
         return refresh_fn(binding.handler_context, self, table, allocator, cancel);
     }
-    fn acknowledgeNotice(raw: *anyopaque, revision: u64) !void {
+    fn acknowledgeNotice(raw: *anyopaque, revision: u64, cancel: ?*provider.CancelToken) !void {
         const self: *Bridge = @ptrCast(@alignCast(raw));
         const binding = self.host_binding orelse return;
-        if (binding.acknowledge_notice) |acknowledge| try acknowledge(binding.handler_context, revision);
+        if (binding.acknowledge_notice) |acknowledge| try acknowledge(binding.handler_context, revision, cancel);
     }
-    fn acceptedResult(raw: *anyopaque, context: host_tools.Context, name: []const u8, result: *const host_tools.Result) !void {
+    fn acceptedResult(raw: *anyopaque, context: host_tools.Context, name: []const u8, result: *const host_tools.Result, cancel: ?*provider.CancelToken) !void {
         const self: *Bridge = @ptrCast(@alignCast(raw));
         const binding = self.host_binding orelse return;
-        if (binding.accepted_result) |accepted| try accepted(binding.handler_context, context, name, result);
+        if (binding.accepted_result) |accepted| try accepted(binding.handler_context, context, name, result, cancel);
     }
     /// The participant worker is parked at a round boundary. Replace only
     /// prepared resources; retain its mutex, mailboxes and controller exchange.
@@ -488,6 +494,7 @@ pub const Bridge = struct {
     pub fn bindingChanged(self: *Bridge, owner: scope.Owner) void {
         self.lock();
         self.pending_binding = owner;
+        for (self.children.items) |child| releaseAutomation(child, true);
         self.mutex.unlock();
     }
     pub fn hostExecutionStarted(self: *Bridge, invocation: host_tools.Invocation) void {
@@ -580,6 +587,10 @@ pub const Bridge = struct {
             self.mutex.unlock();
         }
         for (self.children.items) |child| child.invocation_context.cancel = cancel;
+        // The active run lends this token; prepared adapters outlive the run.
+        defer for (self.children.items) |child| {
+            child.invocation_context.cancel = null;
+        };
         self.emitStep(invocation, .assembling, "");
         var route_subject: approvals.Subject = undefined;
         var route_label: [128]u8 = undefined;
@@ -812,6 +823,9 @@ pub const Bridge = struct {
             child.member.authorized = roster_valid and current != null and app.legacyForHandle(child.owner) != null;
             child.member.capability_revision = app.sessions.capabilityRevisionFor(child.owner) orelse 0;
             child.member.policy_revision = app.workspace.app_config.config_revision;
+            if (child.automation) |grant| {
+                if (self.stopped.load(.acquire) or !child.member.authorized or child.member.policy_revision != self.policy_revision or self.pending_binding != null or !grant.proof.valid()) releaseAutomation(child, true);
+            }
             child.live_services.clearRetainingCapacity();
             if (current) |bindings| child.live_services.appendSlice(self.allocator, bindings) catch {
                 child.member.authorized = false;
@@ -842,17 +856,32 @@ pub const Bridge = struct {
                     self.mutex.unlock();
                     return;
                 };
-                if (current.invocation.effect == .remote_input) {
-                    @import("plugin_window_host.zig").Host.authorizeInput(app, current.invocation.owner, true, self.policy_revision) catch |err| {
+                // Effect comes from the registered, frozen definition. The
+                // invocation field is descriptive and cannot grant authority.
+                const effect = running.parsed.entry.definition.effect;
+                if (current.invocation.effect != effect or !std.mem.eql(u8, current.invocation.tool_id, running.parsed.entry.definition.id)) {
+                    current.failure = error.ToolEffectMismatch;
+                    current.ready.store(true, .release);
+                    self.mutex.unlock();
+                    return;
+                }
+                if (effect == .remote_input) {
+                    const child = for (self.children.items) |candidate| {
+                        if (candidate.owner.eql(current.invocation.owner)) break candidate;
+                    } else {
+                        current.failure = error.StaleBinding;
+                        current.ready.store(true, .release);
+                        self.mutex.unlock();
+                        return;
+                    };
+                    self.authorizeAutomation(app, child, current.cancel) catch |err| {
                         current.failure = err;
                         current.ready.store(true, .release);
                         self.mutex.unlock();
                         return;
                     };
+                    current.invocation.automation_proof = child.automation.?.proof;
                 }
-                defer if (current.invocation.effect == .remote_input) {
-                    @import("plugin_window_host.zig").Host.authorizeInput(app, current.invocation.owner, false, self.policy_revision) catch {};
-                };
                 tools.markSent(self.operationHistory(), current.invocation.owner, current.invocation.operation_id, current.invocation.call_id, current.invocation.tool_id, current.invocation.arguments_hash) catch |err| {
                     current.failure = err;
                     current.ready.store(true, .release);
@@ -863,6 +892,9 @@ pub const Bridge = struct {
                 current.result = current.target.binding.handler(current.target.context, current.invocation, current.allocator) catch |err| blk: {
                     current.failure = err;
                     break :blk null;
+                };
+                if (current.result) |result| if (result.status == .outcome_unknown or result.receipt.remote_effect_unknown) {
+                    for (self.children.items) |child| if (child.owner.eql(current.invocation.owner)) releaseAutomation(child, true);
                 };
             }
             current.ready.store(true, .release);
@@ -919,6 +951,7 @@ pub const Bridge = struct {
     pub fn stopOwner(self: *Bridge, owner: identity.SessionHandle) Application.CloseReceipt {
         var receipt: Application.CloseReceipt = .released;
         for (self.children.items) |child| if (child.owner.eql(owner)) {
+            releaseAutomation(child, true);
             // Closing one member releases that member's authority. The group
             // conversation and unrelated tools keep their original Task.
             if (self.captured_scope) |captured| if (captured.owner == .session and captured.owner.session == @backingInt(owner.session_id)) self.stopped.store(true, .release);
@@ -950,6 +983,7 @@ pub const Bridge = struct {
     pub fn shutdown(self: *Bridge, app: ?*Application.ApplicationHost) void {
         self.stopped.store(true, .release);
         for (self.children.items) |child| {
+            releaseAutomation(child, true);
             self.cancelOwnHistory(child.owner);
             if (child.adapter) |adapter| adapter.vtable.shutdown(adapter.context, if (app) |host| host else null);
         }
@@ -967,6 +1001,7 @@ pub const Bridge = struct {
         if (operation_id) |id| self.operationHistory().cancel(owner, id) catch {};
     }
     fn clearPrepared(self: *Bridge) !void {
+        for (self.children.items) |child| releaseAutomation(child, false);
         for (self.children.items) |child| if (child.adapter) |adapter| try adapter.vtable.clear(adapter.context);
         if (self.table) |*table| table.deinit();
         self.table = null;
@@ -997,6 +1032,24 @@ pub const Bridge = struct {
         self.validation_arena.deinit();
         self.capture_arena.deinit();
         self.* = undefined;
+    }
+    fn releaseAutomation(child: *Child, interrupted: bool) void {
+        if (child.automation) |grant| {
+            grant.release();
+            child.automation = null;
+            child.automation_interrupted = interrupted;
+        }
+    }
+    fn authorizeAutomation(self: *Bridge, app: *Application.ApplicationHost, child: *Child, cancel: ?*provider.CancelToken) !void {
+        if (child.automation_interrupted) return error.AutomationInterrupted;
+        if (child.automation_steps >= 32) return error.AutomationStepBudgetExceeded;
+        const now: u64 = @intCast(timeNow(self));
+        if (child.automation_started_ms == 0) child.automation_started_ms = now;
+        const expires_at = child.automation_started_ms +| (10 * std.time.ms_per_min);
+        if (now >= expires_at) return error.AutomationLeaseExpired;
+        if (child.automation == null) child.automation = try @import("plugin_window_host.zig").Host.acquireAutomation(app, child.owner, self.policy_revision, if (cancel) |token| &token.cancelled else null, &self.stopped, expires_at);
+        if (!child.automation.?.proof.valid()) return error.StaleInputLease;
+        child.automation_steps += 1;
     }
 };
 fn pause() void {

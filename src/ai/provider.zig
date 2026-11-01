@@ -58,11 +58,14 @@ pub const Message = struct {
 };
 pub const CancelToken = struct {
     cancelled: std.atomic.Value(bool) = .init(false),
+    /// Borrowed for this operation only. The source and its thread-safe poll
+    /// must outlive every consumer, including child work through its join.
+    source: ?struct { context: *const anyopaque, poll: *const fn (*const anyopaque) bool } = null,
     pub fn cancel(self: *CancelToken) void {
         self.cancelled.store(true, .release);
     }
     pub fn isCancelled(self: *const CancelToken) bool {
-        return self.cancelled.load(.acquire);
+        return self.cancelled.load(.acquire) or if (self.source) |source| source.poll(source.context) else false;
     }
 };
 pub const ReasoningWire = enum { none, thinking_type, openrouter, ollama, anthropic_adaptive };
@@ -83,7 +86,8 @@ pub const ChatRequest = struct {
     image_token_reservation: ?u32 = null,
     vision: bool = false,
     max_output: u32 = 4096,
-    /// Total budget across retries; active reasoning may exceed one minute.
+    /// Total automatic-run budget across provider/tool rounds and retries.
+    /// An explicit manual answer retry starts a new budget, retaining results.
     timeout_ms: u32 = 10 * 60_000,
     /// Stream inactivity limit, reset by received bytes.
     idle_timeout_ms: u32 = 60_000,

@@ -221,6 +221,15 @@ fn authorize(ctx: *backend.Context, prepared: backend.Prepared) !@import("../ai/
     const api = ctx.backend();
     return api.authorize(api.context, prepared.invocation, prepared.invocation.arguments.object.get("session_ref").?.string, prepared.command, prepared.command_hash);
 }
+fn awaitWorker(fixture: *Fixture, deadline: i128, comptime action: anytype, args: anytype) @typeInfo(@TypeOf(action)).@"fn".return_type.? {
+    while (true) {
+        return @call(.auto, action, args) catch |err| {
+            if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() >= deadline) return err;
+            try fixture.tick();
+            continue;
+        };
+    }
+}
 fn handoff(fixture: *Fixture, store: *assistants.Store, roster: *groups.Roster, controller: *Controller, bridge: *Bridge, target: identity.SessionHandle) !host.Context {
     const original = controller.authority;
     const legacy = fixture.app.legacyForHandle(target).?;
@@ -498,17 +507,20 @@ fn revokeWithdrawnAuthorityBody(fixture: *Fixture, roster: *groups.Roster, kind:
     defer call.deinit();
     var prepared = try backend.prepare(call.value, a);
     defer prepared.deinit();
-    const permit = try approve(&ctx, &broker, &prepared);
+    // The production Driver retries WorkerBusy without dispatching. This
+    // direct-backend fixture must observe the same asynchronous admission
+    // boundary, rather than assume the Local worker mutex is always free.
+    const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
+    const permit = try awaitWorker(fixture, deadline, approve, .{ &ctx, &broker, &prepared });
     defer broker.finish(permit);
-    const accepted = try authorize(&ctx, prepared);
+    const accepted = try awaitWorker(fixture, deadline, authorize, .{ &ctx, prepared });
     fixture.diagnostic_service = accepted.service;
     const api = ctx.backend();
-    const initial = try accepted.service.executionSnapshot();
+    const initial = try awaitWorker(fixture, deadline, @import("../host/terminal_service.zig").Service.executionSnapshot, .{accepted.service});
     fixture.diagnostic_last_execution = initial;
     const id = identity.ExecutionId.generate();
     fixture.diagnostic_execution_id = id;
     const request: execution.Request = .{ .execution_id = id, .task_id = owner.task_id, .expected_input_epoch = initial.input_epoch, .ownership_revision = accepted.ownership_revision, .command = prepared.command, .command_hash = prepared.command_hash };
-    const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
     while (true) {
         _ = api.terminal_call.?(api.context, accepted.service, .{ .request = request }) catch |err| {
             if (err != error.WorkerBusy) return err;

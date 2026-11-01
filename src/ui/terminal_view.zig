@@ -258,6 +258,7 @@ pub const TerminalViewNode = struct {
     palette_observer: ?PaletteObserver = null,
     input_observer: ?InputObserver = null,
     broadcast_event: u64 = 0,
+    keymap: ?*const @import("../config/keybindings.zig").Map = null,
     text_input_modified: bool = false,
     suppress_broadcast: bool = false,
     pending_paste_broadcast: bool = false,
@@ -1147,6 +1148,7 @@ pub const TerminalViewNode = struct {
             .monospace_char_width = cell_width,
             .wrap = .none,
         });
+        local_input_node.meta.ownership.meta.test_id = "terminal.command.input";
         local_input_node.style.position = .absolute;
         const local_ext = try local_input_node.style.ensureExtFallible(cx.allocator);
         local_ext.inset = .{ .top = .{ .px = 0 }, .left = .{ .px = 0 } };
@@ -2077,17 +2079,21 @@ pub const TerminalViewNode = struct {
         self.renderCompletion();
     }
 
+    pub fn openCompletion(self: *TerminalViewNode) bool {
+        if (!self.completionAllowed()) return false;
+        self.trusted_suppressed = null;
+        self.completion_selected = 0;
+        self.refreshCompletion();
+        return true;
+    }
+
     fn handleCompletionKey(self: *TerminalViewNode, key: ui.events.KeyCode, modifiers: ui.events.Modifiers) bool {
         if (!self.completionAllowed()) {
             self.completion.dismiss();
             return false;
         }
-        if (key == .semicolon and ui.events.primaryModifier(modifiers) and !modifiers.shift and !modifiers.alt) {
-            self.trusted_suppressed = null;
-            self.completion_selected = 0;
-            self.refreshCompletion();
-            return true;
-        }
+        const keymap = if (self.keymap) |map| map.* else @import("../config/keybindings.zig").Map{};
+        if (keymap.match(key, modifiers) == .completion) return self.openCompletion();
         if (key == .tab) {
             self.trusted_suppressed = self.completionRevision();
             // Close local UI before shell changes the remote line.
@@ -2249,6 +2255,7 @@ pub const TerminalViewNode = struct {
     fn closeCommandPalette(self: *TerminalViewNode) void {
         self.palette.close();
         hideOverlay(self.palette_panel, &self.palette_cache);
+        self.renderLocalInput();
         self.cx.requestRedraw();
     }
 
@@ -2293,6 +2300,7 @@ pub const TerminalViewNode = struct {
             const keys = footer.children.items[footer.children.items.len - 1];
             keys.setTextContent(cx.allocator, if (window.count == 0) "Esc 关闭" else "↑↓ 选择 · → 采纳 · ↵ 执行 · Esc 关闭") catch {};
         }
+        self.renderLocalInput();
         cx.requestRedraw();
     }
 
@@ -2328,6 +2336,7 @@ pub const TerminalViewNode = struct {
     /// 每帧（FrameHook）重锚定：面板开着时挂在光标行下方（底部放不下则放
     /// 光标行上方），x 跟随 metrics.origin_x；几何脏检查跳过静止帧。
     fn renderCommandPalette(self: *TerminalViewNode) void {
+        defer self.renderLocalInput();
         self.refreshOverlayTheme();
         if (!self.palette.isOpen()) {
             hideOverlay(self.palette_panel, &self.palette_cache);
@@ -2675,10 +2684,16 @@ pub const TerminalViewNode = struct {
         return run.total_advance;
     }
 
+    fn localInputCaretAdvance(self: *TerminalViewNode) f32 {
+        if (self.local_editor.active) return self.localInputAdvance(self.local_editor.text.items[0..self.local_editor.caret]);
+        if (self.palette.isOpen()) return self.localInputAdvance("@") + self.localInputAdvance(self.palette.query.items);
+        return 0;
+    }
+
     fn renderLocalInput(self: *TerminalViewNode) void {
         defer self.renderParameterCandidates();
-        if (self.terminal_surface) |surface| surface.setCommandCaret(if (self.local_editor.active) self.localInputAdvance(self.local_editor.text.items[0..self.local_editor.caret]) else 0);
-        if (!self.local_editor.active) {
+        if (self.terminal_surface) |surface| surface.setCommandCaret(self.localInputCaretAdvance());
+        if (!self.local_editor.active and !self.palette.isOpen()) {
             const visible = self.local_input_node.style.display != .none;
             hideOverlay(self.local_input_node, &self.local_input_cache);
             if (visible) {
@@ -2688,7 +2703,12 @@ pub const TerminalViewNode = struct {
             return;
         }
         const composition = self.preedit orelse "";
-        const display = std.mem.concat(self.cx.allocator, u8, &.{ self.local_editor.text.items[0..self.local_editor.caret], composition, self.local_editor.text.items[self.local_editor.caret..] }) catch return;
+        // The palette owns this draft until adoption, just as the local
+        // editor owns an adopted command. Echo both at the terminal cursor.
+        const display = if (self.local_editor.active)
+            std.mem.concat(self.cx.allocator, u8, &.{ self.local_editor.text.items[0..self.local_editor.caret], composition, self.local_editor.text.items[self.local_editor.caret..] }) catch return
+        else
+            std.mem.concat(self.cx.allocator, u8, &.{ "@", self.palette.query.items, composition }) catch return;
         defer self.cx.allocator.free(display);
         const content_changed = if (self.local_input_node.getText()) |props| !std.mem.eql(u8, props.content, display) else true;
         if (content_changed) self.local_input_node.setTextContent(self.cx.allocator, display) catch return;
@@ -4332,7 +4352,7 @@ pub const TerminalViewNode = struct {
         const rows: u32 = if (self.frame_rows > 0) self.frame_rows else 24;
         const cols: u32 = if (self.frame_cols > 0) self.frame_cols else 80;
         const cursor = self.frame_cursor;
-        if ((!self.has_frame and !self.local_editor.active) or !cursor.visible or cursor.row >= rows or cursor.col > cols) {
+        if ((!self.has_frame and !self.local_editor.active and !self.palette.isOpen()) or !cursor.visible or cursor.row >= rows or cursor.col > cols) {
             hideOverlay(self.cursor_overlay, &self.cursor_cache);
             return;
         }
@@ -4347,7 +4367,7 @@ pub const TerminalViewNode = struct {
         const root_rect = self.root.globalRect();
         var x = self.metrics.origin_x - root_rect.x + @as(f32, @floatFromInt(cursor.col)) * self.metrics.cell_width;
         var y = self.metrics.origin_y - root_rect.y + self.presentationRowY(cursor.row);
-        if (self.local_editor.active) x += self.localInputAdvance(self.local_editor.text.items[0..self.local_editor.caret]);
+        x += self.localInputCaretAdvance();
         // During IME composition the block cursor sits after the preedit run.
         if (self.preedit) |composition| {
             x += self.localInputAdvance(composition);
@@ -5549,6 +5569,33 @@ const TrustedCompletionFixture = struct {
     }
 };
 
+test "terminal completion follows saved and updated shortcuts without retaining the old binding" {
+    const keys = @import("../config/keybindings.zig");
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 450);
+    var view = try TerminalViewNode.mount(cx);
+    defer view.releaseBuffers(cx);
+    cx.root = view.root;
+    var provider: TrustedCompletionFixture = .{};
+    try provider.init(&view);
+    defer provider.base.deinit();
+    defer view.unbindTerminalService(provider.base.service().binding.origin_session.?);
+    var map: keys.Map = .{};
+    view.keymap = &map;
+    try map.set(.completion, .{ .key = .p, .shift = true });
+    view.recordCompletionHistory("git status");
+    view.line.record(cx.allocator, "git st");
+    try std.testing.expect(!view.handleCompletionKey(.semicolon, .{ .super = true }));
+    try std.testing.expect(view.handleCompletionKey(.p, .{ .super = true, .shift = true }));
+    try std.testing.expect(view.completion.state.menu_open);
+    try std.testing.expectEqual(@as(usize, 1), view.completion_count);
+    try std.testing.expect(view.handleCompletionKey(.escape, .{}));
+    try map.set(.completion, .{ .key = .semicolon });
+    try std.testing.expect(!view.handleCompletionKey(.p, .{ .super = true, .shift = true }));
+    try std.testing.expect(view.handleCompletionKey(.semicolon, .{ .super = true }));
+}
+
 test "terminal overlay global completion and replay repaint preserve retained input and geometry" {
     const theme = @import("app_theme.zig");
     const old_name = theme.currentName();
@@ -5679,6 +5726,35 @@ test "trusted completion routes Enter unchanged, replaces only on Right, and sup
     try std.testing.expectEqual(terminal_service.trusted_edit.Kind.replace, provider.request_kind);
     try std.testing.expect(std.mem.indexOfScalar(u8, provider.replacement[0..provider.replacement_len], '\r') == null);
     try std.testing.expect(std.mem.indexOfScalar(u8, provider.replacement[0..provider.replacement_len], 0x7f) == null);
+    try std.testing.expectEqualStrings("", provider.base.written.items);
+}
+
+test "trusted completion palette echoes draft and caret before adoption" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(800, 450);
+    var view = try TerminalViewNode.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    var provider: TrustedCompletionFixture = .{ .buffer = "" };
+    try provider.init(&view);
+    defer provider.base.deinit();
+    defer view.unbindTerminalService(provider.base.service().binding.origin_session.?);
+    try std.testing.expect(TerminalViewNode.serviceEditText(&view, "@"));
+    try provider.acknowledge(&view);
+    try std.testing.expect(view.palette.isOpen());
+    try std.testing.expectEqualStrings("@", view.local_input_node.getText().?.content);
+    try std.testing.expect(view.local_input_cache.placed);
+    try std.testing.expectEqual(view.localInputAdvance("@"), view.terminal_surface.?.command_caret_advance);
+    try std.testing.expect(TerminalViewNode.serviceEditText(&view, "ts"));
+    try std.testing.expectEqualStrings("@ts", view.local_input_node.getText().?.content);
+    try std.testing.expectEqual(view.localInputAdvance("@ts"), view.terminal_surface.?.command_caret_advance);
+    try std.testing.expect(TerminalViewNode.serviceEditKey(&view, .delete, .{}));
+    view.renderCommandPalette();
+    try std.testing.expectEqualStrings("@t", view.local_input_node.getText().?.content);
+    try std.testing.expect(TerminalViewNode.serviceEditKey(&view, .escape, .{}));
+    try std.testing.expect(!view.local_input_cache.placed);
+    try std.testing.expectEqual(@as(f32, 0), view.terminal_surface.?.command_caret_advance);
     try std.testing.expectEqualStrings("", provider.base.written.items);
 }
 
@@ -6479,10 +6555,14 @@ test "builtin command SSH surface works without prompt markers and preserves she
     try std.testing.expect(!view.terminal_surface.?.snapshot.?.projection.at_prompt);
     cx.handleTextInput("@");
     try std.testing.expect(view.palette.isOpen());
+    try std.testing.expectEqualStrings("@", view.local_input_node.getText().?.content);
+    try std.testing.expect(view.local_input_cache.placed);
     cx.handleTextInput("t");
     cx.handleTextInput("s");
+    try std.testing.expectEqualStrings("@ts", view.local_input_node.getText().?.content);
     cx.handleKeyDown(.@"return", .{});
     try std.testing.expect(view.local_state.timestamp_gutter);
+    try std.testing.expect(!view.local_input_cache.placed);
     cx.handleTextInput("@ts off");
     cx.handleKeyDown(.@"return", .{});
     try std.testing.expect(!view.local_state.timestamp_gutter);
@@ -6967,7 +7047,7 @@ test "terminal command annotations preserve grid copy hover wrapped rows and dis
     try std.testing.expectEqual(@as(f32, 4), row.command_ai.?.style.padding.left);
     try std.testing.expectEqual(@as(f32, 4), row.command_ai.?.style.padding.right);
     try std.testing.expectEqual(app_theme.popupSelection(), row.command_ai.?.getBackground());
-    try std.testing.expectEqualStrings("× 7", row.command_code.?.getText().?.content);
+    try std.testing.expectEqualStrings("7", row.command_code.?.getText().?.content);
     try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "AI") == null);
     try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "×") == null);
     const wrapped = value.screen_row.? + 1;

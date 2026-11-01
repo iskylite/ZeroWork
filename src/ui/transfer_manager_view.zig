@@ -1069,7 +1069,7 @@ pub const Panel = struct {
             if (entry.action) |action| if (!allows(task_.phase, action)) continue;
             const state = try menu.scope.createState(Control, .{ .panel = self, .target = task_.target, .kind = entry.kind, .action = entry.action, .menu_open = menu.open });
             const label_ = try menu.scope.createText(entry.label, .{});
-            const button_ = try ui.widgets.Button(.{ .label = label_, .variant = .ghost, .icon_asset = ui.icons.get(entry.icon), .icon_size = @as(f32, 14), .a11y_label = label_, .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 28 }, .justify = .start, .padding = .{ .left = 8, .right = 8 }, .font_size = 11, .text_color = if (entry.action != null) S.theme.current().danger else S.theme.current().fg_2, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 5 }, .shadow = .{} }, .disabled = entry.action != null and !self.actionAvailable(task_.target), .on_click = self.cx.on(Control, state, Control.run) }).mount(menu.scope, self.cx);
+            const button_ = try ui.widgets.Button(.{ .label = label_, .variant = .ghost, .icon_asset = ui.icons.get(entry.icon), .icon_size = @as(f32, 14), .a11y_label = label_, .base_style = ui.BoxStyle{ .width = .fill(), .height = .{ .px = 28 }, .justify = .start, .padding = .{ .left = 8, .right = 8 }, .font_size = 11, .text_color = if (entry.action != null) S.theme.current().danger_ink else S.theme.current().fg_2, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 5 }, .shadow = .{} }, .disabled = entry.action != null and !self.actionAvailable(task_.target), .on_click = self.cx.on(Control, state, Control.run) }).mount(menu.scope, self.cx);
             button_.meta.ownership.meta.test_id = entry.id;
             try menu.content.appendChild(self.cx.allocator, button_);
         }
@@ -1216,7 +1216,7 @@ pub const Panel = struct {
             error.ActionUnavailable => "此任务当前不支持该操作",
             else => @errorName(err),
         }) catch {};
-        self.failure.setTextColor(S.theme.current().danger);
+        self.failure.setTextColor(S.theme.current().danger_ink);
         self.failure.setDisplay(.flex);
         self.cx.requestRedraw();
     }

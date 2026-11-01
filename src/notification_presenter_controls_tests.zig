@@ -4,6 +4,77 @@ const host = @import("host/notification_host.zig");
 const Presenter = @import("ui/notification_presenter.zig").Presenter;
 const a = std.testing.allocator;
 
+test "notification replacement and action revision cancel an old press before dispatch" {
+    const Probe = struct {
+        calls: usize = 0,
+        owner: u64 = 0,
+        fn owns(_: *anyopaque, _: host.notifications.Target) bool {
+            return true;
+        }
+        fn activate(raw: *anyopaque, target: host.notifications.Target) bool {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.calls += 1;
+            self.owner = @backingInt(target.owner.session.session_id);
+            return true;
+        }
+        fn feedback(_: *anyopaque, _: []const u8) void {}
+    };
+    for ([_]bool{ false, true }) |replace_fact| {
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        cx.setViewport(860, 480);
+        cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+        const scope = try ui.Scope.init(a, null, cx.owner);
+        var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+        defer {
+            scope.dispose();
+            notice.coordinator.deinit();
+            notice.windows.deinit(a);
+        }
+        var probe: Probe = .{};
+        const window = try notice.registerWindow(.{ .context = &probe, .owns = Probe.owns, .activate = Probe.activate, .feedback = Probe.feedback });
+        try notice.registerDefinition(.{ .id = "audit.press", .category = .connection_change, .default_channels = .{ .system = false, .attention = true } });
+        const view = try Presenter.mount(cx, scope, &notice, window);
+        const first: host.notifications.NotificationEvent = .{
+            .definition_id = "audit.press",
+            .owner = .{ .window_id = @backingInt(window), .content = .{ .session = .{ .session_id = @fromBackingInt(1), .generation = 1 } } },
+            .operation_id = 1,
+            .event_revision = 1,
+            .phase = .failed,
+            .severity = .failure,
+            .title = "连接需要处理",
+            .attention = .{ .kind = .connection_stopped, .requires_action = true, .time_sensitive = true },
+            .actions = &.{.{ .kind = .locate_owner, .label = "查看来源" }},
+        };
+        _ = try notice.coordinator.publishNotification(first, .{ .monotonic_ms = 1, .local_minute = 0 });
+        for (0..6) |_| {
+            try view.update(1, true, null, .{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } });
+            cx.layout();
+        }
+        const button = view.slots[0].actions[0].root;
+        const before = button.globalRect();
+        cx.handleMouseDown(before.x + before.w / 2, before.y + before.h / 2, .{});
+        var next = first;
+        if (replace_fact) {
+            next.owner.content.session.session_id = @fromBackingInt(2);
+            next.operation_id = 2;
+        } else next.event_revision = 2;
+        const publication = try notice.coordinator.publishNotification(next, .{ .monotonic_ms = 2, .local_minute = 0 });
+        for (0..6) |_| {
+            try view.update(2, true, null, .{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } });
+            cx.layout();
+        }
+        cx.handleMouseUp(before.x + before.w / 2, before.y + before.h / 2);
+        try std.testing.expectEqual(@as(usize, 0), probe.calls);
+        try std.testing.expectEqual(host.notifications.Presentation.visible, notice.coordinator.recordFor(publication.fact_id).?.presentation);
+        const current = button.globalRect();
+        cx.handleMouseDown(current.x + current.w / 2, current.y + current.h / 2, .{});
+        cx.handleMouseUp(current.x + current.w / 2, current.y + current.h / 2);
+        try std.testing.expectEqual(@as(usize, 1), probe.calls);
+        try std.testing.expectEqual(@as(u64, if (replace_fact) 2 else 1), probe.owner);
+    }
+}
+
 test "notification presenter bounds longest admitted content and all actions at minimum window" {
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
@@ -389,4 +460,36 @@ test "notification history expands only independent details without repeating ti
             try std.testing.expectEqualStrings(detail, details.children.items[0].getText().?.content);
         }
     }
+}
+
+test "notification visible migration preserves expanded content and paused presentation" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    defer {
+        scope.dispose();
+        notice.coordinator.deinit();
+    }
+    const view = try Presenter.mount(cx, scope, &notice, @fromBackingInt(1));
+    const owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(1) } };
+    var event: host.notifications.NotificationEvent = .{ .definition_id = "host.feedback", .owner = .{ .window_id = 1, .content = owner }, .operation_id = 1, .event_revision = 1, .phase = .failed, .title = "Needs attention", .detail = "Independent detail", .attention = .{ .kind = .task_blocked, .requires_action = true, .time_sensitive = true, .incident_id = 11 }, .actions = &.{.{ .kind = .view_result, .label = "View" }} };
+    const id = (try notice.coordinator.publishNotification(event, .{ .monotonic_ms = 0, .local_minute = 0 })).fact_id;
+    const placement = @import("ui/notification_presenter.zig").Placement{ .content = .{ .x = 0, .y = 0, .w = 860, .h = 480 } };
+    try view.update(0, true, owner, placement);
+    view.slots[0].expand.behavior.events.on_click.?.invoke();
+    try view.update(1000, true, owner, placement);
+    const root = view.slots[0].root;
+    const remaining = notice.coordinator.recordFor(id).?.remaining_ms;
+    event.event_revision = 2;
+    event.attention.incident_id = 22;
+    _ = try notice.coordinator.publishNotification(event, .{ .monotonic_ms = 1100, .local_minute = 0 });
+    try view.update(16000, true, owner, placement);
+    try std.testing.expect(root == view.slots[0].root);
+    try std.testing.expect(view.slots[0].expanded);
+    try std.testing.expectEqual(ui.types.Display.flex, view.slots[0].detail.style.display);
+    try std.testing.expectEqual(remaining, notice.coordinator.recordFor(id).?.remaining_ms);
+    try std.testing.expect(notice.coordinator.recordFor(id).?.paused);
 }

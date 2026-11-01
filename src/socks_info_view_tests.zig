@@ -50,8 +50,16 @@ test "socks card mounts hidden, copies live values and dispatches actions" {
     try std.testing.expectEqual(view_mod.Action.stop, sink.last.?);
     try view.update(.{ .state = .connecting, .logs = "正在申请监听" });
     const actions_before = sink.actions;
+    try std.testing.expectEqualStrings("取消启动", view.control_text.getText().?.content);
+    try std.testing.expect(!view.control_disabled.get());
     view.dispatch(.start);
-    try std.testing.expectEqual(actions_before, sink.actions);
+    try std.testing.expectEqual(actions_before + 1, sink.actions);
+    try std.testing.expectEqual(view_mod.Action.stop, sink.last.?);
+    try view.update(.{ .state = .stopping, .logs = "正在申请监听" });
+    try std.testing.expectEqualStrings("停止中", view.status.getText().?.content);
+    try std.testing.expect(view.control_disabled.get());
+    view.dispatch(.start);
+    try std.testing.expectEqual(actions_before + 1, sink.actions);
     view.dispatch(.logs);
     try std.testing.expect(view.logs_text.style.display == .flex);
     try std.testing.expectEqualStrings("正在申请监听", view.logs_text.getText().?.content);

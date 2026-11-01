@@ -158,8 +158,7 @@ try {
   assert((await resizeWindow(1440, 900)).ok);
   await click("workspace.empty.local"); await visible("terminal.surface");
   const original = await tabs(); assert.equal(original.length, 1); const localTab = original[0].test_id;
-  await click("sidebar.host"); await click("sidebar.host.connect");
-  await settleSftp();
+  await click("sidebar.host"); await settleSftp();
   assert.equal(report.host_key_decisions.length, 2, "Both independent unknown SFTP connections require actual trust-once UI");
   assert(!(await query("connection.progress")).some(shown));
   const attachedTabs = await tabs(); assert.equal(attachedTabs.length, 2);

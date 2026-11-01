@@ -86,6 +86,7 @@ pub const Editor = struct {
         const cancel_button = try ui.widgets.Button(.{ .label = "取消", .variant = .secondary, .size = .sm, .base_style = styles.renameButton(62), .on_click = cx.on(Editor, self, cancel) }).mount(scope, cx);
         cancel_button.meta.ownership.meta.test_id = "tabs.rename.cancel";
         const save_button = try ui.widgets.Button(.{ .label = "保存名称", .variant = .primary, .size = .sm, .base_style = styles.renameButton(76), .on_click = cx.on(Editor, self, save) }).mount(scope, cx);
+        try @import("app_theme.zig").stylePrimary(cx, scope, save_button, null);
         save_button.meta.ownership.meta.test_id = "tabs.rename.save";
         try buttons.appendChild(cx.allocator, cancel_button);
         try buttons.appendChild(cx.allocator, save_button);

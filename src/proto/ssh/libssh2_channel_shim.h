@@ -9,6 +9,8 @@ void zw_libssh2_channel_close_free(LIBSSH2_CHANNEL *channel);
 int zw_libssh2_channel_release(LIBSSH2_CHANNEL *channel);
 long zw_libssh2_channel_read_stderr(LIBSSH2_CHANNEL *channel, unsigned char *buffer, size_t len);
 int zw_libssh2_channel_eof(LIBSSH2_CHANNEL *channel);
+/* 0 = sent, 1 = retry without closing the other direction, negative = error. */
+int zw_libssh2_channel_send_eof_step(LIBSSH2_CHANNEL *channel);
 int zw_libssh2_channel_exit_status(LIBSSH2_CHANNEL *channel);
 /* 1 = an actual exit-status packet, 0 = unknown. Query before native free. */
 int zw_libssh2_channel_exit_status_received(LIBSSH2_CHANNEL *channel, int *status);

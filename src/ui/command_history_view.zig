@@ -51,12 +51,12 @@ pub const View = struct {
         root.meta.ownership.meta.test_id = "terminal.command-history";
         root.setDisplay(.none);
         const header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 7, .flex_shrink = 0 }, .{});
-        try header.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.list_restart, S.theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
+        try header.appendChild(cx.allocator, try S.theme.icon(cx, ui.icons.list_restart, "fg_2", .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
         try header.appendChild(cx.allocator, try ui.text(cx, "命令历史", S.text(13, 600, false)));
         try header.appendChild(cx.allocator, try ui.spacer(cx));
         const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "关闭命令历史", .base_style = @import("socks_info_styles.zig").iconButton(24), .on_click = cx.on(View, self, hide) }).mount(scope, cx);
         close.meta.ownership.meta.test_id = "terminal.command-history.close";
-        try close.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.x, S.theme.current().fg_2, .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
+        try close.appendChild(cx.allocator, try S.theme.icon(cx, ui.icons.x, "fg_2", .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } }));
         try header.appendChild(cx.allocator, close);
         try root.appendChild(cx.allocator, header);
         const info = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .gap = 8, .flex_shrink = 0 }, .{});
@@ -86,7 +86,7 @@ pub const View = struct {
         const trigger = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "命令历史 · ⇧⌘B", .base_style = @import("status_connection_styles.zig").metricTrigger(28), .hover_style = .{ .background = S.theme.current().hover }, .on_click = self.cx.on(View, self, toggle) }).mount(self.scope, self.cx);
         trigger.setStyleInline(self.cx.allocator, .{ .align_items = .center, .justify = .center, .padding = .{}, .gap = 0 });
         trigger.meta.ownership.meta.test_id = id;
-        try trigger.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.list_restart, S.theme.current().fg_2, .{ .width = .{ .px = 15 }, .height = .{ .px = 15 } }));
+        try trigger.appendChild(self.cx.allocator, try S.theme.icon(self.cx, ui.icons.list_restart, "fg_2", .{ .width = .{ .px = 15 }, .height = .{ .px = 15 } }));
         try bar.appendChild(self.cx.allocator, trigger);
         return trigger;
     }
@@ -217,9 +217,9 @@ pub const View = struct {
         row.card.setStyleInline(self.cx.allocator, S.row());
         row.command.setTextColor(self.colors.fg_1);
         row.state.setTextColor(switch (value.state) {
-            .running => self.colors.accent,
+            .running => self.colors.accent_ink,
             .succeeded => self.colors.ok_ink,
-            .failed => self.colors.danger,
+            .failed => self.colors.danger_ink,
             .unknown => self.colors.fg_3,
         });
         try row.state.setTextContent(self.cx.allocator, annotations.glyph(value.state));

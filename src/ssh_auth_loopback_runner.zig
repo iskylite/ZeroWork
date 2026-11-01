@@ -6,13 +6,21 @@ const c = @import("generated_ssh_session");
 const realtime = @import("platform/realtime.zig");
 extern fn libssh2_userauth_last_result(*c.LIBSSH2_SESSION, *c_int, [*]u8, usize, *usize) c_int;
 
+fn expectedKeyPrompts(mode: []const u8) usize {
+    if (std.mem.eql(u8, mode, "key-openssh-wrong") or std.mem.eql(u8, mode, "key-der-wrong") or std.mem.eql(u8, mode, "key-der-padding-wrong") or std.mem.eql(u8, mode, "key-pkcs8-pem-padding-wrong") or std.mem.eql(u8, mode, "key-legacy-pem-padding-wrong")) return 2;
+    if (std.mem.eql(u8, mode, "key-openssh-encrypted") or std.mem.eql(u8, mode, "key-pem-encrypted") or std.mem.eql(u8, mode, "key-der-encrypted")) return 1;
+    return 0;
+}
+
 const Driver = struct {
     bridge: *challenge.InteractiveBridge,
     cancel: *std.atomic.Value(bool),
     done: *std.atomic.Value(bool),
     port: u16,
     mode: []const u8,
+    padding_wrong: []const u8,
     count: usize = 0,
+    key_prompts: usize = 0,
     failure: ?anyerror = null,
 
     fn run(self: *Driver) void {
@@ -37,7 +45,13 @@ const Driver = struct {
                     }
                     switch (snapshot.kind) {
                         .password => try self.bridge.submit(snapshot.identity, .{ .answers = &.{"fixture-password"} }),
-                        .private_key_passphrase => try self.bridge.submit(snapshot.identity, .{ .answers = &.{"fixture-key-passphrase"} }),
+                        .private_key_passphrase => {
+                            self.key_prompts += 1;
+                            if (self.key_prompts > 2) return error.RepeatedKeyUnlockFailure;
+                            if (std.mem.startsWith(u8, self.mode, "key-") and expectedKeyPrompts(self.mode) == 0) return error.UnexpectedKeyPassphrase;
+                            const passphrase = if (expectedKeyPrompts(self.mode) == 2 and self.key_prompts == 1) (if (std.mem.endsWith(u8, self.mode, "padding-wrong")) self.padding_wrong else "incorrect-fixture-passphrase") else "fixture-key-passphrase";
+                            try self.bridge.submit(snapshot.identity, .{ .answers = &.{passphrase} });
+                        },
                         .keyboard_interactive => {
                             if (snapshot.prompt_count != 2 or !snapshot.promptAt(0).echo or snapshot.promptAt(1).echo or !std.mem.eql(u8, snapshot.promptAt(0).text, "Account:") or !std.mem.eql(u8, snapshot.promptAt(1).text, "Recovery phrase:")) return error.PromptGroupMismatch;
                             try self.bridge.submit(snapshot.identity, .{ .answers = &.{ "operator", "arbitrary-length-response" } });
@@ -73,7 +87,7 @@ pub fn main(init: std.process.Init) !void {
     defer bridge.cancel();
     var cancel: std.atomic.Value(bool) = .init(false);
     var done: std.atomic.Value(bool) = .init(false);
-    var driver: Driver = .{ .bridge = &bridge, .cancel = &cancel, .done = &done, .port = port, .mode = mode };
+    var driver: Driver = .{ .bridge = &bridge, .cancel = &cancel, .done = &done, .port = port, .mode = mode, .padding_wrong = init.environ_map.get("ZW_SSH_FIXTURE_PADDING_WRONG") orelse "incorrect-fixture-passphrase" };
     const thread = try std.Thread.spawn(.{}, Driver.run, .{&driver});
     var joined = false;
     defer if (!joined) {
@@ -86,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
         .host = "127.0.0.1",
         .port = port,
         .user = "operator",
-        .auth = if (std.mem.eql(u8, mode, "key")) .{ .private_key = .{ .path = key_path orelse return error.MissingKeyPath } } else if (std.mem.eql(u8, mode, "agent")) .agent else if (std.mem.eql(u8, mode, "cancel")) .keyboard_interactive else if (std.mem.eql(u8, mode, "malformed")) .{ .password = "rejected-fixture-password" } else .password_prompt,
+        .auth = if (std.mem.eql(u8, mode, "key") or std.mem.startsWith(u8, mode, "key-")) .{ .private_key = .{ .path = key_path orelse return error.MissingKeyPath, .passphrase = if (std.mem.endsWith(u8, mode, "-unlocked")) "fixture-key-passphrase" else null } } else if (std.mem.eql(u8, mode, "agent")) .agent else if (std.mem.eql(u8, mode, "cancel")) .keyboard_interactive else if (std.mem.eql(u8, mode, "malformed")) .{ .password = "rejected-fixture-password" } else .password_prompt,
         .open_shell = false,
         .host_key_decision = .trust_once,
         .connect_timeout_ms = 3000,
@@ -118,6 +132,19 @@ pub fn main(init: std.process.Init) !void {
     if (std.mem.eql(u8, mode, "malformed")) {
         if (failure == null or failure.? != error.InvalidAuthenticationResult or session != null) return error.MalformedResultAccepted;
         std.debug.print("PASS malformed failure has no accepted partial\n", .{});
+        return;
+    }
+    if (std.mem.startsWith(u8, mode, "key-")) {
+        const expected_failure: ?anyerror = if (std.mem.eql(u8, mode, "key-rejected")) error.AuthenticationFailed else if (std.mem.eql(u8, mode, "key-invalid") or std.mem.eql(u8, mode, "key-unsupported") or std.mem.eql(u8, mode, "key-corrupt") or std.mem.eql(u8, mode, "key-cipher-unsupported") or std.mem.eql(u8, mode, "key-oversize") or std.mem.eql(u8, mode, "key-padding-invalid") or std.mem.eql(u8, mode, "key-rsa-field-oversize") or std.mem.eql(u8, mode, "key-fifo") or std.mem.startsWith(u8, mode, "key-encrypted-") or std.mem.startsWith(u8, mode, "key-type-") or std.mem.startsWith(u8, mode, "key-envelope-")) error.IdentityFileInvalid else if (std.mem.eql(u8, mode, "key-missing")) error.IdentityFileUnreadable else null;
+        if (expected_failure) |expected| {
+            if (failure == null or failure.? != expected or session != null or driver.count != 0) return error.KeyFailureClassificationMismatch;
+        } else {
+            if (failure) |err| return err;
+            if (!session.?.accepted_auth_methods.contains(.private_key) or session.?.accepted_auth_methods.count() != 1) return error.AcceptedMethodsMismatch;
+            const expected_prompts = expectedKeyPrompts(mode);
+            if (driver.count != expected_prompts or driver.key_prompts != expected_prompts) return error.KeyPromptCountMismatch;
+        }
+        std.debug.print("PASS {s} key_prompts={d} outcome={s}\n", .{ mode, driver.key_prompts, if (failure) |err| @errorName(err) else "authenticated" });
         return;
     }
     if (failure) |err| return err;

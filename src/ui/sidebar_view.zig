@@ -387,6 +387,7 @@ pub const HostRow = struct {
         node.meta.ownership.meta.test_id = "sidebar.host";
         setFocusRing(node);
         self.node = node;
+        self.menu_trigger = node;
         const content = try ui.box(cx, S.content(), .{});
         try node.appendChild(cx.allocator, content);
         self.dot = try ui.iconTint(cx, data.icon orelse @import("session_icon.zig").resolve(data.kind), ui.Color.WHITE, S.icon(18));
@@ -398,17 +399,15 @@ pub const HostRow = struct {
         name.setStyleInline(cx.allocator, .{ .width = .{ .grow = .{ .min = 0 } }, .max_width = cx.text.measureTextWidth(data.name, 12, 500, false), .min_width = 0, .flex_shrink = 1, .overflow_hidden = true });
         self.name = name;
         try metadata.appendChild(cx.allocator, name);
-        if (!std.ascii.eqlIgnoreCase(data.protocol, "ssh")) {
-            const tag = try ui.box(cx, .{ .height = .{ .px = 12 }, .padding = .{ .left = 3, .right = 3 }, .margin = .{ .top = 8 }, .direction = .row, .align_items = .center, .justify = .center, .background = T.current().well, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
-            tag.meta.ownership.meta.test_id = "sidebar.host.protocol";
-            const upper = try std.ascii.allocUpperString(cx.allocator, data.protocol);
-            defer cx.allocator.free(upper);
-            const protocol_text = try ui.text(cx, upper, .{ .font_size = 7, .font_weight = 400, .line_height = 10.0 / 7.0, .color = T.current().fg_2, .selectable = false });
-            try protocol_text.setTextContent(cx.allocator, upper);
-            protocol_text.setStyleInline(cx.allocator, .{ .height = .{ .px = 10 }, .flex_shrink = 0 });
-            try tag.appendChild(cx.allocator, protocol_text);
-            try metadata.appendChild(cx.allocator, tag);
-        }
+        const tag = try ui.box(cx, .{ .height = .{ .px = 12 }, .padding = .{ .left = 3, .right = 3 }, .margin = .{ .top = 8 }, .direction = .row, .align_items = .center, .justify = .center, .background = T.current().well, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
+        tag.meta.ownership.meta.test_id = "sidebar.host.protocol";
+        const upper = try std.ascii.allocUpperString(cx.allocator, data.protocol);
+        defer cx.allocator.free(upper);
+        const protocol_text = try ui.text(cx, upper, .{ .font_size = 7, .font_weight = 400, .line_height = 10.0 / 7.0, .color = T.current().fg_2, .selectable = false });
+        try protocol_text.setTextContent(cx.allocator, upper);
+        protocol_text.setStyleInline(cx.allocator, .{ .height = .{ .px = 10 }, .flex_shrink = 0 });
+        try tag.appendChild(cx.allocator, protocol_text);
+        try metadata.appendChild(cx.allocator, tag);
         const identity = try std.fmt.allocPrint(cx.allocator, "{s}\n{s}\n{s}", .{ data.name, data.detail, data.route });
         defer cx.allocator.free(identity);
         const identity_hint = try mountHostHint(cx, scope, metadata, identity, node);
@@ -427,7 +426,7 @@ pub const HostRow = struct {
         try trailing.appendChild(cx.allocator, tail);
         const route = try ui.box(cx, S.route(), .{});
         if (data.supports_route) {
-            try route.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("route").?, T.current().fg_2, S.icon(12)));
+            try route.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("route").?, T.current().fg_2, S.icon(S.host_icon_size)));
             var count: [24]u8 = undefined;
             const hops = try text(cx, route, try std.fmt.bufPrint(&count, "{d}", .{data.hops}), 10.5, 400, true);
             hops.meta.ownership.meta.test_id = "sidebar.host.hops";
@@ -446,33 +445,29 @@ pub const HostRow = struct {
         self.forward_label.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try self.forward.appendChild(cx.allocator, self.forward_label);
         try tail.appendChild(cx.allocator, self.forward);
-        const actions = try ui.box(cx, .{ .width = .{ .px = 72 }, .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 0, .flex_shrink = 0 }, .{});
+        const actions = try ui.box(cx, .{ .width = .{ .px = S.action_size * 3 }, .height = .{ .px = S.action_size }, .direction = .row, .align_items = .center, .flex_shrink = 0 }, .{});
         self.actions = actions;
-        const connect_button = try iconButton(cx, scope, "play", "新标签连接", "sidebar.host.connect", S.action(24), tint, hover, cx.on(HostRow, self, HostRow.connect), swallowDoubleClick);
+        const connect_button = try iconButtonWithSize(cx, scope, "play", "新标签连接", "sidebar.host.connect", S.action(S.action_size), S.host_icon_size, tint, hover, cx.on(HostRow, self, HostRow.connect), swallowDoubleClick);
+        const copy_button = try iconButtonWithSize(cx, scope, "copy", "复制配置", "sidebar.host.copy", S.action(S.action_size), S.host_icon_size, tint, hover, cx.on(HostRow, self, HostRow.copy), swallowDoubleClick);
+        const edit_button = try iconButtonWithSize(cx, scope, "pencil", "编辑配置", "sidebar.host.edit", S.action(S.action_size), S.host_icon_size, tint, hover, cx.on(HostRow, self, HostRow.edit), swallowDoubleClick);
         try actions.appendChild(cx.allocator, try hint(cx, scope, connect_button, "新标签连接", .right));
-        const copy_button = try iconButton(cx, scope, "copy", "复制配置", "sidebar.host.copy", S.action(24), tint, hover, cx.on(HostRow, self, HostRow.copy), swallowDoubleClick);
-        const edit_button = try iconButton(cx, scope, "pencil", "编辑配置", "sidebar.host.edit", S.action(24), tint, hover, cx.on(HostRow, self, HostRow.edit), swallowDoubleClick);
         try actions.appendChild(cx.allocator, try hint(cx, scope, copy_button, "复制配置", .right));
         try actions.appendChild(cx.allocator, try hint(cx, scope, edit_button, "编辑配置", .right));
-        const menu_button = edit_button;
-        self.menu_trigger = edit_button;
-        // The complete host menu remains available on right click.
-
         try trailing.appendChild(cx.allocator, actions);
         const hovered = try ui.hooks.useHover(scope, node);
         const name_hover = try ui.hooks.useHover(scope, identity_hint.trigger);
         const connect_hover = try ui.hooks.useHover(scope, connect_button);
-        const menu_hover = try ui.hooks.useHover(scope, menu_button);
         const copy_hover = try ui.hooks.useHover(scope, copy_button);
+        const edit_hover = try ui.hooks.useHover(scope, edit_button);
         const focus = try ui.hooks.useFocusState(scope, cx, node);
         const connect_focus = try ui.hooks.useFocusState(scope, cx, connect_button);
-        const menu_focus = try ui.hooks.useFocusState(scope, cx, menu_button);
         const copy_focus = try ui.hooks.useFocusState(scope, cx, copy_button);
-        try scope.createEffect(.{ .self = self, .hovered = hovered, .name_hover = name_hover, .connect_hover = connect_hover, .menu_hover = menu_hover, .copy_hover = copy_hover, .copy_focus = copy_focus.focused, .focus = focus.focused, .focus_visible = focus.visible, .connect_focus = connect_focus.focused, .menu_focus = menu_focus.focused, .identity_open = identity_hint.open.?, .last_identity_focus = try scope.createState(bool, false), .theme = try cx.themeSignal(scope) }, struct {
+        const edit_focus = try ui.hooks.useFocusState(scope, cx, edit_button);
+        try scope.createEffect(.{ .self = self, .protocol = tag, .hovered = hovered, .name_hover = name_hover, .connect_hover = connect_hover, .copy_hover = copy_hover, .edit_hover = edit_hover, .focus = focus.focused, .focus_visible = focus.visible, .connect_focus = connect_focus.focused, .copy_focus = copy_focus.focused, .edit_focus = edit_focus.focused, .identity_open = identity_hint.open.?, .last_identity_focus = try scope.createState(bool, false), .theme = try cx.themeSignal(scope) }, struct {
             fn run(ctx: anytype) void {
                 _ = ctx.theme.get();
                 const picked = ctx.self.selected.get();
-                const hot = ctx.hovered.get() or ctx.name_hover.get() or ctx.connect_hover.get() or ctx.menu_hover.get() or ctx.copy_hover.get() or ctx.copy_focus.get() or ctx.focus.get() or ctx.connect_focus.get() or ctx.menu_focus.get() or ctx.self.menu_open.get();
+                const hot = ctx.hovered.get() or ctx.name_hover.get() or ctx.connect_hover.get() or ctx.copy_hover.get() or ctx.edit_hover.get() or ctx.focus.get() or ctx.connect_focus.get() or ctx.copy_focus.get() or ctx.edit_focus.get() or ctx.self.menu_open.get();
                 const identity_focus = ctx.focus_visible.get();
                 if (ctx.last_identity_focus.* != identity_focus) {
                     ctx.last_identity_focus.* = identity_focus;
@@ -486,6 +481,7 @@ pub const HostRow = struct {
                 ctx.self.node.setStyleInline(ctx.self.cx.allocator, S.host(picked, hot));
                 setFocusRing(ctx.self.node);
                 ctx.self.hot = hot;
+                ctx.protocol.setDisplay(if (hot) .none else .flex);
                 ctx.self.updateTrailing();
                 if (ctx.self.forward_badge) |badge| ctx.self.forward_label.setTextColor(@import("socks_background_styles.zig").ink(badge.phase));
                 if (ctx.self.name.getText()) |current| {
@@ -513,7 +509,6 @@ pub const HostRow = struct {
     fn updateTrailing(self: *HostRow) void {
         const show_route = self.supports_route and (self.hot or self.forward_badge == null);
         const show_forward = !self.hot and self.forward_badge != null;
-        // Route and actions are siblings in flow, so both remain visible without overlap.
         self.trailing.setDisplay(if (show_route or show_forward or self.hot) .flex else .none);
         self.tail.setStyle(self.cx.allocator, .width, .{ .px = if (show_forward) S.action_size * 3 else S.tail_width });
         self.tail.setDisplay(if (show_route or show_forward) .flex else .none);
@@ -555,15 +550,24 @@ pub const HostRow = struct {
                 return .handled;
             },
             .click => |click| {
+                // A row activates on the first click. The second click of a
+                // double click must not open another connection attempt.
+                if (click.click_count > 1) return .handled;
                 // Child action buttons have already handled their own click.
                 // Stop the row's connect callback when that click bubbles.
+                if (self.cx.focus_manager.getFocused()) |focused| {
+                    if (focused.isDescendantOf(self.actions)) return .handled;
+                }
                 const actions = self.actions.globalRect();
                 if (click.x >= actions.x and click.x < actions.x + actions.w and click.y >= actions.y and click.y < actions.y + actions.h) return .handled;
             },
             .double_click => return .handled,
-            .key_down => |key| if (key.key == .@"return") {
-                self.connect();
-                return .handled;
+            .key_down => |key| {
+                const focused = self.cx.focus_manager.getFocused();
+                if (key.key == .@"return" and focused == self.node) {
+                    self.connect();
+                    return .handled;
+                }
             },
             else => {},
         }
@@ -777,7 +781,10 @@ pub fn text(cx: *ui.Cx, parent: *ui.Node, value: []const u8, size: f32, weight: 
     return node;
 }
 pub fn iconButton(cx: *ui.Cx, scope: *ui.Scope, icon_name: []const u8, label: []const u8, id: []const u8, base: ui.BoxStyle, tint: *ui.Signal(?ui.Color), hover: *ui.Signal(?ui.BoxStyle), click: ?ui.Handler(void), event: ?*const fn (ui.events.Event, ?*anyopaque) ui.events.EventResult) !*ui.Node {
-    const node = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get(icon_name), .icon_size = @as(f32, 16), .icon_tint = tint, .a11y_label = label, .base_style = base, .hover_style = hover, .on_click = click, .on_event = event }).mount(scope, cx);
+    return iconButtonWithSize(cx, scope, icon_name, label, id, base, 16, tint, hover, click, event);
+}
+fn iconButtonWithSize(cx: *ui.Cx, scope: *ui.Scope, icon_name: []const u8, label: []const u8, id: []const u8, base: ui.BoxStyle, icon_size: f32, tint: *ui.Signal(?ui.Color), hover: *ui.Signal(?ui.BoxStyle), click: ?ui.Handler(void), event: ?*const fn (ui.events.Event, ?*anyopaque) ui.events.EventResult) !*ui.Node {
+    const node = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.get(icon_name), .icon_size = icon_size, .icon_tint = tint, .a11y_label = label, .base_style = base, .hover_style = hover, .on_click = click, .on_event = event }).mount(scope, cx);
     node.meta.ownership.meta.test_id = id;
     setFocusRing(node);
     return node;

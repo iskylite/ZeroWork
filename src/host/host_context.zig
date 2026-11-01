@@ -34,6 +34,7 @@ pub const Trust = struct {
     /// SSH trust and TLS trust never share key spaces. No TLS implementation is
     /// implied by the presence of the SSH verifier.
     ssh_host_keys: ?*@import("../proto/ssh/connection_policy.zig").HostKeyStore = null,
+    tls: ?@import("tls_trust.zig").Facade = null,
 };
 pub const HostContext = struct {
     owner: identity.SessionHandle,
@@ -42,6 +43,8 @@ pub const HostContext = struct {
     connection_configs: ?configs.Resolver = null,
     transports: ?transport.Factory = null,
     credentials: ?transport.Credentials = null,
+    secrets: ?@import("secret_lease.zig").Facade = null,
+    resource_actions: ?@import("resource_actions.zig").Facade = null,
     trust: Trust = .{},
     tasks: ?Tasks = null,
     notifications: ?notifications.Facade = null,

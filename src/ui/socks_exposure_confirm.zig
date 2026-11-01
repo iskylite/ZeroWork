@@ -7,6 +7,20 @@
 const std = @import("std");
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
+const forwarding = @import("../proto/ssh/socks5_listener.zig");
+
+/// A session's frozen route plus exit index identifies the actual SSH exit.
+pub const ApprovalScope = struct {
+    owner: @import("../host/identity.zig").SessionHandle,
+    mode: forwarding.ForwardMode,
+    exit_index: ?usize,
+    port: u16,
+    target: forwarding.Target,
+
+    pub fn eql(self: ApprovalScope, other: ApprovalScope) bool {
+        return std.meta.eql(self, other);
+    }
+};
 
 pub const Hooks = struct {
     context: *anyopaque,
@@ -25,6 +39,8 @@ pub const View = struct {
     portaled: bool = false,
     body: ui.widgets.ScrollAreaResult,
     bind_text: *ui.Node,
+    heading: *ui.Node = undefined,
+    intro: *ui.Node = undefined,
     confirm_button: *ui.Node,
     visible: bool = false,
     pending_bind: std.ArrayList(u8) = .empty,
@@ -66,6 +82,7 @@ pub const View = struct {
             .color = theme.current().danger_ink,
             .wrap = .word,
         });
+        self.heading = heading;
         self.body = try ui.widgets.ScrollArea(.{ .direction = .vertical }).mount(scope, cx);
         self.body.container.style.width = .fill();
         self.body.container.style.height = .{ .fit = .{} };
@@ -82,10 +99,16 @@ pub const View = struct {
             .wrap = .word,
             .line_height = 1.45,
         });
+        self.intro = intro;
         intro.style.margin = .{ .top = 8, .bottom = 0, .left = 0, .right = 0 };
         try self.body.content.appendChild(cx.allocator, intro);
 
         self.bind_text = try ui.text(cx, "绑定地址：0.0.0.0", .{ .font_size = 11.5, .color = theme.current().fg_1, .use_monospace_font = true });
+        if (self.bind_text.getText()) |copy| {
+            var wrapped = copy;
+            wrapped.wrap = .word;
+            self.bind_text.setText(wrapped);
+        }
         try self.body.content.appendChild(cx.allocator, self.bind_text);
 
         const foot = try ui.box(cx, .{
@@ -105,6 +128,8 @@ pub const View = struct {
 
     /// Copies the requested bind address. Caller may release its draft after return.
     pub fn show(self: *View, bind: []const u8) !void {
+        try self.heading.setTextContent(self.cx.allocator, "确认开放局域网访问");
+        try self.intro.setTextContent(self.cx.allocator, "转发将绑定到本机的 0.0.0.0。其他设备可通过此端口访问转发目标，无需额外认证。");
         self.pending_bind.clearRetainingCapacity();
         try self.pending_bind.appendSlice(self.cx.allocator, bind);
         var buf: [96]u8 = undefined;
@@ -115,6 +140,21 @@ pub const View = struct {
         self.focus_pending = true;
         self.root.setDisplay(.flex);
         self.cx.requestRedraw();
+    }
+
+    pub fn showScoped(self: *View, bind: []const u8, request: ApprovalScope, exit_name: []const u8) !void {
+        try self.show(bind);
+        if (request.mode == .remote) {
+            try self.heading.setTextContent(self.cx.allocator, "确认开放 SSH 端监听");
+            try self.intro.setTextContent(self.cx.allocator, "将在所选 SSH 出口申请 0.0.0.0 监听，连接会转发到本机目标。实际可访问范围受服务端 GatewayPorts 与网络策略限制。");
+        }
+        const label = try std.fmt.allocPrint(self.cx.allocator, "{s} · 出口 {s} · {s}:{d}", .{ switch (request.mode) {
+            .socks5 => @as([]const u8, "SOCKS5"),
+            .local => "Local",
+            .remote => "Remote",
+        }, exit_name, bind, request.port });
+        defer self.cx.allocator.free(label);
+        try self.bind_text.setTextContent(self.cx.allocator, label);
     }
 
     fn modalChanged(self: *View, value: bool) void {

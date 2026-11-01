@@ -80,3 +80,49 @@ test "short viewport constrains confirmation body" {
     cx.layout();
     try std.testing.expect(view.body.state.scroll_y > 0);
 }
+
+test "forward exposure approval binds mode exit endpoint target and owner generation" {
+    const Scope = view_mod.ApprovalScope;
+    const original: Scope = .{ .owner = .{ .session_id = @fromBackingInt(7), .generation = 1 }, .mode = .local, .exit_index = null, .port = 8080, .target = try @import("../proto/ssh/socks5_listener.zig").Target.init("127.0.0.1", 80) };
+    try std.testing.expect(original.eql(original));
+    var changed = original;
+    changed.mode = .remote;
+    try std.testing.expect(!original.eql(changed));
+    changed = original;
+    changed.exit_index = 0;
+    try std.testing.expect(!original.eql(changed));
+    changed = original;
+    changed.port += 1;
+    try std.testing.expect(!original.eql(changed));
+    changed = original;
+    changed.target.port += 1;
+    try std.testing.expect(!original.eql(changed));
+    changed = original;
+    changed.owner.generation += 1;
+    try std.testing.expect(!original.eql(changed));
+}
+
+test "forward remote exposure names the SSH exit and resets when showing a local bind" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(500, 400);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    var sink: Sink = .{};
+    const view = try view_mod.View.mount(cx, scope, .{ .context = &sink, .confirm = confirm, .cancel = cancel });
+    if (!view.portaled) try cx.root.?.appendChild(cx.allocator, view.root);
+    try view.showScoped("0.0.0.0", .{ .owner = .{ .session_id = @fromBackingInt(7), .generation = 1 }, .mode = .remote, .exit_index = 0, .port = 8080, .target = .{} }, "jump.example");
+    try std.testing.expectEqualStrings("确认开放 SSH 端监听", view.heading.getText().?.content);
+    try std.testing.expect(std.mem.indexOf(u8, view.intro.getText().?.content, "GatewayPorts") != null);
+    try std.testing.expectEqualStrings("Remote · 出口 jump.example · 0.0.0.0:8080", view.bind_text.getText().?.content);
+    for (0..4) |_| {
+        cx.layout();
+        _ = view.updateGeometry();
+    }
+    try std.testing.expect(view.card.globalRect().x >= 0);
+    try std.testing.expect(view.card.globalRect().y + view.card.globalRect().h <= 400);
+    try view.show("0.0.0.0");
+    try std.testing.expectEqualStrings("确认开放局域网访问", view.heading.getText().?.content);
+    try std.testing.expect(std.mem.indexOf(u8, view.intro.getText().?.content, "本机") != null);
+}

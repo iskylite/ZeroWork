@@ -62,20 +62,37 @@ fn nativeSendStream(raw: *anyopaque, plan: http.RequestPlan, body: []const u8, a
     return sendStreamBounded(context.io, raw, nativeSendStreamUnbounded, plan, body, allocator, sink, sink_ctx);
 }
 
-const SendJob = struct {
-    raw: *anyopaque,
-    send: @FieldType(Transport, "send"),
-    plan: http.RequestPlan,
-    body: []const u8,
-    allocator: std.mem.Allocator,
-    done: std.atomic.Value(bool) = .init(false),
+fn SendJob(comptime Timing: type) type {
+    return struct {
+        raw: *anyopaque,
+        send: @FieldType(Transport, "send"),
+        plan: http.RequestPlan,
+        body: []const u8,
+        allocator: std.mem.Allocator,
+        done: std.atomic.Value(bool) = .init(false),
+        timing: Timing,
 
-    fn run(self: *@This()) anyerror!Response {
-        const result = self.send(self.raw, self.plan, self.body, self.allocator);
-        self.done.store(true, .release);
-        return result;
-    }
-};
+        fn deadlineError(self: *const @This()) ?anyerror {
+            if (self.plan.cancel) |token| if (token.isCancelled()) return error.Cancelled;
+            if (self.timing.elapsedMs() >= self.plan.timeout_ms) return error.Timeout;
+            return null;
+        }
+        fn run(self: *@This()) anyerror!Response {
+            defer self.done.store(true, .release);
+            // Queue/startup time is part of the request. Do not dispatch a
+            // request that has already expired or been stopped while queued.
+            if (self.deadlineError()) |reason| return reason;
+            const result = self.send(self.raw, self.plan, self.body, self.allocator);
+            if (self.deadlineError()) |err| {
+                // A completed send owns its body even if Stop or the deadline
+                // wins before publication. Reclaim it before publishing done.
+                discardResponse(result, self.allocator);
+                return err;
+            }
+            return result;
+        }
+    };
+}
 
 /// Keep the request, response head and response body under the same deadline.
 /// Future.cancel interrupts blocked Io operations and joins before borrowed
@@ -84,48 +101,91 @@ const SendJob = struct {
 fn sendBounded(io: std.Io, raw: *anyopaque, send: @FieldType(Transport, "send"), plan: http.RequestPlan, body: []const u8, allocator: std.mem.Allocator) !Response {
     if (plan.cancel) |token| if (token.isCancelled()) return error.Cancelled;
     if (plan.timeout_ms == 0) return error.Timeout;
-    var job: SendJob = .{ .raw = raw, .send = send, .plan = plan, .body = body, .allocator = allocator };
-    var future = try std.Io.concurrent(io, SendJob.run, .{&job});
     const started = std.Io.Clock.Timestamp.now(io, .awake);
+    var job: SendJob(RequestTiming) = .{ .timing = .{ .io = io, .started = started }, .raw = raw, .send = send, .plan = plan, .body = body, .allocator = allocator };
+    var future = try std.Io.concurrent(io, SendJob(RequestTiming).run, .{&job});
+    return awaitSend(io, &job, &future);
+}
+fn awaitSend(io: std.Io, job: anytype, future: anytype) !Response {
+    const plan = job.plan;
     while (!job.done.load(.acquire)) {
         const cancelled = if (plan.cancel) |token| token.isCancelled() else false;
-        const elapsed = started.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.toMilliseconds();
-        if (cancelled or elapsed >= plan.timeout_ms) {
-            if (future.cancel(io)) |completed| {
-                var response = completed;
-                response.deinit(allocator);
-            } else |_| {}
-            return if (cancelled) error.Cancelled else error.Timeout;
+        const elapsed = job.timing.elapsedMs();
+        if (cancelled) {
+            discardResponse(future.cancel(io), job.allocator);
+            return error.Cancelled;
         }
-        @import("retry.zig").wait(10, null) catch unreachable;
+        if (job.done.load(.acquire)) break;
+        if (elapsed >= plan.timeout_ms) return finishSendWait(job, future.cancel(io), true);
+        job.timing.wait();
     }
-    return future.await(io);
+    return finishSendWait(job, future.await(io), false);
+}
+fn discardResponse(result: anyerror!Response, allocator: std.mem.Allocator) void {
+    if (result) |completed| {
+        var response = completed;
+        response.deinit(allocator);
+    } else |_| {}
+}
+fn finishSendWait(job: anytype, result: anyerror!Response, deadline_cancel: bool) !Response {
+    // Joining can race with Stop, including when the worker had already
+    // classified a valid response. Never leave that owned body behind.
+    if (job.plan.cancel) |token| if (token.isCancelled()) {
+        discardResponse(result, job.allocator);
+        return error.Cancelled;
+    };
+    return result catch |err| return if (deadline_cancel and err == error.Canceled) error.Timeout else err;
 }
 
-const StreamJob = struct {
-    raw: *anyopaque,
-    send: StreamSend,
-    plan: http.RequestPlan,
-    body: []const u8,
-    allocator: std.mem.Allocator,
-    sink: ChunkSink,
-    sink_ctx: *anyopaque,
-    done: std.atomic.Value(bool) = .init(false),
+const RequestTiming = struct {
     io: std.Io,
     started: std.Io.Clock.Timestamp,
-    last_activity_ms: std.atomic.Value(u64) = .init(0),
-    fn receive(raw: *anyopaque, bytes: []const u8) !void {
-        const self: *@This() = @ptrCast(@alignCast(raw));
-        if (bytes.len > 0) self.last_activity_ms.store(@intCast(self.started.durationTo(std.Io.Clock.Timestamp.now(self.io, .awake)).raw.toMilliseconds()), .release);
-        try self.sink(self.sink_ctx, bytes);
+    fn elapsedMs(self: @This()) u64 {
+        return @intCast(@max(0, self.started.durationTo(std.Io.Clock.Timestamp.now(self.io, .awake)).raw.toMilliseconds()));
     }
-
-    fn run(self: *@This()) anyerror!ResponseMeta {
-        const result = self.send(self.raw, self.plan, self.body, self.allocator, receive, self);
-        self.done.store(true, .release);
-        return result;
+    fn wait(_: @This()) void {
+        @import("retry.zig").wait(10, null) catch unreachable;
     }
 };
+fn StreamJob(comptime Timing: type) type {
+    return struct {
+        raw: *anyopaque,
+        send: StreamSend,
+        plan: http.RequestPlan,
+        body: []const u8,
+        allocator: std.mem.Allocator,
+        sink: ChunkSink,
+        sink_ctx: *anyopaque,
+        done: std.atomic.Value(bool) = .init(false),
+        timing: Timing,
+        last_activity_ms: std.atomic.Value(u64) = .init(0),
+        fn timedOut(self: *const @This(), elapsed_ms: u64) bool {
+            return elapsed_ms >= self.plan.timeout_ms or if (self.plan.idle_timeout_ms) |idle|
+                elapsed_ms -| self.last_activity_ms.load(.acquire) >= idle
+            else
+                false;
+        }
+        fn receive(raw: *anyopaque, bytes: []const u8) !void {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.plan.cancel) |token| if (token.isCancelled()) return error.Cancelled;
+            const elapsed = self.timing.elapsedMs();
+            // The monitor may be descheduled. A late chunk must not revive an
+            // expired idle period or reach a borrowed parser after its budget.
+            if (self.timedOut(elapsed)) return error.Timeout;
+            if (bytes.len > 0) self.last_activity_ms.store(elapsed, .release);
+            try self.sink(self.sink_ctx, bytes);
+        }
+
+        fn run(self: *@This()) anyerror!ResponseMeta {
+            defer self.done.store(true, .release);
+            const result = self.send(self.raw, self.plan, self.body, self.allocator, receive, self);
+            if (self.plan.cancel) |token| if (token.isCancelled()) return error.Cancelled;
+            // Classify at completion, rather than at the monitor's next wake.
+            if (self.timedOut(self.timing.elapsedMs())) return error.Timeout;
+            return result;
+        }
+    };
+}
 
 /// Cancellation joins the reader before the parser and callback state leave
 /// scope. The sink runs serially on this operation's Io worker.
@@ -133,17 +193,30 @@ fn sendStreamBounded(io: std.Io, raw: *anyopaque, send: StreamSend, plan: http.R
     if (plan.cancel) |token| if (token.isCancelled()) return error.Cancelled;
     if (plan.timeout_ms == 0) return error.Timeout;
     const started = std.Io.Clock.Timestamp.now(io, .awake);
-    var job: StreamJob = .{ .io = io, .started = started, .raw = raw, .send = send, .plan = plan, .body = body, .allocator = allocator, .sink = sink, .sink_ctx = sink_ctx };
-    var future = try std.Io.concurrent(io, StreamJob.run, .{&job});
+    var job: StreamJob(RequestTiming) = .{ .timing = .{ .io = io, .started = started }, .raw = raw, .send = send, .plan = plan, .body = body, .allocator = allocator, .sink = sink, .sink_ctx = sink_ctx };
+    var future = try std.Io.concurrent(io, StreamJob(RequestTiming).run, .{&job});
+    return awaitStream(io, &job, &future);
+}
+
+fn awaitStream(io: std.Io, job: anytype, future: anytype) !ResponseMeta {
+    const plan = job.plan;
     while (!job.done.load(.acquire)) {
         const cancelled = if (plan.cancel) |token| token.isCancelled() else false;
-        const elapsed = started.durationTo(std.Io.Clock.Timestamp.now(io, .awake)).raw.toMilliseconds();
-        const idle_ms = @as(u64, @intCast(@max(0, elapsed))) -| job.last_activity_ms.load(.acquire);
-        if (cancelled or elapsed >= plan.timeout_ms or (plan.idle_timeout_ms != null and idle_ms >= plan.idle_timeout_ms.?)) {
+        const elapsed = job.timing.elapsedMs();
+        if (cancelled) {
             if (future.cancel(io)) |_| {} else |_| {}
-            return if (cancelled) error.Cancelled else error.Timeout;
+            return error.Cancelled;
         }
-        @import("retry.zig").wait(10, null) catch unreachable;
+        if (job.done.load(.acquire)) break;
+        if (job.timedOut(elapsed)) {
+            // cancel joins and may return a result that already completed
+            // within its deadline. The worker has classified its own finish;
+            // do not overwrite that result merely because we resumed late.
+            const completed = future.cancel(io);
+            if (plan.cancel) |token| if (token.isCancelled()) return error.Cancelled;
+            return completed catch |err| return if (err == error.Canceled) error.Timeout else err;
+        }
+        job.timing.wait();
     }
     const result = future.await(io);
     if (plan.cancel) |token| if (token.isCancelled()) return error.Cancelled;
@@ -388,18 +461,26 @@ test "retry hint survives rejected response and resets before next attempt" {
 test "blocked native operation times out and joins before releasing request state" {
     const Stalled = struct {
         io: std.Io,
+        clock: *TestSendClock,
         exited: bool = false,
         fn send(raw: *anyopaque, _: http.RequestPlan, _: []const u8, _: std.mem.Allocator) !Response {
             const self: *@This() = @ptrCast(@alignCast(raw));
             defer self.exited = true;
+            self.clock.ms.store(20, .release);
             try std.Io.sleep(self.io, .fromMilliseconds(60_000), .awake);
             return error.UnexpectedCompletion;
         }
     };
-    var stalled: Stalled = .{ .io = std.testing.io };
+    var clock: TestSendClock = .{};
+    var stalled: Stalled = .{ .io = std.testing.io, .clock = &clock };
     var plan = try http.plan(provider_config.defaults(.openai_compat));
     plan.timeout_ms = 20;
-    try std.testing.expectError(error.Timeout, sendBounded(std.testing.io, &stalled, Stalled.send, plan, "{}", std.testing.allocator));
+    // Advance the unchanged 20ms deadline only after the operation starts;
+    // slow thread scheduling must not turn this into a queued-request test.
+    var job: SendJob(*TestSendClock) = .{ .timing = &clock, .raw = &stalled, .send = Stalled.send, .plan = plan, .body = "{}", .allocator = std.testing.allocator };
+    var future = try std.Io.concurrent(std.testing.io, SendJob(*TestSendClock).run, .{&job});
+    defer _ = future.cancel(std.testing.io) catch {};
+    try std.testing.expectError(error.Timeout, awaitSend(std.testing.io, &job, &future));
     try std.testing.expect(stalled.exited);
 }
 
@@ -653,32 +734,401 @@ test "stream hook caps bytes stops on sink error and keeps retry hints" {
 }
 
 test "stream inactivity resets on chunks while the overall request stays bounded" {
-    const Active = struct {
-        chunks: usize = 0,
-        stall: bool = false,
-        fn send(raw: *anyopaque, _: http.RequestPlan, _: []const u8, _: std.mem.Allocator, sink: ChunkSink, ctx: *anyopaque) !ResponseMeta {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            for (0..8) |_| {
-                try std.Io.sleep(std.testing.io, .fromMilliseconds(15), .awake);
-                try sink(ctx, "reasoning chunk");
-            }
-            if (self.stall) try std.Io.sleep(std.testing.io, .fromMilliseconds(200), .awake);
-            return .{ .status = 200 };
-        }
-        fn receive(raw: *anyopaque, _: []const u8) !void {
-            const self: *@This() = @ptrCast(@alignCast(raw));
-            self.chunks += 1;
-        }
-    };
-    var active: Active = .{};
-    const plan: http.RequestPlan = .{ .endpoint = "http://127.0.0.1/fixture", .auth_style = .none, .timeout_ms = 1000, .idle_timeout_ms = 70 };
-    _ = try sendStreamBounded(std.testing.io, &active, Active.send, plan, "{}", std.testing.allocator, Active.receive, &active);
-    try std.testing.expectEqual(@as(usize, 8), active.chunks);
-    active = .{ .stall = true };
-    try std.testing.expectError(error.Timeout, sendStreamBounded(std.testing.io, &active, Active.send, plan, "{}", std.testing.allocator, Active.receive, &active));
-    try std.testing.expectEqual(@as(usize, 8), active.chunks);
-    active = .{};
+    var clock: TestStreamClock = .{};
+    var steps: [8]TestStreamScript.Step = undefined;
+    for (&steps, 0..) |*step, index| step.* = .{ .ms = (index + 1) * 15, .bytes = "reasoning chunk" };
+    var script: TestStreamScript = .{ .clock = &clock, .steps = &steps, .finish_ms = 120 };
+    const plan: http.RequestPlan = .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 1000, .idle_timeout_ms = 70 };
+    var job = testStreamJob(&script, plan);
+    _ = try job.run();
+    try std.testing.expectEqual(@as(usize, 8), script.chunks);
+
+    clock.ms = 0;
+    script.chunks = 0;
+    script.finish_ms = 320;
+    job = testStreamJob(&script, plan);
+    try std.testing.expectError(error.Timeout, job.run());
+    try std.testing.expectEqual(@as(usize, 8), script.chunks);
+
+    clock.ms = 0;
+    script.chunks = 0;
+    script.finish_ms = 120;
     var capped = plan;
     capped.timeout_ms = 70;
-    try std.testing.expectError(error.Timeout, sendStreamBounded(std.testing.io, &active, Active.send, capped, "{}", std.testing.allocator, Active.receive, &active));
+    job = testStreamJob(&script, capped);
+    try std.testing.expectError(error.Timeout, job.run());
+    try std.testing.expectEqual(@as(usize, 4), script.chunks);
+}
+
+// The same worker/monitor use a scripted monotonic clock in deadline tests.
+// No test assumes a sleeping OS thread is rescheduled at the requested instant.
+const TestStreamClock = struct {
+    ms: u64 = 0,
+    complete_on_sample: ?*std.atomic.Value(bool) = null,
+    fn elapsedMs(self: *@This()) u64 {
+        if (self.complete_on_sample) |done| {
+            done.store(true, .release);
+            self.complete_on_sample = null;
+        }
+        return self.ms;
+    }
+    fn wait(self: *@This()) void {
+        self.ms += 10;
+    }
+};
+const TestStreamScript = struct {
+    const Step = struct { ms: u64, bytes: []const u8 };
+    clock: *TestStreamClock,
+    steps: []const Step = &.{},
+    finish_ms: u64,
+    chunks: usize = 0,
+    fn send(raw: *anyopaque, _: http.RequestPlan, _: []const u8, _: std.mem.Allocator, sink: ChunkSink, ctx: *anyopaque) !ResponseMeta {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        for (self.steps) |step| {
+            self.clock.ms = step.ms;
+            try sink(ctx, step.bytes);
+        }
+        self.clock.ms = self.finish_ms;
+        return .{ .status = 200 };
+    }
+    fn receive(raw: *anyopaque, _: []const u8) !void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.chunks += 1;
+    }
+};
+fn testStreamJob(script: *TestStreamScript, plan: http.RequestPlan) StreamJob(*TestStreamClock) {
+    return .{ .timing = script.clock, .raw = script, .send = TestStreamScript.send, .plan = plan, .body = "{}", .allocator = std.testing.allocator, .sink = TestStreamScript.receive, .sink_ctx = script };
+}
+const TestStreamFuture = struct {
+    result: anyerror!ResponseMeta = .{ .status = 200 },
+    cancellations: usize = 0,
+    done: ?*std.atomic.Value(bool) = null,
+    stop_during_join: ?*provider.CancelToken = null,
+    fn cancel(self: *@This(), _: std.Io) anyerror!ResponseMeta {
+        self.cancellations += 1;
+        if (self.done) |done| done.store(true, .release);
+        if (self.stop_during_join) |token| token.cancel();
+        return self.result;
+    }
+    fn await(self: *@This(), _: std.Io) anyerror!ResponseMeta {
+        return self.result;
+    }
+};
+test "timing regression stream late completion is classified without a monitor" {
+    var clock: TestStreamClock = .{};
+    var script: TestStreamScript = .{ .clock = &clock, .finish_ms = 70 };
+    var job = testStreamJob(&script, .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70 });
+    try std.testing.expectError(error.Timeout, job.run());
+    try std.testing.expect(job.done.load(.acquire));
+}
+test "timing regression stream late chunks cannot revive expired idle" {
+    var clock: TestStreamClock = .{};
+    const steps = [_]TestStreamScript.Step{ .{ .ms = 15, .bytes = "first" }, .{ .ms = 85, .bytes = "late" } };
+    var script: TestStreamScript = .{ .clock = &clock, .steps = &steps, .finish_ms = 85 };
+    var job = testStreamJob(&script, .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 1000, .idle_timeout_ms = 70 });
+    try std.testing.expectError(error.Timeout, job.run());
+    try std.testing.expectEqual(@as(usize, 1), script.chunks);
+    try std.testing.expectEqual(@as(u64, 15), job.last_activity_ms.load(.acquire));
+}
+test "timing regression stream monitor preserves an already completed result" {
+    var clock: TestStreamClock = .{ .ms = 200 };
+    var script: TestStreamScript = .{ .clock = &clock, .finish_ms = 50 };
+    var job = testStreamJob(&script, .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70 });
+    clock.complete_on_sample = &job.done; // completion between done and clock samples
+    var future: TestStreamFuture = .{};
+    try std.testing.expectEqual(@as(u16, 200), (try awaitStream(std.testing.io, &job, &future)).status);
+    try std.testing.expectEqual(@as(usize, 0), future.cancellations);
+}
+test "timing regression stream completion racing cancellation preserves its result" {
+    var clock: TestStreamClock = .{ .ms = 200 };
+    var script: TestStreamScript = .{ .clock = &clock, .finish_ms = 50 };
+    var job = testStreamJob(&script, .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70 });
+    var future: TestStreamFuture = .{ .done = &job.done };
+    try std.testing.expectEqual(@as(u16, 200), (try awaitStream(std.testing.io, &job, &future)).status);
+    try std.testing.expectEqual(@as(usize, 1), future.cancellations);
+}
+
+test "timing regression stream deadline cancellation joins and preserves Stop priority" {
+    var clock: TestStreamClock = .{ .ms = 200 };
+    var script: TestStreamScript = .{ .clock = &clock, .finish_ms = 50 };
+    var token: provider.CancelToken = .{};
+    var job = testStreamJob(&script, .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70, .cancel = &token });
+    var future: TestStreamFuture = .{ .result = error.Canceled, .done = &job.done };
+    try std.testing.expectError(error.Timeout, awaitStream(std.testing.io, &job, &future));
+    try std.testing.expect(job.done.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), future.cancellations);
+
+    job.done.store(false, .release);
+    future = .{ .result = error.Timeout, .done = &job.done, .stop_during_join = &token };
+    try std.testing.expectError(error.Cancelled, awaitStream(std.testing.io, &job, &future));
+    try std.testing.expect(job.done.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), future.cancellations);
+
+    const stopped_steps = [_]TestStreamScript.Step{.{ .ms = 15, .bytes = "after Stop" }};
+    clock.ms = 0;
+    script.steps = &stopped_steps;
+    job = testStreamJob(&script, .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70, .cancel = &token });
+    try std.testing.expectError(error.Cancelled, job.run());
+    try std.testing.expectEqual(@as(usize, 0), script.chunks);
+}
+test "timing regression stream empty chunks do not reset the 70ms idle budget" {
+    var clock: TestStreamClock = .{};
+    const steps = [_]TestStreamScript.Step{ .{ .ms = 15, .bytes = "first" }, .{ .ms = 84, .bytes = "" } };
+    var script: TestStreamScript = .{ .clock = &clock, .steps = &steps, .finish_ms = 85 };
+    var job = testStreamJob(&script, .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 1000, .idle_timeout_ms = 70 });
+    try std.testing.expectError(error.Timeout, job.run());
+    try std.testing.expectEqual(@as(u64, 15), job.last_activity_ms.load(.acquire));
+}
+test "timing regression stream a predeadline chunk resets idle but not the overall budget" {
+    var clock: TestStreamClock = .{};
+    const steps = [_]TestStreamScript.Step{ .{ .ms = 69, .bytes = "first" }, .{ .ms = 138, .bytes = "second" } };
+    var script: TestStreamScript = .{ .clock = &clock, .steps = &steps, .finish_ms = 138 };
+    var job = testStreamJob(&script, .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 1000, .idle_timeout_ms = 70 });
+    _ = try job.run();
+    try std.testing.expectEqual(@as(usize, 2), script.chunks);
+    clock.ms = 0;
+    script.chunks = 0;
+    job = testStreamJob(&script, .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70, .idle_timeout_ms = 70 });
+    try std.testing.expectError(error.Timeout, job.run());
+    try std.testing.expectEqual(@as(usize, 1), script.chunks);
+}
+
+const TestSendScript = struct {
+    clock: *TestStreamClock,
+    finish_ms: u64,
+    calls: usize = 0,
+    stop: ?*provider.CancelToken = null,
+    failure: ?anyerror = null,
+    borrowed: bool = false,
+    fn send(raw: *anyopaque, _: http.RequestPlan, _: []const u8, allocator: std.mem.Allocator) !Response {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.calls += 1;
+        self.clock.ms = self.finish_ms;
+        if (self.stop) |token| token.cancel();
+        if (self.failure) |err| return err;
+        return .{ .status = 200, .retry_after_ms = 123, .body = if (self.borrowed) @constCast("borrowed payload") else try allocator.dupe(u8, "owned payload"), .owned = !self.borrowed };
+    }
+};
+fn testSendJob(script: *TestSendScript, allocator: std.mem.Allocator, plan: http.RequestPlan) SendJob(*TestStreamClock) {
+    return .{ .raw = script, .send = TestSendScript.send, .plan = plan, .body = "{}", .allocator = allocator, .timing = script.clock };
+}
+const TestSendFuture = struct {
+    result: anyerror!Response,
+    cancellations: usize = 0,
+    awaits: usize = 0,
+    done: ?*std.atomic.Value(bool) = null,
+    stop_during_join: ?*provider.CancelToken = null,
+    fn cancel(self: *@This(), _: std.Io) anyerror!Response {
+        self.cancellations += 1;
+        if (self.done) |done| done.store(true, .release);
+        if (self.stop_during_join) |token| token.cancel();
+        return self.result;
+    }
+    fn await(self: *@This(), _: std.Io) anyerror!Response {
+        self.awaits += 1;
+        if (self.stop_during_join) |token| token.cancel();
+        return self.result;
+    }
+};
+fn expectOwnedSendError(expected: anyerror, result: anyerror!Response, allocator: std.mem.Allocator) !void {
+    if (result) |value| {
+        var response = value;
+        defer response.deinit(allocator);
+        try std.testing.expectError(expected, result);
+    } else |_| try std.testing.expectError(expected, result);
+}
+test "deadline regression send late completion rejects and frees its response once" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var clock: TestStreamClock = .{};
+    var script: TestSendScript = .{ .clock = &clock, .finish_ms = 70 };
+    var job = testSendJob(&script, counting.allocator(), .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70 });
+    try expectOwnedSendError(error.Timeout, job.run(), counting.allocator());
+    try std.testing.expect(job.done.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), counting.allocations);
+    try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
+    try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+}
+test "deadline regression send predeadline completion transfers ownership to its caller" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var clock: TestStreamClock = .{};
+    var script: TestSendScript = .{ .clock = &clock, .finish_ms = 69 };
+    var job = testSendJob(&script, counting.allocator(), .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70 });
+    var response = try job.run();
+    try std.testing.expectEqualStrings("owned payload", response.body);
+    try std.testing.expectEqual(@as(?u32, 123), response.retry_after_ms);
+    try std.testing.expectEqual(@as(usize, 0), counting.deallocations);
+    response.deinit(counting.allocator());
+    try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
+}
+test "deadline regression send Stop at completion releases the completed body" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var clock: TestStreamClock = .{};
+    var token: provider.CancelToken = .{};
+    var script: TestSendScript = .{ .clock = &clock, .finish_ms = 50, .stop = &token };
+    var job = testSendJob(&script, counting.allocator(), .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70, .cancel = &token });
+    try expectOwnedSendError(error.Cancelled, job.run(), counting.allocator());
+    try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
+}
+test "deadline regression send monitor preserves a completed owned response" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var clock: TestStreamClock = .{ .ms = 200 };
+    var script: TestSendScript = .{ .clock = &clock, .finish_ms = 50 };
+    var job = testSendJob(&script, counting.allocator(), .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70 });
+    clock.complete_on_sample = &job.done;
+    var future: TestSendFuture = .{ .result = .{ .status = 200, .body = try counting.allocator().dupe(u8, "ready") } };
+    var response = try awaitSend(std.testing.io, &job, &future);
+    try std.testing.expectEqualStrings("ready", response.body);
+    try std.testing.expectEqual(@as(usize, 0), future.cancellations);
+    try std.testing.expectEqual(@as(usize, 0), counting.deallocations);
+    response.deinit(counting.allocator());
+    try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
+}
+test "deadline regression send completion racing a deadline keeps its owned response" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var clock: TestStreamClock = .{ .ms = 200 };
+    var script: TestSendScript = .{ .clock = &clock, .finish_ms = 50 };
+    var job = testSendJob(&script, counting.allocator(), .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70 });
+    var future: TestSendFuture = .{ .result = .{ .status = 200, .body = try counting.allocator().dupe(u8, "ready") }, .done = &job.done };
+    var response = try awaitSend(std.testing.io, &job, &future);
+    try std.testing.expectEqual(@as(usize, 1), future.cancellations);
+    try std.testing.expectEqual(@as(usize, 0), counting.deallocations);
+    response.deinit(counting.allocator());
+    try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
+}
+test "deadline regression send Stop during normal join frees the ready response" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var clock: TestStreamClock = .{ .ms = 50 };
+    var script: TestSendScript = .{ .clock = &clock, .finish_ms = 50 };
+    var token: provider.CancelToken = .{};
+    var job = testSendJob(&script, counting.allocator(), .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70, .cancel = &token });
+    job.done.store(true, .release);
+    var future: TestSendFuture = .{ .result = .{ .status = 200, .body = try counting.allocator().dupe(u8, "ready") }, .stop_during_join = &token };
+    try expectOwnedSendError(error.Cancelled, awaitSend(std.testing.io, &job, &future), counting.allocator());
+    try std.testing.expectEqual(@as(usize, 1), future.awaits);
+    try std.testing.expectEqual(@as(usize, 1), counting.deallocations);
+}
+test "deadline regression send Stop during timeout join wins with and without a body" {
+    for ([_]bool{ false, true }) |with_body| {
+        var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var clock: TestStreamClock = .{ .ms = 200 };
+        var script: TestSendScript = .{ .clock = &clock, .finish_ms = 50 };
+        var token: provider.CancelToken = .{};
+        var job = testSendJob(&script, counting.allocator(), .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70, .cancel = &token });
+        var future: TestSendFuture = .{ .result = if (with_body) .{ .status = 200, .body = try counting.allocator().dupe(u8, "ready") } else error.Timeout, .done = &job.done, .stop_during_join = &token };
+        try expectOwnedSendError(error.Cancelled, awaitSend(std.testing.io, &job, &future), counting.allocator());
+        try std.testing.expect(job.done.load(.acquire));
+        try std.testing.expectEqual(@as(usize, 1), future.cancellations);
+        try std.testing.expectEqual(counting.allocations, counting.deallocations);
+    }
+}
+test "deadline regression send late borrowed responses are not freed" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var clock: TestStreamClock = .{};
+    var script: TestSendScript = .{ .clock = &clock, .finish_ms = 70, .borrowed = true };
+    var job = testSendJob(&script, counting.allocator(), .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70 });
+    try expectOwnedSendError(error.Timeout, job.run(), counting.allocator());
+    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+    try std.testing.expectEqual(@as(usize, 0), counting.deallocations);
+}
+test "deadline regression send preserves an early failure when its monitor wakes late" {
+    var clock: TestStreamClock = .{ .ms = 200 };
+    var script: TestSendScript = .{ .clock = &clock, .finish_ms = 20, .failure = error.ProviderFailure };
+    var job = testSendJob(&script, std.testing.allocator, .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70 });
+    clock.complete_on_sample = &job.done;
+    var future: TestSendFuture = .{ .result = error.ProviderFailure };
+    try expectOwnedSendError(error.ProviderFailure, awaitSend(std.testing.io, &job, &future), std.testing.allocator);
+}
+
+test "deadline regression send native late and stalled HTTP bodies release their allocations" {
+    const Fixture = struct {
+        io: std.Io,
+        server: std.Io.net.Server,
+        clock: *TestSendClock,
+        stall: bool,
+        exited: bool = false,
+        fn serve(self: *@This()) !void {
+            defer self.exited = true;
+            const connection = try self.server.accept(self.io);
+            defer connection.close(self.io);
+            var buffer: [4096]u8 = undefined;
+            var reader = connection.reader(self.io, &buffer);
+            var length: usize = 0;
+            while (true) {
+                const line = try reader.interface.takeDelimiterInclusive('\n');
+                if (std.ascii.startsWithIgnoreCase(line, "content-length:")) length = try std.fmt.parseInt(usize, std.mem.trim(u8, line[15..], " \r\n"), 10);
+                if (std.mem.eql(u8, line, "\r\n")) break;
+            }
+            try reader.interface.discardAll(length);
+            const payload = "late-owned-body";
+            var writer = connection.writer(self.io, &.{});
+            try writer.interface.print("HTTP/1.1 200 OK\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n", .{payload.len});
+            try writer.interface.flush();
+            if (self.stall) {
+                try writer.interface.writeAll(payload[0..1]);
+                try writer.interface.flush();
+                self.clock.ms.store(70, .release);
+                try std.Io.sleep(self.io, .fromMilliseconds(60_000), .awake);
+                return error.UnexpectedCompletion;
+            }
+            // The actual body cannot complete until the exact request deadline.
+            self.clock.ms.store(70, .release);
+            try writer.interface.writeAll(payload);
+            try writer.interface.flush();
+        }
+    };
+    for ([_]bool{ false, true }) |stall| {
+        var clock: TestSendClock = .{};
+        const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
+        var fixture: Fixture = .{ .io = std.testing.io, .server = try address.listen(std.testing.io, .{}), .clock = &clock, .stall = stall };
+        defer fixture.server.deinit(std.testing.io);
+        var serving = try std.Io.concurrent(std.testing.io, Fixture.serve, .{&fixture});
+        defer _ = serving.cancel(std.testing.io) catch {};
+        var endpoint_buffer: [128]u8 = undefined;
+        const endpoint = try std.fmt.bufPrint(&endpoint_buffer, "http://127.0.0.1:{d}/fixture", .{fixture.server.socket.address.getPort()});
+        var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var context: NativeContext = .{ .io = std.testing.io };
+        var job: SendJob(*TestSendClock) = .{ .timing = &clock, .raw = &context, .send = nativeSendUnbounded, .plan = .{ .endpoint = endpoint, .auth_style = .none, .timeout_ms = 70 }, .body = "{}", .allocator = counting.allocator() };
+        if (stall) {
+            // The real monitor cancels a body read and joins its owner.
+            var sending = try std.Io.concurrent(std.testing.io, SendJob(*TestSendClock).run, .{&job});
+            defer _ = sending.cancel(std.testing.io) catch {};
+            try expectOwnedSendError(error.Timeout, awaitSend(std.testing.io, &job, &sending), counting.allocator());
+            try std.testing.expectError(error.Canceled, serving.cancel(std.testing.io));
+        } else {
+            // With no monitor, the worker must reject and reclaim a late body.
+            try expectOwnedSendError(error.Timeout, job.run(), counting.allocator());
+            try serving.await(std.testing.io);
+        }
+        try std.testing.expect(fixture.exited);
+        try std.testing.expect(job.done.load(.acquire));
+        try std.testing.expect(counting.allocations > 0);
+        try std.testing.expectEqual(counting.allocated_bytes, counting.freed_bytes);
+    }
+}
+
+const TestSendClock = struct {
+    ms: std.atomic.Value(u64) = .init(0),
+    fn elapsedMs(self: *@This()) u64 {
+        return self.ms.load(.acquire);
+    }
+    fn wait(_: *@This()) void {
+        @import("retry.zig").wait(10, null) catch unreachable;
+    }
+};
+test "deadline regression send queued expiry and Stop cannot dispatch or allocate" {
+    var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+    var clock: TestStreamClock = .{ .ms = 70 };
+    var script: TestSendScript = .{ .clock = &clock, .finish_ms = 70 };
+    var job = testSendJob(&script, counting.allocator(), .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70 });
+    try expectOwnedSendError(error.Timeout, job.run(), counting.allocator());
+    try std.testing.expectEqual(@as(usize, 0), script.calls);
+    try std.testing.expect(job.done.load(.acquire));
+    var token: provider.CancelToken = .{};
+    token.cancel();
+    clock.ms = 0;
+    job = testSendJob(&script, counting.allocator(), .{ .endpoint = "fixture", .auth_style = .none, .timeout_ms = 70, .cancel = &token });
+    try expectOwnedSendError(error.Cancelled, job.run(), counting.allocator());
+    try std.testing.expectEqual(@as(usize, 0), script.calls);
+    try std.testing.expectEqual(@as(usize, 0), counting.allocations);
+    try std.testing.expectEqual(@as(usize, 0), counting.deallocations);
 }

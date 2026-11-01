@@ -115,12 +115,12 @@ test "socks global material paints retained foreground from every theme with loc
         const c = theme.current();
         const expected = switch (state) {
             .running => ForwardColors.text(.success),
-            .connecting, .paused => ForwardColors.text(.warning),
+            .connecting, .paused, .stopping => ForwardColors.text(.warning),
             .failed => ForwardColors.text(.danger),
             .off => c.fg_2,
         };
         try std.testing.expectEqual(expected, view.status.getText().?.color);
-        try std.testing.expectEqual(if (state == .running or state == .paused or state == .connecting) theme.popupAction() else c.accent, view.control_button.getBackground());
+        try std.testing.expectEqual(if (state == .running or state == .paused or state == .connecting or state == .stopping) theme.popupAction() else c.accent, view.control_button.getBackground());
         try std.testing.expectEqual(c.danger_ink, view.message.getText().?.color);
         try std.testing.expectEqual(state, view.state);
         try std.testing.expectEqual(@as(usize, 0), receipt.actions);

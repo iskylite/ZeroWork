@@ -33,9 +33,9 @@ def relay(sock, channel):
     worker = threading.Thread(target=pump, args=(sock, channel), daemon=True)
     worker.start()
     pump(channel, sock)
+    worker.join(2)
     sock.close()
     channel.close()
-    worker.join(2)
 
 
 def remote_listen(self, address, port):
@@ -88,9 +88,9 @@ Connection.cancel_port_forward_request = remote_cancel
 
 
 class Echo:
-    def __init__(self):
+    def __init__(self, port=0):
         self.socket = socket.socket()
-        self.socket.bind(('127.0.0.1', 0))
+        self.socket.bind(('127.0.0.1', port))
         self.socket.listen(8)
         self.socket.settimeout(.05)
         self.port = self.socket.getsockname()[1]
