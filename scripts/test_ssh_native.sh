@@ -11,10 +11,14 @@ xcrun clang -std=c11 -g -fsanitize=address,undefined \
   vendor/mbedtls/library/libmbedcrypto.a -lz -o "$OUT/security"
 "$OUT/security"
 xcrun clang -std=c11 -g -fsanitize=address,undefined \
-  -Isrc/proto/ssh -Ivendor/libssh2/include src/proto/ssh/ssh_socket_cancel_test.c \
+  -Isrc/proto/ssh -Ivendor/libssh2/include -Ivendor/mbedtls/include src/proto/ssh/ssh_socket_cancel_test.c \
   vendor/libssh2/src/.libs/libssh2.a vendor/mbedtls/library/libmbedcrypto.a -lz -o "$OUT/sockets"
 "$OUT/sockets"
 xcrun clang -std=c11 -g -fsanitize=address,undefined \
-  -Isrc/proto/ssh -Ivendor/libssh2/include src/proto/ssh/ssh_handshake_diagnostic_test.c \
+  -Isrc/proto/ssh -Ivendor/libssh2/include -Ivendor/mbedtls/include src/proto/ssh/ssh_handshake_diagnostic_test.c \
   vendor/libssh2/src/.libs/libssh2.a vendor/mbedtls/library/libmbedcrypto.a -lz -o "$OUT/handshake-diagnostic"
 "$OUT/handshake-diagnostic"
+xcrun clang -std=c11 -g -fsanitize=address,undefined \
+  -Isrc/proto/ssh -Ivendor/libssh2/include -Ivendor/mbedtls/include src/proto/ssh/ssh_relay_wait_test.c \
+  vendor/libssh2/src/.libs/libssh2.a vendor/mbedtls/library/libmbedcrypto.a -lz -o "$OUT/relay-wait"
+"$OUT/relay-wait"

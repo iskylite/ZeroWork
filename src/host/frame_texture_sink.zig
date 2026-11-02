@@ -114,6 +114,7 @@ pub const Sink = struct {
     height: u32 = 0,
     revision: u64 = 0,
     frame_generation: u64 = 0,
+    presentation: @import("frame_performance.zig").Presentation = .{},
     newest_generation: std.atomic.Value(u64) = .init(1),
     producer_thread: std.atomic.Value(usize) = .init(0),
     submitting: std.atomic.Value(bool) = .init(false),

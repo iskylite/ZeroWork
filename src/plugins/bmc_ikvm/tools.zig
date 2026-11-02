@@ -32,6 +32,26 @@ pub fn bindings(comptime handler: *const fn (*anyopaque, api.Invocation, std.mem
 }
 /// A host-owned runtime supplies only its already-authorized typed services.
 pub const Target = struct { owner: svc.identity.SessionHandle, console: typed.Binding, power: typed.Binding, boot: typed.Binding, ai: ?typed.Binding = null };
+
+pub const ConnectionMetadata = struct { state: []const u8 = "unavailable", connected: bool = false, ready: bool = false };
+/// Connection facts are independent of the host's renderer attachment and of
+/// input/control authorization. RFB readiness proves the video transport and
+/// handshake; a current, complete frame is additionally required for ready.
+pub fn connectionMetadata(value: console.Snapshot) ConnectionMetadata {
+    if (value.failure_code != null or value.progress.failure_code != null or value.route == .failed or value.video == .failed or value.progress.stage == .failed) return .{ .state = "failed" };
+    if (value.cleanup != .not_started or value.route == .closed or value.video == .closed or value.progress.stage == .cleanup or value.progress.stage == .released or value.progress.stage == .cancelled) return .{ .state = "closed" };
+    const connected = value.route == .connected and value.rfb_ready and value.input.connected and (value.video == .awaiting_frame or value.video == .streaming);
+    const ready = connected and value.video == .streaming and value.frame_sequence != 0 and value.frame_generation != 0 and value.width != 0 and value.height != 0 and value.stride >= @as(usize, value.width) * 4 and !value.input.geometry_pending and value.input.geometry_generation == value.frame_generation;
+    return .{
+        .state = if (ready) "streaming" else if (connected) "awaiting_first_frame" else switch (value.progress.stage) {
+            .idle, .streaming, .awaiting_first_frame => "connecting",
+            else => @tagName(value.progress.stage),
+        },
+        .connected = connected,
+        .ready = ready,
+    };
+}
+
 pub fn invoke(target: Target, invocation: api.Invocation, a: std.mem.Allocator) !api.ToolResult {
     if (!target.owner.eql(invocation.owner)) return error.StaleBinding;
     const definition = for (definitions) |candidate| {
@@ -65,7 +85,9 @@ pub fn invoke(target: Target, invocation: api.Invocation, a: std.mem.Allocator) 
         var snapshot = try interface.snapshot(target.console.context, target.console, a);
         defer snapshot.deinit();
         const value = snapshot.value;
-        break :blk try std.json.Stringify.valueAlloc(a, .{ .width = value.width, .height = value.height, .stride = value.stride, .pixel_format = value.format, .frame_sequence = value.frame_sequence, .frame_generation = value.frame_generation, .video = value.video, .route = value.route, .management = value.management, .failure_stage = value.failure_stage, .failure_code = value.failure_code, .status = if (value.video == .streaming) "画面已连接" else "视频未连接", .pixel_access = false }, .{});
+        if (!value.owner.eql(target.owner)) return error.StaleBinding;
+        const connection = connectionMetadata(value);
+        break :blk try std.json.Stringify.valueAlloc(a, .{ .width = value.width, .height = value.height, .stride = value.stride, .pixel_format = value.format, .frame_sequence = value.frame_sequence, .frame_generation = value.frame_generation, .video = value.video, .route = value.route, .management = value.management, .connection_state = connection.state, .connected = connection.connected, .ready = connection.ready, .rfb_ready = value.rfb_ready, .connection_stage = value.progress.stage, .connection_failure_stage = value.progress.failure_stage, .failure_stage = value.failure_stage, .failure_code = value.failure_code orelse value.progress.failure_code, .status = if (connection.ready) "画面已连接" else if (connection.connected) "等待有效画面" else "视频未连接", .pixel_access = false }, .{});
     } else return error.UnknownTool;
     errdefer a.free(bytes);
     const blocks = try a.alloc(api.ContentBlock, 1);

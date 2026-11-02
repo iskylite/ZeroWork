@@ -45,6 +45,11 @@ int zw_ssh_relay_step(ZW_SSH_RELAY *relay);
 void zw_ssh_relay_interrupt(ZW_SSH_RELAY *relay);
 void zw_ssh_relay_destroy(ZW_SSH_RELAY *relay);
 void zw_ssh_relay_pause(void);
+#define ZW_SSH_RELAY_WAIT_MAX 16
+/* One bounded wait for sibling streams on the same owned session. Returns 1
+   when a productive round can continue without waiting, otherwise 0. */
+int zw_ssh_relay_wait_many(ZW_SSH_RELAY *const *relays, size_t count,
+    int transport_fd, LIBSSH2_SESSION *session, int timeout_ms);
 void zw_ssh_relay_wait(ZW_SSH_RELAY *relay, int transport_fd, LIBSSH2_SESSION *session, int timeout_ms);
 LIBSSH2_SESSION *zw_libssh2_session_create(void);
 int zw_libssh2_session_handshake(LIBSSH2_SESSION *session, int socket_fd);

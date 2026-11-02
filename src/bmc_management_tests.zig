@@ -8,6 +8,7 @@ const auth = @import("plugins/bmc_ikvm/protocol/auth.zig");
 const power = @import("plugins/bmc_ikvm/protocol/power.zig");
 const boot = @import("plugins/bmc_ikvm/protocol/boot.zig");
 const journal = @import("plugins/bmc_ikvm/management_journal.zig");
+const management = @import("plugins/bmc_ikvm/management_adapter.zig");
 const a = std.testing.allocator;
 const owner: svc.identity.SessionHandle = .{ .session_id = @fromBackingInt(77), .generation = 3 };
 fn execution(id: u64) svc.Execution {
@@ -54,11 +55,62 @@ const TestArbiter = struct {
     }
 };
 fn initEngine(log: *journal.Journal, arbiter: *TestArbiter) !power.Engine {
-    var value = try power.Engine.init(a, owner, .{ .authority = "bmc.invalid:443" }, log, arbiter.api());
+    var value = try power.Engine.initForTest(a, owner, .{ .authority = "bmc.invalid:443" }, log, arbiter.api());
     errdefer value.deinit();
     const values = snapshots();
     try value.setSnapshots(values.p, values.b);
     return value;
+}
+
+test "BMC management taken power and Boot requests release ownership when publishing the previous result runs out of memory" {
+    for ([_]bool{ false, true }) |is_boot| {
+        var failing = std.testing.FailingAllocator.init(a, .{});
+        var memory: journal.MemoryBackend = .{ .allocator = a };
+        defer memory.deinit();
+        var log = try journal.Journal.init(a, memory.backend());
+        defer log.deinit();
+        var arbiter: TestArbiter = .{};
+        var adapter: management.Adapter = undefined;
+        try adapter.initForTest(failing.allocator(), owner, .{ .host = "bmc.invalid" }, &log, null);
+        var live = true;
+        defer {
+            failing.fail_index = std.math.maxInt(usize);
+            failing.resize_fail_index = std.math.maxInt(usize);
+            if (live) adapter.deinit();
+        }
+        adapter.engine.arbiter = arbiter.api();
+        const values = snapshots();
+        try adapter.setSnapshots(values.p, values.b, true);
+        const binding = adapter.powerBinding();
+        const api = try binding.borrow(svc.PowerService, svc.power_key, owner);
+        try std.testing.expect(api.request(binding.context, .{ .execution = execution(91), .action = .force_off }) == .accepted);
+        const first = (try adapter.next(200)).?;
+        try adapter.complete(.{ .sequence = first.sequence, .transport_error = true }, 201);
+        const pending_execution = execution(92);
+        if (is_boot) {
+            const boot_binding = adapter.bootBinding();
+            const boot_api = try boot_binding.borrow(svc.BootService, svc.boot_key, owner);
+            try std.testing.expect(boot_api.apply(boot_binding.context, .{ .execution = pending_execution, .baseline = values.b.state, .enabled = "Once", .target = "Pxe", .etag = values.b.etag }) == .accepted);
+        } else {
+            try std.testing.expect(api.request(binding.context, .{ .execution = pending_execution, .action = .force_off }) == .accepted);
+        }
+        try std.testing.expect(adapter.pending != null);
+        const writes_before = memory.writes;
+        // The next allocation belongs to republishing operation 91, after
+        // operation 92 has been removed from the worker mailbox.
+        failing.fail_index = failing.alloc_index;
+        failing.resize_fail_index = failing.resize_index;
+        try std.testing.expectError(error.OutOfMemory, adapter.tick(202));
+        try std.testing.expect(failing.has_induced_failure);
+        try std.testing.expect(adapter.pending == null);
+        try std.testing.expect(log.find(pending_execution.operation) == null);
+        try std.testing.expectEqual(writes_before, memory.writes);
+        failing.fail_index = std.math.maxInt(usize);
+        failing.resize_fail_index = std.math.maxInt(usize);
+        adapter.deinit();
+        live = false;
+        try std.testing.expectEqual(failing.allocated_bytes, failing.freed_bytes);
+    }
 }
 
 test "BMC payload defaults strict secrets route uniqueness and codec GC ownership" {
@@ -102,15 +154,20 @@ test "BMC same origin paths pagination and field-level body errors fail closed" 
     var partial = try redfish.Document.parse(a, "/redfish/v1/Systems/X", 200, "{\"PowerState\":\"On\",\"error\":{\"code\":\"Base.Error\"}}", null, 200);
     defer partial.deinit();
     const partial_system = try redfish.parseSystem(alloc, origin, partial);
-    try std.testing.expectEqual(svc.PowerState.on, partial_system.power.state.value.?);
+    // A failed error envelope is not a resource representation, even when it
+    // also contains a field that looks like a valid PowerState.
+    try std.testing.expect(partial_system.power.state.value == null);
+    try std.testing.expectEqual(svc.Validity.unavailable, partial_system.power.state.evidence.validity);
+    try std.testing.expectEqual(svc.Validity.partial_with_error, partial_system.power.resource_evidence.validity);
     try std.testing.expect(!partial_system.power.state.evidence.permitsWrite());
+    try std.testing.expect(!partial.resourceAvailable());
     try std.testing.expect(!partial.accepted());
     var extended = try redfish.Document.parse(a, "/redfish/v1/Tasks/X", 200, "{\"@Message.ExtendedInfo\":[{\"MessageSeverity\":\"Critical\"}]}", null, 0);
     defer extended.deinit();
     try std.testing.expect(!extended.accepted());
 }
 
-test "BMC discovery requires independent KVM manager evidence and reciprocal unique mapping" {
+test "BMC discovery verifies standard management independently of reciprocal KVM mapping" {
     var discovery = try redfish.Discovery.init(a, .{ .host = "bmc.invalid" });
     defer discovery.deinit();
     const root = discovery.next().?;
@@ -120,7 +177,7 @@ test "BMC discovery requires independent KVM manager evidence and reciprocal uni
             .systems => "{\"Members\":[{\"@odata.id\":\"/redfish/v1/Systems/node-A\"}]}",
             .managers => "{\"Members\":[{\"@odata.id\":\"/redfish/v1/Managers/B\"}]}",
             .system => system_on,
-            .manager => "{\"Links\":{\"ManagerForServers\":[{\"@odata.id\":\"/redfish/v1/Systems/node-A\"}]},\"SecurityService\":{\"@odata.id\":\"/redfish/v1/Managers/B/SecurityService\"}}",
+            .manager => "{\"Id\":\"B\",\"Links\":{\"ManagerForServers\":[{\"@odata.id\":\"/redfish/v1/Systems/node-A\"}]},\"SecurityService\":{\"@odata.id\":\"/redfish/v1/Managers/B/SecurityService\"}}",
             .security => "{\"EnableAuthConfirm\":false}",
             .boot_options => "{\"Members\":[{\"@odata.id\":\"/redfish/v1/Systems/node-A/BootOptions/A\"},{\"@odata.id\":\"/redfish/v1/Systems/node-A/BootOptions/B\"}]}",
             .boot_option => "{\"Id\":\"A\",\"BootOptionReference\":\"Boot0001\",\"DisplayName\":\"Unknown vendor device\"}",
@@ -131,7 +188,13 @@ test "BMC discovery requires independent KVM manager evidence and reciprocal uni
     var selected = try discovery.system(execution(1).system_uri, capability);
     try std.testing.expect(!selected.power.capability.system_mapping_verified);
     try std.testing.expectEqual(@as(usize, 1), selected.boot.options.len);
+    try discovery.proveManagementTarget();
+    selected = try discovery.system(execution(1).system_uri, capability);
+    try std.testing.expect(selected.power.capability.system_mapping_verified);
+    try std.testing.expectEqual(svc.SecondaryAuth.disabled, selected.power.capability.secondary_auth);
+    try std.testing.expect(discovery.mapping_system == null and discovery.mapping_manager == null);
     try std.testing.expectError(error.MappingUnverified, discovery.proveKvmMapping("/redfish/v1/Managers/B", "/kvm/0", false));
+    try std.testing.expectEqualStrings(execution(1).system_uri, discovery.management_system.?);
     try discovery.proveKvmMapping("/redfish/v1/Managers/B", "/kvm/0", true);
     selected = try discovery.system(execution(1).system_uri, capability);
     try std.testing.expect(selected.power.capability.system_mapping_verified);
@@ -532,7 +595,7 @@ test "BMC recovered query owns all current and pending Boot fields across journa
     const reservation = try log.reserve(ex, "https://bmc.invalid:443/redfish/v1/Systems/node-A", "fixture-system-uuid", .{ .boot = pending }, .{ .boot = boot_state, .etag = "\"rev1\"" });
     try log.beginDispatch(reservation.index);
     try log.setResult(reservation.index, .{ .operation = ex.operation, .phase = .outcome_unknown, .reason = .timeout, .dispatched = true, .task_uri = task_uri, .current_boot = current, .pending_boot = pending });
-    var engine_value = try power.Engine.init(a, owner, .{ .authority = "bmc.invalid:443" }, &log, null);
+    var engine_value = try power.Engine.initForTest(a, owner, .{ .authority = "bmc.invalid:443" }, &log, null);
     defer engine_value.deinit();
     try engine_value.query(ex.operation, 100);
     const read_gate: power.Gate = .{ .owner = owner, .binding_generation = 1, .capability_revision = 1, .grant_revision = 1, .authenticated = true, .write_granted = false };
@@ -555,6 +618,251 @@ test "BMC recovered query owns all current and pending Boot fields across journa
         const persisted = log.entries[reservation.index].result();
         try std.testing.expect(svc.sameBoot(current, persisted.current_boot.?));
         try std.testing.expect(svc.sameBoot(pending, persisted.pending_boot.?));
+    }
+}
+
+const DiagnosticSystem = struct {
+    power_state: []const u8 = "On",
+    state: svc.BootState = boot_state,
+    related: []const []const u8 = &.{},
+    invalid_auxiliary_boot: bool = false,
+    action_info_only: bool = false,
+    declared_uri: ?[]const u8 = null,
+    declared_type: ?[]const u8 = null,
+};
+fn diagnosticSystem(alloc: std.mem.Allocator, options: DiagnosticSystem) ![]const u8 {
+    var parsed = try std.json.parseFromSlice(std.json.Value, alloc, system_on, .{ .allocate = .alloc_always });
+    const root = &parsed.value.object;
+    if (options.declared_uri) |uri| try root.put(alloc, "@odata.id", .{ .string = uri });
+    if (options.declared_type) |kind| try root.put(alloc, "@odata.type", .{ .string = kind });
+    try root.put(alloc, "PowerState", .{ .string = options.power_state });
+    const fields = &root.getPtr("Boot").?.object;
+    for ([_][]const u8{ "BootSourceOverrideEnabled", "BootSourceOverrideTarget", "BootSourceOverrideMode" }, [_]?[]const u8{ options.state.enabled, options.state.target, options.state.mode }) |name, value| {
+        if (value) |text| try fields.put(alloc, name, .{ .string = text }) else _ = fields.swapRemove(name);
+    }
+    _ = fields.swapRemove("BootSourceOverrideEnabled@Redfish.AllowableValues");
+    if (options.invalid_auxiliary_boot) {
+        try fields.put(alloc, "BootSourceOverrideTarget", .{ .integer = 7 });
+        try fields.put(alloc, "BootSourceOverrideMode", .{ .bool = false });
+        try fields.put(alloc, "BootOrder", .{ .integer = 7 });
+        try fields.put(alloc, "BootOptions", .{ .string = "unsupported fixture" });
+    }
+    if (options.action_info_only) {
+        const reset = &root.getPtr("Actions").?.object.getPtr("#ComputerSystem.Reset").?.object;
+        _ = reset.swapRemove("ResetType@Redfish.AllowableValues");
+        try reset.put(alloc, "@Redfish.ActionInfo", .{ .string = "/redfish/v1/Systems/node-A/ResetActionInfo" });
+    }
+    const messages = try std.json.Stringify.valueAlloc(alloc, .{.{ .MessageId = "Base.1.19.InternalError", .Severity = "Critical", .RelatedProperties = options.related }}, .{});
+    const diagnostic = try std.json.parseFromSlice(std.json.Value, alloc, messages, .{ .allocate = .alloc_always });
+    try root.put(alloc, "@Message.ExtendedInfo", diagnostic.value);
+    return std.json.Stringify.valueAlloc(alloc, parsed.value, .{});
+}
+fn setParsedSnapshots(engine_value: *power.Engine, body: []const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    var doc = try redfish.Document.parse(a, execution(1).system_uri, 200, body, "\"rev1\"", 100);
+    defer doc.deinit();
+    var parsed = try redfish.parseSystem(arena.allocator(), engine_value.origin, doc);
+    parsed.power.capability = capability;
+    parsed.boot.capability = capability;
+    try engine_value.setSnapshots(parsed.power, parsed.boot);
+}
+
+test "BMC management global Critical resource permits field-specific power refresh acknowledgement and confirmation" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const on = try diagnosticSystem(arena.allocator(), .{});
+    const off = try diagnosticSystem(arena.allocator(), .{ .power_state = "Off", .invalid_auxiliary_boot = true });
+    var memory: journal.MemoryBackend = .{ .allocator = a };
+    defer memory.deinit();
+    var log = try journal.Journal.init(a, memory.backend());
+    defer log.deinit();
+    var arbiter: TestArbiter = .{};
+    var engine_value = try initEngine(&log, &arbiter);
+    defer engine_value.deinit();
+    try setParsedSnapshots(&engine_value, on);
+    try std.testing.expectEqual(svc.Validity.partial_with_error, engine_value.power.value.resource_evidence.validity);
+    try validatePowerFixture(&engine_value, on, off);
+}
+fn validatePowerFixture(engine_value: *power.Engine, on: []const u8, off: []const u8) !void {
+    const key = try engine_value.requestPower(.{ .execution = execution(1), .action = .force_off }, 6000);
+    const refresh = (try engine_value.next(6000, gate)).?;
+    try std.testing.expectEqual(power.Purpose.refresh, refresh.purpose);
+    try engine_value.complete(.{ .sequence = refresh.sequence, .status = 200, .body = on, .etag = "\"rev1\"" }, 6001);
+    const write = (try engine_value.next(7001, gate)).?;
+    try std.testing.expectEqual(power.Method.post, write.method);
+    try std.testing.expectEqualStrings("\"rev1\"", write.if_match.?);
+    try engine_value.complete(.{ .sequence = write.sequence, .status = 200, .body = off }, 7002);
+    const read = (try engine_value.next(8002, gate)).?;
+    try std.testing.expectEqual(power.Purpose.verify, read.purpose);
+    try engine_value.complete(.{ .sequence = read.sequence, .status = 200, .body = off, .etag = "\"rev2\"" }, 8003);
+    try std.testing.expectEqual(svc.Phase.succeeded, (try engine_value.result(key)).phase);
+    try std.testing.expect((try engine_value.next(9000, gate)) == null);
+}
+
+test "BMC management scoped PowerState error blocks power while Boot uses missing optional enabled annotation" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const before = try diagnosticSystem(arena.allocator(), .{ .related = &.{"#/PowerState"} });
+    const after = try diagnosticSystem(arena.allocator(), .{ .power_state = "InvalidPower", .state = .{ .enabled = "Once", .target = "Pxe", .mode = "UEFI" }, .related = &.{"#/PowerState"} });
+    var memory: journal.MemoryBackend = .{ .allocator = a };
+    defer memory.deinit();
+    var log = try journal.Journal.init(a, memory.backend());
+    defer log.deinit();
+    var arbiter: TestArbiter = .{};
+    var engine_value = try initEngine(&log, &arbiter);
+    defer engine_value.deinit();
+    try setParsedSnapshots(&engine_value, before);
+    try std.testing.expectError(error.UnsupportedAction, engine_value.requestPower(.{ .execution = execution(2), .action = .force_off }, 200));
+    const key = try engine_value.applyBoot(.{ .execution = execution(1), .baseline = boot_state, .enabled = "Once", .target = "Pxe", .etag = "\"rev1\"" }, 6000);
+    const refresh = (try engine_value.next(6000, gate)).?;
+    try engine_value.complete(.{ .sequence = refresh.sequence, .status = 200, .body = before, .etag = "\"rev1\"" }, 6001);
+    const write = (try engine_value.next(7001, gate)).?;
+    try std.testing.expectEqual(power.Method.patch, write.method);
+    try engine_value.complete(.{ .sequence = write.sequence, .status = 200, .body = after }, 7002);
+    const read = (try engine_value.next(8002, gate)).?;
+    try engine_value.complete(.{ .sequence = read.sequence, .status = 200, .body = after }, 8003);
+    try std.testing.expectEqual(svc.Phase.succeeded, (try engine_value.result(key)).phase);
+}
+
+test "BMC management scoped Boot error permits power and Disabled ignores unrelated invalid target mode and baseline" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const before = try diagnosticSystem(arena.allocator(), .{ .state = .{ .enabled = "Once", .target = "Pxe", .mode = "UEFI" }, .related = &.{ "#/Boot/BootSourceOverrideTarget", "#/Boot/BootSourceOverrideMode" }, .invalid_auxiliary_boot = true });
+    const after = try diagnosticSystem(arena.allocator(), .{ .related = &.{ "#/Boot/BootSourceOverrideTarget", "#/Boot/BootSourceOverrideMode" }, .invalid_auxiliary_boot = true });
+    var memory: journal.MemoryBackend = .{ .allocator = a };
+    defer memory.deinit();
+    var log = try journal.Journal.init(a, memory.backend());
+    defer log.deinit();
+    var arbiter: TestArbiter = .{};
+    var engine_value = try initEngine(&log, &arbiter);
+    defer engine_value.deinit();
+    try setParsedSnapshots(&engine_value, before);
+    try power.validatePowerFields(engine_value.power.value, .force_off);
+    try std.testing.expectError(error.UnsupportedBootValue, boot.validateFields(engine_value.boot_snapshot.value, engine_value.boot_snapshot.value.state, .{ .target = "Hdd" }, "\"rev1\""));
+    // The UI's unrelated target/mode draft can be stale or unavailable when
+    // closing an override; it is never serialized or used as a precondition.
+    const key = try engine_value.applyBoot(.{ .execution = execution(1), .baseline = .{ .enabled = "Once", .target = "old-target", .mode = "old-mode" }, .enabled = "Disabled", .target = "Hdd", .mode = "Legacy", .etag = "\"rev1\"" }, 6000);
+    const refresh = (try engine_value.next(6000, gate)).?;
+    try engine_value.complete(.{ .sequence = refresh.sequence, .status = 200, .body = before, .etag = "\"rev1\"" }, 6001);
+    const write = (try engine_value.next(7001, gate)).?;
+    try std.testing.expectEqualStrings("{\"Boot\":{\"BootSourceOverrideEnabled\":\"Disabled\"}}", write.body);
+    try engine_value.complete(.{ .sequence = write.sequence, .status = 200, .body = after }, 7002);
+    const read = (try engine_value.next(8002, gate)).?;
+    try engine_value.complete(.{ .sequence = read.sequence, .status = 200, .body = after }, 8003);
+    try std.testing.expectEqual(svc.Phase.succeeded, (try engine_value.result(key)).phase);
+}
+
+test "BMC management relevant field diagnostics prohibit successful readback and never resend" {
+    for ([_]bool{ false, true }) |is_boot| {
+        var arena: std.heap.ArenaAllocator = .init(a);
+        defer arena.deinit();
+        const body = try diagnosticSystem(arena.allocator(), .{ .power_state = "Off", .state = .{ .enabled = "Once", .target = "Pxe", .mode = "UEFI" }, .related = if (is_boot) &.{"#/Boot/BootSourceOverrideEnabled"} else &.{"#/PowerState"} });
+        var memory: journal.MemoryBackend = .{ .allocator = a };
+        defer memory.deinit();
+        var log = try journal.Journal.init(a, memory.backend());
+        defer log.deinit();
+        var arbiter: TestArbiter = .{};
+        var engine_value = try initEngine(&log, &arbiter);
+        defer engine_value.deinit();
+        const key = if (is_boot) try engine_value.applyBoot(.{ .execution = execution(1), .baseline = boot_state, .enabled = "Once", .target = "Pxe", .etag = "\"rev1\"" }, 200) else try engine_value.requestPower(.{ .execution = execution(1), .action = .force_off }, 200);
+        const write = (try engine_value.next(200, gate)).?;
+        try engine_value.complete(.{ .sequence = write.sequence, .status = 204 }, 201);
+        const read = (try engine_value.next(1201, gate)).?;
+        try engine_value.complete(.{ .sequence = read.sequence, .status = 200, .body = body }, 1202);
+        try std.testing.expectEqual(svc.Phase.outcome_unknown, (try engine_value.result(key)).phase);
+        try std.testing.expectEqual(svc.Reason.remote_error, (try engine_value.result(key)).reason.?);
+        try std.testing.expect((try engine_value.next(2202, gate)) == null);
+        try std.testing.expectEqual(@as(usize, 1), log.entries.len);
+    }
+}
+
+test "BMC management independent Reset ActionInfo survives System refresh without inline allowable values" {
+    var arena: std.heap.ArenaAllocator = .init(a);
+    defer arena.deinit();
+    const on = try diagnosticSystem(arena.allocator(), .{ .action_info_only = true });
+    const off = try diagnosticSystem(arena.allocator(), .{ .power_state = "Off", .action_info_only = true });
+    var memory: journal.MemoryBackend = .{ .allocator = a };
+    defer memory.deinit();
+    var log = try journal.Journal.init(a, memory.backend());
+    defer log.deinit();
+    var arbiter: TestArbiter = .{};
+    var engine_value = try initEngine(&log, &arbiter);
+    defer engine_value.deinit();
+    try setParsedSnapshots(&engine_value, on);
+    var initial = engine_value.power.value;
+    initial.reset_types = .{ .value = &.{ "ForceOff", "On" }, .evidence = .{ .source_uri = "/redfish/v1/Systems/node-A/ResetActionInfo", .collected_ms = 90, .validity = .valid } };
+    try engine_value.setSnapshots(initial, engine_value.boot_snapshot.value);
+    try validatePowerFixture(&engine_value, on, off);
+    try std.testing.expect(svc.contains(engine_value.power.value.reset_types.value.?, "ForceOff"));
+    try std.testing.expectEqualStrings("/redfish/v1/Systems/node-A/ResetActionInfo", engine_value.power.value.reset_types.evidence.source_uri);
+}
+
+test "BMC management HTTP failure and conflict handling do not depend on a JSON failure body" {
+    for ([_]u16{ 401, 403, 409, 412, 500 }) |status| {
+        var memory: journal.MemoryBackend = .{ .allocator = a };
+        defer memory.deinit();
+        var log = try journal.Journal.init(a, memory.backend());
+        defer log.deinit();
+        var arbiter: TestArbiter = .{};
+        var engine_value = try initEngine(&log, &arbiter);
+        defer engine_value.deinit();
+        const key = try engine_value.requestPower(.{ .execution = execution(1), .action = .force_off }, 200);
+        const write = (try engine_value.next(200, gate)).?;
+        try engine_value.complete(.{ .sequence = write.sequence, .status = status, .body = "<html>failure</html>" }, 201);
+        if (status == 409 or status == 412) {
+            const current = (try engine_value.next(201, gate)).?;
+            try std.testing.expectEqual(power.Method.get, current.method);
+            try std.testing.expectEqual(power.Purpose.conflict_refresh, current.purpose);
+            try engine_value.complete(.{ .sequence = current.sequence, .status = 200, .body = system_on }, 202);
+            try std.testing.expectEqual(svc.Reason.conflict, (try engine_value.result(key)).reason.?);
+        } else if (status == 401 or status == 403) {
+            try std.testing.expect(!engine_value.power.value.capability.write_requestable);
+            try std.testing.expect(!engine_value.boot_snapshot.value.capability.write_requestable);
+            try std.testing.expectEqual(if (status == 401) svc.Reason.authentication_failed else svc.Reason.permission_denied, (try engine_value.result(key)).reason.?);
+        } else try std.testing.expectEqual(svc.Reason.remote_error, (try engine_value.result(key)).reason.?);
+        try std.testing.expectEqual(svc.Phase.failed, (try engine_value.result(key)).phase);
+        try std.testing.expectEqual(status, (try engine_value.result(key)).http_status.?);
+        try std.testing.expect((try engine_value.next(2202, gate)) == null);
+        try std.testing.expectEqual(@as(usize, 1), log.entries.len);
+    }
+}
+
+test "BMC management refresh and readback reject a changed System URI origin or resource type despite equal UUID" {
+    for ([_]DiagnosticSystem{
+        .{ .declared_uri = "https://other.invalid/redfish/v1/Systems/node-A" },
+        .{ .declared_uri = "/redfish/v1/Systems/another-node" },
+        .{ .declared_uri = "/redfish/v1/Systems/node-A", .declared_type = "#Manager.v1_0_0.Manager" },
+    }) |options| {
+        for ([_]bool{ false, true }) |dispatched| {
+            var arena: std.heap.ArenaAllocator = .init(a);
+            defer arena.deinit();
+            var response_options = options;
+            response_options.power_state = if (dispatched) "Off" else "On";
+            const body = try diagnosticSystem(arena.allocator(), response_options);
+            var memory: journal.MemoryBackend = .{ .allocator = a };
+            defer memory.deinit();
+            var log = try journal.Journal.init(a, memory.backend());
+            defer log.deinit();
+            var arbiter: TestArbiter = .{};
+            var engine_value = try initEngine(&log, &arbiter);
+            defer engine_value.deinit();
+            const now: u64 = if (dispatched) 200 else 6000;
+            const key = try engine_value.requestPower(.{ .execution = execution(1), .action = .force_off }, now);
+            var request = (try engine_value.next(now, gate)).?;
+            if (dispatched) {
+                try std.testing.expectEqual(power.Method.post, request.method);
+                try engine_value.complete(.{ .sequence = request.sequence, .status = 204 }, now + 1);
+                request = (try engine_value.next(now + 1001, gate)).?;
+            }
+            try std.testing.expectEqual(power.Method.get, request.method);
+            try engine_value.complete(.{ .sequence = request.sequence, .status = 200, .body = body, .etag = "\"rev1\"" }, now + 1002);
+            const result = try engine_value.result(key);
+            try std.testing.expectEqual(if (dispatched) svc.Phase.outcome_unknown else svc.Phase.failed, result.phase);
+            try std.testing.expectEqual(svc.Reason.conflict, result.reason.?);
+            try std.testing.expectEqual(dispatched, log.entries[0].dispatch_started);
+            try std.testing.expect((try engine_value.next(now + 2002, gate)) == null);
+        }
     }
 }
 

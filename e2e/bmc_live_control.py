@@ -30,7 +30,7 @@ def prepare_payload(value: object, phase: str, deadline_seconds: int = 180) -> b
         value["acceptance_mode"] = "safe_interaction"
         value["operator_approval"] = "safe_shift_and_pointer"
     elif phase == "native-interactive":
-        if "click_target" in value or not 30 <= deadline_seconds <= 300:
+        if "click_target" in value or not 30 <= deadline_seconds <= 900:
             raise ValueError("invalid native interactive parameters")
         value["acceptance_mode"] = "native_interactive"
         value["operator_approval"] = "native_view_and_observed_actions"
@@ -52,7 +52,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--phase", required=True, choices=("safe-interaction", "ai-pointer-click", "native-interactive"))
     parser.add_argument("--validate-stdin", action="store_true")
-    parser.add_argument("--deadline-seconds", type=int, default=180, help="Native interactive deadline: 30–300 seconds, plus 10 seconds cleanup")
+    parser.add_argument("--deadline-seconds", type=int, default=180, help="Native interactive deadline: 30–900 seconds, plus 10 seconds cleanup")
     parser.add_argument("--binary", type=Path, help="Use a separately built acceptance runner")
     options = parser.parse_args()
     if not sys.stdin.isatty():

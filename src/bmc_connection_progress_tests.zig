@@ -75,6 +75,84 @@ test "BMC connection progress cancellation stays separate from authentication fa
     try std.testing.expectEqual(@as(u64, 400), value.elapsed_ms);
 }
 
+test "BMC connection progress preserves safe request failure context without logging every body read" {
+    var tracker = progress.Tracker.initAt(1, 0);
+    tracker.setStageAt(.public_script, 10);
+    for (0..400) |index| tracker.setContext(.{ .channel = .management, .method = .get, .path = .public_script, .phase = .response_body, .http_status = 200, .received_bytes = index * 1024, .duration_ms = index * 10 });
+    try std.testing.expectEqual(@as(u8, 1), tracker.snapshotAt(100).event_count);
+    tracker.failAt(error.HttpTimeout, 4100);
+    tracker.setStageAt(.cleanup, 4200);
+    tracker.setContext(.{ .channel = .management, .method = .delete, .path = .web_session, .phase = .response_validate });
+    for (0..40) |index| tracker.noteAt(.{ .code = .remote_logout_unconfirmed, .err = error.TlsClosed }, 4201 + index);
+    tracker.finishAt(false, 4300);
+    const snapshot = tracker.snapshotAt(4400);
+    const failure = snapshot.failure_event.?;
+    try std.testing.expectEqual(progress.Stage.public_script, failure.stage);
+    try std.testing.expectEqualStrings("HttpTimeout", failure.error_code.?);
+    try std.testing.expectEqual(progress.RequestPath.public_script, failure.context.?.path);
+    try std.testing.expectEqual(progress.Phase.response_body, failure.context.?.phase);
+    try std.testing.expectEqual(@as(?u16, 200), failure.context.?.http_status);
+    try std.testing.expectEqual(@as(?u64, 399 * 1024), failure.context.?.received_bytes);
+    try std.testing.expectEqual(@as(u8, 32), snapshot.event_count);
+    try std.testing.expectEqualStrings("TlsClosed", snapshot.events[0].error_code.?);
+}
+
+test "BMC SSH route diagnostics preserve the original jump failure and format only its proven target" {
+    const vm = @import("plugins/bmc_ikvm/view_model.zig");
+    var tracker = progress.Tracker.initAt(1, 0);
+    tracker.setStageAt(.route, 1);
+    tracker.setContext(.{ .channel = .ssh, .ssh_hop = 1, .ssh_hops = 1, .phase = .ssh_handshake });
+    tracker.failAt(error.SshHandshakeReceiveFailed, 2);
+    tracker.setStageAt(.cleanup, 3);
+    tracker.setContext(.{ .phase = .connect });
+    for (0..40) |index| tracker.noteAt(.{ .code = .remote_logout_unconfirmed, .err = error.TlsClosed }, 4 + index);
+    tracker.failAt(error.TlsClosed, 44);
+    tracker.finishAt(false, 45);
+    const snapshot = tracker.snapshotAt(46);
+    try std.testing.expectEqualStrings("SshHandshakeReceiveFailed", snapshot.failure_code.?);
+    try std.testing.expectEqual(progress.Stage.route, snapshot.failure_stage.?);
+    try std.testing.expectEqual(@as(?u8, 1), snapshot.failure_event.?.context.?.ssh_hop);
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try vm.writeLogMessage(&writer.writer, snapshot.failure_event.?, "bmc.invalid:443");
+    try std.testing.expectEqualStrings("建立连接路由 · 失败 · SSH 路由 · 跳板 1/1 · SSH 握手 · SshHandshakeReceiveFailed", writer.written());
+    writer.clearRetainingCapacity();
+    try vm.writeStepDiagnosticsForTarget(&writer.writer, snapshot, .route, "bmc.invalid:443");
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "保留的原始失败") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "SSH 路由 · 跳板 1/1 · SSH 握手") != null);
+    try std.testing.expect(std.mem.indexOf(u8, writer.written(), "bmc.invalid") == null);
+    writer.clearRetainingCapacity();
+    // Without a proven hop, say SSH route and do not invent a BMC target.
+    try vm.writeLogMessage(&writer.writer, .{ .stage = .route, .kind = .failure, .context = .{ .channel = .ssh, .phase = .connect }, .error_code = "SshHandshakeReceiveFailed" }, "bmc.invalid:443");
+    try std.testing.expectEqualStrings("建立连接路由 · 失败 · SSH 路由 · 建立路由 · SshHandshakeReceiveFailed", writer.written());
+    writer.clearRetainingCapacity();
+    try vm.writeLogMessage(&writer.writer, .{ .stage = .route, .kind = .diagnostic, .context = .{ .phase = .connect }, .code = .route_connected }, "bmc.invalid:443");
+    try std.testing.expectEqualStrings("建立连接路由 · 管理通道 → bmc.invalid:443 · 建立路由 · 路由已建立", writer.written());
+}
+
+test "BMC connection progress samples wall time independently from monotonic request duration" {
+    var tracker = progress.Tracker.init(0);
+    const mono = progress.nowMs();
+    tracker.setStageAt(.public_script, mono);
+    tracker.setContext(.{ .method = .get, .path = .public_script, .phase = .response_body, .duration_ms = 1534 });
+    // Advancing the supplied monotonic clock by a week must not manufacture
+    // a wall-clock timestamp a week in the future.
+    const week_ms = 7 * 24 * 60 * 60 * 1000;
+    tracker.noteAt(.{ .http_status = 200 }, mono + week_ms);
+    tracker.failAt(error.HttpTimeout, mono + week_ms + 1);
+    tracker.setStageAt(.cleanup, mono + week_ms + 2);
+    tracker.finishAt(false, mono + week_ms + 3);
+    const snapshot = tracker.snapshotAt(mono + week_ms + 4);
+    const first_wall = snapshot.started_unix_ms.?;
+    const failure = snapshot.failure_event.?;
+    try std.testing.expect(first_wall > 1_500_000_000_000);
+    try std.testing.expect(failure.at_unix_ms.? >= first_wall);
+    try std.testing.expect(failure.at_unix_ms.? < first_wall + 24 * 60 * 60 * 1000);
+    try std.testing.expect(failure.at_ms >= week_ms);
+    try std.testing.expectEqual(@as(?u64, 1534), failure.duration_ms);
+    try std.testing.expectEqualStrings("HttpTimeout", failure.error_code.?);
+}
+
 const Concurrent = struct {
     tracker: progress.Tracker = progress.Tracker.initAt(2, 0),
     done: std.atomic.Value(bool) = .init(false),

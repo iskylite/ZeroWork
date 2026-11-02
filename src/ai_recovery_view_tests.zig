@@ -57,6 +57,32 @@ test "recovery buttons keep captured group and turn and disable IO actions durin
     try std.testing.expectEqual(@as(usize, 1), probe.count);
 }
 
+test "enabled answer recovery click enqueues its captured conversation and turn" {
+    const Probe = struct {
+        last: ?V.Envelope = null,
+        fn enqueue(raw: *anyopaque, envelope: V.Envelope) void {
+            @as(*@This(), @ptrCast(@alignCast(raw))).last = envelope;
+        }
+    };
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 358);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    var probe: Probe = .{};
+    const ticket: V.Ticket = .{ .owner = .{ .session = 101 }, .turn = 85, .conversation_id = @import("host/identity.zig").ConversationId.generate() };
+    const root = try V.mount(cx, scope, .{ .ticket = ticket, .reason = "连接或答复流中断", .retries = 0, .max_retries = 3, .retry_enabled = true, .regenerate_enabled = true, .cooldown_seconds = 0 }, .{ .context = &probe, .enqueue = Probe.enqueue });
+    try cx.root.?.appendChild(cx.allocator, root);
+    cx.layout();
+    const rect = find(root, "ai.recovery.answer").?.globalRect();
+    cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    try std.testing.expectEqual(V.Action.answer, probe.last.?.action);
+    try std.testing.expectEqual(ticket.turn, probe.last.?.ticket.turn);
+    try std.testing.expect(ticket.owner.eql(probe.last.?.ticket.owner));
+    try std.testing.expect(ticket.conversation_id.?.eql(probe.last.?.ticket.conversation_id.?));
+}
+
 test "PATCH recovery details keep an idle thumb and contain boundary input inside the conversation" {
     const a = std.testing.allocator;
     const reason = try std.mem.join(a, "\n", &@as([35][]const u8, @splat("HTTP failure detail retained for inspection")));

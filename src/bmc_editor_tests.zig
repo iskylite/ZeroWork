@@ -533,3 +533,35 @@ test "BMC editor native probe feedback stays visible and log updates preserve ca
     try std.testing.expect(std.mem.indexOf(u8, view.log_entries.?.getText().?.content, "测试失败") != null);
     instance.vtable.unmount(instance.context);
 }
+
+test "BMC editor reopening a temporary session preserves configuration without persisting runtime credentials" {
+    var source = try validDraft();
+    defer source.deinit();
+    try source.setPassword("temporary-password-not-saved");
+    try source.setPort(8443);
+    try source.setScale(.original);
+    const reference = "zw1_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const temporary = try source.snapshotRuntime(a, reference);
+    defer freeEnvelope(temporary);
+    var draft = drafts.Editor.init(a, 1);
+    defer draft.deinit();
+    try draft.load(temporary);
+    try std.testing.expectEqualStrings(source.host, draft.host);
+    try std.testing.expectEqualStrings(source.username, draft.username);
+    try std.testing.expectEqual(@as(u16, 8443), draft.https_port);
+    try std.testing.expectEqual(model.Scale.original, draft.scale);
+    try std.testing.expect(!draft.save_password);
+    try std.testing.expect(draft.credential_ref == null);
+    try std.testing.expectEqual(@as(usize, 0), draft.password.len);
+    const saved = try draft.snapshot(a);
+    defer freeEnvelope(saved);
+    try std.testing.expect(std.mem.indexOf(u8, saved.payload, reference) == null);
+    try std.testing.expect(std.mem.indexOf(u8, saved.payload, "temporary-password-not-saved") == null);
+    var saved_asset = temporary;
+    saved_asset.id = @fromBackingInt(87);
+    var existing = drafts.Editor.init(a, 1);
+    defer existing.deinit();
+    try existing.load(saved_asset);
+    try std.testing.expectEqualStrings(reference, existing.credential_ref.?);
+    try std.testing.expect(existing.save_password);
+}

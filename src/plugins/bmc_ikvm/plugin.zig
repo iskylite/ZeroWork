@@ -24,6 +24,7 @@ pub const Options = struct {
     /// Its stable owner and the journal backend outlive successful deinit.
     frame_budget: *budgets.Budget,
     journal_backend: ledger.Backend,
+    management_policy: svc.ManagementPolicy = .user_approved,
     /// ProbeContext intentionally has no presentation/UI capabilities. This
     /// mailbox host is supplied by composition and is touched only in poll.
     probe_challenges: ?*challenges.Host = null,
@@ -145,7 +146,7 @@ pub const Plugin = struct {
         if (self.shutting_down) return error.PluginShuttingDown;
         if (self.runtimeFor(request.handle) != null) return error.DuplicateBmcOwner;
         try self.runtimes.ensureUnusedCapacity(self.allocator, 1);
-        const resources: runtime_api.Resources = .{ .frame_budget = self.options.frame_budget, .journal = &self.journal };
+        const resources: runtime_api.Resources = .{ .frame_budget = self.options.frame_budget, .journal = &self.journal, .management_policy = self.options.management_policy };
         const injected_driver: ?@import("controller.zig").Driver = if (builtin.is_test) self.test_driver else null;
         const runtime = if (injected_driver) |driver|
             try runtime_api.Runtime.prepareForTest(self.allocator, request, resources, driver)

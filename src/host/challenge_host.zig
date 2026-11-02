@@ -42,7 +42,20 @@ pub const Owner = union(enum) {
 pub const Kind = enum { secret_input, trust_material, choice };
 pub const Option = struct { value: []const u8, label: []const u8 };
 pub const Field = struct { label: []const u8, secret: bool = true, max_bytes: usize = 8192, confirmation: ?[]const u8 = null };
-pub const Payload = struct { allow_save_password: bool = false, title: []const u8, detail: []const u8 = "", source_name: []const u8 = "", material: []const u8 = "", choices: []const Option = &.{}, fields: []const Field = &.{}, submit_label: []const u8 = "确认" };
+/// Public presentation metadata only. Decisions still use the original owned
+/// challenge and its choice values; this never grants a TLS exception.
+pub const CertificateTrust = struct {
+    authority: []const u8,
+    leaf_fingerprint: [32]u8,
+    chain_fingerprint: [32]u8,
+    subject: []const u8,
+    issuer: []const u8,
+    valid_from: []const u8,
+    valid_until: []const u8,
+    failures: []const u8,
+    scope_changed: bool = false,
+};
+pub const Payload = struct { allow_save_password: bool = false, title: []const u8, detail: []const u8 = "", source_name: []const u8 = "", material: []const u8 = "", certificate_trust: ?CertificateTrust = null, choices: []const Option = &.{}, fields: []const Field = &.{}, submit_label: []const u8 = "确认" };
 pub const State = enum { pending, answered, withdrawn, timed_out, cancelled };
 pub const View = struct { owner: Owner, request_id: u64, generation: u64, kind: Kind, payload: Payload, deadline: u64, state: State = .pending, background: bool = false };
 pub const Reply = union(enum) { secret_input: []const u8, trust_material: bool, choice: []const u8, fields: []const []const u8 };
@@ -104,6 +117,16 @@ pub const Host = struct {
         copy.detail = try alloc.dupe(u8, payload.detail);
         copy.source_name = try alloc.dupe(u8, payload.source_name);
         copy.material = try alloc.dupe(u8, payload.material);
+        if (payload.certificate_trust) |certificate| {
+            if (kind != .choice or payload.fields.len != 0) return error.InvalidCertificatePresentation;
+            var owned = certificate;
+            inline for (.{ "authority", "subject", "issuer", "valid_from", "valid_until", "failures" }) |name| {
+                const bytes = @field(certificate, name);
+                if (bytes.len > 4096) return error.ChallengeTooLarge;
+                @field(owned, name) = try alloc.dupe(u8, bytes);
+            }
+            copy.certificate_trust = owned;
+        }
         const choices = try alloc.alloc(Option, payload.choices.len);
         for (payload.choices, 0..) |option, i| {
             if (option.value.len == 0 or option.value.len > 256 or option.label.len > 256) return error.InvalidChoice;
@@ -376,4 +399,29 @@ test "password persistence requires an explicit eligible challenge" {
     try host.offer(owner, 2, 1, .secret_input, .{ .title = "OTP", .fields = &.{.{ .label = "OTP" }} }, 100);
     try std.testing.expectError(error.InvalidChallengeResponse, host.submitPasswordAnswer(owner, 2, 1, .{ .fields = &.{"123456"} }, 1, true));
     try std.testing.expectEqual(State.pending, host.stateFor(owner, 2, 1).?);
+}
+
+test "certificate trust presentation owns all metadata and preserves scoped choice replies" {
+    var host = Host.init(std.testing.allocator);
+    defer host.deinit();
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(93), .generation = 4 };
+    var subject = [_]u8{ 'C', 'N', '=', 'b', 'm', 'c' };
+    try host.offer(owner, 12, 4, .choice, .{
+        .title = "信任 BMC 证书",
+        .certificate_trust = .{ .authority = "bmc.example.test:443", .leaf_fingerprint = @splat(1), .chain_fingerprint = @splat(2), .subject = &subject, .issuer = &subject, .valid_from = "2025-01-01 00:00:00 UTC", .valid_until = "2035-01-01 00:00:00 UTC", .failures = "- 证书颁发者不受信任" },
+        .choices = &.{ .{ .value = "reject", .label = "拒绝连接" }, .{ .value = "once", .label = "仅本次信任" }, .{ .value = "persistent", .label = "保存并继续" } },
+    }, 100);
+    @memset(&subject, 'x');
+    const certificate = host.snapshot(0, owner).?.payload.certificate_trust.?;
+    try std.testing.expectEqualStrings("CN=bmc", certificate.subject);
+    try std.testing.expectEqualStrings("CN=bmc", certificate.issuer);
+    try std.testing.expectEqual(@as(u8, 1), certificate.leaf_fingerprint[31]);
+    try std.testing.expectEqual(@as(u8, 2), certificate.chain_fingerprint[31]);
+    try std.testing.expectError(error.ChallengeMismatch, host.submitAnswer(owner, 12, 5, .{ .choice = "once" }, 1));
+    try std.testing.expectError(error.UnknownChoice, host.submitAnswer(owner, 12, 4, .{ .choice = "trust_all" }, 1));
+    try host.submitAnswer(owner, 12, 4, .{ .choice = "once" }, 1);
+    var answer = host.takeAnswer(owner, 12, 4).?;
+    defer answer.deinit();
+    try std.testing.expectEqualStrings("once", answer.value.choice);
+    try std.testing.expect(!answer.save_password);
 }

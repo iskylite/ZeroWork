@@ -331,6 +331,13 @@ test "BMC plugin runtime trust rejection consumes no credentials and retires cha
     try h.pollUntil(gotChallenge);
     const challenge = h.challenge_host.snapshot(0, h.accepted.handle).?;
     try T.expectEqual(challenges.Kind.choice, challenge.kind);
+    const certificate = challenge.payload.certificate_trust.?;
+    try T.expectEqualStrings("bmc.invalid:443", certificate.authority);
+    try T.expectEqualStrings("2020-10-31 00:00:00 UTC", certificate.valid_from);
+    try T.expectEqualStrings("2030-10-29 00:00:00 UTC", certificate.valid_until);
+    try T.expectEqualSlices(u8, &h.fixture.trust_verification.leaf_fingerprint, &certificate.leaf_fingerprint);
+    try T.expectEqualSlices(u8, &h.fixture.trust_verification.chain_fingerprint, &certificate.chain_fingerprint);
+    try T.expect(std.mem.indexOf(u8, certificate.failures, "证书总有效期超过系统允许上限") != null);
     const material = challenge.payload.material;
     for ([_][]const u8{ "目标：bmc.invalid:443", "有效期开始：2020-10-31 00:00:00 UTC", "有效期结束：2030-10-29 00:00:00 UTC", "证书颁发者不受信任", "自签名证书或未知 CA", "证书主机名与目标不匹配", "证书总有效期超过系统允许上限", "证书 SHA-256：", "证书链 SHA-256：" }) |expected| {
         if (std.mem.indexOf(u8, material, expected) == null) {

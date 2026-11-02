@@ -27,12 +27,17 @@ int zw_ssh_socketpair(int *target_fd, int *relay_fd) {
     *target_fd = -1; *relay_fd = -1;
     if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0) return -1;
     int no_sigpipe = 1;
+    const int buffer_bytes = 64 * 1024;
     for (int i = 0; i < 2; i++) {
         int flags = fcntl(pair[i], F_GETFL, 0);
         if (flags < 0 || fcntl(pair[i], F_SETFL, flags | O_NONBLOCK) < 0 ||
             setsockopt(pair[i], SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe)) < 0) {
             close(pair[0]); close(pair[1]); return -1;
         }
+        /* Per-socket tuning only: Darwin's 8 KiB default splits a 32 KiB
+           relay chunk. Leave the OS default usable if tuning is refused. */
+        (void)setsockopt(pair[i], SOL_SOCKET, SO_SNDBUF, &buffer_bytes, sizeof(buffer_bytes));
+        (void)setsockopt(pair[i], SOL_SOCKET, SO_RCVBUF, &buffer_bytes, sizeof(buffer_bytes));
     }
     *target_fd = pair[0]; *relay_fd = pair[1];
     return 0;
@@ -92,18 +97,40 @@ int zw_ssh_relay_step(ZW_SSH_RELAY *r) {
     return 0;
 }
 
-void zw_ssh_relay_wait(ZW_SSH_RELAY *r, int transport_fd, LIBSSH2_SESSION *session, int timeout_ms) {
-    /* Continue draining decrypted packets without an artificial bandwidth
-       ceiling. Idle waits remain bounded for cancellation and sibling work. */
-    if (r->progressed) return;
-    struct pollfd fds[2] = {
-        { r->fd, 0, 0 }, { transport_fd, POLLIN, 0 }
-    };
-    if (!r->socket_eof && !r->upstream_len) fds[0].events |= POLLIN;
-    if (r->downstream_len) fds[0].events |= POLLOUT;
+int zw_ssh_relay_wait_many(ZW_SSH_RELAY *const *relays, size_t count,
+    int transport_fd, LIBSSH2_SESSION *session, int timeout_ms) {
+    /* Drain available packets immediately. When a local socketpair fills,
+       wake on its writable edge instead of imposing a delay per short write. */
+    if (count > ZW_SSH_RELAY_WAIT_MAX) count = ZW_SSH_RELAY_WAIT_MAX;
+    struct pollfd fds[ZW_SSH_RELAY_WAIT_MAX + 1];
+    size_t used = 0;
+    int can_read_channel = count == 0; /* A pending channel open still needs input. */
+    for (size_t i = 0; i < count; ++i) {
+        ZW_SSH_RELAY *r = relays[i];
+        if (r->progressed) return 1;
+        if (!r->channel_eof && !r->downstream_len) can_read_channel = 1;
+        short events = 0;
+        if (!r->socket_eof && !r->upstream_len) events |= POLLIN;
+        if (r->downstream_len) events |= POLLOUT;
+        if (events) fds[used++] = (struct pollfd){ r->fd, events, 0 };
+    }
+    /* A readable SSH fd cannot help a relay whose local consumer is blocked:
+       step() preserves the pending bytes and deliberately skips channel_read.
+       Keep outbound readiness and retry other session work within 2 ms. */
+    short events = can_read_channel ? POLLIN : 0;
     if (session && (libssh2_session_block_directions(session) & LIBSSH2_SESSION_BLOCK_OUTBOUND))
-        fds[1].events |= POLLOUT;
-    (void)poll(fds, 2, timeout_ms);
+        events |= POLLOUT;
+    if (transport_fd >= 0) {
+        if (!can_read_channel && (timeout_ms < 0 || timeout_ms > 2)) timeout_ms = 2;
+        if (events) fds[used++] = (struct pollfd){ transport_fd, events, 0 };
+    }
+    (void)poll(fds, (nfds_t)used, timeout_ms);
+    return 0;
+}
+
+void zw_ssh_relay_wait(ZW_SSH_RELAY *r, int transport_fd, LIBSSH2_SESSION *session, int timeout_ms) {
+    ZW_SSH_RELAY *relays[] = { r };
+    (void)zw_ssh_relay_wait_many(relays, 1, transport_fd, session, timeout_ms);
 }
 
 void zw_ssh_relay_interrupt(ZW_SSH_RELAY *relay) {

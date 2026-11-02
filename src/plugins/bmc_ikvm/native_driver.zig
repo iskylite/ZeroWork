@@ -21,6 +21,7 @@ const management = @import("management_adapter.zig");
 const transports = @import("../../host/transport_factory.zig");
 const monotonic = @import("../../platform/realtime.zig");
 const progress = @import("connection_progress.zig");
+const ssh_progress = @import("../../proto/ssh/connection_progress.zig");
 
 extern fn zw_bmc_gzip_create() ?*anyopaque;
 extern fn zw_bmc_gzip_destroy(?*anyopaque) void;
@@ -50,6 +51,9 @@ pub const Options = struct {
     kvm_id_field: ?[]const u8 = null,
     callbacks: ?Callbacks = null,
     management_adapter: ?*management.Adapter = null,
+    /// Frozen for this attempt. Authentication and own-session cleanup are
+    /// separate; this policy controls power/boot management IO dispatch.
+    management_policy: svc.ManagementPolicy = .read_only,
     /// Stable per-attempt memory; worker only records safe scalar metadata.
     progress: ?*progress.Tracker = null,
 };
@@ -67,7 +71,10 @@ pub const MappingRejection = enum {
     profile_evidence_unverified,
     ambiguous_mapping,
 };
+pub const ResourceAssociationMethod = enum { reviewed_public_ids_and_chassis };
 pub const DiscoveryDiagnostics = struct {
+    management_discovery_complete: bool = true,
+    management_discovery_error: ?anyerror = null,
     manager_count: usize = 0,
     system_count: usize = 0,
     mapping_verified: bool = false,
@@ -75,6 +82,10 @@ pub const DiscoveryDiagnostics = struct {
     mapping_rejection: ?MappingRejection = null,
     mapping_system_status: ?u16 = null,
     mapping_system_validity: ?svc.Validity = null,
+    management_target_verified: bool = false,
+    management_target_error: ?anyerror = null,
+    resource_association_verified: bool = false,
+    resource_association_method: ?ResourceAssociationMethod = null,
     readonly_system_projection: bool = false,
     readonly_rejection: ?progress.Code = null,
     readonly_collection_count: usize = 0,
@@ -137,6 +148,9 @@ const Transaction = struct {
     response: http.ResponseParser,
     offset: usize = 0,
     deadline_ns: u64,
+    started_ns: u64,
+    received_bytes: u64 = 0,
+    context: progress.Context,
     sequence: u64 = 0,
     fn deinit(self: *Transaction) void {
         self.request.deinit();
@@ -171,6 +185,7 @@ pub const NativeDriver = struct {
     schema: svc.Owned(Schema),
     callbacks: ?Callbacks,
     adapter: ?*management.Adapter,
+    management_policy: svc.ManagementPolicy,
     connection_progress: ?*progress.Tracker = null,
     plan: *const route.Plan,
     pair: route.Pair,
@@ -185,6 +200,7 @@ pub const NativeDriver = struct {
     transaction: ?Transaction = null,
     completed: ?Transaction = null,
     management_failed: bool = false,
+    management_discovery_error: ?anyerror = null,
     cleanup_peer_leaf: ?trust.Fingerprint = null,
     cleanup_peer_chain: ?trust.Fingerprint = null,
     aborted: bool = false,
@@ -275,9 +291,12 @@ pub const NativeDriver = struct {
                 break :blk try route.Pair.prepareProbe(probe, plan, cancel);
             },
         };
-        self.* = .{ .allocator = a, .context = common, .probe_only = source == .probe, .config = frozen, .selected = selected, .selection_ready = options.selected != null, .firmware_pending_verification = if (options.selected) |value| value.identity_source == .reviewed_public_material else false, .schema = schema, .callbacks = options.callbacks, .adapter = options.management_adapter, .connection_progress = options.progress, .plan = plan, .pair = pair, .cancel = cancel, .creator_thread = std.Thread.getCurrentId() };
+        self.* = .{ .allocator = a, .context = common, .probe_only = source == .probe, .config = frozen, .selected = selected, .selection_ready = options.selected != null, .firmware_pending_verification = if (options.selected) |value| value.identity_source == .reviewed_public_material else false, .schema = schema, .callbacks = options.callbacks, .adapter = options.management_adapter, .management_policy = if (source == .probe) .read_only else options.management_policy, .connection_progress = options.progress, .plan = plan, .pair = pair, .cancel = cancel, .creator_thread = std.Thread.getCurrentId() };
         self.diagnostics.firmware_observed = options.selected != null and !self.firmware_pending_verification;
         self.pair.destination = .{ .host = self.origin().host, .port = self.config.value.endpoint.https_port };
+        if (options.progress) |tracker| for (self.pair.transport.options) |*hop| {
+            hop.progress_observer = .{ .context = tracker, .callback = recordSshProgress };
+        };
         return self;
     }
 
@@ -343,7 +362,10 @@ pub const NativeDriver = struct {
         if (self.probe_only) return error.ProbeConsoleForbidden;
         if (self.cleanup_started or self.management_channel != null or plan != self.plan or cancel != self.cancel or !operation.eql(self.context.operation) or !std.mem.eql(u8, payload.endpoint.host, self.config.value.endpoint.host) or payload.endpoint.https_port != self.config.value.endpoint.https_port) return error.StaleNativeDriver;
         try self.beginManagement();
-        try self.publishDiscovery();
+        self.publishDiscovery() catch |err| {
+            if (err == error.Cancelled or err == error.OutOfMemory) return err;
+            self.progressNote(.{ .code = .management_discovery_incomplete, .resource = .system, .err = err });
+        };
         return self.beginConsole();
     }
 
@@ -364,10 +386,12 @@ pub const NativeDriver = struct {
 
     fn beginManagement(self: *NativeDriver) !void {
         try self.check();
+        self.progressContext(.{ .channel = if (self.plan.route.hops.len == 0) .management else .ssh, .phase = .connect });
         self.progressStage(.route);
         // Automatic bootstrap has not identified the BMC yet. Open only the
         // management stream; a video stream is acquired after authorization.
         if (self.probe_only or !self.selection_ready) try self.pair.connectManagement() else try self.pair.connect();
+        self.progressContext(.{ .phase = .connect });
         self.progressNote(.{ .code = .route_connected, .resource = .management_route });
         try self.check();
         self.management_channel = .{ .client = try tls.Client.init(self.pair.management.?.fd, self.origin().host) };
@@ -381,6 +405,9 @@ pub const NativeDriver = struct {
         const root_doc = self.discovery.?.find(root_request.uri) orelse return error.MissingServiceRoot;
         self.progressResponse(.service_root, root_doc.status, root_doc.validity);
         if (!self.selection_ready) try self.selectTrustedProfile(root_doc.*);
+        const reviewed_public_management = self.selected.value.id == .sugon_1_80_oem_rfb and std.mem.eql(u8, self.selected.value.evidence.firmware, "1.80");
+        self.discovery.?.oem_public_security_service = reviewed_public_management;
+        self.discovery.?.oem_public_resource_association = reviewed_public_management;
         const service_link = redfish.link(root_doc.value, "SessionService") orelse return error.MissingSessionService;
         const service_uri = try self.origin().validateReference(service_link);
         var service_response = try self.request("GET", service_uri, &.{}, "");
@@ -398,13 +425,14 @@ pub const NativeDriver = struct {
                 std.mem.eql(u8, service_uri, "/redfish/v1/SessionService")) break :blk try self.allocator.dupe(u8, "/redfish/v1/SessionService/Sessions");
             var service_doc = try redfish.Document.parse(self.allocator, service_uri, service_response.response.status, service_response.response.body(), null, timestamp() / std.time.ns_per_ms);
             defer service_doc.deinit();
-            if (!service_doc.accepted()) return error.SessionServiceUnavailable;
+            if (!service_doc.resourceAvailable() or !service_doc.fieldAccepted("/Sessions")) return error.SessionServiceUnavailable;
             const sessions_link = redfish.link(service_doc.value, "Sessions") orelse return error.MissingSessionsCollection;
             break :blk try self.allocator.dupe(u8, try self.origin().validateReference(sessions_link));
         };
         defer self.allocator.free(sessions_uri);
         var password = try self.acquirePassword();
         defer password.deinit();
+        self.progressContext(.{ .method = .post, .path = .web_sessions, .phase = .request_send, .received_bytes = 0, .duration_ms = 0 });
         self.progressStage(.web_login);
         var login = try auth.webLogin(self.allocator, self.evidence(), auth.nativeEncryptor(), self.config.value.username, password.bytes);
         password.clear();
@@ -419,30 +447,44 @@ pub const NativeDriver = struct {
         self.web_session = try auth.acceptWebSession(self.allocator, self.discovery.?.origin, self.context.owner, login_doc, login_response.response.header("X-Auth-Token").?, login_response.response.header("Location").?);
         self.diagnostics.web_logout = .awaiting;
         self.progressNote(.{ .code = .web_authenticated, .resource = .web_session });
-        // Manager metadata is a prerequisite of deferred firmware verification.
-        // Keep that unfinished work in confirmation even when the discovery
-        // queue interleaves Systems and Manager reads.
-        self.progressStage(if (self.firmware_pending_verification) .firmware_confirmation else .redfish_discovery);
+        // Actual Manager firmware is mandatory when public material selected
+        // the profile. Resolve it before optional Systems/management metadata.
+        if (self.firmware_pending_verification) try self.readFirmwareEvidence();
+        self.progressStage(.redfish_discovery);
         while (self.discovery.?.next()) |pending| {
-            self.progressStage(if (self.firmware_pending_verification) .firmware_confirmation else .redfish_discovery);
-            var response = try self.request("GET", pending.uri, &.{}, "");
-            defer response.deinit();
-            try self.discovery.?.ingest(pending, response.response.status, response.response.body(), response.response.header("ETag"), timestamp() / std.time.ns_per_ms);
-            const observed_doc = self.discovery.?.find(pending.uri);
-            self.progressResponse(resourceKind(pending.kind), response.response.status, if (observed_doc) |doc| doc.validity else null);
-            if (self.firmware_pending_verification) switch (pending.kind) {
-                .managers => {
-                    const doc = self.discovery.?.find(pending.uri) orelse return error.UnsupportedProfileFirmwareUnavailable;
-                    if (!doc.accepted()) return error.UnsupportedProfileFirmwareUnavailable;
-                    const collection = try redfish.parseCollection(self.discovery.?.arena.allocator(), self.discovery.?.origin, doc.*);
-                    if (collection.members.len != 1 or collection.next != null) return error.UnsupportedProfileIdentityAmbiguous;
-                },
-                .manager => try self.confirmFirmware(),
-                else => {},
+            self.readDiscoveryResource(pending) catch |err| {
+                // Probes report their discovery result. A console can keep
+                // its authenticated video path without management metadata;
+                // cancellation and allocation failures remain terminal.
+                if (self.probe_only or err == error.Cancelled or err == error.OutOfMemory) return err;
+                self.management_discovery_error = err;
+                self.progressNote(.{ .code = .management_discovery_incomplete, .resource = resourceKind(pending.kind), .err = err });
+                // A partially consumed HTTP response cannot share a stream
+                // with OEM authentication. Reconnect only to the same endpoint
+                // and authorize only this attempt's already accepted peer.
+                if (self.management_failed) try self.reopenManagementChannel();
+                break;
             };
         }
-        if (self.firmware_pending_verification) try self.confirmFirmware();
-        self.progressStage(.redfish_discovery);
+    }
+    fn readDiscoveryResource(self: *NativeDriver, pending: redfish.ReadRequest) !void {
+        var response = try self.request("GET", pending.uri, &.{}, "");
+        defer response.deinit();
+        try self.discovery.?.ingest(pending, response.response.status, response.response.body(), response.response.header("ETag"), timestamp() / std.time.ns_per_ms);
+        const observed_doc = self.discovery.?.find(pending.uri);
+        self.progressResponse(resourceKind(pending.kind), response.response.status, if (observed_doc) |doc| doc.validity else null);
+    }
+    fn readFirmwareEvidence(self: *NativeDriver) !void {
+        self.progressStage(.firmware_confirmation);
+        const collection_request = self.discovery.?.nextOfKind(.managers) orelse return error.UnsupportedProfileFirmwareUnavailable;
+        try self.readDiscoveryResource(collection_request);
+        const doc = self.discovery.?.find(collection_request.uri) orelse return error.UnsupportedProfileFirmwareUnavailable;
+        if (!doc.resourceAvailable() or !doc.fieldAccepted("/Members")) return error.UnsupportedProfileFirmwareUnavailable;
+        const collection = try redfish.parseCollection(self.discovery.?.arena.allocator(), self.discovery.?.origin, doc.*);
+        if (collection.members.len != 1 or collection.next != null) return error.UnsupportedProfileIdentityAmbiguous;
+        const manager_request = self.discovery.?.nextOfKind(.manager) orelse return error.UnsupportedProfileFirmwareUnavailable;
+        try self.readDiscoveryResource(manager_request);
+        try self.confirmFirmware();
     }
 
     fn selectTrustedProfile(self: *NativeDriver, root_doc: redfish.Document) !void {
@@ -548,7 +590,7 @@ pub const NativeDriver = struct {
         var count: usize = 0;
         for (self.discovery.?.resources.items) |resource| if (resource.kind == .manager) {
             count += 1;
-            if (!resource.doc.accepted()) return error.UnsupportedProfileFirmwareUnavailable;
+            if (!resource.doc.resourceAvailable() or !resource.doc.fieldAccepted("/FirmwareVersion")) return error.UnsupportedProfileFirmwareUnavailable;
             const firmware = redfish.text(resource.doc.value, "FirmwareVersion") orelse return error.UnsupportedProfileFirmwareUnavailable;
             if (!std.mem.eql(u8, firmware, self.selected.value.evidence.firmware)) return error.UnsupportedProfileFirmwareMismatch;
         };
@@ -559,6 +601,7 @@ pub const NativeDriver = struct {
         self.progressNote(.{ .code = .firmware_verified, .resource = .manager });
     }
     fn beginConsole(self: *NativeDriver) !controller.video.rfb.Authenticated {
+        self.progressContext(.{ .method = .post, .path = .kvm_session, .phase = .request_send, .received_bytes = 0, .duration_ms = 0 });
         self.progressStage(.oem_session);
         var kvm_body = try auth.kvmLogin(self.allocator, self.evidence(), self.web_session.?, self.context.owner);
         defer kvm_body.deinit();
@@ -583,6 +626,7 @@ pub const NativeDriver = struct {
             const uri = profile.logoutReference(self.allocator, self.origin(), rule, location, id) catch null;
             if (uri) |path| self.kvm_session.?.verified_logout_uri = .{ .allocator = self.allocator, .bytes = path };
         }
+        self.progressContext(.{ .channel = .video, .path = .websocket, .phase = .connect });
         self.progressStage(.websocket_upgrade);
         if (self.pair.video == null) self.pair.video = try self.pair.transport.openTcpStream(self.pair.destination);
         self.video_channel = .{ .client = try tls.Client.init(self.pair.video.?.fd, self.origin().host) };
@@ -645,6 +689,7 @@ pub const NativeDriver = struct {
     fn handshake(self: *NativeDriver, channel: *Channel) !void {
         const video_channel = channel != &self.management_channel.?;
         const handshake_stage: progress.Stage = if (video_channel) .video_tls_handshake else .tls_handshake;
+        self.progressContext(.{ .channel = if (video_channel) .video else .management, .phase = .tls_handshake });
         self.progressStage(handshake_stage);
         var deadline = timestamp() + stage_timeout_ns;
         while (true) {
@@ -701,12 +746,20 @@ pub const NativeDriver = struct {
             .system => diagnostic.system_count += 1,
             else => {},
         };
+        if (self.management_discovery_error) |err| {
+            diagnostic.management_discovery_complete = false;
+            diagnostic.management_discovery_error = err;
+            diagnostic.mapping_error = error.DiscoveryIncomplete;
+            diagnostic.management_target_error = error.DiscoveryIncomplete;
+            diagnostic.readonly_rejection = .readonly_discovery_incomplete;
+            return;
+        }
         var chosen: ?[]const u8 = null;
         var count: usize = 0;
         for (discovery.resources.items) |resource| if (resource.kind == .manager) {
             discovery.proveKvmMapping(resource.doc.uri, profile.video_path, self.selected.value.evidence.oem_handshake_verified) catch |err| {
                 diagnostic.mapping_error = err;
-                diagnostic.mapping_rejection = self.mappingRejection(resource.doc, &diagnostic);
+                diagnostic.mapping_rejection = if (err == error.MappingAmbiguous) .ambiguous_mapping else self.mappingRejection(resource.doc, &diagnostic);
                 continue;
             };
             chosen = resource.doc.uri;
@@ -717,26 +770,35 @@ pub const NativeDriver = struct {
             discovery.mapping_manager = null;
             diagnostic.mapping_error = if (count > 1) error.MappingAmbiguous else diagnostic.mapping_error orelse error.MappingUnverified;
             if (count > 1) diagnostic.mapping_rejection = .ambiguous_mapping;
+        } else {
+            try discovery.proveKvmMapping(chosen.?, profile.video_path, true);
+            diagnostic.mapping_verified = true;
+            diagnostic.mapping_error = null;
+            diagnostic.mapping_rejection = null;
+            if (discovery.find(discovery.mapping_system.?)) |system| {
+                diagnostic.mapping_system_status = system.status;
+                diagnostic.mapping_system_validity = system.validity;
+            }
+            self.diagnostics.system_mapping_verified = true;
+        }
+        discovery.proveManagementTarget() catch |err| {
+            diagnostic.management_target_error = err;
             if (try self.readOnlyCollectionSystem(&diagnostic)) |selected| {
                 try self.publishManagementSnapshots(selected);
                 diagnostic.readonly_system_projection = true;
             }
             return;
-        }
-        try discovery.proveKvmMapping(chosen.?, profile.video_path, true);
-        diagnostic.mapping_verified = true;
-        diagnostic.mapping_error = null;
-        diagnostic.mapping_rejection = null;
-        if (discovery.find(discovery.mapping_system.?)) |system| {
-            diagnostic.mapping_system_status = system.status;
-            diagnostic.mapping_system_validity = system.validity;
-        }
+        };
+        diagnostic.management_target_verified = true;
+        if (discovery.proveResourceAssociation()) |_| {
+            diagnostic.resource_association_verified = true;
+            diagnostic.resource_association_method = .reviewed_public_ids_and_chassis;
+        } else |_| {}
         var capability: svc.Capability = .{ .binding_generation = self.context.owner.generation };
         if (self.callbacks) |callbacks| if (callbacks.capability) |derive| {
             capability = try derive(callbacks.context, discovery);
         };
-        const selected = try discovery.system(discovery.mapping_system.?, capability);
-        self.diagnostics.system_mapping_verified = true;
+        const selected = try discovery.system(discovery.management_system.?, capability);
         try self.publishManagementSnapshots(selected);
     }
     fn publishManagementSnapshots(self: *NativeDriver, selected: redfish.ParsedSystem) !void {
@@ -749,23 +811,28 @@ pub const NativeDriver = struct {
         if (!self.diagnostics.management_available) self.progressNote(.{ .code = .management_fields_unavailable, .resource = .system });
         if (self.adapter) |adapter| try adapter.setSnapshots(selected.power, selected.boot, true);
     }
-    /// A unique, accepted collection member supplies independently observed
-    /// read-only fields even when the manager's video relationship is broken.
-    /// This path never invokes capability derivation or establishes a mapping.
+    /// A corroborated resource association, or a unique collection member,
+    /// supplies observed read-only values. Property errors and object
+    /// diagnostics stay separate. This never derives a grant or KVM mapping.
     fn readOnlyCollectionSystem(self: *NativeDriver, diagnostic: *DiscoveryDiagnostics) !?redfish.ParsedSystem {
         const discovery = &self.discovery.?;
         if (discovery.cursor != discovery.queue.items.len or discovery.outstanding.items.len != 0) {
             diagnostic.readonly_rejection = .readonly_discovery_incomplete;
             return null;
         }
-        var member_uri: ?[]const u8 = null;
+        const association: ?redfish.ResourceAssociation = discovery.proveResourceAssociation() catch null;
+        if (association != null) {
+            diagnostic.resource_association_verified = true;
+            diagnostic.resource_association_method = .reviewed_public_ids_and_chassis;
+        }
+        var member_uri: ?[]const u8 = if (association) |value| value.system_uri else null;
         var collections: usize = 0;
         for (discovery.resources.items) |resource| if (resource.kind == .systems) {
             collections += 1;
             diagnostic.readonly_collection_count = collections;
             diagnostic.readonly_collection_status = resource.doc.status;
             diagnostic.readonly_collection_validity = resource.doc.validity;
-            if (!resource.doc.accepted()) {
+            if (!resource.doc.resourceAvailable() or !resource.doc.fieldAccepted("/Members")) {
                 diagnostic.readonly_rejection = .readonly_collection_rejected;
                 return null;
             }
@@ -775,13 +842,15 @@ pub const NativeDriver = struct {
             };
             for (collection.members) |uri| {
                 diagnostic.readonly_member_count += 1;
-                // Multiple collection entries, including aliases with an
-                // uncertain shared identity, cannot select one source.
-                if (member_uri != null) {
-                    diagnostic.readonly_rejection = .readonly_members_not_single;
-                    return null;
+                if (association == null) {
+                    // Without an explicit association, multiple entries or
+                    // aliases cannot select one source by their position.
+                    if (member_uri != null) {
+                        diagnostic.readonly_rejection = .readonly_members_not_single;
+                        return null;
+                    }
+                    member_uri = uri;
                 }
-                member_uri = uri;
             }
         };
         if (collections == 0) {
@@ -798,11 +867,11 @@ pub const NativeDriver = struct {
         };
         diagnostic.readonly_system_status = doc.status;
         diagnostic.readonly_system_validity = doc.validity;
-        if (!doc.accepted()) {
+        if (!doc.resourceAvailable()) {
             diagnostic.readonly_rejection = .readonly_member_rejected;
             return null;
         }
-        const capability: svc.Capability = .{ .binding_generation = self.context.owner.generation, .system_mapping_verified = false, .write_granted = false, .secondary_auth = .unknown };
+        const capability: svc.Capability = .{ .binding_generation = self.context.owner.generation, .system_mapping_verified = false, .write_granted = false, .write_requestable = false, .secondary_auth = .unknown };
         var selected = discovery.system(uri, capability) catch |err| {
             diagnostic.readonly_rejection = .readonly_system_invalid;
             return err;
@@ -824,6 +893,9 @@ pub const NativeDriver = struct {
     }
     fn progressNote(self: *NativeDriver, detail: progress.Detail) void {
         if (self.connection_progress) |tracker| tracker.note(detail);
+    }
+    fn progressContext(self: *NativeDriver, context: progress.Context) void {
+        if (self.connection_progress) |tracker| tracker.setContext(context);
     }
     fn progressResponse(self: *NativeDriver, resource: progress.Resource, status: u16, validity: ?svc.Validity) void {
         self.progressNote(.{ .resource = resource, .http_status = status, .validity = if (validity) |v| @fromBackingInt(@intCast(@backingInt(v))) else null });
@@ -849,7 +921,7 @@ pub const NativeDriver = struct {
     /// This static stage summary must never include device links or identities.
     fn mappingRejection(self: *NativeDriver, manager: redfish.Document, diagnostic: *DiscoveryDiagnostics) MappingRejection {
         if (!self.selected.value.evidence.oem_handshake_verified) return .profile_evidence_unverified;
-        if (!manager.accepted()) return .manager_document_rejected;
+        if (!manager.resourceAvailable()) return .manager_document_rejected;
         const links = redfish.member(manager.value, "Links") orelse return .manager_servers_not_single;
         const managed = redfish.member(links, "ManagerForServers") orelse return .manager_servers_not_single;
         if (managed != .array or managed.array.items.len != 1) return .manager_servers_not_single;
@@ -860,14 +932,17 @@ pub const NativeDriver = struct {
         const system = discovery.find(uri) orelse return .system_missing;
         diagnostic.mapping_system_status = system.status;
         diagnostic.mapping_system_validity = system.validity;
-        if (!system.accepted()) return .system_document_rejected;
+        if (!system.resourceAvailable()) return .system_document_rejected;
         const parsed = redfish.parseSystem(discovery.arena.allocator(), discovery.origin, system.*) catch return .invalid_relationship;
         if (!svc.contains(parsed.managed_by, manager.uri)) return .system_reverse_link_missing;
         if (parsed.power.system_identity.len == 0) return .system_identity_missing;
         return .invalid_relationship;
     }
     fn newTransaction(self: *NativeDriver, request_bytes: auth.Secret, sequence: u64) Transaction {
-        return .{ .request = request_bytes, .response = http.ResponseParser.init(self.allocator, .{}), .deadline_ns = timestamp() + stage_timeout_ns, .sequence = sequence };
+        const started = timestamp();
+        const context = requestContext(request_bytes.bytes);
+        self.progressContext(context);
+        return .{ .request = request_bytes, .response = http.ResponseParser.init(self.allocator, .{}), .deadline_ns = started + stage_timeout_ns, .started_ns = started, .context = context, .sequence = sequence };
     }
     fn build(self: *NativeDriver, method: []const u8, uri: []const u8, extra: []const http.Header, body: []const u8) !auth.Secret {
         return self.buildAuthorized(method, uri, extra, body, if (self.web_session) |session| session.token.bytes else null);
@@ -928,6 +1003,8 @@ pub const NativeDriver = struct {
         return transaction;
     }
     fn stepTransaction(self: *NativeDriver, channel: *Channel, transaction: *Transaction, closing: bool) !bool {
+        transaction.context.channel = if (self.video_channel != null and channel == &self.video_channel.?) .video else .management;
+        self.progressTransaction(transaction);
         if (!closing) try self.check();
         if (timestamp() >= transaction.deadline_ns) return error.HttpTimeout;
         if (transaction.offset != transaction.request.bytes.len) {
@@ -936,6 +1013,7 @@ pub const NativeDriver = struct {
                     if (n == 0) return error.TlsClosed;
                     transaction.offset += n;
                     if (transaction.offset == transaction.request.bytes.len) transaction.request.clear();
+                    self.progressTransaction(transaction);
                 },
                 .progress => |state| return switch (state) {
                     .want_read, .want_write => false,
@@ -965,12 +1043,29 @@ pub const NativeDriver = struct {
                 },
             }
         }
+        const body_before = transaction.response.body().len;
         channel.start += try transaction.response.feed(channel.pending[channel.start..channel.end]);
+        transaction.received_bytes += transaction.response.body().len - body_before;
+        self.progressTransaction(transaction);
         if (channel.start == channel.end) {
             channel.start = 0;
             channel.end = 0;
         }
         return transaction.response.isDone();
+    }
+    fn progressTransaction(self: *NativeDriver, transaction: *Transaction) void {
+        transaction.context.phase = if (transaction.offset != transaction.request.bytes.len)
+            .request_send
+        else if (transaction.response.isDone())
+            .response_validate
+        else if (transaction.response.state == .headers)
+            .response_headers
+        else
+            .response_body;
+        transaction.context.received_bytes = transaction.received_bytes;
+        transaction.context.http_status = if (transaction.response.status != 0) transaction.response.status else null;
+        transaction.context.duration_ms = (timestamp() -| transaction.started_ns) / std.time.ns_per_ms;
+        self.progressContext(transaction.context);
     }
     fn read(context: *anyopaque, out: []u8) !usize {
         const self = cast(context);
@@ -1011,6 +1106,7 @@ pub const NativeDriver = struct {
     fn managementIo(context: *anyopaque, outbound: ?power.Outbound) !?power.Completion {
         const self = cast(context);
         if (self.probe_only) return error.ProbeManagementForbidden;
+        if (outbound) |work| if (self.management_policy == .read_only and work.method != .get) return error.ManagementReadOnly;
         try self.requireWorker();
         if (self.completed) |*value| value.deinit();
         self.completed = null;
@@ -1143,6 +1239,15 @@ pub const NativeDriver = struct {
         if (self.pair.management) |*stream| stream.close();
         self.pair.management = null;
     }
+    fn reopenManagementChannel(self: *NativeDriver) !void {
+        try self.check();
+        self.closeManagementChannel();
+        self.progressContext(.{ .phase = .connect });
+        self.pair.management = try self.pair.transport.openTcpStream(self.pair.destination);
+        errdefer self.closeManagementChannel();
+        self.management_channel = .{ .client = try tls.Client.init(self.pair.management.?.fd, self.origin().host) };
+        try self.handshakePinnedManagement(timestamp() + stage_timeout_ns, false);
+    }
     fn openLogoutChannel(self: *NativeDriver, deadline_ns: u64) !void {
         self.closeManagementChannel();
         // This capability has no destination argument, cannot start/reconnect
@@ -1150,8 +1255,13 @@ pub const NativeDriver = struct {
         self.pair.management = try self.pair.transport.openCleanupTcpStream();
         errdefer self.closeManagementChannel();
         self.management_channel = .{ .client = try tls.Client.init(self.pair.management.?.fd, self.origin().host) };
+        try self.handshakePinnedManagement(deadline_ns, true);
+    }
+    fn handshakePinnedManagement(self: *NativeDriver, deadline_ns: u64, closing: bool) !void {
+        self.progressContext(.{ .phase = .tls_handshake });
         const channel = &self.management_channel.?;
         while (true) {
+            if (!closing) try self.check();
             if (timestamp() >= deadline_ns) return error.TlsTimeout;
             switch (try channel.client.handshakeStep()) {
                 .ready => {
@@ -1169,7 +1279,7 @@ pub const NativeDriver = struct {
                     const actual_chain = trust.chainFingerprint(chain);
                     if (!std.mem.eql(u8, &leaf, &actual_leaf) or !std.mem.eql(u8, &expected_chain, &actual_chain)) {
                         channel.client.authorizeTrust(false) catch {};
-                        return error.CleanupPeerChanged;
+                        return if (closing) error.CleanupPeerChanged else error.ManagementPeerChanged;
                     }
                     // No new prompt, trust exception, password or application
                     // byte may precede this exact original peer comparison.
@@ -1317,6 +1427,118 @@ pub const NativeDriver = struct {
     }
 };
 const stage_timeout_ns: u64 = 15 * std.time.ns_per_s;
+/// Only scalar route metadata crosses from the SSH worker. The borrowed host,
+/// authentication and device text never enter the BMC progress tracker.
+fn recordSshProgress(raw: *anyopaque, event: ssh_progress.Event) void {
+    const tracker: *progress.Tracker = @ptrCast(@alignCast(raw));
+    if (event.hop_count == 0 or event.hop >= event.hop_count or event.hop_count > std.math.maxInt(u8)) return;
+    // Pair.connect opens the BMC streams immediately after SSH start returns.
+    // Restore their target before any stream-open error can reach the caller.
+    if (event.phase == .ready and event.status == .succeeded and event.hop + 1 == event.hop_count) {
+        tracker.setContext(.{ .phase = .connect });
+        return;
+    }
+    tracker.setContext(.{
+        .channel = .ssh,
+        .ssh_hop = @intCast(event.hop + 1),
+        .ssh_hops = @intCast(event.hop_count),
+        .phase = switch (event.phase) {
+            .transport => .connect,
+            .tunnel => .ssh_tunnel,
+            .handshake => .ssh_handshake,
+            .host_key => .ssh_host_key,
+            .authentication => .ssh_authentication,
+            .shell, .ready => .none,
+        },
+    });
+}
+
+test "BMC SSH route diagnostics retain the observed failed jump without borrowed host data" {
+    for ([_]usize{ 1, 3 }) |hops| {
+        var tracker = progress.Tracker.initAt(@intCast(hops), 0);
+        tracker.setStageAt(.route, 1);
+        recordSshProgress(&tracker, .{ .attempt = 2, .hop = hops - 1, .hop_count = hops, .host = "borrowed-private-host", .port = 22, .phase = .handshake, .status = .failed, .failure = error.SshHandshakeReceiveFailed });
+        tracker.failAt(error.SshHandshakeReceiveFailed, 2);
+        const failure = tracker.snapshotAt(3).failure_event.?;
+        try std.testing.expectEqual(progress.Channel.ssh, failure.context.?.channel);
+        try std.testing.expectEqual(@as(?u8, @intCast(hops)), failure.context.?.ssh_hop);
+        try std.testing.expectEqual(@as(?u8, @intCast(hops)), failure.context.?.ssh_hops);
+        try std.testing.expectEqual(progress.Phase.ssh_handshake, failure.context.?.phase);
+        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, failure, .{});
+        defer std.testing.allocator.free(encoded);
+        try std.testing.expect(std.mem.indexOf(u8, encoded, "borrowed-private-host") == null);
+    }
+}
+
+test "BMC SSH route diagnostics restore the BMC target only after the final jump is ready" {
+    var tracker = progress.Tracker.initAt(2, 0);
+    tracker.setStageAt(.route, 1);
+    recordSshProgress(&tracker, .{ .attempt = 2, .hop = 0, .hop_count = 2, .host = "jump-1.invalid", .port = 22, .phase = .ready, .status = .succeeded });
+    try std.testing.expectEqual(progress.Channel.ssh, tracker.context.?.channel);
+    recordSshProgress(&tracker, .{ .attempt = 2, .hop = 1, .hop_count = 2, .host = "jump-2.invalid", .port = 22, .phase = .tunnel, .status = .started });
+    try std.testing.expectEqual(progress.Phase.ssh_tunnel, tracker.context.?.phase);
+    try std.testing.expectEqual(@as(?u8, 2), tracker.context.?.ssh_hop);
+    recordSshProgress(&tracker, .{ .attempt = 2, .hop = 1, .hop_count = 2, .host = "jump-2.invalid", .port = 22, .phase = .ready, .status = .succeeded });
+    tracker.failAt(error.StreamOpenFailed, 2);
+    const failure = tracker.snapshotAt(3).failure_event.?;
+    try std.testing.expectEqual(progress.Channel.management, failure.context.?.channel);
+    try std.testing.expectEqual(progress.Phase.connect, failure.context.?.phase);
+    try std.testing.expect(failure.context.?.ssh_hop == null and failure.context.?.ssh_hops == null);
+}
+
+/// Classify the locally built request before its credential-bearing storage is
+/// wiped. Only fixed enum templates survive; no actual resource ID or query is
+/// copied into connection diagnostics.
+fn requestContext(bytes: []const u8) progress.Context {
+    var parts = std.mem.splitScalar(u8, bytes, ' ');
+    const method = parts.next() orelse "";
+    const target = parts.next() orelse "";
+    const path = target[0 .. std.mem.indexOfScalar(u8, target, '?') orelse target.len];
+    return .{
+        .method = if (std.mem.eql(u8, method, "GET")) .get else if (std.mem.eql(u8, method, "POST")) .post else if (std.mem.eql(u8, method, "PATCH")) .patch else if (std.mem.eql(u8, method, "DELETE")) .delete else .none,
+        .path = if (std.mem.eql(u8, path, "/redfish/v1/") or std.mem.eql(u8, path, "/redfish/v1"))
+            .service_root
+        else if (std.mem.eql(u8, path, profile.sugon_public_material_path))
+            .public_script
+        else if (std.mem.eql(u8, path, "/redfish/v1/SessionService"))
+            .session_service
+        else if (std.mem.eql(u8, path, "/redfish/v1/SessionService/Sessions"))
+            .web_sessions
+        else if (std.mem.eql(u8, path, profile.kvm_login_path) or std.mem.startsWith(u8, path, profile.kvm_login_path ++ "/"))
+            .kvm_session
+        else if (isDirectMemberPath(path, "/redfish/v1/SessionService/Sessions/"))
+            .web_session
+        else if (std.mem.eql(u8, path, "/redfish/v1/Managers"))
+            .managers
+        else if (isDirectMemberPath(path, "/redfish/v1/Managers/"))
+            .manager
+        else if (std.mem.eql(u8, path, "/redfish/v1/Systems"))
+            .systems
+        else if (isDirectMemberPath(path, "/redfish/v1/Systems/"))
+            .system
+        else if (std.mem.eql(u8, path, profile.video_path))
+            .websocket
+        else
+            .other_redfish,
+        .phase = .request_send,
+        .received_bytes = 0,
+        .duration_ms = 0,
+    };
+}
+fn isDirectMemberPath(path: []const u8, prefix: []const u8) bool {
+    return std.mem.startsWith(u8, path, prefix) and path.len > prefix.len and std.mem.indexOfScalar(u8, path[prefix.len..], '/') == null;
+}
+test "BMC native HTTP diagnostics retain only reviewed request templates without identifiers query headers or body" {
+    const context = requestContext("GET /redfish/v1/Systems/private-system?private-query HTTP/1.1\r\nX-Auth-Token: private-token\r\n\r\nprivate-body");
+    try std.testing.expectEqual(progress.Method.get, context.method);
+    try std.testing.expectEqual(progress.RequestPath.system, context.path);
+    const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, context, .{});
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expect(std.mem.indexOf(u8, encoded, "private-") == null);
+    const child = requestContext("GET /redfish/v1/Managers/private-manager/SecurityService HTTP/1.1\r\n\r\n");
+    // A subresource must not be mislabeled as its Manager parent.
+    try std.testing.expectEqual(progress.RequestPath.other_redfish, child.path);
+}
 fn resourceKind(kind: redfish.ResourceKind) progress.Resource {
     return switch (kind) {
         .root => .service_root,

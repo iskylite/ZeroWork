@@ -401,7 +401,7 @@ pub const HostRow = struct {
         try metadata.appendChild(cx.allocator, name);
         const tag = try ui.box(cx, .{ .height = .{ .px = 12 }, .padding = .{ .left = 3, .right = 3 }, .margin = .{ .top = 8 }, .direction = .row, .align_items = .center, .justify = .center, .background = T.current().well, .border = .{ .radius = 3 }, .flex_shrink = 0 }, .{});
         tag.meta.ownership.meta.test_id = "sidebar.host.protocol";
-        const upper = try std.ascii.allocUpperString(cx.allocator, data.protocol);
+        const upper = try std.ascii.allocUpperString(cx.allocator, if (std.ascii.eqlIgnoreCase(data.protocol, "bmc_ikvm")) "KVM" else data.protocol);
         defer cx.allocator.free(upper);
         const protocol_text = try ui.text(cx, upper, .{ .font_size = 7, .font_weight = 400, .line_height = 10.0 / 7.0, .color = T.current().fg_2, .selectable = false });
         try protocol_text.setTextContent(cx.allocator, upper);

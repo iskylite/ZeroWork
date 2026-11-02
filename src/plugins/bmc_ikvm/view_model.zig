@@ -1,8 +1,10 @@
-//! Renderer-only projection and persistent Boot draft. No protocol or runtime
-//! access: capabilities and evidence come solely from owned service snapshots.
+//! Renderer projection and persistent Boot draft. Pure protocol field checks
+//! share the executor's rules; no network or runtime access occurs here.
 const std = @import("std");
 const services = @import("services.zig");
 const console = @import("console_service.zig");
+const boot_fields = @import("protocol/boot.zig");
+const power_fields = @import("protocol/power.zig");
 
 pub const Menu = enum { control, keys, display, power, boot };
 pub const Text = struct {
@@ -41,6 +43,7 @@ pub const BootDraft = struct {
     value: BootValues = .{},
     remembered_enabled: Text = .{},
     capability_revision: u64 = 0,
+    grant_revision: u64 = 0,
     binding_generation: u64 = 0,
     conflict: bool = false,
 
@@ -53,6 +56,7 @@ pub const BootDraft = struct {
             self.initialized = true;
             self.binding_generation = snapshot.capability.binding_generation;
             self.capability_revision = snapshot.capability.revision;
+            self.grant_revision = snapshot.capability.grant_revision;
             self.conflict = had_draft;
             return;
         }
@@ -65,8 +69,9 @@ pub const BootDraft = struct {
             } else try @field(self.value, field).set(@field(snapshot.state, field));
             try @field(self.baseline, field).set(@field(snapshot.state, field));
         }
-        if (self.dirty() and snapshot.capability.revision != self.capability_revision) self.conflict = true;
+        if (self.dirty() and (snapshot.capability.revision != self.capability_revision or snapshot.capability.grant_revision != self.grant_revision)) self.conflict = true;
         self.capability_revision = snapshot.capability.revision;
+        self.grant_revision = snapshot.capability.grant_revision;
     }
     pub fn dirty(self: *const BootDraft) bool {
         if (!self.initialized) return false;
@@ -98,26 +103,87 @@ pub const BootDraft = struct {
     }
     pub fn canApply(self: *const BootDraft, snapshot: services.BootSnapshot) bool {
         if (!self.dirty() or self.conflict or !writeAllowed(snapshot.capability)) return false;
-        if (snapshot.write_uri == null or !snapshot.allowed_enabled.evidence.permitsWrite()) return false;
+        if (snapshot.write_uri == null) return false;
+        boot_fields.validateFields(snapshot, self.baseline.state(), self.changed(), snapshot.etag) catch return false;
+        return true;
+    }
+    pub fn changed(self: *const BootDraft) services.BootState {
         const value = self.value.state();
-        const enabled = value.enabled orelse return false;
-        if (!services.contains(snapshot.allowed_enabled.value orelse &.{}, enabled)) return false;
-        if (self.disabled()) return snapshot.enabled_evidence.permitsWrite();
-        return snapshot.target_evidence.permitsWrite() and snapshot.allowed_targets.evidence.permitsWrite() and services.contains(snapshot.allowed_targets.value orelse &.{}, value.target orelse return false);
+        if (self.disabled()) return .{ .enabled = if (self.baseline.enabled.equal("Disabled")) null else "Disabled" };
+        return .{
+            .enabled = if (self.baseline.enabled.equal(value.enabled)) null else value.enabled,
+            .target = if (self.baseline.target.equal(value.target)) null else value.target,
+            .mode = if (self.baseline.mode.equal(value.mode)) null else value.mode,
+        };
+    }
+    pub fn unavailableReason(self: *const BootDraft, snapshot: services.BootSnapshot) ?[]const u8 {
+        if (!writeAllowed(snapshot.capability)) return "当前仅查看管理状态；执行需要本次操作的授权。";
+        if (self.conflict) return "设备或能力已变化，请重新审查草稿。";
+        if (!self.dirty()) return null;
+        if (snapshot.write_uri == null) return "启动设置的写入目标尚未确认。";
+        boot_fields.validateFields(snapshot, self.baseline.state(), self.changed(), snapshot.etag) catch |err| return switch (err) {
+            error.StaleBaseline => "本次更改涉及的启动状态已变化，请重新审查草稿。",
+            error.InvalidBootCombination => "当前启动覆盖与启动设备组合无效。",
+            error.MissingBootBaseline => "本次更改缺少所需的当前启动字段。",
+            error.UnchangedBoot => null,
+            else => "本次更改涉及的启动字段或允许值不可用。",
+        };
+        return null;
     }
 };
 
 pub fn writeAllowed(capability: services.Capability) bool {
-    return capability.write_granted and capability.system_mapping_verified and capability.secondary_auth != .unknown and capability.secondary_auth_evidence.permitsWrite();
+    return (capability.write_granted or capability.write_requestable) and capability.system_mapping_verified and capability.secondary_auth != .unknown and capability.secondary_auth_evidence.permitsWrite();
+}
+pub fn resultLabel(result: services.Result) []const u8 {
+    return switch (result.phase) {
+        .awaiting_approval => "等待批准本次操作；尚未发送。",
+        .awaiting_auth => "等待二次认证；尚未发送。",
+        .queued => "本次操作已批准，正在排队。",
+        .refreshing => "正在重新读取设备状态与写入条件。",
+        .sending => "正在发送本次操作，请等待结果。",
+        .accepted_remote, .tracking_task => "设备已接受，正在跟踪远端任务。",
+        .verifying => "正在回读设备状态。",
+        .succeeded => "回读已确认本次更改。",
+        .cancelled_unsent => "已取消，本次请求未发送。",
+        .outcome_unknown => if (result.reason == .pending) "更改已进入待生效设置，当前值尚未生效；可查询结果。" else if (result.reason == .accepted_unverified) "设备当前开机；此状态不能确认重启完成，仅可查询。" else "操作结果未知，仅可查询；不会自动重发。",
+        .failed => reasonLabel(result.reason orelse .remote_error),
+    };
+}
+pub fn reasonLabel(reason: services.Reason) []const u8 {
+    return switch (reason) {
+        .permission_denied => "当前会话或设备权限不允许此操作。",
+        .stale_binding => "会话已变化，请重新打开管理工具。",
+        .stale_capability, .stale_baseline, .conflict => "设备状态或能力已变化，请重新审查草稿。",
+        .mapping_unverified => "管理目标或读取证据尚未核实，仅供查看。",
+        .secondary_auth_unknown => "二次认证要求尚未核实，暂不能执行。",
+        .secondary_auth_required => "设备要求二次认证，当前未取得本次操作的验证材料。",
+        .unsupported, .invalid_request => "设备不支持当前操作或设置。",
+        .busy => "已有管理操作正在处理或结果未知。",
+        .authentication_failed => "管理认证已失效，请重新连接。",
+        .unavailable => "管理通道当前不可用。",
+        .journal_failed => "操作记录无法保存，本次操作已停止。",
+        .cancelled => "本次操作已取消。",
+        .timeout => "等待设备结果超时。",
+        .transport_lost => "管理连接已中断。",
+        .verification_mismatch => "回读值与本次更改不一致。",
+        .pending => "更改处于待生效状态。",
+        .accepted_unverified => "设备已接受，执行结果尚未确认。",
+        .remote_error => "设备拒绝了请求或返回了无法确认的结果。",
+    };
 }
 pub fn powerAllowed(snapshot: services.PowerSnapshot, action: services.PowerAction) bool {
-    if (!writeAllowed(snapshot.capability) or snapshot.reset_target == null or !snapshot.reset_types.evidence.permitsWrite() or !snapshot.state.evidence.permitsWrite()) return false;
-    if (!services.contains(snapshot.reset_types.value orelse &.{}, action.redfish())) return false;
-    const state = snapshot.state.value orelse return false;
-    return switch (action) {
-        .on => state == .off,
-        else => state == .on,
-    };
+    if (!writeAllowed(snapshot.capability)) return false;
+    power_fields.validatePowerFields(snapshot, action) catch return false;
+    return true;
+}
+pub fn powerUnavailableReason(snapshot: services.PowerSnapshot, action: services.PowerAction) ?[]const u8 {
+    if (!writeAllowed(snapshot.capability)) return "当前仅查看管理状态；执行需要本次操作的授权。";
+    if (!snapshot.state.evidence.permitsWrite() or snapshot.state.value == null or snapshot.state.value == .unknown) return "本次电源操作所需的电源状态不可用。";
+    if (snapshot.reset_target == null) return "电源动作的目标尚未确认。";
+    if (!snapshot.reset_types.evidence.permitsWrite()) return "电源动作的允许值读取异常，暂不能执行此操作。";
+    power_fields.validatePowerFields(snapshot, action) catch |err| return if (err == error.ActionNotApplicable) "当前电源状态不适用此操作。" else "设备未声明支持此电源操作。";
+    return null;
 }
 pub fn powerLabel(action: services.PowerAction) []const u8 {
     return switch (action) {
@@ -162,6 +228,31 @@ pub fn statusTitle(snapshot: console.Snapshot, has_texture: bool) []const u8 {
 pub const ProgressGroup = enum { route, tls, identity, authentication, management, video };
 pub const progress_group_count = @typeInfo(ProgressGroup).@"enum".field_names.len;
 pub const StepState = enum { waiting, current, waiting_for_user, done, warning, failed, stopped };
+/// A failure opens its own step once. Later timer snapshots must respect a
+/// user's choice to collapse it, including after cleanup and ring rollover.
+pub const ProgressDisclosure = struct {
+    open: u8 = 0,
+    auto_opened: u8 = 0,
+
+    pub fn observe(self: *ProgressDisclosure, snapshot: console.progress.Snapshot) void {
+        var failures: u8 = 0;
+        if (snapshot.failure_stage) |stage| if (progressGroup(stage)) |group| {
+            failures |= groupBit(group);
+        };
+        for (snapshot.events[0..@min(snapshot.event_count, snapshot.events.len)]) |event| {
+            if (event.kind != .failure and event.error_code == null) continue;
+            if (progressGroup(event.stage)) |group| failures |= groupBit(group);
+        }
+        self.open |= failures & ~self.auto_opened;
+        self.auto_opened |= failures;
+    }
+    pub fn isOpen(self: *const ProgressDisclosure, group: ProgressGroup) bool {
+        return self.open & groupBit(group) != 0;
+    }
+    pub fn toggle(self: *ProgressDisclosure, group: ProgressGroup) void {
+        self.open ^= groupBit(group);
+    }
+};
 pub const ProgressProjection = struct {
     seen: u8 = 0,
     warnings: u8 = 0,
@@ -282,23 +373,125 @@ pub fn writeDuration(writer: *std.Io.Writer, ms: u64) !void {
 /// Only schema-owned labels, numeric diagnostics and static error names cross
 /// this formatter. It never receives response bodies, headers or credentials.
 pub fn writeConnectionLog(writer: *std.Io.Writer, snapshot: console.progress.Snapshot) !void {
+    return writeConnectionLogForTarget(writer, snapshot, null);
+}
+pub fn writeConnectionLogForTarget(writer: *std.Io.Writer, snapshot: console.progress.Snapshot, target: ?[]const u8) !void {
     if (snapshot.event_count == 0) {
         try writer.writeAll("本会话尚未产生连接事件。");
         return;
     }
     for (snapshot.events[0..@min(snapshot.event_count, snapshot.events.len)], 0..) |event, index| {
         if (index != 0) try writer.writeByte('\n');
-        try writer.print("+{d}.{d}s  {s}", .{ event.at_ms / 1000, (event.at_ms % 1000) / 100, console.progress.stageLabel(event.stage) });
-        if (event.kind == .failure) try writer.writeAll(" · 失败");
-        if (event.code != .none) try writer.print(" · {s}", .{console.progress.codeLabel(event.code)});
-        if (event.resource != .none) try writer.print(" · {s}", .{console.progress.resourceLabel(event.resource)});
-        if (event.http_status) |status| try writer.print(" · HTTP {d}", .{status});
-        if (event.count) |count| try writer.print(" · {d} 项", .{count});
-        if (event.validity) |validity| try writer.print(" · {s}", .{switch (validity) {
-            .valid => "有效",
-            .partial_with_error => "部分结果",
-            .unavailable => "不可用",
-        }});
-        if (event.error_code) |error_code| try writer.print(" · {s}", .{error_code});
+        try writeProgressEvent(writer, event, target);
     }
+    if (retainedFailure(snapshot)) |event| {
+        try writer.writeAll("\n保留的原始失败 · ");
+        try writeProgressEvent(writer, event, target);
+    }
+}
+
+pub fn writeStepDiagnostics(writer: *std.Io.Writer, snapshot: console.progress.Snapshot, group: ProgressGroup) !void {
+    return writeStepDiagnosticsForTarget(writer, snapshot, group, null);
+}
+pub fn writeStepDiagnosticsForTarget(writer: *std.Io.Writer, snapshot: console.progress.Snapshot, group: ProgressGroup, target: ?[]const u8) !void {
+    var count: usize = 0;
+    var original_failure: ?console.progress.Event = null;
+    if (snapshot.failure_stage) |stage| if (progressGroup(stage) == group) {
+        try writer.print("{s}\n失败阶段：{s} · {s}", .{ failureReason(snapshot.failure_code, stage), console.progress.stageLabel(stage), snapshot.failure_code orelse "UnknownFailure" });
+        original_failure = snapshot.failure_event;
+        if (original_failure == null) for (snapshot.events[0..@min(snapshot.event_count, snapshot.events.len)]) |event| {
+            if (event.kind == .failure and event.stage == stage) {
+                original_failure = event;
+                break;
+            }
+        };
+        if (original_failure) |event| {
+            try writer.writeByte('\n');
+            if (retainedFailure(snapshot) != null) try writer.writeAll("保留的原始失败 · ");
+            try writeProgressEvent(writer, event, target);
+        }
+        count += 1;
+    };
+    for (snapshot.events[0..@min(snapshot.event_count, snapshot.events.len)]) |event| {
+        if (progressGroup(event.stage) != group) continue;
+        if (original_failure) |failure| if (event.kind == .failure and event.stage == failure.stage and event.at_ms == failure.at_ms and services.optionalEqual(event.error_code, failure.error_code)) continue;
+        if (count != 0) try writer.writeByte('\n');
+        try writeProgressEvent(writer, event, target);
+        count += 1;
+    }
+    if (count == 0) try writer.writeAll("该步骤尚无连接事件。");
+}
+
+fn retainedFailure(snapshot: console.progress.Snapshot) ?console.progress.Event {
+    const failure = snapshot.failure_event orelse return null;
+    for (snapshot.events[0..@min(snapshot.event_count, snapshot.events.len)]) |event| {
+        if (event.kind == .failure and event.stage == failure.stage and event.at_ms == failure.at_ms and services.optionalEqual(event.error_code, failure.error_code)) return null;
+    }
+    return failure;
+}
+
+pub const LogEvents = struct {
+    events: [console.progress.capacity + 1]console.progress.Event = @splat(.{}),
+    count: usize = 0,
+};
+pub fn connectionLogEvents(snapshot: console.progress.Snapshot) LogEvents {
+    var result: LogEvents = .{};
+    result.count = @min(snapshot.event_count, snapshot.events.len);
+    @memcpy(result.events[0..result.count], snapshot.events[0..result.count]);
+    if (retainedFailure(snapshot)) |event| {
+        result.events[result.count] = event;
+        result.count += 1;
+    }
+    return result;
+}
+
+pub fn writeLogTimestamp(writer: *std.Io.Writer, event: console.progress.Event) !void {
+    const wall_ms = event.at_unix_ms orelse return writer.writeAll("时间未知");
+    var buffer: [32]u8 = undefined;
+    const formatted = @import("../../proto/ssh/forward_diagnostics.zig").formatTimestamp(&buffer, wall_ms);
+    // Zig 0.17 prints an explicit sign for the shared formatter's signed
+    // local-time fields. Normalize those numeric fields for clock notation.
+    var parts = std.mem.splitAny(u8, formatted, ":.");
+    var values: [4]u16 = undefined;
+    for (&values) |*value| {
+        const part = parts.next() orelse return writer.writeAll("时间未知");
+        value.* = std.fmt.parseInt(u16, part, 10) catch return writer.writeAll("时间未知");
+    }
+    try writer.print("{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{ values[0], values[1], values[2], values[3] });
+}
+pub fn writeLogDuration(writer: *std.Io.Writer, event: console.progress.Event) !void {
+    const duration = event.duration_ms orelse (if (event.context) |context| context.duration_ms else null) orelse return writer.writeAll("—");
+    if (duration < 1000) try writer.print("{d} ms", .{duration}) else try writer.print("{d}.{d:0>3} s", .{ duration / 1000, duration % 1000 });
+}
+pub fn writeLogMessage(writer: *std.Io.Writer, event: console.progress.Event, target: ?[]const u8) !void {
+    try writeProgressMessage(writer, event, target, false);
+}
+
+fn writeProgressEvent(writer: *std.Io.Writer, event: console.progress.Event, target: ?[]const u8) !void {
+    try writer.print("+{d}.{d}s  ", .{ event.at_ms / 1000, (event.at_ms % 1000) / 100 });
+    try writeProgressMessage(writer, event, target, true);
+}
+fn writeProgressMessage(writer: *std.Io.Writer, event: console.progress.Event, target: ?[]const u8, include_duration: bool) !void {
+    try writer.writeAll(console.progress.stageLabel(event.stage));
+    if (event.kind == .failure) try writer.writeAll(" · 失败");
+    if (event.context) |context| {
+        try writer.print(" · {s}", .{console.progress.channelLabel(context.channel)});
+        if (context.channel == .ssh) {
+            if (context.ssh_hop) |hop| if (context.ssh_hops) |hops| try writer.print(" · 跳板 {d}/{d}", .{ hop, hops });
+        } else if (target) |endpoint| try writer.print(" → {s}", .{endpoint});
+        if (context.method != .none) try writer.print(" · {s} {s}", .{ console.progress.methodLabel(context.method), console.progress.pathLabel(context.path) });
+        if (context.phase != .none) try writer.print(" · {s}", .{console.progress.phaseLabel(context.phase)});
+        if (context.received_bytes) |bytes| try writer.print(" · 已收 {d} B", .{bytes});
+        if (include_duration) if (context.duration_ms) |ms| try writer.print(" · 请求 {d}.{d}s", .{ ms / 1000, (ms % 1000) / 100 });
+    }
+    if (event.code != .none) try writer.print(" · {s}", .{console.progress.codeLabel(event.code)});
+    if (event.resource != .none) try writer.print(" · {s}", .{console.progress.resourceLabel(event.resource)});
+    if (event.http_status orelse (if (event.context) |context| context.http_status else null)) |status| try writer.print(" · HTTP {d}", .{status});
+    if (event.count) |count| try writer.print(" · {d} 项", .{count});
+    if (event.validity) |validity| try writer.print(" · {s}", .{switch (validity) {
+        .valid => "有效",
+        .partial_with_error => "部分结果",
+        .unavailable => "不可用",
+    }});
+    if (event.error_code) |error_code| try writer.print(" · {s}", .{error_code});
 }

@@ -56,6 +56,7 @@ pub const ActionId = enum(u16) {
     create_temporary_ssh_session = 44,
     create_local_session = 45,
     request_close_window = 46,
+    save_connection = 47,
 };
 
 pub const Capability = enum { terminal, session_factory, connection, saved_connection, route, transfer, groups, recording, ai, appearance, forward };
@@ -147,6 +148,7 @@ pub const descriptors = [_]Descriptor{
     .{ .id = .create_sibling_session, .action_id = "session.create_sibling", .label = "新建同类会话", .rule = .{ .scope = .tab, .capabilities = &.{.session_factory} } },
     .{ .id = .duplicate_session, .action_id = "session.duplicate", .label = "镜像复制会话", .rule = .{ .scope = .terminal, .capabilities = &.{ .terminal, .session_factory } } },
     .{ .id = .edit_connection, .action_id = "connection.edit", .label = "编辑主机配置", .rule = .{ .scope = .tab, .capabilities = &.{.saved_connection} }, .unsupported_reason = "当前会话没有可编辑的已保存连接" },
+    .{ .id = .save_connection, .action_id = "connection.save", .label = "保存连接配置", .rule = .{ .scope = .tab, .capabilities = &.{.connection} }, .unsupported_reason = "当前会话没有可保存的连接配置" },
     .{ .id = .open_route_details, .action_id = "connection.route_details", .label = "通信链路", .rule = .{ .scope = .tab, .capabilities = &.{.route} }, .unsupported_reason = "当前会话没有 SSH 通信链路" },
     .{ .id = .open_theme_chooser, .action_id = "appearance.choose_theme", .label = "全局主题", .rule = .{ .capabilities = &.{.appearance} } },
     .{ .id = .export_record, .action_id = "record.export", .label = "导出记录", .rule = .{ .scope = .tab, .capabilities = &.{.recording} } },

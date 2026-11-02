@@ -5,6 +5,7 @@ const ui = @import("ui");
 const challenge = @import("../host/challenge_host.zig");
 const identity = @import("../host/identity.zig");
 const S = @import("auth_challenge_styles.zig");
+const Certificate = @import("certificate_trust_view.zig");
 pub const PrefillGuard = struct {
     context: *anyopaque,
     valid: *const fn (*anyopaque, u64, ?i128) bool,
@@ -62,6 +63,8 @@ pub const Presenter = struct {
     choices: [32]Choice = undefined,
     choice_scroll: *ui.Node = undefined,
     trust_actions: [2]*ui.Node = undefined,
+    certificate: *Certificate.View = undefined,
+    certificate_mode: bool = false,
     current: ?Current = null,
     pub fn isVisible(self: *const Presenter) bool {
         return self.open.peek();
@@ -160,6 +163,10 @@ pub const Presenter = struct {
         try @import("app_theme.zig").stylePrimary(cx, scope, self.submit_button, self.submit_disabled);
         self.submit_button.meta.ownership.meta.test_id = "plugin.challenge.submit";
         try footer.appendChild(cx.allocator, self.submit_button);
+        self.certificate = try Certificate.View.mount(cx, scope, .{ .context = self, .choose = certificateChoice, .cancel = certificateCancel });
+        try self.modal.body.appendChild(cx.allocator, self.certificate.root);
+        try cx.addAfterLayoutHook(self, fitCertificate);
+        try scope.onCleanup(Presenter, self, cleanup);
         return self;
     }
     pub fn update(self: *Presenter, active_owner: ?identity.SessionHandle) !void {
@@ -178,8 +185,31 @@ pub const Presenter = struct {
         const view = chosen orelse return;
         self.clearInput();
         self.save_password.set(false);
-        self.remember.setDisplay(if (view.payload.allow_save_password) .flex else .none);
         self.current = .{ .owner = view.owner, .request_id = view.request_id, .generation = view.generation, .kind = view.kind, .field_count = view.payload.fields.len, .choice_count = view.payload.choices.len };
+        if (certificateChoices(view.payload)) {
+            for (self.modal.body.children.items) |node| node.setDisplay(.none);
+            self.certificate_mode = true;
+            try self.certificate.show(view.payload);
+            self.certificate.root.setDisplay(.flex);
+            self.modal.body.setStyleInline(self.cx.allocator, Certificate.S.root());
+            self.modal.dialog.setStyleInline(self.cx.allocator, S.panel(@min(Certificate.S.width, @max(160, self.cx.viewport.width - 16)), @min(Certificate.S.height, @max(160, self.cx.viewport.height - 16))));
+            self.modal.dialog.behavior.interaction.a11y = .{ .role = .dialog, .label = self.certificate.title.getText().?.content };
+            self.open.set(true);
+            self.cx.requestRedraw();
+            return;
+        }
+        if (self.certificate_mode) {
+            for (self.modal.body.children.items) |node| node.setDisplay(.flex);
+            self.problem.setDisplay(.none);
+            self.certificate.root.setDisplay(.none);
+            self.certificate_mode = false;
+            self.modal.dialog.setStyleInline(self.cx.allocator, .{ .width = .{ .px = S.width(.password) }, .height = .{ .fit = .{ .max = @max(160, self.cx.viewport.height - 16) } }, .border = .{ .radius = 8 }, .overflow_hidden = false });
+            (try self.modal.dialog.style.ensureExtFallible(self.cx.allocator)).glass = null;
+            self.modal.dialog.markRenderDirty();
+            self.modal.dialog.behavior.interaction.a11y = .{ .role = .dialog };
+            self.modal.body.setStyleInline(self.cx.allocator, .{ .direction = .column, .width = .fill(), .height = .{ .fit = .{} }, .padding = ui.Padding.all(S.padding), .gap = S.gap });
+        }
+        self.remember.setDisplay(if (view.payload.allow_save_password) .flex else .none);
         try self.title.setTextContent(self.cx.allocator, view.payload.title);
         self.title_icon.setDisplay(if (view.kind == .trust_material or view.kind == .secret_input) .flex else .none);
         const changed_key = std.mem.eql(u8, view.payload.title, "主机密钥已变更");
@@ -232,6 +262,27 @@ pub const Presenter = struct {
     }
     fn primaryChanged(self: *Presenter, _: []const u8) void {
         self.refreshSubmit();
+    }
+    fn certificateChoice(raw: *anyopaque, index: usize) void {
+        const self: *Presenter = @ptrCast(@alignCast(raw));
+        self.choose(index);
+    }
+    fn certificateCancel(raw: *anyopaque) void {
+        const self: *Presenter = @ptrCast(@alignCast(raw));
+        self.cancel();
+    }
+    fn cleanup(self: *Presenter) void {
+        self.cx.removeAfterLayoutHook(self);
+    }
+    fn fitCertificate(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
+        const self: *Presenter = @ptrCast(@alignCast(raw));
+        if (!self.certificate_mode or !self.open.peek()) return .done;
+        const w = @min(Certificate.S.width, @max(160, self.cx.viewport.width - 16));
+        const h = @min(Certificate.S.height, @max(160, self.cx.viewport.height - 16));
+        const style = self.modal.dialog.style;
+        if (style.width == .px and @abs(style.width.px - w) < 0.1 and style.height == .px and @abs(style.height.px - h) < 0.1) return .done;
+        self.modal.dialog.setStyleInline(self.cx.allocator, .{ .width = .{ .px = w }, .height = .{ .px = h } });
+        return .needs_layout;
     }
     fn refreshSubmit(self: *Presenter) void {
         const current = self.current orelse {
@@ -372,11 +423,22 @@ pub const Presenter = struct {
         std.crypto.secureZero(u8, &input.state.buffer);
     }
     fn fail(self: *Presenter, message: []const u8) void {
+        if (self.certificate_mode) {
+            self.certificate.fail(message);
+            self.cx.requestRedraw();
+            return;
+        }
         self.problem.setTextContent(self.cx.allocator, message) catch {};
         self.problem.setDisplay(if (message.len == 0) .none else .flex);
         self.cx.requestRedraw();
     }
 };
+fn certificateChoices(payload: challenge.Payload) bool {
+    return payload.certificate_trust != null and payload.choices.len == 3 and
+        std.mem.eql(u8, payload.choices[0].value, "reject") and
+        std.mem.eql(u8, payload.choices[1].value, "once") and
+        std.mem.eql(u8, payload.choices[2].value, "persistent");
+}
 fn label(cx: *ui.Cx, parent: *ui.Node, text: []const u8, style: ui.TextStyle) !*ui.Node {
     const node = try ui.text(cx, text, style);
     node.setStyle(cx.allocator, .width, .fill());
@@ -397,4 +459,70 @@ fn styleActionText(button: *ui.Node, primary: bool) void {
         value.line_height = 1.5;
         node.setText(value);
     };
+}
+
+test "certificate trust presenter keeps complete material scrollable and all three exact decisions accessible" {
+    const allocator = std.testing.allocator;
+    const cx = try ui.Cx.init(allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const scope = try ui.Scope.init(allocator, null, cx.owner);
+    defer scope.dispose();
+    var host = challenge.Host.init(allocator);
+    defer host.deinit();
+    const presenter = try Presenter.mount(cx, scope, &host);
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(93), .generation = 1 };
+    const subject = "CN=certificate-with-a-long-name.internal.example, OU=Management, O=Example Hardware, L=Shanghai, ST=Shanghai, C=CN";
+    for ([_][]const u8{ "reject", "once", "persistent" }, 0..) |expected, i| {
+        const request_id = i + 1;
+        try host.offer(owner, request_id, 1, .choice, .{
+            .title = "信任 BMC 证书",
+            .source_name = "BMC · iKVM",
+            .detail = "通过可信渠道核对原始 BMC 目标和指纹后，再选择信任范围。\n拒绝会停止连接，且不会发送 BMC 凭据。",
+            .certificate_trust = .{ .authority = "bmc.example.test:443", .leaf_fingerprint = @splat(1), .chain_fingerprint = @splat(2), .subject = subject, .issuer = subject, .valid_from = "2025-01-01 00:00:00 UTC", .valid_until = "2035-01-01 00:00:00 UTC", .failures = "- 证书颁发者不受信任\n- 证书主机名与目标不匹配\n- 证书总有效期超过系统允许上限", .scope_changed = i == 2 },
+            .choices = &.{ .{ .value = "reject", .label = "拒绝连接" }, .{ .value = "once", .label = "仅本次信任" }, .{ .value = "persistent", .label = "保存并继续" } },
+        }, std.math.maxInt(u64));
+        try presenter.update(owner);
+        for (0..16) |_| {
+            var unused: [1]std.c.pollfd = undefined;
+            _ = std.c.poll(&unused, 0, 16);
+            cx.advanceFrameClock();
+            cx.layout();
+            _ = cx.render();
+        }
+        const view = presenter.certificate;
+        try std.testing.expect(presenter.certificate_mode);
+        try std.testing.expectEqualStrings(subject, view.subject.getText().?.content);
+        try std.testing.expectEqualStrings(subject, view.issuer.getText().?.content);
+        try std.testing.expectEqual(@as(usize, 64), view.leaf.getText().?.content.len);
+        try std.testing.expectEqual(@as(usize, 64), view.chain.getText().?.content.len);
+        try std.testing.expectEqual(@as(f32, 560), presenter.modal.dialog.globalRect().w);
+        try std.testing.expectEqual(@as(f32, 464), presenter.modal.dialog.globalRect().h);
+        const scroll = view.scroll.container.globalRect();
+        try std.testing.expect(view.scroll.content.globalRect().h > scroll.h);
+        for (view.action_nodes) |button| {
+            const rect = button.globalRect();
+            try std.testing.expect(rect.y >= scroll.y + scroll.h);
+            try std.testing.expect(rect.y + rect.h <= 480);
+            const text = textNode(button).?.globalRect();
+            try std.testing.expectApproxEqAbs(rect.x + rect.w / 2, text.x + text.w / 2, 0.5);
+        }
+        const action = view.action_nodes[i];
+        const rect = action.globalRect();
+        cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
+        var answer = host.takeAnswer(owner, request_id, 1).?;
+        defer answer.deinit();
+        try std.testing.expectEqualStrings(expected, answer.value.choice);
+        try std.testing.expect(!presenter.isVisible());
+    }
+    // Reusing the retained presenter for a password must restore its original
+    // generic form, without hidden TLS actions or a forced certificate height.
+    try host.offer(owner, 4, 1, .secret_input, .{ .title = "Password" }, std.math.maxInt(u64));
+    try presenter.update(owner);
+    cx.layout();
+    try std.testing.expect(!presenter.certificate_mode);
+    try std.testing.expect(presenter.certificate.root.style.display == .none);
+    try std.testing.expect(presenter.input.node.style.display == .flex);
+    try std.testing.expect(presenter.remember.style.display == .none);
 }

@@ -1,14 +1,20 @@
-//! Model-specific documented high-detail estimates, never compressed bytes / 4.
+//! Local image admission uses documented estimates or a conservative reservation,
+//! never compressed bytes / 4 or fabricated provider usage.
 //! https://developers.openai.com/api/docs/guides/images-vision#tile-based-image-tokenization
 const std = @import("std");
 const provider = @import("provider.zig");
 const images = @import("image_attachments.zig");
 pub const max_reservation = 128 * 1024;
+/// Local admission reservation for a declared vision model whose tokenizer is
+/// unknown. It is deliberately conservative, bounded by the same per-image
+/// reservation limit, and is never provider-reported usage. Image count, wire
+/// size and the request's context window are still checked independently.
+pub const unknown_model_reservation = max_reservation;
 pub fn validReservation(value: u32) bool {
     return value > 0 and value <= max_reservation;
 }
 pub fn supportsWithReservation(model: []const u8, reservation: ?u32) bool {
-    return supports(model) or (if (reservation) |value| validReservation(value) else false);
+    return supports(model) or (if (reservation) |value| validReservation(value) else true);
 }
 pub fn supports(model: []const u8) bool {
     return std.mem.eql(u8, model, "gpt-4o-mini") or std.mem.eql(u8, model, "gpt-4o") or std.mem.eql(u8, model, "gpt-4.1");
@@ -43,7 +49,7 @@ pub fn validate(request: provider.ChatRequest) !usize {
         for (message.images) |reference| {
             const content = reference.content() orelse return error.EmptyAttachmentResult;
             if (content.bytes.len > images.max_bytes) return error.ImageTooLarge;
-            const reserved = tokens(request.model, content) catch |err| if (err == error.UnknownImageBudget) @as(usize, request.image_token_reservation orelse return err) else return err;
+            const reserved = tokens(request.model, content) catch |err| if (err == error.UnknownImageBudget) @as(usize, request.image_token_reservation orelse unknown_model_reservation) else return err;
             if (reserved == 0 or reserved > max_reservation) return error.UnknownImageBudget;
             total = std.math.add(usize, total, reserved) catch return error.RequestTooLarge;
         }

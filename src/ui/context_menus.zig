@@ -20,6 +20,7 @@ pub const Action = enum {
     reuse_connection,
     clone_host,
     edit_host,
+    save_host,
     pin_host,
     move_group,
     delete_host,
@@ -48,6 +49,7 @@ pub const Item = struct {
 
 pub fn isVisible(action: Action, context: Context) bool {
     if (context.has_saved_connection) |saved| if (!saved and action == .edit_host) return false;
+    if (action == .save_host and !context.has_unsaved_connection) return false;
     if (context.capability_snapshot) |snapshot| if (catalogAction(action)) |id| return actions.project(id, snapshot).visible;
     return true;
 }
@@ -71,6 +73,7 @@ fn catalogAction(action: Action) ?actions.ActionId {
         .export_selection, .export_session => .export_record,
         .new_tab, .reuse_connection => .create_sibling_session,
         .edit_host => .edit_connection,
+        .save_host => .save_connection,
         .reconnect => .reconnect,
         .close_session => .request_close,
         .rename_tab => .rename_tab,
@@ -102,6 +105,7 @@ pub fn isEnabled(action: Action, context: Context) bool {
 pub const Context = struct {
     capability_snapshot: ?capabilities.Snapshot = null,
     has_saved_connection: ?bool = null,
+    has_unsaved_connection: bool = false,
     new_window_available: bool = false,
     reuse_connection_available: bool = false,
     local_session: bool = false,
@@ -133,6 +137,7 @@ const tab_menu = [_]Item{
     .{ .action = .reuse_connection, .label = "复用连接", .icon = "copy" },
     .{ .action = .new_window, .label = "新窗口连接", .icon = "app-window" },
     .{ .action = .edit_host, .label = "编辑主机配置", .icon = "settings" },
+    .{ .action = .save_host, .label = "保存连接配置", .icon = "save" },
     .{ .action = .view_jump_chain, .label = "通信链路", .icon = "network" },
     .{ .action = .open_theme, .label = "全局主题", .icon = "palette" },
     .{ .action = .export_session, .label = "导出记录", .icon = "download" },
@@ -273,7 +278,7 @@ test "context menus keep terminal and host actions separate" {
 
 test "tab menu carries session lifecycle actions, disjoint from text ops" {
     const tab = items(.tab, .{});
-    try std.testing.expectEqual(@as(usize, 11), tab.len);
+    try std.testing.expectEqual(@as(usize, 12), tab.len);
     try std.testing.expectEqual(Action.rename_tab, tab[0].action);
     // Terminal text operations never appear on the tab menu (zero-overlap rule).
     for (tab) |item| {
@@ -282,8 +287,8 @@ test "tab menu carries session lifecycle actions, disjoint from text ops" {
         try std.testing.expect(item.action != .search);
     }
     // Danger styling on disconnect+close.
-    try std.testing.expect(tab[10].danger);
-    try std.testing.expectEqual(Action.close_session, tab[10].action);
+    try std.testing.expect(tab[11].danger);
+    try std.testing.expectEqual(Action.close_session, tab[11].action);
     // "Close others" requires multiple open tabs.
     try std.testing.expect(!isEnabled(.close_others, .{ .multi_tabs = false }));
     try std.testing.expect(isEnabled(.close_others, .{ .multi_tabs = true }));
@@ -302,4 +307,16 @@ test "SSH connection actions are confined to the tab menu" {
     try std.testing.expect(!isEnabled(.reuse_connection, .{}));
     try std.testing.expect(isEnabled(.reuse_connection, .{ .reuse_connection_available = true }));
     try std.testing.expect(!isEnabled(.reuse_connection, .{ .reuse_connection_available = true, .session_ended = true }));
+}
+
+test "tab menu connection actions distinguish saved assets from temporary remote sessions" {
+    const temporary: Context = .{ .has_saved_connection = false, .has_unsaved_connection = true };
+    try std.testing.expect(isVisible(.save_host, temporary));
+    try std.testing.expect(isEnabled(.save_host, temporary));
+    try std.testing.expect(!isVisible(.edit_host, temporary));
+    const saved: Context = .{ .has_saved_connection = true };
+    try std.testing.expect(isVisible(.edit_host, saved));
+    try std.testing.expect(!isVisible(.save_host, saved));
+    try std.testing.expect(!isEnabled(.save_host, .{}));
+    for (items(.terminal, temporary)) |item| try std.testing.expect(item.action != .save_host);
 }

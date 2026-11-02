@@ -7,6 +7,7 @@ const api = @import("ai/plugin_tools.zig");
 const scope = @import("ai/tool_scope.zig");
 const provider = @import("ai/provider.zig");
 const tools = @import("plugins/bmc_ikvm/tools.zig");
+const console = @import("plugins/bmc_ikvm/console_service.zig");
 const control = @import("plugins/bmc_ikvm/ai_control.zig");
 const remote = @import("plugins/bmc_ikvm/remote_input.zig");
 const framebuffer = @import("plugins/bmc_ikvm/framebuffer.zig");
@@ -201,6 +202,83 @@ test "BMC AI gateway preserves read IDs and has seven schema effect matched tool
     try T.expectEqual(api.Effect.remote_input, tools.definitions[5].effect);
     try T.expectEqual(api.Effect.read_state, tools.definitions[6].effect);
     try T.expect(try api.needsApproval(tools.definitions[3], .{ .full_control = true }));
+}
+
+test "BMC AI describe frame reports real connection stages and requires a current complete frame" {
+    const Stub = struct {
+        value: console.Snapshot = .{ .owner = owner, .operation = .{ .owner = .{ .session = owner }, .operation_id = 1 }, .route = .connecting, .video = .authenticating, .progress = .{ .stage = .public_script }, .input = .{ .input_epoch = 1, .control_generation = 1, .transport_generation = 1, .connected = false, .controlled = false, .focused = false, .capture_paused = true, .queued = 0, .remote_unconfirmed = false } },
+        unavailable: bool = false,
+        fn snapshot(raw: *anyopaque, binding: typed.Binding, allocator: std.mem.Allocator) !console.OwnedSnapshot {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (!binding.owner.eql(owner) or self.unavailable) return error.SnapshotUnavailable;
+            return console.OwnedSnapshot.init(allocator, self.value);
+        }
+        fn invoke(self: *@This(), arguments: std.json.Value) !api.ToolResult {
+            // Only snapshot is initialized: discovery must never use any
+            // control, refresh, focus or retry entry point.
+            var table: console.Interface = undefined;
+            table.snapshot = snapshot;
+            const binding = typed.Binding.init(console.Interface, console.key, self, &table, owner, 1);
+            return tools.invoke(.{ .owner = owner, .console = binding, .power = undefined, .boot = undefined }, .{ .owner = owner, .operation_id = 9, .tool_id = "bmc_ikvm.describe_frame", .arguments = arguments, .arguments_json = "{\"session_ids\":[83]}", .arguments_hash = @splat(0) }, a);
+        }
+        fn expect(self: *@This(), arguments: std.json.Value, state: []const u8, connected: bool, ready: bool) !void {
+            var result = try self.invoke(arguments);
+            defer result.deinit(a);
+            const parsed = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
+            defer parsed.deinit();
+            const facts = parsed.value.object;
+            try T.expectEqualStrings(state, facts.get("connection_state").?.string);
+            try T.expectEqual(connected, facts.get("connected").?.bool);
+            try T.expectEqual(ready, facts.get("ready").?.bool);
+            try T.expectEqual(self.value.rfb_ready, facts.get("rfb_ready").?.bool);
+            try T.expectEqualStrings(@tagName(self.value.progress.stage), facts.get("connection_stage").?.string);
+            try T.expect(!facts.get("pixel_access").?.bool);
+            try T.expect(!facts.contains("pixels"));
+            try T.expectEqual(api.Status.succeeded, result.status);
+        }
+    };
+    const arguments = try std.json.parseFromSlice(std.json.Value, a, "{\"session_ids\":[83]}", .{});
+    defer arguments.deinit();
+    var stub: Stub = .{};
+    try stub.expect(arguments.value, "public_script", false, false);
+    stub.value.route = .connected;
+    stub.value.video = .awaiting_frame;
+    stub.value.progress.stage = .awaiting_first_frame;
+    stub.value.rfb_ready = true;
+    stub.value.input.connected = true;
+    try stub.expect(arguments.value, "awaiting_first_frame", true, false);
+    stub.value.video = .streaming;
+    stub.value.progress.stage = .streaming;
+    try stub.expect(arguments.value, "awaiting_first_frame", true, false);
+    stub.value.width = 2;
+    stub.value.height = 1;
+    stub.value.stride = 8;
+    stub.value.frame_sequence = 6;
+    stub.value.frame_generation = 2;
+    stub.value.input.geometry_generation = 2;
+    try stub.expect(arguments.value, "streaming", true, true);
+    // A retained frame cannot make a resize or a newer generation ready.
+    stub.value.input.geometry_pending = true;
+    try stub.expect(arguments.value, "awaiting_first_frame", true, false);
+    stub.value.input.geometry_pending = false;
+    stub.value.input.geometry_generation = 3;
+    try stub.expect(arguments.value, "awaiting_first_frame", true, false);
+    stub.value.input.geometry_generation = 2;
+    stub.value.rfb_ready = false;
+    try stub.expect(arguments.value, "connecting", false, false);
+    stub.value.rfb_ready = true;
+    stub.value.progress.failure_stage = .public_script;
+    stub.value.progress.failure_code = "HttpTimeout";
+    stub.value.progress.stage = .released;
+    try stub.expect(arguments.value, "failed", false, false);
+    stub.value.progress.failure_code = null;
+    stub.value.progress.failure_stage = null;
+    try stub.expect(arguments.value, "closed", false, false);
+    stub.value.owner = try owner.nextGeneration();
+    try T.expectError(error.StaleBinding, stub.invoke(arguments.value));
+    stub.value.owner = owner;
+    stub.unavailable = true;
+    try T.expectError(error.SnapshotUnavailable, stub.invoke(arguments.value));
 }
 
 test "BMC AI gateway image approval rejection revision change and foreign owner stay zero dispatch" {

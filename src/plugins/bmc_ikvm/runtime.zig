@@ -39,12 +39,13 @@ pub const ChallengeBridge = struct {
     request_id: u64 = 0,
     deadline: u64 = 0,
     offered: bool = false,
+    management_policy: svc.ManagementPolicy = .read_only,
 
     pub fn init(a: std.mem.Allocator, owner: svc.identity.SessionHandle, operation: svc.OperationKey, host: ?*challenges.Host) ChallengeBridge {
         return .{ .allocator = a, .owner = owner, .operation = operation, .host = host };
     }
     pub fn callbacks(self: *ChallengeBridge) native.Callbacks {
-        return .{ .context = self, .trust_reply = trustReply, .password_reply = passwordReply, .capability = readonlyCapability };
+        return .{ .context = self, .trust_reply = trustReply, .password_reply = passwordReply, .capability = managementCapability };
     }
     pub fn cancel(self: *ChallengeBridge) void {
         while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
@@ -81,7 +82,25 @@ pub const ChallengeBridge = struct {
                 .trust => |challenge| {
                     const material = try trustMaterial(self.allocator, challenge);
                     defer self.allocator.free(material);
-                    try host.offer(self.owner, self.request_id, self.owner.generation, .choice, .{ .title = "BMC · 证书信任", .detail = "核对原始 BMC 目标与证书指纹后选择信任范围。拒绝将停止连接，且不会发送 BMC 凭据。", .source_name = "BMC · iKVM", .material = material, .choices = &.{ .{ .value = "reject", .label = "拒绝" }, .{ .value = "once", .label = "仅本次" }, .{ .value = "persistent", .label = "保存此证书与例外" } } }, self.deadline);
+                    const authority = if (std.mem.indexOfScalar(u8, challenge.authority.host(), ':') != null)
+                        try std.fmt.allocPrint(self.allocator, "[{s}]:{d}", .{ challenge.authority.host(), challenge.authority.port })
+                    else
+                        try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ challenge.authority.host(), challenge.authority.port });
+                    defer self.allocator.free(authority);
+                    const starts = try utcDate(self.allocator, challenge.verification.not_before_unix);
+                    defer self.allocator.free(starts);
+                    const ends = try utcDate(self.allocator, challenge.verification.not_after_unix);
+                    defer self.allocator.free(ends);
+                    const failures = try trustFailures(self.allocator, challenge.verification.failures);
+                    defer self.allocator.free(failures);
+                    try host.offer(self.owner, self.request_id, self.owner.generation, .choice, .{
+                        .title = "信任 BMC 证书",
+                        .detail = "通过可信渠道核对原始 BMC 目标和指纹后，再选择信任范围。\n拒绝会停止连接，且不会发送 BMC 凭据。",
+                        .source_name = "BMC · iKVM",
+                        .material = material,
+                        .certificate_trust = .{ .authority = authority, .leaf_fingerprint = challenge.verification.leaf_fingerprint, .chain_fingerprint = challenge.verification.chain_fingerprint, .subject = challenge.verification.subjectText(), .issuer = challenge.verification.issuerText(), .valid_from = starts, .valid_until = ends, .failures = failures, .scope_changed = challenge.scope_changed },
+                        .choices = &.{ .{ .value = "reject", .label = "拒绝连接" }, .{ .value = "once", .label = "仅本次信任" }, .{ .value = "persistent", .label = "保存并继续" } },
+                    }, self.deadline);
                 },
             }
             self.offered = true;
@@ -161,9 +180,9 @@ pub const ChallengeBridge = struct {
         defer response.password.deinit();
         return auth.Secret.init(a, response.password.bytes);
     }
-    fn readonlyCapability(raw: *anyopaque, _: *const @import("protocol/redfish.zig").Discovery) !svc.Capability {
+    fn managementCapability(raw: *anyopaque, _: *const @import("protocol/redfish.zig").Discovery) !svc.Capability {
         const self: *ChallengeBridge = @ptrCast(@alignCast(raw));
-        return .{ .binding_generation = self.owner.generation, .write_granted = false };
+        return .{ .binding_generation = self.owner.generation, .write_granted = false, .write_requestable = self.management_policy == .user_approved };
     }
 };
 
@@ -176,7 +195,15 @@ fn trustMaterial(a: std.mem.Allocator, challenge: tls.Challenge) ![]u8 {
     var material: std.Io.Writer.Allocating = .init(a);
     defer material.deinit();
     try material.writer.print("目标：{s}:{d}\n证书 SHA-256：{s}\n证书链 SHA-256：{s}\nSubject：{s}\nIssuer：{s}\n有效期开始：{s}\n有效期结束：{s}\n验证失败原因：\n", .{ challenge.authority.host(), challenge.authority.port, std.fmt.bytesToHex(verification.leaf_fingerprint, .lower), std.fmt.bytesToHex(verification.chain_fingerprint, .lower), verification.subjectText(), verification.issuerText(), starts, ends });
-    const failures = verification.failures;
+    const failures = try trustFailures(a, verification.failures);
+    defer a.free(failures);
+    try material.writer.print("{s}\n证书或例外变化：{s}", .{ failures, if (challenge.scope_changed) "是" else "否" });
+    return material.toOwnedSlice();
+}
+
+fn trustFailures(a: std.mem.Allocator, failures: tls.FailureSet) ![]u8 {
+    var material: std.Io.Writer.Allocating = .init(a);
+    defer material.deinit();
     if (failures.untrusted_issuer) try material.writer.writeAll("- 证书颁发者不受信任（可能为自签名证书或未知 CA）\n");
     if (failures.expired) try material.writer.writeAll("- 证书已过期\n");
     if (failures.not_yet_valid) try material.writer.writeAll("- 证书尚未生效\n");
@@ -187,7 +214,7 @@ fn trustMaterial(a: std.mem.Allocator, challenge: tls.Challenge) ![]u8 {
     if (failures.evaluation_unavailable) try material.writer.writeAll("- 系统证书验证不可用（不允许例外）\n");
     if (failures.reserved != 0) try material.writer.writeAll("- 未知证书验证失败（不允许例外）\n");
     if (failures.empty()) try material.writer.writeAll("- 无\n");
-    try material.writer.print("证书或例外变化：{s}", .{if (challenge.scope_changed) "是" else "否"});
+    if (material.written().len != 0 and material.written()[material.written().len - 1] == '\n') material.writer.end -= 1;
     return material.toOwnedSlice();
 }
 
@@ -205,8 +232,16 @@ fn utcDate(a: std.mem.Allocator, seconds: i64) ![]u8 {
     return std.fmt.allocPrint(a, "{d:0>4}-{d:0>2}-{d:0>2} {d:0>2}:{d:0>2}:{d:0>2} UTC", .{ year, @backingInt(month_day.month), month_day.day_index + 1, day.getHoursIntoDay(), day.getMinutesIntoHour(), day.getSecondsIntoMinute() });
 }
 
-pub const Resources = struct { frame_budget: *budgets.Budget, journal: *ledger.Journal };
+pub const Resources = struct { frame_budget: *budgets.Budget, journal: *ledger.Journal, management_policy: svc.ManagementPolicy = .user_approved };
 pub const Runtime = struct {
+    const Review = struct {
+        request: svc.Owned(svc.ManagementRequest),
+        fingerprint: [32]u8,
+        result: svc.Result,
+        deadline_ms: u64,
+        delegated: bool = false,
+        offered: bool = false,
+    };
     allocator: std.mem.Allocator,
     owner: svc.identity.SessionHandle,
     operation: svc.OperationKey,
@@ -220,6 +255,8 @@ pub const Runtime = struct {
     content_consumer_installed: bool = false,
     backend: ?*native.NativeDriver = null,
     bridge: ChallengeBridge,
+    management_policy: svc.ManagementPolicy,
+    management_review: ?Review = null,
     published: bool = false,
     stopping: bool = false,
     stale: bool = false,
@@ -247,9 +284,19 @@ pub const Runtime = struct {
     /// Submission failure is fully retired through discardPrepared, without
     /// native cleanup/join on the configuration thread.
     pub fn prepare(a: std.mem.Allocator, request: sessions.CreateRequest, resources: Resources) !*Runtime {
+        return prepareNative(a, request, resources, null);
+    }
+    /// Only the loopback acceptance tests may substitute an ephemeral reviewed
+    /// profile. Factory policy, callbacks, controller and native IO are shared
+    /// with prepare; there is no application path to this profile override.
+    pub fn prepareNativeForTest(a: std.mem.Allocator, request: sessions.CreateRequest, resources: Resources, selected: @import("protocol/profile.zig").Profile) !*Runtime {
+        if (!builtin.is_test or !selected.synthetic) return error.TestDriverForbidden;
+        return prepareNative(a, request, resources, selected);
+    }
+    fn prepareNative(a: std.mem.Allocator, request: sessions.CreateRequest, resources: Resources, selected: ?@import("protocol/profile.zig").Profile) !*Runtime {
         const self = try prepareMemory(a, request, resources);
         errdefer self.destroyUnstarted();
-        self.backend = try native.NativeDriver.prepare(a, self.context, self.controller.config.value, &self.controller.plan, &self.controller.cancel_requested, .{ .callbacks = self.bridge.callbacks(), .management_adapter = &self.controller.manager, .progress = &self.controller.connection_progress });
+        self.backend = try native.NativeDriver.prepare(a, self.context, self.controller.config.value, &self.controller.plan, &self.controller.cancel_requested, .{ .selected = selected, .callbacks = self.bridge.callbacks(), .management_adapter = &self.controller.manager, .progress = &self.controller.connection_progress, .management_policy = self.management_policy });
         errdefer {
             self.backend.?.discardPrepared() catch unreachable;
             self.backend = null;
@@ -278,7 +325,8 @@ pub const Runtime = struct {
         try envelope.validate();
         var parsed = try model.parse(a, envelope.payload);
         defer parsed.deinit();
-        const control = try controller.Controller.create(a, request.handle, request.key, parsed.value(), context.connection_configs, resources.frame_budget, resources.journal, null);
+        const policy: svc.ManagementPolicy = if (parsed.value().display.read_only_requested) .read_only else resources.management_policy;
+        const control = try controller.Controller.createWithPolicy(a, request.handle, request.key, parsed.value(), context.connection_configs, resources.frame_budget, resources.journal, context.resource_actions, policy);
         errdefer control.deinit() catch unreachable;
         // The initial unavailable management snapshots use the real owner
         // generation too; retry generations must not look like stale calls.
@@ -297,7 +345,8 @@ pub const Runtime = struct {
         errdefer a.free(route_summary);
         const self = try a.create(Runtime);
         errdefer a.destroy(self);
-        self.* = .{ .allocator = a, .owner = request.handle, .operation = request.key, .context = context, .name = name, .target = target, .route_summary = route_summary, .controller = control, .ai_control = ai.Service.init(request.handle, &control.framebuffer, &control.remote_input), .bridge = ChallengeBridge.init(a, request.handle, request.key, context.challenges) };
+        self.* = .{ .allocator = a, .owner = request.handle, .operation = request.key, .context = context, .name = name, .target = target, .route_summary = route_summary, .controller = control, .ai_control = ai.Service.init(request.handle, &control.framebuffer, &control.remote_input), .bridge = ChallengeBridge.init(a, request.handle, request.key, context.challenges), .management_policy = policy };
+        self.bridge.management_policy = policy;
         self.ai_control.refresh = .{ .context = self, .request = requestAiRefresh };
         self.ai_control.on_stop = .{ .context = self, .revoke_lease = revokeAiLease };
         if (context.presentation.input) |input_context| {
@@ -324,6 +373,7 @@ pub const Runtime = struct {
     }
     fn freeMemory(self: *Runtime) void {
         const a = self.allocator;
+        if (self.management_review) |*review| review.request.deinit();
         a.free(self.name);
         a.free(self.target);
         a.free(self.route_summary);
@@ -332,6 +382,7 @@ pub const Runtime = struct {
     pub fn close(self: *Runtime) sessions.CloseReceipt {
         if (!self.stopping) {
             self.stopping = true;
+            self.retireManagementReview();
             // Host stop/focus/permission revocation uses the same content lease
             // as every other plugin. Clear its proof before retiring this owner.
             if (self.context.presentation.input) |input_context| input_context.takeHumanControl();
@@ -357,6 +408,7 @@ pub const Runtime = struct {
     }
     pub fn poll(self: *Runtime) !bool {
         var changed = try self.bridge.poll();
+        changed = (try self.pollManagement()) or changed;
         changed = (try self.ai_control.poll()) or changed;
         const state = self.controller.poll();
         const progress_second = state.progress.elapsed_ms / 1000;
@@ -465,7 +517,7 @@ pub const Runtime = struct {
     }
     pub fn snapshot(self: *Runtime, a: std.mem.Allocator) !console.OwnedSnapshot {
         const state = self.controller.poll();
-        return console.OwnedSnapshot.init(a, .{ .owner = self.owner, .operation = self.operation, .name = self.name, .target = self.target, .route_summary = self.route_summary, .route = @fromBackingInt(@intCast(@backingInt(state.route))), .video = @fromBackingInt(@intCast(@backingInt(state.video))), .management = @fromBackingInt(@intCast(@backingInt(state.management))), .cleanup = @fromBackingInt(@intCast(@backingInt(state.cleanup))), .input = state.input, .control = @fromBackingInt(@intCast(@backingInt(state.control))), .control_request = state.control_request, .failure_stage = if (state.failure) |err| failureStage(err) else null, .failure_code = if (state.failure) |err| @errorName(err) else null, .progress = state.progress, .width = self.last_width, .height = self.last_height, .stride = @as(usize, self.last_width) * 4, .frame_sequence = self.last_sequence, .frame_generation = self.last_generation, .rfb_ready = state.rfb_ready, .read_only_requested = self.controller.config.value.display.read_only_requested, .remote_web_logout = @fromBackingInt(@intCast(@backingInt(self.remote_web_logout))), .remote_kvm_logout = @fromBackingInt(@intCast(@backingInt(self.remote_kvm_logout))) });
+        return console.OwnedSnapshot.init(a, .{ .owner = self.owner, .operation = self.operation, .name = self.name, .target = self.target, .route_summary = self.route_summary, .route = @fromBackingInt(@intCast(@backingInt(state.route))), .video = @fromBackingInt(@intCast(@backingInt(state.video))), .management = @fromBackingInt(@intCast(@backingInt(state.management))), .cleanup = @fromBackingInt(@intCast(@backingInt(state.cleanup))), .input = state.input, .control = @fromBackingInt(@intCast(@backingInt(state.control))), .control_request = state.control_request, .failure_stage = if (state.failure) |err| failureStage(err) else null, .failure_code = if (state.failure) |err| @errorName(err) else null, .progress = state.progress, .width = self.last_width, .height = self.last_height, .stride = @as(usize, self.last_width) * 4, .frame_sequence = self.last_sequence, .decoded_frames = state.published_frames, .frame_generation = self.last_generation, .rfb_ready = state.rfb_ready, .read_only_requested = self.controller.config.value.display.read_only_requested, .remote_web_logout = @fromBackingInt(@intCast(@backingInt(self.remote_web_logout))), .remote_kvm_logout = @fromBackingInt(@intCast(@backingInt(self.remote_kvm_logout))) });
     }
     fn snapshotFrom(raw: *anyopaque, binding: typed.Binding, a: std.mem.Allocator) !console.OwnedSnapshot {
         const self = from(raw);
@@ -524,6 +576,7 @@ pub const Runtime = struct {
         const iface = try binding.borrow(svc.PowerService, svc.power_key, self.owner);
         var value = try iface.snapshot(binding.context, call, a);
         value.value.capability.write_granted = false;
+        value.value.capability.write_requestable = value.value.capability.write_requestable and self.management_policy == .user_approved and self.context.resource_actions != null;
         return value;
     }
     fn bootSnapshot(raw: *anyopaque, call: svc.Call, a: std.mem.Allocator) !svc.OwnedBootSnapshot {
@@ -533,6 +586,7 @@ pub const Runtime = struct {
         const iface = try binding.borrow(svc.BootService, svc.boot_key, self.owner);
         var value = try iface.snapshot(binding.context, call, a);
         value.value.capability.write_granted = false;
+        value.value.capability.write_requestable = value.value.capability.write_requestable and self.management_policy == .user_approved and self.context.resource_actions != null;
         return value;
     }
     fn denyPower(raw: *anyopaque, request: svc.PowerExecutionRequest) svc.RequestResult {
@@ -543,16 +597,154 @@ pub const Runtime = struct {
         from(raw).validateCall(request.execution.call) catch return .{ .rejected = .stale_binding };
         return .{ .rejected = .permission_denied };
     }
-    fn cancelWrite(_: *anyopaque, _: svc.Call, _: svc.OperationKey) svc.CancelResult {
-        return .stale_operation;
+    fn requestManagement(raw: *anyopaque, binding: typed.Binding, request: svc.ManagementRequest) svc.RequestResult {
+        const self = from(raw);
+        self.validate(binding) catch return .{ .rejected = .stale_binding };
+        const execution = request.execution();
+        self.validateCall(execution.call) catch return .{ .rejected = .stale_binding };
+        if (self.management_policy == .read_only) return .{ .rejected = .permission_denied };
+        if (self.context.resource_actions == null) return .{ .rejected = .unavailable };
+        if (execution.operation.owner != .session or !execution.operation.owner.session.eql(self.owner) or execution.operation.operation_id == 0 or std.mem.allEqual(u8, &execution.nonce, 0)) return .{ .rejected = .stale_binding };
+        var power_snapshot = powerSnapshot(raw, execution.call, self.allocator) catch return .{ .rejected = .unavailable };
+        defer power_snapshot.deinit();
+        const p = power_snapshot.value;
+        const cap = p.capability;
+        if (!std.mem.eql(u8, execution.system_uri, p.system_uri)) return .{ .rejected = .stale_binding };
+        if (execution.capability_revision != cap.revision or execution.grant_revision != cap.grant_revision) return .{ .rejected = .stale_capability };
+        if (!cap.system_mapping_verified) return .{ .rejected = .mapping_unverified };
+        if (!cap.write_requestable) return .{ .rejected = .permission_denied };
+        if (cap.secondary_auth == .unknown or !cap.secondary_auth_evidence.permitsWrite()) return .{ .rejected = .secondary_auth_unknown };
+        if (cap.secondary_auth == .required) return .{ .rejected = .secondary_auth_required };
+        switch (request) {
+            .power => |value| {
+                if (p.reset_target == null or !p.state.evidence.permitsWrite() or !p.reset_types.evidence.permitsWrite() or !svc.contains(p.reset_types.value orelse &.{}, value.action.redfish())) return .{ .rejected = .unsupported };
+                if (p.state.value != (if (value.action == .on) svc.PowerState.off else svc.PowerState.on)) return .{ .rejected = .invalid_request };
+            },
+            .boot => |value| {
+                var b = bootSnapshot(raw, execution.call, self.allocator) catch return .{ .rejected = .unavailable };
+                defer b.deinit();
+                if (b.value.write_uri == null) return .{ .rejected = .unsupported };
+                var arena: std.heap.ArenaAllocator = .init(self.allocator);
+                defer arena.deinit();
+                _ = @import("protocol/boot.zig").prepare(arena.allocator(), b.value, value) catch |err| return .{ .rejected = @import("protocol/power.zig").rejection(err) };
+            },
+        }
+        const fingerprint = svc.requestFingerprint(self.allocator, request, self.controller.manager.engine.origin.authority, p.system_identity) catch return .{ .rejected = .unavailable };
+        if (self.management_review) |*old| {
+            if (old.result.operation.eql(execution.operation) or std.mem.eql(u8, &old.request.value.execution().nonce, &execution.nonce)) {
+                if (!std.mem.eql(u8, &old.fingerprint, &fingerprint)) return .{ .rejected = .conflict };
+                return .{ .accepted = execution.operation };
+            }
+            if (!old.result.terminal() or old.result.phase == .outcome_unknown) return .{ .rejected = .busy };
+            old.request.deinit();
+            self.management_review = null;
+        }
+        const copy = svc.Owned(svc.ManagementRequest).init(self.allocator, request) catch return .{ .rejected = .unavailable };
+        self.management_review = .{ .request = copy, .fingerprint = fingerprint, .result = .{ .operation = execution.operation, .phase = .awaiting_approval }, .deadline_ms = monotonicMs() +| 120_000 };
+        return .{ .accepted = execution.operation };
     }
-    fn result(raw: *anyopaque, call: svc.Call, _: svc.OperationKey, _: std.mem.Allocator) !svc.Owned(svc.Result) {
-        try from(raw).validateCall(call);
-        return error.StaleOperation;
+    fn retireManagementReview(self: *Runtime) void {
+        const review = if (self.management_review) |*value| value else return;
+        if (review.offered) if (self.context.challenges) |host| {
+            const key = review.result.operation;
+            host.retire(key, key.operation_id, key.attempt_id orelse 1);
+        };
+        review.offered = false;
+        if (!review.delegated and !review.result.terminal()) {
+            review.result.phase = .cancelled_unsent;
+            review.result.reason = .cancelled;
+        }
     }
-    const console_vtable: console.Interface = .{ .snapshot = snapshotFrom, .request_control = requestControl, .reply_control = replyControl, .refresh = refresh, .set_focus = setFocus, .retry = retry, .cancel = cancelConnection };
-    const power_vtable: svc.PowerService = .{ .snapshot = powerSnapshot, .request = denyPower, .cancel = cancelWrite, .result = result };
-    const boot_vtable: svc.BootService = .{ .snapshot = bootSnapshot, .apply = denyBoot, .cancel = cancelWrite, .result = result };
+    fn pollManagement(self: *Runtime) !bool {
+        const review = if (self.management_review) |*value| value else return false;
+        if (review.delegated) {
+            const binding = self.controller.powerBinding();
+            const table = try binding.borrow(svc.PowerService, svc.power_key, self.owner);
+            var current = try table.result(binding.context, review.request.value.execution().call, review.result.operation, self.allocator);
+            defer current.deinit();
+            const changed = review.result.phase != current.value.phase or review.result.reason != current.value.reason;
+            review.result.phase = current.value.phase;
+            review.result.reason = current.value.reason;
+            return changed;
+        }
+        if (review.result.terminal()) return false;
+        if (self.stopping or self.stale or self.management_policy == .read_only or monotonicMs() >= review.deadline_ms) {
+            self.retireManagementReview();
+            return true;
+        }
+        const host = self.context.challenges orelse return error.ChallengeHostUnavailable;
+        const key = review.result.operation;
+        const generation = key.attempt_id orelse 1;
+        if (!review.offered) {
+            const material = try self.managementMaterial(review.request.value);
+            defer self.allocator.free(material);
+            try host.offer(key, key.operation_id, generation, .choice, .{ .title = "确认 BMC 管理操作", .detail = "核对目标与本次更改后批准。该批准仅适用于当前操作；选择草稿不会执行。", .source_name = self.name, .material = material, .choices = &.{ .{ .value = "cancel", .label = "取消" }, .{ .value = "approve", .label = "批准本次操作" } } }, review.deadline_ms);
+            review.offered = true;
+            return true;
+        }
+        if (host.takeAnswer(key, key.operation_id, generation)) |incoming| {
+            var answer = incoming;
+            defer answer.deinit();
+            review.offered = false;
+            if (answer.value != .choice or !std.mem.eql(u8, answer.value.choice, "approve")) {
+                review.result.phase = .cancelled_unsent;
+                review.result.reason = .cancelled;
+                return true;
+            }
+            // Adapter rechecks the live binding, mapping and both revisions.
+            // The original owned request is the sole source of queued bytes.
+            switch (self.controller.manager.approve(review.request.value)) {
+                .accepted => review.delegated = true,
+                .rejected => |reason| {
+                    review.result.phase = .failed;
+                    review.result.reason = reason;
+                },
+            }
+            return true;
+        }
+        const state = host.stateFor(key, key.operation_id, generation);
+        if (state == null or state == .withdrawn or state == .cancelled or state == .timed_out) {
+            self.retireManagementReview();
+            return true;
+        }
+        return false;
+    }
+    fn managementMaterial(self: *Runtime, request: svc.ManagementRequest) ![]u8 {
+        return switch (request) {
+            .power => |value| std.fmt.allocPrint(self.allocator, "目标：{s}\n管理资源：{s}\n操作：{s}{s}", .{ self.target, value.execution.system_uri, @import("view_model.zig").powerLabel(value.action), if (value.action == .force_off or value.action == .force_restart or value.action == .power_cycle) "\n强制动作可能造成数据丢失。" else "" }),
+            .boot => |value| std.fmt.allocPrint(self.allocator, "目标：{s}\n管理资源：{s}\n当前：{s} · {s} · {s}\n本次设置：{s} · {s} · {s}\n仅设置启动覆盖，不会自动重启。", .{ self.target, value.execution.system_uri, value.baseline.enabled orelse "未知有效期", value.baseline.target orelse "未知设备", value.baseline.mode orelse "未知模式", value.enabled orelse value.baseline.enabled orelse "未知有效期", value.target orelse value.baseline.target orelse "未知设备", value.mode orelse value.baseline.mode orelse "未知模式" }),
+        };
+    }
+    fn cancelWrite(raw: *anyopaque, call: svc.Call, key: svc.OperationKey) svc.CancelResult {
+        const self = from(raw);
+        self.validateCall(call) catch return .stale_operation;
+        if (self.management_review) |review| if (review.result.operation.eql(key) and !review.delegated) {
+            if (review.result.terminal()) return .already_terminal;
+            self.retireManagementReview();
+            return .cancelled_unsent;
+        };
+        const binding = self.controller.powerBinding();
+        const table = binding.borrow(svc.PowerService, svc.power_key, self.owner) catch return .stale_operation;
+        return table.cancel(binding.context, call, key);
+    }
+    fn result(raw: *anyopaque, call: svc.Call, key: svc.OperationKey, allocator: std.mem.Allocator) !svc.Owned(svc.Result) {
+        const self = from(raw);
+        try self.validateCall(call);
+        if (self.management_review) |review| if (review.result.operation.eql(key) and !review.delegated) return svc.Owned(svc.Result).init(allocator, review.result);
+        const binding = self.controller.powerBinding();
+        const table = try binding.borrow(svc.PowerService, svc.power_key, self.owner);
+        return table.result(binding.context, call, key, allocator);
+    }
+    fn query(raw: *anyopaque, call: svc.Call, key: svc.OperationKey) !void {
+        const self = from(raw);
+        try self.validateCall(call);
+        const binding = self.controller.powerBinding();
+        const table = try binding.borrow(svc.PowerService, svc.power_key, self.owner);
+        try (table.query orelse return error.QueryUnavailable)(binding.context, call, key);
+    }
+    const console_vtable: console.Interface = .{ .snapshot = snapshotFrom, .request_control = requestControl, .reply_control = replyControl, .refresh = refresh, .set_focus = setFocus, .retry = retry, .cancel = cancelConnection, .request_management = requestManagement };
+    const power_vtable: svc.PowerService = .{ .snapshot = powerSnapshot, .request = denyPower, .cancel = cancelWrite, .result = result, .query = query };
+    const boot_vtable: svc.BootService = .{ .snapshot = bootSnapshot, .apply = denyBoot, .cancel = cancelWrite, .result = result, .query = query };
 };
 
 fn failureStage(err: anyerror) console.FailureStage {

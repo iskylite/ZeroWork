@@ -90,7 +90,9 @@ test "images real multimodal JSON has exact raster base64 full count and documen
     try std.testing.expectError(error.ModelDoesNotSupportImages, http.requestBodySize(.openai_compat, request, 8192));
     request.vision = true;
     request.model = "mimo-v2.6-flash";
-    try std.testing.expectError(error.UnknownImageBudget, http.requestBodySize(.openai_compat, request, 8192));
+    try std.testing.expectEqual(@as(usize, @import("ai/image_budget.zig").unknown_model_reservation + 11), try budget.inputTokens(request));
+    try std.testing.expectError(error.ContextBudgetExceeded, budget.checkContext(request, 8192));
+    _ = try http.requestBodySize(.openai_compat, request, 500_000);
 }
 
 fn oomImage(allocator: std.mem.Allocator) !void {
@@ -174,7 +176,7 @@ test "images real TIFF clipboard normalizes to an actual decoded PNG" {
     try std.testing.expect(std.mem.startsWith(u8, content.bytes, "\x89PNG\r\n\x1a\n"));
 }
 
-test "images unavailable adapters and unknown model budgets fail before wire output without consuming history" {
+test "images unavailable adapters fail and unknown model reservations retain bounded context and exact history" {
     var reference = try images.ContentRef.create(a, "/fixture.png", png, 1, .{});
     defer reference.release();
     const request: provider.ChatRequest = .{ .model = "gpt-4o", .vision = true, .system = "", .messages = &.{.{ .content = "image", .images = &.{reference} }} };
@@ -196,6 +198,9 @@ test "images unavailable adapters and unknown model budgets fail before wire out
     try std.testing.expectEqualStrings(png, history.images.?.items[0].reference.content().?.bytes);
     var unknown = request;
     unknown.model = "mimo-v2.6-flash";
-    try std.testing.expectError(error.UnknownImageBudget, http.requestBodySize(.openai_compat, unknown, 8192));
+    try std.testing.expectError(error.ContextBudgetExceeded, budget.checkContext(unknown, 8192));
+    _ = try http.requestBodySize(.openai_compat, unknown, 500_000);
+    unknown.vision = false;
+    try std.testing.expectError(error.ModelDoesNotSupportImages, http.requestBodySize(.openai_compat, unknown, 500_000));
     try std.testing.expectEqualStrings(png, history.images.?.items[0].reference.content().?.bytes);
 }

@@ -1,0 +1,379 @@
+{
+  "schema": 1,
+  "profile_id": "sugon_1_80_oem_rfb",
+  "evidence_date": "2026-11-01",
+  "authentication_observation": {
+    "session_type": "Redfish",
+    "session_post_status": 201,
+    "scope": "Standard Redfish session reproduced the System resource shape below; no session token or identifier is retained."
+  },
+  "field_interpretation": {
+    "unscoped_object_diagnostic_preserved": true,
+    "valid_power_boot_fields_available": true,
+    "management_target_independent_of_kvm_mapping": true
+  },
+  "scope": "Sanitized structural fixture from authenticated read-only GET observations. Identifiers, UUID, times and labels are synthetic; no device address, token, credential or session identifier is retained.",
+  "verification_limits": {
+    "management_writes_verified": false,
+    "boot_writes_verified": false,
+    "specific_kvm_system_mapping_verified": false,
+    "critical_system_error_resolved": false,
+    "select_query_reduced_payload": false
+  },
+  "documents": {
+    "root": {
+      "uri": "/redfish/v1/",
+      "status": 200,
+      "body": {
+        "@odata.id": "/redfish/v1",
+        "@odata.type": "#ServiceRoot.v1_16_0.ServiceRoot",
+        "Systems": {
+          "@odata.id": "/redfish/v1/Systems"
+        },
+        "Managers": {
+          "@odata.id": "/redfish/v1/Managers"
+        },
+        "SessionService": {
+          "@odata.id": "/redfish/v1/SessionService"
+        },
+        "Links": {
+          "ManagerProvidingService": {
+            "@odata.id": "/redfish/v1/Managers/manager-B"
+          }
+        },
+        "Oem": {
+          "Public": {
+            "SystemId": "node-B",
+            "ManagerId": "manager-B",
+            "ChassisId": "chassis-C"
+          }
+        }
+      }
+    },
+    "systems": {
+      "uri": "/redfish/v1/Systems",
+      "status": 200,
+      "body": {
+        "@odata.id": "/redfish/v1/Systems",
+        "@odata.type": "#ComputerSystemCollection.ComputerSystemCollection",
+        "Members": [
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B"
+          }
+        ],
+        "Members@odata.count": 1
+      }
+    },
+    "managers": {
+      "uri": "/redfish/v1/Managers",
+      "status": 200,
+      "body": {
+        "@odata.id": "/redfish/v1/Managers",
+        "@odata.type": "#ManagerCollection.ManagerCollection",
+        "Members": [
+          {
+            "@odata.id": "/redfish/v1/Managers/manager-B"
+          }
+        ],
+        "Members@odata.count": 1
+      }
+    },
+    "system": {
+      "uri": "/redfish/v1/Systems/node-B",
+      "status": 200,
+      "body": {
+        "@odata.id": "/redfish/v1/Systems/node-B",
+        "@odata.type": "#ComputerSystem.v1_22_0.ComputerSystem",
+        "Id": "node-B",
+        "UUID": "synthetic-system",
+        "PowerState": "On",
+        "LastResetTime": "2026-10-31T00:00:00Z",
+        "@Message.ExtendedInfo": [
+          {
+            "@odata.type": "#Message.v1_1_2.Message",
+            "MessageId": "Base.1.19.InternalError",
+            "MessageSeverity": "Critical",
+            "Severity": "Critical",
+            "MessageArgs": [],
+            "RelatedProperties": []
+          }
+        ],
+        "Actions": {
+          "#ComputerSystem.Reset": {
+            "target": "/redfish/v1/Systems/node-B/Actions/ComputerSystem.Reset",
+            "@Redfish.ActionInfo": "/redfish/v1/Systems/node-B/ResetActionInfo",
+            "ResetType@Redfish.AllowableValues": [
+              "On",
+              "ForceOff",
+              "ForceOn",
+              "ForceRestart",
+              "GracefulRestart",
+              "GracefulShutdown",
+              "PowerCycle",
+              "Nmi"
+            ]
+          }
+        },
+        "Boot": {
+          "BootSourceOverrideEnabled": "Disabled",
+          "BootSourceOverrideTarget": "None",
+          "BootSourceOverrideMode": "UEFI",
+          "BootSourceOverrideTarget@Redfish.AllowableValues": [
+            "None",
+            "Pxe",
+            "Hdd",
+            "Cd",
+            "Diags",
+            "BiosSetup",
+            "Usb"
+          ],
+          "BootSourceOverrideMode@Redfish.AllowableValues": [
+            "Legacy",
+            "UEFI"
+          ],
+          "BootOrder": [
+            "Boot0001",
+            "Boot0002",
+            "Boot0003",
+            "Boot0004",
+            "Boot0005",
+            "Boot0006",
+            "Boot0007",
+            "Boot0008",
+            "Boot0009",
+            "Boot000A",
+            "Boot000B",
+            "Boot000C",
+            "Boot000D",
+            "Boot000E",
+            "Boot000F",
+            "Boot0010",
+            "Boot0011",
+            "Boot0012",
+            "Boot0013",
+            "Boot0014"
+          ],
+          "AliasBootOrder": [
+            "Hdd",
+            "Usb",
+            "Pxe",
+            "Cd",
+            "Other"
+          ],
+          "BootOptions": {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions"
+          }
+        },
+        "Links": {
+          "ManagedBy": [
+            {
+              "@odata.id": "/redfish/v1/Managers/manager-B"
+            }
+          ],
+          "Chassis": [
+            {
+              "@odata.id": "/redfish/v1/Chassis/chassis-C"
+            }
+          ]
+        },
+        "GraphicalConsole": {
+          "ServiceEnabled": true,
+          "ConnectTypesSupported": [
+            "KVMIP"
+          ]
+        }
+      }
+    },
+    "manager": {
+      "uri": "/redfish/v1/Managers/manager-B",
+      "status": 200,
+      "body": {
+        "@odata.id": "/redfish/v1/Managers/manager-B",
+        "@odata.type": "#Manager.v1_18_0.Manager",
+        "Id": "manager-B",
+        "FirmwareVersion": "1.80",
+        "Links": {
+          "ManagerForServers": [
+            {
+              "@odata.id": "/redfish/v1/Systems/broken-alias"
+            }
+          ]
+        },
+        "Oem": {
+          "Public": {
+            "SecurityService": {
+              "@odata.id": "/redfish/v1/Managers/manager-B/SecurityService"
+            },
+            "KvmService": {
+              "@odata.id": "/redfish/v1/Managers/manager-B/KvmService"
+            }
+          }
+        },
+        "GraphicalConsole": {
+          "ServiceEnabled": true,
+          "ConnectTypesSupported": [
+            "KVMIP"
+          ]
+        }
+      }
+    },
+    "chassis": {
+      "uri": "/redfish/v1/Chassis/chassis-C",
+      "status": 200,
+      "body": {
+        "@odata.id": "/redfish/v1/Chassis/chassis-C",
+        "@odata.type": "#Chassis.v1_22_0.Chassis",
+        "Id": "chassis-C",
+        "Links": {
+          "ComputerSystems": [
+            {
+              "@odata.id": "/redfish/v1/Systems/node-B"
+            }
+          ],
+          "ManagedBy": [
+            {
+              "@odata.id": "/redfish/v1/Managers/manager-B"
+            }
+          ]
+        }
+      }
+    },
+    "missing_manager_target": {
+      "uri": "/redfish/v1/Systems/broken-alias",
+      "status": 404,
+      "body": {
+        "error": {
+          "code": "Base.1.19.ResourceNotFound",
+          "@Message.ExtendedInfo": [
+            {
+              "MessageId": "Base.1.19.ResourceNotFound",
+              "Severity": "Critical",
+              "MessageSeverity": "Critical"
+            }
+          ]
+        }
+      }
+    },
+    "security": {
+      "uri": "/redfish/v1/Managers/manager-B/SecurityService",
+      "status": 200,
+      "body": {
+        "@odata.id": "/redfish/v1/Managers/manager-B/SecurityService",
+        "@odata.type": "#SecurityService.v1_0_0.SecurityService",
+        "EnableAuthConfirm": false
+      }
+    },
+    "reset_action_info": {
+      "uri": "/redfish/v1/Systems/node-B/ResetActionInfo",
+      "status": 200,
+      "body": {
+        "@odata.id": "/redfish/v1/Systems/node-B/ResetActionInfo",
+        "@odata.type": "#ActionInfo.v1_1_2.ActionInfo",
+        "Parameters": [
+          {
+            "Name": "ResetType",
+            "Required": true,
+            "AllowableValues": [
+              "ForceOff",
+              "PowerCycle",
+              "Nmi",
+              "On",
+              "ForceOn",
+              "ForceRestart",
+              "GracefulRestart",
+              "GracefulShutdown"
+            ]
+          }
+        ]
+      }
+    },
+    "boot_options": {
+      "uri": "/redfish/v1/Systems/node-B/BootOptions",
+      "status": 200,
+      "body": {
+        "@odata.id": "/redfish/v1/Systems/node-B/BootOptions",
+        "@odata.type": "#BootOptionCollection.BootOptionCollection",
+        "Members": [
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0001"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0002"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0003"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0004"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0005"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0006"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0007"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0008"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0009"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot000A"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot000B"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot000C"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot000D"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot000E"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot000F"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0010"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0011"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0012"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0013"
+          },
+          {
+            "@odata.id": "/redfish/v1/Systems/node-B/BootOptions/Boot0014"
+          }
+        ],
+        "Members@odata.count": 20
+      }
+    },
+    "kvm_service": {
+      "uri": "/redfish/v1/Managers/manager-B/KvmService",
+      "status": 200,
+      "body": {
+        "@odata.id": "/redfish/v1/Managers/manager-B/KvmService",
+        "@odata.type": "#KvmService.v1_0_0.KvmService",
+        "ServiceEnabled": true,
+        "EncryptionEnabled": true,
+        "KVMPort": 5900
+      }
+    }
+  },
+  "boot_option_template": {
+    "@odata.type": "#BootOption.v1_0_4.BootOption",
+    "DisplayName": "Synthetic boot option; independent successful GET",
+    "BootOptionReference": "<member-id>",
+    "Id": "<member-id>"
+  }
+}

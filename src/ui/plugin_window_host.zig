@@ -122,6 +122,18 @@ pub const Host = struct {
     pub fn installDomain(domain: *application.Domain) void {
         domain.sessions.setContextFactory(.{ .context = domain, .create = contextFor });
     }
+    /// Called after the native tick returns, never from before-render/layout.
+    /// GPU submission is evidence of presentation intent, not physical scanout.
+    pub fn observePresentedFrame(app: anytype) void {
+        for (windows) |maybe| if (maybe) |host| {
+            if (host.cx != app.cx or host.closed or host.shutdown_prepared) continue;
+            const now: u64 = @intCast(@max(0, @import("../platform/realtime.zig").monotonicNs()) / std.time.ns_per_ms);
+            for (host.content_host.entries.items) |entry| {
+                if (entry.retired) continue;
+                entry.frames.presentation.finish(app.cx.frame_count, app.renderer.frame_count, app.renderer.last_frame_presented, now);
+            }
+        };
+    }
     /// Invoke before native windows/Cx teardown on ordinary or exceptional
     /// process exit. Only owners using this domain's contexts are affected.
     pub fn prepareShutdown(domain: *application.Domain) void {
@@ -203,6 +215,11 @@ pub const Host = struct {
     pub fn acquireAutomation(app_host: *application.ApplicationHost, owner: identity.SessionHandle, policy_revision: u64, cancel: ?*const std.atomic.Value(bool), stopped: ?*const std.atomic.Value(bool), expires_at_ms: u64) !content.AutomationGrant {
         for (windows) |window| if (window) |self| if (self.application == app_host) {
             if (self.closed or self.shutdown_prepared or self.application.sessions.queryState(owner) == null) return error.StaleHostContext;
+            // AI's after-layout pump runs before this host's frame hook. Native
+            // activation or a tab switch may therefore precede the cached
+            // ContentContext focus. Check the current state in both directions.
+            const focus = self.currentInputFocus();
+            self.content_host.syncFocus(self.cx.window_active, focus.owner, focus.content_focused);
             return self.content_host.acquireAutomation(owner, policy_revision, cancel, stopped, expires_at_ms);
         };
         return error.PluginWindowUnavailable;
@@ -520,6 +537,19 @@ pub const Host = struct {
         };
         return .done;
     }
+    fn currentInputFocus(self: *Host) struct { owner: ?identity.SessionHandle, content_focused: bool } {
+        const workspace = self.application.workspace;
+        var active: ?identity.SessionHandle = null;
+        var content_focused = false;
+        if (workspace.active_tab) |index| if (index < workspace.tabs.items.len) {
+            const tab = workspace.tabs.items[index];
+            if (tab.content_owner == .session and !tab.closing) active = tab.content_owner.session;
+            if (self.cx.focus_manager.getFocused()) |focused| content_focused = focused == tab.root or focused.isDescendantOf(tab.root);
+        };
+        // A top layer owns keyboard focus before content routing.
+        if (self.cx.overlay_stack.topmost() != null) content_focused = false;
+        return .{ .owner = active, .content_focused = content_focused };
+    }
     pub fn tick(self: *Host, now_ms: u64) !void {
         if (self.closed or self.shutdown_prepared) return;
         if (self.probes) |host| {
@@ -535,17 +565,9 @@ pub const Host = struct {
         };
         if (self.retainer) |retainer| retainer.sweep();
         sweepOrphans();
-        const workspace = self.application.workspace;
-        var active: ?identity.SessionHandle = null;
-        var content_focused = false;
-        if (workspace.active_tab) |index| if (index < workspace.tabs.items.len) {
-            const tab = workspace.tabs.items[index];
-            if (tab.content_owner == .session and !tab.closing) active = tab.content_owner.session;
-            if (self.cx.focus_manager.getFocused()) |focused| content_focused = focused == tab.root or focused.isDescendantOf(tab.root);
-        };
-        // A top layer owns keyboard focus before content routing.
-        if (self.cx.overlay_stack.topmost() != null) content_focused = false;
-        try self.content_host.tick(self.cx.window_active, active, content_focused);
+        const focus = self.currentInputFocus();
+        const active = focus.owner;
+        try self.content_host.tick(self.cx.window_active, active, focus.content_focused);
         if (self.cx.consume(@import("challenge_window_host.zig").Services)) |shared| shared.active_owner = active;
         for (self.entries.items) |entry| {
             const snapshot = self.application.sessions.queryState(entry.owner);
@@ -797,6 +819,48 @@ const TransferTestWindow = struct {
         return accepted;
     }
 };
+
+test "automation acquisition synchronizes current activation and owner before the later frame hook" {
+    const fixture = @import("../plugins/fixture_probe/plugin.zig");
+    const a = std.testing.allocator;
+    const plugin = try fixture.Plugin.init(a);
+    defer plugin.deinit();
+    const domain = try application.Domain.initWithContributions(a, false, &.{plugin.manifest()}, &.{plugin.renderer()});
+    defer domain.deinit();
+    var store: TransferTestStore = .{};
+    var window: TransferTestWindow = undefined;
+    try window.init(domain, &store);
+    defer window.deinit();
+    const accepted = try window.open(plugin, 1191);
+    const input = window.host.inputFor(accepted.handle).?;
+    window.workspace.active_tab = 0;
+    const overlay = try window.cx.overlay_stack.push(.{ .kind = .non_modal });
+    defer window.cx.overlay_stack.removePermanently(overlay);
+
+    // Activation and approval can precede PluginWindowHost's after-layout hook.
+    // The AI overlay owns content focus but the native window is now active.
+    input.setFocus(false, false);
+    window.cx.window_active = true;
+    const grant = try Host.acquireAutomation(window.app, accepted.handle, 1, null, null, std.math.maxInt(u64));
+    try std.testing.expect(grant.proof.valid());
+    try std.testing.expect(input.focused);
+    try std.testing.expect(!input.content_focused);
+    try std.testing.expect(input.human == null);
+
+    // Conversely, a stale true must never authorize input after native blur.
+    window.cx.window_active = false;
+    try std.testing.expectError(error.WindowNotFocused, Host.acquireAutomation(window.app, accepted.handle, 1, null, null, std.math.maxInt(u64)));
+    try std.testing.expect(!grant.proof.valid());
+    try std.testing.expect(input.automation == null);
+    try std.testing.expect(!input.focused);
+
+    // A foreground window still cannot authorize a no-longer-active owner.
+    input.setFocus(true, false);
+    window.cx.window_active = true;
+    window.workspace.active_tab = null;
+    try std.testing.expectError(error.WindowNotFocused, Host.acquireAutomation(window.app, accepted.handle, 1, null, null, std.math.maxInt(u64)));
+    try std.testing.expect(!input.focused);
+}
 
 test "BMC generic released retry remounts the same tab with the new owner" {
     const fixture = @import("../plugins/fixture_probe/plugin.zig");

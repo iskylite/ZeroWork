@@ -114,6 +114,45 @@ test "BMC view capability gate rejects unknown authentication, partial evidence 
     try std.testing.expect(vm.powerAllowed(snapshot, .graceful_restart));
 }
 
+test "BMC view resource diagnostics do not replace operation field validation" {
+    const cap: services.Capability = .{ .write_requestable = true, .system_mapping_verified = true, .secondary_auth = .disabled, .secondary_auth_evidence = .{ .validity = .valid } };
+    var power: services.PowerSnapshot = .{ .resource_evidence = .{ .validity = .partial_with_error }, .capability = cap, .reset_target = "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset", .state = .{ .value = .on, .evidence = .{ .validity = .valid } }, .reset_types = .{ .value = &.{"GracefulRestart"}, .evidence = .{ .validity = .valid } } };
+    var boot = bootSnapshot();
+    boot.capability = cap;
+    boot.resource_evidence.validity = .partial_with_error;
+    boot.boot_order.evidence.validity = .partial_with_error;
+    boot.mode_evidence.validity = .partial_with_error;
+    var draft: vm.BootDraft = .{};
+    try draft.refresh(boot);
+    try draft.selectTarget("Pxe");
+    try std.testing.expect(vm.powerAllowed(power, .graceful_restart));
+    try std.testing.expect(draft.canApply(boot)); // Neither BootOrder nor unchanged mode is required.
+    power.state.evidence.validity = .partial_with_error;
+    try std.testing.expect(!vm.powerAllowed(power, .graceful_restart));
+    try std.testing.expect(draft.canApply(boot));
+    power.state.evidence.validity = .valid;
+    boot.target_evidence.validity = .partial_with_error;
+    try std.testing.expect(!draft.canApply(boot));
+    try std.testing.expect(vm.powerAllowed(power, .graceful_restart));
+}
+
+test "BMC view closing Boot override requires no target or mode proof" {
+    var boot = bootSnapshot();
+    boot.capability = .{ .write_requestable = true, .system_mapping_verified = true, .secondary_auth = .disabled, .secondary_auth_evidence = .{ .validity = .valid } };
+    boot.state = .{ .enabled = "Once", .target = null, .mode = null };
+    boot.target_evidence.validity = .partial_with_error;
+    boot.mode_evidence.validity = .partial_with_error;
+    boot.allowed_targets = .{};
+    boot.allowed_modes = .{};
+    var draft: vm.BootDraft = .{};
+    try draft.refresh(boot);
+    try draft.selectTarget("Disabled");
+    try std.testing.expect(draft.canApply(boot));
+    try std.testing.expect(draft.unavailableReason(boot) == null);
+    boot.enabled_evidence.validity = .partial_with_error;
+    try std.testing.expect(!draft.canApply(boot));
+}
+
 test "BMC view failure keeps explicit stale frame state separate from completed cleanup" {
     const state: console.Snapshot = .{ .owner = owner, .operation = .{ .owner = .{ .session = owner }, .operation_id = 1 }, .route = .failed, .video = .failed, .cleanup = .released, .input = .{ .input_epoch = 1, .control_generation = 1, .transport_generation = 1, .connected = false, .controlled = false, .focused = false, .capture_paused = true, .queued = 0, .remote_unconfirmed = false } };
     try std.testing.expectEqualStrings("视频已中断 · 画面已停止更新", vm.statusTitle(state, true));
@@ -170,10 +209,40 @@ test "BMC view connection log formats only bounded typed telemetry and warns on 
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "首帧就绪") == null);
 }
 
+test "BMC view progress diagnostics identify safe request and retain user collapse after cleanup" {
+    const context: console.progress.Context = .{ .channel = .management, .method = .get, .path = .public_script, .phase = .response_body, .http_status = 200, .received_bytes = 524288, .duration_ms = 15000 };
+    var tracker = console.progress.Tracker.initAt(1, 0);
+    tracker.setStageAt(.public_script, 1);
+    tracker.setContext(context);
+    tracker.failAt(error.HttpTimeout, 15001);
+    var disclosure: vm.ProgressDisclosure = .{};
+    disclosure.observe(tracker.snapshotAt(15001));
+    try std.testing.expect(disclosure.isOpen(.identity));
+    try std.testing.expect(!disclosure.isOpen(.tls));
+    disclosure.toggle(.identity);
+    tracker.setStageAt(.cleanup, 15002);
+    for (0..40) |index| tracker.noteAt(.{ .code = .remote_logout_unconfirmed, .resource = .web_session }, 15003 + index);
+    tracker.finishAt(false, 15100);
+    const snapshot = tracker.snapshotAt(16000);
+    disclosure.observe(snapshot);
+    try std.testing.expect(!disclosure.isOpen(.identity));
+    var writer: std.Io.Writer.Allocating = .init(a);
+    defer writer.deinit();
+    try vm.writeStepDiagnosticsForTarget(&writer.writer, snapshot, .identity, "offline.invalid:443");
+    for ([_][]const u8{ "保留的原始失败", "管理通道 → offline.invalid:443", "GET /js/app.0bc71eb0.js", "读取响应正文", "HTTP 200", "已收 524288 B", "请求 15.0s", "HttpTimeout" }) |text| try std.testing.expect(std.mem.indexOf(u8, writer.written(), text) != null);
+    writer.clearRetainingCapacity();
+    try vm.writeStepDiagnostics(&writer.writer, snapshot, .tls);
+    try std.testing.expectEqualStrings("该步骤尚无连接事件。", writer.written());
+    try std.testing.expect(std.mem.indexOf(u8, console.progress.pathLabel(.web_session), "{id}") != null);
+}
+
 const Fixture = struct {
     real_input: ?*remote.Service = null,
     management_available: bool = false,
     system_mapping_verified: bool = true,
+    management_write_requestable: bool = false,
+    resource_diagnostic: bool = false,
+    boot_order: ?[]const []const u8 = null,
     management_writes: usize = 0,
     frame_generation: u64 = 1,
     width: u32 = 2,
@@ -254,7 +323,12 @@ const Fixture = struct {
         var value = bootSnapshot();
         value.capability.system_mapping_verified = self.system_mapping_verified;
         value.capability.write_granted = false;
+        value.capability.write_requestable = self.management_write_requestable;
+        value.capability.secondary_auth = .disabled;
+        value.capability.secondary_auth_evidence.validity = .valid;
+        value.resource_evidence.validity = if (self.resource_diagnostic) .partial_with_error else .valid;
         value.state = .{ .enabled = "Once", .target = "Pxe", .mode = "UEFI" };
+        value.boot_order = .{ .value = self.boot_order, .evidence = .{ .validity = .valid } };
         return services.OwnedBootSnapshot.init(allocator, value);
     }
     fn applyBoot(raw: *anyopaque, _: services.BootExecutionPatch) services.RequestResult {
@@ -271,7 +345,7 @@ const Fixture = struct {
     const boot_table: services.BootService = .{ .snapshot = readBoot, .apply = applyBoot, .cancel = cancelBoot, .result = bootResult };
     fn readPower(raw: *anyopaque, _: services.Call, allocator: std.mem.Allocator) !services.OwnedPowerSnapshot {
         const self: *Fixture = @ptrCast(@alignCast(raw));
-        return services.OwnedPowerSnapshot.init(allocator, .{ .system_uri = "/redfish/v1/Systems/1", .capability = .{ .system_mapping_verified = self.system_mapping_verified, .write_granted = false }, .state = .{ .value = .on, .evidence = .{ .validity = .valid } }, .reset_types = .{ .value = &.{ "On", "GracefulShutdown", "GracefulRestart" }, .evidence = .{ .validity = .valid } }, .reset_target = "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset" });
+        return services.OwnedPowerSnapshot.init(allocator, .{ .system_uri = "/redfish/v1/Systems/1", .resource_evidence = .{ .validity = if (self.resource_diagnostic) .partial_with_error else .valid }, .capability = .{ .system_mapping_verified = self.system_mapping_verified, .write_granted = false, .write_requestable = self.management_write_requestable, .secondary_auth = .disabled, .secondary_auth_evidence = .{ .validity = .valid } }, .state = .{ .value = .on, .evidence = .{ .validity = .valid } }, .reset_types = .{ .value = &.{ "On", "GracefulShutdown", "GracefulRestart" }, .evidence = .{ .validity = .valid } }, .reset_target = "/redfish/v1/Systems/1/Actions/ComputerSystem.Reset" });
     }
     fn requestPower(raw: *anyopaque, _: services.PowerExecutionRequest) services.RequestResult {
         const self: *Fixture = @ptrCast(@alignCast(raw));
@@ -399,7 +473,7 @@ test "BMC view native renderer uses real sink, captures on image, releases on me
     try std.testing.expect(view.closed);
 }
 
-test "BMC view unverified resource association stays visible and read only in mounted management views" {
+test "BMC view management target and response diagnostics keep distinct mounted operation gates" {
     var fixture: Fixture = .{ .management_available = true, .system_mapping_verified = false };
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
@@ -414,7 +488,7 @@ test "BMC view unverified resource association stays visible and read only in mo
     const renderer = try views.mount(null, .{ .cx = cx, .scope = scope, .slot = cx.root.?, .owner = owner, .connection = .{ .protocol_id = "bmc_ikvm", .name = "Synthetic", .payload = "{}" }, .frame_sink = &sink, .service_access = access.SessionServiceAccess{ .context = &fixture, .owner = owner, .lookup_fn = Fixture.lookup } });
     defer renderer.vtable.unmount(renderer.context);
     const view: *views.View = @ptrCast(@alignCast(renderer.context));
-    const warning = "该管理资源与当前视频的关联未验证，仅供查看";
+    const warning = "管理目标或读取证据尚未核实，仅供查看";
     view.tool_nodes[3].?.behavior.events.on_click.?.invoke();
     for (0..8) |_| {
         cx.frame_count += 1;
@@ -424,7 +498,7 @@ test "BMC view unverified resource association stays visible and read only in mo
     try std.testing.expect(view.menus[3].?.chrome.getOpacity() > 0.98);
     const unverified_status = renderer.vtable.connection_status.?(renderer.context);
     try std.testing.expectEqual(.degraded, unverified_status.state);
-    try std.testing.expectEqualStrings("视频在线 · 管理关联待核实", unverified_status.label);
+    try std.testing.expectEqualStrings("视频在线 · 管理条件待核实", unverified_status.label);
     try std.testing.expectEqualStrings(warning, view.power_mapping_warning.?.getText().?.content);
     try std.testing.expectEqual(.flex, view.power_mapping_warning.?.style.display);
     try std.testing.expect(view.power_mapping_warning.?.globalRect().h > 0);
@@ -470,8 +544,88 @@ test "BMC view unverified resource association stays visible and read only in mo
     try std.testing.expectEqual(.none, view.order_mapping_warning.?.style.display);
     try std.testing.expectEqualStrings("当前电源", view.power_scope_label.?.getText().?.content);
     try std.testing.expectEqualStrings("当前启动覆盖", view.boot_scope_label.?.getText().?.content);
-    try std.testing.expect(view.power_disabled.peek() and view.boot_disabled.peek());
+    try std.testing.expect(!view.power_disabled.peek() and !view.boot_disabled.peek());
+    try std.testing.expect(view.power_execute_disabled.peek() and view.boot_execute_disabled.peek());
     try std.testing.expectEqual(.online, renderer.vtable.connection_status.?(renderer.context).state);
+    fixture.resource_diagnostic = true;
+    fixture.management_write_requestable = true;
+    view.power_choice = .graceful_restart;
+    try view.draft.selectTarget("Hdd");
+    cx.frame_time_ms += 1001;
+    try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 3, .title = "Synthetic", .status = "" });
+    try std.testing.expectEqualStrings("设备响应含附加诊断；以下字段按各自读取结果显示。", view.power_mapping_warning.?.getText().?.content);
+    try std.testing.expectEqual(.flex, view.power_mapping_warning.?.style.display);
+    try std.testing.expectEqual(.flex, view.boot_mapping_warning.?.style.display);
+    try std.testing.expectEqualStrings("开机", view.power_label.?.getText().?.content);
+    try std.testing.expect(!view.power_execute_disabled.peek());
+    try std.testing.expect(!view.boot_execute_disabled.peek());
+    try std.testing.expectEqual(@as(usize, 0), fixture.management_writes);
+}
+
+test "BMC view BootOrder has twenty separate ordered rows and scrolls in standard and compact windows" {
+    const references = [_][]const u8{
+        "Boot0001", "Boot0002", "Boot0003", "Boot0004", "Boot0005",
+        "Boot0006", "Boot0007", "Boot0008", "Boot0009", "Boot000A",
+        "Boot000B", "Boot000C", "Boot000D", "Boot000E", "Boot000F",
+        "Boot0010", "Boot0011", "Boot0012", "Boot0013", "Boot0014",
+    };
+    var fixture: Fixture = .{ .management_available = true, .boot_order = &references };
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(1440, 900);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    var sink = frames.Sink.init(owner, .{ .context = &fixture, .create = Fixture.create, .update = Fixture.upload, .release = Fixture.release });
+    defer sink.close() catch unreachable;
+    const renderer = try views.mount(null, .{ .cx = cx, .scope = scope, .slot = cx.root.?, .owner = owner, .connection = .{ .protocol_id = "bmc_ikvm", .name = "Synthetic", .payload = "{}" }, .frame_sink = &sink, .service_access = access.SessionServiceAccess{ .context = &fixture, .owner = owner, .lookup_fn = Fixture.lookup } });
+    defer renderer.vtable.unmount(renderer.context);
+    const view: *views.View = @ptrCast(@alignCast(renderer.context));
+    const order_action = findById(view.menus[4].?.content, "bmc.boot.order").?;
+    for ([_][2]f32{ .{ 1440, 900 }, .{ 860, 480 } }) |size| {
+        cx.setViewport(size[0], size[1]);
+        renderFrames(cx, 8);
+        order_action.behavior.events.on_click.?.invoke();
+        renderFrames(cx, 8);
+        const scroll = view.order_scroll.?;
+        const rows = view.order_rows.?.children.items;
+        try std.testing.expect(view.order_open.?.peek());
+        try std.testing.expectEqual(@as(usize, 20), rows.len);
+        try std.testing.expectApproxEqAbs(@as(f32, 240), scroll.container.globalRect().h, 0.01);
+        try std.testing.expect(scroll.state.maxScrollY() > 0);
+        for (rows, references, 0..) |row, reference, index| {
+            var expected: [64]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&expected, "{d:0>2}  {s}", .{ index + 1, reference }), row.getText().?.content);
+            try std.testing.expect(row.globalRect().h >= 22);
+            if (index > 0) try std.testing.expect(row.globalRect().y >= rows[index - 1].globalRect().y + rows[index - 1].globalRect().h - 0.01);
+        }
+        _ = scroll.container.behavior.events.on_event_capture.?(.{ .key_down = .{ .key = .end } }, view);
+        renderFrames(cx, 3);
+        try std.testing.expectApproxEqAbs(scroll.state.maxScrollY(), scroll.state.scroll_y, 0.01);
+        _ = scroll.container.behavior.events.on_event_capture.?(.{ .key_down = .{ .key = .home } }, view);
+        renderFrames(cx, 3);
+        try std.testing.expectApproxEqAbs(@as(f32, 0), scroll.state.scroll_y, 0.01);
+        findById(view.order_modal.?.dialog, "bmc.boot.order_close").?.behavior.events.on_click.?.invoke();
+        renderFrames(cx, 8);
+        try std.testing.expect(!view.order_open.?.peek());
+        order_action.behavior.events.on_click.?.invoke();
+        renderFrames(cx, 8);
+        cx.handleKeyDown(.escape, .{});
+        cx.handleKeyUp(.escape, .{});
+        renderFrames(cx, 8);
+        try std.testing.expect(!view.order_open.?.peek());
+    }
+    fixture.boot_order = &references[0..2].*;
+    cx.frame_time_ms += 1001;
+    try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 2, .title = "Synthetic", .status = "" });
+    try std.testing.expectEqual(.flex, view.order_rows.?.children.items[1].style.display);
+    try std.testing.expectEqual(.none, view.order_rows.?.children.items[2].style.display);
+    fixture.boot_order = null;
+    cx.frame_time_ms += 1001;
+    try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 3, .title = "Synthetic", .status = "" });
+    try std.testing.expectEqualStrings("设备尚未返回启动顺序。", view.order_rows.?.children.items[0].getText().?.content);
+    try std.testing.expectEqual(.none, view.order_rows.?.children.items[1].style.display);
+    try std.testing.expectEqual(@as(usize, 0), fixture.management_writes);
 }
 
 test "BMC view progress compact card scrolls independently and log close never cancels the session" {
@@ -486,7 +640,9 @@ test "BMC view progress compact card scrolls independently and log close never c
     defer scope.dispose();
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     // Match the measured compact shell content region: toolbar y=50..94,
-    // video x=8, y=94, 844x346. The shell itself remains host-owned.
+    // This explicit legacy host slot remains valid; video now fills its
+    // full width and all height below the 44px toolbar, without card insets.
+    // The shell itself remains host-owned.
     const slot = try ui.box(cx, .{ .width = .{ .px = 844 }, .height = .{ .px = 390 }, .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = 50 } } }, .{});
     try cx.root.?.appendChild(a, slot);
     const renderer = try views.mount(null, .{ .cx = cx, .scope = scope, .slot = slot, .owner = owner, .connection = .{ .protocol_id = "bmc_ikvm", .name = "Synthetic", .payload = "{}" }, .service_access = access.SessionServiceAccess{ .context = &fixture, .owner = owner, .lookup_fn = Fixture.lookup } });
@@ -514,8 +670,9 @@ test "BMC view progress compact card scrolls independently and log close never c
     renderFrames(cx, 3);
     const route = view.progress_route.?.globalRect();
     const body_rect = body.container.globalRect();
-    // ScrollArea snaps the content translation to its backing-pixel grid.
-    try std.testing.expect(route.y >= body_rect.y - 0.5 and route.y + route.h <= body_rect.y + body_rect.h + 0.5);
+    // The complete route is a fixed sibling above the header and scroller.
+    try std.testing.expect(route.y >= card.y and route.y + route.h < body_rect.y);
+    try std.testing.expectEqualDeep(card, view.waiting.?.globalRect());
     for ([_]console.progress.Stage{ .waiting_certificate, .waiting_credentials, .waiting_video_certificate }) |stage| {
         fixture.progress.stage = stage;
         fixture.progress.waiting_for_user = true;
@@ -531,7 +688,7 @@ test "BMC view progress compact card scrolls independently and log close never c
     try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 2, .title = "Synthetic", .status = "" });
     findById(view.waiting.?, "bmc.connection_log").?.behavior.events.on_click.?.invoke();
     renderFrames(cx, 8);
-    try std.testing.expectEqual(@as(u16, 3), view.log_detail.?.layoutTextLayout().?.line_count);
+    try std.testing.expectEqual(@as(usize, 3), view.log_count);
     findById(view.log_modal.?.dialog, "bmc.connection_log.dismiss").?.behavior.events.on_click.?.invoke();
     renderFrames(cx, 8);
     // Bounded history can be longer than a compact viewport. Opening/closing
@@ -543,8 +700,8 @@ test "BMC view progress compact card scrolls independently and log close never c
     findById(view.waiting.?, "bmc.connection_log").?.behavior.events.on_click.?.invoke();
     renderFrames(cx, 8);
     try std.testing.expect(view.log_open.?.peek());
-    try std.testing.expectEqual(@as(u16, 32), view.log_detail.?.layoutTextLayout().?.line_count);
-    try std.testing.expectApproxEqAbs(@as(f32, 32 * 18.7), view.log_detail.?.globalRect().h, 0.01);
+    try std.testing.expectEqual(@as(usize, 32), view.log_count);
+    try std.testing.expectApproxEqAbs(@as(f32, 32 * 28), view.log_detail.?.globalRect().h, 0.01);
     try std.testing.expect(view.log_scroll.?.state.maxScrollY() > 0);
     try std.testing.expectApproxEqAbs(view.log_scroll.?.state.maxScrollY(), view.log_scroll.?.state.scroll_y, 0.01);
     const modal = view.log_modal.?.dialog.globalRect();
@@ -559,6 +716,7 @@ test "BMC view progress compact card scrolls independently and log close never c
     try std.testing.expectApproxEqAbs(view.log_scroll.?.state.maxScrollY(), view.log_scroll.?.state.scroll_y, 0.01);
     const log_scroll = view.log_scroll.?;
     ui.widgets.scroll_area.setScrollY(log_scroll.state, log_scroll.content, 100);
+    const evicted_height = view.log_rows[0].?.globalRect().h;
     fixture.progress.revision += 1;
     for (&fixture.progress.events) |*event| {
         event.sequence += 1;
@@ -566,7 +724,7 @@ test "BMC view progress compact card scrolls independently and log close never c
     }
     try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 3, .title = "Synthetic", .status = "" });
     renderFrames(cx, 5);
-    try std.testing.expectApproxEqAbs(@as(f32, 100 - 18.7), log_scroll.state.scroll_y, 0.6); // same event remains under the reader after one ring eviction
+    try std.testing.expectApproxEqAbs(100 - evicted_height, log_scroll.state.scroll_y, 0.6); // same event remains under the reader after one ring eviction
     _ = log_scroll.container.behavior.events.on_event_capture.?(.{ .key_down = .{ .key = .end } }, view);
     fixture.progress.revision += 1;
     fixture.progress.events[31].code = .readonly_collection_rejected;
@@ -574,13 +732,13 @@ test "BMC view progress compact card scrolls independently and log close never c
     try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 4, .title = "Synthetic", .status = "" });
     renderFrames(cx, 5);
     try std.testing.expectApproxEqAbs(log_scroll.state.maxScrollY(), log_scroll.state.scroll_y, 0.01);
-    const retained_log = try a.dupe(u8, view.log_detail.?.getText().?.content);
+    const retained_log = try a.dupe(u8, view.log_messages[31].?.getText().?.content);
     defer a.free(retained_log);
     findById(view.log_modal.?.dialog, "bmc.connection_log.dismiss").?.behavior.events.on_click.?.invoke();
     renderFrames(cx, 8);
     try std.testing.expect(!view.log_open.?.peek());
     try std.testing.expectEqual(@as(usize, 0), fixture.cancel_requests);
-    try std.testing.expectEqualStrings(retained_log, view.log_detail.?.getText().?.content);
+    try std.testing.expectEqualStrings(retained_log, view.log_messages[31].?.getText().?.content);
     view.cancel_node.?.behavior.events.on_click.?.invoke();
     view.cancel_node.?.behavior.events.on_click.?.invoke();
     try std.testing.expectEqual(@as(usize, 1), fixture.cancel_requests);
@@ -606,7 +764,7 @@ test "BMC view progress slots remain fixed across phase timing legacy and long d
     defer _ = theme.setMaterialParameters(previous_material.transparency, previous_material.blur);
     for ([_]struct { width: f32, height: f32 }{ .{ .width = 1440, .height = 900 }, .{ .width = 860, .height = 480 } }) |size| {
         _ = theme.setMaterialParameters(0, 0);
-        var fixture: Fixture = .{ .route = .connecting, .video = .authenticating };
+        var fixture: Fixture = .{ .route = .connecting, .video = .authenticating, .route_summary = "本机 → a-long-synthetic-hostname.invalid:22 → another-long-synthetic-hostname.invalid:22 → third-long-synthetic-hostname.invalid:22 → offline.invalid:443" };
         const cx = try ui.Cx.init(a, std.testing.io);
         defer cx.deinit();
         cx.setTheme(theme.widgetTheme(theme.currentName()));
@@ -626,14 +784,13 @@ test "BMC view progress slots remain fixed across phase timing legacy and long d
         try std.testing.expectEqual(@as(f32, 0), surface.style.border.width);
         try std.testing.expect(surface.style.glass_params().?.backdrop_blur >= 24);
         try std.testing.expectEqualDeep(view.waiting.?.globalRect(), surface.globalRect());
-        const nodes = [_]*ui.Node{ view.waiting.?, view.waiting_header.?, view.waiting_title.?, view.progress_timing.?, view.progress_stage_time.?, view.progress_total_time.?, view.progress_notice.?, view.waiting_body.?.container, view.progress_steps.?, view.waiting_actions.?, findById(view.waiting.?, "bmc.connection_log").? };
+        const nodes = [_]*ui.Node{ view.waiting.?, view.waiting_header.?, view.waiting_title.?, view.progress_timing.?, view.progress_stage_time.?, view.progress_total_time.?, view.progress_notice.?, view.waiting_body.?.container, view.progress_route.?, view.waiting_actions.?, findById(view.waiting.?, "bmc.connection_log").? };
         var baseline: [nodes.len]ui.ComputedRect = undefined;
         for (nodes, &baseline) |node, *rect| rect.* = node.globalRect();
         const stages = [_]console.progress.Stage{ .public_script, .public_script, .public_script, .public_script, .waiting_certificate, .waiting_credentials, .redfish_discovery, .failed };
         const times = [_]u64{ 9900, 10000, 99900, 100000, 100000, 100000, 100000, 100000 };
         for (stages, times, 0..) |stage, ms, index| {
             fixture.progress = .{ .revision = index + 1, .stage = stage, .elapsed_ms = ms, .stage_elapsed_ms = ms, .waiting_for_user = stage == .waiting_certificate or stage == .waiting_credentials };
-            if (index >= 6) fixture.route_summary = "本机 → a-long-synthetic-hostname.invalid:22 → another-long-synthetic-hostname.invalid:22 → third-long-synthetic-hostname.invalid:22 → offline.invalid:443";
             if (stage == .failed) {
                 fixture.progress.failure_stage = .public_script;
                 fixture.progress.failure_code = "UnsupportedProfilePublicEvidenceUnavailable";
@@ -645,7 +802,11 @@ test "BMC view progress slots remain fixed across phase timing legacy and long d
                     const actual = node.globalRect();
                     inline for (.{ "x", "y", "w", "h" }) |field| try std.testing.expectApproxEqAbs(@field(expected, field), @field(actual, field), 0.01);
                 }
-                try std.testing.expectEqual(@as(f32, 0), view.waiting_body.?.state.scroll_y);
+                if (vm.progressGroup(stage)) |group| {
+                    const row = view.progress_rows[@intCast(@backingInt(group))].?.globalRect();
+                    const body = view.waiting_body.?.container.globalRect();
+                    try std.testing.expect(row.y >= body.y - 0.6 and row.y + row.h <= body.y + body.h + 0.6);
+                }
                 try std.testing.expect(!std.meta.eql(surface.getBackground(), view.viewport.?.getBackground()));
                 try std.testing.expectEqualDeep(view.waiting.?.globalRect(), surface.globalRect());
                 if (stage == .public_script) {
@@ -676,6 +837,84 @@ test "BMC view progress slots remain fixed across phase timing legacy and long d
     }
 }
 
+test "BMC view connection log renders independent timestamp message and duration columns" {
+    var fixture: Fixture = .{ .route = .connecting, .video = .authenticating, .progress = .{ .revision = 1, .stage = .public_script, .event_count = 1 } };
+    fixture.progress.events[0] = .{ .sequence = 1, .at_ms = 987654, .at_unix_ms = 1_799_000_000_123, .duration_ms = 1534, .stage = .public_script, .kind = .failure, .error_code = "HttpTimeout", .context = .{ .channel = .management, .method = .get, .path = .public_script, .phase = .response_body, .http_status = 200 } };
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const renderer = try views.mount(null, .{ .cx = cx, .scope = scope, .slot = cx.root.?, .owner = owner, .connection = .{ .protocol_id = "bmc_ikvm", .name = "Synthetic", .payload = "{}" }, .service_access = access.SessionServiceAccess{ .context = &fixture, .owner = owner, .lookup_fn = Fixture.lookup } });
+    defer renderer.vtable.unmount(renderer.context);
+    const view: *views.View = @ptrCast(@alignCast(renderer.context));
+    findById(view.waiting.?, "bmc.connection_log").?.behavior.events.on_click.?.invoke();
+    renderFrames(cx, 8);
+    const timestamp = view.log_timestamps[0].?;
+    const message = view.log_messages[0].?;
+    const duration = view.log_durations[0].?;
+    try std.testing.expect(std.mem.endsWith(u8, timestamp.getText().?.content, ".123"));
+    try std.testing.expect(!std.mem.startsWith(u8, timestamp.getText().?.content, "+"));
+    try std.testing.expectEqualStrings("1.534 s", duration.getText().?.content);
+    try std.testing.expect(std.mem.indexOf(u8, message.getText().?.content, "GET /js/app.0bc71eb0.js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, message.getText().?.content, "HttpTimeout") != null);
+    try std.testing.expectApproxEqAbs(@as(f32, 86), timestamp.globalRect().w, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 76), duration.globalRect().w, 0.01);
+    try std.testing.expect(message.globalRect().x >= timestamp.globalRect().x + timestamp.globalRect().w + 11.9);
+    try std.testing.expect(duration.globalRect().x >= message.globalRect().x + message.globalRect().w + 11.9);
+    fixture.progress.events[0].at_unix_ms = null;
+    fixture.progress.revision += 1;
+    try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 2, .title = "Synthetic", .status = "" });
+    renderFrames(cx, 3);
+    try std.testing.expectEqualStrings("时间未知", timestamp.getText().?.content);
+}
+
+test "BMC view progress follows active stage changes but preserves manual scrolling during timer updates" {
+    var fixture: Fixture = .{ .route = .connecting, .video = .authenticating };
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
+    const renderer = try views.mount(null, .{ .cx = cx, .scope = scope, .slot = cx.root.?, .owner = owner, .connection = .{ .protocol_id = "bmc_ikvm", .name = "Synthetic", .payload = "{}" }, .service_access = access.SessionServiceAccess{ .context = &fixture, .owner = owner, .lookup_fn = Fixture.lookup } });
+    defer renderer.vtable.unmount(renderer.context);
+    const view: *views.View = @ptrCast(@alignCast(renderer.context));
+    renderFrames(cx, 5);
+    const route = view.progress_route.?.globalRect();
+    const actions = view.waiting_actions.?.globalRect();
+    const stages = [_]console.progress.Stage{ .route, .tls_handshake, .public_identity, .public_script, .waiting_credentials, .web_login, .firmware_confirmation, .redfish_discovery, .oem_session, .video_tls_handshake, .waiting_video_certificate, .websocket_upgrade, .rfb_negotiation, .awaiting_first_frame };
+    for (stages, 0..) |stage, index| {
+        fixture.progress = .{ .revision = index + 1, .stage = stage, .elapsed_ms = index * 1000, .waiting_for_user = stage == .waiting_credentials or stage == .waiting_video_certificate };
+        try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = index + 1, .title = "Synthetic", .status = "" });
+        renderFrames(cx, 3);
+        const body = view.waiting_body.?.container.globalRect();
+        const row = view.progress_rows[@intCast(@backingInt(vm.progressGroup(stage).?))].?.globalRect();
+        try std.testing.expect(row.y >= body.y - 0.6 and row.y + row.h <= body.y + body.h + 0.6);
+        try std.testing.expectEqualDeep(route, view.progress_route.?.globalRect());
+        try std.testing.expectEqualDeep(actions, view.waiting_actions.?.globalRect());
+    }
+    const body = view.waiting_body.?;
+    try std.testing.expect(body.state.scroll_y > 0);
+    // A user can read an earlier step while the current phase keeps waiting.
+    ui.widgets.scroll_area.setScrollY(body.state, body.content, 0);
+    fixture.progress.revision += 1;
+    fixture.progress.elapsed_ms += 1000;
+    fixture.progress.stage_elapsed_ms += 1000;
+    try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 100, .title = "Synthetic", .status = "" });
+    renderFrames(cx, 3);
+    try std.testing.expectEqual(@as(f32, 0), body.state.scroll_y);
+    // Another real phase within the same video group brings its row back.
+    fixture.progress.stage = .rfb_negotiation;
+    fixture.progress.revision += 1;
+    try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 101, .title = "Synthetic", .status = "" });
+    renderFrames(cx, 3);
+    const row = view.progress_rows[5].?.globalRect();
+    const rect = body.container.globalRect();
+    try std.testing.expect(row.y >= rect.y - 0.6 and row.y + row.h <= rect.y + rect.h + 0.6);
+}
+
 test "BMC view failure retains Chinese reason and static code after cleanup and success keeps log entry" {
     var fixture: Fixture = .{ .route = .failed, .video = .failed, .cleanup = .released, .progress = .{ .revision = 2, .stage = .failed, .failure_stage = .public_script, .failure_code = "UnsupportedProfilePublicEvidenceUnavailable", .event_count = 2 } };
     fixture.progress.events[0] = .{ .sequence = 1, .stage = .public_script };
@@ -691,13 +930,25 @@ test "BMC view failure retains Chinese reason and static code after cleanup and 
     const view: *views.View = @ptrCast(@alignCast(renderer.context));
     renderFrames(cx, 3);
     try std.testing.expectEqualStrings("连接失败", view.waiting_title.?.getText().?.content);
-    const detail = view.waiting_detail.?.getText().?.content;
+    const detail = view.progress_details[2].?.getText().?.content;
+    try std.testing.expectEqual(.flex, view.progress_details[2].?.style.display);
     try std.testing.expect(std.mem.indexOf(u8, detail, "无法取得可验证的公开设备信息") != null);
     try std.testing.expect(std.mem.indexOf(u8, detail, "UnsupportedProfilePublicEvidenceUnavailable") != null);
     try std.testing.expectEqualStrings("失败", view.progress_states[2].?.getText().?.content);
+    view.progress_buttons[2].?.behavior.events.on_click.?.invoke();
+    renderFrames(cx, 3);
+    try std.testing.expectEqual(.none, view.progress_details[2].?.style.display);
+    fixture.progress.stage = .cleanup;
+    fixture.progress.revision += 1;
+    try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 3, .title = "Synthetic", .status = "" });
+    renderFrames(cx, 3);
+    try std.testing.expectEqual(.none, view.progress_details[2].?.style.display);
+    view.progress_buttons[2].?.behavior.events.on_click.?.invoke();
+    renderFrames(cx, 3);
+    try std.testing.expectEqual(.flex, view.progress_details[2].?.style.display);
     findById(view.waiting.?, "bmc.connection_log").?.behavior.events.on_click.?.invoke();
     renderFrames(cx, 8);
-    try std.testing.expect(std.mem.indexOf(u8, view.log_detail.?.getText().?.content, "UnsupportedProfilePublicEvidenceUnavailable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, view.log_messages[1].?.getText().?.content, "UnsupportedProfilePublicEvidenceUnavailable") != null);
     findById(view.log_modal.?.dialog, "bmc.connection_log.close").?.behavior.events.on_click.?.invoke();
     renderFrames(cx, 8);
     try std.testing.expect(!view.log_open.?.peek());
@@ -844,6 +1095,90 @@ const InputWire = struct {
         try std.testing.expectEqual(y, std.mem.readInt(u16, self.data[offset + 4 ..][0..2], .big));
     }
 };
+
+test "BMC view workspace and rounded video fill the shared slot without padding across resize" {
+    var service = remote.Service.init(owner);
+    try service.setConnected(true, 1);
+    try service.setControl(true, 2);
+    var harness = try InputViewHarness.init(&service);
+    defer harness.deinit();
+    const view = harness.view;
+    for ([_][2]f32{ .{ 860, 480 }, .{ 1440, 900 } }) |size| {
+        harness.cx.setViewport(size[0], size[1]);
+        renderFrames(harness.cx, 4);
+        const card_node = findById(view.root.?, "bmc.video_card").?;
+        const card = card_node.globalRect();
+        const viewport = view.viewport.?.globalRect();
+        const image = view.image_node.?.globalRect();
+        try std.testing.expectApproxEqAbs(@as(f32, 0), card.x, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 44), card.y, 0.01);
+        try std.testing.expectEqual(card, viewport);
+        try std.testing.expectApproxEqAbs(size[0], viewport.w, 0.01);
+        try std.testing.expectApproxEqAbs(size[1] - 44, viewport.h, 0.01);
+        try std.testing.expectEqual(ui.Padding.ZERO, card_node.style.padding);
+        try std.testing.expectEqual(ui.Padding.ZERO, findById(view.root.?, "bmc.video_workspace").?.style.padding);
+        try std.testing.expectEqual(@as(f32, 11), view.root.?.style.border.radius);
+        try std.testing.expectEqual(@as(f32, 11), view.viewport.?.style.border.radius);
+        try std.testing.expectEqual(@as(f32, 11), view.image_node.?.style.border.radius);
+        try std.testing.expectEqual(@import("ui/app_theme.zig").current().surface_1, view.root.?.getBackground());
+        try std.testing.expectApproxEqAbs(@as(f32, 1.6), image.w / image.h, 0.0001);
+        try std.testing.expect(image.x >= card.x and image.y >= card.y);
+        try std.testing.expect(image.x + image.w <= card.x + card.w + 0.01);
+        try std.testing.expect(image.y + image.h <= card.y + card.h + 0.01);
+        // Rounded clipped corners and letterbox remain local, while geometry
+        // still maps the complete frame's four corners and center once.
+        for ([_][2]f32{ .{ 1, 45 }, .{ card.x + 2, card.y + 2 }, .{ viewport.x + 1, viewport.y + viewport.h / 2 } }) |point| {
+            harness.cx.handleMouseDown(point[0], point[1], .{});
+            harness.cx.handleMouseUp(point[0], point[1]);
+            try std.testing.expect(!view.captured);
+            try std.testing.expectEqual(@as(usize, 0), (try service.snapshot(service.binding())).queued);
+        }
+        var wire: InputWire = .{};
+        const scale = image.w / 1920;
+        for ([_][2]u16{ .{ 0, 0 }, .{ 1919, 0 }, .{ 0, 1199 }, .{ 1919, 1199 }, .{ 960, 600 } }) |point| {
+            const x = image.x + (@as(f32, @floatFromInt(point[0])) + 0.25) * scale;
+            const y = image.y + (@as(f32, @floatFromInt(point[1])) + 0.25) * scale;
+            const offset = wire.len;
+            harness.cx.handleMouseDown(x, y, .{});
+            harness.cx.handleMouseUp(x, y);
+            try wire.pump(&service);
+            try std.testing.expect(view.captured);
+            try wire.expectPointer(offset, point[0], point[1], 1);
+            try wire.expectPointer(offset + 6, point[0], point[1], 0);
+        }
+        harness.cx.handleKeyDown(.escape, .{ .ctrl = true, .alt = true });
+        try wire.pump(&service);
+        try std.testing.expect(!view.captured);
+    }
+}
+
+test "BMC view final coalesced mouse move schedules its own deadline and flushes without another event" {
+    var service = remote.Service.init(owner);
+    try service.setConnected(true, 1);
+    try service.setControl(true, 2);
+    var harness = try InputViewHarness.init(&service);
+    defer harness.deinit();
+    const view = harness.view;
+    harness.click(view.image_node.?);
+    var wire: InputWire = .{};
+    try wire.pump(&service);
+    try std.testing.expect(view.captured);
+    renderFrames(harness.cx, 4);
+    const image = view.image_node.?.globalRect();
+    view.last_pointer_ms = ui.frame.estimateTimeMs();
+    harness.cx.next_redraw_scheduled_at = null;
+    harness.cx.next_redraw_delay_ns = null;
+    _ = view.viewport.?.behavior.events.on_event_capture.?(.{ .mouse_move = .{ .x = image.x + image.w * 0.75, .y = image.y + image.h * 0.75 } }, view);
+    try std.testing.expect(view.pending_pointer != null);
+    const deadline = harness.cx.next_redraw_delay_ns orelse return error.PointerDeadlineMissing;
+    try std.testing.expect(deadline > 0 and deadline <= 16_666_667);
+    view.last_pointer_ms -= 17;
+    renderFrames(harness.cx, 1);
+    try std.testing.expect(view.pending_pointer == null);
+    const offset = wire.len;
+    try wire.pump(&service);
+    try wire.expectPointer(offset, 1440, 900, 0);
+}
 
 test "BMC view Cx routes physical keys Esc pointer and wheel to real RFB without duplicate text" {
     var service = remote.Service.init(owner);
@@ -1176,4 +1511,83 @@ test "BMC view Cx resize refuses old texture until the published geometry is act
     try std.testing.expectEqual(@as(u64, 2), view.capture_authority.?.frame_generation);
     try wire.expectPointer(wire.len - 12, 320, 240, 1);
     try wire.expectPointer(wire.len - 6, 320, 240, 0);
+}
+
+test "BMC FPS HUD defaults on, preserves pointer routing and toggles without changing video bounds" {
+    var service = remote.Service.init(owner);
+    try service.setConnected(true, 1);
+    try service.setControl(true, 2);
+    var h = try InputViewHarness.init(&service);
+    defer h.deinit();
+    // Match video aspect so the HUD lies over the image, not fit-mode padding.
+    h.cx.setViewport(860, 581.5);
+    renderFrames(h.cx, 3);
+    try std.testing.expect(h.view.show_fps.peek());
+    const before = h.view.viewport.?.globalRect();
+    const hud = h.view.fps_hud.?;
+    try std.testing.expect(hud.globalRect().w > 0 and hud.globalRect().h > 0);
+    // The stats overlay must not consume input intended for the remote video.
+    h.click(hud);
+    try std.testing.expect(h.view.captured);
+    var wire: InputWire = .{};
+    try wire.pump(&service);
+    try std.testing.expect(wire.len > 0);
+    h.view.open[@backingInt(vm.Menu.display)].set(true);
+    renderFrames(h.cx, 3);
+    const toggle = findById(h.cx.root.?, "bmc.display.fps").?;
+    h.click(toggle);
+    renderFrames(h.cx, 3);
+    try std.testing.expect(!h.view.show_fps.peek());
+    try std.testing.expectEqual(before, h.view.viewport.?.globalRect());
+    h.click(toggle);
+    renderFrames(h.cx, 3);
+    try std.testing.expect(h.view.show_fps.peek());
+}
+
+test "BMC Select keyboard highlight remains visible inside compact dropdown" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(860, 480);
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .padding = .{ .top = 210 } }, .{});
+    const options = [_]ui.widgets.SelectOption{
+        .{ .value = "a", .label = "First" },   .{ .value = "b", .label = "Second" },
+        .{ .value = "c", .label = "Third" },   .{ .value = "d", .label = "Fourth" },
+        .{ .value = "e", .label = "Fifth" },   .{ .value = "f", .label = "Sixth" },
+        .{ .value = "g", .label = "Seventh" }, .{ .value = "h", .label = "Last" },
+    };
+    const select = try ui.widgets.Select(.{ .options = &options, .width = 180, .open = true }).mount(scope, cx);
+    try @import("plugins/bmc_ikvm/select_surface.zig").mount(cx, select);
+    try cx.root.?.appendChild(a, select.wrapper);
+    renderFrames(cx, 8);
+    const state = ui.widgets.select.stateOf(select);
+    const viewport = select.chrome.children.items[0];
+    const content = viewport.children.items[0];
+    try std.testing.expect(viewport.globalRect().h < 8 * 32);
+    _ = state.focus_target.behavior.events.on_key_down.?(.end, .{}, state.focus_target.behavior.events.key_context);
+    renderFrames(cx, 4);
+    try std.testing.expectEqual(@as(?usize, 7), state.highlighted_index);
+    var row = state.option_nodes[7].globalRect();
+    var bounds = viewport.globalRect();
+    try std.testing.expect(row.y >= bounds.y - 0.5 and row.y + row.h <= bounds.y + bounds.h + 0.5);
+    _ = state.focus_target.behavior.events.on_key_down.?(.home, .{}, state.focus_target.behavior.events.key_context);
+    renderFrames(cx, 4);
+    try std.testing.expectEqual(@as(?usize, 0), state.highlighted_index);
+    row = state.option_nodes[0].globalRect();
+    bounds = viewport.globalRect();
+    try std.testing.expect(row.y >= bounds.y - 0.5 and row.y + row.h <= bounds.y + bounds.h + 0.5);
+    for (0..7) |_| {
+        _ = state.focus_target.behavior.events.on_key_down.?(.down, .{}, state.focus_target.behavior.events.key_context);
+        renderFrames(cx, 3);
+    }
+    try std.testing.expectEqual(@as(?usize, 7), state.highlighted_index);
+    row = state.option_nodes[7].globalRect();
+    bounds = viewport.globalRect();
+    try std.testing.expect(row.y >= bounds.y - 0.5 and row.y + row.h <= bounds.y + bounds.h + 0.5);
+    // Pointer scrolling is independent when the keyboard highlight is unchanged.
+    const scroll_ctx: *ui.widgets.scroll_area.ScrollEventCtx = @ptrCast(@alignCast(viewport.behavior.events.event_context.?));
+    ui.widgets.scroll_area.setScrollY(scroll_ctx.state, content, 0);
+    renderFrames(cx, 4);
+    try std.testing.expectEqual(@as(f32, 0), scroll_ctx.state.scroll_y);
 }

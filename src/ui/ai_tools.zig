@@ -89,6 +89,10 @@ pub const Bridge = struct {
     sequence: u64 = 0,
     approval_target: [4096]u8 = undefined,
     stopped: std.atomic.Value(bool) = .init(false),
+    // These flags outlive the entire tool loop and its queued KVM input. The
+    // per-call CancelToken can be a stack child carrying a borrowed deadline.
+    automation_cancel: ?*const std.atomic.Value(bool) = null,
+    automation_finished: std.atomic.Value(bool) = .init(true),
     owned_history: operations.Store,
     shared_history: ?*operations.Store = null,
     validation_arena: std.heap.ArenaAllocator,
@@ -100,6 +104,17 @@ pub const Bridge = struct {
 
     pub fn init(allocator: std.mem.Allocator) Bridge {
         return .{ .allocator = allocator, .owned_history = operations.Store.init(allocator), .validation_arena = .init(allocator), .capture_arena = .init(allocator) };
+    }
+    /// Main thread, after preparing a new Task and before spawning its worker.
+    /// The caller's Stop flag must live until this bridge releases its grants.
+    pub fn beginAutomationRun(self: *Bridge, cancel: *const std.atomic.Value(bool)) void {
+        self.automation_cancel = cancel;
+        self.automation_finished.store(false, .release);
+    }
+    /// Worker-safe: called when the complete tool loop returns, never between
+    /// provider rounds. Proof validation observes this without borrowing stack.
+    pub fn endAutomationRun(self: *Bridge) void {
+        self.automation_finished.store(true, .release);
     }
     pub fn operationHistory(self: *Bridge) *operations.Store {
         return self.shared_history orelse &self.owned_history;
@@ -1041,20 +1056,108 @@ pub const Bridge = struct {
         }
     }
     fn authorizeAutomation(self: *Bridge, app: *Application.ApplicationHost, child: *Child, cancel: ?*provider.CancelToken) !void {
+        const task_cancel = try self.automationCancel(cancel);
         if (child.automation_interrupted) return error.AutomationInterrupted;
         if (child.automation_steps >= 32) return error.AutomationStepBudgetExceeded;
         const now: u64 = @intCast(timeNow(self));
         if (child.automation_started_ms == 0) child.automation_started_ms = now;
         const expires_at = child.automation_started_ms +| (10 * std.time.ms_per_min);
         if (now >= expires_at) return error.AutomationLeaseExpired;
-        if (child.automation == null) child.automation = try @import("plugin_window_host.zig").Host.acquireAutomation(app, child.owner, self.policy_revision, if (cancel) |token| &token.cancelled else null, &self.stopped, expires_at);
+        if (child.automation == null) child.automation = try @import("plugin_window_host.zig").Host.acquireAutomation(app, child.owner, self.policy_revision, task_cancel, &self.automation_finished, expires_at);
         if (!child.automation.?.proof.valid()) return error.StaleInputLease;
         child.automation_steps += 1;
+    }
+    fn automationCancel(self: *Bridge, call_cancel: ?*provider.CancelToken) !*const std.atomic.Value(bool) {
+        if (self.stopped.load(.acquire) or self.automation_finished.load(.acquire)) return error.CancelledBeforeDispatch;
+        if (call_cancel) |token| if (token.isCancelled()) return error.CancelledBeforeDispatch;
+        const cancel = self.automation_cancel orelse return error.AutomationRunUnavailable;
+        if (cancel.load(.acquire)) return error.CancelledBeforeDispatch;
+        return cancel;
     }
 };
 fn pause() void {
     var duration: std.c.timespec = .{ .sec = 0, .nsec = 5 * std.time.ns_per_ms };
     _ = std.c.nanosleep(&duration, null);
+}
+
+test "automation proof outlives borrowed call cancellation and ends with the complete run" {
+    const a = std.testing.allocator;
+    const remote = @import("../plugins/bmc_ikvm/remote_input.zig");
+    const automation = @import("../plugins/bmc_ikvm/automation_input.zig");
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(871) };
+    const Output = struct {
+        bytes: usize = 0,
+        finish: ?*Bridge = null,
+        fn consume(_: *anyopaque, _: content.Input) !void {}
+        fn write(raw: *anyopaque, bytes: []const u8) !usize {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const count = if (self.finish != null) @min(bytes.len, 3) else bytes.len;
+            self.bytes += count;
+            if (self.finish) |bridge| {
+                bridge.endAutomationRun();
+                self.finish = null;
+            }
+            return count;
+        }
+        fn abort(_: *anyopaque) void {}
+    };
+    for ([_]enum { queued, sent, partial, stop }{ .queued, .sent, .partial, .stop }) |mode| {
+        var bridge = Bridge.init(a);
+        defer bridge.deinit();
+        var stop: provider.CancelToken = .{};
+        bridge.beginAutomationRun(&stop.cancelled);
+        var output: Output = .{};
+        var context: content.Context = .{ .owner = owner, .window_id = @fromBackingInt(1), .window = undefined, .consumer = .{ .context = &output, .consume = Output.consume } };
+        defer context.close();
+        context.setFocus(true, false);
+        try context.setAuthorization(true, 1);
+        // A short-lived token emulates Manager.runWithTiming's stack child.
+        // Destroy it before the worker/UI next inspect the retained proof.
+        const borrowed = try a.create(provider.CancelToken);
+        borrowed.* = .{};
+        const durable = try bridge.automationCancel(borrowed);
+        try std.testing.expect(durable == &stop.cancelled);
+        const grant = try context.acquireAutomation(1, durable, &bridge.automation_finished, std.math.maxInt(u64));
+        a.destroy(borrowed);
+        context.expireAutomation();
+        try std.testing.expect(grant.proof.valid());
+
+        var input = remote.Service.init(owner);
+        try input.setConnected(true, 1);
+        try input.setControl(true, 1);
+        const snapshot = try input.snapshot(input.binding());
+        _ = try input.submitAutomation(input.binding(), .{ .owner = owner, .binding_generation = owner.generation, .transport_generation = snapshot.transport_generation, .control_generation = snapshot.control_generation, .input_epoch = snapshot.input_epoch, .proof = grant.proof }, .{ .operation_id = 1, .action = .{ .key = 'a' } });
+        const wire: remote.Wire = .{ .context = &output, .generation = 1, .write = Output.write, .abort = Output.abort };
+        if (mode == .sent) _ = try input.pump(wire);
+        // A provider round alone does not end this lifetime; the complete run
+        // does, even after its child cancellation storage has disappeared.
+        try std.testing.expect(grant.proof.valid());
+        if (mode == .partial) {
+            output.finish = &bridge;
+            try std.testing.expectError(error.InputWriteInterrupted, input.pump(wire));
+        } else if (mode == .stop) stop.cancel() else bridge.endAutomationRun();
+        try std.testing.expect(!grant.proof.valid());
+        context.expireAutomation();
+        _ = try input.pump(wire);
+        try std.testing.expectEqual(if (mode == .sent) automation.Status.sent else if (mode == .partial) automation.Status.outcome_unknown else automation.Status.cancelled_unsent, (try input.automationStatus(input.binding(), 1)).status);
+        try std.testing.expectEqual(@as(usize, if (mode == .sent) 16 else if (mode == .partial) 3 else 0), output.bytes);
+    }
+}
+
+test "automation cancellation honors stable Stop and borrowed source before dispatch" {
+    var bridge = Bridge.init(std.testing.allocator);
+    defer bridge.deinit();
+    var stop: provider.CancelToken = .{};
+    bridge.beginAutomationRun(&stop.cancelled);
+    const Source = struct {
+        fn cancelled(_: *const anyopaque) bool {
+            return true;
+        }
+    };
+    var borrowed: provider.CancelToken = .{ .source = .{ .context = &stop, .poll = Source.cancelled } };
+    try std.testing.expectError(error.CancelledBeforeDispatch, bridge.automationCancel(&borrowed));
+    stop.cancel();
+    try std.testing.expectError(error.CancelledBeforeDispatch, bridge.automationCancel(null));
 }
 
 test "host metadata remains available for opening and failed sessions without terminal targets" {

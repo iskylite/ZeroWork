@@ -1,7 +1,7 @@
 //! Non-UI controller. Creation freezes configuration/route on their owner;
 //! detached protocol worker owns Driver IO, Pipeline and cleanup. poll/cancel
 //! never join, resolve credentials or execute native IO. The production plugin
-//! supplies the evidence-gated native backend and exposes management read-only.
+//! supplies the evidence-gated native backend and operation-scoped approvals.
 const std = @import("std");
 const builtin = @import("builtin");
 pub const model = @import("model.zig");
@@ -23,6 +23,21 @@ pub const RouteState = enum { frozen, connecting, connected, failed, closed };
 pub const VideoState = enum { idle, authenticating, negotiating, awaiting_frame, streaming, failed, closed };
 pub const ManagementState = enum { idle, authenticating, available, unavailable, closed };
 pub const Cleanup = enum { not_started, awaiting, unknown, released };
+/// Worker counters only. Frame publication is a client decode/copy receipt;
+/// these values do not claim renderer FPS or BMC-to-display input latency.
+pub const Performance = struct {
+    read_calls: u64 = 0,
+    read_bytes: u64 = 0,
+    read_would_block: u64 = 0,
+    written_bytes: u64 = 0,
+    idle_waits: u64 = 0,
+    idle_wait_ms: u64 = 0,
+    active_yields: u64 = 0,
+    feed_ns: u64 = 0,
+    max_feed_ns: u64 = 0,
+    last_read_ns: u64 = 0,
+    last_published_ns: u64 = 0,
+};
 pub const Snapshot = struct {
     owner: svc.identity.SessionHandle,
     operation: svc.OperationKey,
@@ -39,6 +54,7 @@ pub const Snapshot = struct {
     failure: ?anyerror = null,
     worker_exited: bool = false,
     progress: progress.Snapshot = .{},
+    performance: Performance = .{},
 };
 /// begin performs route/TLS/auth/validated WS upgrade on the worker. It must
 /// honor cancel while connecting. Credentials belong to this backend and may
@@ -86,6 +102,19 @@ pub const Controller = struct {
     control_command: ?QueuedControl = null,
 
     pub fn create(a: std.mem.Allocator, owner: svc.identity.SessionHandle, operation: svc.OperationKey, payload: model.Payload, configs: ?resolver.Resolver, budget: *budgets.Budget, journal: *ledger.Journal, facade: ?actions.Facade) !*Controller {
+        return createWithPolicy(a, owner, operation, payload, configs, budget, journal, facade, .user_approved);
+    }
+    /// Legacy protocol fixtures supply their own preauthorized capabilities.
+    /// Production runtimes always use createWithPolicy and exact user approval.
+    pub fn createForTest(a: std.mem.Allocator, owner: svc.identity.SessionHandle, operation: svc.OperationKey, payload: model.Payload, configs: ?resolver.Resolver, budget: *budgets.Budget, journal: *ledger.Journal, facade: ?actions.Facade) !*Controller {
+        if (!builtin.is_test) return error.TestDriverForbidden;
+        if (payload.display.read_only_requested) return error.ReadOnlyRequested;
+        const self = try createWithPolicy(a, owner, operation, payload, configs, budget, journal, facade, .user_approved);
+        self.manager.fixture_preauthorized = true;
+        self.manager.engine.fixture_preauthorized = true;
+        return self;
+    }
+    pub fn createWithPolicy(a: std.mem.Allocator, owner: svc.identity.SessionHandle, operation: svc.OperationKey, payload: model.Payload, configs: ?resolver.Resolver, budget: *budgets.Budget, journal: *ledger.Journal, facade: ?actions.Facade, policy: svc.ManagementPolicy) !*Controller {
         try model.validate(payload);
         if (operation.owner != .session or !operation.owner.session.eql(owner) or operation.operation_id == 0) return error.InvalidOperationOwner;
         var config = try svc.Owned(model.Payload).init(a, payload);
@@ -103,7 +132,7 @@ pub const Controller = struct {
         var remote_input = input.Service.init(owner);
         self.* = .{ .allocator = a, .config = config, .plan = plan, .owner = owner, .operation = operation, .framebuffer = frames.Service.init(a, owner, budget), .remote_input = remote_input, .manager = undefined, .creator_thread = std.Thread.getCurrentId(), .state = .{ .owner = owner, .operation = operation, .input = try remote_input.snapshot(remote_input.binding()) } };
         self.connection_progress = progress.Tracker.init(@intCast(hops.len));
-        try self.manager.init(a, owner, self.config.value.endpoint, journal, facade);
+        try self.manager.initWithPolicy(a, owner, self.config.value.endpoint, journal, facade, if (payload.display.read_only_requested) .read_only else policy);
         return self;
     }
     pub fn start(self: *Controller, identity: profile.Identity, driver: Driver) !void {
@@ -153,6 +182,7 @@ pub const Controller = struct {
     }
     pub fn cancel(self: *Controller) void {
         self.cancel_requested.store(true, .release);
+        self.manager.revoke();
         // Revoke submission immediately, even while begin/read/cleanup is
         // blocked. close retains actual held state and priority releases; an
         // unavailable wire must still leave remote_unconfirmed set on stop.
@@ -289,16 +319,36 @@ pub const Controller = struct {
         self.state.management = if (authenticated.web_authenticated and (if (driver.management_available) |available| available(driver.context) else true)) .available else .unavailable;
         self.unlock();
         var bytes: [16 * 1024]u8 = undefined;
+        var performance: Performance = .{};
+        var active_turns: usize = 0;
+        const wire: video.Wire = .{ .context = driver.context, .write = driver.write, .abort = driver.abort };
         while (!self.cancel_requested.load(.acquire)) {
+            const written_before = self.pipeline.?.written_bytes;
+            // Input need not wait behind the next video record or management
+            // read. Each feed remains bounded to one 16KiB transport chunk.
+            try self.pipeline.?.pump(wire);
             const now = driver.now_ns(driver.context);
+            performance.read_calls += 1;
             const read_count: ?usize = driver.read(driver.context, &bytes) catch |err| switch (err) {
-                error.WouldBlock => null,
+                error.WouldBlock => blk: {
+                    performance.read_would_block += 1;
+                    break :blk null;
+                },
                 else => return err,
             };
             if (read_count) |n| {
                 if (n == 0) return error.VideoClosed;
                 if (n > bytes.len) return error.InvalidVideoRead;
+                performance.read_bytes += n;
+                performance.last_read_ns = now;
+                const published_before = self.pipeline.?.published_frames;
+                const feed_start = driver.now_ns(driver.context);
                 _ = try self.pipeline.?.feed(bytes[0..n], now);
+                const feed_end = driver.now_ns(driver.context);
+                const feed_ns = feed_end -| feed_start;
+                performance.feed_ns += feed_ns;
+                performance.max_feed_ns = @max(performance.max_feed_ns, feed_ns);
+                if (self.pipeline.?.published_frames != published_before) performance.last_published_ns = feed_end;
             }
             self.pipeline.?.expireControlRequest(now);
             self.lock();
@@ -315,7 +365,7 @@ pub const Controller = struct {
                 },
                 .refresh => try self.pipeline.?.requestFullRefresh(),
             };
-            try self.pipeline.?.pump(.{ .context = driver.context, .write = driver.write, .abort = driver.abort });
+            try self.pipeline.?.pump(wire);
             if (driver.management_io) |io| {
                 // Adapter retains the HTTP slot after logical cancellation:
                 // null keeps draining it, and only its exact late completion is
@@ -323,12 +373,24 @@ pub const Controller = struct {
                 const outbound = try self.manager.next(now / std.time.ns_per_ms);
                 if (try io(driver.context, outbound)) |completion| try self.manager.complete(completion, now / std.time.ns_per_ms);
             } else try self.manager.tick(now / std.time.ns_per_ms);
+            performance.written_bytes = self.pipeline.?.written_bytes;
+            const progressed = read_count != null or performance.written_bytes != written_before;
+            const yield_active = progressed and active_turns + 1 == 16;
+            if (progressed) {
+                active_turns = if (yield_active) 0 else active_turns + 1;
+                if (yield_active) performance.active_yields += 1;
+            } else {
+                active_turns = 0;
+                performance.idle_waits += 1;
+                performance.idle_wait_ms += 2;
+            }
             self.lock();
             if (driver.management_available) |available| self.state.management = if (available(driver.context)) .available else .unavailable;
             self.state.published_frames = self.pipeline.?.published_frames;
             self.state.control_request = self.pipeline.?.control_request;
             self.state.control = self.pipeline.?.decoder.control_state;
             self.state.rfb_ready = decoderReady(self.pipeline.?.decoder.phase);
+            self.state.performance = performance;
             self.state.video = if (self.state.published_frames != 0) .streaming else if (self.state.rfb_ready) .awaiting_frame else .negotiating;
             const connection_stage: progress.Stage = switch (self.state.video) {
                 .streaming => .streaming,
@@ -337,7 +399,10 @@ pub const Controller = struct {
             };
             self.unlock();
             self.connection_progress.setStage(connection_stage);
-            driver.wait(driver.context, 10);
+            // Drain ready TLS records without a sleep per record. Yield after
+            // 256KiB of productive turns; only a fully idle turn backs off.
+            if (yield_active) std.Thread.yield() catch {};
+            if (!progressed) driver.wait(driver.context, 2);
         }
     }
     fn failed(self: *Controller, err: anyerror) void {

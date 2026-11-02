@@ -159,6 +159,22 @@ pub const SessionTab = struct {
         return .{ .session_id = self.id, .generation = self.generation };
     }
 
+    /// Frozen source identity survives deletion of the saved asset. Generic
+    /// plugin tabs carry it directly rather than through a legacy snapshot.
+    pub fn sourceConnectionId(self: *const SessionTab) ?identity.ConnectionId {
+        const id: identity.ConnectionId = if (self.host_snapshot) |snapshot| snapshot.value.connection_id else if (self.plugin_protocol_id.len != 0) @fromBackingInt(self.host_id) else return null;
+        return if (@backingInt(id) == 0) null else id;
+    }
+
+    /// Only the tab's frozen remote target can seed a new saved connection.
+    /// Sidebar selection and registry edits must never retarget this draft.
+    pub fn temporaryHost(self: *const SessionTab) ?hosts_mod.HostConfig {
+        if (self.local or self.closing or self.content_owner != .session) return null;
+        const snapshot = self.host_snapshot orelse return null;
+        if (@backingInt(snapshot.value.connection_id) != 0 or !snapshot.value.isLegacy()) return null;
+        return snapshot.value;
+    }
+
     pub fn titleSlice(self: *const SessionTab) []const u8 {
         return self.title[0..self.title_len];
     }
@@ -3867,6 +3883,34 @@ pub const Workspace = struct {
         self.cx.requestRedraw();
     }
 
+    /// Saved plugin tabs intentionally have no legacy HostSnapshot. Resolve
+    /// their asset by its stable identity, as for terminal/file snapshots.
+    pub fn savedConnectionForTab(self: *Workspace, index: usize) ?identity.AssetOwner {
+        if (index >= self.tabs.items.len) return null;
+        const id = self.tabs.items[index].sourceConnectionId() orelse return null;
+        const asset_index = self.registry.indexOf(id) orelse return null;
+        return self.registry.hosts[asset_index].owner();
+    }
+
+    pub const ConnectionTabs = struct { count: usize = 0, first_index: ?usize = null };
+    pub fn connectionTabs(self: *const Workspace, id: identity.ConnectionId) ConnectionTabs {
+        var result: ConnectionTabs = .{};
+        if (@backingInt(id) == 0) return result;
+        for (self.tabs.items, 0..) |tab, index| if (tab.sourceConnectionId()) |source| {
+            if (source != id) continue;
+            result.count += 1;
+            if (result.first_index == null) result.first_index = index;
+        };
+        return result;
+    }
+
+    /// Opaque plugin payloads do not have legacy user/host/port fields. Use
+    /// their public name instead of inventing an SSH endpoint such as @:22.
+    pub fn assetActionEndpoint(self: *const Workspace, allocator: std.mem.Allocator, host: hosts_mod.HostConfig) ![]u8 {
+        if (host.isLegacy()) return std.fmt.allocPrint(allocator, "{s}@{s}:{d}", .{ host.user, host.host, host.port });
+        return allocator.dupe(u8, if (self.plugins.find(host.protocolId())) |manifest| manifest.display_name else host.protocolId());
+    }
+
     pub fn createPluginSession(self: *Workspace, owner: identity.SessionHandle, value: envelopes.Envelope, renderer: plugin_ui.RendererDefinition) !SessionId {
         if (self.shutting_down) return error.WorkspaceClosed;
         const mount_renderer = renderer.mount orelse return error.ContentRendererUnavailable;
@@ -4988,6 +5032,42 @@ test "recent tab input leaves plain Tab and higher priority input untouched" {
     tab.terminal.?.local_editor.active = true;
     try std.testing.expectEqual(ui.events.EventResult.ignored, workspace.handleTabKey(.tab, control));
     try std.testing.expect(workspace.model.recent_cursor == null);
+}
+
+test "temporary connection source uses the frozen remote tab and excludes saved local or closed tabs" {
+    var endpoint = "frozen.example".*;
+    var tab: SessionTab = .{
+        .id = 91,
+        .tab_id = @fromBackingInt(7),
+        .content_owner = .{ .session = .{ .session_id = @fromBackingInt(91) } },
+        .host_id = 0,
+        .host_index = removed_host_index,
+        .host_snapshot = try HostSnapshot.init(std.testing.allocator, .{ .name = "temporary target", .host = &endpoint, .port = 2222, .user = "operator" }),
+        .root = undefined,
+    };
+    defer tab.host_snapshot.?.deinit();
+    const owner = tab.content_owner;
+    @memset(&endpoint, 'x');
+    try std.testing.expectEqualStrings("frozen.example", tab.temporaryHost().?.host);
+    try std.testing.expectEqual(@as(u16, 2222), tab.temporaryHost().?.port);
+    tab.host_snapshot.?.value.protocol = .sftp;
+    try std.testing.expectEqual(hosts_mod.Protocol.sftp, tab.temporaryHost().?.protocol);
+    try std.testing.expect(tab.content_owner.eql(owner));
+    tab.host_snapshot.?.value.connection_id = @fromBackingInt(41);
+    try std.testing.expect(tab.temporaryHost() == null);
+    tab.host_snapshot.?.value.connection_id = @fromBackingInt(0);
+    tab.local = true;
+    try std.testing.expect(tab.temporaryHost() == null);
+    tab.local = false;
+    tab.closing = true;
+    try std.testing.expect(tab.temporaryHost() == null);
+    tab.closing = false;
+    tab.content_owner = .{ .history = @fromBackingInt(3) };
+    try std.testing.expect(tab.temporaryHost() == null);
+    tab.content_owner = owner;
+    var without_snapshot = tab;
+    without_snapshot.host_snapshot = null;
+    try std.testing.expect(without_snapshot.temporaryHost() == null);
 }
 
 test "first tab resizes an already laid out empty title strip" {
@@ -6343,9 +6423,64 @@ test "registered nonterminal renderer mounts into the existing tab without a leg
     try std.testing.expect(tab.content_owner.eql(.{ .session = owner }));
     try std.testing.expectEqualStrings("Canvas owner", workspace.model.tabs.items[0].details);
     try std.testing.expectEqual(@as(usize, 1), workspace.model.tabs.items.len);
+    try std.testing.expect(workspace.savedConnectionForTab(0) == null);
+    const saved = try workspace.registry.add(.{ .name = "Saved canvas", .host = "", .user = "", .protocol_id = "example.canvas", .plugin_payload = "{}" });
+    tab.host_id = @backingInt(saved.id);
+    try std.testing.expectEqual(saved, workspace.savedConnectionForTab(0).?);
+    tab.host_id = 0;
+    try std.testing.expect(workspace.savedConnectionForTab(0) == null);
+    try std.testing.expect(workspace.savedConnectionForTab(99) == null);
     _ = cx.render();
     workspace.forceCloseTab(0);
     try std.testing.expectEqual(@as(usize, 0), workspace.model.tabs.items.len);
+}
+
+test "asset action projections retain plugin sessions after deletion without inventing SSH endpoints" {
+    const a = std.testing.allocator;
+    var workspace: Workspace = undefined;
+    workspace.registry = .{ .arena = .init(a), .hosts = &.{} };
+    defer workspace.registry.deinit();
+    workspace.plugins = .{ .published = .{ .entries = &.{.{ .id = "bmc_ikvm", .display_name = "BMC · iKVM", .workspace_kind = "bmc_ikvm", .content_renderer = "bmc_ikvm" }}, .renderers = &.{} } };
+    workspace.tabs = .empty;
+    defer workspace.tabs.deinit(a);
+    const saved = try workspace.registry.add(.{ .name = "Saved KVM", .host = "", .user = "", .protocol_id = "bmc_ikvm", .plugin_payload = "{}" });
+    var tab: SessionTab = .{
+        .id = 17,
+        .tab_id = @fromBackingInt(17),
+        .content_owner = .{ .session = .{ .session_id = @fromBackingInt(17) } },
+        .host_id = @backingInt(saved.id),
+        .host_index = 0,
+        .host_snapshot = null,
+        .root = undefined,
+        .plugin_protocol_id = "bmc_ikvm",
+    };
+    try workspace.tabs.append(a, &tab);
+    const expected: Workspace.ConnectionTabs = .{ .count = 1, .first_index = 0 };
+    try std.testing.expectEqual(saved.id, tab.sourceConnectionId().?);
+    try std.testing.expectEqualDeep(expected, workspace.connectionTabs(saved.id));
+    try std.testing.expectEqual(saved, workspace.savedConnectionForTab(0).?);
+    const endpoint = try workspace.assetActionEndpoint(a, try workspace.registry.get(saved));
+    defer a.free(endpoint);
+    try std.testing.expectEqualStrings("BMC · iKVM", endpoint);
+
+    // The asset action removes only configuration; the existing frozen tab
+    // must remain countable and selectable from its success panel.
+    try workspace.registry.remove(saved);
+    try std.testing.expect(workspace.savedConnectionForTab(0) == null);
+    try std.testing.expectEqualDeep(expected, workspace.connectionTabs(saved.id));
+    tab.host_id = 0;
+    try std.testing.expect(tab.sourceConnectionId() == null);
+    try std.testing.expectEqualDeep(Workspace.ConnectionTabs{}, workspace.connectionTabs(saved.id));
+    try std.testing.expectEqualDeep(Workspace.ConnectionTabs{}, workspace.connectionTabs(@fromBackingInt(0)));
+
+    var legacy: hosts_mod.HostConfig = .{ .name = "SSH", .host = "legacy.example", .port = 2222, .user = "operator" };
+    const ssh_endpoint = try workspace.assetActionEndpoint(a, legacy);
+    defer a.free(ssh_endpoint);
+    try std.testing.expectEqualStrings("operator@legacy.example:2222", ssh_endpoint);
+    legacy.protocol_id = "future.plugin";
+    const future_endpoint = try workspace.assetActionEndpoint(a, legacy);
+    defer a.free(future_endpoint);
+    try std.testing.expectEqualStrings("future.plugin", future_endpoint);
 }
 
 test "workspace creation without its registered session host never starts a native connection" {

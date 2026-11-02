@@ -1,6 +1,7 @@
 //! Single worker owns Engine. Typed callers enqueue owned requests; they never
 //! execute journal persistence or network IO. Locks cover mailbox/cache copies.
 const std = @import("std");
+const builtin = @import("builtin");
 pub const svc = @import("services.zig");
 pub const power = @import("protocol/power.zig");
 const journal = @import("management_journal.zig");
@@ -22,6 +23,9 @@ pub const Adapter = struct {
     cached_power: svc.OwnedPowerSnapshot,
     cached_boot: svc.OwnedBootSnapshot,
     pending: ?Pending = null,
+    pending_approval_hash: ?[32]u8 = null,
+    pending_query: ?svc.OperationKey = null,
+    active_query: ?svc.OperationKey = null,
     /// Owned by the worker until the matching HTTP transaction has drained.
     /// Cancelling Engine observation does not retire bytes on the HTTP stream.
     in_flight: ?InFlight = null,
@@ -29,7 +33,10 @@ pub const Adapter = struct {
     mutex: std.atomic.Value(bool) = .init(false),
     authenticated: bool = false,
     closed: bool = false,
+    revoked: bool = false,
     now_ms: u64 = 0,
+    policy: svc.ManagementPolicy = .read_only,
+    fixture_preauthorized: bool = false,
 
     /// Call at the final address; endpoint text and journal outlive Adapter.
     pub fn init(self: *Adapter, a: std.mem.Allocator, owner: svc.identity.SessionHandle, endpoint: model.Endpoint, ledger: *journal.Journal, facade: ?actions.Facade) !void {
@@ -44,6 +51,17 @@ pub const Adapter = struct {
         const owned_origin: redfish.Origin = .{ .authority = try a.dupe(u8, origin.authority) };
         errdefer a.free(owned_origin.authority);
         self.* = .{ .allocator = a, .owner = owner, .endpoint = endpoint, .facade = facade, .engine = try power.Engine.init(a, owner, owned_origin, ledger, if (facade != null) .{ .context = self, .acquire = acquire, .revalidate = revalidate, .release = release } else null), .cached_power = cached_power, .cached_boot = cached_boot };
+    }
+    pub fn initWithPolicy(self: *Adapter, a: std.mem.Allocator, owner: svc.identity.SessionHandle, endpoint: model.Endpoint, ledger: *journal.Journal, facade: ?actions.Facade, policy: svc.ManagementPolicy) !void {
+        try self.init(a, owner, endpoint, ledger, facade);
+        self.policy = policy;
+        self.engine.policy = policy;
+    }
+    pub fn initForTest(self: *Adapter, a: std.mem.Allocator, owner: svc.identity.SessionHandle, endpoint: model.Endpoint, ledger: *journal.Journal, facade: ?actions.Facade) !void {
+        if (!builtin.is_test) return error.TestDriverForbidden;
+        try self.initWithPolicy(a, owner, endpoint, ledger, facade, .user_approved);
+        self.fixture_preauthorized = true;
+        self.engine.fixture_preauthorized = true;
     }
     pub fn deinit(self: *Adapter) void {
         self.close();
@@ -62,17 +80,34 @@ pub const Adapter = struct {
             return;
         }
         self.closed = true;
+        self.revoked = true;
         self.authenticated = false;
         self.unlock();
         self.tick(self.now_ms) catch {};
         if (self.engine.active) |active| _ = self.engine.cancel(active.execution.operation);
         self.publishResults() catch {};
     }
+    /// Main-thread revocation barrier. Engine/network ownership stays on the
+    /// worker; no late confirmation can enter its queue after cancel/close.
+    pub fn revoke(self: *Adapter) void {
+        self.lock();
+        defer self.unlock();
+        self.revoked = true;
+        self.authenticated = false;
+    }
     pub fn setSnapshots(self: *Adapter, p: svc.PowerSnapshot, b: svc.BootSnapshot, authenticated: bool) !void {
         var pc = try svc.OwnedPowerSnapshot.init(self.allocator, p);
         errdefer pc.deinit();
         var bc = try svc.OwnedBootSnapshot.init(self.allocator, b);
         errdefer bc.deinit();
+        if (!self.fixture_preauthorized) {
+            pc.value.capability.write_granted = false;
+            bc.value.capability.write_granted = false;
+            if (self.policy == .read_only) {
+                pc.value.capability.write_requestable = false;
+                bc.value.capability.write_requestable = false;
+            }
+        }
         try self.engine.setSnapshots(pc.value, bc.value);
         self.swapSnapshots(pc, bc, authenticated);
     }
@@ -82,7 +117,7 @@ pub const Adapter = struct {
         const oldb = self.cached_boot;
         self.cached_power = pc;
         self.cached_boot = bc;
-        self.authenticated = authenticated and !self.closed;
+        self.authenticated = authenticated and !self.closed and !self.revoked;
         self.unlock();
         var mutable_p = oldp;
         mutable_p.deinit();
@@ -111,22 +146,37 @@ pub const Adapter = struct {
         // and the HTTP slot until its matching response or transport failure.
         const take_pending = self.in_flight == null or closed or pending_cancelled;
         const pending = if (take_pending) self.pending else null;
-        if (take_pending) self.pending = null;
+        const approval_hash = if (take_pending) self.pending_approval_hash else null;
+        if (take_pending) {
+            self.pending = null;
+            self.pending_approval_hash = null;
+        }
+        const queued_query = if (self.in_flight == null and pending == null) self.pending_query else null;
+        if (queued_query) |key| self.active_query = key;
+        if (queued_query != null or closed) self.pending_query = null;
         self.unlock();
+        // A taken request is worker-owned even if publishing the preceding
+        // result fails before this request reaches the Engine.
+        defer if (pending) |value| {
+            var request = value;
+            switch (request) {
+                .power => |*v| v.deinit(),
+                .boot => |*v| v.deinit(),
+            }
+        };
         for (cancellations) |key| if (key) |value| {
             _ = self.engine.cancel(value);
         };
-        try self.publishResults();
+        // Do not republish the old unknown result between taking a query and
+        // installing its new Engine observation; the mailbox remains occupied.
+        if (queued_query == null) try self.publishResults();
         if (pending) |value| {
-            var request = value;
-            defer switch (request) {
-                .power => |*v| v.deinit(),
-                .boot => |*v| v.deinit(),
-            };
+            const request = value;
             const key = pendingKey(request);
             if (closed or pending_cancelled) {
                 try self.store(.{ .operation = key, .phase = .cancelled_unsent, .reason = .cancelled });
             } else {
+                if (approval_hash) |fingerprint| try self.engine.approveUserRequest(fingerprint);
                 const accepted: ?svc.OperationKey = switch (request) {
                     .power => |v| self.engine.requestPower(v.value, now_ms),
                     .boot => |v| self.engine.applyBoot(v.value, now_ms),
@@ -137,6 +187,7 @@ pub const Adapter = struct {
                 _ = accepted;
             }
         }
+        if (!closed) if (queued_query) |key| try self.engine.query(key, now_ms);
         try self.publishResults();
     }
     fn pendingKey(value: Pending) svc.OperationKey {
@@ -148,12 +199,13 @@ pub const Adapter = struct {
     pub fn next(self: *Adapter, now_ms: u64) !?power.Outbound {
         try self.tick(now_ms);
         self.lock();
-        const cap = self.cached_power.value.capability;
+        const cap = if (self.engine.active != null and self.engine.active.?.kind == .boot) self.cached_boot.value.capability else self.cached_power.value.capability;
         const authenticated = self.authenticated;
         const closed = self.closed;
         self.unlock();
         if (closed) return null;
-        const gate: power.Gate = .{ .owner = self.owner, .binding_generation = cap.binding_generation, .capability_revision = cap.revision, .grant_revision = cap.grant_revision, .authenticated = authenticated, .write_granted = cap.write_granted };
+        const approved = if (self.engine.active) |active| active.user_approved else false;
+        const gate: power.Gate = .{ .owner = self.owner, .binding_generation = cap.binding_generation, .capability_revision = cap.revision, .grant_revision = cap.grant_revision, .authenticated = authenticated, .write_granted = self.policy == .user_approved and (approved or (self.fixture_preauthorized and cap.write_granted)), .read_granted = authenticated };
         if (self.in_flight) |flight| {
             const active = self.engine.active orelse return error.InvalidManagementTransaction;
             if (!active.execution.operation.eql(flight.operation) or (!active.waiting and !active.result.terminal())) return error.InvalidManagementTransaction;
@@ -202,6 +254,9 @@ pub const Adapter = struct {
         for (&self.records) |*slot| if (slot.*) |*record| if (record.key.eql(result.operation)) {
             var old = record.result;
             record.result = copy;
+            if (result.terminal()) if (self.active_query) |key| if (key.eql(result.operation)) {
+                self.active_query = null;
+            };
             old.deinit();
             return;
         };
@@ -216,7 +271,7 @@ pub const Adapter = struct {
     fn validate(self: *Adapter, call: svc.Call) !void {
         if (!self.owner.eql(call.owner) or call.binding_generation != self.cached_power.value.capability.binding_generation) return error.StaleBinding;
     }
-    fn enqueue(self: *Adapter, pending: Pending) svc.RequestResult {
+    fn enqueue(self: *Adapter, pending: Pending, user_approved: bool) svc.RequestResult {
         self.lock();
         defer self.unlock();
         const execution = switch (pending) {
@@ -230,28 +285,30 @@ pub const Adapter = struct {
             .boot => |*v| v.deinit(),
         };
         self.validate(execution.call) catch return .{ .rejected = .stale_binding };
-        if (execution.operation.owner != .session or !execution.operation.owner.session.eql(self.owner) or execution.operation.operation_id == 0 or std.mem.allEqual(u8, &execution.nonce, 0) or !std.mem.eql(u8, execution.system_uri, self.cached_power.value.system_uri)) return .{ .rejected = .stale_binding };
-        const cap = self.cached_power.value.capability;
+        const system_uri = switch (pending) {
+            .power => self.cached_power.value.system_uri,
+            .boot => self.cached_boot.value.system_uri,
+        };
+        const system_identity = switch (pending) {
+            .power => self.cached_power.value.system_identity,
+            .boot => self.cached_boot.value.system_identity,
+        };
+        if (execution.operation.owner != .session or !execution.operation.owner.session.eql(self.owner) or execution.operation.operation_id == 0 or std.mem.allEqual(u8, &execution.nonce, 0) or !std.mem.eql(u8, execution.system_uri, system_uri)) return .{ .rejected = .stale_binding };
+        const cap = switch (pending) {
+            .power => self.cached_power.value.capability,
+            .boot => self.cached_boot.value.capability,
+        };
         if (self.closed or !self.authenticated) return .{ .rejected = .unavailable };
-        if (!cap.write_granted) return .{ .rejected = .permission_denied };
+        if (self.policy == .read_only or (!self.fixture_preauthorized and !user_approved)) return .{ .rejected = .permission_denied };
+        if (if (self.fixture_preauthorized) !cap.write_granted else !cap.write_requestable) return .{ .rejected = .permission_denied };
         if (!cap.system_mapping_verified) return .{ .rejected = .mapping_unverified };
         if (execution.capability_revision != cap.revision or execution.grant_revision != cap.grant_revision) return .{ .rejected = .stale_capability };
-        const encoded = switch (pending) {
-            .power => |v| std.json.Stringify.valueAlloc(self.allocator, v.value, .{}),
-            .boot => |v| std.json.Stringify.valueAlloc(self.allocator, v.value, .{}),
-        } catch return .{ .rejected = .unavailable };
-        defer self.allocator.free(encoded);
-        // This schema serialization includes typed parameters, complete nonce,
-        // operation, revisions, baseline and exact verified System target. Salt
-        // it with canonical authority + discovered identity + operation kind.
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        hash.update(if (pending == .power) "power\x00" else "boot\x00");
-        hash.update(self.engine.origin.authority);
-        hash.update("\x00");
-        hash.update(self.cached_power.value.system_identity);
-        hash.update("\x00");
-        hash.update(encoded);
-        const fingerprint = hash.finalResult();
+        if (!self.fixture_preauthorized and (cap.secondary_auth == .unknown or !cap.secondary_auth_evidence.permitsWrite())) return .{ .rejected = .secondary_auth_unknown };
+        if (!self.fixture_preauthorized and cap.secondary_auth == .required) return .{ .rejected = .secondary_auth_required };
+        const fingerprint = svc.requestFingerprint(self.allocator, switch (pending) {
+            .power => |v| .{ .power = v.value },
+            .boot => |v| .{ .boot = v.value },
+        }, self.engine.origin.authority, system_identity) catch return .{ .rejected = .unavailable };
         for (self.records) |slot| if (slot) |record| if (record.key.eql(execution.operation) or std.mem.eql(u8, &record.nonce, &execution.nonce)) {
             if (!record.key.eql(execution.operation) or !std.mem.eql(u8, &record.nonce, &execution.nonce) or !std.mem.eql(u8, &record.request_sha256, &fingerprint)) return .{ .rejected = .conflict };
             return .{ .accepted = execution.operation };
@@ -261,6 +318,7 @@ pub const Adapter = struct {
             const result = svc.Owned(svc.Result).init(self.allocator, .{ .operation = execution.operation, .phase = .queued }) catch return .{ .rejected = .unavailable };
             slot.* = .{ .key = execution.operation, .nonce = execution.nonce, .request_sha256 = fingerprint, .result = result };
             self.pending = pending;
+            self.pending_approval_hash = if (user_approved) fingerprint else null;
             transferred = true;
             return .{ .accepted = execution.operation };
         };
@@ -285,11 +343,33 @@ pub const Adapter = struct {
     }
     fn requestPower(raw: *anyopaque, request: svc.PowerExecutionRequest) svc.RequestResult {
         const self = from(raw);
-        return self.enqueue(.{ .power = svc.Owned(svc.PowerExecutionRequest).init(self.allocator, request) catch return .{ .rejected = .unavailable } });
+        return self.enqueue(.{ .power = svc.Owned(svc.PowerExecutionRequest).init(self.allocator, request) catch return .{ .rejected = .unavailable } }, false);
     }
     fn applyBoot(raw: *anyopaque, request: svc.BootExecutionPatch) svc.RequestResult {
         const self = from(raw);
-        return self.enqueue(.{ .boot = svc.Owned(svc.BootExecutionPatch).init(self.allocator, request) catch return .{ .rejected = .unavailable } });
+        return self.enqueue(.{ .boot = svc.Owned(svc.BootExecutionPatch).init(self.allocator, request) catch return .{ .rejected = .unavailable } }, false);
+    }
+    /// Called only after Runtime matches the answer to its frozen challenge.
+    /// These methods copy the request into the same bounded worker mailbox.
+    pub fn approve(self: *Adapter, request: svc.ManagementRequest) svc.RequestResult {
+        return switch (request) {
+            .power => |value| self.enqueue(.{ .power = svc.Owned(svc.PowerExecutionRequest).init(self.allocator, value) catch return .{ .rejected = .unavailable } }, true),
+            .boot => |value| self.enqueue(.{ .boot = svc.Owned(svc.BootExecutionPatch).init(self.allocator, value) catch return .{ .rejected = .unavailable } }, true),
+        };
+    }
+    fn query(raw: *anyopaque, call: svc.Call, key: svc.OperationKey) !void {
+        const self = from(raw);
+        self.lock();
+        defer self.unlock();
+        try self.validate(call);
+        if (self.closed or !self.authenticated) return error.OwnerClosed;
+        if (self.pending != null or self.pending_query != null or self.active_query != null) return error.ManagementBusy;
+        for (self.records) |record| if (record) |value| if (value.key.eql(key)) {
+            if (value.result.value.phase != .outcome_unknown) return error.OperationNotUnknown;
+            self.pending_query = key;
+            return;
+        };
+        return error.StaleOperation;
     }
     fn readResult(raw: *anyopaque, call: svc.Call, key: svc.OperationKey, a: std.mem.Allocator) !svc.Owned(svc.Result) {
         const self = from(raw);
@@ -320,8 +400,8 @@ pub const Adapter = struct {
         };
         return .stale_operation;
     }
-    const power_vtable: svc.PowerService = .{ .snapshot = snapshotPower, .request = requestPower, .cancel = cancel, .result = readResult };
-    const boot_vtable: svc.BootService = .{ .snapshot = snapshotBoot, .apply = applyBoot, .cancel = cancel, .result = readResult };
+    const power_vtable: svc.PowerService = .{ .snapshot = snapshotPower, .request = requestPower, .cancel = cancel, .result = readResult, .query = query };
+    const boot_vtable: svc.BootService = .{ .snapshot = snapshotBoot, .apply = applyBoot, .cancel = cancel, .result = readResult, .query = query };
     fn acquire(raw: *anyopaque, key: []const u8, execution: svc.Execution) !u64 {
         const self = from(raw);
         const snapshot = self.engine.power.value;

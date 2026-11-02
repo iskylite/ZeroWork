@@ -10,7 +10,9 @@ ZeroWork 是面向 Apple Silicon Mac 的 SSH 终端，架构定义见 [总体架
 
 ## 当前基线
 
-当前版本为 **0.2.7（插件宿主 API 2）**。实现与交互契约见[设计路线](docs/DESIGN/README.md)、[AI 会话执行设计](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)及[可编辑 V3 原型](docs/UI_V3/README.md)；构建与验证命令见[开发手册](docs/GUIDES/DEVELOPMENT.md)。
+当前版本为 **0.3.0-rc1（插件宿主 API 2）**。实现与交互契约见[设计路线](docs/DESIGN/README.md)、[AI 会话执行设计](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)及[可编辑 V3 原型](docs/UI_V3/README.md)；构建与验证命令见[开发手册](docs/GUIDES/DEVELOPMENT.md)。
+
+当前动态插件工具的操作历史在每个应用进程内最多保留 128 条记录，按目标会话计数。达到上限后，新操作会在审批和派发前被拒绝；需正常退出并重新启动应用后继续。历史不会自动驱逐，以保留未知结果及尚未释放资源的操作事实。
 
 - 项目使用 Zig 0.17.0（本地通过 zvm 管理），目标固定为 arm64、macOS 14 或更新版本。
 - P0 配置模型及严格子集 TOML 加载器。
@@ -98,6 +100,8 @@ sh scripts/package_macos.sh /absolute/path/to/output
 ```
 
 脚本在构建前检查已保存的签名身份，检查 Zenit vendor 源码，在需要时构建 SSH 静态依赖，然后以关闭测试模式的 `ReleaseFast` 构建生成 `ZeroWork.app`，加入图标和必要资源，使用长期复用的本地自签名身份签名，执行签名校验和 DMG 校验。输出为 `ZeroWork-<版本>-arm64.dmg` 及其 `.dmg.sha256` 校验文件；`.app` 位于 DMG 内，临时打包目录会在退出时清理。脚本拒绝覆盖同路径的已有 DMG，重新打包时应先清理旧包或使用另一个输出目录。
+
+候选版本在 DMG 文件名及 `ZeroWorkReleaseVersion` 中保留完整版本。例如 `0.3.0-rc1` 对应 `CFBundleShortVersionString=0.3.0`、`CFBundleVersion=0.3.0fc1`，遵循 [Apple 的包版本格式](https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html#//apple_ref/doc/uid/TP40009249-SW1)。
 
 签名私钥保存在当前用户的钥匙串中；`~/Library/Application Support/com.zerowork.signing/` 仅保存公开证书和指纹。重复执行 setup 会复用原身份；身份缺失时应恢复原身份，不应重新生成替代。首次配置或签名时 macOS 可能要求授权。打包仅使用已保存的固定身份，不会回退到 ad-hoc 签名。应用凭据继续使用现有钥匙串存储；固定签名身份不保证旧凭据永远无需再次授权。
 

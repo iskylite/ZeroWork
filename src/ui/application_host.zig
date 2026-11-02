@@ -3570,7 +3570,16 @@ test "task finish real Local records observed intervals and retains unverified a
             if (@import("../platform/realtime.zig").monotonicNs() >= until) return error.ExecutionIntervalNeverSettled;
         }
         if (case.control != .stop) {
-            current = try service.executionSnapshot();
+            // Settled execution does not reserve the worker's entry mutex.
+            // Await this independent observation within the same case budget.
+            while (true) {
+                current = service.executionSnapshot() catch |err| {
+                    if (err != error.WorkerBusy or @import("../platform/realtime.zig").monotonicNs() >= until) return err;
+                    try fixture.tick();
+                    continue;
+                };
+                break;
+            }
             try std.testing.expectEqual(execution.State.interval_recorded, current.state);
             try std.testing.expectEqual(execution.OutputScope.session_interval, current.output_scope);
             try std.testing.expect(current.interval_saved and current.recording_settled and !current.recording_failed);

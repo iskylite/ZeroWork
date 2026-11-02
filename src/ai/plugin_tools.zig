@@ -693,26 +693,28 @@ pub const Runtime = struct {
             const cancelled = if (cancel) |token| token.isCancelled() else false;
             if (cancelled or uncertain) {
                 try self.operations.cancel(target.owner, invocation.operation_id);
+                try self.operations.resourcesReleased(target.owner, invocation.operation_id);
                 result.* = .{ .status = .cancelled_unsent, .receipt = .{ .owner = target.owner, .operation_id = invocation.operation_id } };
                 initialized += 1;
                 continue;
             }
             // Revalidate just before each send; earlier callbacks can revoke a
             // later member, but can never redirect it to another connection.
-            preflight(invocation.table, parsed, try self.live_scope(self.context), try self.live_members(self.context)) catch {
+            preflight(invocation.table, parsed, try self.live_scope(self.context), try self.live_members(self.context)) catch |err| {
                 try self.operations.cancel(target.owner, invocation.operation_id);
-                result.* = .{ .status = .cancelled_unsent, .receipt = .{ .owner = target.owner, .operation_id = invocation.operation_id } };
+                try self.operations.resourcesReleased(target.owner, invocation.operation_id);
+                result.* = try dispatchFailure(allocator, target.owner, invocation.operation_id, err, false);
                 initialized += 1;
                 continue;
             };
             if (self.invoke == null) try markSent(self.operations, target.owner, invocation.operation_id, invocation.call_id, parsed.entry.definition.id, parsed.arguments_hash);
             const request: Invocation = .{ .owner = target.owner, .operation_id = invocation.operation_id, .call_id = invocation.call_id, .turn_id = invocation.turn_id, .tool_id = parsed.entry.definition.id, .effect = parsed.entry.definition.effect, .arguments = parsed.json.value, .arguments_json = invocation.arguments, .arguments_hash = parsed.arguments_hash };
-            result.* = (if (self.invoke) |invoke| invoke(self.context, target, request, allocator, cancel) else target.binding.handler(target.context, request, allocator)) catch {
+            result.* = (if (self.invoke) |invoke| invoke(self.context, target, request, allocator, cancel) else target.binding.handler(target.context, request, allocator)) catch |err| {
                 const stage = self.operations.lookup(target.owner, invocation.operation_id).?.stage;
                 const was_sent = stage == .sent or stage == .verifying or stage == .outcome_unknown;
                 try self.operations.cancel(target.owner, invocation.operation_id);
                 uncertain = was_sent;
-                result.* = .{ .status = if (was_sent) .outcome_unknown else .cancelled_unsent, .receipt = .{ .owner = target.owner, .operation_id = invocation.operation_id, .remote_effect_unknown = was_sent } };
+                result.* = try dispatchFailure(allocator, target.owner, invocation.operation_id, err, was_sent);
                 initialized += 1;
                 if (result.receipt.local_released) try self.operations.resourcesReleased(target.owner, invocation.operation_id);
                 @import("tool_trace.zig").emit(.{ .event = "dynamic_result", .call_id = invocation.call_id, .tool_id = parsed.entry.definition.id, .owner = target.owner, .operation_id = invocation.operation_id, .status = result.status, .local_released = result.receipt.local_released, .remote_effect_unknown = result.receipt.remote_effect_unknown });
@@ -736,6 +738,23 @@ pub const Runtime = struct {
         return output;
     }
 };
+
+// Controller preflight errors must reach both the result card and the model.
+// In particular, approval does not imply a focused window or an input lease.
+// Preserve the dispatch boundary: a handler failure after markSent is unknown.
+fn dispatchFailure(allocator: std.mem.Allocator, owner: identity.SessionHandle, operation_id: u64, err: anyerror, started: bool) !ToolResult {
+    const bytes = try std.json.Stringify.valueAlloc(allocator, .{
+        .error_code = @errorName(err),
+        .stage = if (started) "dispatch" else "preflight",
+        .side_effect_started = started,
+        .remote_effect_unknown = started,
+        .automatic_replay_allowed = false,
+    }, .{});
+    errdefer allocator.free(bytes);
+    const blocks = try allocator.alloc(ContentBlock, 1);
+    blocks[0] = .{ .structured = bytes };
+    return .{ .status = if (started) .outcome_unknown else .cancelled_unsent, .blocks = blocks, .receipt = .{ .owner = owner, .operation_id = operation_id, .remote_effect_unknown = started } };
+}
 
 test {
     _ = @import("plugin_tools_tests.zig");

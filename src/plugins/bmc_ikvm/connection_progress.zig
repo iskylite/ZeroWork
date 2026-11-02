@@ -31,6 +31,26 @@ pub const Stage = enum {
 pub const Kind = enum { stage, diagnostic, http_response, failure };
 pub const Validity = enum { valid, partial_with_error, unavailable };
 pub const Resource = enum { none, management_route, video_route, service_root, public_script, session_service, web_session, managers_collection, manager, systems_collection, system, other_redfish, kvm_session, websocket };
+pub const Channel = enum { management, video, ssh };
+pub const Method = enum { none, get, post, patch, delete };
+/// Reviewed path templates only. Resource/session identifiers, query strings,
+/// request headers and bodies never enter telemetry.
+pub const RequestPath = enum { none, service_root, public_script, session_service, web_sessions, web_session, managers, manager, systems, system, kvm_session, websocket, other_redfish };
+pub const Phase = enum { none, connect, ssh_tunnel, ssh_handshake, ssh_host_key, ssh_authentication, tls_handshake, request_send, response_headers, response_body, response_validate };
+pub const Context = struct {
+    channel: Channel = .management,
+    /// One-based SSH jump position, copied from the native SSH observer.
+    /// Missing metadata means the SSH route, never the BMC endpoint.
+    ssh_hop: ?u8 = null,
+    ssh_hops: ?u8 = null,
+    method: Method = .none,
+    path: RequestPath = .none,
+    phase: Phase = .none,
+    http_status: ?u16 = null,
+    /// HTTP entity bytes received, before any optional content decompression.
+    received_bytes: ?u64 = null,
+    duration_ms: ?u64 = null,
+};
 pub const Code = enum {
     none,
     route_connected,
@@ -40,6 +60,9 @@ pub const Code = enum {
     web_authenticated,
     kvm_authenticated,
     websocket_ready,
+    request_started,
+    request_completed,
+    management_discovery_incomplete,
     mapping_verified,
     mapping_manager_document_rejected,
     mapping_manager_servers_not_single,
@@ -71,6 +94,10 @@ pub const Event = struct {
     sequence: u64 = 0,
     /// Milliseconds since this attempt began, measured by MONOTONIC.
     at_ms: u64 = 0,
+    /// Independent REALTIME clock sample, never derived from elapsed time.
+    at_unix_ms: ?i64 = null,
+    /// Monotonic phase/request duration when this event completed work.
+    duration_ms: ?u64 = null,
     stage: Stage = .idle,
     kind: Kind = .stage,
     code: Code = .none,
@@ -80,16 +107,20 @@ pub const Event = struct {
     error_code: ?[]const u8 = null,
     count: ?u16 = null,
     validity: ?Validity = null,
+    context: ?Context = null,
 };
 pub const Snapshot = struct {
     revision: u64 = 0,
     stage: Stage = .idle,
     elapsed_ms: u64 = 0,
     stage_elapsed_ms: u64 = 0,
+    started_unix_ms: ?i64 = null,
     waiting_for_user: bool = false,
     route_hops: u8 = 0,
     failure_stage: ?Stage = null,
     failure_code: ?[]const u8 = null,
+    /// First failure survives cleanup events and bounded-ring eviction.
+    failure_event: ?Event = null,
     /// Oldest first; only events[0..event_count] contain published events.
     events: [capacity]Event = @splat(.{}),
     event_count: u8 = 0,
@@ -100,6 +131,9 @@ pub const Detail = struct {
     http_status: ?u16 = null,
     count: ?u16 = null,
     validity: ?Validity = null,
+    context: ?Context = null,
+    /// A Zig error value, never a caller-supplied device error string.
+    err: ?anyerror = null,
 };
 
 pub const Tracker = struct {
@@ -110,9 +144,12 @@ pub const Tracker = struct {
     last_ms: u64 = 0,
     ended_ms: ?u64 = null,
     was_cancelled: bool = false,
+    context: ?Context = null,
 
     pub fn init(route_hops: u8) Tracker {
-        return initAt(route_hops, nowMs());
+        var result = initAt(route_hops, nowMs());
+        result.value.started_unix_ms = nowWallMs();
+        return result;
     }
     pub fn initAt(route_hops: u8, now_ms: u64) Tracker {
         return .{ .value = .{ .route_hops = route_hops }, .started_ms = now_ms, .stage_started_ms = now_ms, .last_ms = now_ms };
@@ -133,7 +170,17 @@ pub const Tracker = struct {
         self.lock();
         defer self.unlock();
         if (self.ended_ms != null) return;
-        self.append(.{ .at_ms = self.clampTime(now_ms) -| self.started_ms, .stage = self.value.stage, .kind = if (detail.http_status != null and detail.code == .none) .http_response else .diagnostic, .code = detail.code, .resource = detail.resource, .http_status = detail.http_status, .count = detail.count, .validity = detail.validity });
+        const current = self.clampTime(now_ms);
+        const context = detail.context orelse self.context;
+        const duration = if (context) |value| value.duration_ms orelse current -| self.stage_started_ms else current -| self.stage_started_ms;
+        self.append(.{ .at_ms = current -| self.started_ms, .duration_ms = duration, .stage = self.value.stage, .kind = if (detail.http_status != null and detail.code == .none) .http_response else .diagnostic, .code = detail.code, .resource = detail.resource, .http_status = detail.http_status, .count = detail.count, .validity = detail.validity, .context = context, .error_code = if (detail.err) |err| @errorName(err) else null });
+    }
+    /// Refresh a transaction's safe metadata without filling the event ring
+    /// with per-read progress. The next note/failure snapshots this value.
+    pub fn setContext(self: *Tracker, context: Context) void {
+        self.lock();
+        defer self.unlock();
+        if (self.ended_ms == null) self.context = context;
     }
     pub fn fail(self: *Tracker, err: anyerror) void {
         self.failAt(err, nowMs());
@@ -148,11 +195,14 @@ pub const Tracker = struct {
             self.transition(.cancelled, current);
             return;
         }
+        const duration = if (self.context) |context| context.duration_ms orelse current -| self.stage_started_ms else current -| self.stage_started_ms;
+        const event: Event = .{ .sequence = self.value.revision +| 1, .at_ms = current -| self.started_ms, .at_unix_ms = self.wallTime(), .duration_ms = duration, .stage = self.value.stage, .kind = .failure, .error_code = @errorName(err), .context = self.context };
         if (self.value.failure_code == null) {
             self.value.failure_stage = self.value.stage;
             self.value.failure_code = @errorName(err);
+            self.value.failure_event = event;
         }
-        self.append(.{ .at_ms = current -| self.started_ms, .stage = self.value.stage, .kind = .failure, .error_code = @errorName(err) });
+        self.append(event);
         self.transition(.failed, current);
     }
     /// Called only after the complete local cleanup/FrameLease barrier.
@@ -191,6 +241,7 @@ pub const Tracker = struct {
         self.value.revision +|= 1;
         var published = event;
         published.sequence = self.value.revision;
+        published.at_unix_ms = event.at_unix_ms orelse self.wallTime();
         const count: usize = self.value.event_count;
         if (count == capacity) {
             std.mem.copyForwards(Event, self.value.events[0 .. capacity - 1], self.value.events[1..]);
@@ -199,6 +250,9 @@ pub const Tracker = struct {
             self.value.events[count] = published;
             self.value.event_count += 1;
         }
+    }
+    fn wallTime(self: *const Tracker) ?i64 {
+        return if (self.value.started_unix_ms != null) nowWallMs() else null;
     }
     fn clampTime(self: *Tracker, now_ms: u64) u64 {
         self.last_ms = @max(self.last_ms, now_ms);
@@ -211,6 +265,11 @@ pub const Tracker = struct {
         self.mutex.store(false, .release);
     }
 };
+
+fn nowWallMs() ?i64 {
+    const value = @import("../../platform/realtime.zig").milliseconds(undefined);
+    return if (value > 0) value else null;
+}
 
 pub fn nowMs() u64 {
     var ts: std.c.timespec = undefined;
@@ -260,6 +319,54 @@ pub fn resourceLabel(resource: Resource) []const u8 {
         .websocket => "WebSocket",
     };
 }
+pub fn channelLabel(channel: Channel) []const u8 {
+    return switch (channel) {
+        .management => "管理通道",
+        .video => "视频通道",
+        .ssh => "SSH 路由",
+    };
+}
+pub fn methodLabel(method: Method) []const u8 {
+    return switch (method) {
+        .none => "",
+        .get => "GET",
+        .post => "POST",
+        .patch => "PATCH",
+        .delete => "DELETE",
+    };
+}
+pub fn pathLabel(path: RequestPath) []const u8 {
+    return switch (path) {
+        .none => "",
+        .service_root => "/redfish/v1/",
+        .public_script => "/js/app.0bc71eb0.js",
+        .session_service => "/redfish/v1/SessionService",
+        .web_sessions => "/redfish/v1/SessionService/Sessions",
+        .web_session => "/redfish/v1/SessionService/Sessions/{id}",
+        .managers => "/redfish/v1/Managers",
+        .manager => "/redfish/v1/Managers/{id}",
+        .systems => "/redfish/v1/Systems",
+        .system => "/redfish/v1/Systems/{id}",
+        .kvm_session => "/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions/{id?}",
+        .websocket => "/kvm/0",
+        .other_redfish => "/redfish/v1/{resource}",
+    };
+}
+pub fn phaseLabel(phase: Phase) []const u8 {
+    return switch (phase) {
+        .none => "",
+        .connect => "建立路由",
+        .ssh_tunnel => "建立 SSH 转发",
+        .ssh_handshake => "SSH 握手",
+        .ssh_host_key => "验证 SSH 主机密钥",
+        .ssh_authentication => "SSH 认证",
+        .tls_handshake => "TLS 握手",
+        .request_send => "发送请求",
+        .response_headers => "等待响应头",
+        .response_body => "读取响应正文",
+        .response_validate => "验证响应",
+    };
+}
 pub fn codeLabel(code: Code) []const u8 {
     return switch (code) {
         .none => "",
@@ -270,6 +377,9 @@ pub fn codeLabel(code: Code) []const u8 {
         .web_authenticated => "WEB 登录成功",
         .kvm_authenticated => "OEM KVM 认证成功",
         .websocket_ready => "WSS 升级成功",
+        .request_started => "请求已开始",
+        .request_completed => "请求已完成",
+        .management_discovery_incomplete => "管理资源发现未完成",
         .mapping_verified => "管理器与系统映射已验证",
         .mapping_manager_document_rejected => "系统映射未验证：管理器文档不可用",
         .mapping_manager_servers_not_single => "系统映射未验证：管理器系统关系不唯一",

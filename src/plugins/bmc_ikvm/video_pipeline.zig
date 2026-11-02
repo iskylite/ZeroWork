@@ -44,6 +44,7 @@ pub const Pipeline = struct {
     decoder_generation: u64 = 0,
     published_frames: u64 = 0,
     skipped_frames: u64 = 0,
+    written_bytes: u64 = 0,
     control_request: ?[4]u8 = null,
     control_request_deadline_ns: ?u64 = null,
     closed: bool = false,
@@ -255,6 +256,7 @@ pub const Pipeline = struct {
                     self.abort();
                     return error.InvalidVideoWrite;
                 }
+                self.written_bytes += n;
                 output.offset += n;
                 if (output.offset != output.bytes.len) return;
                 self.output_bytes -= output.bytes.len;
@@ -294,6 +296,7 @@ pub const Pipeline = struct {
         const wire = self.wire orelse return error.VideoUnavailable;
         const n = try wire.write(wire.context, value.output.bytes[value.output.offset..]);
         if (n > value.output.bytes.len - value.output.offset) return error.InvalidVideoWrite;
+        self.written_bytes += n;
         value.output.offset += n;
         if (n != 0 and value.output.offset != value.output.bytes.len) self.remote_input.notePartialWrite(authority);
         if (value.output.offset != value.output.bytes.len) return 0;

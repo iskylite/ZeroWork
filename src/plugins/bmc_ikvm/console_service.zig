@@ -37,6 +37,8 @@ pub const Snapshot = struct {
     stride: usize = 0,
     format: framebuffer.Format = .rgba8,
     frame_sequence: u64 = 0,
+    /// Complete CPU frame publications; independent of window submission rate.
+    decoded_frames: u64 = 0,
     frame_generation: u64 = 0,
     rfb_ready: bool = false,
     read_only_requested: bool = false,
@@ -57,5 +59,7 @@ pub const Interface = struct {
     retry: *const fn (*anyopaque, typed.Binding) anyerror!void,
     /// Queue cancellation on the owner thread; keep the tab's diagnostics.
     cancel: ?*const fn (*anyopaque, typed.Binding) anyerror!void = null,
+    /// Human action: freeze the request and ask the host for explicit approval.
+    request_management: ?*const fn (*anyopaque, typed.Binding, services.ManagementRequest) services.RequestResult = null,
 };
 pub const definition = typed.Definition.of(Interface, key);

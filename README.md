@@ -10,7 +10,9 @@ ZeroWork is an Apple Silicon macOS SSH terminal specified in [docs/SPEC/OVERALL_
 
 ## Current baseline
 
-The current version is **0.2.7 (plugin host API 2)**. The implementation and interaction contracts are documented in [the design roadmap](docs/DESIGN/README.md), [AI session execution](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md), and the [editable V3 prototypes](docs/UI_V3/README.md). Build and validation commands are in the [development guide](docs/GUIDES/DEVELOPMENT.md).
+The current version is **0.3.0-rc1 (plugin host API 2)**. The implementation and interaction contracts are documented in [the design roadmap](docs/DESIGN/README.md), [AI session execution](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md), and the [editable V3 prototypes](docs/UI_V3/README.md). Build and validation commands are in the [development guide](docs/GUIDES/DEVELOPMENT.md).
+
+Dynamic plugin tool history currently retains at most 128 records per application process, counted per target session. At capacity, new operations are rejected before approval or dispatch; quit normally and restart the app to continue. Records are not evicted automatically, preserving unknown outcomes and operations whose resources have not been released.
 
 - Zig 0.17.0 project baseline (managed with local zvm), locked to arm64 macOS 14+
 - P0 configuration model and strict subset TOML loader
@@ -157,6 +159,8 @@ sh scripts/package_macos.sh /absolute/path/to/output
 ```
 
 The script checks the saved signing identity before building, verifies the Zenit vendor sources, builds the SSH static dependencies if needed, and creates `ZeroWork.app` from a `ReleaseFast` build with test mode disabled. It adds the icon and required resources, signs with the persistent local self-signed identity, and verifies both the signature and the DMG. The outputs are `ZeroWork-<version>-arm64.dmg` and its `.dmg.sha256` checksum file. The `.app` bundle is inside the DMG, and the temporary packaging directory is removed on exit. The script refuses to overwrite an existing DMG at the same path; remove the old image or use another output directory before repackaging.
+
+Release candidates retain the full version in the DMG name and `ZeroWorkReleaseVersion`. For example, `0.3.0-rc1` uses `CFBundleShortVersionString=0.3.0` and `CFBundleVersion=0.3.0fc1`, following [Apple's bundle version format](https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html#//apple_ref/doc/uid/TP40009249-SW1).
 
 The signing private key stays in the current user's Keychain; only the public certificate and fingerprint are stored in `~/Library/Application Support/com.zerowork.signing/`. Repeated setup reuses the same identity. If it is missing, restore the original identity instead of generating a replacement. macOS may request authorization during setup or signing. Packaging uses only the saved identity and does not fall back to ad-hoc signing. Saved application credentials continue to use Keychain. A stable signing identity does not guarantee that existing Keychain access will never require authorization again.
 

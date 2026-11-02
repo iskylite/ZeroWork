@@ -93,8 +93,12 @@ pub const Store = struct {
     allocator: std.mem.Allocator,
     records: std.ArrayList(*Record) = .empty,
     retained_bytes: usize = 0,
+    retained_image_bytes: usize = 0,
     pub const max_records = 128;
     pub const max_bytes = 16 * 1024 * 1024;
+    // Decoded screenshots are shared immutable refs, but retaining them keeps
+    // their PNG and RGBA storage alive. Budget them separately from text facts.
+    pub const max_image_bytes = 128 * 1024 * 1024;
     pub fn init(allocator: std.mem.Allocator) Store {
         return .{ .allocator = allocator };
     }
@@ -120,13 +124,14 @@ pub const Store = struct {
     }
     fn recount(self: *Store) void {
         self.retained_bytes = 0;
+        self.retained_image_bytes = 0;
         for (self.records.items) |record| {
             self.retained_bytes += record.name.len + record.arguments.len * 2 + record.call_id.len + 1024;
             if (record.host) |fact| self.retained_bytes += fact.content.len;
             if (record.execution) |execution| self.retained_bytes += execution.retainedBytes();
             for (record.targets) |target| self.retained_bytes += target.result.stdout.len + target.result.stderr.len + target.label.len + (if (target.result.cwd) |cwd| cwd.len else 0) + (if (target.result.error_code) |code| code.len else 0);
             for (record.images) |ref| if (ref.content()) |content| {
-                self.retained_bytes += content.bytes.len + content.pixels.len;
+                self.retained_image_bytes += content.bytes.len + content.pixels.len;
             };
         }
     }
@@ -234,6 +239,7 @@ pub const Store = struct {
     /// Loop for inspection and must prevent starting a new request.
     pub fn capture(self: *Store, run: *const loop.Loop, sources: []const Source) !bool {
         var needed: usize = 0;
+        var needed_images: usize = 0;
         var added: usize = 0;
         for (run.records.items) |record| {
             if (self.contains(record.key.owner, record.key.turn_id, record.key.call_id)) continue;
@@ -249,7 +255,7 @@ pub const Store = struct {
             if (record.generic_results) |results| for (results) |result| for (result.blocks) |block| switch (block) {
                 .text, .structured => |bytes| needed += bytes.len,
                 .image_ref => |reference| if (reference.content()) |content| {
-                    needed += content.bytes.len + content.pixels.len;
+                    needed_images += content.bytes.len + content.pixels.len;
                 },
             };
             if (record.outcome) |outcome| for (outcome.targets) |target| {
@@ -261,7 +267,7 @@ pub const Store = struct {
             };
         }
         if (added == 0) return false;
-        if (self.records.items.len + added > max_records or needed > max_bytes -| self.retained_bytes) return error.ToolResultStoreCapacity;
+        if (self.records.items.len + added > max_records or needed > max_bytes -| self.retained_bytes or needed_images > max_image_bytes -| self.retained_image_bytes) return error.ToolResultStoreCapacity;
         try self.records.ensureUnusedCapacity(self.allocator, added);
         const start = self.records.items.len;
         errdefer {
@@ -281,6 +287,7 @@ pub const Store = struct {
             self.records.appendAssumeCapacity(saved);
         }
         self.retained_bytes += needed;
+        self.retained_image_bytes += needed_images;
         return true;
     }
     fn copyRecord(self: *Store, record: loop.Record, sources: []const Source) !*Record {
@@ -404,6 +411,73 @@ pub const Store = struct {
         return saved;
     }
 };
+
+test "tool result store budgets full resolution observations separately from later text" {
+    const a = std.testing.allocator;
+    const image = @import("../plugins/bmc_ikvm/observation_image.zig");
+    const refs = @import("image_attachments.zig");
+    const api = @import("plugin_tools.zig");
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(171) };
+    const pixels = try a.alloc(u8, 1920 * 1200 * 4);
+    defer a.free(pixels);
+    @memset(pixels, 255);
+    const snapshot: @import("../plugins/bmc_ikvm/framebuffer.zig").Snapshot = .{ .session_handle = owner, .frame_generation = 1, .sequence = 1, .width = 1920, .height = 1200, .stride = 1920 * 4, .pixels = pixels, .received_monotonic_ns = 1 };
+    const mapping = try image.transform(1920, 1200, null, 1920, 1200);
+    var first = try image.capture(a, snapshot, mapping, 1);
+    defer first.release();
+    var second = try image.capture(a, snapshot, mapping, 2);
+    defer second.release();
+    const Append = struct {
+        fn imageRecord(run: *loop.Loop, reference: refs.ContentRef, index: usize) !void {
+            const results = try a.alloc(api.ToolResult, 1);
+            const blocks = try a.alloc(api.ContentBlock, 1);
+            blocks[0] = .{ .image_ref = reference.retain() };
+            results[0] = .{ .status = .succeeded, .blocks = blocks, .receipt = .{ .owner = owner, .operation_id = index + 1 } };
+            try run.records.append(run.arena.allocator(), .{ .key = .{ .owner = .{ .session = 171 }, .turn_id = 1, .call_id = try std.fmt.allocPrint(run.arena.allocator(), "image-{d}", .{index}) }, .name = "bmc_ikvm.screenshot", .arguments = "{}", .arguments_hash = @splat(0), .dispatched = true, .generic_results = results });
+        }
+    };
+    var run = loop.Loop.init(a, .{ .owner = .{ .session = 171 }, .members = .{} }, 1, .{});
+    defer run.deinit();
+    var store = Store.init(a);
+    defer store.deinit();
+    try Append.imageRecord(&run, first, 0);
+    try Append.imageRecord(&run, second, 1);
+    try std.testing.expect(try store.capture(&run, &.{}));
+    try std.testing.expect(store.retained_image_bytes > Store.max_bytes);
+    try std.testing.expect(store.retained_bytes < 4096);
+    try std.testing.expect(!try store.capture(&run, &.{}));
+    // The next pure-text exchange remains admissible after both observations.
+    try run.records.append(run.arena.allocator(), .{ .key = .{ .owner = .{ .session = 171 }, .turn_id = 2, .call_id = "later-text" }, .name = "read_terminal", .arguments = "{}", .arguments_hash = @splat(0), .dispatched = true, .outcome = try loop.Outcome.copy(a, &.{.{ .session_id = 171, .status = .succeeded, .transport = .local, .stdout = "follow-up text" }}) });
+    try std.testing.expect(try store.capture(&run, &.{}));
+    const two_images = store.retained_image_bytes;
+    store.recount();
+    try std.testing.expectEqual(two_images, store.retained_image_bytes);
+    // Reusing an immutable ref avoids allocating 128 MiB in this test; every
+    // retained occurrence is still conservatively charged to the image limit.
+    const image_size = first.content().?.bytes.len + first.content().?.pixels.len;
+    const admitted = Store.max_image_bytes / image_size;
+    for (2..admitted) |index| try Append.imageRecord(&run, first, index);
+    try std.testing.expect(try store.capture(&run, &.{}));
+    try Append.imageRecord(&run, first, admitted);
+    try std.testing.expectError(error.ToolResultStoreCapacity, store.capture(&run, &.{}));
+    try std.testing.expectEqual(admitted + 1, store.records.items.len);
+    store.keepTurns(&.{});
+    try std.testing.expectEqual(@as(usize, 0), store.retained_bytes);
+    try std.testing.expectEqual(@as(usize, 0), store.retained_image_bytes);
+
+    var text_run = loop.Loop.init(a, .{ .owner = .{ .session = 171 }, .members = .{} }, 3, .{});
+    defer text_run.deinit();
+    const oversized = try a.alloc(u8, 64 * 1024);
+    defer a.free(oversized);
+    @memset(oversized, 'x');
+    var targets: [16]loop.TargetResult = undefined;
+    for (&targets, 1..) |*target, id| target.* = .{ .session_id = id, .status = .succeeded, .transport = .local, .stdout = oversized };
+    // Each group member stays within its valid 64 KiB output limit; the
+    // aggregate retained text still must respect the unchanged 16 MiB cap.
+    for (0..17) |index| try text_run.records.append(text_run.arena.allocator(), .{ .key = .{ .owner = .{ .session = 171 }, .turn_id = 3, .call_id = try std.fmt.allocPrint(text_run.arena.allocator(), "text-{d}", .{index}) }, .name = "read_terminal", .arguments = "{}", .arguments_hash = @splat(0), .outcome = try loop.Outcome.copy(a, &targets) });
+    try std.testing.expectError(error.ToolResultStoreCapacity, store.capture(&text_run, &.{}));
+    try std.testing.expectEqual(@as(usize, 0), store.records.items.len);
+}
 
 test "host result snapshot retains exact content and receipt without a fake session target" {
     const a = std.testing.allocator;

@@ -11,11 +11,13 @@ const services = @import("services.zig");
 const mapping = @import("input_mapping.zig");
 const vm = @import("view_model.zig");
 const S = @import("styles.zig");
+const performance = @import("../../host/frame_performance.zig");
+const LogS = @import("../../ui/connection_logs_styles.zig");
 const Menu = vm.Menu;
 const Popover = ui.widgets.popover.PopoverResult;
 const Option = ui.widgets.SelectOption;
 const WaitingBounds = struct { width: f32, height: f32, theme: u32 };
-const LogBounds = struct { width: f32, height: f32, compact: bool, theme: u32 };
+const LogBounds = struct { width: f32, height: f32, route_height: f32, compact: bool, theme: u32 };
 pub const CaptureAuthority = struct {
     binding_generation: u64,
     input_epoch: u64,
@@ -43,7 +45,8 @@ const power_actions = [_]services.PowerAction{ .on, .graceful_shutdown, .gracefu
 const target_values = [_][]const u8{ "Disabled", "Pxe", "Hdd", "Cd", "Diags", "BiosSetup", "Usb", "None" };
 const target_names = [_][]const u8{ "恢复默认（关闭覆盖）", "网络 PXE", "硬盘", "CD / DVD", "诊断", "BIOS 设置", "USB", "None（设备返回）" };
 const mode_values = [_][]const u8{ "UEFI", "Legacy" };
-const unverified_mapping_message = "该管理资源与当前视频的关联未验证，仅供查看";
+const unverified_mapping_message = "管理目标或读取证据尚未核实，仅供查看";
+const response_diagnostic_message = "设备响应含附加诊断；以下字段按各自读取结果显示。";
 const power_option_ids = [_][]const u8{ "bmc.power.option.on", "bmc.power.option.shutdown", "bmc.power.option.restart", "bmc.power.option.force_off", "bmc.power.option.force_restart", "bmc.power.option.power_cycle" };
 const target_option_ids = [_][]const u8{ "bmc.boot.option.disabled", "bmc.boot.option.pxe", "bmc.boot.option.hdd", "bmc.boot.option.cd", "bmc.boot.option.diags", "bmc.boot.option.bios", "bmc.boot.option.usb", "bmc.boot.option.none" };
 
@@ -70,12 +73,20 @@ pub const View = struct {
     waiting_actions: ?*ui.Node = null,
     progress_active: bool = false,
     progress_projection: vm.ProgressProjection = .{},
+    progress_disclosure: vm.ProgressDisclosure = .{},
+    progress_failure_scroll: ?usize = null,
+    progress_stage_scroll: ?usize = null,
+    progress_last_stage: ?console.progress.Stage = null,
+    progress_attempt: ?services.OperationKey = null,
     progress_timing: ?*ui.Node = null,
     progress_stage_time: ?*ui.Node = null,
     progress_total_time: ?*ui.Node = null,
     progress_notice: ?*ui.Node = null,
     progress_steps: ?*ui.Node = null,
     progress_rows: [vm.progress_group_count]?*ui.Node = @splat(null),
+    progress_buttons: [vm.progress_group_count]?*ui.Node = @splat(null),
+    progress_details: [vm.progress_group_count]?*ui.Node = @splat(null),
+    progress_chevrons: [vm.progress_group_count]?*ui.Node = @splat(null),
     progress_icons: [vm.progress_group_count]?*ui.Node = @splat(null),
     progress_names: [vm.progress_group_count]?*ui.Node = @splat(null),
     progress_states: [vm.progress_group_count]?*ui.Node = @splat(null),
@@ -91,14 +102,19 @@ pub const View = struct {
     log_footer: ?*ui.Node = null,
     log_scroll: ?ui.widgets.ScrollAreaResult = null,
     log_detail: ?*ui.Node = null,
+    log_empty: ?*ui.Node = null,
+    log_rows: [console.progress.capacity + 1]?*ui.Node = @splat(null),
+    log_timestamps: [console.progress.capacity + 1]?*ui.Node = @splat(null),
+    log_messages: [console.progress.capacity + 1]?*ui.Node = @splat(null),
+    log_durations: [console.progress.capacity + 1]?*ui.Node = @splat(null),
+    log_route_text: ?*ui.Node = null,
     log_revision: ?u64 = null,
     log_layout_pending: bool = false,
     last_log_open: bool = false,
     log_scroll_pending: bool = false,
     log_follow_latest: bool = true,
     log_anchor: ?struct { sequence: u64, inside: f32, fallback: f32 } = null,
-    log_sequences: [32]u64 = @splat(0),
-    log_offsets: [32]u32 = @splat(0),
+    log_sequences: [console.progress.capacity + 1]u64 = @splat(0),
     log_count: usize = 0,
     waiting_bounds: ?WaitingBounds = null,
     log_bounds: ?LogBounds = null,
@@ -106,6 +122,8 @@ pub const View = struct {
     snapshot: ?console.OwnedSnapshot = null,
     power_snapshot: ?services.OwnedPowerSnapshot = null,
     boot_snapshot: ?services.OwnedBootSnapshot = null,
+    management_operation: ?struct { key: services.OperationKey, boot: bool } = null,
+    management_result: ?services.Owned(services.Result) = null,
     draft: vm.BootDraft = .{},
     mode: mapping.Mode = .fit,
     captured: bool = false,
@@ -125,6 +143,15 @@ pub const View = struct {
     texture: ?u32 = null,
     frame_revision: u64 = 0,
     frame_generation: u64 = 0,
+    show_fps: *ui.Signal(bool) = undefined,
+    fps_hud: ?*ui.Node = null,
+    fps_display: ?*ui.Node = null,
+    fps_decode: ?*ui.Node = null,
+    fps_detail: ?*ui.Node = null,
+    decoded_meter: performance.Meter = .{},
+    decoded_total: ?u64 = null,
+    decoded_generation: u64 = 0,
+    last_fps_ms: u64 = 0,
     width: u32 = 0,
     height: u32 = 0,
     last_poll_ms: f64 = -1000,
@@ -139,6 +166,13 @@ pub const View = struct {
     capture_disabled: *ui.Signal(bool) = undefined,
     power_disabled: *ui.Signal(bool) = undefined,
     boot_disabled: *ui.Signal(bool) = undefined,
+    mode_disabled: *ui.Signal(bool) = undefined,
+    power_execute_disabled: *ui.Signal(bool) = undefined,
+    boot_execute_disabled: *ui.Signal(bool) = undefined,
+    power_query: ?*ui.Node = null,
+    boot_query: ?*ui.Node = null,
+    power_cancel: ?*ui.Node = null,
+    boot_cancel: ?*ui.Node = null,
     switch_disabled: *ui.Signal(bool) = undefined,
     power_options: *ui.Signal([]const Option) = undefined,
     boot_options: *ui.Signal([]const Option) = undefined,
@@ -169,7 +203,7 @@ pub const View = struct {
     switch_checked: bool = false,
     switch_theme_version: u32 = std.math.maxInt(u32),
     mode_row: ?*ui.Node = null,
-    order_detail: ?*ui.Node = null,
+    order_rows: ?*ui.Node = null,
     order_mapping_warning: ?*ui.Node = null,
     order_open: ?*ui.Signal(bool) = null,
     order_modal: ?ui.widgets.ModalResult = null,
@@ -339,6 +373,18 @@ pub const View = struct {
         self.pending_pointer = null;
         if (self.submit(.{ .pointer = pending })) self.last_pointer_ms = ui.frame.estimateTimeMs();
     }
+    fn flushPointerWhenDue(self: *View) void {
+        if (self.pending_pointer == null) return;
+        const now = ui.frame.estimateTimeMs();
+        const remaining_ms = 1000.0 / 60.0 - (now - self.last_pointer_ms);
+        if (remaining_ms <= 0 or now < self.last_pointer_ms) {
+            self.flushPointer();
+        } else {
+            // A final move must not wait for the ordinary 33ms console poll.
+            // Cx retains the earliest scheduled redraw, including at idle.
+            self.mount_request.cx.scheduleRedrawAfterNs(@intFromFloat(@ceil(remaining_ms * std.time.ns_per_ms)));
+        }
+    }
     fn localPointerTarget(self: *View, x: f32, y: f32) bool {
         if (self.pointer_captured) return false;
         const area = self.scroll orelse return false;
@@ -388,8 +434,7 @@ pub const View = struct {
                 var pointer_value = g.remote(.{ .x = value.x, .y = value.y }, self.buttons != 0) orelse return .ignored;
                 pointer_value.buttons = self.buttons;
                 self.pending_pointer = pointer_value;
-                const now = ui.frame.estimateTimeMs();
-                if (now - self.last_pointer_ms >= 1000.0 / 60.0 or now < self.last_pointer_ms) self.flushPointer();
+                self.flushPointerWhenDue();
                 return .stop;
             },
             .scroll => |value| {
@@ -446,8 +491,13 @@ pub const View = struct {
         }
         self.updateGeometry();
         _ = self.updatePopovers();
-        const pointer_now = ui.frame.estimateTimeMs();
-        if (pointer_now - self.last_pointer_ms >= 1000.0 / 60.0 or pointer_now < self.last_pointer_ms) self.flushPointer();
+        self.flushPointerWhenDue();
+        if (self.mount_request.frame_sink) |sink| {
+            // The host confirms this candidate only after a successful native
+            // frame submission. Repainting the HUD never increments video FPS.
+            if (self.texture != null and self.texture == sink.texture and self.frame_generation == sink.frame_generation)
+                sink.presentation.stage(self.mount_request.cx.frame_count, sink.frame_generation, sink.revision);
+        }
         if (self.pending_capture and !self.anyMenu() and self.mount_request.cx.overlay_stack.topmost() == null) {
             const requested = self.pending_capture_authority;
             self.pending_capture = false;
@@ -499,12 +549,50 @@ pub const View = struct {
         // former proves this owner exposes frames, the latter owns GPU lifetime.
         if (try self.lookup(framebuffer.definition)) |binding| _ = try binding.borrow(framebuffer.Interface, framebuffer.key, self.mount_request.owner);
         try self.presentFrame(value);
+        try self.updatePerformance(value);
         try self.projectProgress(value);
         if (self.mount_request.content_context) |context| self.fullscreen_label.set(if (context.fullscreen()) "退出全屏" else "进入全屏");
         if (value.cleanup == .not_started and value.route != .closed and (now - self.last_management_ms >= 1000 or now < self.last_management_ms)) {
             self.last_management_ms = now;
             try self.refreshManagement();
         }
+    }
+    fn updatePerformance(self: *View, value: console.Snapshot) !void {
+        const now: u64 = @intCast(@max(0, @import("../../platform/realtime.zig").monotonicNs()) / std.time.ns_per_ms);
+        const live = value.video == .streaming and self.texture != null;
+        if (self.fps_hud) |hud| hud.setDisplay(if (self.show_fps.peek() and live) .flex else .none);
+        if (self.decoded_generation != value.frame_generation or (self.decoded_total != null and value.decoded_frames < self.decoded_total.?)) {
+            self.decoded_meter = .{};
+            self.decoded_total = null;
+            self.decoded_generation = value.frame_generation;
+        }
+        if (live) {
+            const delta = if (self.decoded_total) |total| value.decoded_frames -| total else @as(u64, @intFromBool(value.decoded_frames != 0));
+            self.decoded_meter.record(now, delta);
+        }
+        self.decoded_total = value.decoded_frames;
+        if (now >= self.last_fps_ms and now - self.last_fps_ms < 500) return;
+        self.last_fps_ms = now;
+        const meter = if (self.mount_request.frame_sink) |sink| &sink.presentation.meter else null;
+        var buf: [160]u8 = undefined;
+        try setText(self, self.fps_display, if (live and meter != null and meter.?.fps(now) != null)
+            try std.fmt.bufPrint(&buf, "显示 {d:.1} FPS", .{meter.?.fps(now).?})
+        else
+            "显示 — FPS");
+        try setText(self, self.fps_decode, if (live and self.decoded_meter.fps(now) != null)
+            try std.fmt.bufPrint(&buf, "解码 {d:.1} FPS", .{self.decoded_meter.fps(now).?})
+        else
+            "解码 — FPS");
+        try setText(self, self.fps_detail, if (live and meter != null and meter.?.last_ms != null)
+            try std.fmt.bufPrint(&buf, "最近 10 秒最大帧间隔：{d} ms\n距上一显示帧：{d} ms", .{ meter.?.maxGap(now), now -| meter.?.last_ms.? })
+        else
+            "等待视频帧统计");
+    }
+    fn fpsChanged(self: *View, enabled: bool) void {
+        self.show_fps.set(enabled);
+        self.last_fps_ms = 0;
+        if (self.snapshot) |snapshot| self.updatePerformance(snapshot.value) catch {};
+        self.mount_request.cx.requestRedraw();
     }
     fn presentFrame(self: *View, value: console.Snapshot) !void {
         if (self.mount_request.frame_sink) |sink| {
@@ -544,8 +632,37 @@ pub const View = struct {
     fn projectProgress(self: *View, value: console.Snapshot) !void {
         const cx = self.mount_request.cx;
         const progress = value.progress;
+        if (self.progress_attempt == null or !self.progress_attempt.?.eql(value.operation)) {
+            self.progress_attempt = value.operation;
+            self.progress_projection = .{};
+            self.progress_disclosure = .{};
+            self.progress_failure_scroll = null;
+            self.progress_stage_scroll = null;
+            self.progress_last_stage = null;
+            self.log_revision = null;
+        }
         self.progress_active = progress.revision != 0;
+        // A real phase change follows the active work once. Timer/revision
+        // updates within that phase leave the reader's scroll position alone.
+        if (self.progress_active and self.progress_last_stage != progress.stage) {
+            self.progress_last_stage = progress.stage;
+            self.progress_stage_scroll = if (progress.stage != .streaming and progress.failure_code == null) if (vm.progressGroup(progress.stage)) |group| @intCast(@backingInt(group)) else null else null;
+        }
         self.progress_projection.observe(progress);
+        const previous_failures = self.progress_disclosure.auto_opened;
+        self.progress_disclosure.observe(progress);
+        const newly_failed = self.progress_disclosure.auto_opened & ~previous_failures;
+        if (newly_failed != 0) {
+            if (progress.failure_stage) |stage| {
+                if (vm.progressGroup(stage)) |group| self.progress_failure_scroll = @intCast(@backingInt(group));
+            } else {
+                for (0..vm.progress_group_count) |index| {
+                    if (newly_failed & (@as(u8, 1) << @intCast(index)) == 0) continue;
+                    self.progress_failure_scroll = index;
+                    break;
+                }
+            }
+        }
         var writer: std.Io.Writer.Allocating = .init(cx.allocator);
         defer writer.deinit();
         if (self.progress_active) try writer.writer.print("{d}.{d}", .{ progress.stage_elapsed_ms / 1000, (progress.stage_elapsed_ms % 1000) / 100 }) else try writer.writer.writeAll("—");
@@ -565,9 +682,8 @@ pub const View = struct {
         try setText(self, self.progress_notice, writer.written());
         if (self.progress_notice) |node| setTextColorIfChanged(node, if (failure_code != null) S.theme.current().danger_ink else S.progressSecondary());
         writer.clearRetainingCapacity();
-        if (failure_code) |code| {
-            if (progress.failure_stage) |stage| try writer.writer.print("失败阶段：{s}\n", .{console.progress.stageLabel(stage)});
-            try writer.writer.print("{s}\n错误码：{s}", .{ vm.failureReason(code, progress.failure_stage), code });
+        if (failure_code != null and progress.failure_stage == null) {
+            try writer.writer.print("{s}\n错误码：{s}", .{ vm.failureReason(failure_code, null), failure_code.? });
         } else if (progress.waiting_for_user) {
             try writer.writer.writeAll(if (progress.stage == .waiting_certificate or progress.stage == .waiting_video_certificate) "请完成证书确认，连接正在等待你的选择。" else "请完成凭据输入，连接正在等待你的操作。");
         } else if (self.cancel_pending and progress.stage != .cancelled) {
@@ -600,6 +716,18 @@ pub const View = struct {
                 const fill = if (current) S.progressCurrentFill() else ui.Color.TRANSPARENT;
                 if (!std.meta.eql(row.getBackground(), fill)) row.setBackground(fill);
             }
+            if (self.progress_buttons[index]) |button| if (button.behavior.interaction.a11y) |*a11y| {
+                a11y.expanded = self.progress_disclosure.isOpen(group);
+            };
+            const expanded = self.progress_disclosure.isOpen(group);
+            if (self.progress_details[index]) |node| node.setDisplay(if (expanded) .flex else .none);
+            try setText(self, self.progress_chevrons[index], if (expanded) "⌄" else "›");
+            if (self.log_revision == null or self.log_revision.? != progress.revision) {
+                writer.clearRetainingCapacity();
+                try vm.writeStepDiagnosticsForTarget(&writer.writer, progress, group, value.target);
+                try setText(self, self.progress_details[index], writer.written());
+                writer.clearRetainingCapacity();
+            }
             if (group == .route) {
                 if (progress.route_hops == 0) {
                     try writer.writer.writeAll("建立直连通道");
@@ -609,6 +737,7 @@ pub const View = struct {
             }
         }
         try setText(self, self.progress_route_text, if (value.route_summary.len != 0) value.route_summary else value.target);
+        try setText(self, self.log_route_text, if (value.route_summary.len != 0) value.route_summary else value.target);
         const failed = value.route == .failed or value.video == .failed or failure_code != null;
         const terminal = failed or progress.stage == .cancelled or value.route == .closed or value.video == .closed or value.cleanup == .released;
         if (self.retry_node) |node| node.setDisplay(if (failed or progress.stage == .cancelled) .flex else .none);
@@ -619,15 +748,25 @@ pub const View = struct {
         self.cancel_disabled.set(self.cancel_pending or value.cleanup == .awaiting or value.cleanup == .unknown);
         if (self.log_revision == null or self.log_revision.? != progress.revision) {
             self.captureLogPosition();
-            writer.clearRetainingCapacity();
-            try vm.writeConnectionLog(&writer.writer, progress);
-            try setText(self, self.log_detail, writer.written());
-            self.log_count = @min(progress.event_count, self.log_sequences.len);
-            var offset: usize = 0;
-            for (0..self.log_count) |index| {
-                self.log_sequences[index] = progress.events[index].sequence;
-                self.log_offsets[index] = @intCast(offset);
-                if (std.mem.indexOfScalarPos(u8, writer.written(), offset, '\n')) |newline| offset = newline + 1;
+            const entries = vm.connectionLogEvents(progress);
+            self.log_count = entries.count;
+            if (self.log_empty) |node| node.setDisplay(if (entries.count == 0) .flex else .none);
+            for (self.log_rows, 0..) |maybe_row, index| {
+                const row = maybe_row orelse continue;
+                row.setDisplay(if (index < entries.count) .flex else .none);
+                if (index >= entries.count) continue;
+                const event = entries.events[index];
+                self.log_sequences[index] = event.sequence;
+                writer.clearRetainingCapacity();
+                try vm.writeLogTimestamp(&writer.writer, event);
+                try setText(self, self.log_timestamps[index], writer.written());
+                writer.clearRetainingCapacity();
+                try vm.writeLogMessage(&writer.writer, event, value.target);
+                try setText(self, self.log_messages[index], writer.written());
+                if (self.log_messages[index]) |message| setTextColorIfChanged(message, if (event.kind == .failure or event.error_code != null) S.theme.current().danger_ink else S.theme.current().fg_1);
+                writer.clearRetainingCapacity();
+                try vm.writeLogDuration(&writer.writer, event);
+                try setText(self, self.log_durations[index], writer.written());
             }
             self.log_revision = progress.revision;
             self.log_layout_pending = true;
@@ -645,10 +784,31 @@ pub const View = struct {
         self.presentFrame(snapshot.value) catch |err| self.showMessage(@errorName(err));
         self.updateGeometry();
         const popup_changed = self.updatePopovers();
+        const progress_scrolled = if (!popup_changed) self.scrollToProgressStep() else false;
         const log_changed = self.updateLogLayout();
         const bounds_changed = self.bounds_layout_pending;
         self.bounds_layout_pending = false;
-        return if (prior_width != self.width or prior_height != self.height or popup_changed or log_changed or bounds_changed) .needs_layout else .done;
+        return if (prior_width != self.width or prior_height != self.height or popup_changed or progress_scrolled or log_changed or bounds_changed) .needs_layout else .done;
+    }
+    fn scrollToProgressStep(self: *View) bool {
+        const index = self.progress_failure_scroll orelse self.progress_stage_scroll orelse return false;
+        const body = self.waiting_body orelse return false;
+        const row = self.progress_rows[index] orelse return false;
+        if (body.container.globalRect().h <= 0 or row.globalRect().h <= 0) return false;
+        body.state.content_height = body.content.globalRect().h;
+        body.state.viewport_height = body.container.globalRect().h;
+        const top = body.state.scroll_y + row.globalRect().y - body.container.globalRect().y;
+        var height = row.globalRect().h;
+        if (self.progress_details[index]) |detail| if (detail.style.display != .none) {
+            // Show the step header and the beginning of its expanded detail;
+            // a long diagnostic remains independently scrollable in the body.
+            height += 4 + @min(detail.globalRect().h, 16 + 2 * 18.7);
+        };
+        const before = body.state.scroll_y;
+        ui.widgets.scroll_area.scrollRectIntoView(body.state, body.content, top, @min(height, body.state.viewport_height), if (self.progress_failure_scroll != null) .start else .nearest);
+        self.progress_failure_scroll = null;
+        self.progress_stage_scroll = null;
+        return @abs(before - body.state.scroll_y) > 0.1;
     }
     fn captureLogPosition(self: *View) void {
         if (self.log_open == null or !self.log_open.?.peek()) return;
@@ -656,23 +816,19 @@ pub const View = struct {
         self.log_follow_latest = scroll.state.scroll_y >= scroll.state.maxScrollY() - 1;
         self.log_anchor = null;
         if (self.log_follow_latest or self.log_count == 0) return;
-        const detail = self.log_detail orelse return;
-        const layout = detail.layoutTextLayout() orelse return;
-        const text = detail.getText() orelse return;
-        const line_height = text.font_size * text.line_height;
-        const visible: usize = @min(@as(usize, @intFromFloat(@max(0, scroll.state.scroll_y) / line_height)), layout.line_count -| 1);
-        const byte = layout.lines[visible].byte_start;
-        var event_index: usize = 0;
-        for (self.log_offsets[0..self.log_count], 0..) |offset, index| if (offset <= byte) {
-            event_index = index;
-        };
-        var first_line: usize = 0;
-        while (first_line + 1 < layout.line_count and layout.lines[first_line].byte_start < self.log_offsets[event_index]) : (first_line += 1) {}
-        self.log_anchor = .{ .sequence = self.log_sequences[event_index], .inside = scroll.state.scroll_y - @as(f32, @floatFromInt(first_line)) * line_height, .fallback = scroll.state.scroll_y };
+        const content_top = scroll.content.globalRect().y;
+        var visible: usize = 0;
+        for (self.log_rows[0..self.log_count], 0..) |maybe_row, index| {
+            const row = maybe_row orelse continue;
+            if (row.globalRect().y - content_top <= scroll.state.scroll_y) visible = index;
+        }
+        const row = self.log_rows[visible] orelse return;
+        const top = row.globalRect().y - content_top;
+        self.log_anchor = .{ .sequence = self.log_sequences[visible], .inside = scroll.state.scroll_y - top, .fallback = scroll.state.scroll_y };
     }
-    /// A suspended portal can retain the old wrapped-text artifact while its
-    /// owned content grows. Reflow at the layout safety point on first/re-open
-    /// and after a new event while visible, including programmatic Signal open.
+    /// Reflow preserved row nodes at the layout safety point. The anchor is an
+    /// event sequence plus the position within its row, so wrapping or ring
+    /// eviction cannot replace the event the user was reading.
     fn updateLogLayout(self: *View) bool {
         const open = if (self.log_open) |signal| signal.peek() else false;
         const newly_open = open and !self.last_log_open;
@@ -687,17 +843,14 @@ pub const View = struct {
         }
         if (!newly_open and !self.log_layout_pending) {
             if (!self.log_scroll_pending) return false;
-            const layout = detail.layoutTextLayout() orelse return false;
-            const text = detail.getText() orelse return false;
             scroll.state.content_height = scroll.content.globalRect().h;
             scroll.state.viewport_height = scroll.container.globalRect().h - scroll.container.style.padding.vertical();
             var target = if (self.log_follow_latest) scroll.state.maxScrollY() else scroll.state.scroll_y;
             if (!self.log_follow_latest) if (self.log_anchor) |anchor| {
                 target = anchor.fallback;
                 for (self.log_sequences[0..self.log_count], 0..) |sequence, index| if (sequence == anchor.sequence) {
-                    var line: usize = 0;
-                    while (line + 1 < layout.line_count and layout.lines[line].byte_start < self.log_offsets[index]) : (line += 1) {}
-                    target = @as(f32, @floatFromInt(line)) * text.font_size * text.line_height + anchor.inside;
+                    const row = self.log_rows[index] orelse continue;
+                    target = row.globalRect().y - scroll.content.globalRect().y + anchor.inside;
                     break;
                 };
             };
@@ -706,7 +859,10 @@ pub const View = struct {
             self.log_anchor = null;
             return false;
         }
-        detail.clearTextLayout();
+        for (self.log_messages[0..self.log_count]) |maybe_message| if (maybe_message) |message| {
+            message.clearTextLayout();
+            message.markSizingDirty();
+        };
         detail.markSizingDirty();
         scroll.content.markSizingDirty();
         scroll.container.markSizingDirty();
@@ -741,10 +897,16 @@ pub const View = struct {
     fn updateProgressBounds(self: *View) bool {
         const cx = self.mount_request.cx;
         var changed = false;
+        if (self.waiting) |waiting| if (self.waiting_body) |body| {
+            const route_height = if (self.progress_route) |route| route.globalRect().h else 0;
+            const body_height = @max(0, waiting.globalRect().h - S.progress_padding * 2 - S.progress_header_height - S.progress_action_height - S.progress_gap * 3 - route_height);
+            changed = setHeight(cx, body.container, body_height) or changed;
+        };
         if (self.log_modal) |modal| {
             const compact = cx.viewport.height < 600;
             const width = @min(S.log_width, @max(1, cx.viewport.width - 32));
-            const bounds: LogBounds = .{ .width = width, .height = cx.viewport.height, .compact = compact, .theme = cx.theme_version };
+            const route_height = if (self.log_route_text) |route| route.globalRect().h else 0;
+            const bounds: LogBounds = .{ .width = width, .height = cx.viewport.height, .route_height = route_height, .compact = compact, .theme = cx.theme_version };
             if (self.log_bounds) |old| if (std.meta.eql(old, bounds)) return changed;
             self.log_bounds = bounds;
             self.bounds_layout_pending = true;
@@ -754,7 +916,7 @@ pub const View = struct {
             if (self.log_footer) |footer| footer.setStyleInline(cx.allocator, S.logFooter(compact));
             if (self.log_scroll) |scroll| {
                 scroll.container.setBackground(S.theme.current().well);
-                const cap = @max(1, cx.viewport.height - 32 - (if (compact) @as(f32, 130.5) else @as(f32, 150.5)));
+                const cap = @max(1, cx.viewport.height - 32 - (if (compact) @as(f32, 130.5) else @as(f32, 150.5)) - route_height - 12 - 28);
                 const height = @min(if (compact) @as(f32, 200) else @as(f32, 320), cap);
                 changed = setHeight(cx, scroll.container, height) or changed;
             }
@@ -763,6 +925,15 @@ pub const View = struct {
     }
     fn refreshManagement(self: *View) !void {
         const call: services.Call = .{ .owner = self.mount_request.owner, .binding_generation = self.mount_request.owner.generation };
+        if (self.management_operation) |operation| {
+            if (try self.lookup(services.power_definition)) |binding| {
+                const table = try binding.borrow(services.PowerService, services.power_key, self.mount_request.owner);
+                const next = try table.result(binding.context, call, operation.key, self.mount_request.cx.allocator);
+                if (operation.boot and next.value.phase == .succeeded and (if (self.management_result) |old| old.value.phase != .succeeded else true)) self.draft.initialized = false;
+                if (self.management_result) |*old| old.deinit();
+                self.management_result = next;
+            }
+        }
         if (try self.lookup(services.power_definition)) |binding| {
             const table = try binding.borrow(services.PowerService, services.power_key, self.mount_request.owner);
             const next = try table.snapshot(binding.context, call, self.mount_request.cx.allocator);
@@ -784,28 +955,41 @@ pub const View = struct {
         const slot = self.option_slot;
         const power_unmapped = if (self.power_snapshot) |snapshot| snapshot.value.system_uri.len != 0 and !snapshot.value.capability.system_mapping_verified else false;
         const boot_unmapped = if (self.boot_snapshot) |snapshot| snapshot.value.system_uri.len != 0 and !snapshot.value.capability.system_mapping_verified else false;
-        if (self.power_mapping_warning) |node| node.setDisplay(if (power_unmapped) .flex else .none);
-        if (self.boot_mapping_warning) |node| node.setDisplay(if (boot_unmapped) .flex else .none);
-        if (self.order_mapping_warning) |node| node.setDisplay(if (boot_unmapped) .flex else .none);
+        const power_diagnostic = if (self.power_snapshot) |snapshot| snapshot.value.resource_evidence.validity == .partial_with_error else false;
+        const boot_diagnostic = if (self.boot_snapshot) |snapshot| snapshot.value.resource_evidence.validity == .partial_with_error else false;
+        if (self.power_mapping_warning) |node| node.setDisplay(if (power_unmapped or power_diagnostic) .flex else .none);
+        if (self.boot_mapping_warning) |node| node.setDisplay(if (boot_unmapped or boot_diagnostic) .flex else .none);
+        if (self.order_mapping_warning) |node| node.setDisplay(if (boot_unmapped or boot_diagnostic) .flex else .none);
+        try setText(self, self.power_mapping_warning, if (power_unmapped) unverified_mapping_message else response_diagnostic_message);
+        try setText(self, self.boot_mapping_warning, if (boot_unmapped) unverified_mapping_message else response_diagnostic_message);
+        try setText(self, self.order_mapping_warning, if (boot_unmapped) unverified_mapping_message else response_diagnostic_message);
         try setText(self, self.power_scope_label, if (power_unmapped) "资源电源状态" else "当前电源");
         try setText(self, self.boot_scope_label, if (boot_unmapped) "资源启动覆盖" else "当前启动覆盖");
         var power_count: usize = 0;
         if (self.power_snapshot) |snapshot| {
-            try setText(self, self.power_label, vm.powerStateLabel(snapshot.value.state.value));
+            var state_buffer: [128]u8 = undefined;
+            const label = vm.powerStateLabel(snapshot.value.state.value);
+            try setText(self, self.power_label, if (snapshot.value.state.value != null and snapshot.value.state.evidence.validity != .valid) try std.fmt.bufPrint(&state_buffer, "{s}（部分结果）", .{label}) else label);
             for (power_actions, power_option_ids) |action, id| if (services.contains(snapshot.value.reset_types.value orelse &.{}, action.redfish())) {
                 self.power_storage[slot][power_count] = .{ .value = action.redfish(), .label = vm.powerLabel(action), .test_id = id };
                 power_count += 1;
             };
         }
         self.power_options.set(self.power_storage[slot][0..power_count]);
-        self.power_disabled.set(true); // this release exposes read-only management services
+        const locked = self.managementLocked();
+        const power_ready = if (self.power_snapshot) |snapshot| vm.writeAllowed(snapshot.value.capability) and snapshot.value.capability.secondary_auth == .disabled else false;
+        // Selecting a local draft is harmless in a read-only session. Only the
+        // execute button consumes operation authority and field readiness.
+        self.power_disabled.set(locked or power_unmapped or power_count == 0);
+        self.power_execute_disabled.set(locked or !power_ready or (if (self.power_snapshot) |snapshot| !vm.powerAllowed(snapshot.value, self.power_choice) else true));
         var target_count: usize = 0;
         var mode_count: usize = 0;
         if (self.boot_snapshot) |snapshot| {
             const value = snapshot.value;
             const current = value.state;
             var buffer: [768]u8 = undefined;
-            const text = if (services.optionalEqual(current.enabled, "Disabled")) "未覆盖" else try std.fmt.bufPrint(&buffer, "{s} · {s} · {s}", .{ current.target orelse "未知设备", current.enabled orelse "未知有效期", current.mode orelse "未知模式" });
+            const partial = (current.enabled != null and value.enabled_evidence.validity != .valid) or (current.target != null and value.target_evidence.validity != .valid) or (current.mode != null and value.mode_evidence.validity != .valid);
+            const text = if (services.optionalEqual(current.enabled, "Disabled")) (if (partial) "未覆盖（部分结果）" else "未覆盖") else try std.fmt.bufPrint(&buffer, "{s} · {s} · {s}{s}", .{ current.target orelse "未知设备", current.enabled orelse "未知有效期", current.mode orelse "未知模式", if (partial) "（部分结果）" else "" });
             try setText(self, self.boot_label, text);
             if (value.pending) |pending| {
                 const pending_text = try std.fmt.bufPrint(&buffer, "待生效：{s} · {s} · {s}", .{ pending.target orelse "未知设备", pending.enabled orelse "未知有效期", pending.mode orelse "未知模式" });
@@ -822,27 +1006,34 @@ pub const View = struct {
                 self.mode_storage[slot][mode_count] = .{ .value = mode, .label = mode, .test_id = if (std.mem.eql(u8, mode, "UEFI")) "bmc.boot.mode_option.uefi" else "bmc.boot.mode_option.legacy" };
                 mode_count += 1;
             };
-            if (value.boot_order.value) |order| {
-                var writer: std.Io.Writer.Allocating = .init(self.mount_request.cx.allocator);
-                defer writer.deinit();
-                for (order[0..@min(order.len, 256)], 0..) |reference, index| {
-                    if (index != 0) try writer.writer.writeByte('\n');
-                    try writer.writer.print("{d:0>2}  {s}", .{ index + 1, reference });
-                }
-                try setText(self, self.order_detail, writer.written());
-            } else try setText(self, self.order_detail, "设备尚未返回启动顺序。");
+            try self.refreshOrder(value.boot_order.value);
         }
         self.boot_options.set(self.target_storage[slot][0..target_count]);
         self.mode_options.set(self.mode_storage[slot][0..mode_count]);
-        self.boot_disabled.set(true);
-        self.switch_disabled.set(true);
+        const boot_ready = if (self.boot_snapshot) |snapshot| vm.writeAllowed(snapshot.value.capability) and snapshot.value.capability.secondary_auth == .disabled else false;
+        self.boot_disabled.set(locked or boot_unmapped or target_count == 0);
+        self.mode_disabled.set(locked or boot_unmapped or mode_count == 0);
+        self.boot_execute_disabled.set(locked or !boot_ready or (if (self.boot_snapshot) |snapshot| !self.draft.canApply(snapshot.value) else true));
+        const enabled_ready = if (self.boot_snapshot) |snapshot| snapshot.value.enabled_evidence.permitsWrite() and snapshot.value.allowed_enabled.evidence.permitsWrite() else false;
+        self.switch_disabled.set(locked or boot_unmapped or !enabled_ready or self.draft.disabled());
         self.target_value.set(if (self.draft.disabled()) "Disabled" else canonicalTarget(self.draft.value.target.get()));
         self.mode_value.set(canonicalMode(self.draft.value.mode.get()));
         self.boot_continuous.set(self.draft.continuous());
         if (self.boot_details) |node| node.setDisplay(if (!self.draft.initialized or self.draft.disabled()) .none else .flex);
         if (self.mode_row) |node| node.setDisplay(if (mode_count > 0) .flex else .none);
-        try setText(self, self.power_hint, "当前仅查看管理状态；此版本未授予电源写入权限。");
-        try setText(self, self.boot_hint, if (boot_unmapped) "仅查看该管理资源的启动覆盖与顺序，不会写入或重启。" else if (self.draft.conflict) "设备或能力已变化，请重新审查草稿。" else "仅设置启动覆盖，不会自动重启。USB / 光驱指目标机已有设备，不提供镜像挂载。");
+        const result = if (self.management_result) |value| value.value else null;
+        const operation = self.management_operation;
+        const unknown = if (result) |value| value.phase == .outcome_unknown else false;
+        const running = if (result) |value| !value.terminal() else false;
+        if (self.power_query) |node| node.setDisplay(if (unknown and operation != null and !operation.?.boot) .flex else .none);
+        if (self.boot_query) |node| node.setDisplay(if (unknown and operation != null and operation.?.boot) .flex else .none);
+        if (self.power_cancel) |node| node.setDisplay(if (running and operation != null and !operation.?.boot) .flex else .none);
+        if (self.boot_cancel) |node| node.setDisplay(if (running and operation != null and operation.?.boot) .flex else .none);
+        const power_reason = if (self.power_snapshot) |snapshot| vm.powerUnavailableReason(snapshot.value, self.power_choice) else @as(?[]const u8, "管理通道当前不可用。");
+        const power_hint = if (result != null and operation != null and !operation.?.boot) vm.resultLabel(result.?) else if (power_reason) |reason| reason else if (self.power_choice == .force_off or self.power_choice == .force_restart or self.power_choice == .power_cycle) "强制动作可能造成数据丢失；点击执行后核对并批准本次操作。" else "选择不会执行；点击执行后核对并批准本次操作。";
+        try setText(self, self.power_hint, power_hint);
+        const boot_reason = if (self.boot_snapshot) |snapshot| self.draft.unavailableReason(snapshot.value) else @as(?[]const u8, "管理通道当前不可用。");
+        try setText(self, self.boot_hint, if (result != null and operation != null and operation.?.boot) vm.resultLabel(result.?) else if (boot_unmapped) "仅查看该管理资源的启动覆盖与顺序，不会写入或重启。" else if (boot_reason) |reason| reason else "仅设置启动覆盖，不会自动重启。USB / 光驱指目标机已有设备，不提供镜像挂载。");
     }
     fn updateGeometry(self: *View) void {
         const alloc = self.mount_request.cx.allocator;
@@ -875,7 +1066,6 @@ pub const View = struct {
             if (self.waiting_bounds == null or !std.meta.eql(self.waiting_bounds.?, bounds) or size_changed) {
                 self.waiting_bounds = bounds;
                 node.setStyleInline(alloc, .{ .width = .{ .px = width }, .height = .{ .px = height }, .inset = .{ .left = .{ .px = @max(0, (rect.w - width) / 2) }, .top = .{ .px = @max(12, (rect.h - height) / 2) } } });
-                if (self.waiting_body) |body| _ = setHeight(self.mount_request.cx, body.container, @max(0, height - S.progress_padding * 2 - S.progress_header_height - S.progress_action_height - S.progress_gap * 2));
                 self.bounds_layout_pending = true;
             }
         }
@@ -920,7 +1110,7 @@ pub const View = struct {
         if (value.video == .streaming) {
             const power_unmapped = if (self.power_snapshot) |resource| resource.value.system_uri.len != 0 and !resource.value.capability.system_mapping_verified else false;
             const boot_unmapped = if (self.boot_snapshot) |resource| resource.value.system_uri.len != 0 and !resource.value.capability.system_mapping_verified else false;
-            if (self.texture != null and self.frame_generation == value.frame_generation and (power_unmapped or boot_unmapped)) return .{ .state = .degraded, .label = "视频在线 · 管理关联待核实" };
+            if (self.texture != null and self.frame_generation == value.frame_generation and (power_unmapped or boot_unmapped)) return .{ .state = .degraded, .label = "视频在线 · 管理条件待核实" };
             return .{ .state = .online, .label = if (value.management == .unavailable) "视频在线 · 管理不可用" else "视频在线" };
         }
         return .{ .state = .connecting, .label = if (value.progress.revision != 0) console.progress.stageLabel(value.progress.stage) else switch (value.video) {
@@ -958,9 +1148,16 @@ pub const View = struct {
         if (self.snapshot) |*value| value.deinit();
         if (self.power_snapshot) |*value| value.deinit();
         if (self.boot_snapshot) |*value| value.deinit();
+        if (self.management_result) |*value| value.deinit();
         self.snapshot = null;
         self.power_snapshot = null;
         self.boot_snapshot = null;
+        self.management_result = null;
+        self.management_operation = null;
+        self.power_query = null;
+        self.boot_query = null;
+        self.power_cancel = null;
+        self.boot_cancel = null;
         // GPU texture, content/window facade and protocol producer remain host
         // owned. Unmount releases presentation references and never joins IO.
         self.root = null;
@@ -981,6 +1178,9 @@ pub const View = struct {
         self.progress_notice = null;
         self.progress_steps = null;
         self.progress_rows = @splat(null);
+        self.progress_buttons = @splat(null);
+        self.progress_details = @splat(null);
+        self.progress_chevrons = @splat(null);
         self.progress_icons = @splat(null);
         self.progress_names = @splat(null);
         self.progress_states = @splat(null);
@@ -993,6 +1193,12 @@ pub const View = struct {
         self.log_footer = null;
         self.log_scroll = null;
         self.log_detail = null;
+        self.log_empty = null;
+        self.log_rows = @splat(null);
+        self.log_timestamps = @splat(null);
+        self.log_messages = @splat(null);
+        self.log_durations = @splat(null);
+        self.log_route_text = null;
         self.control_label = null;
         self.control_request_row = null;
         self.power_label = null;
@@ -1007,7 +1213,7 @@ pub const View = struct {
         self.boot_details = null;
         self.boot_switch = null;
         self.mode_row = null;
-        self.order_detail = null;
+        self.order_rows = null;
         self.order_mapping_warning = null;
         self.order_open = null;
         self.order_modal = null;
@@ -1113,8 +1319,7 @@ pub const View = struct {
             self.power_choice = action;
             break;
         };
-        const risk = self.power_choice == .force_off or self.power_choice == .force_restart or self.power_choice == .power_cycle;
-        setText(self, self.power_hint, if (risk) "强制动作可能造成数据丢失；当前未授予执行权限。" else "选择不会执行；当前仅查看管理状态。") catch {};
+        self.projectManagement() catch {};
     }
     fn targetChanged(self: *View, selected: ?[]const u8) void {
         const value = selected orelse return;
@@ -1123,12 +1328,98 @@ pub const View = struct {
     }
     fn modeChanged(self: *View, selected: ?[]const u8) void {
         self.draft.selectMode(selected orelse return) catch {};
+        self.projectManagement() catch {};
     }
     fn continuousChanged(self: *View, value: bool) void {
         self.draft.setContinuous(value) catch {};
+        self.projectManagement() catch {};
     }
-    fn executeReadOnly(self: *View) void {
-        self.showMessage("当前会话未授予管理写入权限。");
+    fn managementLocked(self: *const View) bool {
+        return if (self.management_result) |value| !value.value.terminal() or value.value.phase == .outcome_unknown else false;
+    }
+    fn execution(self: *View, capability: services.Capability, system_uri: []const u8) services.Execution {
+        var nonce: [16]u8 = undefined;
+        std.c.arc4random_buf(&nonce, nonce.len);
+        if (std.mem.allEqual(u8, &nonce, 0)) nonce[0] = 1;
+        var operation_id: u64 = undefined;
+        std.c.arc4random_buf(@ptrCast(&operation_id), @sizeOf(u64));
+        return .{ .call = .{ .owner = self.mount_request.owner, .binding_generation = capability.binding_generation }, .operation = .{ .owner = .{ .session = self.mount_request.owner }, .operation_id = operation_id | 1, .attempt_id = self.mount_request.owner.generation }, .nonce = nonce, .system_uri = system_uri, .capability_revision = capability.revision, .grant_revision = capability.grant_revision };
+    }
+    fn executePower(self: *View) void {
+        if (self.closed or self.power_execute_disabled.peek() or self.managementLocked()) return;
+        const snapshot = self.power_snapshot orelse return;
+        self.submitManagement(.{ .power = .{ .execution = self.execution(snapshot.value.capability, snapshot.value.system_uri), .action = self.power_choice } });
+    }
+    fn executeBoot(self: *View) void {
+        if (self.closed or self.boot_execute_disabled.peek() or self.managementLocked()) return;
+        const snapshot = self.boot_snapshot orelse return;
+        const draft = self.draft.value.state();
+        self.submitManagement(.{ .boot = .{ .execution = self.execution(snapshot.value.capability, snapshot.value.system_uri), .baseline = self.draft.baseline.state(), .enabled = draft.enabled, .target = if (self.draft.disabled()) null else draft.target, .mode = if (self.draft.disabled()) null else draft.mode, .etag = snapshot.value.etag } });
+    }
+    fn submitManagement(self: *View, request: services.ManagementRequest) void {
+        const borrowed = self.borrowConsole() catch return;
+        const request_management = borrowed.table.request_management orelse {
+            self.showMessage("当前会话未提供管理操作批准入口。");
+            return;
+        };
+        self.releaseInput(.released);
+        switch (request_management(borrowed.binding.context, borrowed.binding, request)) {
+            .accepted => |key| {
+                self.management_operation = .{ .key = key, .boot = request == .boot };
+                if (self.management_result) |*old| old.deinit();
+                self.management_result = services.Owned(services.Result).init(self.mount_request.cx.allocator, .{ .operation = key, .phase = .awaiting_approval }) catch null;
+                self.projectManagement() catch {};
+            },
+            .rejected => |reason| self.showMessage(vm.reasonLabel(reason)),
+        }
+        self.mount_request.cx.requestRedraw();
+    }
+    fn queryManagement(self: *View) void {
+        const operation = self.management_operation orelse return;
+        const binding = (self.lookup(services.power_definition) catch return) orelse return;
+        const table = binding.borrow(services.PowerService, services.power_key, self.mount_request.owner) catch return;
+        const query = table.query orelse return;
+        query(binding.context, .{ .owner = self.mount_request.owner, .binding_generation = self.mount_request.owner.generation }, operation.key) catch {
+            self.showMessage("当前无法查询管理操作结果。");
+            return;
+        };
+        if (self.management_result) |*value| value.value.phase = .verifying;
+        self.projectManagement() catch {};
+        self.mount_request.cx.requestRedraw();
+    }
+    fn cancelManagement(self: *View) void {
+        const operation = self.management_operation orelse return;
+        const binding = (self.lookup(services.power_definition) catch return) orelse return;
+        const table = binding.borrow(services.PowerService, services.power_key, self.mount_request.owner) catch return;
+        const result = table.cancel(binding.context, .{ .owner = self.mount_request.owner, .binding_generation = self.mount_request.owner.generation }, operation.key);
+        self.showMessage(if (result == .cancelled_unsent) "已取消，本次请求未发送。" else if (result == .observation_stopped_remote_may_continue) "已停止等待；设备可能继续执行，仅可查询结果。" else "该操作已经结束或会话已变化。");
+        self.refreshManagement() catch {};
+        self.mount_request.cx.requestRedraw();
+    }
+    fn refreshOrder(self: *View, order: ?[]const []const u8) !void {
+        const rows = self.order_rows orelse return;
+        const cx = self.mount_request.cx;
+        const references = order orelse &.{};
+        const count = @max(1, @min(references.len, 256));
+        var writer: std.Io.Writer.Allocating = .init(cx.allocator);
+        defer writer.deinit();
+        for (0..count) |index| {
+            // Separate native text nodes give every option its own measured
+            // row; a newline inside one shaped text run is not a row boundary.
+            if (index == rows.children.items.len) {
+                const row = try ui.textStyled(cx, S.orderText, "");
+                row.setStyleInline(cx.allocator, S.orderRow());
+                var id: [48]u8 = undefined;
+                row.meta.ownership.meta.test_id = try ownedText(self.mount_request.scope, try std.fmt.bufPrint(&id, "bmc.boot.order_row.{d:0>2}", .{index + 1}));
+                try rows.appendChild(cx.allocator, row);
+            }
+            writer.clearRetainingCapacity();
+            if (references.len == 0) try writer.writer.writeAll("设备尚未返回启动顺序。") else try writer.writer.print("{d:0>2}  {s}", .{ index + 1, references[index] });
+            const row = rows.children.items[index];
+            try setText(self, row, writer.written());
+            row.setDisplay(.flex);
+        }
+        for (rows.children.items[count..]) |row| row.setDisplay(.none);
     }
     fn showOrder(self: *View) void {
         self.releaseInput(.released);
@@ -1206,6 +1497,16 @@ const ReplyAction = struct {
     }
 };
 
+const ProgressStepAction = struct {
+    view: *View,
+    group: vm.ProgressGroup,
+    fn toggle(self: *ProgressStepAction) void {
+        self.view.progress_disclosure.toggle(self.group);
+        if (self.view.snapshot) |snapshot| self.view.projectProgress(snapshot.value) catch {};
+        self.view.mount_request.cx.requestRedraw();
+    }
+};
+
 pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererInstance {
     if (request.service_access == null) return error.ServiceUnavailable;
     const cx = request.cx;
@@ -1224,6 +1525,9 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     state.capture_disabled = try scope.createSignal(bool, true);
     state.power_disabled = try scope.createSignal(bool, true);
     state.boot_disabled = try scope.createSignal(bool, true);
+    state.mode_disabled = try scope.createSignal(bool, true);
+    state.power_execute_disabled = try scope.createSignal(bool, true);
+    state.boot_execute_disabled = try scope.createSignal(bool, true);
     state.switch_disabled = try scope.createSignal(bool, true);
     state.power_options = try scope.createSignal([]const Option, &.{});
     state.boot_options = try scope.createSignal([]const Option, &.{});
@@ -1232,6 +1536,7 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     state.target_value = try scope.createSignal(?[]const u8, null);
     state.mode_value = try scope.createSignal(?[]const u8, null);
     state.boot_continuous = try scope.createSignal(bool, false);
+    state.show_fps = try scope.createSignal(bool, true);
     state.order_open = try scope.createSignal(bool, false);
     state.log_open = try scope.createSignal(bool, false);
     state.cancel_disabled = try scope.createSignal(bool, false);
@@ -1239,7 +1544,7 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     state.fit_style = try scope.createSignal(ui.BoxStyle, S.segment(true));
     state.original_style = try scope.createSignal(ui.BoxStyle, S.segment(false));
     state.fullscreen_label = try scope.createSignal([]const u8, "进入全屏");
-    const root = try ui.vstackStyled(cx, S.root, .{});
+    const root = try ui.vstackStyled(cx, S.workspaceRoot, .{});
     root.meta.ownership.meta.test_id = "bmc.content";
     root.behavior.events.on_event_capture = View.reserved;
     root.behavior.events.capture_context = state;
@@ -1287,13 +1592,19 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
         try head.appendChild(cx.allocator, close);
         try mountMenu(state, @fromBackingInt(@intCast(index)), popup);
     }
+    const workspace = try ui.boxStyled(cx, S.videoWorkspace, .{});
+    workspace.meta.ownership.meta.test_id = "bmc.video_workspace";
+    try root.appendChild(cx.allocator, workspace);
+    const video_card = try ui.boxStyled(cx, S.videoCard, .{});
+    video_card.meta.ownership.meta.test_id = "bmc.video_card";
+    try workspace.appendChild(cx.allocator, video_card);
     const scroll = try ui.widgets.ScrollArea(.{ .direction = .both, .rubber_band_x = false, .rubber_band_y = false, .background = ui.Color.BLACK }).mount(scope, cx);
     scroll.container.setStyleInline(cx.allocator, S.video());
     scroll.container.meta.ownership.meta.test_id = "bmc.viewport";
     scroll.container.behavior.interaction.focusable = true;
     scroll.container.behavior.events.on_event_capture = View.handle;
     scroll.container.behavior.events.capture_context = state;
-    try root.appendChild(cx.allocator, scroll.container);
+    try video_card.appendChild(cx.allocator, scroll.container);
     state.scroll = scroll;
     state.viewport = scroll.container;
     if (scroll.container.children.items.len >= 3) {
@@ -1311,6 +1622,16 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     image_node.meta.ownership.meta.test_id = "bmc.frame";
     try scroll.content.appendChild(cx.allocator, image_node);
     state.image_node = image_node;
+    const fps_hud = try ui.vstackStyled(cx, S.fpsHud, .{});
+    fps_hud.meta.ownership.meta.test_id = "bmc.fps";
+    state.fps_hud = fps_hud;
+    state.fps_display = try ui.textStyled(cx, S.fpsPrimary, "显示 — FPS");
+    state.fps_decode = try ui.textStyled(cx, S.fpsSecondary, "解码 — FPS");
+    state.fps_display.?.meta.ownership.meta.test_id = "bmc.fps.display";
+    state.fps_decode.?.meta.ownership.meta.test_id = "bmc.fps.decode";
+    try fps_hud.appendChild(cx.allocator, state.fps_display.?);
+    try fps_hud.appendChild(cx.allocator, state.fps_decode.?);
+    try video_card.appendChild(cx.allocator, fps_hud);
     try mountProgress(state, scroll.container);
     try mountConnectionLog(state);
     try scope.onCleanup(View, state, View.release);
@@ -1335,6 +1656,15 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
     const surface = try ui.boxStyled(cx, S.progressSurface, .{});
     surface.meta.ownership.meta.test_id = "bmc.progress.surface";
     try waiting.appendChild(cx.allocator, surface);
+    const route = try ui.boxStyled(cx, S.progressRouteBox, .{});
+    route.meta.ownership.meta.test_id = "bmc.progress.route";
+    try waiting.appendChild(cx.allocator, route);
+    state.progress_route = route;
+    try route.appendChild(cx.allocator, try ui.textStyled(cx, S.progressRouteLabel, "连接路径"));
+    state.progress_route_text = try ui.textStyled(cx, S.progressRoute, "");
+    state.progress_route_text.?.meta.ownership.meta.test_id = "bmc.progress.target";
+    state.progress_route_text.?.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
+    try route.appendChild(cx.allocator, state.progress_route_text.?);
     const header = try ui.vstackStyled(cx, S.progressHeader, .{});
     try waiting.appendChild(cx.allocator, header);
     state.waiting_header = header;
@@ -1376,32 +1706,43 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
     state.progress_steps = steps;
     for (0..vm.progress_group_count) |index| {
         const group: vm.ProgressGroup = @fromBackingInt(@intCast(index));
-        const row = try ui.hstackStyled(cx, S.progressStep, .{});
+        const block = try ui.vstack(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .gap = 0, .min_width = 0, .flex_shrink = 0 }, .{});
+        try steps.appendChild(cx.allocator, block);
+        const action = try cx.bindState(ProgressStepAction, .{ .view = state, .group = group });
+        const row = try ui.hstackStyled(cx, S.progressStepBackdrop, .{});
         state.progress_rows[index] = row;
-        row.meta.ownership.meta.test_id = try scopedId(scope, "bmc.progress.step.", @tagName(group));
-        try steps.appendChild(cx.allocator, row);
+        try block.appendChild(cx.allocator, row);
+        const button = try ui.widgets.Button(.{ .label = "", .a11y_label = vm.progressGroupLabel(group), .variant = .ghost, .base_style = S.progressStep(cx.tokens), .hover_style = ui.BoxStyle{ .background = ui.Color.TRANSPARENT }, .pressed_style = ui.BoxStyle{ .background = ui.Color.TRANSPARENT }, .focus_ring = .{ .width = 0, .offset = 0 }, .on_click = cx.on(ProgressStepAction, action, ProgressStepAction.toggle) }).mount(scope, cx);
+        // The standard button owns focus, keyboard and pressed semantics; its
+        // caller content supplies the status/name/disclosure columns.
+        for (button.children.items) |child| child.setDisplay(.none);
+        state.progress_buttons[index] = button;
+        button.meta.ownership.meta.test_id = try scopedId(scope, "bmc.progress.step.", @tagName(group));
+        try row.appendChild(cx.allocator, button);
         const icon = try ui.textStyled(cx, S.progressText, "○");
         icon.setStyleInline(cx.allocator, .{ .width = .{ .px = 16 }, .flex_shrink = 0 });
-        try row.appendChild(cx.allocator, icon);
+        try button.appendChild(cx.allocator, icon);
         state.progress_icons[index] = icon;
         const name = try ui.textStyled(cx, S.progressText, vm.progressGroupLabel(group));
         name.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
-        try row.appendChild(cx.allocator, name);
+        try button.appendChild(cx.allocator, name);
         state.progress_names[index] = name;
         const status = try ui.textStyled(cx, S.progressState, "等待");
         status.setStyleInline(cx.allocator, .{ .width = .{ .px = 55 }, .flex_shrink = 0 });
         setTextLayout(status, 18.0 / 11.0, .end);
-        try row.appendChild(cx.allocator, status);
+        try button.appendChild(cx.allocator, status);
         state.progress_states[index] = status;
+        const chevron = try ui.textStyled(cx, S.progressState, "›");
+        chevron.setStyleInline(cx.allocator, .{ .width = .{ .px = 12 }, .flex_shrink = 0 });
+        try button.appendChild(cx.allocator, chevron);
+        state.progress_chevrons[index] = chevron;
+        const detail = try ui.textStyled(cx, S.progressDiagnostic, "该步骤尚无连接事件。");
+        detail.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0, .margin = .{ .left = 24, .top = 4 }, .padding = .{ .top = 8, .bottom = 8, .left = 10, .right = 10 }, .background = S.theme.current().well, .border = .{ .width = 0, .radius = 8 } });
+        detail.meta.ownership.meta.test_id = try scopedId(scope, "bmc.progress.diagnostic.", @tagName(group));
+        detail.setDisplay(.none);
+        try block.appendChild(cx.allocator, detail);
+        state.progress_details[index] = detail;
     }
-    const route = try ui.boxStyled(cx, S.progressRouteBox, .{});
-    route.meta.ownership.meta.test_id = "bmc.progress.route";
-    try body.content.appendChild(cx.allocator, route);
-    state.progress_route = route;
-    state.progress_route_text = try ui.textStyled(cx, S.progressRoute, "");
-    state.progress_route_text.?.meta.ownership.meta.test_id = "bmc.progress.target";
-    state.progress_route_text.?.setStyleInline(cx.allocator, .{ .width = .fill() });
-    try route.appendChild(cx.allocator, state.progress_route_text.?);
     state.waiting_detail = try ui.textStyled(cx, S.progressDetail, "");
     state.waiting_detail.?.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 0 });
     state.waiting_detail.?.meta.ownership.meta.test_id = "bmc.progress.detail";
@@ -1414,6 +1755,28 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
     try actions.appendChild(cx.allocator, session_action);
     state.cancel_node = try progressButton(state, session_action, "取消连接", "bmc.cancel", state.cancel_disabled, View.cancel);
     state.retry_node = try progressButton(state, session_action, "重试连接", "bmc.retry", state.retry_disabled, View.retry);
+}
+
+fn logColumns() ui.BoxStyle {
+    var style = LogS.row(28);
+    style.gap = 12;
+    style.padding = .{ .left = 12, .right = 12 };
+    return style;
+}
+fn logMuted(_: *const ui.ThemeTokens) ui.TextStyle {
+    var style = LogS.logs();
+    style.color = LogS.theme.current().fg_2;
+    style.wrap = .none;
+    return style;
+}
+fn logMessageStyle(_: *const ui.ThemeTokens) ui.TextStyle {
+    return LogS.logs();
+}
+fn logCell(cx: *ui.Cx, text: []const u8, width: ?f32, right: bool) !*ui.Node {
+    const node = try ui.textStyled(cx, logMuted, text);
+    node.setStyleInline(cx.allocator, .{ .width = if (width) |value| .{ .px = value } else .fill(), .height = .{ .px = 16 }, .min_width = 0, .flex_shrink = 0 });
+    if (right) setTextLayout(node, 16.0 / 10.5, .end);
+    return node;
 }
 
 fn mountConnectionLog(state: *View) !void {
@@ -1435,18 +1798,58 @@ fn mountConnectionLog(state: *View) !void {
     const hint = try ui.textStyled(cx, S.hint, "仅本会话最近 32 条脱敏事件。关闭日志不会取消连接。");
     hint.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 0 });
     try modal.body.appendChild(cx.allocator, hint);
-    const scroll = try ui.widgets.ScrollArea(.{ .height = @as(f32, 320), .direction = .vertical, .rubber_band_y = false, .padding = ui.Padding.all(10) }).mount(scope, cx);
-    scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .background = S.theme.current().well, .border = .{ .radius = 8 }, .flex_shrink = 0 });
+    state.log_route_text = try ui.textStyled(cx, S.progressRoute, "");
+    state.log_route_text.?.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0, .padding = ui.Padding.all(10), .margin = .{ .bottom = 12 }, .background = S.theme.current().well, .border = .{ .width = 0, .radius = 8 } });
+    state.log_route_text.?.meta.ownership.meta.test_id = "bmc.connection_log.route";
+    try modal.body.appendChild(cx.allocator, state.log_route_text.?);
+    const columns = try ui.box(cx, logColumns(), .{});
+    columns.meta.ownership.meta.test_id = "bmc.connection_log.columns";
+    try modal.body.appendChild(cx.allocator, columns);
+    try columns.appendChild(cx.allocator, try logCell(cx, "时间戳", 86, false));
+    try columns.appendChild(cx.allocator, try logCell(cx, "消息", null, false));
+    try columns.appendChild(cx.allocator, try logCell(cx, "耗时", 76, true));
+    const scroll = try ui.widgets.ScrollArea(.{ .height = @as(f32, 320), .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
+    scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .background = LogS.theme.popupInset(), .border = .{ .width = 0, .radius = 9 }, .flex_shrink = 0 });
+    scroll.content.setStyleInline(cx.allocator, LogS.logContent());
     scroll.container.meta.ownership.meta.test_id = "bmc.connection_log.list";
     scroll.container.behavior.interaction.focusable = true;
     scroll.container.behavior.events.on_event_capture = View.logKey;
     scroll.container.behavior.events.capture_context = state;
     try modal.body.appendChild(cx.allocator, scroll.container);
     state.log_scroll = scroll;
-    state.log_detail = try ui.textStyled(cx, S.logText, "本会话尚未产生连接事件。");
-    state.log_detail.?.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 0 });
+    state.log_detail = try ui.vstack(cx, .{ .width = .fill(), .height = .{ .fit = .{} }, .gap = 0, .min_width = 0, .flex_shrink = 0 }, .{});
     state.log_detail.?.meta.ownership.meta.test_id = "bmc.connection_log.events";
     try scroll.content.appendChild(cx.allocator, state.log_detail.?);
+    state.log_empty = try ui.textStyled(cx, logMessageStyle, "本会话尚未产生连接事件。");
+    try state.log_detail.?.appendChild(cx.allocator, state.log_empty.?);
+    for (0..state.log_rows.len) |index| {
+        var row_style = LogS.row(28);
+        row_style.height = .{ .fit = .{} };
+        row_style.min_height = 28;
+        row_style.align_items = .start;
+        row_style.gap = 12;
+        row_style.padding = .{ .top = 6, .bottom = 6 };
+        const row = try ui.box(cx, row_style, .{});
+        var index_buffer: [12]u8 = undefined;
+        const suffix = try std.fmt.bufPrint(&index_buffer, "{d}", .{index});
+        row.meta.ownership.meta.test_id = try scopedId(scope, "bmc.connection_log.row.", suffix);
+        try state.log_detail.?.appendChild(cx.allocator, row);
+        state.log_rows[index] = row;
+        const timestamp = try logCell(cx, "时间未知", 86, false);
+        timestamp.meta.ownership.meta.test_id = try scopedId(scope, "bmc.connection_log.timestamp.", suffix);
+        try row.appendChild(cx.allocator, timestamp);
+        state.log_timestamps[index] = timestamp;
+        const message = try ui.textStyled(cx, logMessageStyle, "");
+        message.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
+        message.meta.ownership.meta.test_id = try scopedId(scope, "bmc.connection_log.message.", suffix);
+        try row.appendChild(cx.allocator, message);
+        state.log_messages[index] = message;
+        const duration = try logCell(cx, "—", 76, true);
+        duration.meta.ownership.meta.test_id = try scopedId(scope, "bmc.connection_log.duration.", suffix);
+        try row.appendChild(cx.allocator, duration);
+        state.log_durations[index] = duration;
+        row.setDisplay(.none);
+    }
     const footer = try ui.box(cx, S.logFooter(cx.viewport.height < 600), .{});
     try modal.dialog.appendChild(cx.allocator, footer);
     state.log_footer = footer;
@@ -1517,6 +1920,13 @@ fn mountMenu(state: *View, menu: Menu, popup: Popover) !void {
             const fullscreen = try ui.widgets.Button(.{ .label = state.fullscreen_label, .variant = .secondary, .base_style = S.action(), .on_click = cx.on(View, state, View.fullscreen) }).mount(scope, cx);
             fullscreen.meta.ownership.meta.test_id = "bmc.display.fullscreen";
             try parent.appendChild(cx.allocator, fullscreen);
+            const fps_toggle = try ui.widgets.Switch(.{ .label = "显示 FPS", .checked = state.show_fps, .on_change = cx.on(View, state, View.fpsChanged) }).mount(scope, cx);
+            fps_toggle.meta.ownership.meta.test_id = "bmc.display.fps";
+            try parent.appendChild(cx.allocator, fps_toggle);
+            state.fps_detail = try ui.textStyled(cx, S.hint, "等待视频帧统计");
+            state.fps_detail.?.meta.ownership.meta.test_id = "bmc.fps.detail";
+            try parent.appendChild(cx.allocator, state.fps_detail.?);
+            try parent.appendChild(cx.allocator, try ui.textStyled(cx, S.hint, "显示：新视频帧提交至窗口的频率。解码：完整视频帧发布频率。无新帧不一定表示卡顿。"));
             _ = try actionButton(state, scope, parent, "请求完整视频帧", "bmc.display.refresh", null, View.refreshVideo);
             _ = try actionButton(state, scope, parent, "连接日志", "bmc.display.connection_log", null, View.showLog);
         },
@@ -1530,7 +1940,11 @@ fn mountMenu(state: *View, menu: Menu, popup: Popover) !void {
             try parent.appendChild(cx.allocator, state.power_hint.?);
             const actions = try ui.hstackStyled(cx, S.actions, .{});
             try parent.appendChild(cx.allocator, actions);
-            _ = try actionButton(state, scope, actions, "执行", "bmc.power.execute", state.power_disabled, View.executeReadOnly);
+            state.power_cancel = try actionButton(state, scope, actions, "取消等待", "bmc.power.cancel", null, View.cancelManagement);
+            state.power_cancel.?.setDisplay(.none);
+            state.power_query = try actionButton(state, scope, actions, "查询结果", "bmc.power.query", null, View.queryManagement);
+            state.power_query.?.setDisplay(.none);
+            _ = try actionButton(state, scope, actions, "执行", "bmc.power.execute", state.power_execute_disabled, View.executePower);
         },
         .boot => {
             state.boot_mapping_warning = try mappingWarning(state, parent, "bmc.boot.mapping_warning");
@@ -1552,7 +1966,7 @@ fn mountMenu(state: *View, menu: Menu, popup: Popover) !void {
             const mode_row = try ui.hstackStyled(cx, S.field, .{});
             try details.appendChild(cx.allocator, mode_row);
             state.mode_row = mode_row;
-            try selectFieldContents(state, scope, mode_row, "下次启动模式", "bmc.boot.mode", state.mode_options, state.mode_value, state.boot_disabled, View.modeChanged);
+            try selectFieldContents(state, scope, mode_row, "下次启动模式", "bmc.boot.mode", state.mode_options, state.mode_value, state.mode_disabled, View.modeChanged);
             _ = try actionButton(state, scope, parent, "查看启动顺序（只读）", "bmc.boot.order", null, View.showOrder);
             const modal = try ui.widgets.Modal(.{ .title = "启动顺序 · 只读", .open = state.order_open.?, .width = @as(f32, 420), .max_height = @as(f32, 360), .close_icon_asset = ui.icons.x, .enter_transition = .fade, .exit_transition = .fade }).mount(scope, cx);
             if (!modal.portaled) try state.root.?.appendChild(cx.allocator, modal.overlay);
@@ -1572,19 +1986,23 @@ fn mountMenu(state: *View, menu: Menu, popup: Popover) !void {
             order_scroll.container.behavior.events.capture_context = state;
             try modal.body.appendChild(cx.allocator, order_scroll.container);
             state.order_scroll = order_scroll;
-            state.order_detail = try ui.textStyled(cx, S.orderText, "设备尚未返回启动顺序。");
-            try order_scroll.content.appendChild(cx.allocator, state.order_detail.?);
+            state.order_rows = order_scroll.content;
+            try state.refreshOrder(null);
             state.boot_hint = try ui.textStyled(cx, S.hint, "仅查看启动覆盖；保存启动项不会自动重启。");
             try parent.appendChild(cx.allocator, state.boot_hint.?);
             const actions = try ui.hstackStyled(cx, S.actions, .{});
             try parent.appendChild(cx.allocator, actions);
-            _ = try actionButton(state, scope, actions, "执行", "bmc.boot.execute", state.boot_disabled, View.executeReadOnly);
+            state.boot_cancel = try actionButton(state, scope, actions, "取消等待", "bmc.boot.cancel", null, View.cancelManagement);
+            state.boot_cancel.?.setDisplay(.none);
+            state.boot_query = try actionButton(state, scope, actions, "查询结果", "bmc.boot.query", null, View.queryManagement);
+            state.boot_query.?.setDisplay(.none);
+            _ = try actionButton(state, scope, actions, "执行", "bmc.boot.execute", state.boot_execute_disabled, View.executeBoot);
         },
     }
 }
 
 fn actionButton(state: *View, scope: *ui.Scope, parent: *ui.Node, label: []const u8, id: []const u8, disabled: ?*ui.Signal(bool), comptime action: fn (*View) void) !*ui.Node {
-    const button = try ui.widgets.Button(.{ .label = label, .variant = .secondary, .disabled = if (disabled) |signal| ui.Source(bool){ .signal = signal } else ui.Source(bool){ .value = false }, .base_style = S.action(), .on_click = state.mount_request.cx.on(View, state, action) }).mount(scope, state.mount_request.cx);
+    const button = try ui.widgets.Button(.{ .label = label, .variant = .secondary, .disabled = if (disabled) |signal| ui.Source(bool){ .signal = signal } else ui.Source(bool){ .value = false }, .base_style = S.action(), .focus_ring = ui.FocusRingConfig{ .width = 0 }, .on_click = state.mount_request.cx.on(View, state, action) }).mount(scope, state.mount_request.cx);
     button.meta.ownership.meta.test_id = id;
     try parent.appendChild(state.mount_request.cx.allocator, button);
     return button;
@@ -1671,6 +2089,8 @@ fn selectFieldContents(state: *View, scope: *ui.Scope, row: *ui.Node, label: []c
     select.wrapper.meta.ownership.meta.test_id = id;
     select.trigger.meta.ownership.meta.test_id = try scopedId(scope, id, ".trigger");
     select.trigger.setStyleInline(cx.allocator, .{ .height = .{ .px = 32 }, .min_height = 32, .border = .{ .width = 0, .radius = 8 }, .font_size = 12 });
+    select.chrome.meta.ownership.meta.test_id = try scopedId(scope, id, ".dropdown");
+    try @import("select_surface.zig").mount(cx, select);
     try row.appendChild(cx.allocator, select.wrapper);
 }
 fn setText(state: *View, node: ?*ui.Node, text: []const u8) !void {

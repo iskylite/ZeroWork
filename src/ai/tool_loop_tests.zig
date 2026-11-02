@@ -296,6 +296,7 @@ const Script = struct {
     index: usize = 0,
     requests: std.ArrayList([]u8) = .empty,
     transient_round: ?usize = null,
+    interrupted_error: anyerror = error.Transient,
     failed: bool = false,
     inside_chat: bool = false,
     dispatch_count: ?*usize = null,
@@ -319,7 +320,7 @@ const Script = struct {
         if (self.transient_round == self.index and !self.failed) {
             self.failed = true;
             sink(sink_ctx, .{ .text = "failed-attempt-prefix" });
-            return error.Transient;
+            return self.interrupted_error;
         }
         if (self.index >= self.rounds.len) return error.UnexpectedProviderRound;
         const before = if (self.dispatch_count) |value| value.* else 0;
@@ -785,6 +786,67 @@ test "answer retry without tool capability keeps frozen scoped request and parti
     try std.testing.expectEqualStrings("recovered without tools", manager.cards.cards.items[1].text);
 }
 
+test "answer retry after timeout or interrupted text sends a fresh request with the original context" {
+    for ([_]anyerror{ error.Timeout, error.ProviderMissingDone }) |failure| {
+        var script: Script = .{ .rounds = &.{.{ .text = "continued answer" }}, .transient_round = 0, .interrupted_error = failure };
+        defer script.deinit();
+        var manager = manager_mod.Manager.init(a);
+        defer manager.deinit();
+        manager.scope = scope;
+        manager.turn_id = 85;
+        manager.retry_policy.max_attempts = 0;
+        var original_stop: provider.CancelToken = .{};
+        const request: provider.ChatRequest = .{ .model = "test", .system = "original system", .messages = &.{ .{ .content = "previous question" }, .{ .role = .assistant, .content = "previous answer" }, .{ .content = "current question" } }, .cancel = &original_stop };
+        try std.testing.expectError(failure, manager.run(script.interface(), request));
+        const captured = manager.tool_run.?;
+        original_stop.cancel();
+        var next_stop: provider.CancelToken = .{};
+        _ = try manager.resumeAnswer(script.interface(), &next_stop);
+        try std.testing.expectEqual(captured, manager.tool_run.?);
+        try std.testing.expectEqual(@as(usize, 2), script.requests.items.len);
+        try std.testing.expect(!next_stop.isCancelled());
+        const body = try std.json.parseFromSlice(std.json.Value, a, script.requests.items[1], .{});
+        defer body.deinit();
+        const messages = body.value.object.get("messages").?.array.items;
+        try std.testing.expectEqualStrings("original system", messages[0].object.get("content").?.string);
+        try std.testing.expectEqualStrings("previous question", messages[1].object.get("content").?.string);
+        try std.testing.expectEqualStrings("previous answer", messages[2].object.get("content").?.string);
+        try std.testing.expectEqualStrings("current question", messages[3].object.get("content").?.string);
+        try std.testing.expect(body.value.object.get("tools") == null);
+        try std.testing.expectEqualStrings("failed-attempt-prefix", manager.cards.cards.items[0].text);
+        try std.testing.expectEqualStrings("continued answer", manager.cards.cards.items[1].text);
+    }
+}
+
+test "answer retry after a completed tool and provider timeout retains paired results without replay" {
+    var script: Script = .{ .rounds = &.{ .{ .calls = &.{df} }, .{ .text = "continued from tool result" } }, .transient_round = 1, .interrupted_error = error.Timeout };
+    defer script.deinit();
+    var host: ControlledHost = .{};
+    var manager = managerFor(&host);
+    defer manager.deinit();
+    var original_stop: provider.CancelToken = .{};
+    try std.testing.expectError(error.Timeout, manager.run(script.interface(), makeRequest(&original_stop)));
+    const captured = manager.tool_run.?;
+    try std.testing.expectEqual(@as(usize, 1), host.count);
+    original_stop.cancel();
+    var next_stop: provider.CancelToken = .{};
+    _ = try manager.resumeAnswer(script.interface(), &next_stop);
+    try std.testing.expectEqual(captured, manager.tool_run.?);
+    try std.testing.expectEqual(@as(usize, 1), host.count);
+    try std.testing.expectEqual(@as(usize, 3), script.requests.items.len);
+    const body = try std.json.parseFromSlice(std.json.Value, a, script.requests.items[2], .{});
+    defer body.deinit();
+    const messages = body.value.object.get("messages").?.array.items;
+    const calls = messages[2].object.get("tool_calls").?.array.items;
+    try std.testing.expectEqualStrings(df.id, calls[0].object.get("id").?.string);
+    try std.testing.expectEqualStrings(df.id, messages[3].object.get("tool_call_id").?.string);
+    var result = try resultFromBody(script.requests.items[2], 3);
+    defer result.deinit();
+    try std.testing.expectEqualStrings("actual-controlled-output", result.value.object.get("targets").?.array.items[0].object.get("stdout").?.string);
+    try std.testing.expect(body.value.object.get("tools") == null);
+    try std.testing.expect(!next_stop.isCancelled());
+}
+
 test "manual answer retry honors retained Retry-After deadline without requesting or replaying" {
     const Limited = struct {
         calls: usize = 0,
@@ -865,6 +927,86 @@ test "host uncertain execution blocks a fresh command while preserving exact rea
     try std.testing.expectEqual(@as(usize, 3), gateway.calls);
     try std.testing.expect(!run.records.items[1].dispatched);
     try std.testing.expect(std.mem.indexOf(u8, run.records.items[1].result_body.?, "EarlierToolOutcomeUnknown") != null);
+    try http.validateToolMessages(.{ .model = "test", .system = "", .messages = run.messages.items });
+}
+
+test "operation history capacity rejects unsent plugin calls without inventing unknown effects" {
+    const tools = @import("plugin_tools.zig");
+    const operations = @import("../host/operation_store.zig");
+    const identity = @import("../host/identity.zig");
+    var history = operations.Store.init(a);
+    defer history.deinit();
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(101), .generation = 3 };
+    for (0..operations.Store.capacity) |index| {
+        const id = index + 1;
+        _ = try history.beginNew(owner, id, "fixture.completed", @splat(0), 1);
+        try history.markSent(owner, id);
+        try history.finish(owner, id, true, "observed");
+        try history.resourcesReleased(owner, id);
+    }
+    const Fixture = struct {
+        history: *operations.Store,
+        members: []const tools.Member = &.{},
+        gateway_calls: usize = 0,
+        approvals: usize = 0,
+        effects: usize = 0,
+        fn legacy(_: *anyopaque, _: loop_mod.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !loop_mod.Outcome {
+            return error.UnexpectedLegacyDispatch;
+        }
+        fn handler(raw: *anyopaque, _: tools.Invocation, _: std.mem.Allocator) !tools.ToolResult {
+            @as(*@This(), @ptrCast(@alignCast(raw))).effects += 1;
+            return error.UnexpectedPluginDispatch;
+        }
+        fn liveScope(_: *anyopaque) !scope_mod.Scope {
+            return scope;
+        }
+        fn liveMembers(raw: *anyopaque) ![]const tools.Member {
+            return @as(*@This(), @ptrCast(@alignCast(raw))).members;
+        }
+        fn policy(_: *anyopaque) tools.Policy {
+            return .{};
+        }
+        fn now(_: *anyopaque) i64 {
+            return 100;
+        }
+        fn approval(raw: *anyopaque, _: tools.DynamicInvocation, _: *tools.ApprovalTicket, _: ?*provider.CancelToken) !bool {
+            @as(*@This(), @ptrCast(@alignCast(raw))).approvals += 1;
+            return true;
+        }
+        fn invoke(raw: *anyopaque, call: tools.DynamicInvocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) ![]tools.ToolResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.gateway_calls += 1;
+            const runtime: tools.Runtime = .{ .context = self, .live_scope = liveScope, .live_members = liveMembers, .current_policy = policy, .now_ms = now, .approval = approval, .operations = self.history };
+            return runtime.execute(call, allocator, cancel);
+        }
+    };
+    var fixture: Fixture = .{ .history = &history };
+    const schema = "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ids\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":16,\"uniqueItems\":true,\"items\":{\"type\":\"integer\",\"minimum\":1}}},\"required\":[\"session_ids\"]}";
+    const definition: tools.ToolDefinition = .{ .id = "fixture.capacity_write", .schema = schema, .effect = .resource_write, .approval_policy = .always_confirm };
+    const members = [_]tools.Member{.{ .owner = owner, .plugin_id = "fixture", .context = &fixture, .bindings = &.{.{ .plugin_id = "fixture", .definition_id = definition.id, .handler = Fixture.handler }} }};
+    fixture.members = &members;
+    var table = try tools.RequestTable.init(a, scope, &.{definition}, &members);
+    defer table.deinit();
+    const wire = try tools.providerDefinitions(&table, table.arena.allocator());
+    var run = loop_mod.Loop.init(a, scope, 19, .{ .context_window = 100_000 });
+    defer run.deinit();
+    try run.start(.{ .model = "test", .system = "", .messages = &.{}, .tools = wire, .tool_table = &table });
+    try run.complete("", &.{
+        .{ .id = "capacity-first", .name = wire[0].name(), .arguments = "{\"session_ids\":[101]}" },
+        .{ .id = "capacity-second", .name = wire[0].name(), .arguments = "{\"session_ids\":[101]}" },
+    }, .{ .context = &fixture, .execute = Fixture.legacy, .execute_dynamic = Fixture.invoke }, .{}, 1, null);
+    try std.testing.expectEqual(@as(usize, 2), fixture.gateway_calls);
+    try std.testing.expectEqual(@as(usize, 0), fixture.approvals);
+    try std.testing.expectEqual(@as(usize, 0), fixture.effects);
+    try std.testing.expect(!run.uncertain);
+    try std.testing.expectEqual(@as(usize, operations.Store.capacity), history.count());
+    for (run.records.items) |record| {
+        try std.testing.expect(!record.dispatched);
+        const body = try std.json.parseFromSlice(std.json.Value, a, record.result_body.?, .{});
+        defer body.deinit();
+        try std.testing.expectEqualStrings("rejected", body.value.object.get("status").?.string);
+        try std.testing.expectEqualStrings("OperationHistoryFull", body.value.object.get("error_code").?.string);
+    }
     try http.validateToolMessages(.{ .model = "test", .system = "", .messages = run.messages.items });
 }
 

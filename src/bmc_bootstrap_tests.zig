@@ -70,6 +70,7 @@ const fixture =
     \\    elif path=='/js/app.0bc71eb0.js' and method=='GET':
     \\     assert mode.startswith('asset-') and headers.get('accept-encoding')=='identity' and 'x-auth-token' not in headers
     \\     asset=b'/* ephemeral loopback asset */'*3000
+    \\     if mode=='asset-large-gzip': asset=b''.join(os.urandom(1024)+b'/* ephemeral loopback only */'*144 for _ in range(2300))
     \\     if mode=='asset-bomb': asset=b'x'*(16*1024*1024+1)
     \\     encoded=gzip.compress(asset,mtime=0)
     \\     if mode=='asset-truncated': encoded=encoded[:-3]
@@ -275,6 +276,11 @@ test "BMC bootstrap gzip and plain public assets require exact reviewed digest b
     try autoProbe("asset-truncated", error.InvalidPublicMaterialGzip, true);
     try autoProbe("asset-trailing", error.InvalidPublicMaterialGzip, true);
     try autoProbe("asset-bomb", error.BodyTooLarge, true);
+}
+test "BMC bootstrap large streamed gzip public asset completes framing and digest before rejecting unreviewed material" {
+    // Match the live-shaped multi-megabyte encoded / eleven-megabyte decoded
+    // body without retaining device JavaScript or weakening the digest gate.
+    try autoProbe("asset-large-gzip", error.UnsupportedProfilePublicEvidence, true);
 }
 test "BMC bootstrap operation default secret overrides an existing saved reference without prompting" {
     try autoProbe("success", null, true);

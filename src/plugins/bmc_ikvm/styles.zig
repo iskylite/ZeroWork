@@ -2,7 +2,9 @@
 //! palette/materials come from the existing three-theme publication.
 const ui = @import("ui");
 pub const theme = @import("../../ui/app_theme.zig");
+const shell = @import("../../ui/shell_styles.zig");
 pub const toolbar_height: f32 = 44;
+pub const video_card_radius: f32 = shell.card_radius;
 pub const popup_width: f32 = 296;
 pub const boot_width: f32 = 312;
 pub const select_width: f32 = 180;
@@ -18,8 +20,21 @@ pub const log_width: f32 = 760;
 pub fn root(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .column, .gap = 0, .min_width = 0, .min_height = 0, .overflow_hidden = true };
 }
+pub fn workspaceRoot(tokens: *const ui.ThemeTokens) ui.BoxStyle {
+    // The host clears nonterminal tab backgrounds. Keep the shared pane's
+    // single material on this inner node; its host already owns the shadow.
+    var style = shell.pane(tokens);
+    style.shadow = null;
+    style.inset_shadow = null;
+    style.padding = ui.Padding.ZERO;
+    style.gap = 0;
+    style.overflow_hidden = true;
+    style.clip_shape = .{ .rounded_rect = shell.card_radius };
+    return style;
+}
 pub fn toolbar(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = toolbar_height }, .direction = .row, .align_items = .center, .justify = .end, .gap = 6, .padding = .{ .top = 10, .bottom = 10, .left = 12, .right = 12 }, .background = theme.current().well, .flex_shrink = 0, .min_width = 0 };
+    // Share the workspace material with the area outside the video's top corners.
+    return .{ .width = .fill(), .height = .{ .px = toolbar_height }, .direction = .row, .align_items = .center, .justify = .end, .gap = 6, .padding = .{ .top = 10, .bottom = 10, .left = 12, .right = 12 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn connectionTitle(tokens: *const ui.ThemeTokens) ui.TextStyle {
     var style = title(tokens);
@@ -32,14 +47,28 @@ pub fn tool() ui.BoxStyle {
 pub fn toolHover() ui.BoxStyle {
     return .{ .background = theme.current().hover };
 }
+pub fn videoWorkspace(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .padding = ui.Padding.ZERO, .gap = 0 };
+}
+pub fn videoCard(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .padding = ui.Padding.ZERO, .gap = 0, .background = ui.Color.BLACK, .border = .{ .width = 0, .radius = video_card_radius }, .overflow_hidden = true, .clip_shape = .{ .rounded_rect = video_card_radius } };
+}
 pub fn video() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .background = ui.Color.BLACK, .padding = ui.Padding.ZERO, .gap = 0, .border = .{ .width = 0, .radius = 0 }, .overflow_hidden = true, .hit_behavior = .@"opaque" };
+    return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .background = ui.Color.BLACK, .padding = ui.Padding.ZERO, .gap = 0, .border = .{ .width = 0, .radius = video_card_radius }, .overflow_hidden = true, .clip_shape = .{ .rounded_rect = video_card_radius }, .hit_behavior = .@"opaque" };
 }
 pub fn image() ui.Style {
-    return .{ .position = .absolute, .width = .{ .px = 1 }, .height = .{ .px = 1 }, .flex_shrink = 0 };
+    return .{ .position = .absolute, .width = .{ .px = 1 }, .height = .{ .px = 1 }, .flex_shrink = 0, .border = .{ .width = 0, .radius = video_card_radius } };
 }
 pub fn popup() ui.BoxStyle {
     return .{ .direction = .column, .gap = 0, .padding = ui.Padding.ZERO, .min_width = 0, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = 12 }, .shadow = .{ .offset_y = 20, .blur = 50, .color = theme.current().shadow }, .hit_behavior = .@"opaque" };
+}
+// Same nested menu material as the shared SSH surfaces. bg_primary is an
+// inline workspace material and must not back a Select above another popup.
+pub fn selectDropdown() ui.BoxStyle {
+    return .{ .direction = .column, .gap = 0, .padding = ui.Padding.all(5), .background = theme.layerBackground(2), .glass = theme.overlayGlass(), .border = .{ .width = 0, .radius = 10 }, .corner_radius = 10, .hit_shape = .{ .rounded_rect = 10 }, .clip_shape = .{ .rounded_rect = 10 }, .hit_behavior = .@"opaque", .shadow = .{ .offset_y = 12, .blur = 24, .color = theme.current().shadow } };
+}
+pub fn selectOption() ui.BoxStyle {
+    return .{ .height = .{ .px = 32 }, .min_height = 32, .padding = .{ .top = 7, .bottom = 7, .left = 9, .right = 9 }, .border = .{ .width = 0, .radius = 7 }, .corner_radius = 7, .flex_shrink = 0 };
 }
 pub fn popupBody(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 12, .padding = ui.Padding.all(12), .min_width = 0, .flex_shrink = 0 };
@@ -143,7 +172,13 @@ pub fn progressSteps(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .min_width = 0, .flex_shrink = 0 };
 }
 pub fn progressStep(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .top = 6, .bottom = 6 }, .min_width = 0, .flex_shrink = 0, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 8 } };
+    return .{ .width = .fill(), .height = .{ .px = 30 }, .min_height = 30, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{ .top = 6, .bottom = 6 }, .min_width = 0, .flex_shrink = 0, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .radius = 8 } };
+}
+pub fn progressStepBackdrop(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .gap = 0, .padding = ui.Padding.ZERO, .min_width = 0, .flex_shrink = 0, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .radius = 8 } };
+}
+pub fn progressDiagnostic(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 11, .line_height = 1.7, .color = theme.current().fg_1, .wrap = .word, .selectable = false, .use_monospace_font = true };
 }
 pub fn progressText(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 12, .line_height = 1.5, .color = theme.current().fg_1, .wrap = .word, .selectable = false };
@@ -154,8 +189,11 @@ pub fn progressState(_: *const ui.ThemeTokens) ui.TextStyle {
 pub fn progressRoute(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 1.7, .color = theme.current().fg_1, .wrap = .word, .use_monospace_font = true, .selectable = false };
 }
+pub fn progressRouteLabel(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 11, .line_height = 1.5, .color = progressSecondary(), .selectable = false };
+}
 pub fn progressRouteBox(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .padding = ui.Padding.all(10), .background = theme.current().well, .border = .{ .radius = 8 }, .min_width = 0, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 4, .padding = ui.Padding.all(10), .background = theme.current().well, .border = .{ .width = 0, .radius = 8 }, .min_width = 0, .flex_shrink = 0 };
 }
 pub fn progressActions(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .justify = .end, .align_items = .center, .gap = 8, .min_width = 0, .flex_shrink = 0 };
@@ -181,6 +219,23 @@ pub fn inputHintBox() ui.BoxStyle {
 pub fn orderText(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 2.0, .color = theme.current().fg_1, .wrap = .word, .selectable = false, .use_monospace_font = true };
 }
+pub fn orderRow() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .flex_shrink = 0 };
+}
 pub fn segment(selected: bool) ui.BoxStyle {
     return .{ .height = .{ .px = 32 }, .min_height = 32, .width = .fill(), .min_width = 0, .font_size = 12, .background = if (selected) theme.current().selection else theme.current().well, .border = .{ .width = 0, .radius = 8 } };
+}
+
+// Video-local contrast is stable across shell themes; never intercept input.
+pub fn fpsHud(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .position = .absolute, .inset = .{ .top = .{ .px = 12 }, .right = .{ .px = 12 } }, .direction = .column, .gap = 2, .padding = .{ .top = 6, .bottom = 6, .left = 10, .right = 10 }, .background = ui.Color.rgba(18, 20, 24, 199), .border = .{ .radius = 7 }, .hit_behavior = .pass_through, .hit_roles = .{ .pointer = false, .scroll = false }, .flex_shrink = 0 };
+}
+pub fn fpsPrimary(_: *const ui.ThemeTokens) ui.TextStyle {
+    return .{ .font_size = 11, .line_height = 16.0 / 11.0, .font_weight = 500, .use_monospace_font = true, .color = ui.Color.hex(0xf3f4f6), .selectable = false };
+}
+pub fn fpsSecondary(t: *const ui.ThemeTokens) ui.TextStyle {
+    var s = fpsPrimary(t);
+    s.font_weight = 400;
+    s.color = ui.Color.hex(0xc6cad1);
+    return s;
 }

@@ -22,6 +22,8 @@ pub const Session = struct {
     state: []const u8,
     ready: bool,
     connected: bool = false,
+    /// Optional transport state; state above remains the host lifecycle.
+    connection_state: ?[]const u8 = null,
     closing: bool = false,
     current_member: bool = true,
     read_terminal: bool = false,
@@ -99,7 +101,7 @@ pub const terminal_contributions = @import("host_terminal_queries.zig").contribu
 pub const contributions = [_]host.Contribution{
     query("get_current_context", "Read host metadata for this conversation: current binding_ref, effective mode and granted capabilities. Contains no chat history, terminal text or foreground-process status. Use when these facts are needed, not before every tool call. A single-session binding_ref is already its exact session reference; further discovery is only needed for additional metadata or target disambiguation. UI focus never changes authority.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"detail\":{\"type\":\"string\",\"enum\":[\"summary\"]}}}"),
     query("list_sessions", "List only this conversation's bound session or current group members. Other sessions and groups are inaccessible. Optional group_ref must name the current group. Pages are bounded; restart on CursorExpired or SnapshotChanged.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ page_fields ++ "," ++ scope_field ++ "," ++ group_field ++ ",\"state_filter\":{\"type\":\"string\",\"enum\":[\"all\",\"ready\",\"opening\",\"closed\"]}}}"),
-    query("get_session", "Read exact visible session metadata without effects or terminal content. Connection ready does not prove PTY execution ready: inspect trusted_pty_execution (legacy capability name), trusted_pty_state, trusted_pty_failure and completion_source. shell_reported means cooperative shell events, not private attestation. Initializing/busy allow bounded read-only observation before input. Validates the original generation.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ session_field ++ "},\"required\":[\"session_ref\"]}"),
+    query("get_session", "Read exact visible session metadata without effects or terminal content. state is the host attachment lifecycle. For BMC, connection_state describes the video connection; connected requires an RFB-ready video transport, and ready additionally requires a current complete frame. Connection ready does not prove PTY execution ready: inspect trusted_pty_execution (legacy capability name), trusted_pty_state, trusted_pty_failure and completion_source. shell_reported means cooperative shell events, not private attestation. Initializing/busy allow bounded read-only observation before input. Validates the original generation.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ session_field ++ "},\"required\":[\"session_ref\"]}"),
     query("list_groups", "List only this conversation's bound group. A single-session conversation returns no groups. Other groups are inaccessible.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ page_fields ++ "," ++ scope_field ++ "}}"),
     query("get_group", "Read the exact visible group's identity, name and membership revision. No connection, execution or membership mutation occurs.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ group_field ++ "},\"required\":[\"group_ref\"]}"),
     query("list_group_members", "Read one authorized group's members using a revision-bound cursor. SnapshotChanged requires restarting the query, so pages never mix membership revisions. A page does not expand execution authority.", "{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{" ++ page_fields ++ "," ++ group_field ++ "},\"required\":[\"group_ref\"]}"),
@@ -214,7 +216,7 @@ fn boundedText(text: []const u8, max: usize) []const u8 {
     while (len > 0 and !std.unicode.utf8ValidateSlice(text[0..len])) len -= 1;
     return text[0..len];
 }
-const SessionView = struct { session_ref: []const u8, session_id: u64, generation: u64, source_ref: ?[]const u8, metadata_only: bool, title: []const u8, protocol: []const u8, state: []const u8, ready: bool, connected: bool, closing: bool, current_member: bool, task_owned: bool = false, ownership: ?@import("lifecycle_journal.zig").Ownership, ownership_revision: u64, retention: ?config.SessionRetention, recording_ref: ?[]const u8, recording_unavailable_reason: ?[]const u8, connection_policies: []const []const u8, connection_policy: ?[]const u8, group_refs: []const []const u8, control: struct { state: ?[]const u8, lease_held: bool, input_ready: ?bool, local_released: ?bool }, capabilities: struct { read_state: bool = true, read_terminal: bool, batch_execution: bool, trusted_pty_execution: bool = false, trusted_pty_state: []const u8, trusted_pty_failure: ?[]const u8, completion_source: @import("../host/terminal_execution.zig").CompletionSource }, capability_revision: u64 };
+const SessionView = struct { session_ref: []const u8, session_id: u64, generation: u64, source_ref: ?[]const u8, metadata_only: bool, title: []const u8, protocol: []const u8, state: []const u8, ready: bool, connected: bool, connection_state: ?[]const u8, closing: bool, current_member: bool, task_owned: bool = false, ownership: ?@import("lifecycle_journal.zig").Ownership, ownership_revision: u64, retention: ?config.SessionRetention, recording_ref: ?[]const u8, recording_unavailable_reason: ?[]const u8, connection_policies: []const []const u8, connection_policy: ?[]const u8, group_refs: []const []const u8, control: struct { state: ?[]const u8, lease_held: bool, input_ready: ?bool, local_released: ?bool }, capabilities: struct { read_state: bool = true, read_terminal: bool, batch_execution: bool, trusted_pty_execution: bool = false, trusted_pty_state: []const u8, trusted_pty_failure: ?[]const u8, completion_source: @import("../host/terminal_execution.zig").CompletionSource }, capability_revision: u64 };
 fn sessionView(a: std.mem.Allocator, snapshot: Snapshot, raw: Session) !SessionView {
     var item = if (raw.metadata_only or !boundSession(snapshot, raw.handle)) metadataOnly(raw) else raw;
     if (retainedSession(snapshot, raw)) {
@@ -240,7 +242,7 @@ fn sessionView(a: std.mem.Allocator, snapshot: Snapshot, raw: Session) !SessionV
         };
     }
     const policies: []const []const u8 = if (item.metadata_only) &.{} else if (item.saved_source != null) &.{ "new_only", "prefer_reuse" } else if (std.mem.eql(u8, item.protocol, "local")) &.{"new_only"} else if (std.mem.eql(u8, item.protocol, "ssh")) &.{ "reuse_only", "new_only", "prefer_reuse" } else &.{};
-    return .{ .session_ref = reference, .source_ref = if (item.metadata_only) null else if (item.saved_source) |source| try @import("host_lifecycle.zig").connectionRef(a, snapshot.context, source) else reference, .metadata_only = item.metadata_only, .session_id = @backingInt(item.handle.session_id), .generation = item.handle.generation, .title = boundedText(item.title, 256), .protocol = item.protocol, .state = item.state, .ready = item.ready, .connected = item.connected, .closing = item.closing, .current_member = item.current_member, .task_owned = item.task_owned, .ownership = if (item.metadata_only and !retainedSession(snapshot, raw)) null else item.ownership, .ownership_revision = item.ownership_revision, .retention = item.retention, .recording_ref = if (item.recording_id) |id| if (item.recording_generation > 0) try @import("host_terminal_queries.zig").recordingRef(a, snapshot.context, id, item.recording_generation) else null else null, .recording_unavailable_reason = item.recording_unavailable_reason, .connection_policies = policies, .connection_policy = if (policies.len > 0) policies[0] else null, .group_refs = group_refs.items, .control = .{ .state = item.control_state, .lease_held = item.has_control_lease, .input_ready = item.input_ready, .local_released = item.local_released }, .capabilities = .{ .read_terminal = item.read_terminal, .batch_execution = item.batch_execution, .trusted_pty_execution = item.trusted_pty_execution, .trusted_pty_state = item.trusted_pty_state, .completion_source = item.completion_source, .trusted_pty_failure = if (item.trusted_pty_failure) |failure| boundedText(failure, 96) else null }, .capability_revision = item.capability_revision };
+    return .{ .session_ref = reference, .source_ref = if (item.metadata_only) null else if (item.saved_source) |source| try @import("host_lifecycle.zig").connectionRef(a, snapshot.context, source) else reference, .metadata_only = item.metadata_only, .session_id = @backingInt(item.handle.session_id), .generation = item.handle.generation, .title = boundedText(item.title, 256), .protocol = item.protocol, .state = item.state, .ready = item.ready, .connected = item.connected, .connection_state = item.connection_state, .closing = item.closing, .current_member = item.current_member, .task_owned = item.task_owned, .ownership = if (item.metadata_only and !retainedSession(snapshot, raw)) null else item.ownership, .ownership_revision = item.ownership_revision, .retention = item.retention, .recording_ref = if (item.recording_id) |id| if (item.recording_generation > 0) try @import("host_terminal_queries.zig").recordingRef(a, snapshot.context, id, item.recording_generation) else null else null, .recording_unavailable_reason = item.recording_unavailable_reason, .connection_policies = policies, .connection_policy = if (policies.len > 0) policies[0] else null, .group_refs = group_refs.items, .control = .{ .state = item.control_state, .lease_held = item.has_control_lease, .input_ready = item.input_ready, .local_released = item.local_released }, .capabilities = .{ .read_terminal = item.read_terminal, .batch_execution = item.batch_execution, .trusted_pty_execution = item.trusted_pty_execution, .trusted_pty_state = item.trusted_pty_state, .completion_source = item.completion_source, .trusted_pty_failure = if (item.trusted_pty_failure) |failure| boundedText(failure, 96) else null }, .capability_revision = item.capability_revision };
 }
 const GroupView = struct { group_ref: []const u8, name: []const u8, membership_revision: u64, member_count: usize, current_binding: bool, closing: bool = false };
 fn groupView(a: std.mem.Allocator, snapshot: Snapshot, item: Group) !GroupView {
@@ -499,6 +501,33 @@ fn testQuery(a: std.mem.Allocator, snapshot: Snapshot, tool: []const u8, args: [
     var parsed = try table.parse(a, try @import("plugin_tools.zig").encodeName(&name, tool), args);
     defer parsed.deinit();
     return execute(snapshot, .{ .context = snapshot.context, .authority = .conversation_context, .operation_id = 1, .turn_id = 1, .call_id = "query", .tool_id = tool, .arguments = parsed.json.value, .arguments_json = args, .arguments_hash = parsed.arguments_hash, .canonical_arguments_hash = parsed.canonical_arguments_hash.? }, a);
+}
+
+test "BMC host discovery exposes transport state without replacing attachment lifecycle" {
+    const a = std.testing.allocator;
+    const context: host.Context = .{ .conversation_id = identity.ConversationId.generate(), .task_id = identity.TaskId.generate(), .binding = .{ .session = 83 }, .binding_revision = 1, .grant_revision = 1 };
+    const handle: identity.SessionHandle = .{ .session_id = @fromBackingInt(83), .generation = 7 };
+    const snapshot: Snapshot = .{ .context = context, .initial_binding = context.binding, .execution_policy = .{ .execution_mode = .auto, .session_retention = .ask }, .permission_mode = .confirm, .observed_at = 10, .source_revision = 11, .cursor_key = @splat(7), .sessions = &.{.{ .handle = handle, .title = "BMC", .protocol = "bmc_ikvm", .state = "attached", .connection_state = "public_script", .ready = false, .connected = false }}, .groups = &.{} };
+    const reference = try sessionRef(a, context, handle);
+    defer a.free(reference);
+    const args = try std.json.Stringify.valueAlloc(a, .{ .session_ref = reference }, .{});
+    defer a.free(args);
+    var result = try testQuery(a, snapshot, "host.get_session", args);
+    defer result.deinit(a);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, result.blocks[0].structured, .{});
+    defer parsed.deinit();
+    const item = parsed.value.object.get("session").?.object;
+    try std.testing.expectEqualStrings("attached", item.get("state").?.string);
+    try std.testing.expectEqualStrings("public_script", item.get("connection_state").?.string);
+    try std.testing.expect(!item.get("ready").?.bool and !item.get("connected").?.bool);
+    try std.testing.expectEqual(@as(i64, 83), item.get("session_id").?.integer);
+    var listed = try testQuery(a, snapshot, "host.list_sessions", "{}");
+    defer listed.deinit(a);
+    const page_result = try std.json.parseFromSlice(std.json.Value, a, listed.blocks[0].structured, .{});
+    defer page_result.deinit();
+    const row = page_result.value.object.get("sessions").?.array.items[0].object;
+    try std.testing.expectEqualStrings("public_script", row.get("connection_state").?.string);
+    try std.testing.expectEqualStrings("attached", row.get("state").?.string);
 }
 
 fn directTestQuery(a: std.mem.Allocator, snapshot: Snapshot, tool: []const u8, args: []const u8) !host.Result {

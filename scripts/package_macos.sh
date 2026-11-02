@@ -38,9 +38,14 @@ python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_execution.
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_secret_consume.so"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_execution_guard"
 python3 - "$APP" "$VERSION" <<'PY'
-import pathlib,plistlib,sys
+import pathlib,plistlib,re,sys
 app=pathlib.Path(sys.argv[1]);version=sys.argv[2]
-info={'CFBundleExecutable':'ZeroWork','CFBundleIdentifier':'com.zerowork.app','CFBundleName':'ZeroWork','CFBundleIconFile':'AppIcon','CFBundlePackageType':'APPL','CFBundleShortVersionString':version,'CFBundleVersion':version,'LSMinimumSystemVersion':'14.0','LSArchitecturePriority':['arm64']}
+match=re.fullmatch(r'([0-9]+\.[0-9]+\.[0-9]+)(?:-rc([1-9][0-9]{0,2}))?',version)
+if match is None or (match[2] is not None and int(match[2])>255):
+    raise SystemExit('Unsupported package version; expected X.Y.Z or X.Y.Z-rc1..rc255')
+short_version=match[1]
+build_version=short_version+('fc'+match[2] if match[2] is not None else '')
+info={'CFBundleExecutable':'ZeroWork','CFBundleIdentifier':'com.zerowork.app','CFBundleName':'ZeroWork','CFBundleIconFile':'AppIcon','CFBundlePackageType':'APPL','CFBundleShortVersionString':short_version,'CFBundleVersion':build_version,'ZeroWorkReleaseVersion':version,'LSMinimumSystemVersion':'14.0','LSArchitecturePriority':['arm64']}
 with (app/'Contents/Info.plist').open('wb') as f: plistlib.dump(info,f)
 binary=(app/'Contents/MacOS/ZeroWork').read_bytes()
 for marker in [b'fixture_probe',b'fixture_uprobe',b'/zerowork/windows']:

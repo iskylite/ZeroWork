@@ -322,11 +322,11 @@ test "configured chat model preserves tool declarations calls results and reques
     try std.testing.expectEqual(provider.Effort.high, configured.effort.?);
 }
 
-test "API2 configured image reservations reject invalid values and do not infer unknown budgets" {
+test "API2 configured image reservations override the conservative default and reject invalid values" {
     var config = defaults(.openai_compat);
     config.model = "custom/vision-model";
     config.vision = true;
-    try std.testing.expect(!config.supportsImageBudget());
+    try std.testing.expect(config.supportsImageBudget());
     config.image_token_reservation = 1024;
     try config.validate();
     const configured = config.chatRequest(.{ .model = "caller-model", .system = "", .messages = &.{} });

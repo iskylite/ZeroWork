@@ -378,6 +378,8 @@ const WorkerFixture = struct {
     read_blocked: std.atomic.Value(bool) = .init(false),
     sent_key_ups: std.atomic.Value(usize) = .init(0),
     sent_button_releases: std.atomic.Value(usize) = .init(0),
+    waits_with_inbound: std.atomic.Value(usize) = .init(0),
+    delayed_ms_with_inbound: std.atomic.Value(u64) = .init(0),
     cancel_io: ?*const std.atomic.Value(bool) = null,
     creator: std.Thread.Id,
     inbound: []const u8 = &.{},
@@ -418,7 +420,12 @@ const WorkerFixture = struct {
         _ = self.cleanups.fetchAdd(1, .acq_rel);
         return .released;
     }
-    fn wait(_: *anyopaque, _: u32) void {
+    fn wait(raw: *anyopaque, milliseconds: u32) void {
+        const self: *WorkerFixture = @ptrCast(@alignCast(raw));
+        if (self.read_offset < self.inbound.len) {
+            _ = self.waits_with_inbound.fetchAdd(1, .acq_rel);
+            _ = self.delayed_ms_with_inbound.fetchAdd(milliseconds, .acq_rel);
+        }
         std.atomic.spinLoopHint();
     }
     fn now(_: *anyopaque) u64 {
@@ -428,6 +435,145 @@ const WorkerFixture = struct {
         return .{ .context = self, .begin = begin, .read = read, .write = write, .abort = abort, .cleanup = cleanup, .wait = wait, .now_ns = now };
     }
 };
+
+fn appendServerBinary(bytes: *std.ArrayList(u8), payload: []const u8) !void {
+    if (payload.len < 126) {
+        try bytes.appendSlice(a, &.{ 0x82, @intCast(payload.len) });
+    } else if (payload.len <= 65535) {
+        try bytes.appendSlice(a, &.{ 0x82, 126 });
+        try append16(bytes, @intCast(payload.len));
+    } else {
+        try bytes.appendSlice(a, &.{ 0x82, 127 });
+        var length: [8]u8 = undefined;
+        std.mem.writeInt(u64, &length, @intCast(payload.len), .big);
+        try bytes.appendSlice(a, &length);
+    }
+    try bytes.appendSlice(a, payload);
+}
+
+test "BMC controller drains multi-record video without a sleep per 16KiB" {
+    var budget = budgets.Budget.init(128 * 1024 * 1024);
+    defer budget.deinit() catch unreachable;
+    var backend: ledger.MemoryBackend = .{ .allocator = a };
+    defer backend.deinit();
+    var journal = try ledger.Journal.init(a, backend.backend());
+    defer journal.deinit();
+    const controller = try console.Controller.create(a, owner, key, .{ .endpoint = .{ .host = "bmc.invalid" }, .username = "operator" }, null, &budget, &journal, null);
+    var hello = try handshake(256, 256);
+    defer hello.deinit(a);
+    var image = try rawUpdate(256, 256, .{ 3, 2, 1, 0 });
+    defer image.deinit(a);
+    var packet: std.ArrayList(u8) = .empty;
+    defer packet.deinit(a);
+    try appendServerBinary(&packet, hello.items);
+    try appendServerBinary(&packet, image.items);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("fixture", &digest, .{});
+    const selected = try profile.syntheticForTest(identityFixture(), .{ .firmware = "1.80", .identity_fixture_sha256 = @splat(1), .public_key_pem = "fixture", .public_key_sha256 = digest, .public_key_source = "fixture", .web_login_schema_verified = true, .kvm_login_schema_verified = true, .ws_subprotocol_echo_verified = true, .oem_handshake_verified = true, .web_logout = .own_session_location, .kvm_logout = .own_session_location });
+    var fixture: WorkerFixture = .{ .creator = std.Thread.getCurrentId(), .inbound = packet.items };
+    defer {
+        controller.cancel();
+        while (!controller.poll().worker_exited) std.atomic.spinLoopHint();
+        controller.deinit() catch unreachable;
+    }
+    fixture.begin_release.store(true, .release);
+    try controller.startSynthetic(selected, fixture.driver());
+    while (controller.poll().published_frames == 0 and !controller.poll().worker_exited) std.atomic.spinLoopHint();
+    try T.expectEqual(@as(u64, 1), controller.poll().published_frames);
+    // The complete update spans 17 transport reads. A ready record must not be
+    // penalized by the idle backoff between those reads (formerly 160ms).
+    try T.expectEqual(@as(u64, 0), fixture.delayed_ms_with_inbound.load(.acquire));
+    try T.expectEqual(@as(usize, 0), fixture.waits_with_inbound.load(.acquire));
+    const measured = controller.poll().performance;
+    try T.expectEqual(@as(u64, packet.items.len), measured.read_bytes);
+    try T.expect(measured.read_calls >= 17);
+    try T.expect(measured.active_yields >= 1);
+}
+
+const ShortWriteSchedulingFixture = struct {
+    worker: WorkerFixture,
+    controller: *console.Controller,
+    input_submitted: bool = false,
+    pending_input_delay_ms: std.atomic.Value(u64) = .init(0),
+    idle_waits: std.atomic.Value(usize) = .init(0),
+    fn cast(raw: *anyopaque) *ShortWriteSchedulingFixture {
+        return @ptrCast(@alignCast(raw));
+    }
+    fn begin(raw: *anyopaque, payload: *const console.model.Payload, plan: *const console.route.Plan, operation: svc.OperationKey, cancel: *const std.atomic.Value(bool)) !video.rfb.Authenticated {
+        return WorkerFixture.begin(&cast(raw).worker, payload, plan, operation, cancel);
+    }
+    fn read(raw: *anyopaque, bytes: []u8) !usize {
+        const self = cast(raw);
+        if (self.worker.read_offset == self.worker.inbound.len and !self.input_submitted) {
+            self.controller.remote_input.setFocus(true);
+            const binding = self.controller.inputBinding();
+            try T.expect(self.controller.remote_input.submit(binding, self.controller.remote_input.command(1, .{ .key = .{ .keysym = 'a', .down = true } })) == .accepted);
+            self.input_submitted = true;
+        }
+        return WorkerFixture.read(&self.worker, bytes);
+    }
+    fn write(_: *anyopaque, bytes: []const u8) !usize {
+        // A valid TLS short write must be retried promptly even when the
+        // remote desktop is static and no video bytes are arriving.
+        return @min(@as(usize, 1), bytes.len);
+    }
+    fn abort(raw: *anyopaque) void {
+        WorkerFixture.abort(&cast(raw).worker);
+    }
+    fn cleanup(raw: *anyopaque) console.Cleanup {
+        return WorkerFixture.cleanup(&cast(raw).worker);
+    }
+    fn wait(raw: *anyopaque, milliseconds: u32) void {
+        const self = cast(raw);
+        if (self.input_submitted and self.controller.poll().input.last_sent_input_sequence == 0) {
+            _ = self.pending_input_delay_ms.fetchAdd(milliseconds, .acq_rel);
+        } else if (self.input_submitted) {
+            _ = self.idle_waits.fetchAdd(1, .acq_rel);
+        }
+        WorkerFixture.wait(&self.worker, milliseconds);
+    }
+    fn driver(self: *ShortWriteSchedulingFixture) console.Driver {
+        return .{ .context = self, .begin = begin, .read = read, .write = write, .abort = abort, .cleanup = cleanup, .wait = wait, .now_ns = WorkerFixture.now };
+    }
+};
+
+test "BMC controller drains positive input short writes then backs off when idle" {
+    var budget = budgets.Budget.init(128 * 1024 * 1024);
+    defer budget.deinit() catch unreachable;
+    var backend: ledger.MemoryBackend = .{ .allocator = a };
+    defer backend.deinit();
+    var journal = try ledger.Journal.init(a, backend.backend());
+    defer journal.deinit();
+    const controller = try console.Controller.create(a, owner, key, .{ .endpoint = .{ .host = "bmc.invalid" }, .username = "operator" }, null, &budget, &journal, null);
+    var bytes = try handshake(1, 1);
+    defer bytes.deinit(a);
+    var image = try rawUpdate(1, 1, .{ 3, 2, 1, 0 });
+    defer image.deinit(a);
+    try bytes.appendSlice(a, image.items);
+    var packet: std.ArrayList(u8) = .empty;
+    defer packet.deinit(a);
+    try appendServerBinary(&packet, bytes.items);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash("fixture", &digest, .{});
+    const selected = try profile.syntheticForTest(identityFixture(), .{ .firmware = "1.80", .identity_fixture_sha256 = @splat(1), .public_key_pem = "fixture", .public_key_sha256 = digest, .public_key_source = "fixture", .web_login_schema_verified = true, .kvm_login_schema_verified = true, .ws_subprotocol_echo_verified = true, .oem_handshake_verified = true, .web_logout = .own_session_location, .kvm_logout = .own_session_location });
+    var fixture: ShortWriteSchedulingFixture = .{ .worker = .{ .creator = std.Thread.getCurrentId(), .inbound = packet.items }, .controller = controller };
+    defer {
+        controller.cancel();
+        while (!controller.poll().worker_exited) std.atomic.spinLoopHint();
+        controller.deinit() catch unreachable;
+    }
+    fixture.worker.begin_release.store(true, .release);
+    try controller.startSynthetic(selected, fixture.driver());
+    while (fixture.idle_waits.load(.acquire) == 0 and !controller.poll().worker_exited) std.atomic.spinLoopHint();
+    const state = controller.poll();
+    try T.expect(state.failure == null);
+    try T.expectEqual(@as(u64, 1), state.input.last_sent_input_sequence);
+    try T.expectEqual(@as(u64, 0), fixture.pending_input_delay_ms.load(.acquire));
+    try T.expect(state.performance.written_bytes > 14);
+    try T.expect(state.performance.idle_waits > 0);
+    try T.expectEqual(state.performance.idle_waits * 2, state.performance.idle_wait_ms);
+}
+
 test "BMC controller freezes config and unsupported production identity acquires no network" {
     var budget = budgets.Budget.init(128 * 1024 * 1024);
     defer budget.deinit() catch unreachable;
@@ -591,7 +737,7 @@ test "BMC management typed services use host arbiter and unknown writes never re
     var arbiter = actions.Arbiter.init(a);
     defer arbiter.deinit();
     var adapter: management.Adapter = undefined;
-    try adapter.init(a, owner, .{ .host = "bmc.invalid" }, &journal, arbiter.facade(owner));
+    try adapter.initForTest(a, owner, .{ .host = "bmc.invalid" }, &journal, arbiter.facade(owner));
     defer adapter.deinit();
     const snapshots = managementSnapshots();
     try adapter.setSnapshots(snapshots.power, snapshots.boot, true);
@@ -638,7 +784,7 @@ test "BMC management completion republishes verified power and boot typed snapsh
     var arbiter = actions.Arbiter.init(a);
     defer arbiter.deinit();
     var adapter: management.Adapter = undefined;
-    try adapter.init(a, owner, .{ .host = "bmc.invalid" }, &journal, arbiter.facade(owner));
+    try adapter.initForTest(a, owner, .{ .host = "bmc.invalid" }, &journal, arbiter.facade(owner));
     defer adapter.deinit();
     const snapshots = managementSnapshots();
     try adapter.setSnapshots(snapshots.power, snapshots.boot, true);
@@ -670,7 +816,7 @@ test "BMC management cancellation drains the exact HTTP transaction before new d
     var arbiter = actions.Arbiter.init(a);
     defer arbiter.deinit();
     var adapter: management.Adapter = undefined;
-    try adapter.init(a, owner, .{ .host = "bmc.invalid" }, &journal, arbiter.facade(owner));
+    try adapter.initForTest(a, owner, .{ .host = "bmc.invalid" }, &journal, arbiter.facade(owner));
     defer adapter.deinit();
     const snapshots = managementSnapshots();
     try adapter.setSnapshots(snapshots.power, snapshots.boot, true);
@@ -709,7 +855,7 @@ test "BMC management timeout retains the HTTP slot until its late completion" {
     var arbiter = actions.Arbiter.init(a);
     defer arbiter.deinit();
     var adapter: management.Adapter = undefined;
-    try adapter.init(a, owner, .{ .host = "bmc.invalid" }, &journal, arbiter.facade(owner));
+    try adapter.initForTest(a, owner, .{ .host = "bmc.invalid" }, &journal, arbiter.facade(owner));
     defer adapter.deinit();
     const snapshots = managementSnapshots();
     try adapter.setSnapshots(snapshots.power, snapshots.boot, true);
@@ -872,7 +1018,7 @@ test "BMC controller keeps video streaming while cancelled management HTTP drain
     defer journal.deinit();
     var arbiter = actions.Arbiter.init(a);
     defer arbiter.deinit();
-    const controller = try console.Controller.create(a, owner, key, .{ .endpoint = .{ .host = "bmc.invalid" }, .username = "operator" }, null, &budget, &journal, arbiter.facade(owner));
+    const controller = try console.Controller.createForTest(a, owner, key, .{ .endpoint = .{ .host = "bmc.invalid" }, .username = "operator" }, null, &budget, &journal, arbiter.facade(owner));
     var bytes = try handshake(1, 1);
     defer bytes.deinit(a);
     var image = try rawUpdate(1, 1, .{ 3, 2, 1, 0 });

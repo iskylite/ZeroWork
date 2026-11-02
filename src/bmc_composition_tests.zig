@@ -117,7 +117,7 @@ fn unstartedRuntime(plugin: *bmc.Plugin, budget: *budgets.Budget) !*runtime_api.
     const route_summary = try a.dupe(u8, "本机 → bmc.invalid:443");
     errdefer a.free(route_summary);
     const runtime = try a.create(runtime_api.Runtime);
-    runtime.* = .{ .allocator = a, .owner = owner, .operation = key, .context = .{ .owner = owner, .operation = key, .target = .{ .window_id = target.window_id, .workspace_id = target.workspace_id } }, .name = name, .target = endpoint, .route_summary = route_summary, .controller = control, .ai_control = @import("plugins/bmc_ikvm/ai_control.zig").Service.init(owner, &control.framebuffer, &control.remote_input), .bridge = runtime_api.ChallengeBridge.init(a, owner, key, null) };
+    runtime.* = .{ .allocator = a, .owner = owner, .operation = key, .context = .{ .owner = owner, .operation = key, .target = .{ .window_id = target.window_id, .workspace_id = target.workspace_id } }, .name = name, .target = endpoint, .route_summary = route_summary, .controller = control, .ai_control = @import("plugins/bmc_ikvm/ai_control.zig").Service.init(owner, &control.framebuffer, &control.remote_input), .bridge = runtime_api.ChallengeBridge.init(a, owner, key, null), .management_policy = .read_only };
     return runtime;
 }
 

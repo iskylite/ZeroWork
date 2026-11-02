@@ -10,7 +10,7 @@ const policy = @import("../proto/ssh/connection_policy.zig");
 pub const ReleaseReceipt = ssh.ReleaseReceipt;
 pub const Purpose = enum { connection, probe, file, management };
 pub const Destination = struct { host: []const u8, port: u16 };
-pub const max_streams = 16;
+pub const max_streams = c.ZW_SSH_RELAY_WAIT_MAX;
 pub const Credentials = struct {
     context: *anyopaque,
     /// Read controlled references for this owner; never query a live Session.
@@ -308,11 +308,27 @@ pub const OwnedTransport = struct {
             return;
         };
         self.ready.store(true, .release);
+        var productive_rounds: usize = 0;
         while (!self.closing.load(.acquire) and (self.factory.keep_established_until_close or !self.externalCancelled())) {
             self.mutex.lock();
             self.step();
+            var relays: [max_streams]?*c.ZW_SSH_RELAY = undefined;
+            var count: usize = 0;
+            for (self.slots) |slot| if (slot.state == .active) if (slot.relay) |relay| {
+                relays[count] = relay;
+                count += 1;
+            };
+            const session = self.nativeSession();
             self.mutex.unlock();
-            pause();
+            // Only this worker frees relays/session; callers merely enqueue
+            // state changes. Poll outside the mailbox lock, bounded to 2 ms.
+            if (c.zw_ssh_relay_wait_many(&relays, count, if (session) |s| s.socket_fd else -1, if (session) |s| s.handle else null, 2) != 0) {
+                productive_rounds += 1;
+                if (productive_rounds == 16) {
+                    std.Thread.yield() catch {};
+                    productive_rounds = 0;
+                }
+            } else productive_rounds = 0;
         }
         self.releaseNative();
     }

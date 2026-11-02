@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>BMC 证书信任 · 共享认证样式</title>
+  <link rel="stylesheet" href="../theme-tokens.css">
+  <style>
+    @font-face{font-family:Inter;src:url('../assets/fonts/InterVariable.woff2') format('woff2');font-weight:100 900}
+    *{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden}
+    body{font-family:Inter,-apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;background:var(--bg-app);color:var(--fg-1)}
+    #stage{width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:rgb(0 0 0 / 35%)}
+    #certificate-modal{width:min(560px,calc(100vw - 16px));height:min(680px,calc(100vh - 16px));display:flex;flex-direction:column;border:0;border-radius:14px;overflow:hidden;background:var(--overlay);box-shadow:var(--shadow-float)}
+    .header{height:40px;flex-shrink:0;display:flex;align-items:center;gap:6px;padding:0 12px}
+    .icon{width:18px;height:18px;flex-shrink:0;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.warn{color:var(--warn-ink)}
+    h1{margin:0;font-size:13px;line-height:20px;font-weight:700;flex:1}
+    button{font:500 12px/18px Inter,-apple-system,"PingFang SC",sans-serif;border:0;cursor:pointer;color:var(--fg-2);border-radius:8px;background:var(--popup-action)}
+    button:focus-visible{outline:2px solid var(--accent-ink);outline-offset:2px}
+    #close{width:22px;height:22px;background:transparent;display:grid;place-items:center;padding:0}#close .icon{width:16px;height:16px}
+    .body{display:flex;flex-direction:column;min-height:0;flex:1;padding:8px 12px 12px;gap:6px}
+    #certificate-scroll{min-height:0;flex:1;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin}
+    .stack{display:flex;flex-direction:column;gap:6px}
+    .identity{display:flex;align-items:center;gap:12px;min-height:44px;flex-shrink:0}.identity-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+    .name{font-size:14px;line-height:20px;font-weight:500}.endpoint{font:400 10.5px/16px Menlo,monospace;color:var(--fg-2);overflow-wrap:anywhere}
+    .well{border:0;border-radius:9px;padding:10px;background:var(--control-bg);display:flex;flex-direction:column;gap:4px;flex-shrink:0}
+    .notice{padding:12px;background:color-mix(in srgb,var(--warn) 9%,transparent)}
+    .label{font-size:11px;line-height:16px;font-weight:500;margin:0}.notice .label{font-size:12px;line-height:18px;color:var(--warn-ink)}
+    .body-text{font-size:11px;line-height:16px;font-weight:400;color:var(--fg-2);white-space:pre-line;margin:0;overflow-wrap:anywhere}
+    .fingerprint{font:400 10px/16px Menlo,monospace;color:var(--fg-1);margin:0;overflow-wrap:anywhere;user-select:text}
+    .rows{display:flex;flex-direction:column;gap:6px}.row{display:flex;align-items:flex-start;gap:10px;min-width:0}.row dt{font-size:11px;line-height:16px;color:var(--fg-2);width:64px;flex-shrink:0}.row dd{font-size:11px;line-height:16px;color:var(--fg-1);margin:0;min-width:0;flex:1;overflow-wrap:anywhere;user-select:text}.row .mono{font-family:Menlo,monospace;font-size:10px}
+    .actions{height:34px;flex-shrink:0;display:flex;gap:8px;justify-content:flex-end}.actions button{height:34px;flex-shrink:0;padding:0 14px}#reject{width:104px;margin-right:auto}#once{width:132px}#save{width:146px;color:var(--accent-fg);background:var(--action-accent)}
+    #outcome{position:fixed;left:12px;bottom:8px;color:var(--fg-2);font-size:11px}
+  </style>
+</head>
+<body data-theme="dark">
+  <main id="stage">
+    <section id="certificate-modal" role="dialog" aria-modal="true" aria-labelledby="title">
+      <header class="header">
+        <svg class="icon warn" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/><path d="M9.5 9a2.5 2.5 0 0 1 5 0c0 2-2.5 2-2.5 4M12 16h.01"/></svg>
+        <h1 id="title">信任 BMC 证书</h1>
+        <button id="close" aria-label="拒绝证书并取消连接"><svg class="icon" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+      </header>
+      <div class="body">
+        <div id="certificate-scroll" tabindex="0">
+          <div class="stack">
+            <div class="identity">
+              <svg class="icon" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6h.01M7 17h.01"/></svg>
+              <div class="identity-text"><div class="name">BMC · iKVM</div><div id="endpoint" class="endpoint">bmc.example.test:443</div></div>
+            </div>
+            <section id="notice" class="well notice">
+              <h2 class="label">无法验证此证书</h2>
+              <p class="body-text">通过可信渠道核对原始 BMC 目标和指纹后，再选择信任范围。
+拒绝会停止连接，且不会发送 BMC 凭据。</p>
+              <p id="failures" class="body-text">- 证书颁发者不受信任（可能为自签名证书或未知 CA）
+- 证书主机名与目标不匹配
+- 证书总有效期超过系统允许上限</p>
+            </section>
+            <section id="leaf-well" class="well"><h2 class="label">证书 SHA-256</h2><p id="leaf-fingerprint" class="fingerprint">0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef</p></section>
+            <section id="chain-well" class="well"><h2 class="label">证书链 SHA-256</h2><p id="chain-fingerprint" class="fingerprint">fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210</p></section>
+            <dl id="metadata" class="well rows" style="margin:0">
+              <div class="row"><dt>Subject</dt><dd id="subject">CN=bmc.example.test, OU=Management, O=Example Hardware, L=Shanghai, ST=Shanghai, C=CN</dd></div>
+              <div class="row"><dt>Issuer</dt><dd id="issuer">CN=bmc.example.test, OU=Management, O=Example Hardware, L=Shanghai, ST=Shanghai, C=CN</dd></div>
+              <div class="row"><dt>生效时间</dt><dd class="mono">2025-01-01 00:00:00 UTC</dd></div>
+              <div class="row"><dt>到期时间</dt><dd class="mono">2035-01-01 00:00:00 UTC</dd></div>
+              <div class="row"><dt>信任记录</dt><dd>未发现证书或例外变化</dd></div>
+            </dl>
+            <p id="scope-note" class="body-text">仅本次信任不会保存记录。保存并继续会记住此目标的证书、证书链和上述验证例外；证书或例外变化时会重新确认。</p>
+          </div>
+        </div>
+        <footer class="actions"><button id="reject">拒绝连接</button><button id="once">仅本次信任</button><button id="save">保存并继续</button></footer>
+      </div>
+    </section>
+  </main>
+  <output id="outcome"></output>
+  <script>
+    const q=new URLSearchParams(location.search);document.body.dataset.theme=q.get('theme')||'dark';
+    for(const [id,value] of [['reject','reject'],['once','once'],['save','persistent'],['close','reject']])document.getElementById(id).addEventListener('click',()=>{document.getElementById('outcome').textContent=value;});
+  </script>
+</body>
+</html>

@@ -1,11 +1,15 @@
 //! Isolated V0.3 public seam and protocol tests; no user credentials or BMC IO.
 comptime {
+    _ = @import("host/frame_performance.zig");
     _ = @import("plugins/bmc_ikvm/input_mapping.zig");
     _ = @import("bmc_security_tests.zig");
     _ = @import("bmc_frame_input_tests.zig");
     _ = @import("bmc_wire_tests.zig");
     _ = @import("bmc_rfb_tests.zig");
     _ = @import("bmc_management_tests.zig");
+    _ = @import("bmc_redfish_compatibility_tests.zig");
+    _ = @import("bmc_production_management_tests.zig");
+    _ = @import("bmc_journal_concurrency_tests.zig");
     _ = @import("bmc_probe_access_tests.zig");
     _ = @import("bmc_credential_gc_tests.zig");
     _ = @import("plugins/bmc_ikvm/route.zig");

@@ -7,6 +7,8 @@ const host = @import("../ai/host_tools.zig");
 const identity = @import("../host/identity.zig");
 const config = @import("../config/config.zig");
 const terminal = @import("../host/terminal_service.zig");
+const bmc_console = @import("../plugins/bmc_ikvm/console_service.zig");
+const bmc_tools = @import("../plugins/bmc_ikvm/tools.zig");
 const Application = @import("application_host.zig").ApplicationHost;
 const SessionTab = @import("workspace.zig").SessionTab;
 const inventory = @import("../ai/inventory_grants.zig");
@@ -55,7 +57,7 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
             break :blk false;
         } else @backingInt(handle.session_id) == binding.session;
         if (!in_binding) continue;
-        const basic = basicMetadata(app, tab);
+        const basic = basicMetadata(app, tab, a);
         const state = app.sessions.queryState(handle) orelse {
             try sessions.append(a, basic);
             continue;
@@ -77,7 +79,7 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
         const resource = app.lifecycle_supervisor.resource(handle);
         const facts = if (ready) serviceMetadata(app, tab, handle) else ServiceMetadata{};
         const owned = if (resource) |entry| entry.request.context.conversation_id.eql(context.conversation_id) and entry.request.context.task_id.eql(context.task_id) and entry.snapshot.ownership == .created_task else false;
-        try sessions.append(a, .{ .handle = handle, .title = basic.title, .protocol = state.protocol_id, .state = basic.state, .ready = ready, .connected = basic.connected, .closing = tab.closing, .read_terminal = read_terminal, .batch_execution = batch_execution, .trusted_pty_execution = pty.ready, .trusted_pty_state = pty.state, .trusted_pty_failure = pty.failure, .completion_source = pty.completion_source, .saved_source = associatedAsset(app, handle), .task_owned = owned, .ownership = if (resource) |entry| entry.snapshot.ownership else .borrowed_user, .ownership_revision = if (resource) |entry| entry.snapshot.ownership_revision else 0, .retention = if (resource) |entry| entry.snapshot.retention else null, .recording_id = facts.recording_id, .recording_generation = facts.recording_generation, .recording_unavailable_reason = facts.recording_unavailable_reason, .control_state = facts.control_state, .has_control_lease = facts.has_control_lease, .input_ready = facts.input_ready, .local_released = facts.local_released, .capability_revision = app.sessions.capabilityRevisionFor(handle) orelse 0 });
+        try sessions.append(a, .{ .handle = handle, .title = basic.title, .protocol = state.protocol_id, .state = basic.state, .ready = ready, .connected = basic.connected, .connection_state = basic.connection_state, .closing = tab.closing, .read_terminal = read_terminal, .batch_execution = batch_execution, .trusted_pty_execution = pty.ready, .trusted_pty_state = pty.state, .trusted_pty_failure = pty.failure, .completion_source = pty.completion_source, .saved_source = associatedAsset(app, handle), .task_owned = owned, .ownership = if (resource) |entry| entry.snapshot.ownership else .borrowed_user, .ownership_revision = if (resource) |entry| entry.snapshot.ownership_revision else 0, .retention = if (resource) |entry| entry.snapshot.retention else null, .recording_id = facts.recording_id, .recording_generation = facts.recording_generation, .recording_unavailable_reason = facts.recording_unavailable_reason, .control_state = facts.control_state, .has_control_lease = facts.has_control_lease, .input_ready = facts.input_ready, .local_released = facts.local_released, .capability_revision = app.sessions.capabilityRevisionFor(handle) orelse 0 });
     }
     // Completed host close receipts retain this conversation/binding's exact
     // historical metadata across Tasks, regardless of task-owned status.
@@ -114,7 +116,7 @@ fn captureSnapshot(app: *Application, roster: ?*@import("group_model.zig").Roste
 }
 
 fn appendClosed(a: std.mem.Allocator, sessions: *std.ArrayList(queries.Session), app: *Application, context: host.Context, handle: identity.SessionHandle, metadata: *const @import("../host/lifecycle_supervisor.zig").SessionMetadata, ownership: @import("../host/lifecycle_supervisor.zig").Ownership, ownership_revision: u64, retention: ?config.SessionRetention, owned_by_task: bool) !void {
-    const item: queries.Session = .{ .handle = handle, .title = if (app.workspace.app_config.ai.redact_ip) "<redacted>" else metadata.title[0..metadata.title_len], .protocol = metadata.protocol[0..metadata.protocol_len], .state = "closed", .ready = false, .current_member = false, .task_owned = owned_by_task and ownership == .created_task, .ownership = ownership, .ownership_revision = ownership_revision, .retention = retention, .recording_id = metadata.recording_id, .recording_generation = metadata.recording_generation, .recording_unavailable_reason = metadata.recording_unavailable_reason, .local_released = true, .metadata_only = true, .retained_context = context };
+    const item: queries.Session = .{ .handle = handle, .title = if (app.workspace.app_config.ai.redact_ip) "<redacted>" else metadata.title[0..metadata.title_len], .protocol = metadata.protocol[0..metadata.protocol_len], .state = "closed", .ready = false, .connection_state = if (std.mem.eql(u8, metadata.protocol[0..metadata.protocol_len], "bmc_ikvm")) "closed" else null, .current_member = false, .task_owned = owned_by_task and ownership == .created_task, .ownership = ownership, .ownership_revision = ownership_revision, .retention = retention, .recording_id = metadata.recording_id, .recording_generation = metadata.recording_generation, .recording_unavailable_reason = metadata.recording_unavailable_reason, .local_released = true, .metadata_only = true, .retained_context = context };
     for (sessions.items) |*existing| if (existing.handle.eql(handle)) {
         existing.* = item;
         return;
@@ -122,11 +124,126 @@ fn appendClosed(a: std.mem.Allocator, sessions: *std.ArrayList(queries.Session),
     try sessions.append(a, item);
 }
 
-/// Only cheap host-owned identity/state metadata. No manifest or service read.
-fn basicMetadata(app: *Application, tab: *const SessionTab) queries.Session {
+/// Host attachment metadata plus the BMC's read-only typed video snapshot.
+fn basicMetadata(app: *Application, tab: *const SessionTab, a: std.mem.Allocator) queries.Session {
     const state = app.sessions.queryState(tab.content_owner.session);
     const ready = if (state) |value| !tab.closing and !tab.archived and !tab.failed and !tab.owned_pending and (value.lifecycle == .ready or value.lifecycle == .attached) else false;
-    return .{ .handle = tab.content_owner.session, .title = if (app.workspace.app_config.ai.redact_ip) "<redacted>" else tab.titleSlice(), .protocol = if (state) |value| value.protocol_id else if (tab.local) "local" else if (tab.plugin_protocol_id.len > 0) tab.plugin_protocol_id else "unknown", .state = if (state) |value| @tagName(value.lifecycle) else if (tab.failed) "failed" else if (tab.closing) "closing" else if (tab.archived) "closed" else "unknown", .ready = ready, .connected = if (state) |value| !tab.failed and (value.lifecycle == .ready or value.lifecycle == .attached) else false, .closing = tab.closing, .metadata_only = true };
+    var result: queries.Session = .{ .handle = tab.content_owner.session, .title = if (app.workspace.app_config.ai.redact_ip) "<redacted>" else tab.titleSlice(), .protocol = if (state) |value| value.protocol_id else if (tab.local) "local" else if (tab.plugin_protocol_id.len > 0) tab.plugin_protocol_id else "unknown", .state = if (state) |value| @tagName(value.lifecycle) else if (tab.failed) "failed" else if (tab.closing) "closing" else if (tab.archived) "closed" else "unknown", .ready = ready, .connected = if (state) |value| !tab.failed and (value.lifecycle == .ready or value.lifecycle == .attached) else false, .closing = tab.closing, .metadata_only = true };
+    if (std.mem.eql(u8, result.protocol, "bmc_ikvm")) {
+        const connection = bmcConnectionMetadata(app.sessions, result.handle, a);
+        result.connection_state = if (tab.failed) "failed" else if (tab.closing or tab.archived) "closed" else if (state) |value| switch (value.lifecycle) {
+            .failed => "failed",
+            .closing, .closed, .ended, .cleanup_unknown => "closed",
+            else => connection.state,
+        } else connection.state;
+        result.ready = ready and connection.ready;
+        result.connected = ready and connection.connected;
+    }
+    return result;
+}
+
+fn bmcConnectionMetadata(sessions: *@import("../host/session_host.zig").SessionHost, owner: identity.SessionHandle, a: std.mem.Allocator) bmc_tools.ConnectionMetadata {
+    const service = switch (sessions.queryTypedService(owner, bmc_console.Interface, bmc_console.key)) {
+        .available => |value| value,
+        else => return .{},
+    };
+    var snapshot = service.vtable.snapshot(service.context, service.binding, a) catch return .{};
+    defer snapshot.deinit();
+    if (!snapshot.value.owner.eql(owner)) return .{};
+    return bmc_tools.connectionMetadata(snapshot.value);
+}
+
+test "BMC host metadata keeps attachment separate and fails closed on missing denied or stale console snapshots" {
+    const a = std.testing.allocator;
+    const Session = @import("../host/session_host.zig");
+    const typed = @import("../host/plugin_services.zig");
+    const Stub = struct {
+        value: bmc_console.Snapshot = undefined,
+        unavailable: bool = false,
+        fn validate(_: []const u8) !void {}
+        fn create(_: *anyopaque, _: Session.CreateRequest) !void {}
+        fn cancel(_: *anyopaque, _: Session.OperationKey) Session.CloseReceipt {
+            return .released;
+        }
+        fn close(_: *anyopaque, _: identity.SessionHandle, _: Session.OperationKey) !Session.CloseReceipt {
+            return .released;
+        }
+        fn stale(_: *anyopaque, _: identity.SessionHandle, _: Session.OperationKey) void {}
+        fn snapshot(raw: *anyopaque, _: typed.Binding, allocator: std.mem.Allocator) !bmc_console.OwnedSnapshot {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            if (self.unavailable) return error.SnapshotUnavailable;
+            return bmc_console.OwnedSnapshot.init(allocator, self.value);
+        }
+    };
+    var stub: Stub = .{};
+    const factory: Session.Adapter.VTable = .{ .create = Stub.create, .cancel = Stub.cancel, .close = Stub.close, .release_stale = Stub.stale };
+    var sessions = try Session.SessionHost.initPlugins(a, &.{.{ .id = "bmc_ikvm", .display_name = "BMC fixture", .workspace_kind = "metadata.fixture", .content_renderer = "metadata.fixture", .quick_create = .{ .validate_payload = Stub.validate }, .session_factory = .{ .context = &stub, .vtable = &factory }, .services = &.{bmc_console.definition}, .required_services = &.{bmc_console.definition} }}, &.{.{ .kind = "metadata.fixture", .shared_renderer = true }});
+    defer sessions.deinit();
+    const target: Session.AttachmentTarget = .{ .window_id = @fromBackingInt(1), .workspace_id = @fromBackingInt(1) };
+    const accepted = try sessions.openQuick("bmc_ikvm", "{}", .{ .request_key = 1, .target = target });
+    stub.value = .{ .owner = accepted.handle, .operation = accepted.operation, .route = .connecting, .video = .authenticating, .progress = .{ .stage = .public_script }, .input = .{ .input_epoch = 1, .control_generation = 1, .transport_generation = 1, .connected = false, .controlled = false, .focused = false, .capture_paused = true, .queued = 0, .remote_unconfirmed = false } };
+    // No non-snapshot entry point may be used by host metadata discovery.
+    var table: bmc_console.Interface = undefined;
+    table.snapshot = Stub.snapshot;
+    const binding = typed.Binding.init(bmc_console.Interface, bmc_console.key, &stub, &table, accepted.handle, 1);
+    _ = try sessions.readyPlugin(accepted.handle, accepted.operation, &.{binding});
+    _ = try sessions.attached(accepted.handle, .{ .target = target, .tab_id = @fromBackingInt(1) });
+    var settings: config.Config = .{};
+    var workspace: @import("workspace.zig").Workspace = undefined;
+    workspace.app_config = &settings;
+    var tab: SessionTab = .{ .id = 1, .tab_id = @fromBackingInt(1), .content_owner = .{ .session = accepted.handle }, .host_id = 0, .host_index = 0, .host_snapshot = null, .root = undefined, .plugin_protocol_id = "bmc_ikvm" };
+    tab.setTitle("fixture");
+    var app: Application = undefined;
+    app.workspace = &workspace;
+    app.sessions = &sessions;
+    var result = basicMetadata(&app, &tab, a);
+    try std.testing.expectEqualStrings("attached", result.state);
+    try std.testing.expectEqualStrings("public_script", result.connection_state.?);
+    try std.testing.expect(!result.ready and !result.connected);
+    stub.value.route = .connected;
+    stub.value.video = .streaming;
+    stub.value.progress.stage = .streaming;
+    stub.value.rfb_ready = true;
+    stub.value.input.connected = true;
+    stub.value.input.geometry_generation = 2;
+    stub.value.width = 1;
+    stub.value.height = 1;
+    stub.value.stride = 4;
+    stub.value.frame_sequence = 1;
+    stub.value.frame_generation = 2;
+    result = basicMetadata(&app, &tab, a);
+    try std.testing.expectEqualStrings("attached", result.state);
+    try std.testing.expectEqualStrings("streaming", result.connection_state.?);
+    try std.testing.expect(result.ready and result.connected);
+    stub.value.failure_code = "VideoClosed";
+    result = basicMetadata(&app, &tab, a);
+    try std.testing.expectEqualStrings("failed", result.connection_state.?);
+    try std.testing.expect(!result.ready and !result.connected);
+    stub.value.failure_code = null;
+    stub.unavailable = true;
+    result = basicMetadata(&app, &tab, a);
+    try std.testing.expectEqualStrings("unavailable", result.connection_state.?);
+    try std.testing.expect(!result.ready and !result.connected);
+    stub.unavailable = false;
+    stub.value.owner = try accepted.handle.nextGeneration();
+    result = basicMetadata(&app, &tab, a);
+    try std.testing.expectEqualStrings("unavailable", result.connection_state.?);
+    try std.testing.expect(!result.ready and !result.connected);
+    stub.value.owner = accepted.handle;
+    try sessions.authorizeService(accepted.handle, bmc_console.key, false);
+    result = basicMetadata(&app, &tab, a);
+    try std.testing.expectEqualStrings("unavailable", result.connection_state.?);
+    try std.testing.expect(!result.ready and !result.connected);
+    try sessions.authorizeService(accepted.handle, bmc_console.key, true);
+    try std.testing.expect(try sessions.revokeTypedService(accepted.handle, accepted.operation, bmc_console.key));
+    result = basicMetadata(&app, &tab, a);
+    try std.testing.expectEqualStrings("unavailable", result.connection_state.?);
+    try std.testing.expect(!result.ready and !result.connected);
+    _ = try sessions.shutdownOwner(accepted.handle);
+    result = basicMetadata(&app, &tab, a);
+    try std.testing.expectEqualStrings("ended", result.state);
+    try std.testing.expectEqualStrings("closed", result.connection_state.?);
+    try std.testing.expect(!result.ready and !result.connected);
 }
 
 const ServiceMetadata = struct {

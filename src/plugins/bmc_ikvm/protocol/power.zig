@@ -2,6 +2,7 @@
 //! pulls bounded HTTP work and feeds completions; no networking or automatic
 //! retry of writes exists here. All methods run on the controller's IO owner.
 const std = @import("std");
+const builtin = @import("builtin");
 pub const svc = @import("../services.zig");
 const redfish = @import("redfish.zig");
 const auth = @import("auth.zig");
@@ -21,6 +22,13 @@ pub const Arbiter = struct {
     release: *const fn (*anyopaque, u64) void,
 };
 pub const Gate = struct { owner: svc.identity.SessionHandle, binding_generation: u64, capability_revision: u64, grant_revision: u64, authenticated: bool, write_granted: bool, read_granted: bool = true };
+/// Shared field-level admission for UI and Engine. Policy, approval, ownership
+/// and dispatch authority remain separate checks at their existing boundaries.
+pub fn validatePowerFields(snapshot: svc.PowerSnapshot, action: svc.PowerAction) !void {
+    if (!snapshot.state.evidence.permitsWrite() or snapshot.state.value == null or !snapshot.reset_types.evidence.permitsWrite() or !svc.contains(snapshot.reset_types.value orelse return error.UnsupportedAction, action.redfish()) or snapshot.reset_target == null) return error.UnsupportedAction;
+    if (action == .on and snapshot.state.value.? != .off) return error.ActionNotApplicable;
+    if (action != .on and snapshot.state.value.? != .on) return error.ActionNotApplicable;
+}
 const Active = struct {
     arena: std.heap.ArenaAllocator,
     execution: svc.Execution,
@@ -38,6 +46,7 @@ const Active = struct {
     precondition_collected_ms: u64 = 0,
     task_completed: bool = false,
     query_only: bool = false,
+    user_approved: bool = false,
     pending_uri: ?[]const u8 = null,
     waiting: bool = false,
     next_poll_ms: u64 = 0,
@@ -55,10 +64,42 @@ pub const Engine = struct {
     active: ?Active = null,
     sequence: u64 = 0,
     now_ms: u64 = 0,
+    policy: svc.ManagementPolicy = .read_only,
+    approval_hash: ?[32]u8 = null,
+    fixture_preauthorized: bool = false,
+    historical_result: ?svc.Owned(svc.Result) = null,
     pub fn init(a: std.mem.Allocator, owner: svc.identity.SessionHandle, origin: redfish.Origin, journal: *ledger.Journal, arbiter: ?Arbiter) !Engine {
         var power_snapshot = try svc.OwnedPowerSnapshot.init(a, .{});
         errdefer power_snapshot.deinit();
         return .{ .allocator = a, .owner = owner, .origin = origin, .journal = journal, .arbiter = arbiter, .power = power_snapshot, .boot_snapshot = try svc.OwnedBootSnapshot.init(a, .{}) };
+    }
+    /// Existing protocol fixtures deliberately provide their own grants. This
+    /// constructor cannot enable writes in an application binary.
+    pub fn initForTest(a: std.mem.Allocator, owner: svc.identity.SessionHandle, origin: redfish.Origin, journal: *ledger.Journal, arbiter: ?Arbiter) !Engine {
+        if (!builtin.is_test) return error.TestDriverForbidden;
+        var value = try init(a, owner, origin, journal, arbiter);
+        value.policy = .user_approved;
+        value.fixture_preauthorized = true;
+        return value;
+    }
+    /// Worker-only, consumed by the exact next request. The application never
+    /// derives this proof from public capability.write_granted.
+    pub fn approveUserRequest(self: *Engine, fingerprint: [32]u8) !void {
+        if (self.policy == .read_only) return error.PermissionDenied;
+        self.approval_hash = fingerprint;
+    }
+    fn consumeApproval(self: *Engine, request: svc.ManagementRequest) !bool {
+        if (self.policy == .read_only) return error.PermissionDenied;
+        if (self.fixture_preauthorized) return false;
+        const approved = self.approval_hash orelse return error.PermissionDenied;
+        self.approval_hash = null;
+        const system_identity = switch (request) {
+            .power => self.power.value.system_identity,
+            .boot => self.boot_snapshot.value.system_identity,
+        };
+        const fingerprint = try svc.requestFingerprint(self.allocator, request, self.origin.authority, system_identity);
+        if (!std.mem.eql(u8, &approved, &fingerprint)) return error.PermissionDenied;
+        return true;
     }
     pub fn deinit(self: *Engine) void {
         if (self.active) |*active| {
@@ -67,6 +108,7 @@ pub const Engine = struct {
         }
         self.power.deinit();
         self.boot_snapshot.deinit();
+        if (self.historical_result) |*value| value.deinit();
         self.* = undefined;
     }
     pub fn setSnapshots(self: *Engine, power_snapshot: svc.PowerSnapshot, boot_snapshot: svc.BootSnapshot) !void {
@@ -89,41 +131,43 @@ pub const Engine = struct {
     fn validateCall(self: *const Engine, call: svc.Call) !void {
         if (!self.owner.eql(call.owner) or call.binding_generation != self.power.value.capability.binding_generation) return error.StaleBinding;
     }
-    fn validateExecution(self: *const Engine, execution: svc.Execution, capability: svc.Capability, uri: []const u8) !void {
+    fn validateExecution(self: *const Engine, execution: svc.Execution, capability: svc.Capability, uri: []const u8, approved: bool) !void {
         try self.validateCall(execution.call);
         const owner = switch (execution.operation.owner) {
             .session => |owner| owner,
             else => return error.StaleBinding,
         };
         if (!owner.eql(self.owner) or !std.mem.eql(u8, execution.system_uri, uri) or execution.operation.operation_id == 0 or std.mem.allEqual(u8, &execution.nonce, 0)) return error.StaleBinding;
+        // The binding concerns this standard management System, independently
+        // of any OEM video-channel mapping. Approval remains operation scoped.
         if (!capability.system_mapping_verified) return error.MappingUnverified;
-        if (!capability.write_granted) return error.PermissionDenied;
+        if (!approved and !(self.fixture_preauthorized and capability.write_granted)) return error.PermissionDenied;
         if (capability.revision != execution.capability_revision or capability.grant_revision != execution.grant_revision) return error.StaleCapability;
         if (capability.secondary_auth == .unknown or !capability.secondary_auth_evidence.permitsWrite()) return error.SecondaryAuthUnknown;
         if (self.arbiter == null) return error.ArbiterUnavailable;
     }
     pub fn requestPower(self: *Engine, request: svc.PowerExecutionRequest, now_ms: u64) !svc.OperationKey {
+        const approved = try self.consumeApproval(.{ .power = request });
         if (try self.duplicate(request.execution, .{ .power = request.action })) |key| return key;
         const snapshot = self.power.value;
-        try self.validateExecution(request.execution, snapshot.capability, snapshot.system_uri);
-        if (!snapshot.state.evidence.permitsWrite() or snapshot.state.value == null or !snapshot.reset_types.evidence.permitsWrite() or !svc.contains(snapshot.reset_types.value orelse return error.UnsupportedAction, request.action.redfish()) or snapshot.reset_target == null) return error.UnsupportedAction;
-        if (request.action == .on and snapshot.state.value.? != .off) return error.ActionNotApplicable;
-        if (request.action != .on and snapshot.state.value.? != .on) return error.ActionNotApplicable;
+        try self.validateExecution(request.execution, snapshot.capability, snapshot.system_uri, approved);
+        try validatePowerFields(snapshot, request.action);
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         errdefer arena.deinit();
         const body = try std.json.Stringify.valueAlloc(arena.allocator(), .{ .ResetType = request.action.redfish() }, .{});
-        return self.begin(&arena, request.execution, .{ .power = request.action }, .{ .power = snapshot.state.value, .etag = snapshot.etag }, snapshot.system_identity, snapshot.reset_target.?, body, null, @min(snapshot.state.evidence.collected_ms, snapshot.reset_types.evidence.collected_ms), now_ms);
+        return self.begin(&arena, request.execution, .{ .power = request.action }, .{ .power = snapshot.state.value, .etag = snapshot.etag, .last_reset_time = if (request.action.isRestart()) resetTime(snapshot) else null }, snapshot.system_identity, snapshot.reset_target.?, body, null, @min(snapshot.state.evidence.collected_ms, snapshot.reset_types.evidence.collected_ms), now_ms, approved);
     }
     pub fn applyBoot(self: *Engine, patch: svc.BootExecutionPatch, now_ms: u64) !svc.OperationKey {
+        const approved = try self.consumeApproval(.{ .boot = patch });
         if (try self.duplicate(patch.execution, .{ .boot = boot.normalized(patch) })) |key| return key;
         const snapshot = self.boot_snapshot.value;
-        try self.validateExecution(patch.execution, snapshot.capability, snapshot.system_uri);
+        try self.validateExecution(patch.execution, snapshot.capability, snapshot.system_uri, approved);
         if (snapshot.write_uri == null) return error.BootWriteTargetUnverified;
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         errdefer arena.deinit();
         const prepared = try boot.prepare(arena.allocator(), snapshot, patch);
-        const collected = @min(snapshot.enabled_evidence.collected_ms, snapshot.target_evidence.collected_ms);
-        return self.begin(&arena, patch.execution, .{ .boot = prepared.parameters }, .{ .boot = snapshot.state, .etag = snapshot.etag }, snapshot.system_identity, snapshot.write_uri.?, prepared.body, prepared.expected, collected, now_ms);
+        const collected = boot.collectedMs(snapshot, prepared.parameters);
+        return self.begin(&arena, patch.execution, .{ .boot = prepared.parameters }, .{ .boot = snapshot.state, .etag = snapshot.etag }, snapshot.system_identity, snapshot.write_uri.?, prepared.body, prepared.expected, collected, now_ms, approved);
     }
     fn duplicate(self: *Engine, execution: svc.Execution, parameters: ledger.Parameters) !?svc.OperationKey {
         try self.validateCall(execution.call);
@@ -132,19 +176,16 @@ pub const Engine = struct {
             else => return error.StaleBinding,
         };
         if (!request_owner.eql(self.owner)) return error.StaleBinding;
-        var index = self.journal.find(execution.operation);
-        if (index == null) for (self.journal.entries, 0..) |entry, i| if (std.mem.eql(u8, &entry.nonce, &execution.nonce)) {
-            index = i;
-            break;
-        };
-        const existing = self.journal.entries[index orelse return null];
+        var retained = (try self.journal.snapshotOperationOrNonce(self.allocator, execution.operation, execution.nonce)) orelse return null;
+        defer retained.deinit();
+        const existing = retained.entry.value;
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         defer arena.deinit();
         const target = try redfish.canonicalTarget(arena.allocator(), self.origin, execution.system_uri);
         _ = try self.journal.reserve(execution, target, existing.system_identity, parameters, existing.baseline);
         return execution.operation;
     }
-    fn begin(self: *Engine, arena: *std.heap.ArenaAllocator, execution_value: svc.Execution, parameters: ledger.Parameters, baseline_value: ledger.Baseline, system_identity: []const u8, write_uri_value: []const u8, body: []const u8, expected: ?svc.BootState, collected_ms: u64, now_ms: u64) !svc.OperationKey {
+    fn begin(self: *Engine, arena: *std.heap.ArenaAllocator, execution_value: svc.Execution, parameters: ledger.Parameters, baseline_value: ledger.Baseline, system_identity: []const u8, write_uri_value: []const u8, body: []const u8, expected: ?svc.BootState, collected_ms: u64, now_ms: u64, approved: bool) !svc.OperationKey {
         const a = arena.allocator();
         var execution = execution_value;
         execution.system_uri = try a.dupe(u8, execution.system_uri);
@@ -163,7 +204,9 @@ pub const Engine = struct {
             old.arena.deinit();
             self.active = null;
         }
-        const entry = self.journal.entries[reservation.index];
+        var retained = try self.journal.snapshot(self.allocator, reservation.index);
+        defer retained.deinit();
+        const entry = retained.value;
         const baseline = try copyBaseline(a, entry.baseline);
         const owned_parameters = try copyParameters(a, entry.parameters);
         const uri = try redfish.resourceUri(a, self.origin, write_uri_value);
@@ -174,13 +217,13 @@ pub const Engine = struct {
             return err;
         };
         errdefer arbiter.release(arbiter.context, lease);
-        const cap = self.power.value.capability;
-        const refresh = now_ms < collected_ms or now_ms - collected_ms > 5000 or (parameters == .boot and baseline.etag == null);
+        const cap = if (parameters == .power) self.power.value.capability else self.boot_snapshot.value.capability;
+        const refresh = approved or now_ms < collected_ms or now_ms - collected_ms > 5000 or (parameters == .boot and baseline.etag == null);
         var result_state: svc.Result = .{ .operation = execution.operation, .phase = if (cap.secondary_auth == .required) .awaiting_auth else if (refresh) .refreshing else .queued };
         try self.journal.setResult(reservation.index, result_state);
         result_state.dispatched = false;
         const expected_copy = if (expected) |state| try copyBoot(a, state) else null;
-        self.active = .{ .arena = arena.*, .execution = execution, .index = reservation.index, .kind = owned_parameters, .baseline = baseline, .expected_boot = expected_copy, .write_uri = uri, .body = body, .result = result_state, .arbiter_lease = lease, .stage = if (refresh) .refresh else .write, .precondition_collected_ms = collected_ms, .deadline_ms = now_ms +| 60_000 };
+        self.active = .{ .arena = arena.*, .execution = execution, .index = reservation.index, .kind = owned_parameters, .baseline = baseline, .expected_boot = expected_copy, .write_uri = uri, .body = body, .result = result_state, .arbiter_lease = lease, .stage = if (refresh) .refresh else .write, .precondition_collected_ms = collected_ms, .deadline_ms = now_ms +| 60_000, .user_approved = approved };
         return execution.operation;
     }
     pub fn supplySecondary(self: *Engine, proof: *auth.SecondaryProof) !void {
@@ -220,13 +263,18 @@ pub const Engine = struct {
         const stage = active.stage;
         var outbound: Outbound = .{ .sequence = self.sequence + 1, .operation = active.execution.operation, .purpose = stage, .method = .get, .uri = active.execution.system_uri };
         if (stage == .write) {
+            if (self.policy == .read_only or (!active.user_approved and !self.fixture_preauthorized)) {
+                try self.finish(active, .failed, .permission_denied, null);
+                return null;
+            }
             if (active.query_only or active.result.dispatched) return error.OperationAlreadyDispatched;
             const arbiter = self.arbiter orelse return error.ArbiterUnavailable;
             if (active.arbiter_lease == null or !arbiter.revalidate(arbiter.context, active.arbiter_lease.?, active.execution)) {
                 try self.finish(active, .failed, .permission_denied, null);
                 return null;
             }
-            if (self.power.value.capability.secondary_auth == .required and active.authkey == null) return error.SecondaryAuthRequired;
+            const capability = if (active.kind == .power) self.power.value.capability else self.boot_snapshot.value.capability;
+            if (capability.secondary_auth == .required and active.authkey == null) return error.SecondaryAuthRequired;
             // This is the sole write dispatch boundary. Failure returns no work.
             try self.journal.beginDispatch(active.index);
             active.result.dispatched = true;
@@ -257,29 +305,39 @@ pub const Engine = struct {
             try self.finish(active, if (active.result.dispatched) .outcome_unknown else .failed, .transport_lost, null);
             return;
         }
+        // HTTP authorization and conflict outcomes are authoritative even if
+        // a device returns HTML or malformed JSON in its failure body.
+        if (response.status == 401 or response.status == 403) {
+            self.power.value.capability.write_granted = false;
+            self.boot_snapshot.value.capability.write_granted = false;
+            self.power.value.capability.write_requestable = false;
+            self.boot_snapshot.value.capability.write_requestable = false;
+            self.power.value.capability.grant_revision +|= 1;
+            self.boot_snapshot.value.capability.grant_revision = self.power.value.capability.grant_revision;
+            try self.finish(active, .failed, if (response.status == 401) .authentication_failed else .permission_denied, response.status);
+            return;
+        }
+        if (stage == .write and (response.status == 409 or response.status == 412)) {
+            active.stage = .conflict_refresh;
+            active.result.phase = .refreshing;
+            active.result.reason = .conflict;
+            active.result.http_status = response.status;
+            active.next_poll_ms = now_ms;
+            try self.journal.setResult(active.index, active.result);
+            return;
+        }
+        if (response.status < 200 or response.status >= 300) {
+            try self.finish(active, if (stage == .write or !active.result.dispatched) .failed else .outcome_unknown, .remote_error, response.status);
+            return;
+        }
         const uri = if (stage == .task) active.result.task_uri.? else if (stage == .pending_verify) active.pending_uri.? else if (stage == .write) active.write_uri else active.execution.system_uri;
         var doc = redfish.Document.parse(self.allocator, uri, response.status, response.body, response.etag, now_ms) catch {
             try self.finish(active, if (active.result.dispatched) .outcome_unknown else .failed, .remote_error, response.status);
             return;
         };
         defer doc.deinit();
-        if (response.status == 401 or response.status == 403) {
-            self.power.value.capability.write_granted = false;
-            self.boot_snapshot.value.capability.write_granted = false;
-            try self.finish(active, .failed, if (response.status == 401) .authentication_failed else .permission_denied, response.status);
-            return;
-        }
         if (stage == .write) {
-            if (response.status == 409 or response.status == 412) {
-                active.stage = .conflict_refresh;
-                active.result.phase = .refreshing;
-                active.result.reason = .conflict;
-                active.result.http_status = response.status;
-                active.next_poll_ms = now_ms;
-                try self.journal.setResult(active.index, active.result);
-                return;
-            }
-            if (!doc.accepted()) {
+            if (!writeResponseAccepted(doc)) {
                 try self.finish(active, .failed, .remote_error, response.status);
                 return;
             }
@@ -295,12 +353,9 @@ pub const Engine = struct {
                 active.result.task_uri = task;
                 active.stage = .task;
                 active.result.phase = .tracking_task;
-            } else if (response.status == 200 or response.status == 204) {
+            } else {
                 active.stage = .verify;
                 active.result.phase = .verifying;
-            } else {
-                try self.finish(active, .outcome_unknown, .remote_error, response.status);
-                return;
             }
             active.result.http_status = response.status;
         } else if (stage == .task) {
@@ -318,7 +373,7 @@ pub const Engine = struct {
                 },
                 .running => {},
                 .failed => {
-                    try self.finish(active, if (doc.accepted()) .failed else .outcome_unknown, .remote_error, response.status);
+                    try self.finish(active, if (doc.resourceAvailable()) .failed else .outcome_unknown, .remote_error, response.status);
                     return;
                 },
                 .unknown => {
@@ -327,21 +382,22 @@ pub const Engine = struct {
                 },
             }
         } else {
-            if (!doc.accepted()) {
+            if (!doc.resourceAvailable()) {
                 try self.finish(active, if (active.result.dispatched) .outcome_unknown else .failed, .remote_error, response.status);
                 return;
             }
-            const parsed = try redfish.parseSystem(active.arena.allocator(), self.origin, doc);
+            var parsed = try redfish.parseSystem(active.arena.allocator(), self.origin, doc);
             if (stage == .pending_verify) {
                 active.result.pending_boot = try copyBoot(active.arena.allocator(), parsed.boot.state);
                 const changed = active.kind.boot;
-                try self.finish(active, .outcome_unknown, if (boot.matches(active.expected_boot orelse expectedFrom(active.baseline.boot.?, changed), parsed.boot.state, changed)) .pending else .verification_mismatch, response.status);
+                try self.finish(active, .outcome_unknown, if (boot.observationValid(parsed.boot, changed) and boot.matches(active.expected_boot orelse expectedFrom(active.baseline.boot.?, changed), parsed.boot.state, changed)) .pending else .verification_mismatch, response.status);
                 return;
             }
-            if (!std.mem.eql(u8, parsed.power.system_identity, self.power.value.system_identity)) {
+            if (!try systemIdentityMatches(active.arena.allocator(), self.origin, doc, parsed.power, active.execution.system_uri, self.power.value.system_identity)) {
                 try self.finish(active, if (active.result.dispatched) .outcome_unknown else .failed, .conflict, response.status);
                 return;
             }
+            try self.retainActionInfo(active, &parsed, doc);
             var observed = parsed;
             observed.power.capability = self.power.value.capability;
             observed.boot.capability = self.boot_snapshot.value.capability;
@@ -354,13 +410,20 @@ pub const Engine = struct {
             }
             if (stage == .refresh) {
                 const same = switch (active.kind) {
-                    .power => parsed.power.state.value == active.baseline.power,
-                    .boot => svc.sameBoot(parsed.boot.state, active.baseline.boot.?),
+                    .power => |action| parsed.power.state.value == active.baseline.power and (!action.isRestart() or active.baseline.last_reset_time == null or svc.optionalEqual(active.baseline.last_reset_time, resetTime(parsed.power))),
+                    .boot => |changed| boot.baselineMatches(parsed.boot, active.baseline.boot.?, changed),
                 };
-                if (!same or !svc.optionalEqual(active.baseline.etag, response.etag)) {
+                if (!same or (active.baseline.etag != null and !svc.optionalEqual(active.baseline.etag, response.etag))) {
                     try self.finish(active, .failed, .stale_baseline, response.status);
                     return;
                 }
+                if (active.baseline.etag == null) if (response.etag) |tag| {
+                    active.baseline.etag = try active.arena.allocator().dupe(u8, tag);
+                };
+                if (active.kind == .power and active.kind.power.isRestart() and active.baseline.last_reset_time == null) if (resetTime(parsed.power)) |value| {
+                    try self.journal.collectLastResetBaseline(active.index, value);
+                    active.baseline.last_reset_time = try active.arena.allocator().dupe(u8, value);
+                };
                 // Fresh reads cannot introduce new allowable values. They must
                 // independently continue to permit every requested field.
                 if (!try self.refreshAllows(active, parsed)) {
@@ -375,11 +438,19 @@ pub const Engine = struct {
                 active.result.current_power = parsed.power.state.value;
                 active.result.current_boot = try copyBoot(active.arena.allocator(), parsed.boot.state);
                 const verified = switch (active.kind) {
-                    .power => |action| if (action.isRestart()) active.task_completed and parsed.power.state.value == .on else parsed.power.state.value == (if (action == .on) svc.PowerState.on else svc.PowerState.off),
-                    .boot => |changed| boot.matches(active.expected_boot orelse expectedFrom(active.baseline.boot.?, changed), parsed.boot.state, changed),
+                    .power => |action| parsed.power.state.evidence.permitsWrite() and (if (action.isRestart()) (active.task_completed or svc.lastResetTimeAdvanced(active.baseline.last_reset_time, resetTime(parsed.power))) and parsed.power.state.value == .on else parsed.power.state.value == (if (action == .on) svc.PowerState.on else svc.PowerState.off)),
+                    .boot => |changed| boot.observationValid(parsed.boot, changed) and boot.matches(active.expected_boot orelse expectedFrom(active.baseline.boot.?, changed), parsed.boot.state, changed),
                 };
                 if (verified) {
                     try self.finish(active, .succeeded, null, response.status);
+                    return;
+                }
+                const observation_valid = switch (active.kind) {
+                    .power => parsed.power.state.evidence.permitsWrite(),
+                    .boot => |changed| boot.observationValid(parsed.boot, changed),
+                };
+                if (!observation_valid) {
+                    try self.finish(active, .outcome_unknown, .remote_error, response.status);
                     return;
                 }
                 if (active.kind == .power and active.kind.power.isRestart() and parsed.power.state.value == .on and !active.task_completed) {
@@ -409,11 +480,35 @@ pub const Engine = struct {
             .power => |action| parsed.power.state.evidence.permitsWrite() and parsed.power.reset_types.evidence.permitsWrite() and svc.contains(parsed.power.reset_types.value orelse return false, action.redfish()) and parsed.power.reset_target != null and std.mem.eql(u8, parsed.power.reset_target.?, active.write_uri),
             .boot => |changed| blk: {
                 var snapshot = parsed.boot;
+                if (snapshot.write_uri == null or !std.mem.eql(u8, snapshot.write_uri.?, active.write_uri)) break :blk false;
                 snapshot.etag = active.baseline.etag;
-                _ = boot.prepare(active.arena.allocator(), snapshot, .{ .execution = active.execution, .baseline = active.baseline.boot.?, .enabled = changed.enabled, .target = changed.target, .mode = changed.mode, .etag = active.baseline.etag }) catch break :blk false;
+                boot.validate(snapshot, .{ .execution = active.execution, .baseline = active.baseline.boot.?, .enabled = changed.enabled, .target = changed.target, .mode = changed.mode, .etag = active.baseline.etag }) catch break :blk false;
                 break :blk true;
             },
         };
+    }
+    /// Discovery can read ResetType from a separate ActionInfo resource. A
+    /// later System read commonly carries only its link, so retain that proof
+    /// while the same linked resource and reset target remain valid. Explicit
+    /// fresh inline values can further restrict this independent allowlist.
+    fn retainActionInfo(self: *Engine, active: *Active, parsed: *redfish.ParsedSystem, doc: redfish.Document) !void {
+        const previous = self.power.value;
+        const info = parsed.action_info orelse return;
+        if (!previous.reset_types.evidence.permitsWrite() or previous.reset_types.value == null or !std.mem.eql(u8, previous.reset_types.evidence.source_uri, info) or !svc.optionalEqual(previous.reset_target, parsed.power.reset_target)) return;
+        const reset = redfish.member(redfish.member(doc.value, "Actions") orelse return, "#ComputerSystem.Reset") orelse return;
+        const a = active.arena.allocator();
+        var values: std.ArrayList([]const u8) = .empty;
+        if (redfish.member(reset, "ResetType@Redfish.AllowableValues") != null) {
+            if (!parsed.power.reset_types.evidence.permitsWrite()) return;
+            for (parsed.power.reset_types.value orelse return) |value| if (svc.contains(previous.reset_types.value.?, value)) try values.append(a, try a.dupe(u8, value));
+        } else {
+            for (previous.reset_types.value.?) |value| try values.append(a, try a.dupe(u8, value));
+        }
+        const refreshed_ms = parsed.power.reset_types.evidence.collected_ms;
+        parsed.power.reset_types.evidence = previous.reset_types.evidence;
+        parsed.power.reset_types.evidence.collected_ms = @min(previous.reset_types.evidence.collected_ms, refreshed_ms);
+        parsed.power.reset_types.evidence.source_uri = try a.dupe(u8, previous.reset_types.evidence.source_uri);
+        parsed.power.reset_types.value = try values.toOwnedSlice(a);
     }
     pub fn cancel(self: *Engine, key: svc.OperationKey) svc.CancelResult {
         const active = if (self.active) |*value| value else return if (self.journal.find(key) != null) .already_terminal else .stale_operation;
@@ -428,9 +523,12 @@ pub const Engine = struct {
         active.waiting = false;
         return if (sent) .observation_stopped_remote_may_continue else .cancelled_unsent;
     }
-    pub fn result(self: *const Engine, key: svc.OperationKey) !svc.Result {
+    pub fn result(self: *Engine, key: svc.OperationKey) !svc.Result {
         if (self.active) |active| if (active.execution.operation.eql(key)) return active.result;
-        return self.journal.entries[self.journal.find(key) orelse return error.StaleOperation].result();
+        const retained = (try self.journal.snapshotResult(self.allocator, key)) orelse return error.StaleOperation;
+        if (self.historical_result) |*old| old.deinit();
+        self.historical_result = retained;
+        return retained.value;
     }
     /// Explicit query of a recovered/unknown result. This creates GET work only.
     pub fn query(self: *Engine, key: svc.OperationKey, now_ms: u64) !void {
@@ -440,8 +538,10 @@ pub const Engine = struct {
             old.arena.deinit();
             self.active = null;
         }
-        const index = self.journal.find(key) orelse return error.StaleOperation;
-        const entry = self.journal.entries[index];
+        var retained = (try self.journal.snapshotOperation(self.allocator, key)) orelse return error.StaleOperation;
+        defer retained.deinit();
+        const index = retained.index;
+        const entry = retained.entry.value;
         if (!entry.dispatch_started or entry.phase != .outcome_unknown) return error.OperationNotUnknown;
         const owner = switch (key.owner) {
             .session => |owner| owner,
@@ -451,7 +551,7 @@ pub const Engine = struct {
         var arena: std.heap.ArenaAllocator = .init(self.allocator);
         errdefer arena.deinit();
         const path = try redfish.resourceUri(arena.allocator(), self.origin, entry.canonical_target);
-        const cap = self.power.value.capability;
+        const cap = if (entry.parameters == .power) self.power.value.capability else self.boot_snapshot.value.capability;
         var state = entry.result();
         state.phase = .verifying;
         // A task completion replaces the journal arena; the query owns every
@@ -555,6 +655,35 @@ fn copyBoot(a: std.mem.Allocator, state: svc.BootState) !svc.BootState {
 fn expectedFrom(baseline: svc.BootState, changed: svc.BootState) svc.BootState {
     return .{ .enabled = changed.enabled orelse baseline.enabled, .target = changed.target orelse baseline.target, .mode = changed.mode orelse baseline.mode };
 }
+fn writeResponseAccepted(doc: redfish.Document) bool {
+    if (doc.accepted()) return true;
+    if (!doc.resourceAvailable()) return false;
+    // A mutation may return the affected resource with unrelated diagnostics.
+    // It is only an acknowledgement; the Engine still reads and verifies the
+    // operation's own fields. A pure failure/message package stays a failure.
+    if (redfish.text(doc.value, "PowerState") != null or redfish.text(doc.value, "TaskState") != null) return true;
+    const value = redfish.member(doc.value, "Boot") orelse return false;
+    return value == .object;
+}
+fn systemIdentityMatches(a: std.mem.Allocator, origin: redfish.Origin, doc: redfish.Document, snapshot: svc.PowerSnapshot, system_uri: []const u8, system_identity: []const u8) !bool {
+    const identity_path = if (redfish.member(doc.value, "UUID") != null) "/UUID" else "/Id";
+    if (!doc.fieldAccepted(identity_path) or snapshot.system_identity.len == 0 or !std.mem.eql(u8, snapshot.system_identity, system_identity)) return false;
+    if (redfish.member(doc.value, "@odata.id") != null) {
+        if (!doc.fieldAccepted("/@odata.id")) return false;
+        const declared = redfish.text(doc.value, "@odata.id") orelse return false;
+        const canonical = redfish.resourceUri(a, origin, declared) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return false,
+        };
+        if (!std.mem.eql(u8, canonical, system_uri)) return false;
+    }
+    if (redfish.member(doc.value, "@odata.type") != null) {
+        if (!doc.fieldAccepted("/@odata.type")) return false;
+        const declared = redfish.text(doc.value, "@odata.type") orelse return false;
+        if (!std.mem.startsWith(u8, declared, "#ComputerSystem.") or !std.mem.endsWith(u8, declared, ".ComputerSystem")) return false;
+    }
+    return true;
+}
 fn copyParameters(a: std.mem.Allocator, parameters: ledger.Parameters) !ledger.Parameters {
     return switch (parameters) {
         .power => parameters,
@@ -562,5 +691,9 @@ fn copyParameters(a: std.mem.Allocator, parameters: ledger.Parameters) !ledger.P
     };
 }
 fn copyBaseline(a: std.mem.Allocator, baseline: ledger.Baseline) !ledger.Baseline {
-    return .{ .power = baseline.power, .boot = if (baseline.boot) |state| try copyBoot(a, state) else null, .etag = if (baseline.etag) |tag| try a.dupe(u8, tag) else null };
+    return .{ .power = baseline.power, .boot = if (baseline.boot) |state| try copyBoot(a, state) else null, .etag = if (baseline.etag) |tag| try a.dupe(u8, tag) else null, .last_reset_time = if (baseline.last_reset_time) |value| try a.dupe(u8, value) else null };
+}
+fn resetTime(snapshot: svc.PowerSnapshot) ?[]const u8 {
+    if (!snapshot.last_reset_time.evidence.permitsWrite() or svc.lastResetTimeMillis(snapshot.last_reset_time.value) == null) return null;
+    return snapshot.last_reset_time.value;
 }

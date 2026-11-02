@@ -84,14 +84,21 @@ pub const Host = struct {
         };
         return error.UnknownContentOwner;
     }
-    /// Invoke from the existing window frame pump after global input routing.
+    /// Synchronize native focus before lease acquisition as well as frame polling.
     /// content_focused must be false when the AI panel/challenge owns focus.
-    pub fn tick(self: *Host, window_focused: bool, active_owner: ?identity.SessionHandle, content_focused: bool) !void {
+    pub fn syncFocus(self: *Host, window_focused: bool, active_owner: ?identity.SessionHandle, content_focused: bool) void {
         for (self.entries.items) |entry| {
             if (entry.retired) continue;
             const active = if (active_owner) |owner| owner.eql(entry.input.owner) else false;
             entry.input.setFocus(window_focused and active, content_focused and active);
             entry.input.expireAutomation();
+        }
+    }
+    /// Invoke from the existing window frame pump after global input routing.
+    pub fn tick(self: *Host, window_focused: bool, active_owner: ?identity.SessionHandle, content_focused: bool) !void {
+        self.syncFocus(window_focused, active_owner, content_focused);
+        for (self.entries.items) |entry| {
+            if (entry.retired) continue;
             if (try entry.frames.drain()) self.cx.requestRedraw();
         }
     }

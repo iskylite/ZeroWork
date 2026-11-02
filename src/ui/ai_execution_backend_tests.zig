@@ -113,17 +113,29 @@ const Fixture = struct {
     fn local(self: *@This()) !identity.SessionHandle {
         const source = try self.app.createLocal(self.directory);
         const deadline = @import("../platform/realtime.zig").monotonicNs() + 8 * std.time.ns_per_s;
-        while (true) {
+        while (@import("../platform/realtime.zig").monotonicNs() < deadline) {
             try self.tick();
             if (self.app.legacyForHandle(source.handle)) |legacy| if (self.workspace.sessionTab(legacy)) |tab| if (tab.terminal) |view| if (view.terminal_surface) |surface| {
                 const snapshot = surface.service.executionSnapshot() catch |err| {
                     if (err == error.WorkerBusy) continue;
                     return err;
                 };
-                if (snapshot.interactive_execution and snapshot.input_ready) return source.handle;
+                // The execution hello/lease can be ready before the separate
+                // authenticated ZLE observation. Require the same empty edit
+                // gate that the real Local request checks before dispatch.
+                if (snapshot.interactive_execution and snapshot.input_ready) {
+                    if (surface.service.trustedSnapshot(a) catch |err| {
+                        if (err == error.WorkerBusy) continue;
+                        return err;
+                    }) |value| {
+                        var edit = value;
+                        defer edit.deinit(a);
+                        if (edit.editable() and edit.buffer.len == 0 and edit.lease == 0) return source.handle;
+                    }
+                }
             };
-            if (@import("../platform/realtime.zig").monotonicNs() >= deadline) return error.ExecutionIntegrationNotReady;
         }
+        return error.ExecutionIntegrationNotReady;
     }
     fn deinit(self: *@This()) void {
         for (self.app.mappings.items) |mapping| _ = self.app.requestCloseLegacy(mapping.legacy_id) catch |err| {

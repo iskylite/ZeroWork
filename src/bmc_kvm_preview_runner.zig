@@ -19,7 +19,7 @@ const theme = @import("ui/app_theme.zig");
 
 const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(320), .generation = 7 };
 const operation: services.OperationKey = .{ .owner = .{ .session = owner }, .operation_id = 1, .attempt_id = 1 };
-const State = enum { controlled, read_only, no_signal, disconnected, partial, unknown, progress_log };
+const State = enum { controlled, read_only, no_signal, disconnected, partial, unknown, progress_log, management };
 const ProgressFixture = struct { revision: u64 = 1, stage: console.progress.Stage = .public_script, elapsed_ms: u64 = 9900, stage_elapsed_ms: u64 = 9900, long_route: bool = false, failure: bool = false, log_generation: u64 = 1 };
 var selected_state: State = .controlled;
 var selected_theme: theme.Name = .dark;
@@ -61,6 +61,7 @@ const Fixture = struct {
     renderer: ?contract.RendererInstance = null,
     state: State = .controlled,
     progress_log_generation: u64 = 0,
+    progress_wall_started_ms: i64 = 0,
     progress_fixture: ?ProgressFixture = null,
     closed: bool = false,
     console_reads: usize = 0,
@@ -72,6 +73,8 @@ const Fixture = struct {
     retries: usize = 0,
     power_writes: usize = 0,
     boot_writes: usize = 0,
+    management_requests: usize = 0,
+    management_result: ?services.Result = null,
     release_count: usize = 0,
     last_release: input.ReleaseCause = .released,
     key_count: usize = 0,
@@ -136,8 +139,8 @@ const Fixture = struct {
             .owner = owner,
             .operation = operation,
             .name = "LOCAL BMC fixture",
-            .target = "local.synthetic.invalid",
-            .route_summary = if (progress_log and self.progress_fixture != null and self.progress_fixture.?.long_route) "LOCAL SYNTHETIC ROUTE · local → first.synthetic.invalid:22 → a-long-hostname-for-layout-measurement.synthetic.invalid:22 → another-long-hostname-for-layout-measurement.synthetic.invalid:22 → local.synthetic.invalid:443" else "Local synthetic fixture · no network transport",
+            .target = "local.synthetic.invalid:443",
+            .route_summary = if (progress_log and self.progress_fixture != null and self.progress_fixture.?.long_route) "本机 → first.synthetic.invalid:22 → a-long-hostname-for-layout-measurement.synthetic.invalid:22 → another-long-hostname-for-layout-measurement.synthetic.invalid:22 → local.synthetic.invalid:443" else "本机 → local.synthetic.invalid:443",
             .route = if (disconnected or failed_progress) .failed else .connected,
             .video = if (disconnected or failed_progress) .failed else if (no_signal or progress_log) .awaiting_frame else .streaming,
             .cleanup = if (failed_progress) .released else .not_started,
@@ -148,7 +151,8 @@ const Fixture = struct {
             .height = self.fb.height,
             .stride = @as(usize, self.fb.width) * 4,
             .frame_sequence = self.fb.sequence,
-            .frame_generation = self.fb.frame_generation,
+            .decoded_frames = self.fb.sequence,
+            .frame_generation = if (failed_progress) 0 else self.fb.frame_generation,
             .rfb_ready = !disconnected and !progress_log,
             .progress = if (progress_log) self.syntheticProgressLog() else .{},
             .read_only_requested = self.state == .read_only,
@@ -159,6 +163,7 @@ const Fixture = struct {
     /// Explicit acceptance data only. No Runtime, transport or response parser
     /// feeds this fixture; the final two rows prove real native wrapping/scroll.
     fn syntheticProgressLog(self: *Fixture) console.progress.Snapshot {
+        if (self.progress_wall_started_ms == 0) self.progress_wall_started_ms = @import("platform/realtime.zig").milliseconds(undefined) - 30_000;
         var result: console.progress.Snapshot = .{ .revision = 31 + self.progress_log_generation, .stage = .redfish_discovery, .elapsed_ms = 12300, .stage_elapsed_ms = 11700, .event_count = 32 };
         const first_sequence = result.revision - 31;
         const phases = [_]console.progress.Stage{ .route, .tls_handshake, .public_identity, .public_script, .web_login, .firmware_confirmation, .redfish_discovery };
@@ -175,11 +180,22 @@ const Fixture = struct {
             result.stage = if (fixture.failure) .failed else fixture.stage;
             result.elapsed_ms = fixture.elapsed_ms;
             result.stage_elapsed_ms = fixture.stage_elapsed_ms;
-            result.waiting_for_user = fixture.stage == .waiting_certificate or fixture.stage == .waiting_credentials;
+            result.waiting_for_user = fixture.stage == .waiting_certificate or fixture.stage == .waiting_video_certificate or fixture.stage == .waiting_credentials;
             if (fixture.failure) {
-                result.failure_stage = .public_script;
-                result.failure_code = "UnsupportedProfilePublicEvidenceUnavailable";
+                result.failure_stage = fixture.stage;
+                result.failure_code = "HttpTimeout";
+                result.failure_event = .{ .sequence = fixture.revision, .at_ms = fixture.elapsed_ms, .stage = fixture.stage, .kind = .failure, .error_code = "HttpTimeout", .context = .{ .channel = .management, .method = .get, .path = .public_script, .phase = .response_body, .http_status = 200, .received_bytes = 524288, .duration_ms = fixture.stage_elapsed_ms } };
+                result.events[31] = result.failure_event.?;
             }
+        }
+        result.started_unix_ms = self.progress_wall_started_ms;
+        for (result.events[0..result.event_count]) |*event| {
+            event.at_unix_ms = self.progress_wall_started_ms + @as(i64, @intCast(event.at_ms));
+            if (event.kind != .stage) event.duration_ms = if (event.context) |context| context.duration_ms else 50;
+        }
+        if (result.failure_event) |*event| {
+            event.at_unix_ms = self.progress_wall_started_ms + @as(i64, @intCast(event.at_ms));
+            event.duration_ms = if (event.context) |context| context.duration_ms else null;
         }
         return result;
     }
@@ -211,7 +227,15 @@ const Fixture = struct {
         try self.validate(binding, console.definition);
         self.retries += 1;
     }
-    const console_table: console.Interface = .{ .snapshot = consoleSnapshot, .request_control = requestControl, .reply_control = replyControl, .refresh = refresh, .set_focus = focus, .retry = retry };
+    fn requestManagement(raw: *anyopaque, binding: typed.Binding, request: services.ManagementRequest) services.RequestResult {
+        const self = from(raw);
+        self.validate(binding, console.definition) catch return .{ .rejected = .stale_binding };
+        if (self.state != .management) return .{ .rejected = .permission_denied };
+        self.management_requests += 1;
+        self.management_result = .{ .operation = request.execution().operation, .phase = .awaiting_approval };
+        return .{ .accepted = request.execution().operation };
+    }
+    const console_table: console.Interface = .{ .snapshot = consoleSnapshot, .request_control = requestControl, .reply_control = replyControl, .refresh = refresh, .set_focus = focus, .retry = retry, .request_management = requestManagement };
     fn inputSnapshot(raw: *anyopaque, binding: typed.Binding) !input.Snapshot {
         const self = from(raw);
         try self.validate(binding, input.definition);
@@ -260,7 +284,7 @@ const Fixture = struct {
     }
     const input_table: input.Interface = .{ .snapshot = inputSnapshot, .submit = submit, .release_all = releaseAll, .submit_chord = submitChord };
     fn capability(self: *Fixture) services.Capability {
-        return .{ .revision = 1, .grant_revision = 1, .binding_generation = owner.generation, .system_mapping_verified = true, .write_granted = false, .secondary_auth = .disabled, .secondary_auth_evidence = self.localEvidence() };
+        return .{ .revision = 1, .grant_revision = 1, .binding_generation = owner.generation, .system_mapping_verified = true, .write_granted = false, .write_requestable = self.state == .management, .secondary_auth = .disabled, .secondary_auth_evidence = self.localEvidence() };
     }
     fn localEvidence(self: *Fixture) services.Evidence {
         var result = evidence;
@@ -291,15 +315,31 @@ const Fixture = struct {
         from(raw).boot_writes += 1;
         return .{ .rejected = .permission_denied };
     }
-    fn cancel(_: *anyopaque, _: services.Call, _: services.OperationKey) services.CancelResult {
+    fn cancel(raw: *anyopaque, _: services.Call, key: services.OperationKey) services.CancelResult {
+        const self = from(raw);
+        if (self.management_result) |*result| if (result.operation.eql(key)) {
+            result.phase = if (result.dispatched) .outcome_unknown else .cancelled_unsent;
+            result.reason = .cancelled;
+            return if (result.dispatched) .observation_stopped_remote_may_continue else .cancelled_unsent;
+        };
         return .already_terminal;
     }
     fn operationResult(raw: *anyopaque, call: services.Call, op: services.OperationKey, allocator: std.mem.Allocator) !services.Owned(services.Result) {
         try from(raw).validateCall(call);
+        if (from(raw).management_result) |result| if (result.operation.eql(op)) return services.Owned(services.Result).init(allocator, result);
         return services.Owned(services.Result).init(allocator, .{ .operation = op, .phase = .failed, .reason = .permission_denied });
     }
-    const power_table: services.PowerService = .{ .snapshot = powerSnapshot, .request = powerRequest, .cancel = cancel, .result = operationResult };
-    const boot_table: services.BootService = .{ .snapshot = bootSnapshot, .apply = bootApply, .cancel = cancel, .result = operationResult };
+    fn queryManagement(raw: *anyopaque, call: services.Call, key: services.OperationKey) !void {
+        const self = from(raw);
+        try self.validateCall(call);
+        if (self.management_result) |*result| if (result.operation.eql(key) and result.phase == .outcome_unknown) {
+            result.phase = .verifying;
+            return;
+        };
+        return error.StaleOperation;
+    }
+    const power_table: services.PowerService = .{ .snapshot = powerSnapshot, .request = powerRequest, .cancel = cancel, .result = operationResult, .query = queryManagement };
+    const boot_table: services.BootService = .{ .snapshot = bootSnapshot, .apply = bootApply, .cancel = cancel, .result = operationResult, .query = queryManagement };
     fn localWrite(raw: *anyopaque, bytes: []const u8) !usize {
         const self = from(raw);
         self.wire_bytes += bytes.len;
@@ -384,16 +424,28 @@ fn syntheticFrame(self: *Fixture) !void {
 fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     theme.select(selected_theme);
     cx.setTheme(theme.widgetTheme(selected_theme));
-    const root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column, .gap = 6, .padding = ui.Padding.all(8), .background = theme.baseColors().app, .min_width = 0, .min_height = 0 }, .{});
+    const shell = @import("ui/shell_styles.zig");
+    const root = try ui.boxStyled(cx, shell.root, .{});
     root.meta.ownership.meta.test_id = "fixture.window";
-    const top = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 36 }, .flex_shrink = 0, .align_items = .center, .padding = .{ .left = 12, .right = 12 }, .background = theme.current().surface_1, .border = .{ .radius = 9 } }, .{});
+    const top = try ui.boxStyled(cx, shell.title, .{});
     top.meta.ownership.meta.test_id = "fixture.shell.header";
     try root.appendChild(cx.allocator, top);
     try top.appendChild(cx.allocator, try ui.text(cx, "ZeroWork · BMC renderer · LOCAL SYNTHETIC FIXTURE", .{ .font_size = 12, .color = theme.current().fg_2 }));
-    const slot = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .border = .{ .radius = 11 }, .overflow_hidden = true }, .{});
+    const body = try ui.boxStyled(cx, shell.body, .{});
+    body.meta.ownership.meta.test_id = "fixture.shell.body";
+    try root.appendChild(cx.allocator, body);
+    const sidebar = try ui.boxStyled(cx, shell.sidebar, .{});
+    sidebar.meta.ownership.meta.test_id = "fixture.shell.sidebar";
+    try body.appendChild(cx.allocator, sidebar);
+    try sidebar.appendChild(cx.allocator, try ui.text(cx, "主机与连接 · SYNTHETIC", .{ .font_size = 13, .color = theme.current().fg_2 }));
+    const pane = try ui.boxStyled(cx, shell.pane, .{});
+    pane.meta.ownership.meta.test_id = "fixture.shared_pane";
+    try body.appendChild(cx.allocator, pane);
+    const slot = try ui.box(cx, @import("ui/local_session_styles.zig").pane(), .{});
     slot.meta.ownership.meta.test_id = "fixture.content_slot";
-    try root.appendChild(cx.allocator, slot);
-    const status = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 26 }, .flex_shrink = 0, .align_items = .center, .padding = .{ .left = 12, .right = 12 }, .background = theme.current().surface_1, .border = .{ .radius = 8 } }, .{});
+    try pane.appendChild(cx.allocator, slot);
+    const status = try ui.boxStyled(cx, shell.status, .{});
+    status.meta.ownership.meta.test_id = "fixture.shell.status";
     try root.appendChild(cx.allocator, status);
     try status.appendChild(cx.allocator, try ui.text(cx, "LOCAL ONLY  ·  1920 × 1200 synthetic RGBA  ·  management read only", .{ .font_size = 11, .color = theme.current().fg_2 }));
     const self = try scope.createState(Fixture, .{ .cx = cx, .main_thread = std.Thread.getCurrentId(), .root = root, .slot = slot });
@@ -408,11 +460,29 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     // phase, just as PluginWindowHost does for the application.
     try cx.addAfterLayoutHook(self, Fixture.afterLayout);
     self.renderer = try views.mount(null, .{ .cx = cx, .scope = scope, .slot = slot, .owner = owner, .connection = .{ .protocol_id = "bmc_ikvm", .name = "LOCAL BMC fixture", .payload = "{}" }, .frame_sink = &self.sink, .service_access = self.access() });
+    // Match AppNavHost's nonterminal material cleanup after mounting: neither
+    // the shared pane nor tab root may conceal the renderer's own contract.
+    pane.setBackground(ui.Color.TRANSPARENT);
+    slot.setBackground(ui.Color.TRANSPARENT);
     return root;
 }
 
 fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
     const self = active_fixture orelse return null;
+    if (std.mem.eql(u8, path, "/app/bmc-fixture/quit")) {
+        if (app_instance) |app| app.quit();
+        return "{\"ok\":true}";
+    }
+    if (std.mem.eql(u8, path, "/app/bmc-fixture/management")) {
+        const parsed = std.json.parseFromSlice(struct { phase: services.Phase, reason: ?services.Reason = null, dispatched: bool = false }, self.cx.allocator, body, .{}) catch return "{\"error\":\"invalid management projection\"}";
+        defer parsed.deinit();
+        const result = if (self.management_result) |*value| value else return "{\"error\":\"no synthetic management request\"}";
+        result.phase = parsed.value.phase;
+        result.reason = parsed.value.reason;
+        result.dispatched = parsed.value.dispatched;
+        self.cx.requestRedraw();
+        return "{\"ok\":true,\"synthetic_projection_only\":true}";
+    }
     if (std.mem.eql(u8, path, "/app/bmc-fixture/progress")) {
         const parsed = std.json.parseFromSlice(ProgressFixture, self.cx.allocator, body, .{}) catch return "{\"error\":\"invalid progress fixture\"}";
         defer parsed.deinit();
@@ -522,9 +592,19 @@ fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
         .log_revision = if (view) |v| v.log_revision else null,
         .log_scroll_y = if (view) |v| if (v.log_scroll) |s| s.state.scroll_y else 0 else 0,
         .log_max_y = if (view) |v| if (v.log_scroll) |s| s.state.maxScrollY() else 0 else 0,
-        .log_line_count = if (view) |v| if (v.log_detail) |n| if (n.layoutTextLayout()) |layout| layout.line_count else @as(u16, 0) else @as(u16, 0) else @as(u16, 0),
+        .log_line_count = blk: {
+            var count: u32 = 0;
+            if (view) |v| for (v.log_messages[0..v.log_count]) |message| {
+                if (message) |node| if (node.layoutTextLayout()) |layout| {
+                    count += layout.line_count;
+                };
+            };
+            break :blk count;
+        },
         .power_writes = self.power_writes,
         .boot_writes = self.boot_writes,
+        .management_requests = self.management_requests,
+        .management_result = self.management_result,
         .release_count = self.release_count,
         .last_release = @tagName(self.last_release),
         .keys = self.key_count,
@@ -565,5 +645,11 @@ pub fn main(init: std.process.Init) !void {
     defer app_instance = null;
     zenit.setTestRouteHandler(route);
     try app.mount(mount);
-    try application.run();
+    while (application.shouldContinue()) {
+        if (!try application.tick()) break;
+        if (active_fixture) |fixture| {
+            const now: u64 = @intCast(@max(0, @import("platform/realtime.zig").monotonicNs()) / std.time.ns_per_ms);
+            fixture.sink.presentation.finish(app.cx.frame_count, app.renderer.frame_count, app.renderer.last_frame_presented, now);
+        }
+    }
 }

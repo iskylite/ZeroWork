@@ -225,9 +225,125 @@ test "API2 runtime rejects denial and cancellation without effects and never rep
         a.free(results);
     }
     try std.testing.expectEqual(tools.Status.outcome_unknown, results[0].status);
+    const failure = try std.json.parseFromSlice(std.json.Value, a, results[0].blocks[0].structured, .{});
+    defer failure.deinit();
+    try std.testing.expectEqualStrings("ResponseLost", failure.value.object.get("error_code").?.string);
+    try std.testing.expect(failure.value.object.get("side_effect_started").?.bool);
     try std.testing.expectEqual(operations.Stage.outcome_unknown, history.lookup(members[0].owner, 3).?.stage);
     try std.testing.expectError(error.ToolOperationAlreadyRecorded, fake.runtime(&history).execute(invocation, a, null));
     try std.testing.expectEqual(@as(usize, 1), fake.count);
+}
+
+test "API2 runtime unsent members release reserved resources without clearing unknown dispatches" {
+    const a = std.testing.allocator;
+    const provider = @import("provider.zig");
+    const Fixture = struct {
+        mode: enum { preflight, cancelled, unknown },
+        members: [2]tools.Member,
+        history: *operations.Store,
+        reads: usize = 0,
+        dispatches: usize = 0,
+        fn liveScope(_: *anyopaque) !scope.Scope {
+            return captured;
+        }
+        fn liveMembers(raw: *anyopaque) ![]const tools.Member {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            self.reads += 1;
+            if (self.mode == .preflight and self.reads >= 3) self.members[0].authorized = false;
+            return &self.members;
+        }
+        fn policy(_: *anyopaque) tools.Policy {
+            return .{};
+        }
+        fn now(_: *anyopaque) i64 {
+            return 100;
+        }
+        fn invoke(raw: *anyopaque, target: tools.TargetBinding, request: tools.Invocation, _: std.mem.Allocator, cancel: ?*provider.CancelToken) !tools.ToolResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try tools.markSent(self.history, request.owner, request.operation_id, request.call_id, request.tool_id, request.arguments_hash);
+            self.dispatches += 1;
+            if (self.mode == .cancelled) cancel.?.cancel();
+            return .{ .status = if (self.mode == .unknown) .outcome_unknown else .succeeded, .receipt = .{ .owner = target.owner, .operation_id = request.operation_id, .local_released = self.mode != .unknown, .remote_effect_unknown = self.mode == .unknown } };
+        }
+    };
+    for ([_]@FieldType(Fixture, "mode"){ .preflight, .cancelled, .unknown }) |mode| {
+        var fake: Fake = .{};
+        var history = operations.Store.init(a);
+        defer history.deinit();
+        var fixture: Fixture = .{ .mode = mode, .members = .{ member(&fake, 101, &.{binding}), member(&fake, 102, &.{binding}) }, .history = &history };
+        var read = definition();
+        read.effect = .read_state;
+        read.approval_policy = .read_only;
+        var table = try tools.RequestTable.init(a, captured, &.{read}, &fixture.members);
+        defer table.deinit();
+        const arguments = "{\"session_ids\":[101,102],\"value\":3}";
+        var call = try table.parse(a, table.entries[0].provider_name, arguments);
+        defer call.deinit();
+        const runtime: tools.Runtime = .{ .context = &fixture, .live_scope = Fixture.liveScope, .live_members = Fixture.liveMembers, .current_policy = Fixture.policy, .now_ms = Fixture.now, .operations = &history, .invoke = Fixture.invoke };
+        var cancel: provider.CancelToken = .{};
+        const results = try runtime.execute(.{ .table = &table, .parsed = call, .turn_id = 1, .call_id = "group-release", .arguments = arguments, .operation_id = 1 }, a, &cancel);
+        defer {
+            for (results) |*result| result.deinit(a);
+            a.free(results);
+        }
+        try std.testing.expectEqual(tools.Status.cancelled_unsent, results[1].status);
+        try std.testing.expect(results[1].receipt.local_released);
+        try std.testing.expect(history.lookup(fixture.members[1].owner, 1).?.resources_released);
+        if (mode == .preflight) {
+            try std.testing.expectEqual(@as(usize, 0), fixture.dispatches);
+            try std.testing.expect(history.lookup(fixture.members[0].owner, 1).?.resources_released);
+            try std.testing.expectEqual(@as(usize, 2), history.clearCompleted(false));
+        } else {
+            try std.testing.expectEqual(@as(usize, 1), fixture.dispatches);
+            const first = history.lookup(fixture.members[0].owner, 1).?;
+            try std.testing.expectEqual(operations.Stage.outcome_unknown, first.stage);
+            try std.testing.expectEqual(mode != .unknown, first.resources_released);
+            try std.testing.expectEqual(@as(usize, 1), history.clearCompleted(false));
+            if (mode == .unknown) try std.testing.expectEqual(@as(usize, 0), history.clearCompleted(true));
+        }
+    }
+}
+
+test "API2 approved controller input preserves focus rejection before dispatch" {
+    const a = std.testing.allocator;
+    const Rejected = struct {
+        fn invoke(_: *anyopaque, target: tools.TargetBinding, _: tools.Invocation, _: std.mem.Allocator, _: ?*@import("provider.zig").CancelToken) !tools.ToolResult {
+            const content = @import("../host/content_context.zig");
+            // The real content gate checks focus before any window/consumer
+            // callback. Reproduce approval followed by loss of native focus.
+            var context: content.Context = .{ .owner = target.owner, .window_id = @fromBackingInt(1), .window = undefined, .consumer = undefined };
+            _ = try context.acquireAutomation(1, null, null, std.math.maxInt(u64));
+            return error.UnexpectedDispatch;
+        }
+    };
+    var fake: Fake = .{ .approve = true };
+    const members = [_]tools.Member{member(&fake, 101, &.{binding})};
+    fake.members = &members;
+    var table = try tools.RequestTable.init(a, captured, &.{definition()}, &members);
+    defer table.deinit();
+    const arguments = "{\"session_ids\":[101],\"value\":3}";
+    var call = try table.parse(a, table.entries[0].provider_name, arguments);
+    defer call.deinit();
+    var history = operations.Store.init(a);
+    defer history.deinit();
+    var runtime = fake.runtime(&history);
+    runtime.invoke = Rejected.invoke;
+    const invocation: tools.DynamicInvocation = .{ .table = &table, .parsed = call, .turn_id = 1, .call_id = "approved-input", .arguments = arguments, .operation_id = 1 };
+    const results = try runtime.execute(invocation, a, null);
+    defer {
+        for (results) |*result| result.deinit(a);
+        a.free(results);
+    }
+    try std.testing.expectEqual(tools.Status.cancelled_unsent, results[0].status);
+    try results[0].validate(members[0].owner, 1);
+    const failure = try std.json.parseFromSlice(std.json.Value, a, results[0].blocks[0].structured, .{});
+    defer failure.deinit();
+    try std.testing.expectEqualStrings("WindowNotFocused", failure.value.object.get("error_code").?.string);
+    try std.testing.expectEqualStrings("preflight", failure.value.object.get("stage").?.string);
+    try std.testing.expect(!failure.value.object.get("side_effect_started").?.bool);
+    try std.testing.expect(!results[0].receipt.remote_effect_unknown);
+    try std.testing.expectEqual(@as(usize, 0), fake.count);
+    try std.testing.expectError(error.ToolOperationAlreadyRecorded, runtime.execute(invocation, a, null));
 }
 
 test "API2 per-plugin eight and request union sixteen are independent limits" {
@@ -326,7 +442,7 @@ test "API2 actual tool images survive loop and result snapshot and all native pr
     try std.testing.expectEqual(@as(usize, 1024), try @import("image_budget.zig").validate(request));
     var unreserved = request;
     unreserved.image_token_reservation = null;
-    try std.testing.expectError(error.UnknownImageBudget, @import("image_budget.zig").validate(unreserved));
+    try std.testing.expectEqual(@as(usize, @import("image_budget.zig").unknown_model_reservation), try @import("image_budget.zig").validate(unreserved));
     var known = request;
     known.model = "gpt-4o";
     known.image_token_reservation = 1;
@@ -363,4 +479,122 @@ test "API2 actual tool images survive loop and result snapshot and all native pr
     try std.testing.expectEqualSlices(u8, &original_hash, &saved.records.items[0].images[0].content().?.sha256);
     // The UI result card and provider next round share immutable actual pixels.
     try std.testing.expectEqual(@as(u32, 1), saved.records.items[0].images[0].content().?.width);
+}
+
+test "API2 unknown vision budget keeps observation input new observation and answer retry within 500k" {
+    const a = std.testing.allocator;
+    const provider = @import("provider.zig");
+    const Loop = @import("tool_loop.zig");
+    const Image = @import("image_attachments.zig");
+    const http = @import("provider_http.zig");
+    const Fixture = struct {
+        calls: [3]provider.ToolCall = undefined,
+        provider_calls: usize = 0,
+        observations: usize = 0,
+        inputs: usize = 0,
+        last_request: ?[]u8 = null,
+        fn legacy(_: *anyopaque, _: Loop.Invocation, _: std.mem.Allocator, _: ?*provider.CancelToken) !Loop.Outcome {
+            return error.UnexpectedLegacyDispatch;
+        }
+        fn execute(raw: *anyopaque, invocation: tools.DynamicInvocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) ![]tools.ToolResult {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            const results = try allocator.alloc(tools.ToolResult, 1);
+            errdefer allocator.free(results);
+            const blocks = try allocator.alloc(tools.ContentBlock, 1);
+            errdefer allocator.free(blocks);
+            if (invocation.parsed.entry.definition.effect == .observe_image) {
+                self.observations += 1;
+                blocks[0] = .{ .image_ref = try Image.ContentRef.create(allocator, "synthetic-observation", png, @intCast(self.observations), .{}) };
+            } else {
+                self.inputs += 1;
+                blocks[0] = .{ .text = try allocator.dupe(u8, "controlled input completed once") };
+            }
+            results[0] = .{ .status = .succeeded, .blocks = blocks, .receipt = .{ .owner = invocation.parsed.entry.targets[0].owner, .operation_id = invocation.operation_id } };
+            return results;
+        }
+        fn chat(raw: *anyopaque, request: provider.ChatRequest, sink: *const fn (*anyopaque, provider.Delta) void, ctx: *anyopaque) !provider.ChatStats {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            try std.testing.expect(!request.cancel.?.isCancelled());
+            const body = try http.requestBody(a, .openai_compat, request, 500_000);
+            if (self.last_request) |previous| a.free(previous);
+            self.last_request = body;
+            const round = self.provider_calls;
+            self.provider_calls += 1;
+            if (round < self.calls.len) {
+                const call = self.calls[round];
+                sink(ctx, .{ .tool_plan = .{ .call_id = call.id, .name = call.name, .arguments = call.arguments } });
+            } else if (round == self.calls.len) {
+                sink(ctx, .{ .text = "partial after the new screenshot" });
+                return error.Timeout;
+            } else {
+                try std.testing.expectEqual(@as(usize, 0), request.tools.len);
+                sink(ctx, .{ .text = "continued from both screenshots and the completed input" });
+            }
+            sink(ctx, .done);
+            return .{ .usage_reported = false };
+        }
+        fn models(_: *anyopaque, allocator: std.mem.Allocator) ![]provider.ModelInfo {
+            return allocator.alloc(provider.ModelInfo, 0);
+        }
+    };
+    var fixture: Fixture = .{};
+    defer if (fixture.last_request) |body| a.free(body);
+    var fake: Fake = .{};
+    const observe: tools.ToolDefinition = .{ .id = "example.observe", .schema = schema, .effect = .observe_image, .approval_policy = .read_only };
+    const input: tools.ToolDefinition = .{ .id = "example.input", .schema = schema, .effect = .remote_input, .approval_policy = .always_confirm };
+    const bindings = [_]tools.ToolBinding{ .{ .plugin_id = "example", .definition_id = observe.id, .handler = Fake.handler }, .{ .plugin_id = "example", .definition_id = input.id, .handler = Fake.handler } };
+    const members = [_]tools.Member{member(&fake, 101, &bindings)};
+    var table = try tools.RequestTable.init(a, captured, &.{ observe, input }, &members);
+    defer table.deinit();
+    const definitions = try tools.providerDefinitions(&table, table.arena.allocator());
+    fixture.calls = .{
+        .{ .id = "observation-before-input", .name = definitions[0].name(), .arguments = "{\"session_ids\":[101],\"value\":1}" },
+        .{ .id = "input-once", .name = definitions[1].name(), .arguments = "{\"session_ids\":[101],\"value\":2}" },
+        .{ .id = "new-observation-after-input", .name = definitions[0].name(), .arguments = "{\"session_ids\":[101],\"value\":3}" },
+    };
+    const callbacks: Loop.Host = .{ .context = &fixture, .execute = Fixture.legacy, .execute_dynamic = Fixture.execute };
+    var manager = @import("turn_manager.zig").Manager.init(a);
+    defer manager.deinit();
+    manager.scope = captured;
+    manager.turn_id = 401;
+    manager.tool_host = callbacks;
+    manager.tool_limits.context_window = 500_000;
+    var original_stop: provider.CancelToken = .{};
+    const request: provider.ChatRequest = .{ .model = "gateway/custom-vision@500k", .vision = true, .tool_images = true, .system = "synthetic visual task", .messages = &.{.{ .content = "observe, apply one input, then observe the new result" }}, .tools = definitions, .tool_table = &table, .cancel = &original_stop };
+    const p: provider.Provider = .{ .ctx = &fixture, .chat = Fixture.chat, .models = Fixture.models };
+    try std.testing.expectError(error.Timeout, manager.run(p, request));
+    const run = manager.tool_run.?;
+    try std.testing.expectEqual(@as(usize, 2), fixture.observations);
+    try std.testing.expectEqual(@as(usize, 1), fixture.inputs);
+    try std.testing.expectEqual(@as(usize, 2 * @import("image_budget.zig").unknown_model_reservation), try @import("image_budget.zig").validate(run.request));
+    try std.testing.expectEqual(@as(i64, 1), run.messages.items[2].images[0].content().?.captured_at_ms);
+    try std.testing.expectEqual(@as(i64, 2), run.messages.items[6].images[0].content().?.captured_at_ms);
+    original_stop.cancel();
+    var next_stop: provider.CancelToken = .{};
+    const stats = try manager.resumeAnswer(p, &next_stop);
+    try std.testing.expect(!stats.usage_reported);
+    try std.testing.expectEqual(@as(usize, 5), fixture.provider_calls);
+    try std.testing.expectEqual(@as(usize, 2), fixture.observations);
+    try std.testing.expectEqual(@as(usize, 1), fixture.inputs);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, fixture.last_request.?, .{});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.value.object.get("tools") == null);
+    const projection = @import("tool_trace.zig").summarize(parsed.value);
+    try std.testing.expectEqual(@as(usize, 2), projection.image_count);
+    for (fixture.calls) |call| {
+        try std.testing.expect(std.mem.indexOf(u8, fixture.last_request.?, call.id) != null);
+    }
+    // A third retained frame fits; a fourth exceeds 500k. Preserve every
+    // actual result and reject admission instead of dropping/replaying frames.
+    var extra = fixture.calls[0];
+    extra.id = "third-observation";
+    try run.complete("", &.{extra}, callbacks, .{}, 1, null);
+    _ = try run.nextRequest();
+    extra.id = "fourth-observation-over-window";
+    try run.complete("", &.{extra}, callbacks, .{}, 1, null);
+    try std.testing.expectError(error.ToolContextBudget, run.nextRequest());
+    try std.testing.expectEqual(@as(usize, 5), run.records.items.len);
+    try std.testing.expectEqual(@as(usize, 1), run.messages.items[10].images.len);
+    try std.testing.expectEqual(@as(usize, 4), fixture.observations);
+    try std.testing.expectEqual(@as(usize, 1), fixture.inputs);
 }

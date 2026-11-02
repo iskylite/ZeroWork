@@ -68,11 +68,15 @@ fn isReadOnly(value: Input) bool {
 const DiscoverySummary = struct {
     manager_count: usize,
     system_count: usize,
+    resource_association_verified: bool,
+    resource_association_method: ?[]const u8,
     mapping_verified: bool,
     mapping_error: ?[]const u8,
     mapping_rejection: ?[]const u8,
     mapping_system_status: ?u16,
     mapping_system_validity: ?[]const u8,
+    management_target_verified: bool = false,
+    management_target_error: ?[]const u8 = null,
     readonly_system_projection: bool,
     readonly_rejection: ?[]const u8,
     readonly_collection_count: usize,
@@ -90,8 +94,11 @@ const ProgressHeadline = struct {
     waiting_for_user: bool,
     failure_stage: ?[]const u8,
     static_errorcode: ?[]const u8,
+    failure_event: ?console.progress.Event,
 };
 const ProgressEventSummary = struct {
+    sequence: u64 = 0,
+    at_ms: u64 = 0,
     stage: []const u8 = "idle",
     kind: []const u8 = "stage",
     code: []const u8 = "none",
@@ -100,16 +107,27 @@ const ProgressEventSummary = struct {
     static_errorcode: ?[]const u8 = null,
     count: ?u16 = null,
     validity: ?[]const u8 = null,
+    context: ?console.progress.Context = null,
 };
 const TypedManagementSummary = struct {
+    management_policy: []const u8,
+    power_write_requestable: bool,
+    power_write_granted: bool,
+    boot_write_requestable: bool,
+    boot_write_granted: bool,
     power_resource_present: bool,
+    power_resource_validity: services.Validity,
     power_mapping_verified: bool,
     power_state_present: bool,
     power_state_known: bool,
+    power_state: ?services.PowerState,
+    power_last_reset_time_present: bool,
+    power_last_reset_time_validity: services.Validity,
     power_state_validity: services.Validity,
     power_reset_types_count: usize,
     power_reset_types_validity: services.Validity,
     boot_resource_present: bool,
+    boot_resource_validity: services.Validity,
     boot_mapping_verified: bool,
     boot_state_present: bool,
     boot_enabled_present: bool,
@@ -205,7 +223,7 @@ fn validateInput(value: Input) ![32]u8 {
     switch (value.acceptance_mode) {
         .read_only => if (value.operator_approval != null or value.click_target != null) return error.UnexpectedControlApproval,
         .safe_interaction => if (value.operator_approval != .safe_shift_and_pointer or value.click_target != null) return error.ExplicitSafeInteractionApprovalRequired,
-        .native_interactive => if (value.operator_approval != .native_view_and_observed_actions or value.click_target != null or value.interactive_seconds < 30 or value.interactive_seconds > 300) return error.ExplicitNativeInteractionApprovalRequired,
+        .native_interactive => if (value.operator_approval != .native_view_and_observed_actions or value.click_target != null or value.interactive_seconds < 30 or value.interactive_seconds > 900) return error.ExplicitNativeInteractionApprovalRequired,
         .ai_pointer_click => {
             if (value.operator_approval != .observed_screen_single_click or value.click_target == null) return error.ObservedScreenClickApprovalRequired;
             // Check against the actual observation dimensions again at dispatch.
@@ -356,10 +374,14 @@ const ControlSummary = struct {
     interactive_actions_sent: usize,
     interactive_actions_cancelled_unsent: usize,
     interactive_stop_requests: usize,
+    actions_with_post_send_observation: usize,
+    last_action_timing: ?ActionTiming,
     reconnects: usize,
     same_tab_preserved: bool,
     old_proof_invalid_after_retry: bool,
     old_proof_rejected_by_new_owner: bool,
+    old_proof_invalid_after_stop: bool,
+    old_proof_rejected_after_stop: bool,
     retry_own_logout_confirmed: bool,
 };
 const WireReceiptSummary = struct {
@@ -368,6 +390,67 @@ const WireReceiptSummary = struct {
     sent_events: u16,
     total_events: u16,
     possibly_written: bool,
+};
+/// Only the latest immutable CPU framebuffer is sampled here. Publication
+/// sequence gaps remain visible; main-thread polling is never a video FPS.
+const VideoEvidence = struct {
+    connection_started_ms: u64 = 0,
+    first_sampled_ms: u64 = 0,
+    last_sampled_ms: u64 = 0,
+    last_received_ns: u64 = 0,
+    first_sequence: u64 = 0,
+    last_sequence: u64 = 0,
+    sampled_latest_frames: u64 = 0,
+    unsampled_published_sequences: u64 = 0,
+    consecutive_interval_samples: u64 = 0,
+    consecutive_interval_total_ns: u64 = 0,
+    consecutive_interval_min_ns: u64 = std.math.maxInt(u64),
+    consecutive_interval_max_ns: u64 = 0,
+    sampled_latest_age_max_ms: u64 = 0,
+};
+const VideoSummary = struct {
+    owner_generation: ?u64,
+    observation_ms: u64,
+    first_frame_observed_after_connection_ms: ?u64,
+    published_complete_cpu_frames: u64,
+    sampled_latest_frames: u64,
+    published_updates_over_observation: u64,
+    published_sequences_not_individually_sampled: u64,
+    published_updates_per_second_over_observation: ?f64,
+    consecutive_received_interval_samples: u64,
+    consecutive_received_interval_min_ms: ?f64,
+    consecutive_received_interval_mean_ms: ?f64,
+    consecutive_received_interval_max_ms: ?f64,
+    sampled_latest_frame_age_ms: ?u64,
+    sampled_latest_frame_age_max_ms: u64,
+    includes_requested_full_refreshes: bool = true,
+    received_or_decoded_frame_drops_measured: bool = false,
+    rendered_fps_measured: bool = false,
+    motion_or_static_screen_classification: []const u8 = "operator_observation_required",
+    no_update_interval_alone_proves_stall: bool = false,
+};
+/// The production receipt owns the wire timestamp. Dispatch/receipt-observed
+/// times are host bounds, not an invented exact enqueue or remote response time.
+const ActionTiming = struct {
+    owner: identity.SessionHandle,
+    operation_id: u64,
+    source_observation_id: u64,
+    source_frame_generation: u64,
+    source_frame_sequence: u64,
+    dispatch_started_monotonic_ms: u64,
+    queued_receipt_observed_monotonic_ms: ?u64 = null,
+    sent_monotonic_ns: ?u64 = null,
+    sent_receipt_observed_monotonic_ms: ?u64 = null,
+    dispatch_to_wire_sent_ms_upper_bound: ?u64 = null,
+    exact_queue_to_wire_ms: ?u64 = null,
+    post_observation_id: ?u64 = null,
+    post_frame_sequence: ?u64 = null,
+    post_frame_received_monotonic_ns: ?u64 = null,
+    post_screenshot_captured_monotonic_ms: ?u64 = null,
+    sent_to_post_frame_ms: ?f64 = null,
+    sent_to_post_screenshot_ms: ?u64 = null,
+    post_send_new_frame_verified: bool = false,
+    remote_application_effect_verified: bool = false,
 };
 /// Test control contains no connection, credential or arbitrary text fields.
 /// An action names the observation and owner Root has actually inspected.
@@ -414,6 +497,7 @@ const NativeQueued = struct {
     sequence: u64,
     transport: u64,
     epoch: u64,
+    queued_observed_monotonic_ms: u64,
     kind: enum { shift_down, shift_up, pointer_move, left_button_down, left_button_up, other },
     event_kind: enum { key, pointer, wheel, chord },
     keysym: ?u32 = null,
@@ -491,6 +575,7 @@ const Runner = struct {
     last_video: ?controller_api.VideoState = null,
     last_management: ?controller_api.ManagementState = null,
     last_frames: u64 = 0,
+    video_evidence: VideoEvidence = .{},
     last_width: u32 = 0,
     last_height: u32 = 0,
     last_input_sequence: u64 = 0,
@@ -540,6 +625,11 @@ const Runner = struct {
     observation_width: u32 = 0,
     observation_height: u32 = 0,
     observation_valid_until_ms: u64 = 0,
+    observation_frame_generation: u64 = 0,
+    observation_frame_sequence: u64 = 0,
+    action_timing: ?ActionTiming = null,
+    last_completed_action_timing: ?ActionTiming = null,
+    actions_with_post_send_observation: usize = 0,
     ai_operation: ?u64 = null,
     ai_keyboard_sent: bool = false,
     ai_pointer_sent: bool = false,
@@ -573,6 +663,9 @@ const Runner = struct {
     reconnects: usize = 0,
     reconnect_requested: bool = false,
     retry_previous_proof: ?content.AutomationProof = null,
+    stopped_previous_proof: ?content.AutomationProof = null,
+    old_proof_invalid_after_stop: bool = false,
+    old_proof_rejected_after_stop: bool = false,
     old_proof_invalid_after_retry: bool = false,
     old_proof_rejected_by_new_owner: bool = false,
     retry_own_logout_confirmed: bool = true,
@@ -601,7 +694,7 @@ const Runner = struct {
             self.challenge_host.deinit();
         }
         for (value.ssh_hops, 0..) |hop, i| self.hop_assets[i] = try self.registry.add(.{ .name = "Read-only SSH route", .host = hop.host, .port = hop.port, .user = hop.username, .auth_mode = .password, .strict_host_key_checking = true, .auto_shell_integration = false });
-        self.plugin = try plugin_api.Plugin.init(a, .{ .frame_budget = &self.budget, .journal_backend = self.journal_backend.backend(), .probe_challenges = &self.challenge_host, .retry_context = self, .retry_accepted = retryAccepted });
+        self.plugin = try plugin_api.Plugin.init(a, .{ .frame_budget = &self.budget, .journal_backend = self.journal_backend.backend(), .management_policy = .read_only, .probe_challenges = &self.challenge_host, .retry_context = self, .retry_accepted = retryAccepted });
         errdefer self.plugin.?.deinit() catch unreachable;
         self.host = try sessions.SessionHost.initPlugins(a, &.{self.plugin.?.manifest()}, &.{self.plugin.?.renderer()});
         errdefer self.host.?.deinit();
@@ -681,6 +774,7 @@ const Runner = struct {
         self.envelope = .{ .protocol_id = model.protocol_id, .name = if (isReadOnly(self.input)) "BMC · live read-only" else "BMC · live safe control", .payload = try std.json.Stringify.valueAlloc(a, payload, .{}) };
         self.target = .{ .window_id = @fromBackingInt(self.app.windowId()), .workspace_id = try self.workspace_ids.allocate() };
         self.begin_ms = runtime_api.monotonicMs();
+        self.video_evidence.connection_started_ms = self.begin_ms;
         self.accepted = try self.host.?.open(self.envelope.?, .{ .request_key = 1, .target = self.target.? });
         emit(.{ .phase = "accepted", .production_plugin = true, .automatic_profile = true, .native_owned_ssh = true, .ssh_nodes = self.input.ssh_hops.len, .shell = false, .pty = false, .read_only_requested = isReadOnly(self.input), .acceptance_mode = @tagName(self.input.acceptance_mode) });
     }
@@ -694,16 +788,18 @@ const Runner = struct {
         // The backend publishes this immutable subset through its own release /
         // acquire barrier. Never inspect its worker-owned discovery resources.
         const diagnostic = backend.discoveryDiagnostics() orelse return self.discovery_summary;
-        self.discovery_summary = .{ .manager_count = diagnostic.manager_count, .system_count = diagnostic.system_count, .mapping_verified = diagnostic.mapping_verified, .mapping_error = if (diagnostic.mapping_error) |err| @errorName(err) else null, .mapping_rejection = if (diagnostic.mapping_rejection) |reason| @tagName(reason) else null, .mapping_system_status = diagnostic.mapping_system_status, .mapping_system_validity = if (diagnostic.mapping_system_validity) |validity| @tagName(validity) else null, .readonly_system_projection = diagnostic.readonly_system_projection, .readonly_rejection = if (diagnostic.readonly_rejection) |reason| @tagName(reason) else null, .readonly_collection_count = diagnostic.readonly_collection_count, .readonly_member_count = diagnostic.readonly_member_count, .readonly_collection_status = diagnostic.readonly_collection_status, .readonly_collection_validity = if (diagnostic.readonly_collection_validity) |validity| @tagName(validity) else null, .readonly_system_status = diagnostic.readonly_system_status, .readonly_system_validity = if (diagnostic.readonly_system_validity) |validity| @tagName(validity) else null, .readonly_system_identity_present = diagnostic.readonly_system_identity_present };
+        self.discovery_summary = .{ .manager_count = diagnostic.manager_count, .system_count = diagnostic.system_count, .resource_association_verified = diagnostic.resource_association_verified, .resource_association_method = if (diagnostic.resource_association_method) |method| @tagName(method) else null, .mapping_verified = diagnostic.mapping_verified, .mapping_error = if (diagnostic.mapping_error) |err| @errorName(err) else null, .mapping_rejection = if (diagnostic.mapping_rejection) |reason| @tagName(reason) else null, .mapping_system_status = diagnostic.mapping_system_status, .mapping_system_validity = if (diagnostic.mapping_system_validity) |validity| @tagName(validity) else null, .readonly_system_projection = diagnostic.readonly_system_projection, .readonly_rejection = if (diagnostic.readonly_rejection) |reason| @tagName(reason) else null, .readonly_collection_count = diagnostic.readonly_collection_count, .readonly_member_count = diagnostic.readonly_member_count, .readonly_collection_status = diagnostic.readonly_collection_status, .readonly_collection_validity = if (diagnostic.readonly_collection_validity) |validity| @tagName(validity) else null, .readonly_system_status = diagnostic.readonly_system_status, .readonly_system_validity = if (diagnostic.readonly_system_validity) |validity| @tagName(validity) else null, .readonly_system_identity_present = diagnostic.readonly_system_identity_present };
+        self.discovery_summary.?.management_target_verified = diagnostic.management_target_verified;
+        self.discovery_summary.?.management_target_error = if (diagnostic.management_target_error) |err| @errorName(err) else null;
         return self.discovery_summary;
     }
     fn captureProgressSummary(self: *Runner, value: console.progress.Snapshot) void {
         // Controller.poll() copies this bounded, lock-protected snapshot. Its
         // strings are exclusively @errorName values by the production Tracker
         // contract; no route/authority/device text can enter this projection.
-        self.progress_headline = .{ .stage = @tagName(value.stage), .event_count = value.event_count, .elapsed_ms = value.elapsed_ms, .waiting_for_user = value.waiting_for_user, .failure_stage = if (value.failure_stage) |stage| @tagName(stage) else null, .static_errorcode = value.failure_code };
+        self.progress_headline = .{ .stage = @tagName(value.stage), .event_count = value.event_count, .elapsed_ms = value.elapsed_ms, .waiting_for_user = value.waiting_for_user, .failure_stage = if (value.failure_stage) |stage| @tagName(stage) else null, .static_errorcode = value.failure_code, .failure_event = value.failure_event };
         self.progress_event_count = @min(value.event_count, self.progress_events.len);
-        for (value.events[0..self.progress_event_count], 0..) |event, i| self.progress_events[i] = .{ .stage = @tagName(event.stage), .kind = @tagName(event.kind), .code = @tagName(event.code), .resource = @tagName(event.resource), .http_status = event.http_status, .static_errorcode = event.error_code, .count = event.count, .validity = if (event.validity) |validity| @tagName(validity) else null };
+        for (value.events[0..self.progress_event_count], 0..) |event, i| self.progress_events[i] = .{ .sequence = event.sequence, .at_ms = event.at_ms, .stage = @tagName(event.stage), .kind = @tagName(event.kind), .code = @tagName(event.code), .resource = @tagName(event.resource), .http_status = event.http_status, .static_errorcode = event.error_code, .count = event.count, .validity = if (event.validity) |validity| @tagName(validity) else null, .context = event.context };
         if (value.revision != 0 and self.last_progress_stage != value.stage) {
             self.last_progress_stage = value.stage;
             emit(.{ .phase = "progress_state", .progress = self.progress_headline });
@@ -736,18 +832,30 @@ const Runner = struct {
         const b_table = try b.borrow(services.BootService, services.boot_key, call.owner);
         var boot = try b_table.snapshot(b.context, call, a);
         defer boot.deinit();
-        if (power.value.capability.write_granted or boot.value.capability.write_granted) return error.UnsafeManagementActions;
+        const runtime_value = self.runtime() orelse return error.MissingRuntime;
+        if (runtime_value.management_policy != .read_only or runtime_value.controller.manager.policy != .read_only or runtime_value.controller.manager.engine.policy != .read_only) return error.UnsafeManagementPolicy;
+        if (power.value.capability.write_granted or boot.value.capability.write_granted or power.value.capability.write_requestable or boot.value.capability.write_requestable) return error.UnsafeManagementActions;
         const pv = power.value;
         const bv = boot.value;
         const value: TypedManagementSummary = .{
+            .management_policy = @tagName(runtime_value.management_policy),
+            .power_write_requestable = pv.capability.write_requestable,
+            .power_write_granted = pv.capability.write_granted,
+            .boot_write_requestable = bv.capability.write_requestable,
+            .boot_write_granted = bv.capability.write_granted,
             .power_resource_present = pv.system_uri.len != 0,
+            .power_resource_validity = pv.resource_evidence.validity,
             .power_mapping_verified = pv.capability.system_mapping_verified,
             .power_state_present = pv.state.value != null,
             .power_state_known = if (pv.state.value) |state| state != .unknown else false,
+            .power_state = pv.state.value,
+            .power_last_reset_time_present = pv.last_reset_time.value != null,
+            .power_last_reset_time_validity = pv.last_reset_time.evidence.validity,
             .power_state_validity = pv.state.evidence.validity,
             .power_reset_types_count = if (pv.reset_types.value) |items| items.len else 0,
             .power_reset_types_validity = pv.reset_types.evidence.validity,
             .boot_resource_present = bv.system_uri.len != 0,
+            .boot_resource_validity = bv.resource_evidence.validity,
             .boot_mapping_verified = bv.capability.system_mapping_verified,
             .boot_state_present = bv.state.enabled != null or bv.state.target != null or bv.state.mode != null,
             .boot_enabled_present = bv.state.enabled != null,
@@ -858,6 +966,7 @@ const Runner = struct {
         if (self.input.acceptance_mode != .native_interactive or !self.reconnect_requested or owner.session_id != previous.handle.session_id or owner.generation != previous.handle.generation + 1 or self.presentation_count >= self.presentations.len) return error.InvalidRetryOwner;
         const old = self.runtime() orelse return error.MissingRetiredRuntime;
         if (old.receipt() != .released) return error.RetryCleanupNotReleased;
+        emit(.{ .phase = "video_observation", .boundary = "retired_owner", .video = self.videoSummary() });
         const diagnostic = old.remote_logout_diagnostics orelse return error.MissingRetryLogoutReceipt;
         self.retry_own_logout_confirmed = self.retry_own_logout_confirmed and old.remote_web_logout == .confirmed and old.remote_kvm_logout == .confirmed and diagnostic.web.http_status == 200 and diagnostic.kvm.http_status == 200;
         self.stopInteractiveAuthority();
@@ -875,6 +984,9 @@ const Runner = struct {
         self.tool_table = null;
         self.tool_scope = null;
         self.observation_id = null;
+        self.observation_frame_generation = 0;
+        self.observation_frame_sequence = 0;
+        self.action_timing = null;
         self.ai_operation = null;
         self.native_refresh_sequence = null;
         self.native_refresh_needed = false;
@@ -886,6 +998,7 @@ const Runner = struct {
         self.safe_views_verified = false;
         self.native_route_verified = false;
         self.first_frame_ms = null;
+        self.video_evidence = .{ .connection_started_ms = runtime_api.monotonicMs() };
         self.last_route = null;
         self.last_video = null;
         self.last_management = null;
@@ -943,7 +1056,7 @@ const Runner = struct {
         if (result == .accepted) {
             self.native_view.accepted_events += 1;
             self.native_view.last_queued_sequence = command.input_sequence;
-            var queued: NativeQueued = .{ .sequence = command.input_sequence, .transport = snapshot.transport_generation, .epoch = snapshot.input_epoch, .kind = .other, .event_kind = switch (command.event) {
+            var queued: NativeQueued = .{ .sequence = command.input_sequence, .transport = snapshot.transport_generation, .epoch = snapshot.input_epoch, .queued_observed_monotonic_ms = runtime_api.monotonicMs(), .kind = .other, .event_kind = switch (command.event) {
                 .key => .key,
                 .pointer => .pointer,
                 .wheel => .wheel,
@@ -1004,7 +1117,7 @@ const Runner = struct {
                 self.native_pending[self.native_pending_count] = queued;
                 self.native_pending_count += 1;
             }
-            emit(.{ .phase = "native_view_input", .owner = binding.owner, .state = "queued", .kind = @tagName(queued.kind), .event_kind = queued.event_kind, .keysym = queued.keysym, .down = queued.down, .keysym_redacted = queued.keysym_redacted, .button = queued.button, .buttons = queued.buttons, .click_down_sequence = queued.click_down_sequence, .input_sequence = command.input_sequence, .input_epoch = snapshot.input_epoch, .transport_generation = snapshot.transport_generation, .wire_sent = false, .remote_application_effect_verified = false });
+            emit(.{ .phase = "native_view_input", .owner = binding.owner, .state = "queued", .kind = @tagName(queued.kind), .event_kind = queued.event_kind, .keysym = queued.keysym, .down = queued.down, .keysym_redacted = queued.keysym_redacted, .button = queued.button, .buttons = queued.buttons, .click_down_sequence = queued.click_down_sequence, .input_sequence = command.input_sequence, .input_epoch = snapshot.input_epoch, .transport_generation = snapshot.transport_generation, .queued_observed_monotonic_ms = queued.queued_observed_monotonic_ms, .wire_sent = false, .remote_application_effect_verified = false });
         }
         return result;
     }
@@ -1062,6 +1175,58 @@ const Runner = struct {
         const self: *Runner = @ptrCast(@alignCast(raw));
         self.close_requested = true;
     }
+    fn observeVideo(self: *Runner, runtime_value: *runtime_api.Runtime) !void {
+        const now = runtime_api.monotonicMs();
+        const evidence = &self.video_evidence;
+        evidence.last_sampled_ms = now;
+        defer if (evidence.last_received_ns != 0) {
+            evidence.sampled_latest_age_max_ms = @max(evidence.sampled_latest_age_max_ms, now -| (evidence.last_received_ns / std.time.ns_per_ms));
+        };
+        var lease = switch (runtime_value.controller.framebuffer.acquireLatest(runtime_value.controller.framebuffer.binding(), evidence.last_sequence)) {
+            .frame => |value| value,
+            .stale_binding => return error.StaleVideoEvidenceOwner,
+            else => return,
+        };
+        defer lease.release();
+        const frame = lease.snapshot;
+        if (!frame.session_handle.eql(self.accepted.?.handle)) return error.StaleVideoEvidenceOwner;
+        if (evidence.first_sequence == 0) {
+            evidence.first_sampled_ms = now;
+            evidence.first_sequence = frame.sequence;
+        } else if (frame.sequence == evidence.last_sequence + 1 and frame.received_monotonic_ns >= evidence.last_received_ns) {
+            const interval = frame.received_monotonic_ns - evidence.last_received_ns;
+            evidence.consecutive_interval_samples += 1;
+            evidence.consecutive_interval_total_ns += interval;
+            evidence.consecutive_interval_min_ns = @min(evidence.consecutive_interval_min_ns, interval);
+            evidence.consecutive_interval_max_ns = @max(evidence.consecutive_interval_max_ns, interval);
+        }
+        evidence.unsampled_published_sequences += frame.sequence - evidence.last_sequence - 1;
+        evidence.sampled_latest_frames += 1;
+        evidence.last_sequence = frame.sequence;
+        evidence.last_received_ns = frame.received_monotonic_ns;
+    }
+    fn videoSummary(self: *Runner) VideoSummary {
+        const evidence = &self.video_evidence;
+        const elapsed = if (evidence.first_sequence != 0) evidence.last_sampled_ms -| evidence.first_sampled_ms else 0;
+        const age: ?u64 = if (evidence.last_received_ns != 0) evidence.last_sampled_ms -| (evidence.last_received_ns / std.time.ns_per_ms) else null;
+        const intervals = evidence.consecutive_interval_samples;
+        return .{
+            .owner_generation = if (self.accepted) |accepted| accepted.handle.generation else null,
+            .observation_ms = elapsed,
+            .first_frame_observed_after_connection_ms = if (evidence.first_sequence != 0) evidence.first_sampled_ms -| evidence.connection_started_ms else null,
+            .published_complete_cpu_frames = self.last_frames,
+            .sampled_latest_frames = evidence.sampled_latest_frames,
+            .published_updates_over_observation = evidence.last_sequence -| evidence.first_sequence,
+            .published_sequences_not_individually_sampled = evidence.unsampled_published_sequences,
+            .published_updates_per_second_over_observation = if (elapsed != 0) @as(f64, @floatFromInt(evidence.last_sequence - evidence.first_sequence)) * 1000 / @as(f64, @floatFromInt(elapsed)) else null,
+            .consecutive_received_interval_samples = intervals,
+            .consecutive_received_interval_min_ms = if (intervals != 0) @as(f64, @floatFromInt(evidence.consecutive_interval_min_ns)) / std.time.ns_per_ms else null,
+            .consecutive_received_interval_mean_ms = if (intervals != 0) @as(f64, @floatFromInt(evidence.consecutive_interval_total_ns)) / @as(f64, @floatFromInt(intervals)) / std.time.ns_per_ms else null,
+            .consecutive_received_interval_max_ms = if (intervals != 0) @as(f64, @floatFromInt(evidence.consecutive_interval_max_ns)) / std.time.ns_per_ms else null,
+            .sampled_latest_frame_age_ms = age,
+            .sampled_latest_frame_age_max_ms = evidence.sampled_latest_age_max_ms,
+        };
+    }
     fn poll(self: *Runner) !void {
         if (self.finished) return;
         if (self.plugin != null) {
@@ -1074,6 +1239,7 @@ const Runner = struct {
             self.captureProgressSummary(state.progress);
             self.observeProgressShot(state.progress, runtime_value.last_sequence != 0);
             self.last_frames = state.published_frames;
+            if (!self.close_requested and !self.reconnect_requested and !self.cancelled_connection) try self.observeVideo(runtime_value);
             self.last_width = runtime_value.last_width;
             self.last_height = runtime_value.last_height;
             self.last_input_sequence = state.input.last_input_sequence;
@@ -1097,7 +1263,7 @@ const Runner = struct {
             if (state.failure) |failure| if (!self.close_requested) self.fail(@errorName(failure));
             if (runtime_value.last_sequence > 0 and self.first_frame_ms == null) {
                 self.first_frame_ms = runtime_api.monotonicMs();
-                emit(.{ .phase = "first_frame", .width = self.last_width, .height = self.last_height, .frames = self.last_frames, .budget_bytes = self.budget.usedBytes(), .discovery = self.captureDiscoverySummary(), .typed_management = try self.captureTypedManagementSummary(), .presentation = try self.capturePresentationSummary(), .progress = self.progress_headline });
+                emit(.{ .phase = "first_frame", .width = self.last_width, .height = self.last_height, .frames = self.last_frames, .video = self.videoSummary(), .budget_bytes = self.budget.usedBytes(), .discovery = self.captureDiscoverySummary(), .typed_management = try self.captureTypedManagementSummary(), .presentation = try self.capturePresentationSummary(), .progress = self.progress_headline });
             }
             if (state.worker_exited) {
                 self.pressed_keys = runtime_value.controller.remote_input.pressed_count;
@@ -1122,7 +1288,7 @@ const Runner = struct {
             self.web_logout = .unknown;
             self.kvm_logout = .unknown;
             self.releasePresentation() catch {};
-            emit(.{ .phase = "complete", .success = false, .cleanup = "unknown", .web_logout = @tagName(self.web_logout), .kvm_logout = @tagName(self.kvm_logout), .width = self.last_width, .height = self.last_height, .frames = self.last_frames, .budget_bytes = self.budget.usedBytes(), .pressed_keys = self.pressed_keys, .pressed_buttons = self.pressed_buttons, .logout_diagnostics = self.logout_summary, .control = self.controlSummary(), .failure_code = self.failure_code, .progress_screenshot = self.progress_shot, .log_screenshot = self.log_shot, .progress = self.progress_headline, .progress_events = self.progress_events[0..self.progress_event_count] });
+            emit(.{ .phase = "complete", .success = false, .cleanup = "unknown", .web_logout = @tagName(self.web_logout), .kvm_logout = @tagName(self.kvm_logout), .width = self.last_width, .height = self.last_height, .frames = self.last_frames, .budget_bytes = self.budget.usedBytes(), .pressed_keys = self.pressed_keys, .pressed_buttons = self.pressed_buttons, .logout_diagnostics = self.logout_summary, .control = self.controlSummary(), .video = self.videoSummary(), .failure_code = self.failure_code, .progress_screenshot = self.progress_shot, .log_screenshot = self.log_shot, .progress = self.progress_headline, .progress_events = self.progress_events[0..self.progress_event_count] });
             self.finished = true;
             _ = self.app.commitClose();
         }
@@ -1167,7 +1333,7 @@ const Runner = struct {
                     .other => {},
                 }
                 self.native_refresh_needed = true;
-                emit(.{ .phase = "native_view_input", .owner = self.accepted.?.handle, .state = "sent", .kind = @tagName(pending.kind), .event_kind = pending.event_kind, .keysym = pending.keysym, .down = pending.down, .keysym_redacted = pending.keysym_redacted, .button = pending.button, .buttons = pending.buttons, .click_down_sequence = pending.click_down_sequence, .input_sequence = pending.sequence, .last_sent_input_sequence = snapshot.last_sent_input_sequence, .transport_generation = pending.transport, .wire_sent = true, .remote_application_effect_verified = false });
+                emit(.{ .phase = "native_view_input", .owner = self.accepted.?.handle, .state = "sent", .kind = @tagName(pending.kind), .event_kind = pending.event_kind, .keysym = pending.keysym, .down = pending.down, .keysym_redacted = pending.keysym_redacted, .button = pending.button, .buttons = pending.buttons, .click_down_sequence = pending.click_down_sequence, .input_sequence = pending.sequence, .last_sent_input_sequence = snapshot.last_sent_input_sequence, .transport_generation = pending.transport, .queued_observed_monotonic_ms = pending.queued_observed_monotonic_ms, .queued_to_sent_confirmation_ms = runtime_api.monotonicMs() -| pending.queued_observed_monotonic_ms, .exact_wire_send_time_available = false, .wire_sent = true, .remote_application_effect_verified = false });
             } else if (!same_epoch) {
                 self.native_view.invalidated_before_send_confirmation += 1;
                 emit(.{ .phase = "native_view_input", .owner = self.accepted.?.handle, .state = "confirmation_unavailable_after_barrier", .kind = @tagName(pending.kind), .event_kind = pending.event_kind, .keysym = pending.keysym, .down = pending.down, .keysym_redacted = pending.keysym_redacted, .button = pending.button, .buttons = pending.buttons, .input_sequence = pending.sequence, .wire_sent = false, .remote_effect_unknown = true, .input_replayed = false });
@@ -1217,7 +1383,7 @@ const Runner = struct {
         } else if (command.pointer_action != null or command.x != null or command.y != null or command.end_x != null or command.end_y != null or command.steps_x != null or command.steps_y != null) return error.UnexpectedPointerParameter;
         if ((command.command == .text_probe or command.command == .clear_line) != command.observed_idle_prompt) return error.ExplicitIdlePromptObservationRequired;
         if (command.command == .reconnect and self.presentation_count >= self.presentations.len) return error.AcceptanceRetryLimit;
-        if (command.command == .observe and self.control_stage != .interactive_ready) return error.InteractiveActionInProgress;
+        if ((command.command == .observe or command.command == .finish) and self.control_stage != .interactive_ready) return error.InteractiveActionInProgress;
         if (command.command == .observe and !try self.frameGeometryReady()) return error.FrameGeometryPending;
         if ((command.command == .reconnect or command.command == .cancel_connection) and (!self.console_ready or self.tab_id == null)) return error.NativeViewNotReady;
     }
@@ -1249,7 +1415,7 @@ const Runner = struct {
         self.observeNativeInput(view, state.input);
         while (context.drainRevocation()) |revoked| emit(.{ .phase = "content_lease_revoked", .owner = revoked.lease.owner, .lease_kind = @tagName(revoked.lease.kind), .reason = @tagName(revoked.reason) });
         if (!self.safe_views_verified) {
-            if (!view.power_disabled.peek() or !view.boot_disabled.peek()) return error.UnsafeManagementActions;
+            if (!view.power_execute_disabled.peek() or !view.boot_execute_disabled.peek()) return error.UnsafeManagementActions;
             self.safe_views_verified = true;
             try self.prepareToolGateway();
             if (self.readonly_tool_calls == 0) try self.runReadonlyTools();
@@ -1275,8 +1441,13 @@ const Runner = struct {
                 },
                 .stop_ai => {
                     self.interactive_stop_requests += 1;
+                    if (self.ai_grant) |grant| self.stopped_previous_proof = grant.proof;
                     self.stopInteractiveAuthority();
-                    emit(.{ .phase = "interactive_ai_stopped", .input_replayed = false, .active_operation_id = self.ai_operation });
+                    self.old_proof_invalid_after_stop = if (self.stopped_previous_proof) |proof| !proof.valid() else false;
+                    self.old_proof_rejected_after_stop = false;
+                    self.observation_id = null;
+                    if (self.control_stage != .interactive_action_wait) self.setControlStage(.interactive_observe);
+                    emit(.{ .phase = "interactive_ai_stopped", .input_replayed = false, .active_operation_id = self.ai_operation, .old_proof_present = self.stopped_previous_proof != null, .old_proof_invalid = self.old_proof_invalid_after_stop });
                 },
                 .reconnect => {
                     self.retry_previous_proof = if (self.ai_grant) |grant| grant.proof else self.retry_previous_proof;
@@ -1305,18 +1476,22 @@ const Runner = struct {
                     }
                 },
                 .old_proof_probe => {
-                    const proof = self.retry_previous_proof orelse return error.NoRetiredProofToVerify;
-                    if (self.reconnects == 0 or proof.valid() or proof.lease.owner.eql(self.accepted.?.handle)) return error.RetiredProofRequired;
+                    const after_retry = self.reconnects != 0;
+                    const proof = (if (after_retry) self.retry_previous_proof else self.stopped_previous_proof) orelse return error.NoRetiredProofToVerify;
+                    if (proof.valid() or (after_retry and proof.lease.owner.eql(self.accepted.?.handle))) return error.RetiredProofRequired;
                     const remote = &runtime_value.controller.remote_input;
                     const before = try remote.snapshot(remote.binding());
                     if (before.geometry_pending or before.geometry_generation == 0 or before.geometry_generation != runtime_value.last_generation) return error.FrameGeometryPending;
+                    if (before.automation_queued != 0 or before.queued != 0) return error.OperationPending;
                     const operation_id = self.next_tool_operation;
                     self.next_tool_operation += 1;
                     const authority: remote_input.automation.Authority = .{ .owner = self.accepted.?.handle, .binding_generation = self.accepted.?.handle.generation, .transport_generation = before.transport_generation, .control_generation = before.control_generation, .input_epoch = before.input_epoch, .geometry_generation = before.geometry_generation, .expires_at_ms = runtime_api.monotonicMs() + 1000, .proof = proof };
                     _ = remote.submitAutomation(remote.binding(), authority, .{ .operation_id = operation_id, .action = .{ .pointer_move = .{ .x = 0, .y = 0 } } }) catch |err| {
                         const after = try remote.snapshot(remote.binding());
-                        self.old_proof_rejected_by_new_owner = err == error.StaleAutomationAuthority and before.automation_queued == after.automation_queued and before.last_input_sequence == after.last_input_sequence;
-                        emit(.{ .phase = "retired_proof_probe", .owner = self.accepted.?.handle, .rejected = self.old_proof_rejected_by_new_owner, .code = @errorName(err), .current_binding_generation = authority.binding_generation, .current_transport_generation = authority.transport_generation, .current_control_generation = authority.control_generation, .current_input_epoch = authority.input_epoch, .current_geometry_generation = authority.geometry_generation, .only_retired_proof_substituted = true, .input_dispatched = false, .wire_sent = false });
+                        const rejected = err == error.StaleAutomationAuthority and before.automation_queued == after.automation_queued and before.queued == after.queued and before.last_input_sequence == after.last_input_sequence and before.last_sent_input_sequence == after.last_sent_input_sequence and before.last_sent_transport_generation == after.last_sent_transport_generation;
+                        if (after_retry) self.old_proof_rejected_by_new_owner = rejected else self.old_proof_rejected_after_stop = rejected;
+                        emit(.{ .phase = "retired_proof_probe", .boundary = if (after_retry) @as([]const u8, "reconnect") else "stop", .owner = self.accepted.?.handle, .rejected = rejected, .code = @errorName(err), .current_binding_generation = authority.binding_generation, .current_transport_generation = authority.transport_generation, .current_control_generation = authority.control_generation, .current_input_epoch = authority.input_epoch, .current_geometry_generation = authority.geometry_generation, .only_retired_proof_substituted = true, .input_queue_and_sent_watermarks_unchanged = rejected, .input_dispatched = false, .wire_sent = false });
+                        if (!rejected) return error.RetiredProofRejectionUnverified;
                         return;
                     };
                     self.stopInteractiveAuthority();
@@ -1409,7 +1584,7 @@ const Runner = struct {
         }
         if (!self.safe_views_verified) {
             const view: *views.View = @ptrCast(@alignCast(self.renderer.?.context));
-            if (!view.power_disabled.peek() or !view.boot_disabled.peek()) return error.UnsafeManagementActions;
+            if (!view.power_execute_disabled.peek() or !view.boot_execute_disabled.peek()) return error.UnsafeManagementActions;
             self.safe_views_verified = true;
             try self.prepareToolGateway();
             self.control_stage_ms = now;
@@ -1589,10 +1764,14 @@ const Runner = struct {
             .interactive_actions_sent = self.interactive_actions_sent,
             .interactive_actions_cancelled_unsent = self.interactive_actions_cancelled_unsent,
             .interactive_stop_requests = self.interactive_stop_requests,
+            .actions_with_post_send_observation = self.actions_with_post_send_observation,
+            .last_action_timing = self.last_completed_action_timing,
             .reconnects = self.reconnects,
             .same_tab_preserved = self.same_tab_preserved,
             .old_proof_invalid_after_retry = self.old_proof_invalid_after_retry,
             .old_proof_rejected_by_new_owner = self.old_proof_rejected_by_new_owner,
+            .old_proof_invalid_after_stop = self.old_proof_invalid_after_stop,
+            .old_proof_rejected_after_stop = self.old_proof_rejected_after_stop,
             .retry_own_logout_confirmed = self.retry_own_logout_confirmed,
         };
     }
@@ -1733,7 +1912,7 @@ const Runner = struct {
             }
         }
         self.approved_tool_calls += 1;
-        emit(.{ .phase = "generic_approval", .owner = self.accepted.?.handle, .operation_id = invocation.operation_id, .effect = @tagName(definition.effect), .tool_id = definition.id, .exact_arguments = true, .one_shot = true, .explicit_operator_plan = @tagName(self.input.operator_approval.?), .provider_upload = false });
+        emit(.{ .phase = "generic_approval", .owner = self.accepted.?.handle, .operation_id = invocation.operation_id, .effect = @tagName(definition.effect), .tool_id = definition.id, .exact_arguments = true, .one_shot = true, .explicit_operator_plan = @tagName(self.input.operator_approval.?), .observed_command = if (definition.effect == .remote_input and self.input.acceptance_mode == .native_interactive) self.active_command else null, .source_observation_id = if (definition.effect == .remote_input) self.observation_id else null, .source_frame_generation = self.observation_frame_generation, .source_frame_sequence = self.observation_frame_sequence, .approved_monotonic_ms = runtime_api.monotonicMs(), .provider_upload = false });
         return true;
     }
     fn invokeTool(raw: *anyopaque, target: tool_api.TargetBinding, request: tool_api.Invocation, allocator: std.mem.Allocator, _: ?*provider.CancelToken) !tool_api.ToolResult {
@@ -1754,6 +1933,14 @@ const Runner = struct {
         // This is the generic gateway dispatch boundary, not an RFB wire ack.
         // Only the typed input receipt may claim that its events were sent.
         if (request.effect == .remote_input) try tool_api.markSent(&self.tool_operations, request.owner, request.operation_id, request.call_id, request.tool_id, request.arguments_hash);
+        if (request.effect == .remote_input) self.action_timing = .{
+            .owner = request.owner,
+            .operation_id = request.operation_id,
+            .source_observation_id = self.observation_id orelse return error.MissingObservation,
+            .source_frame_generation = self.observation_frame_generation,
+            .source_frame_sequence = self.observation_frame_sequence,
+            .dispatch_started_monotonic_ms = runtime_api.monotonicMs(),
+        };
         const result = target.binding.handler(target.context, actual, allocator) catch |err| {
             self.last_tool_error = err;
             return err;
@@ -1821,7 +2008,26 @@ const Runner = struct {
             self.observation_width = @intCast(try jsonUnsigned(object, "output_width"));
             self.observation_height = @intCast(try jsonUnsigned(object, "output_height"));
             if (self.observation_width == 0 or self.observation_height == 0) return error.InvalidObservationDimensions;
-            emit(.{ .phase = "ai_observation", .owner = self.accepted.?.handle, .operation_id = operation_id, .observation_id = self.observation_id, .width = self.observation_width, .height = self.observation_height, .frame_generation = try jsonUnsigned(object, "frame_generation"), .frame_sequence = try jsonUnsigned(object, "sequence"), .provider_uploaded = false });
+            self.observation_frame_generation = try jsonUnsigned(object, "frame_generation");
+            self.observation_frame_sequence = try jsonUnsigned(object, "sequence");
+            const received_ns = try jsonUnsigned(object, "frame_received_monotonic_ns");
+            const captured_ms = try jsonUnsigned(object, "captured_monotonic_ms");
+            emit(.{ .phase = "ai_observation", .owner = self.accepted.?.handle, .operation_id = operation_id, .observation_id = self.observation_id, .width = self.observation_width, .height = self.observation_height, .frame_generation = self.observation_frame_generation, .frame_sequence = self.observation_frame_sequence, .frame_received_monotonic_ns = received_ns, .captured_monotonic_ms = captured_ms, .transport_generation = try jsonUnsigned(object, "transport_generation"), .control_generation = try jsonUnsigned(object, "control_generation"), .input_epoch = try jsonUnsigned(object, "input_epoch"), .provider_uploaded = false });
+            if (self.action_timing) |*timing| if (timing.sent_monotonic_ns) |sent_ns| {
+                const runtime_value = self.runtime() orelse return error.MissingRuntime;
+                if (runtime_value.ai_control.refresh_fence_operation_id != timing.operation_id or self.observation_frame_sequence <= runtime_value.ai_control.refresh_fence_sequence or received_ns < sent_ns) return error.PostActionEvidenceMismatch;
+                timing.post_observation_id = self.observation_id;
+                timing.post_frame_sequence = self.observation_frame_sequence;
+                timing.post_frame_received_monotonic_ns = received_ns;
+                timing.post_screenshot_captured_monotonic_ms = captured_ms;
+                timing.sent_to_post_frame_ms = @as(f64, @floatFromInt(received_ns - sent_ns)) / std.time.ns_per_ms;
+                timing.sent_to_post_screenshot_ms = captured_ms -| (sent_ns / std.time.ns_per_ms);
+                timing.post_send_new_frame_verified = true;
+                self.last_completed_action_timing = timing.*;
+                self.actions_with_post_send_observation += 1;
+                emit(.{ .phase = "input_observed_after_send", .owner = self.accepted.?.handle, .timing = timing.* });
+                self.action_timing = null;
+            };
         } else if (std.mem.eql(u8, id, "bmc_ikvm.keyboard") or std.mem.eql(u8, id, "bmc_ikvm.pointer") or std.mem.eql(u8, id, "bmc_ikvm.operation_status")) {
             const state = object.get("state") orelse return error.MissingToolResultField;
             const possibly_written = object.get("possibly_written") orelse return error.MissingToolResultField;
@@ -1835,6 +2041,9 @@ const Runner = struct {
             const total_events = try jsonUnsigned(object, "total_events");
             if (sent_events > total_events or total_events == 0 or total_events > 256) return error.InvalidToolResultField;
             self.last_wire_receipt = .{ .operation_id = input_operation, .state = safe_state, .sent_events = @intCast(sent_events), .total_events = @intCast(total_events), .possibly_written = possibly_written.bool };
+            if (self.action_timing) |*timing| if (timing.operation_id == input_operation and timing.queued_receipt_observed_monotonic_ms == null) {
+                timing.queued_receipt_observed_monotonic_ms = runtime_api.monotonicMs();
+            };
             emit(.{ .phase = "generic_input_receipt", .owner = self.accepted.?.handle, .tool_operation_id = operation_id, .input_operation_id = input_operation, .tool_id = id, .state = safe_state, .sent_events = sent_events, .total_events = total_events, .possibly_written = possibly_written.bool, .wire_sent = std.mem.eql(u8, safe_state, "sent"), .remote_application_effect_verified = false });
         }
     }
@@ -1921,13 +2130,21 @@ const Runner = struct {
         const binding = (try access.lookup(owner, ai_control.definition)) orelse return error.MissingAiControlService;
         const iface = try binding.borrow(ai_control.Interface, ai_control.key, owner);
         const receipt = try iface.operation_status(binding.context, binding, operation_id);
+        if (self.action_timing) |*timing| if (timing.operation_id == receipt.operation_id and receipt.status == .sent) {
+            if (receipt.sent_monotonic_ns == 0) return error.MissingWireSendTimestamp;
+            timing.sent_monotonic_ns = receipt.sent_monotonic_ns;
+            timing.sent_receipt_observed_monotonic_ms = runtime_api.monotonicMs();
+            // Both endpoints are truncated to milliseconds; reserve one ms so
+            // this remains an upper bound on time spent after local admission.
+            timing.dispatch_to_wire_sent_ms_upper_bound = (receipt.sent_monotonic_ms -| timing.dispatch_started_monotonic_ms) +| 1;
+        };
         self.last_wire_receipt = .{ .operation_id = receipt.operation_id, .state = switch (receipt.status) {
             .accepted => "queued",
             .sent => "sent",
             .cancelled_unsent => "cancelled_unsent",
             .outcome_unknown => "partial_unknown",
         }, .sent_events = receipt.sent_events, .total_events = receipt.total_events, .possibly_written = receipt.possibly_written };
-        emit(.{ .phase = "ai_input_receipt", .owner = receipt.owner, .operation_id = receipt.operation_id, .effect = "remote_input", .state = @tagName(receipt.status), .sent_events = receipt.sent_events, .total_events = receipt.total_events, .possibly_written = receipt.possibly_written, .wire_sent = receipt.status == .sent, .remote_effect_unknown = receipt.status == .outcome_unknown, .remote_application_effect_verified = false });
+        emit(.{ .phase = "ai_input_receipt", .owner = receipt.owner, .operation_id = receipt.operation_id, .effect = "remote_input", .state = @tagName(receipt.status), .sent_events = receipt.sent_events, .total_events = receipt.total_events, .possibly_written = receipt.possibly_written, .sent_monotonic_ns = receipt.sent_monotonic_ns, .timing = self.action_timing, .wire_sent = receipt.status == .sent, .remote_effect_unknown = receipt.status == .outcome_unknown, .remote_application_effect_verified = false });
         return switch (receipt.status) {
             .accepted => false,
             .sent => receipt.sent_events == receipt.total_events and receipt.total_events != 0,
@@ -1939,7 +2156,7 @@ const Runner = struct {
         if (self.close_requested or self.renderer == null or self.sink == null or self.sink.?.texture == null) return;
         const view: *views.View = @ptrCast(@alignCast(self.renderer.?.context));
         if (!self.safe_views_verified) {
-            if (!view.request_disabled.peek() or !view.keys_disabled.peek() or !view.power_disabled.peek() or !view.boot_disabled.peek()) return error.UnsafeRendererActions;
+            if (!view.request_disabled.peek() or !view.keys_disabled.peek() or !view.power_execute_disabled.peek() or !view.boot_execute_disabled.peek()) return error.UnsafeRendererActions;
             const typed_summary = try self.captureTypedManagementSummary();
             self.safe_views_verified = true;
             emit(.{ .phase = "readonly_verified", .control_disabled = true, .input_disabled = true, .power_disabled = true, .boot_disabled = true, .management_snapshots = true, .discovery = self.captureDiscoverySummary(), .typed_management = typed_summary, .presentation = try self.capturePresentationSummary(), .progress = self.progress_headline });
@@ -2056,7 +2273,7 @@ const Runner = struct {
             const result = self.controlSummary().?;
             if (!self.control_complete or !result.own_web_delete_http_200 or !result.own_kvm_delete_http_200 or result.active_human_leases != 0 or result.active_automation_leases != 0 or result.input_queued != 0 or result.automation_pending != 0 or result.remote_input_unconfirmed) self.failed = true;
         }
-        emit(.{ .phase = "complete", .success = !self.failed, .cleanup = "released", .web_logout = @tagName(self.web_logout), .kvm_logout = @tagName(self.kvm_logout), .width = self.last_width, .height = self.last_height, .frames = self.last_frames, .budget_bytes = self.budget.usedBytes(), .budget_peak_bytes = self.budget.peakBytes(), .pressed_keys = self.pressed_keys, .pressed_buttons = self.pressed_buttons, .input_sequence = self.last_input_sequence, .journal_writes = self.journal_backend.denied_writes, .screenshots = self.shots, .progress_screenshot = self.progress_shot, .log_screenshot = self.log_shot, .discovery = self.discovery_summary, .typed_management = self.typed_management_summary, .logout_diagnostics = self.logout_summary, .control = self.controlSummary(), .failure_code = self.failure_code, .presentation = self.presentation_summary, .progress = self.progress_headline, .progress_events = self.progress_events[0..self.progress_event_count] });
+        emit(.{ .phase = "complete", .success = !self.failed, .cleanup = "released", .web_logout = @tagName(self.web_logout), .kvm_logout = @tagName(self.kvm_logout), .width = self.last_width, .height = self.last_height, .frames = self.last_frames, .budget_bytes = self.budget.usedBytes(), .budget_peak_bytes = self.budget.peakBytes(), .pressed_keys = self.pressed_keys, .pressed_buttons = self.pressed_buttons, .input_sequence = self.last_input_sequence, .journal_writes = self.journal_backend.denied_writes, .screenshots = self.shots, .progress_screenshot = self.progress_shot, .log_screenshot = self.log_shot, .discovery = self.discovery_summary, .typed_management = self.typed_management_summary, .logout_diagnostics = self.logout_summary, .control = self.controlSummary(), .video = self.videoSummary(), .failure_code = self.failure_code, .presentation = self.presentation_summary, .progress = self.progress_headline, .progress_events = self.progress_events[0..self.progress_event_count] });
         _ = self.app.commitClose();
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
@@ -2120,15 +2337,36 @@ fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
         return "{\"ok\":true,\"state\":\"test_command_queued\",\"wire_sent\":false,\"remote_application_effect_verified\":false}";
     }
     if (std.mem.eql(u8, path, "/app/bmc-live/native-evidence")) return jsonReply(self.native_view, out);
+    if (std.mem.eql(u8, path, "/app/bmc-live/video-stats")) return jsonReply(self.videoSummary(), out);
+    if (std.mem.eql(u8, path, "/app/bmc-live/performance")) {
+        const runtime_value = self.runtime() orelse return "{\"error\":\"RuntimeUnavailable\"}";
+        const state = runtime_value.controller.poll();
+        return jsonReply(.{ .observed_monotonic_ms = runtime_api.monotonicMs(), .performance = state.performance, .published_frames = state.published_frames, .queued_sequence = state.input.last_input_sequence, .sent_sequence = state.input.last_sent_input_sequence }, out);
+    }
+    if (std.mem.eql(u8, path, "/app/bmc-live/control-state")) return jsonReply(.{
+        .owner = if (self.accepted) |accepted| accepted.handle else null,
+        .control_stage = self.control_stage,
+        .command_queued = self.native_command != null,
+        .observation_id = self.observation_id,
+        .observation_frame_sequence = self.observation_frame_sequence,
+        .observation_remaining_ms = self.observation_valid_until_ms -| runtime_api.monotonicMs(),
+        .geometry_ready = self.frameGeometryReady() catch false,
+        .window_active = self.app.cx.window_active,
+        .closing = self.close_requested,
+    }, out);
     if (std.mem.eql(u8, path, "/app/bmc-live/focus-stats")) return jsonReply(self.nativeFocusDiagnostic(), out);
     if (std.mem.eql(u8, path, "/app/bmc-live/lifecycle-stats")) return jsonReply(.{
         .interactive_actions_sent = self.interactive_actions_sent,
         .interactive_actions_cancelled_unsent = self.interactive_actions_cancelled_unsent,
         .interactive_stop_requests = self.interactive_stop_requests,
+        .actions_with_post_send_observation = self.actions_with_post_send_observation,
+        .last_completed_action_timing = self.last_completed_action_timing,
         .reconnects = self.reconnects,
         .same_tab_preserved = self.same_tab_preserved,
         .old_proof_invalid_after_retry = self.old_proof_invalid_after_retry,
         .old_proof_rejected_by_new_owner = self.old_proof_rejected_by_new_owner,
+        .old_proof_invalid_after_stop = self.old_proof_invalid_after_stop,
+        .old_proof_rejected_after_stop = self.old_proof_rejected_after_stop,
         .retry_own_logout_confirmed = self.retry_own_logout_confirmed,
         .active_human_leases = if (self.content_context) |context| @intFromBool(context.human != null) else 0,
         .active_automation_leases = if (self.content_context) |context| @intFromBool(context.automation != null) else 0,
@@ -2152,6 +2390,8 @@ fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
         .ai_proof_valid = if (self.ai_grant) |grant| grant.proof.valid() else false,
         .ai_operation = self.ai_operation,
         .last_wire_receipt = self.last_wire_receipt,
+        .pending_action_timing = self.action_timing,
+        .last_completed_action_timing = self.last_completed_action_timing,
     }, out);
     const now = runtime_api.monotonicMs();
     const deadline_ms = self.begin_ms + (if (self.input.acceptance_mode == .native_interactive) @as(u64, self.input.interactive_seconds) * 1000 else 50_000);
@@ -2179,6 +2419,8 @@ fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
         .observation_id = self.observation_id,
         .observation_width = self.observation_width,
         .observation_height = self.observation_height,
+        .observation_frame_generation = self.observation_frame_generation,
+        .observation_frame_sequence = self.observation_frame_sequence,
         .observation_remaining_ms = self.observation_valid_until_ms -| now,
         .local_image_path = if (self.input.acceptance_mode == .native_interactive) @as(?[]const u8, "/tmp/zerowork-bmc-interactive-observation.png") else null,
     };

@@ -5,6 +5,7 @@ const profile = @import("plugins/bmc_ikvm/protocol/profile.zig");
 const auth = @import("plugins/bmc_ikvm/protocol/auth.zig");
 const http = @import("plugins/bmc_ikvm/protocol/http.zig");
 const redfish = @import("plugins/bmc_ikvm/protocol/redfish.zig");
+const power = @import("plugins/bmc_ikvm/protocol/power.zig");
 const svc = @import("plugins/bmc_ikvm/services.zig");
 const trust = @import("host/tls_trust.zig");
 const secrets = @import("host/secret_lease.zig");
@@ -20,6 +21,7 @@ const progress = @import("plugins/bmc_ikvm/connection_progress.zig");
 const a = std.testing.allocator;
 const owner: svc.identity.SessionHandle = .{ .session_id = @fromBackingInt(902), .generation = 7 };
 const operation: svc.OperationKey = .{ .owner = .{ .session = owner }, .operation_id = 80, .attempt_id = 2 };
+const management_fixture = @embedFile("plugins/bmc_ikvm/protocol/profile_fixtures/sugon_1_80_management_readonly.json");
 
 // Only loopback sockets. The key/certificate and passwords exist for this run;
 // neither a real BMC nor the documented design-example addresses are contacted.
@@ -31,9 +33,19 @@ const fixture =
     \\ subprocess.run(['/usr/bin/openssl','req','-new','-x509','-newkey','rsa:2048','-nodes','-keyout',str(d/'key.pem'),'-out',str(d/'cert.pem'),'-days','1','-config',str(d/'cert.cnf')],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     \\ public=subprocess.run(['/usr/bin/openssl','pkey','-in',str(d/'key.pem'),'-pubout'],capture_output=True,check=True).stdout
     \\ listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen(4);listener.settimeout(15)
-    \\ port=listener.getsockname()[1];reviewed=json.loads(sys.argv[3])
-    \\ readonly_modes={'firmware-progress','cancel','mapped-read','missing-mapping','partial-mapping','missing-fields','manager-linked-system','broken-canonical','multiple-members','paged-members','partial-collection','missing-identity'}
+    \\ port=listener.getsockname()[1];reviewed=json.loads(sys.argv[3]);management_reviewed=json.loads(sys.argv[4])
+    \\ observed=sys.argv[2]=='observed-partial'
+    \\ readonly_modes={'firmware-progress','optional-malformed','optional-disconnect','cancel','mapped-read','missing-mapping','partial-mapping','missing-fields','manager-linked-system','broken-canonical','multiple-members','paged-members','partial-collection','missing-identity','observed-partial'}
     \\ broken_canonical_modes={'broken-canonical','multiple-members','paged-members','partial-collection','missing-identity'}
+    \\ restart_modes={'production-restart','production-restart-advanced','production-restart-missing','production-restart-invalid','production-restart-query'}
+    \\ critical_modes={'production-critical-power','production-critical-boot','production-scoped-power','production-scoped-boot','production-critical-disabled'}
+    \\ production_modes={'production-power','production-boot','production-pending','production-forbidden403','production-conflict409','production-precondition412','production-disconnect','production-hold'}|restart_modes|critical_modes
+    \\ production=sys.argv[2] in production_modes
+    \\ current={'power':'On','boot_enabled':'Disabled','boot_target':'None','pending':False,'written':False,'system_gets':0}
+    \\ if sys.argv[2]=='production-critical-disabled': current.update(boot_enabled='Once',boot_target='Pxe')
+    \\ def diagnostics():
+    \\  related={'production-scoped-power':['#/PowerState'],'production-scoped-boot':['#/Boot/BootSourceOverrideTarget'],'production-critical-disabled':['#/Boot/BootSourceOverrideTarget','#/Boot/BootSourceOverrideMode']}.get(sys.argv[2],[])
+    \\  return [{'MessageId':'Base.1.19.InternalError','Severity':'Critical','MessageSeverity':'Critical','MessageArgs':[],'RelatedProperties':related}]
     \\ bootstrap=socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=10)
     \\ bootstrap.sendall(str(port).encode()+b'\n'+public+b'ENDPUB\n')
     \\ expected=b''
@@ -41,7 +53,7 @@ const fixture =
     \\ bootstrap.close()
     \\ context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(d/'cert.pem',d/'key.pem')
     \\ changed_context=None
-    \\ if sys.argv[2]=='cleanup-changed-cert':
+    \\ if sys.argv[2] in ('cleanup-changed-cert','optional-changed-cert'):
     \\  subprocess.run(['/usr/bin/openssl','req','-new','-x509','-newkey','rsa:2048','-nodes','-keyout',str(d/'changed-key.pem'),'-out',str(d/'changed-cert.pem'),'-days','1','-config',str(d/'cert.cnf')],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     \\  changed_context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);changed_context.load_cert_chain(d/'changed-cert.pem',d/'changed-key.pem')
     \\ webtoken=os.urandom(16).hex();kvmtoken=os.urandom(16).hex()
@@ -110,7 +122,7 @@ const fixture =
     \\       data=take(length);decoded=bytes(x^mask[i%4] for i,x in enumerate(data))
     \\       if opcode==8: closed.append('ws');ws_closed.set();return
     \\       if decoded==b'KVM ': closed.append('preamble')
-    \\     elif path=='/redfish/v1/' and method=='GET': response(200,{'Systems':{'@odata.id':'/redfish/v1/Systems'},'Managers':{'@odata.id':'/redfish/v1/Managers'},'SessionService':{'@odata.id':'/redfish/v1/SessionService'}})
+    \\     elif path=='/redfish/v1/' and method=='GET': response(200,management_reviewed['documents']['root']['body'] if observed else {'Systems':{'@odata.id':'/redfish/v1/Systems'},'Managers':{'@odata.id':'/redfish/v1/Managers'},'SessionService':{'@odata.id':'/redfish/v1/SessionService'}})
     \\     elif path=='/redfish/v1/SessionService': response(200,{'Sessions':{'@odata.id':'/redfish/v1/SessionService/Sessions'}})
     \\     elif path=='/redfish/v1/SessionService/Sessions' and method=='POST':
     \\      assert headers['from']=='WebUI' and headers['x-requested-with']=='XMLHttpRequest'
@@ -122,6 +134,13 @@ const fixture =
     \\     else:
     \\      expected_token=kvmtoken if method=='DELETE' and path.endswith('/own-kvm') else webtoken
     \\      assert headers.get('x-auth-token')==expected_token
+    \\      if observed and method=='GET':
+    \\       document=next((value for value in management_reviewed['documents'].values() if value['uri']==path),None)
+    \\       if document: response(document['status'],document['body'],{'ETag':'"observed"'});continue
+    \\       options=management_reviewed['documents']['boot_options']['body']['Members']
+    \\       assert any(option['@odata.id']==path for option in options),'unexpected observed fixture GET'
+    \\       reference=path.rsplit('/',1)[1];option=dict(management_reviewed['boot_option_template']);option['BootOptionReference']=reference;option['Id']=reference
+    \\       response(200,option,{'ETag':'"observed-option"'});continue
     \\      if method=='DELETE':
     \\       assert path in ('/redfish/v1/SessionService/Sessions/own-web','/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions/own-kvm')
     \\       assert ws_closed.wait(.5),'owned session DELETE preceded WebSocket close'
@@ -135,6 +154,8 @@ const fixture =
     \\       closed.append(path);response(evidence['status'],{'error':{'code':evidence['message_id'],'@Message.ExtendedInfo':messages}})
     \\       return
     \\      elif path=='/redfish/v1/Systems':
+    \\       if sys.argv[2]=='optional-malformed': s.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\ninvalid');continue
+    \\       if sys.argv[2] in ('optional-disconnect','optional-changed-cert'): s.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\n{');return
     \\       collection={'Members':[{'@odata.id':'/redfish/v1/Systems/one'}]}
     \\       if sys.argv[2]=='multiple-members': collection['Members'].append({'@odata.id':'/redfish/v1/Systems/second'})
     \\       if sys.argv[2]=='paged-members': collection['Members@odata.nextLink']='/redfish/v1/Systems?page=2'
@@ -143,18 +164,56 @@ const fixture =
     \\      elif path=='/redfish/v1/Systems?page=2': response(200,{'Members':[{'@odata.id':'/redfish/v1/Systems/second'}]})
     \\      elif path=='/redfish/v1/Managers': response(200,{'Members':[{'@odata.id':'/redfish/v1/Managers/one'}]})
     \\      elif path in ('/redfish/v1/Systems/one','/redfish/v1/Systems/canonical','/redfish/v1/Systems/second'):
+    \\       if production and method=='PATCH':
+    \\        assert sys.argv[2] in ('production-boot','production-pending','production-critical-boot','production-scoped-power','production-critical-disabled') and path=='/redfish/v1/Systems/one'
+    \\        assert headers['if-match']=='"fixture-1"' and 'authkey' not in headers
+    \\        request=json.loads(body);assert set(request)=={'Boot'}
+    \\        if sys.argv[2]=='production-critical-disabled': assert request['Boot']=={'BootSourceOverrideEnabled':'Disabled'}
+    \\        else:
+    \\         assert set(request['Boot']) in ({'BootSourceOverrideEnabled','BootSourceOverrideTarget'},{'BootSourceOverrideEnabled','BootSourceOverrideTarget','BootSourceOverrideMode'})
+    \\         assert request['Boot']['BootSourceOverrideEnabled']=='Once' and request['Boot']['BootSourceOverrideTarget']=='Pxe' and request['Boot'].get('BootSourceOverrideMode','UEFI')=='UEFI'
+    \\        writes.append(path);current['written']=True
+    \\        if sys.argv[2]=='production-pending': current['pending']=True
+    \\        elif sys.argv[2]=='production-critical-disabled': current['boot_enabled']='Disabled'
+    \\        else: current['boot_enabled']='Once';current['boot_target']='Pxe'
+    \\        if sys.argv[2] in critical_modes: response(200,{'@odata.id':path,'Boot':{'BootSourceOverrideEnabled':current['boot_enabled'],'BootSourceOverrideTarget':current['boot_target'],'BootSourceOverrideMode':'UEFI'},'@Message.ExtendedInfo':diagnostics()})
+    \\        else: response(204)
+    \\        continue
+    \\       assert method=='GET'
     \\       if path.endswith('/canonical') and sys.argv[2] in broken_canonical_modes:
     \\        response(404,{'error':{'code':'Base.ResourceMissingAtURI'}});continue
     \\       system={'Id':'one','UUID':'synthetic-system','PowerState':'On','Actions':{'#ComputerSystem.Reset':{'target':'/redfish/v1/Systems/one/Actions/ComputerSystem.Reset','ResetType@Redfish.AllowableValues':['On','GracefulShutdown']}},'Boot':{'BootSourceOverrideEnabled':'Disabled','BootSourceOverrideTarget':'None','BootSourceOverrideMode':'UEFI','BootSourceOverrideEnabled@Redfish.AllowableValues':['Disabled','Once'],'BootSourceOverrideTarget@Redfish.AllowableValues':['None','Pxe'],'BootSourceOverrideMode@Redfish.AllowableValues':['UEFI'],'BootOrder':['Boot%04X'%i for i in range(20)]},'Links':{'ManagedBy':[{'@odata.id':'/redfish/v1/Managers/one'}]}}
+    \\       system['@odata.id']='/redfish/v1/Systems/canonical' if sys.argv[2]=='manager-linked-system' else path
     \\       if sys.argv[2]=='partial-mapping': system['error']={'code':'Base.Error'}
     \\       if sys.argv[2]=='missing-identity': system.pop('Id');system.pop('UUID')
     \\       if sys.argv[2]=='missing-fields':
     \\        for key in ('PowerState','Actions','Boot'): system.pop(key)
-    \\       response(200,system,{'ETag':'"first"'})
+    \\       if production:
+    \\        current['system_gets']+=1
+    \\        system['PowerState']=current['power'];system['Boot']['BootSourceOverrideEnabled']=current['boot_enabled'];system['Boot']['BootSourceOverrideTarget']=current['boot_target']
+    \\        system['Actions']['#ComputerSystem.Reset']['ResetType@Redfish.AllowableValues']+=['ForceOff','GracefulRestart']
+    \\        if sys.argv[2] in critical_modes:
+    \\         system['@Message.ExtendedInfo']=diagnostics()
+    \\         system['Boot'].pop('BootSourceOverrideEnabled@Redfish.AllowableValues');system['Boot'].pop('BootSourceOverrideMode@Redfish.AllowableValues')
+    \\        if current['pending']: system['@Redfish.Settings']={'SettingsObject':{'@odata.id':'/redfish/v1/Systems/one/Settings'}}
+    \\        if sys.argv[2] in restart_modes:
+    \\         system['LastResetTime']='2026-10-31T01:00:00Z'
+    \\         if current['written']:
+    \\          if sys.argv[2]=='production-restart-advanced' or (sys.argv[2]=='production-restart-query' and current['system_gets']>=4): system['LastResetTime']='2026-11-01T01:00:00Z'
+    \\          elif sys.argv[2]=='production-restart-missing': system.pop('LastResetTime')
+    \\          elif sys.argv[2]=='production-restart-invalid': system['LastResetTime']='2026-02-30T01:00:00Z'
+    \\       response(200,system,{'ETag':('"fixture-2"' if current['written'] else '"fixture-1"') if production else '"first"'})
+    \\      elif production and path=='/redfish/v1/Systems/one/Settings':
+    \\       assert method=='GET' and current['pending']
+    \\       response(200,{'Id':'one','UUID':'synthetic-system','Boot':{'BootSourceOverrideEnabled':'Once','BootSourceOverrideTarget':'Pxe','BootSourceOverrideMode':'UEFI'}},{'ETag':'"fixture-pending"'})
+    \\      elif production and path=='/redfish/v1/TaskService/Tasks/fixture':
+    \\       assert method=='GET' and sys.argv[2]=='production-power' and current['written']
+    \\       response(200,{'TaskState':'Completed','TaskStatus':'OK'})
     \\      elif path=='/redfish/v1/Managers/one':
     \\       manager={'Id':'one','Links':{'ManagerForServers':[{'@odata.id':'/redfish/v1/Systems/one'}]},'SecurityService':{'@odata.id':'/redfish/v1/Managers/one/SecurityService'}}
+    \\       if production: manager['Oem']={'Public':{'SecurityService':manager.pop('SecurityService')}}
     \\       if sys.argv[2]=='manager-linked-system' or sys.argv[2] in broken_canonical_modes: manager['Links']['ManagerForServers']=[{'@odata.id':'/redfish/v1/Systems/canonical'}]
-    \\       if sys.argv[2]=='firmware-progress': manager['FirmwareVersion']='1.80'
+    \\       if sys.argv[2] in ('firmware-progress','optional-malformed','optional-disconnect','optional-changed-cert'): manager['FirmwareVersion']='1.80'
     \\       if sys.argv[2]=='missing-mapping': manager.pop('Links')
     \\       response(200,manager)
     \\      elif path.endswith('/SecurityService'): response(200,{'EnableAuthConfirm':False})
@@ -163,6 +222,22 @@ const fixture =
     \\       response(201,{'Id':'own-kvm'},{'X-Auth-Token':kvmtoken,'Location':'/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions/own-kvm'})
     \\       if sys.argv[2]=='idle-management': closed.append('idle-management');return
     \\      elif path=='/redfish/v1/Systems/one/Actions/ComputerSystem.Reset':
+    \\       if production:
+    \\        requested_action='GracefulRestart' if sys.argv[2] in restart_modes else 'ForceOff'
+    \\        assert method=='POST' and json.loads(body)=={'ResetType':requested_action} and headers['if-match']=='"fixture-1"' and 'authkey' not in headers
+    \\        writes.append(path);current['written']=True
+    \\        if sys.argv[2]=='production-disconnect': return
+    \\        if sys.argv[2]=='production-hold':
+    \\         time.sleep(1);current['power']='Off';response(204);continue
+    \\        if sys.argv[2] in restart_modes:
+    \\         response(200,{'error':{'code':'Base.1.19.Success','@Message.ExtendedInfo':[{'MessageId':'Base.1.19.Success','Severity':'OK','MessageSeverity':'OK'}]}});continue
+    \\        failures={'production-forbidden403':(403,'Base.1.19.InsufficientPrivilege'),'production-conflict409':(409,'Base.1.19.ResourceInUse'),'production-precondition412':(412,'Base.1.19.PreconditionFailed')}
+    \\        if sys.argv[2] in failures:
+    \\         status,message=failures[sys.argv[2]];response(status,{'error':{'code':message,'@Message.ExtendedInfo':[{'MessageId':message,'Severity':'Critical'}]}});continue
+    \\        if sys.argv[2] in ('production-critical-power','production-scoped-boot'):
+    \\         current['power']='Off';response(200,{'@odata.id':'/redfish/v1/Systems/one','PowerState':'Off','@Message.ExtendedInfo':diagnostics()});continue
+    \\        assert sys.argv[2]=='production-power'
+    \\        current['power']='Off';response(202,{'TaskState':'Running'},{'Location':'/redfish/v1/TaskService/Tasks/fixture','Retry-After':'0'});continue
     \\       assert method=='POST' and body==b'{"ResetType":"On"}' and headers['authkey'].encode()==expected and headers['if-match']=='"first"'
     \\       writes.append(path);response(202,{'TaskState':'Running'},{'Location':'/redfish/v1/TaskService/Tasks/own','Retry-After':'2'})
     \\      elif path=='/redfish/v1/CancelledRead': raise AssertionError('cancelled normal IO reached wire')
@@ -170,18 +245,29 @@ const fixture =
     \\  except (EOFError,ssl.SSLEOFError,ConnectionResetError,BrokenPipeError):
     \\   if sys.argv[2] in ('graceful','missing-headers','mixed'): errors.append('unexpected disconnect')
     \\  except Exception as e: errors.append(type(e).__name__+': '+str(e))
-    \\ for index in range(2 if sys.argv[2]=='untrusted' else 4):
+    \\ for index in range(2 if sys.argv[2]=='untrusted' else (5 if sys.argv[2]=='optional-disconnect' else 4)):
     \\  raw,_=listener.accept();connections.append(raw);thread=threading.Thread(target=run,args=(raw,index>=2));thread.start();connections.append(thread)
     \\ for thread in connections[1::2]: thread.join(15);assert not thread.is_alive()
     \\ listener.close()
     \\ assert not errors,errors
     \\ if sys.argv[2]=='untrusted': assert paths==[], 'application bytes preceded host trust'
+    \\ if production:
+    \\  assert len(writes)==1 and 'ws' in closed and 'preamble' in closed
+    \\  assert closed.count('/redfish/v1/SessionService/Sessions/own-web')==1
+    \\  assert closed.count('/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions/own-kvm')==1
+    \\ if sys.argv[2] in ('production-restart','production-restart-query'): assert paths.count(('GET','/redfish/v1/Systems/one'))>=4,'restart query did not reach the wire'
+    \\ elif sys.argv[2] in restart_modes: assert paths.count(('GET','/redfish/v1/Systems/one'))>=3,'restart verification did not reach the wire'
+    \\ if sys.argv[2]=='production-hold': assert paths.count(('GET','/redfish/v1/Systems/one'))>=3,'cancelled operation query did not reach the wire'
     \\ if sys.argv[2] in ('graceful','missing-headers','mixed'):
     \\  assert len(writes)==1 and 'ws' in closed and 'preamble' in closed
     \\ if sys.argv[2] in ('graceful','missing-headers','mixed') or sys.argv[2] in readonly_modes:
     \\  assert closed.count('/redfish/v1/SessionService/Sessions/own-web')==1
     \\  assert closed.count('/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions/own-kvm')==1
     \\ if sys.argv[2] in readonly_modes: assert writes==[] and len([p for p in paths if p[0]=='DELETE'])==2
+    \\ if sys.argv[2] in ('optional-malformed','optional-disconnect'):
+    \\  assert paths.index(('GET','/redfish/v1/Managers/one'))<paths.index(('GET','/redfish/v1/Systems'))
+    \\  assert paths.count(('GET','/redfish/v1/Systems'))==1,'optional failed read replayed'
+    \\  assert paths.count(('POST','/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions'))==1,'OEM session creation retried'
     \\ if sys.argv[2]=='manager-linked-system': assert paths.count(('GET','/redfish/v1/Systems/canonical'))==1
     \\ if sys.argv[2]=='logout-timeout':
     \\  assert writes==[] and [p for p in paths if p[0]=='DELETE']==[('DELETE','/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions/own-kvm'),('DELETE','/redfish/v1/SessionService/Sessions/own-web')]
@@ -190,18 +276,21 @@ const fixture =
     \\  assert closed.count('/redfish/v1/SessionService/Sessions/own-web')==1
     \\  assert closed.count('/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions/own-kvm')==1
     \\ if sys.argv[2]=='cleanup-changed-cert': assert writes==[] and not [p for p in paths if p[0]=='DELETE'],'tokens sent to a changed cleanup peer'
+    \\ if sys.argv[2]=='optional-changed-cert':
+    \\  assert writes==[] and not [p for p in paths if p[0]=='DELETE'],'tokens sent to a changed peer'
+    \\  assert not [p for p in paths if '/Oem/' in p[1] or p[1]=='/kvm/0'],'KVM started after a peer change'
     \\ if sys.argv[2]=='partial-video':
     \\  assert writes==[] and 'partial-ws' in closed and 'ws' not in closed
     \\  assert closed.count('/redfish/v1/SessionService/Sessions/own-web')==1
     \\  assert closed.count('/redfish/v1/SessionService/Sessions/Oem/Public/KvmSessions/own-kvm')==1
 ;
 
-const Fixture = struct {
+pub const Fixture = struct {
     child: std.process.Child,
     port: u16,
     pem: []u8,
     password: [32]u8,
-    fn start(mode: []const u8) !Fixture {
+    pub fn start(mode: []const u8) !Fixture {
         const listener = std.c.socket(std.c.AF.INET, std.c.SOCK.STREAM, 0);
         if (listener < 0) return error.SocketFailed;
         defer _ = std.c.close(listener);
@@ -211,7 +300,7 @@ const Fixture = struct {
         if (std.c.getsockname(listener, @ptrCast(&address), &len) != 0) return error.AddressFailed;
         const port = try std.fmt.allocPrint(a, "{d}", .{std.mem.bigToNative(u16, address.port)});
         defer a.free(port);
-        var child = try std.process.spawn(std.testing.io, .{ .argv = &.{ "/usr/bin/python3", "-c", fixture, port, mode, @embedFile("plugins/bmc_ikvm/protocol/profile_fixtures/sugon_1_80.json") } });
+        var child = try std.process.spawn(std.testing.io, .{ .argv = &.{ "/usr/bin/python3", "-c", fixture, port, mode, @embedFile("plugins/bmc_ikvm/protocol/profile_fixtures/sugon_1_80.json"), management_fixture } });
         errdefer child.kill(std.testing.io);
         var pending = [_]std.c.pollfd{.{ .fd = listener, .events = std.c.POLL.IN, .revents = 0 }};
         if (std.c.poll(&pending, 1, 10000) <= 0) return error.FixtureTimeout;
@@ -239,7 +328,7 @@ const Fixture = struct {
         if (std.c.write(fd, &password, password.len) != password.len) return error.FixtureClosed;
         return .{ .child = child, .port = try std.fmt.parseInt(u16, data.items[0..newline], 10), .pem = try a.dupe(u8, data.items[newline + 1 .. data.items.len - "ENDPUB\n".len]), .password = password };
     }
-    fn deinit(self: *Fixture) void {
+    pub fn deinit(self: *Fixture) void {
         if (self.child.id != null) self.child.kill(std.testing.io);
         a.free(self.pem);
         std.crypto.secureZero(u8, &self.password);
@@ -276,7 +365,7 @@ const Replies = struct {
         return .{ .failures = .{ .untrusted_issuer = true } };
     }
 };
-fn selected(pem: []const u8) !profile.Profile {
+pub fn selected(pem: []const u8) !profile.Profile {
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(pem, &digest, .{});
     return profile.syntheticForTest(.{ .trusted_channel = true, .manufacturer = "Sugon", .product = "SuperPod", .processor_vendor = "Hygon", .bmc_chip = "AST2600-A3", .firmware = "1.80", .oem_namespace = "Public", .kvm_login_resource = profile.kvm_login_path, .oem_rfb = true }, .{ .firmware = "1.80", .identity_fixture_sha256 = @splat(1), .public_key_pem = pem, .public_key_sha256 = digest, .public_key_source = "ephemeral loopback-only fixture", .web_login_schema_verified = true, .kvm_login_schema_verified = true, .ws_subprotocol_echo_verified = true, .oem_handshake_verified = true, .web_logout = .own_session_location, .kvm_logout = .own_session_location });
@@ -318,6 +407,12 @@ const Worker = struct {
         }
         const authenticated = try driver.begin(driver.context, &self.payload, self.plan, operation, self.cancel);
         if (self.backend.connection_progress) |tracker| self.begin_progress = tracker.snapshot();
+        if (self.backend.management_policy == .read_only) {
+            for ([_]power.Method{ .post, .patch }) |method| {
+                try std.testing.expectError(error.ManagementReadOnly, driver.management_io.?(driver.context, .{ .sequence = 98, .operation = operation, .purpose = .write, .method = method, .uri = "/redfish/v1/ForbiddenWrite", .body = "{}" }));
+                try std.testing.expect(self.backend.transaction == null);
+            }
+        }
         if (self.probe_missing_headers) try self.missingWebHeaders();
         if (self.cancel_after_begin) {
             self.cancel.store(true, .release);
@@ -439,15 +534,19 @@ const Worker = struct {
     }
 };
 
-const Mode = enum { firmware_progress, graceful, cancel, untrusted, missing_headers, mixed, logout_timeout, idle_management, cleanup_changed_cert, partial_video, mapped_read, missing_mapping, partial_mapping, missing_fields, manager_linked_system, broken_canonical, multiple_members, paged_members, partial_collection, missing_identity };
+const Mode = enum { firmware_progress, optional_malformed, optional_disconnect, optional_changed_cert, graceful, cancel, untrusted, missing_headers, mixed, logout_timeout, idle_management, cleanup_changed_cert, partial_video, mapped_read, missing_mapping, partial_mapping, missing_fields, manager_linked_system, broken_canonical, multiple_members, paged_members, partial_collection, missing_identity, observed_partial };
 fn endToEnd(mode: Mode) !void {
+    const optional_failure = mode == .optional_malformed or mode == .optional_disconnect or mode == .optional_changed_cert;
     const cancel_after_begin = switch (mode) {
-        .firmware_progress, .cancel, .logout_timeout, .mapped_read, .missing_mapping, .partial_mapping, .missing_fields, .manager_linked_system, .broken_canonical, .multiple_members, .paged_members, .partial_collection, .missing_identity => true,
+        .firmware_progress, .optional_malformed, .optional_disconnect, .cancel, .logout_timeout, .mapped_read, .missing_mapping, .partial_mapping, .missing_fields, .manager_linked_system, .broken_canonical, .multiple_members, .paged_members, .partial_collection, .missing_identity, .observed_partial => true,
         else => false,
     };
     const no_trust_reply = mode == .untrusted;
     var server = try Fixture.start(switch (mode) {
         .firmware_progress => "firmware-progress",
+        .optional_malformed => "optional-malformed",
+        .optional_disconnect => "optional-disconnect",
+        .optional_changed_cert => "optional-changed-cert",
         .graceful => "graceful",
         .cancel => "cancel",
         .untrusted => "untrusted",
@@ -467,6 +566,7 @@ fn endToEnd(mode: Mode) !void {
         .paged_members => "paged-members",
         .partial_collection => "partial-collection",
         .missing_identity => "missing-identity",
+        .observed_partial => "observed-partial",
     });
     defer server.deinit();
     var memory: credentials.MemoryBackend = .{};
@@ -501,37 +601,63 @@ fn endToEnd(mode: Mode) !void {
     var tracker = progress.Tracker.init(0);
     var replies: Replies = .{ .connection_progress = &tracker };
     const unproven_mapping = switch (mode) {
-        .missing_mapping, .partial_mapping, .broken_canonical, .multiple_members, .paged_members, .partial_collection, .missing_identity => true,
+        .optional_malformed, .optional_disconnect, .missing_mapping, .partial_mapping, .broken_canonical, .multiple_members, .paged_members, .partial_collection, .missing_identity, .observed_partial => true,
         else => false,
     };
-    const backend = try native.NativeDriver.prepare(a, context, payload, &plan, &cancel, .{ .selected = try selected(server.pem), .callbacks = if (no_trust_reply) null else .{ .context = &replies, .trust_reply = Replies.reply, .capability = if (unproven_mapping) Replies.grantCapability else null }, .management_adapter = &adapter, .progress = &tracker });
+    const backend = try native.NativeDriver.prepare(a, context, payload, &plan, &cancel, .{ .selected = try selected(server.pem), .callbacks = if (no_trust_reply) null else .{ .context = &replies, .trust_reply = Replies.reply, .capability = if (unproven_mapping) Replies.grantCapability else null }, .management_adapter = &adapter, .management_policy = switch (mode) {
+        .graceful, .missing_headers, .mixed => .user_approved,
+        else => .read_only,
+    }, .progress = &tracker });
     defer backend.deinit() catch unreachable;
-    if (mode == .firmware_progress) backend.firmware_pending_verification = true;
+    if (mode == .firmware_progress or optional_failure) backend.firmware_pending_verification = true;
     // Preparing is memory/config-only and cannot perform native IO here.
     try std.testing.expect(!backend.pair.transport.started);
     try std.testing.expectError(error.NativeIoOnConfigurationThread, backend.driver().begin(backend, &payload, &plan, operation, &cancel));
-    var worker: Worker = .{ .backend = backend, .payload = payload, .plan = &plan, .cancel = &cancel, .password = server.password, .cancel_after_begin = cancel_after_begin, .truncate_video = mode == .partial_video, .readonly_after_frame = mode == .idle_management or mode == .cleanup_changed_cert, .revoked_trust_store = if (mode == .cancel) &trust_store else null, .probe_missing_headers = mode == .missing_headers, .expected_begin_error = if (no_trust_reply) error.TrustReplyUnavailable else null };
+    var worker: Worker = .{ .backend = backend, .payload = payload, .plan = &plan, .cancel = &cancel, .password = server.password, .cancel_after_begin = cancel_after_begin, .truncate_video = mode == .partial_video, .readonly_after_frame = mode == .idle_management or mode == .cleanup_changed_cert, .revoked_trust_store = if (mode == .cancel) &trust_store else null, .probe_missing_headers = mode == .missing_headers, .expected_begin_error = if (no_trust_reply) error.TrustReplyUnavailable else if (mode == .optional_changed_cert) error.ManagementPeerChanged else null };
     const thread = try std.Thread.spawn(.{}, Worker.run, .{&worker});
     thread.join();
     if (worker.failure) |err| return err;
+    if (mode == .optional_changed_cert) {
+        try std.testing.expectEqual(@as(usize, 1), replies.prompts);
+        try std.testing.expect(backend.diagnostics.firmware_observed);
+        try std.testing.expect(!backend.diagnostics.video_upgraded);
+        try std.testing.expectEqual(native.RemoteRelease.not_created, backend.diagnostics.kvm_logout);
+        try std.testing.expectEqual(native.RemoteRelease.unknown, backend.diagnostics.web_logout);
+        try std.testing.expectEqual(console.Cleanup.released, backend.diagnostics.local_cleanup);
+        const rejected_cleanup = backend.logoutDiagnostics().?.web;
+        try std.testing.expectEqual(error.CleanupPeerChanged, rejected_cleanup.failure.?);
+        try std.testing.expect(!rejected_cleanup.request_dispatched);
+        const term = try server.child.wait(std.testing.io);
+        try std.testing.expect(term.success());
+        return;
+    }
     try std.testing.expectEqual(@as(usize, if (no_trust_reply) 0 else 1), replies.prompts);
     const mapped = !no_trust_reply and !unproven_mapping;
-    const readonly_projection = mode == .missing_mapping or mode == .broken_canonical;
-    const has_fields = (mapped or readonly_projection) and mode != .missing_fields;
+    const management_verified = mapped or mode == .missing_mapping or mode == .broken_canonical or mode == .observed_partial;
+    const has_fields = management_verified and mode != .missing_fields;
     try std.testing.expectEqual(mapped, backend.diagnostics.system_mapping_verified);
     try std.testing.expectEqual(has_fields, backend.driver().management_available.?(backend));
-    try std.testing.expectEqual(@as(usize, 0), replies.capability_calls);
+    try std.testing.expectEqual(@as(usize, if (mode == .missing_mapping or mode == .broken_canonical or mode == .observed_partial) 1 else 0), replies.capability_calls);
     if (backend.discoveryDiagnostics()) |diagnostic| {
         try std.testing.expectEqual(@as(usize, 1), diagnostic.manager_count);
         const expected_systems: usize = switch (mode) {
-            .manager_linked_system, .broken_canonical, .partial_collection, .missing_identity => 2,
+            .optional_malformed, .optional_disconnect => 0,
+            .manager_linked_system, .broken_canonical, .missing_identity, .observed_partial => 2,
+            // An error envelope cannot contribute its apparent Members; only
+            // the Manager's independently followed target is discovered.
+            .partial_collection => 1,
             .multiple_members, .paged_members => 3,
             else => 1,
         };
         try std.testing.expectEqual(expected_systems, diagnostic.system_count);
         try std.testing.expectEqual(mapped, diagnostic.mapping_verified);
-        try std.testing.expectEqual(readonly_projection, diagnostic.readonly_system_projection);
+        try std.testing.expectEqual(management_verified, diagnostic.management_target_verified);
+        try std.testing.expectEqual(!management_verified, diagnostic.management_target_error != null);
+        try std.testing.expectEqual(mode == .observed_partial, diagnostic.resource_association_verified);
+        try std.testing.expectEqual(if (mode == .observed_partial) @as(?native.ResourceAssociationMethod, .reviewed_public_ids_and_chassis) else null, diagnostic.resource_association_method);
+        try std.testing.expect(!diagnostic.readonly_system_projection);
         const readonly_rejection: ?progress.Code = switch (mode) {
+            .optional_malformed, .optional_disconnect => .readonly_discovery_incomplete,
             .partial_mapping => .readonly_member_rejected,
             .multiple_members, .paged_members => .readonly_members_not_single,
             .partial_collection => .readonly_collection_rejected,
@@ -539,7 +665,7 @@ fn endToEnd(mode: Mode) !void {
             else => null,
         };
         try std.testing.expectEqual(readonly_rejection, diagnostic.readonly_rejection);
-        if (readonly_rejection != null or readonly_projection) {
+        if (readonly_rejection != null and !optional_failure) {
             try std.testing.expect(diagnostic.readonly_collection_count > 0);
             try std.testing.expect(diagnostic.readonly_collection_status != null);
             if (diagnostic.readonly_system_projection) try std.testing.expect(diagnostic.readonly_system_identity_present);
@@ -547,6 +673,12 @@ fn endToEnd(mode: Mode) !void {
         if (mapped) {
             try std.testing.expect(diagnostic.mapping_error == null);
             try std.testing.expect(diagnostic.mapping_rejection == null);
+        } else if (optional_failure) {
+            try std.testing.expectEqual(error.DiscoveryIncomplete, diagnostic.mapping_error.?);
+            try std.testing.expect(diagnostic.mapping_rejection == null);
+            try std.testing.expect(!diagnostic.management_discovery_complete);
+            try std.testing.expectEqual(if (mode == .optional_malformed) error.SyntaxError else error.TlsFailed, diagnostic.management_discovery_error.?);
+            try std.testing.expect(backend.diagnostics.firmware_observed);
         } else {
             const mapping_error = diagnostic.mapping_error orelse return error.MissingMappingDiagnostic;
             try std.testing.expectEqualStrings("MappingUnverified", @errorName(mapping_error));
@@ -570,12 +702,13 @@ fn endToEnd(mode: Mode) !void {
     var boot_snapshot = try boot_api.snapshot(boot_binding.context, call, a);
     defer boot_snapshot.deinit();
     try std.testing.expect(!power_snapshot.value.capability.write_granted and !boot_snapshot.value.capability.write_granted);
-    try std.testing.expectEqual(mapped, power_snapshot.value.capability.system_mapping_verified);
-    try std.testing.expectEqual(mapped, boot_snapshot.value.capability.system_mapping_verified);
-    if (readonly_projection) {
-        try std.testing.expectEqual(svc.SecondaryAuth.unknown, power_snapshot.value.capability.secondary_auth);
-        try std.testing.expectEqual(svc.SecondaryAuth.unknown, boot_snapshot.value.capability.secondary_auth);
-        try std.testing.expect(boot_snapshot.value.write_uri == null);
+    try std.testing.expectEqual(management_verified, power_snapshot.value.capability.system_mapping_verified);
+    try std.testing.expectEqual(management_verified, boot_snapshot.value.capability.system_mapping_verified);
+    if (mode == .missing_mapping or mode == .broken_canonical) {
+        try std.testing.expectEqual(svc.SecondaryAuth.disabled, power_snapshot.value.capability.secondary_auth);
+        try std.testing.expect(power_snapshot.value.capability.secondary_auth_evidence.permitsWrite());
+        try std.testing.expectEqualStrings("/redfish/v1/Systems/one", boot_snapshot.value.write_uri.?);
+        try std.testing.expect(!power_snapshot.value.capability.write_requestable and !boot_snapshot.value.capability.write_requestable);
     }
     if (has_fields) {
         // Discovery was destroyed during cleanup: typed caches must own their
@@ -583,9 +716,19 @@ fn endToEnd(mode: Mode) !void {
         try std.testing.expectEqual(svc.PowerState.on, power_snapshot.value.state.value.?);
         if (mode == .manager_linked_system) try std.testing.expectEqualStrings("/redfish/v1/Systems/canonical", power_snapshot.value.state.evidence.source_uri);
         try std.testing.expectEqual(svc.Validity.valid, power_snapshot.value.state.evidence.validity);
-        try std.testing.expectEqual(@as(usize, 2), power_snapshot.value.reset_types.value.?.len);
-        try std.testing.expectEqualStrings("On", power_snapshot.value.reset_types.value.?[0]);
-        try std.testing.expectEqualStrings("GracefulShutdown", power_snapshot.value.reset_types.value.?[1]);
+        if (mode == .observed_partial) {
+            try std.testing.expectEqual(@as(usize, 8), power_snapshot.value.reset_types.value.?.len);
+            try std.testing.expectEqual(svc.Validity.partial_with_error, power_snapshot.value.resource_evidence.validity);
+            try std.testing.expectEqual(svc.Validity.partial_with_error, boot_snapshot.value.resource_evidence.validity);
+            try std.testing.expectEqual(@as(usize, 20), boot_snapshot.value.options.len);
+            for (boot_snapshot.value.options) |option| try std.testing.expectEqual(svc.Validity.valid, option.evidence.validity);
+            try std.testing.expect(boot_snapshot.value.allowed_enabled.evidence.permitsWrite());
+            try std.testing.expect(!boot_snapshot.value.capability.write_requestable and !power_snapshot.value.capability.write_requestable);
+        } else {
+            try std.testing.expectEqual(@as(usize, 2), power_snapshot.value.reset_types.value.?.len);
+            try std.testing.expectEqualStrings("On", power_snapshot.value.reset_types.value.?[0]);
+            try std.testing.expectEqualStrings("GracefulShutdown", power_snapshot.value.reset_types.value.?[1]);
+        }
         try std.testing.expectEqualStrings("Disabled", boot_snapshot.value.state.enabled.?);
         try std.testing.expectEqualStrings("None", boot_snapshot.value.state.target.?);
         try std.testing.expectEqualStrings("UEFI", boot_snapshot.value.state.mode.?);
@@ -645,7 +788,10 @@ fn endToEnd(mode: Mode) !void {
             if (event.kind == .stage and event.stage == .video_tls_handshake) saw_video_tls = true;
             if (saw_video_tls) try std.testing.expect(event.stage != .tls_handshake and event.stage != .waiting_certificate);
         }
-        try std.testing.expect(saw_web and saw_kvm and saw_upgrade and saw_video_tls);
+        try std.testing.expect(saw_kvm and saw_upgrade and saw_video_tls);
+        // Twenty separately sourced BootOption reads can retire early WEB
+        // events from the intentionally bounded progress ring.
+        if (mode != .observed_partial) try std.testing.expect(saw_web);
         if (mode == .firmware_progress) {
             var firmware_verified = false;
             var confirmations: usize = 0;
@@ -663,11 +809,23 @@ fn endToEnd(mode: Mode) !void {
                     if (event.resource == .systems_collection or event.resource == .managers_collection or event.resource == .manager or event.resource == .system) try std.testing.expectEqual(progress.Stage.firmware_confirmation, event.stage);
                 }
             }
-            try std.testing.expect(firmware_verified and systems_before_firmware and manager_before_firmware);
+            try std.testing.expect(firmware_verified and !systems_before_firmware and manager_before_firmware);
             try std.testing.expectEqual(@as(usize, 1), confirmations);
             try std.testing.expectEqual(@as(usize, 1), discoveries);
         }
     } else try std.testing.expect(no_trust_reply);
+    if (optional_failure) {
+        var saw_degraded = false;
+        const observed = worker.begin_progress.?;
+        for (observed.events[0..observed.event_count]) |event| if (event.code == .management_discovery_incomplete) {
+            saw_degraded = true;
+            try std.testing.expect(event.error_code != null);
+            try std.testing.expectEqual(progress.Resource.systems_collection, event.resource);
+            try std.testing.expectEqual(progress.RequestPath.systems, event.context.?.path);
+            try std.testing.expectEqual(progress.Channel.management, event.context.?.channel);
+        };
+        try std.testing.expect(saw_degraded);
+    }
     const final_progress = tracker.snapshot();
     try std.testing.expectEqual(progress.Stage.cleanup, final_progress.stage);
     const safe_log = try std.json.Stringify.valueAlloc(a, final_progress, .{});
@@ -731,4 +889,16 @@ test "BMC native driver live-shaped session DELETE Success mixed with Critical s
 
 test "BMC native driver pending firmware metadata stays in confirmation before management discovery" {
     try endToEnd(.firmware_progress);
+}
+test "BMC native driver optional malformed management discovery preserves required firmware proof and KVM startup" {
+    try endToEnd(.optional_malformed);
+}
+test "BMC native driver optional truncated management stream reopens the accepted peer before KVM startup" {
+    try endToEnd(.optional_disconnect);
+}
+test "BMC native driver optional management recovery rejects a changed peer without tokens or KVM startup" {
+    try endToEnd(.optional_changed_cert);
+}
+test "BMC native driver observed object Critical publishes independently bound valid fields and diagnostic" {
+    try endToEnd(.observed_partial);
 }

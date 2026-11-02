@@ -67,11 +67,14 @@ pub const Editor = struct {
         try self.replace(&self.name, initial.name);
         try self.replace(&self.host, value.endpoint.host);
         try self.replace(&self.username, value.username);
-        const reference = if (value.credential_ref) |ref| try self.allocator.dupe(u8, ref) else null;
+        // Runtime handoff references are not persistent credentials. Reopening
+        // an unsaved session as a draft must not save its one-shot secret.
+        const reference = if (@backingInt(initial.id) != 0) (if (value.credential_ref) |ref| try self.allocator.dupe(u8, ref) else null) else null;
         if (self.credential_ref) |old| self.allocator.free(old);
         self.credential_ref = reference;
         self.asset_id = initial.id;
         self.asset_revision = initial.revision;
+        if (@backingInt(initial.id) == 0) self.save_password = false;
         self.group_id = initial.group_id;
         self.https_port = value.endpoint.https_port;
         self.scale = value.display.scale;

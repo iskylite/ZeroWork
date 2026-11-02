@@ -7,7 +7,7 @@ pub const schema_version: u32 = 1;
 pub const max_journal_bytes = 4 * 1024 * 1024;
 pub const max_entries = 1024;
 pub const Parameters = union(enum) { power: svc.PowerAction, boot: svc.BootState };
-pub const Baseline = struct { power: ?svc.PowerState = null, boot: ?svc.BootState = null, etag: ?[]const u8 = null };
+pub const Baseline = struct { power: ?svc.PowerState = null, boot: ?svc.BootState = null, etag: ?[]const u8 = null, last_reset_time: ?[]const u8 = null };
 pub const Entry = struct {
     session_id: u64,
     generation: u64,
@@ -115,9 +115,21 @@ pub const MemoryBackend = struct {
     }
 };
 pub const Reservation = struct { index: usize, existing: bool };
+pub const OwnedEntry = svc.Owned(Entry);
+pub const EntrySnapshot = struct {
+    index: usize,
+    entry: OwnedEntry,
+    pub fn deinit(self: *EntrySnapshot) void {
+        self.entry.deinit();
+        self.* = undefined;
+    }
+};
 pub const Journal = struct {
+    mutex: std.atomic.Mutex = .unlocked,
     arena: std.heap.ArenaAllocator,
     backend: Backend,
+    /// Borrowed storage, for inspection only after all users have stopped.
+    /// Concurrent consumers must use the owned snapshot APIs below.
     entries: []const Entry = &.{},
     pub fn init(a: std.mem.Allocator, backend: Backend) !Journal {
         var self: Journal = .{ .arena = .init(a), .backend = backend };
@@ -137,7 +149,7 @@ pub const Journal = struct {
                 }
             }
             self.entries = entries;
-            if (recovered) try self.persist(entries);
+            if (recovered) try self.persistLocked(entries);
         }
         return self;
     }
@@ -145,11 +157,45 @@ pub const Journal = struct {
         self.arena.deinit();
         self.* = undefined;
     }
-    pub fn find(self: *const Journal, key: svc.OperationKey) ?usize {
+    /// Indices remain stable because the ledger only appends entries.
+    pub fn find(self: *Journal, key: svc.OperationKey) ?usize {
+        self.lock();
+        defer self.mutex.unlock();
+        return self.findLocked(key);
+    }
+    fn findLocked(self: *const Journal, key: svc.OperationKey) ?usize {
         for (self.entries, 0..) |entry, i| if (entry.key().eql(key)) return i;
         return null;
     }
+    pub fn snapshot(self: *Journal, a: std.mem.Allocator, index: usize) !OwnedEntry {
+        self.lock();
+        defer self.mutex.unlock();
+        if (index >= self.entries.len) return error.StaleOperation;
+        return OwnedEntry.init(a, self.entries[index]);
+    }
+    pub fn snapshotOperation(self: *Journal, a: std.mem.Allocator, key: svc.OperationKey) !?EntrySnapshot {
+        self.lock();
+        defer self.mutex.unlock();
+        const index = self.findLocked(key) orelse return null;
+        return .{ .index = index, .entry = try OwnedEntry.init(a, self.entries[index]) };
+    }
+    pub fn snapshotOperationOrNonce(self: *Journal, a: std.mem.Allocator, key: svc.OperationKey, nonce: [16]u8) !?EntrySnapshot {
+        self.lock();
+        defer self.mutex.unlock();
+        for (self.entries, 0..) |entry, index| if (entry.key().eql(key) or std.mem.eql(u8, &entry.nonce, &nonce)) {
+            return .{ .index = index, .entry = try OwnedEntry.init(a, entry) };
+        };
+        return null;
+    }
+    pub fn snapshotResult(self: *Journal, a: std.mem.Allocator, key: svc.OperationKey) !?svc.Owned(svc.Result) {
+        self.lock();
+        defer self.mutex.unlock();
+        const index = self.findLocked(key) orelse return null;
+        return try svc.Owned(svc.Result).init(a, self.entries[index].result());
+    }
     pub fn reserve(self: *Journal, execution: svc.Execution, target: []const u8, system_identity: []const u8, parameters: Parameters, baseline: Baseline) !Reservation {
+        self.lock();
+        defer self.mutex.unlock();
         const owner = switch (execution.operation.owner) {
             .session => |owner| owner,
             else => return error.InvalidOperationOwner,
@@ -174,18 +220,34 @@ pub const Journal = struct {
         @memcpy(next[0..self.entries.len], self.entries);
         next[self.entries.len] = owned.value;
         const index = next.len - 1;
-        try self.persist(next);
+        try self.persistLocked(next);
         return .{ .index = index, .existing = false };
     }
     pub fn beginDispatch(self: *Journal, index: usize) !void {
+        self.lock();
+        defer self.mutex.unlock();
         if (index >= self.entries.len) return error.StaleOperation;
         var entry = self.entries[index];
         if (entry.dispatch_started or entry.result().terminal()) return error.OperationAlreadyDispatched;
         entry.dispatch_started = true;
         entry.phase = .sending;
-        try self.update(index, entry);
+        try self.updateLocked(index, entry);
+    }
+    /// A clean pre-write read may supply an anchor absent at discovery. Persist
+    /// it before dispatch so recovery/query can use the same frozen baseline.
+    pub fn collectLastResetBaseline(self: *Journal, index: usize, value: []const u8) !void {
+        self.lock();
+        defer self.mutex.unlock();
+        if (index >= self.entries.len) return error.StaleOperation;
+        var entry = self.entries[index];
+        if (entry.dispatch_started or entry.result().terminal() or entry.baseline.last_reset_time != null) return error.OperationAlreadyDispatched;
+        if (svc.lastResetTimeMillis(value) == null) return error.InvalidJournalEntry;
+        entry.baseline.last_reset_time = value;
+        try self.updateLocked(index, entry);
     }
     pub fn setResult(self: *Journal, index: usize, result: svc.Result) !void {
+        self.lock();
+        defer self.mutex.unlock();
         if (index >= self.entries.len or !self.entries[index].key().eql(result.operation)) return error.StaleOperation;
         var entry = self.entries[index];
         if (entry.dispatch_started and result.phase == .cancelled_unsent) return error.OperationAlreadyDispatched;
@@ -198,16 +260,16 @@ pub const Journal = struct {
         entry.pending_boot = result.pending_boot;
         entry.retry_after_ms = result.retry_after_ms;
         try validateEntry(entry);
-        try self.update(index, entry);
+        try self.updateLocked(index, entry);
     }
-    fn update(self: *Journal, index: usize, entry: Entry) !void {
+    fn updateLocked(self: *Journal, index: usize, entry: Entry) !void {
         var temporary: std.heap.ArenaAllocator = .init(self.arena.child_allocator);
         defer temporary.deinit();
         const next = try temporary.allocator().dupe(Entry, self.entries);
         next[index] = entry;
-        try self.persist(next);
+        try self.persistLocked(next);
     }
-    fn persist(self: *Journal, entries: []const Entry) !void {
+    fn persistLocked(self: *Journal, entries: []const Entry) !void {
         var replacement: std.heap.ArenaAllocator = .init(self.arena.child_allocator);
         errdefer replacement.deinit();
         const encoded = try std.json.Stringify.valueAlloc(replacement.allocator(), Disk{ .schema_version = schema_version, .entries = entries }, .{});
@@ -217,6 +279,9 @@ pub const Journal = struct {
         self.arena.deinit();
         self.arena = replacement;
         self.entries = parsed.value.entries;
+    }
+    fn lock(self: *Journal) void {
+        while (!self.mutex.tryLock()) std.atomic.spinLoopHint();
     }
 };
 fn validText(value: []const u8, max: usize) bool {
@@ -232,6 +297,7 @@ fn validateEntry(entry: Entry) !void {
     std.crypto.hash.sha2.Sha256.hash(encoded, &hash, .{});
     if (!std.mem.eql(u8, &hash, &entry.parameters_sha256)) return error.InvalidJournalHash;
     if (entry.baseline.etag) |etag| if (!validText(etag, 1024)) return error.InvalidJournalEntry;
+    if (entry.baseline.last_reset_time) |value| if (svc.lastResetTimeMillis(value) == null) return error.InvalidJournalEntry;
     if (entry.task_uri) |uri| if (!validText(uri, 4096) or !std.mem.startsWith(u8, uri, "/redfish/v1/") or std.mem.indexOfAny(u8, uri, "@#\\% ") != null or std.mem.indexOf(u8, uri, "..") != null) return error.InvalidJournalEntry;
     const states = [_]?svc.BootState{ entry.baseline.boot, switch (entry.parameters) {
         .boot => |state| state,

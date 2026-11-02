@@ -1398,18 +1398,25 @@ const AiHost = struct {
         const can_compact = self.thread_state.load(.acquire) == 0 and self.compaction.job == null and @import("ai/context_compaction.zig").cutoff(self.wire_history.messages) != null;
         std.hash.autoHash(&hash, compact_status);
         std.hash.autoHash(&hash, can_compact);
-        const history_tokens = if (selected) |model_config| ai_attachment_request.inputTokens(model_config.chatRequest(.{ .model = model_config.model, .system = "", .messages = self.wire_history.messages, .tool_images = model_config.vision })) catch ((history_bytes + 3) / 4) else (history_bytes + 3) / 4;
+        var reserved_image_tokens: usize = 0;
+        const history_tokens = if (selected) |model_config| history: {
+            const request = model_config.chatRequest(.{ .model = model_config.model, .system = "", .messages = self.wire_history.messages, .tool_images = model_config.vision });
+            if (!@import("ai/image_budget.zig").supports(model_config.model)) reserved_image_tokens = @import("ai/image_budget.zig").validate(request) catch 0;
+            break :history ai_attachment_request.inputTokens(request) catch ((history_bytes + 3) / 4);
+        } else (history_bytes + 3) / 4;
         const parts = [_]@import("ui/ai_composer_controls_view.zig").UsagePart{
             .{ .name = "终端上下文", .tokens = context_tokens },
-            .{ .name = "对话", .tokens = history_tokens + (response_bytes + 3) / 4 },
+            .{ .name = "对话", .tokens = (history_tokens -| reserved_image_tokens) + (response_bytes + 3) / 4 },
             .{ .name = "草稿", .tokens = (self.prompt.peek().len + 3) / 4 },
+            .{ .name = "图片保守预留", .tokens = reserved_image_tokens },
         };
-        const used = parts[0].tokens + parts[1].tokens + parts[2].tokens;
+        const used = parts[0].tokens + parts[1].tokens + parts[2].tokens + parts[3].tokens;
         std.hash.autoHash(&hash, used);
+        std.hash.autoHash(&hash, reserved_image_tokens);
         std.hash.autoHash(&hash, context_tokens);
         const fingerprint = hash.final();
         if (self.composer_hash == fingerprint) return;
-        const usage: ?@import("ui/ai_composer_controls_view.zig").Usage = if (selected) |model_config| .{ .used_tokens = used, .limit_tokens = model_config.context_window, .estimated = true, .parts = &parts, .compaction = compact_status, .can_compact = can_compact, .compaction_before = self.compaction.before_tokens, .compaction_after = self.compaction.after_tokens } else null;
+        const usage: ?@import("ui/ai_composer_controls_view.zig").Usage = if (selected) |model_config| .{ .used_tokens = used, .limit_tokens = model_config.context_window, .estimated = true, .parts = parts[0..if (reserved_image_tokens > 0) 4 else 3], .compaction = compact_status, .can_compact = can_compact, .compaction_before = self.compaction.before_tokens, .compaction_after = self.compaction.after_tokens } else null;
         const key: ?@import("ui/ai_composer_controls_view.zig").ModelKey = if (controls.model) |value| .{ .provider_id = value.provider_id, .model_id = value.model_id } else if (selected) |value| .{ .provider_id = config.ai.default_provider, .model_id = value.model } else null;
         try view.update(.{ .owner = owner, .revision = self.controlsRevision(), .providers = config.ai.providers[0..@min(config.ai.provider_count, config.ai.providers.len)], .current = key, .usage = usage, .permission = controls.permission orelse config.ai.permission_mode, .inventory_authorized = false, .inventory_conversation_id = null, .global_execution_mode = config.ai.execution_mode, .global_session_retention = config.ai.session_retention, .execution_mode_override = controls.execution_mode, .session_retention_override = controls.session_retention, .effort = controls.effort, .thinking = controls.thinking, .attachments = .{ .image = true, .paste_image = true, .local_text = true, .remote_file = true }, .editable = true });
         self.composer_hash = fingerprint;
@@ -2649,14 +2656,10 @@ const AiHost = struct {
     }
 
     fn recoveryReason(self: *AiHost) []const u8 {
-        if (self.native_context) |context| if (context.diagnostic.status != 0) return self.failure_label;
-        return if (self.request_failure) |err| switch (err) {
-            error.ToolOutcomeUnknown => "远端写入结果待核实，请先核查原目标",
-            error.Timeout => "模型长时间未返回新内容，已保留收到的答复和附件",
-            error.RequestRejected, error.RateLimited => "服务暂不可用或请求受限，请在冷却结束后重试",
-            error.MissingApiKey, error.ProviderFailure => "服务请求失败，请检查 AI 设置",
-            else => "连接或答复流中断，已保留收到的内容",
-        } else "请求失败，已保留收到的内容";
+        return if (self.request_failure) |err|
+            @import("ai/error_feedback.zig").recoveryReason(err, self.failure_label, if (self.native_context) |context| context.diagnostic.status else 0)
+        else
+            "请求失败，已保留收到的内容";
     }
 
     fn recoveryVisible(self: *AiHost) bool {
@@ -3177,6 +3180,7 @@ const AiHost = struct {
         };
         self.request_cancel = .{};
         self.request_stats = .{ .usage_reported = false };
+        self.tool_bridge.beginAutomationRun(&self.request_cancel.cancelled);
         self.answer_only = false;
         self.retry_prefix_count = 0;
         self.request_failure = null;
@@ -3242,6 +3246,7 @@ const AiHost = struct {
     /// Touches NO UI state; the poll hook reads the results after the
     /// state flag flip.
     fn workerRun(self: *AiHost) void {
+        defer self.tool_bridge.endAutomationRun();
         if (self.answer_only) {
             self.finishRequest(self.manager.resumeAnswer(self.provider, &self.request_cancel));
             return;
@@ -4927,7 +4932,8 @@ const MenuHost = struct {
         };
         self.state.show(kind, .{
             .capability_snapshot = self.capabilitiesForTab(self.context_tab),
-            .has_saved_connection = if (self.workspace) |workspace| if (self.context_tab) |index| if (index < workspace.tabs.items.len) workspace.tabs.items[index].host_snapshot != null else false else null else null,
+            .has_saved_connection = if (self.workspace) |workspace| if (self.context_tab) |index| workspace.savedConnectionForTab(index) != null else null else null,
+            .has_unsaved_connection = if (self.context_tab) |index| self.unsavedConnectionForTab(index) != null else false,
             .new_window_available = process_windows != null and (self.captured_asset != null or self.captured_tab != null),
             .reuse_connection_available = if (self.context_tab) |index| if (self.workspace) |workspace| workspace.tabs.items[index].runtime != null else false else false,
             .local_session = self.isLocalTarget(),
@@ -5027,6 +5033,30 @@ const MenuHost = struct {
         if (owner != .session) return null;
         const application = if (self.transfer_host) |transfer| transfer.application else if (self.ai) |ai| ai.application_host orelse return null else return null;
         return application.sessions.capabilitySnapshot(owner.session) catch null;
+    }
+
+    const UnsavedConnection = union(enum) {
+        remote: hosts_mod.HostConfig,
+        plugin: @import("config/connection_envelope.zig").Envelope,
+    };
+
+    fn unsavedConnectionForTab(self: *MenuHost, index: usize) ?UnsavedConnection {
+        const workspace = self.workspace orelse return null;
+        if (index >= workspace.tabs.items.len) return null;
+        const tab = workspace.tabs.items[index];
+        if (tab.local or tab.closing or tab.content_owner != .session) return null;
+        if (tab.temporaryHost()) |host| {
+            const manifest = workspace.plugins.find(host.protocolId()) orelse return null;
+            _ = manifest.connection orelse return null;
+            return .{ .remote = host };
+        }
+        if (tab.plugin_protocol_id.len == 0) return null;
+        const wizard = self.wizard_host orelse return null;
+        const value = wizard.application_host.sessions.connectionEnvelope(tab.content_owner.session) orelse return null;
+        if (@backingInt(value.id) != 0) return null;
+        const manifest = workspace.plugins.find(value.protocol_id) orelse return null;
+        _ = manifest.connection orelse return null;
+        return .{ .plugin = value };
     }
 
     fn backgroundAvailable(self: *MenuHost) bool {
@@ -5242,6 +5272,7 @@ const MenuHost = struct {
             .new_window => "app-window",
             .start_background_socks, .manage_background_socks => "plug-zap",
             .edit_host => "settings",
+            .save_host => "save",
             .pin_host => "pin",
             .move_group => "folder",
             .delete_host => "trash-2",
@@ -5297,12 +5328,9 @@ const MenuHost = struct {
         const groups = try self.allocator.alloc(Group, workspace.registry.groups.len);
         defer self.allocator.free(groups);
         for (workspace.registry.groups, groups) |group, *destination| destination.* = .{ .reference = .{ .id = group.group_id, .revision = group.revision }, .name = group.name, .host_count = group.ordered_connection_ids.len };
-        const endpoint = try std.fmt.allocPrint(self.allocator, "{s}@{s}:{d}", .{ host.user, host.host, host.port });
+        const endpoint = try workspace.assetActionEndpoint(self.allocator, host);
         defer self.allocator.free(endpoint);
-        var open_sessions: usize = 0;
-        for (workspace.tabs.items) |tab| if (tab.host_snapshot) |snapshot| {
-            if (snapshot.value.connection_id == owner.id) open_sessions += 1;
-        };
+        const open_sessions = workspace.connectionTabs(owner.id).count;
         try view.retheme();
         self.asset_action_colors = app_theme.current();
         try view.show(.{ .mode = mode, .owner = owner, .name = host.name, .endpoint = endpoint, .source_group = if (group_index) |index| .{ .id = workspace.registry.groups[index].group_id, .revision = workspace.registry.groups[index].revision } else null, .source_group_name = if (group_index) |index| workspace.registry.groups[index].name else "未分组", .groups = groups, .open_sessions = open_sessions });
@@ -5364,12 +5392,10 @@ const MenuHost = struct {
     fn viewAssetSessions(raw: *anyopaque, owner: @import("host/identity.zig").AssetOwner) void {
         const self: *MenuHost = @ptrCast(@alignCast(raw));
         const workspace = self.workspace orelse return;
-        for (workspace.tabs.items, 0..) |tab, index| if (tab.host_snapshot) |snapshot| {
-            if (snapshot.value.connection_id == owner.id) {
-                workspace.selectTab(index);
-                return;
-            }
-        };
+        if (workspace.connectionTabs(owner.id).first_index) |index| {
+            workspace.selectTab(index);
+            return;
+        }
         workspace.status("该主机的会话已关闭");
     }
 
@@ -5538,8 +5564,8 @@ const MenuHost = struct {
             },
             .edit_host => {
                 const host_index = self.context_host orelse if (self.context_tab) |tab| blk: {
-                    if (tab >= workspace.tabs.items.len) return;
-                    break :blk workspace.tabs.items[tab].host_index;
+                    const asset = workspace.savedConnectionForTab(tab) orelse return;
+                    break :blk workspace.registry.indexOf(asset.id) orelse return;
                 } else return;
                 const host = self.wizard_host orelse return;
                 if (host_index >= workspace.registry.hosts.len) return;
@@ -5548,6 +5574,21 @@ const MenuHost = struct {
                     return;
                 };
                 self.edit_host_index = host_index;
+            },
+            .save_host => {
+                const index = self.context_tab orelse return;
+                const source = self.unsavedConnectionForTab(index) orelse return;
+                const host = self.wizard_host orelse return;
+                var arena: std.heap.ArenaAllocator = .init(self.allocator);
+                defer arena.deinit();
+                const value = switch (source) {
+                    .remote => |remote| @import("config/connection_envelope.zig").fromTemporaryHost(arena.allocator(), remote) catch |err| {
+                        workspace.statusFailure(@errorName(err));
+                        return;
+                    },
+                    .plugin => |value| value,
+                };
+                WizardHost.openConnectionDraft(host, value) catch |err| workspace.statusFailure(@errorName(err));
             },
             .pin_host => {
                 const host_index = self.context_host orelse return;
@@ -10727,6 +10768,17 @@ const WizardHost = struct {
         self.wizard.show();
     }
 
+    fn openConnectionDraft(self: *WizardHost, value: @import("config/connection_envelope.zig").Envelope) !void {
+        if (self.wizard.isVisible()) return error.WizardAlreadyOpen;
+        if (@backingInt(value.id) != 0) return error.ConnectionAlreadySaved;
+        try self.refreshAssets();
+        self.edit_host_index = null;
+        self.selected_group = null;
+        try self.wizard.loadEnvelope(value);
+        if (remote_editor.editor(self.wizard)) |editor| editor.sig_save_password.?.set(false);
+        self.wizard.show();
+    }
+
     fn startProbe(raw: *anyopaque, draft: *const wizard_mod.Draft) void {
         const self: *WizardHost = @ptrCast(@alignCast(raw));
         self.probe_controller.cancelAll();
@@ -12978,6 +13030,7 @@ pub fn main() !void {
         // at this next loop boundary without another timed wait before painting.
         windows.config.pump_timeout_ms = if (changed) 0 else 16;
         if (!try windows.tick()) break;
+        for (windows.windows.items) |managed| @import("ui/plugin_window_host.zig").Host.observePresentedFrame(managed.app);
         @import("vt/input_timing.zig").frameReturned();
         if (process.data_cleanup_exit) break;
         if (process.data_cleanup_pending) {
