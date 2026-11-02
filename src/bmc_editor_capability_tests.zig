@@ -236,7 +236,14 @@ test "BMC editor capability protocol picker replaces its own scope only after th
         _ = harness.cx.render();
     }
     const before = fixture.mounted.?.credentials.?;
-    const button = findNode(harness.wizard.root.?, "wizard.protocol.fixture.second-editor").?;
+    const trigger = harness.wizard.protocol_picker.?.globalRect();
+    harness.cx.handleClick(trigger.x + trigger.w / 2, trigger.y + trigger.h / 2);
+    harness.cx.handleMouseUpEx(trigger.x + trigger.w / 2, trigger.y + trigger.h / 2, .left, .{});
+    for (0..3) |_| {
+        harness.cx.advanceFrameClock();
+        _ = harness.cx.render();
+    }
+    const button = ui.widgets.select.stateOf(harness.wizard.protocol_select.?).option_nodes[1];
     const rect = button.globalRect();
     harness.cx.handleClick(rect.x + rect.w / 2, rect.y + rect.h / 2);
     harness.cx.handleMouseUpEx(rect.x + rect.w / 2, rect.y + rect.h / 2, .left, .{});

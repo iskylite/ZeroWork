@@ -7,6 +7,7 @@ pub const Policy = struct {
     cx: *ui.Cx,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope) !void {
+        try @import("floating_input.zig").Policy.mount(cx, scope);
         const self = try scope.createState(Policy, .{ .cx = cx });
         try cx.addAfterLayoutHook(self, afterLayout);
         errdefer cx.removeAfterLayoutHook(self);

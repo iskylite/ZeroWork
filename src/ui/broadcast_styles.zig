@@ -41,7 +41,7 @@ pub fn close() @FieldType(ui.widgets.ControlShellConfig, "style") {
     return style;
 }
 pub fn controlHover(primary: bool) @FieldType(ui.widgets.ControlShellConfig, "style") {
-    return .{ .background = if (primary) theme.current().action_accent else theme.current().hover, .text_color = if (primary) theme.actionForeground(theme.current().action_accent) else theme.current().fg_1 };
+    return .{ .background = if (primary) theme.current().action_accent else theme.states().hover, .text_color = if (primary) theme.actionForeground(theme.current().action_accent) else theme.current().fg_1 };
 }
 
 pub fn titleText(_: *const ui.ThemeTokens) ui.TextStyle {

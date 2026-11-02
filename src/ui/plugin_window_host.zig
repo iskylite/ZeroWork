@@ -593,19 +593,20 @@ pub const Host = struct {
         if (self.notification_presenter) |view| {
             var avoid: [32]ui.ComputedRect = undefined;
             var count: usize = 0;
-            for (self.cx.overlay_stack.layers) |maybe| if (maybe) |layer| {
-                if (count == avoid.len) break;
-                if (layer.state == .exiting or layer.suspended) continue;
-                if (layer.content_node) |node| {
-                    avoid[count] = node.globalRect();
-                    count += 1;
-                }
-            };
-            // App-owned detail cards may be retained outside Zenit's overlay
-            // stack (notably global/session transfer popovers). Their public
-            // roots are the same ones used by native Harness and presentation.
             const app_root = self.cx.root orelse return;
-            collectNotificationObstacles(self.cx, app_root, &avoid, &count);
+            // Timer/owner processing still runs below. Geometry is needed only
+            // when this window can actually present an admitted banner.
+            if (self.cx.window_active and view.host.coordinator.presentation_count != 0 and view.host.coordinator.open_centers == 0) {
+                for (self.cx.overlay_stack.layers) |maybe| if (maybe) |layer| {
+                    if (count == avoid.len) break;
+                    if (layer.state == .exiting or layer.suspended) continue;
+                    if (layer.content_node) |node| {
+                        avoid[count] = node.globalRect();
+                        count += 1;
+                    }
+                };
+                collectNotificationObstacles(self.cx, app_root, &avoid, &count);
+            }
             try view.update(now_ms, self.cx.window_active, if (active) |owner| .{ .session = owner } else null, .{ .content = app_root.globalRect(), .avoid = avoid[0..count] });
         }
     }
@@ -613,7 +614,7 @@ pub const Host = struct {
 // Explicit host-owned floating surfaces only; ordinary workspace panels and
 // notification descendants must never become their own avoidance obstacles.
 fn collectNotificationObstacles(cx: *ui.Cx, node: *ui.Node, avoid: []ui.ComputedRect, count: *usize) void {
-    if (node.isPaintSkipped() or count.* == avoid.len or cx.overlay_stack.isNodeInSuspendedLayer(node)) return;
+    if (node.style.display == .none or node.isPaintSkipped() or count.* == avoid.len or cx.overlay_stack.isNodeInSuspendedLayer(node)) return;
     if (node.style.overflow_hidden) {
         const bounds = node.globalRect();
         if (bounds.w <= 0.1 or bounds.h <= 0.1) return;

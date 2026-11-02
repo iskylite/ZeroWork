@@ -886,12 +886,12 @@ pub const TerminalViewNode = struct {
             (try mark.style.ensureExtFallible(self.cx.allocator)).inset = .{ .left = .{ .px = self.metrics.origin_x - root_rect.x + @as(f32, @floatFromInt(col)) * self.cell_width }, .top = .{ .px = self.metrics.origin_y - root_rect.y + @as(f32, @floatFromInt(absolute_row - offset)) * self.cell_height } };
             mark.style.width = .{ .px = @as(f32, @floatFromInt(width)) * self.cell_width };
             mark.style.height = .{ .px = self.cell_height };
-            mark.setBackground(if (current) design.color.accent else ui.Color.rgba(212, 154, 12, 71));
+            mark.setBackground(if (current) app_theme.states().search_current else app_theme.states().search_match);
             const text = mark.children.items[0];
             try text.setTextContent(self.cx.allocator, self.search.source.items[hit.start..hit.end]);
             if (text.getText()) |old| {
                 var properties = old;
-                properties.color = if (current) ui.Color.WHITE else self.base_fg;
+                properties.color = if (current) app_theme.states().search_current_ink else app_theme.states().search_match_ink;
                 properties.font_size = self.terminal_font_size;
                 text.setText(properties);
             }
@@ -998,12 +998,12 @@ pub const TerminalViewNode = struct {
                 (try mark.style.ensureExtFallible(self.cx.allocator)).inset = .{ .left = .{ .px = self.metrics.origin_x - root_rect.x + self.row_layouts[@min(row_index - top, max_grid_rows - 1)].shift_x + @as(f32, @floatFromInt(start.col)) * self.cell_width }, .top = .{ .px = self.metrics.origin_y - root_rect.y + self.presentationRowY(row_index - top) } };
                 mark.style.width = .{ .px = @as(f32, @floatFromInt(end.col + end.width - start.col)) * self.cell_width };
                 mark.style.height = .{ .px = self.cell_height };
-                mark.setBackground(if (index == self.search.current) app_theme.current().accent else ui.Color.rgba(212, 154, 12, 71));
+                mark.setBackground(if (index == self.search.current) app_theme.states().search_current else app_theme.states().search_match);
                 const text = mark.children.items[0];
                 try text.setTextContent(self.cx.allocator, document.text[start.start..end.end]);
                 if (text.getText()) |old| {
                     var props = old;
-                    props.color = if (index == self.search.current) ui.Color.WHITE else self.base_fg;
+                    props.color = if (index == self.search.current) app_theme.states().search_current_ink else app_theme.states().search_match_ink;
                     props.font_size = self.terminal_font_size;
                     props.line_height = self.terminal_line_height;
                     text.setText(props);
@@ -1050,12 +1050,12 @@ pub const TerminalViewNode = struct {
                 (try mark.style.ensureExtFallible(self.cx.allocator)).inset = .{ .left = .{ .px = origin_x + displayed.projection.visible_rows[visible].presentation.shift_x + @as(f32, @floatFromInt(start.col)) * surface.options.cell_width }, .top = .{ .px = origin_y + surface.presentationY(visible) } };
                 mark.style.width = .{ .px = @as(f32, @floatFromInt(width)) * surface.options.cell_width };
                 mark.style.height = .{ .px = surface.options.row_height };
-                mark.setBackground(if (index == self.search.current) app_theme.current().accent else ui.Color.rgba(212, 154, 12, 71));
+                mark.setBackground(if (index == self.search.current) app_theme.states().search_current else app_theme.states().search_match);
                 const text = mark.children.items[0];
                 try text.setTextContent(self.cx.allocator, document.text[start.start..end.end]);
                 if (text.getText()) |old| {
                     var props = old;
-                    props.color = if (index == self.search.current) ui.Color.WHITE else self.base_fg;
+                    props.color = if (index == self.search.current) app_theme.states().search_current_ink else app_theme.states().search_match_ink;
                     props.font_family = self.terminal_font_family_id;
                     props.use_monospace_font = self.terminal_font_family_id == 0;
                     props.font_size = self.terminal_font_size;
@@ -1536,6 +1536,7 @@ pub const TerminalViewNode = struct {
     fn makeCatalogueNodes(cx: *ui.Cx) !CommandPaletteNodes {
         const c = app_theme.current();
         const panel = try ui.box(cx, overlay_styles.cataloguePanel(), .{});
+        @import("floating_input.zig").protect(cx, panel);
         panel.meta.ownership.meta.test_id = "terminal.commands";
         panel.setDisplay(.none);
         const header = try ui.box(cx, overlay_styles.catalogueHeader(), .{});
@@ -1579,6 +1580,7 @@ pub const TerminalViewNode = struct {
         const ext = try panel.style.ensureExtFallible(cx.allocator);
         ext.inset = .{ .top = .{ .px = 0 }, .left = .{ .px = 0 } };
         ext.z_index = palette_z_index;
+        @import("floating_input.zig").protect(cx, panel);
         panel.setDisplay(.none);
 
         // 标题行：“内置指令” + 触发规则说明（浅灰小字）。
@@ -2237,6 +2239,7 @@ pub const TerminalViewNode = struct {
         const x = std.math.clamp(cursor_x, left, left + content.w - width);
         const y = placement.y;
         const resized = !self.completion_cache.placed or self.completion_cache.w != width or self.completion_cache.h != height;
+        if (self.completion_panel.style.display == .none) self.cx.dispatcher.cancelScrollGesture();
         placeOverlay(self.completion_panel, &self.completion_cache, x, y, width, height);
         if (resized) self.completion_panel.markLayoutDirty();
     }
@@ -2379,6 +2382,7 @@ pub const TerminalViewNode = struct {
         const content_left = content.x - root_rect.x + 8;
         const content_right = content.x + content.w - root_rect.x - 8;
         x = std.math.clamp(x, content_left, content_right - panel_width);
+        if (self.palette_panel.style.display == .none) self.cx.dispatcher.cancelScrollGesture();
         placeOverlay(self.palette_panel, &self.palette_cache, x, y, panel_width, panel_height);
     }
 
@@ -4233,7 +4237,7 @@ pub const TerminalViewNode = struct {
         return if (self.terminal_surface == null or self.history.selected != null) @import("terminal_styles.zig").contentPadding(self.terminal_grouped) else .ZERO;
     }
     fn legacyGutterWidth(self: *const TerminalViewNode) f32 {
-        return if ((self.terminal_surface == null or self.history.selected != null) and self.local_state.timestamp_gutter and !self.remote_input_context.alternate_screen) @import("terminal_styles.zig").gutter else 0;
+        return if ((self.terminal_surface == null or self.history.selected != null) and self.local_state.timestamp_gutter and !self.remote_input_context.alternate_screen) (@import("terminal_styles.zig").timestampWidth(self.cx, self.terminal_font_family_id) + @import("terminal_styles.zig").timestamp_gap) else 0;
     }
     fn refreshLegacyTimestamps(self: *TerminalViewNode) void {
         if (self.terminal_surface != null and self.history.selected == null) return;
@@ -4267,9 +4271,10 @@ pub const TerminalViewNode = struct {
             props.color = app_theme.current().fg_3;
             props.line_height = self.cell_height / props.font_size;
             node.setText(props);
-            node.style.width = .{ .px = @import("terminal_styles.zig").timestamp_width };
+            const timestamp_width = width - @import("terminal_styles.zig").timestamp_gap;
+            node.style.width = .{ .px = timestamp_width };
             node.style.height = .{ .px = self.cell_height };
-            @import("builtin_records_styles.zig").place(self.cx, node, self.historyContentPadding().left, self.rows_box.style.padding.top + self.presentationRowY(row), @import("terminal_styles.zig").timestamp_width, self.cell_height);
+            @import("builtin_records_styles.zig").place(self.cx, node, self.historyContentPadding().left, self.rows_box.style.padding.top + self.presentationRowY(row), timestamp_width, self.cell_height);
             node.setDisplay(.flex);
             node.markLayoutDirty();
         }
@@ -4722,7 +4727,7 @@ pub const TerminalViewNode = struct {
                 const detail = label.children.items[1];
                 try detail.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&text, "{s}  {s}", .{ code_text, try annotations.duration(&elapsed, command.elapsed_ms) }));
                 detail.setTextColor(c.fg_2);
-                label.setBackground(c.surface_1.withAlpha(235));
+                label.setBackground(ui.Color.TRANSPARENT);
                 label.setStyleInline(self.cx.allocator, .{ .inset = .{ .right = .{ .px = self.rows_box.style.padding.right }, .top = .{ .px = y } } });
                 self.history_command_ids[index] = command.id;
             }
@@ -7037,6 +7042,7 @@ test "terminal command annotations preserve grid copy hover wrapped rows and dis
     const row_index = value.screen_row.? - surface.snapshot.?.projection.scrollback.viewport_offset;
     const row = &surface.rows.items[row_index];
     try std.testing.expect(row.command_state != null and row.command_info != null);
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, row.command_info.?.getBackground());
     try std.testing.expectEqualStrings("AI", row.command_ai.?.getText().?.content);
     try std.testing.expectEqualStrings("CommandAiTag", row.command_ai.?.meta.ownership.meta.component_name.?);
     try std.testing.expect(row.command_ai.?.style.height.px <= surface.options.row_height);
@@ -7047,6 +7053,7 @@ test "terminal command annotations preserve grid copy hover wrapped rows and dis
     try std.testing.expectEqual(@as(f32, 4), row.command_ai.?.style.padding.left);
     try std.testing.expectEqual(@as(f32, 4), row.command_ai.?.style.padding.right);
     try std.testing.expectEqual(app_theme.popupSelection(), row.command_ai.?.getBackground());
+    try std.testing.expectEqual(ui.Color.TRANSPARENT, row.command_info.?.getBackground());
     try std.testing.expectEqualStrings("7", row.command_code.?.getText().?.content);
     try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "AI") == null);
     try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "×") == null);
@@ -7162,6 +7169,7 @@ test "terminal command archive restores first row annotations and locates its re
     try std.testing.expect(view.locateCommand(1));
     var seen = false;
     for (view.history_command_info) |maybe| if (maybe) |node| {
+        try std.testing.expectEqual(ui.Color.TRANSPARENT, node.getBackground());
         const tag = node.children.items[0];
         if (tag.style.display == .none) continue;
         try std.testing.expectEqualStrings("CommandAiTag", tag.meta.ownership.meta.component_name.?);

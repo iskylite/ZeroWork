@@ -111,7 +111,7 @@ try {
  assert(assistantStrip.rect.y>=firstMenu.rect.y+firstMenu.rect.h,"AI strip must clear member controls");
  await click("ai.strip");await visible("ai.panel");await click("ai.sessions");await sleep(100);await click("ai.sessions");await click("ai.collapse");await hidden("ai.panel");
  check("group AI strip clears member controls and opens pinned panel without stealing member menu",{});
- await click(`groups.menu.${firstId}`);await menuItem("切换上下布局");await sleep(200);pp=await panes();assert(Math.abs(pp[0].rect.x-pp[1].rect.x)<1);assert(Math.abs(pp[1].rect.y-pp[0].rect.y-pp[0].rect.h-6)<=1);await capture("03-stacked");
+ await click(`groups.menu.${firstId}`);await menuItem("全部改为上下排列");await sleep(200);pp=await panes();assert(Math.abs(pp[0].rect.x-pp[1].rect.x)<1);assert(Math.abs(pp[1].rect.y-pp[0].rect.y-pp[0].rect.h-6)<=1);await capture("03-stacked");
  for(const [sessionId,marker] of [[firstId,"first"],[secondId,"second"]]) {
    await clickNode(await paneTerminal(sessionId));
    const path=join(isolated,`${marker}.txt`);await type(`printf '${marker}' > ${JSON.stringify(path)}`);await press("enter");await waitFor(async()=>{try{return await readFile(path,"utf8")===marker||null}catch{return null}},10000);

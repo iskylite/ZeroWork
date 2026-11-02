@@ -105,6 +105,7 @@
 
 /* Transcript siblings share one 14px inset; cards own only their inner padding. */
 #ai-messages > :is(.assistant-answer,.ai-tool-card,.ap-card,.cleanup-row,.approval,.turn-status){width:100%;min-width:0;box-sizing:border-box;margin-left:0;margin-right:0}
+#assistant #ai-messages,#assistant .ap-scene{gap:6px}
 /* Unavailable custom choices own a readable fg_3; do not fade that ink twice. */
 #assistant .v3-ai-control-row .ai-control:disabled,
 #assistant .v3-ai-control-row .ai-control:disabled:hover{opacity:1;color:var(--fg-3);background:var(--control-bg,var(--card));cursor:default}

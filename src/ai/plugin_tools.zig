@@ -268,16 +268,32 @@ pub const RequestTable = struct {
         var table = try init(allocator, captured_scope, definitions, members);
         errdefer table.deinit();
         const a = table.arena.allocator();
-        const entries = try a.alloc(Entry, table.entries.len + contributions.len);
-        @memcpy(entries[0..table.entries.len], table.entries);
-        for (contributions, table.entries.len..) |contribution, index| {
+        // The host query replaces the legacy tail-only read. Keep its captured
+        // targets only to advertise authorized live references in the schema;
+        // content dispatch still revalidates the host grant and generation.
+        const has_terminal_query = for (contributions) |item| {
+            if (std.mem.eql(u8, item.definition.id, "host.read_terminal")) break true;
+        } else false;
+        const legacy_read = if (has_terminal_query) table.lookup("read_terminal") else null;
+        const terminal_targets: []const TargetBinding = if (legacy_read) |entry| entry.targets else &.{};
+        const plugin_count = table.entries.len - @intFromBool(legacy_read != null);
+        const entries = try a.alloc(Entry, plugin_count + contributions.len);
+        var kept: usize = 0;
+        for (table.entries) |entry| {
+            if (legacy_read != null and std.mem.eql(u8, entry.definition.id, "read_terminal")) continue;
+            entries[kept] = entry;
+            kept += 1;
+        }
+        for (contributions, plugin_count..) |contribution, index| {
             const definition = contribution.definition;
             if (contribution.authority == .session_targets or !std.mem.startsWith(u8, definition.id, "host.") or definition.required_services.len != 0) return error.InvalidHostAuthority;
             try validateDefinition(definition);
             var encoded: [64]u8 = undefined;
             const name = try encodeName(&encoded, definition.id);
             for (entries[0..index]) |entry| if (std.mem.eql(u8, entry.provider_name, name)) return error.ToolDefinitionConflict;
-            entries[index] = .{ .definition = try copyDefinition(a, definition), .provider_name = try a.dupe(u8, name), .targets = &.{}, .authority = contribution.authority };
+            var owned_definition = try copyDefinition(a, definition);
+            if (std.mem.eql(u8, definition.id, "host.read_terminal") and terminal_targets.len != 0) owned_definition.schema = try terminalSourceSchema(a, definition.schema, terminal_targets, context);
+            entries[index] = .{ .definition = owned_definition, .provider_name = try a.dupe(u8, name), .targets = &.{}, .authority = contribution.authority };
         }
         table.entries = entries;
         table.host_context = context;
@@ -564,24 +580,28 @@ pub fn providerDefinitions(table: *const RequestTable, allocator: std.mem.Alloca
     for (table.entries, output) |entry, *definition| {
         const ids = try allocator.alloc(u64, entry.targets.len);
         for (entry.targets, ids) |target, *id| id.* = @backingInt(target.owner.session_id);
-        definition.* = .{ .session_ids = ids, .authority = entry.authority, .dynamic = .{ .id = entry.definition.id, .name = entry.provider_name, .schema = try terminalReadSchema(allocator, entry, ids), .description = entry.definition.description } };
+        definition.* = .{ .session_ids = ids, .authority = entry.authority, .dynamic = .{ .id = entry.definition.id, .name = entry.provider_name, .schema = try builtinTargetSchema(allocator, entry, ids), .description = entry.definition.description } };
     }
     return output;
 }
 
-/// Expose the already captured read targets so an unambiguous current-terminal
-/// read does not need a discovery round just to learn its ID. Dispatch still
-/// validates the original schema, target binding, generation and live scope.
-fn terminalReadSchema(allocator: std.mem.Allocator, entry: Entry, ids: []const u64) ![]const u8 {
-    if (entry.authority != .session_targets or !std.mem.eql(u8, entry.definition.id, "read_terminal")) return entry.definition.schema;
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, entry.definition.schema, .{});
+/// Builtin tools advertise the same captured target bounds in every provider
+/// path. Dispatch still validates the target binding, generation and live scope.
+fn builtinTargetSchema(allocator: std.mem.Allocator, entry: Entry, ids: []const u64) ![]const u8 {
+    if (entry.authority != .session_targets or !legacyName(entry.definition.id)) return entry.definition.schema;
+    return narrowSessionSchema(allocator, entry.definition.schema, ids);
+}
+
+/// Shared by captured builtin tools and the legacy provider wire adapter.
+pub fn narrowSessionSchema(allocator: std.mem.Allocator, input: []const u8, ids: []const u64) ![]const u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, input, .{});
     defer parsed.deinit();
     var schema = parsed.value;
-    const properties = schema.object.getPtr("properties") orelse return entry.definition.schema;
-    const targets = properties.object.getPtr("session_ids") orelse return entry.definition.schema;
-    const items = targets.object.getPtr("items") orelse return entry.definition.schema;
+    const properties = schema.object.getPtr("properties") orelse return input;
+    const targets = properties.object.getPtr("session_ids") orelse return input;
+    const items = targets.object.getPtr("items") orelse return input;
     // Do not replace a plugin's own enum or remove any declared constraints.
-    if (items.object.contains("enum")) return entry.definition.schema;
+    if (items.object.contains("enum")) return input;
     const a = parsed.arena.allocator();
     var allowed: std.array_list.Managed(std.json.Value) = .init(a);
     for (ids) |id| try allowed.append(if (std.math.cast(i64, id)) |value| .{ .integer = value } else .{ .number_string = try std.fmt.allocPrint(a, "{d}", .{id}) });
@@ -589,6 +609,19 @@ fn terminalReadSchema(allocator: std.mem.Allocator, entry: Entry, ids: []const u
     if (targets.object.getPtr("maxItems")) |maximum| if (maximum.* == .integer) {
         maximum.integer = @min(maximum.integer, @as(i64, @intCast(ids.len)));
     };
+    return std.json.Stringify.valueAlloc(allocator, schema, .{});
+}
+
+fn terminalSourceSchema(allocator: std.mem.Allocator, input: []const u8, targets: []const TargetBinding, context: host.Context) ![]const u8 {
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, input, .{});
+    defer parsed.deinit();
+    var schema = parsed.value;
+    const properties = schema.object.getPtr("properties") orelse return error.InvalidToolSchema;
+    const source = properties.object.getPtr("session_ref") orelse return error.InvalidToolSchema;
+    const a = parsed.arena.allocator();
+    var references: std.array_list.Managed(std.json.Value) = .init(a);
+    for (targets) |target| try references.append(.{ .string = try @import("host_queries.zig").sessionRef(a, context, target.owner) });
+    try source.object.put(a, "enum", .{ .array = references });
     return std.json.Stringify.valueAlloc(allocator, schema, .{});
 }
 

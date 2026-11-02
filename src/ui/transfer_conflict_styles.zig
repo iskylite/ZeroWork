@@ -65,7 +65,7 @@ pub fn notice() ui.BoxStyle {
     var style = stack(4);
     style.padding = ui.Padding.all(12);
     style.min_height = 62;
-    style.background = theme.current().danger.withAlpha(23);
+    style.background = theme.states().feedback_danger;
     style.border = .{ .radius = 9 };
     return style;
 }
@@ -96,7 +96,7 @@ pub fn iconButton(size: f32) ui.BoxStyle {
     return style;
 }
 pub fn hover() ui.BoxStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };

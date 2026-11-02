@@ -115,6 +115,7 @@ pub const Manager = struct {
     }
 
     pub fn run(self: *Manager, p: provider.Provider, request: provider.ChatRequest) !provider.ChatStats {
+        try @import("../update/admission.zig").require();
         return self.runWithTiming(p, request, retry.Clock{});
     }
 
@@ -206,6 +207,7 @@ pub const Manager = struct {
     /// and completed-call ledger. It exposes no tools and cannot dispatch new
     /// effects, even if a misbehaving provider returns a tool call anyway.
     pub fn resumeAnswer(self: *Manager, p: provider.Provider, cancel: ?*provider.CancelToken) !provider.ChatStats {
+        try @import("../update/admission.zig").require();
         return self.resumeAnswerWithTiming(p, cancel, retry.Clock{});
     }
 

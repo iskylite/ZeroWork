@@ -522,7 +522,7 @@ pub const View = struct {
     fn paintInputFocus(self: *View) void {
         inline for (.{ "input", "host_input", "port_input", "user_input" }) |field_name| {
             const input = &@field(self, field_name);
-            const background = if (input.state.focused) S.theme.popupSelection() else S.theme.popupInset();
+            const background = if (input.state.focused) S.theme.states().focus else S.theme.popupInset();
             if (!ui.Color.eql(input.node.getBackground(), background)) input.node.setBackground(background);
         }
     }

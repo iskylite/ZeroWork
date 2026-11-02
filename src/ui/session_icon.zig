@@ -53,8 +53,10 @@ test "OS icons take precedence over protocol and retain unknown fallback" {
     try std.testing.expectEqual(forPlugin(.{}, "ssh", false).icon_id, forConnection(.{}, "ssh", .unknown, false).icon_id);
 }
 
-/// Saved hosts use source colours; live tabs keep their existing status tint.
+/// Saved OS artwork uses source colours; protocol glyphs use theme ink.
+/// Live tabs keep their existing status tint.
 pub fn forHost(source: @import("../host/plugin_registry.zig").Registry, protocol_id: []const u8, kind: Os) ui.SvgAsset {
+    if (@import("std").mem.eql(u8, protocol_id, "bmc_ikvm")) return ui.icons.screen_share;
     const os = @import("host_os_assets.zig");
     return switch (kind) {
         .ubuntu => os.ubuntu,
@@ -74,7 +76,15 @@ pub fn setHostNode(node: *ui.Node, source: @import("../host/plugin_registry.zig"
     const selected = forHost(source, protocol_id, kind);
     node.setImage(null); // Replace an already-uploaded generic OS texture after discovery.
     node.setIcon(.{ .icon_id = selected.icon_id.?, .rep = selected.pickRep(18).?, .tint = ui.Color.WHITE });
+    refreshHostTint(node);
     node.markRenderDirty();
+}
+
+/// Coloured host SVGs become images after upload; both forms retain source RGB.
+pub fn refreshHostTint(node: *ui.Node) void {
+    const artwork = if (node.getIcon()) |icon| @import("host_os_assets.zig").index(icon.icon_id) != null else node.getImage() != null;
+    const remote_screen = if (node.getIcon()) |icon| icon.icon_id == ui.icons.screen_share.icon_id.? else false;
+    _ = node.setTint(if (artwork) ui.Color.WHITE else if (remote_screen) @import("sidebar_styles.zig").kvmIconInk() else @import("app_theme.zig").current().fg_2);
 }
 
 test "saved host artwork has independent coloured assets without changing tab OS assets" {

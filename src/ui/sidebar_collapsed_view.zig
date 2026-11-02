@@ -18,7 +18,7 @@ pub const View = struct {
     root: *ui.Node,
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, _: *Workspace, actions: Actions) !*View {
         const tint = try scope.createSignal(?ui.Color, theme.current().fg_2);
-        const hover = try scope.createSignal(?ui.BoxStyle, .{ .background = theme.current().hover });
+        const hover = try scope.createSignal(?ui.BoxStyle, .{ .background = theme.states().hover });
         const button = try Sidebar.iconButton(cx, scope, "panel-left-open", "显示连接列表 ⌘B", "sidebar.restore", Sidebar.styles.railAction(26), tint, hover, ui.Cx.simpleHandler(actions.expand, actions.context), null);
         const root = try Sidebar.hint(cx, scope, button, "显示连接列表 ⌘B", .top);
         root.meta.ownership.meta.test_id = "workspace.sidebar.restore";

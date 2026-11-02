@@ -45,7 +45,7 @@ pub fn detail() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 120 }, .direction = .column, .gap = 4, .padding = .{ .top = 8, .left = 10, .right = 10, .bottom = 8 }, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 8 }, .flex_shrink = 0, .overflow = .hidden };
 }
 pub fn track() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 3 }, .background = theme.popupInset(), .border = .{ .radius = 1 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 3 }, .background = theme.states().range_track, .border = .{ .radius = 1 }, .flex_shrink = 0 };
 }
 pub fn fill(fraction: f32, color: ui.Color) ui.BoxStyle {
     return .{ .width = .{ .percent = fraction * 100 }, .height = .fill(), .background = color, .border = .{ .radius = 1 } };
@@ -171,7 +171,7 @@ pub fn v3Footer() ui.BoxStyle {
     return s;
 }
 pub fn v3FooterButton(primary: bool) ui.BoxStyle {
-    return .{ .height = .{ .px = 30 }, .min_width = if (primary) 88 else 76, .padding = .{ .top = 6, .bottom = 6, .left = 10, .right = 10 }, .font_size = 11, .font_weight = 500, .text_color = if (primary) theme.actionForeground(theme.current().action_accent) else theme.current().fg_1, .background = if (primary) theme.current().action_accent else theme.current().hover, .border = .{ .radius = 8 }, .shadow = .{}, .flex_shrink = 0, .align_items = .center, .justify = .center };
+    return .{ .height = .{ .px = 30 }, .min_width = if (primary) 88 else 76, .padding = .{ .top = 6, .bottom = 6, .left = 10, .right = 10 }, .font_size = 11, .font_weight = 500, .text_color = if (primary) theme.actionForeground(theme.current().action_accent) else theme.current().fg_1, .background = if (primary) theme.current().action_accent else theme.states().action, .border = .{ .radius = 8 }, .shadow = .{}, .flex_shrink = 0, .align_items = .center, .justify = .center };
 }
 
 /// Embedded SFTP tray shares exactly the same task renderer as both popovers.

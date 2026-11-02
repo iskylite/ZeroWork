@@ -26,6 +26,7 @@ test "plugin V3 reads registered metadata and detail actions preserve draft" {
     const entries = [_]registry.PluginManifest{
         .{ .id = "ssh", .display_name = "SSH", .plugin_version = "9.8.7", .origin = .builtin, .workspace_kind = "terminal", .content_renderer = "terminal" },
         .{ .id = "probe", .display_name = "Real registered probe", .plugin_version = "0.3.1", .origin = .bundled, .workspace_kind = "canvas", .content_renderer = "canvas", .settings_section = .{ .fields = &.{.{ .key = "show_grid", .label = "显示网格", .kind = .boolean, .default_value = "true", .apply_timing = .next_connection }} } },
+        .{ .id = "bmc_ikvm", .display_name = "BMC · iKVM", .plugin_version = "0.3.2", .origin = .bundled, .workspace_kind = "console", .content_renderer = "console" },
     };
     controller.plugin_page.registry_source = .{ .published = .{ .entries = &entries, .renderers = &.{} } };
     controller.model.selectPage(5);
@@ -33,6 +34,9 @@ test "plugin V3 reads registered metadata and detail actions preserve draft" {
     var context: u8 = 0;
     const content = try view.mountContent(cx, scope, &controller, .{ .context = &context, .changed = changed, .request_edit = request, .action = action });
     try cx.root.?.appendChild(cx.allocator, content);
+    try std.testing.expect(byId(content, "settings.plugin.bmc_ikvm.row") != null);
+    try std.testing.expect(!hasText(byId(content, "settings.plugins.future.body").?, "BMC iKVM"));
+    try std.testing.expect(!hasText(byId(content, "settings.plugins.future.body").?, "BMC · iKVM"));
     const timing = byId(content, "settings.plugin.probe.show_grid.timing").?;
     try std.testing.expect(timing.behavior.interaction.focusable);
     try std.testing.expectEqualStrings("下次连接生效", timing.behavior.interaction.a11y.?.label.?);

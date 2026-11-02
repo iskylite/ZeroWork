@@ -29,7 +29,7 @@ pub fn row() ButtonStyle {
     return .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .row, .align_items = .center, .justify = .start, .gap = 0, .padding = .{}, .background = ui.Color.TRANSPARENT, .corner_radius = 7, .border_width = 0, .flex_shrink = 0 };
 }
 pub fn hover() ButtonStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn rowContent() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 6, .right = 6 } };

@@ -409,6 +409,7 @@ pub const SessionHost = struct {
     /// allocator. The probe host alone dispatches its restricted factory; no
     /// normal controller, renderer, tab or export is created for this entry.
     pub fn openProbeScope(self: *SessionHost, envelope: envelopes.Envelope, parent_editor_operation: OperationKey, draft_revision: u64) !probes.ProbeToken {
+        try @import("../update/admission.zig").require();
         if (std.Thread.getCurrentId() != self.owner_thread) return error.ProbeOffMainThread;
         if (draft_revision == 0 or parent_editor_operation.operation_id == 0) return error.InvalidProbeEditor;
         try envelope.validate();
@@ -801,6 +802,7 @@ pub const SessionHost = struct {
     }
 
     fn createWithPurpose(self: *SessionHost, spec: SessionCreateSpec, target: AttachmentTarget, purpose: SessionPurpose) !Accepted {
+        try @import("../update/admission.zig").require();
         try spec.validate();
         if (@backingInt(target.window_id) == 0 or @backingInt(target.workspace_id) == 0) return error.InvalidIdentity;
         const protocol_id = if (spec == .plugin) spec.plugin.protocol_id else plugins.legacyId(spec.pluginId());

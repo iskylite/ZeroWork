@@ -56,34 +56,18 @@ fn appendTable(cx: *ui.Cx, scope: *ui.Scope, parent: *ui.Node, lines: []const []
     };
     columns = @min(columns, 16);
     const column_width = @max(120, width / @as(f32, @floatFromInt(columns)));
-    var heights: std.ArrayList(f32) = .empty;
-    defer heights.deinit(cx.allocator);
-    var total_height: f32 = 0;
-    for (lines, 0..) |line, index| {
-        if (index == 1) {
-            try heights.append(cx.allocator, 0);
-            continue;
-        }
-        var cells = std.mem.splitScalar(u8, std.mem.trim(u8, line, " \t\r|"), '|');
-        var height: f32 = 34;
-        while (cells.next()) |cell| {
-            const measured = cx.text.measureTextWidth(cell, S.body_font_size, 400, false);
-            height = @max(height, @ceil(measured / (column_width - 16)) * 21 + 12);
-        }
-        try heights.append(cx.allocator, height);
-        total_height += height;
-    }
-    const scroll = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .height = total_height, .rubber_band_x = false }).mount(scope, cx);
+    // Markdown spans wrap using their rendered fonts and word boundaries.
+    // Let layout measure that content instead of estimating lines from width.
+    const scroll = try ui.widgets.ScrollArea(.{ .direction = .horizontal, .rubber_band_x = false }).mount(scope, cx);
     scroll.container.meta.ownership.meta.test_id = "ai.message.table";
-    scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
+    scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .flex_shrink = 0 });
     scroll.content.setStyleInline(cx.allocator, .{ .width = .{ .px = @as(f32, @floatFromInt(columns)) * column_width }, .direction = .column, .flex_shrink = 0 });
     for (lines, 0..) |line, index| {
         if (index == 1) continue;
-        const row_height = heights.items[index];
-        const row = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = row_height }, .direction = .row, .flex_shrink = 0 }, .{});
+        const row = try ui.box(cx, .{ .width = .fill(), .min_height = 34, .direction = .row, .flex_shrink = 0 }, .{});
         var cells = std.mem.splitScalar(u8, std.mem.trim(u8, line, " \t\r|"), '|');
         for (0..columns) |_| {
-            const cell = try ui.box(cx, .{ .width = .{ .px = column_width }, .height = .{ .px = row_height }, .padding = .{ .left = 8, .right = 8, .top = 6, .bottom = 6 }, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT }, .background = if (index == 0) @import("app_theme.zig").current().well else ui.Color.TRANSPARENT, .overflow = .hidden, .flex_shrink = 0 }, .{});
+            const cell = try ui.box(cx, .{ .width = .{ .px = column_width }, .min_height = 34, .padding = .{ .left = 8, .right = 8, .top = 6, .bottom = 6 }, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT }, .background = if (index == 0) @import("app_theme.zig").current().well else ui.Color.TRANSPARENT, .overflow = .hidden, .flex_shrink = 0 }, .{});
             const value = std.mem.trim(u8, cells.next() orelse "", " \t\r");
             const text = try ui.widgets.Markdown(.{ .text = try scope.createText(value, .{}), .options = S.markdownOptions() }).mount(scope, cx);
             try compact(cx, scope, text);

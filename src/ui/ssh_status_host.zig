@@ -281,6 +281,8 @@ pub const Host = struct {
     }
     pub fn updateActive(self: *Host, next: ?Active) !void {
         const controls = self.controls orelse return;
+        controls.identity_button.behavior.events.on_click = .{ .context = self, .callback = showIdentity };
+        controls.progress_slot.setDisplay(.flex);
         if (next) |source| {
             try Details.validate(source.details);
             if (source.details.key.owner != .session) return error.InvalidOwner;
@@ -339,6 +341,8 @@ pub const Host = struct {
     }
     pub fn updateFile(self: *Host, next: FileActive) !void {
         const controls = self.controls orelse return;
+        controls.identity_button.behavior.events.on_click = .{ .context = self, .callback = showIdentity };
+        controls.progress_slot.setDisplay(.flex);
         self.info.dismiss();
         if (self.detail.controller.source) |source| self.detail.invalidate(source.value.owner);
         self.active = null;
@@ -368,6 +372,27 @@ pub const Host = struct {
             };
         }
         try self.finishUpdate();
+    }
+    /// Keep the original status bar and trim terminal/file-only entries for
+    /// graphical sessions. Their original route action opens native diagnostics.
+    pub fn updateGraphical(self: *Host, next: @import("../host/plugin_ui_contract.zig").ConnectionStatus) !void {
+        try self.updateActive(null);
+        const controls = self.controls orelse return;
+        controls.disabled.set(false);
+        controls.identity_button.behavior.events.on_click = controls.chain_button.behavior.events.on_click;
+        try self.text(controls.identity_label, if (next.state == .online) "已连接" else switch (next.state) {
+            .connecting => "连接中",
+            .ended => "已断开",
+            else => "连接异常",
+        });
+        _ = controls.state_dot.setTint(if (next.state == .online) S.theme.current().ok else S.theme.current().fg_3);
+        controls.identity_button.setStyleInline(self.cx.allocator, .{ .width = .{ .px = S.identity_width } });
+        controls.rtt_label.setDisplay(.flex);
+        for ([_]*ui.Node{ controls.encoding_button, controls.grid_button, controls.more_button, controls.socks_button, controls.progress_slot }) |node| node.setDisplay(.none);
+        if (controls.chain_button.behavior.interaction.a11y) |*props| props.description = "KVM 连接链路与连接日志";
+        for (controls.chain_button.children.items) |child| if (child.getIcon() != null) {
+            _ = child.setTint(if (next.state == .online) S.theme.current().ok else S.theme.current().fg_3);
+        };
     }
     fn finishUpdate(self: *Host) !void {
         const controls = self.controls orelse return;

@@ -59,6 +59,7 @@ test {
     _ = @import("ssh_terminal_service_tests.zig");
     _ = @import("ui/background_layers.zig");
     _ = @import("background_surface_tests.zig");
+    _ = @import("floating_input_tests.zig");
     _ = @import("socks_info_theme_tests.zig");
     _ = @import("socks_background_ui_tests.zig");
     _ = @import("material_popup_tests.zig");

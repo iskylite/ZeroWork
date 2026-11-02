@@ -61,8 +61,9 @@ pub const keys = [_]ConfigKey{
     .{ .page = "AI 辅助", .section = "ai", .key = "execution_mode" },
     .{ .page = "AI 辅助", .section = "ai", .key = "session_retention" },
     .{ .page = "外观与主题", .section = "ui", .key = "command_info" },
+    .{ .page = "关于与更新", .section = "updates", .key = "auto_check" },
 };
-pub const sections = [_][]const u8{ "ui", "ui.materials", "ui.materials.background", "completion", "transfer", "ssh", "ai", "log", "notify" };
+pub const sections = [_][]const u8{ "ui", "ui.materials", "ui.materials.background", "completion", "transfer", "ssh", "ai", "log", "notify", "updates" };
 
 pub fn keyExists(section: []const u8, key: []const u8) bool {
     for (keys) |entry| if (std.mem.eql(u8, entry.section, section) and std.mem.eql(u8, entry.key, key)) return true;
@@ -92,17 +93,18 @@ pub const pages = [_]Page{
     .{ .name = "协议插件", .config_section = "plugins", .description = "查看内置协议服务" },
     .{ .name = "通知", .config_section = "notify", .description = "事件通知、标签提醒与勿扰时段" },
     .{ .name = "数据与日志", .config_section = "log", .description = "本地配置、会话记录、日志导出与清理" },
+    .{ .name = "关于与更新", .config_section = "updates", .description = "应用版本、自动检查与安全安装更新" },
 };
 
-test "settings page map covers eight documented pages" {
-    try std.testing.expectEqual(@as(usize, 8), pages.len);
+test "settings page map covers nine documented pages" {
+    try std.testing.expectEqual(@as(usize, 9), pages.len);
     try std.testing.expectEqualStrings("ai", pages[4].config_section);
     try std.testing.expectEqualStrings("log", pages[7].config_section);
     for (pages) |page| if (!std.mem.eql(u8, page.config_section, "plugins")) try std.testing.expect(sectionExists(page.config_section));
     var buffer: [1024]u8 = undefined;
     const text = try formatPages(&buffer);
     try std.testing.expect(std.mem.indexOf(u8, text, "AI 辅助 [ai]") != null);
-    try std.testing.expectEqual(@as(usize, 58), keys.len);
+    try std.testing.expectEqual(@as(usize, 59), keys.len);
     try std.testing.expectEqualStrings("line_height", keys[5].key);
     try std.testing.expectEqualStrings("permission_mode", keys[20].key);
     try std.testing.expectEqualStrings("error_hint", keys[22].key);

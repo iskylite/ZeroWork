@@ -36,6 +36,7 @@ pub const Service = struct {
     /// Explicit settings discovery uses the same transport/parser without saving
     /// candidates into the configuration. Disabled drafts may be inspected.
     pub fn request(self: *Service, provider: config.AiProvider, revision: u64) !void {
+        try @import("../update/admission.zig").require();
         if (self.job != null) return error.WorkerBusy;
         var selected = provider;
         selected.enabled = true;

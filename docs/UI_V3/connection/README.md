@@ -1,5 +1,8 @@
 # 连接与资产管理 · V3 可交互设计
 
+当前新建连接外壳（2026-11-02）：标题旁协议下拉框、圆点与连线三步指引由 `wizard-shell.js` / `wizard-shell.css` 统一渲染；步骤按内容宽度排列，连接线两端各留20px。SSH/SFTP 保留第一步全部高级选项；BMC 使用 [`../kvm/editor.html`](../kvm/editor.html) 的三步 provider，路径与显示/只读高级项在第二步。原生对应注册表 Select 与 `src/ui/connection_stepper.zig`，不把业务校验放进公共外壳。
+
+
 > 当前评审：。本轮替代下文与其冲突的侧栏、会话、气泡、连接页与 KVM 展示规则；待用户确认后再落地 APP UI。
 [新建连接](index.html) · [连接管理](index.html?open=none) · [KVM 配置](index.html?protocol=kvm)
 

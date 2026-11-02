@@ -42,7 +42,10 @@ pub const Pipeline = struct {
     wire: ?Wire = null,
     received_ns: u64 = 0,
     decoder_generation: u64 = 0,
+    /// Successful complete CPU snapshots, used by the UI's "decode" FPS.
+    /// Not socket reads, every received FBU, or distinct visual content changes.
     published_frames: u64 = 0,
+    /// Lease contention skips publication only; protocol deltas remain applied.
     skipped_frames: u64 = 0,
     written_bytes: u64 = 0,
     control_request: ?[4]u8 = null,

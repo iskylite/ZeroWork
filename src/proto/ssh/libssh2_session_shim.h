@@ -33,7 +33,9 @@ void zw_ssh_socket_interrupt(int socket_fd);
 int zw_ssh_socket_release(int socket_fd);
 int zw_ssh_socket_set_blocking(int socket_fd);
 int zw_ssh_socket_set_nonblocking(int socket_fd);
-/* Both endpoints are nonblocking and owned by the caller. */
+/* Both endpoints are nonblocking and owned by the caller. Requests 64 KiB
+   send/receive buffers on each endpoint; the OS may clamp the request, and
+   refusal leaves defaults usable. No system-wide configuration changes. */
 int zw_ssh_socketpair(int *target_fd, int *relay_fd);
 typedef struct zw_ssh_relay ZW_SSH_RELAY;
 /* Borrows the channel, consumes relay_fd. Only one thread may use its session. */
@@ -47,7 +49,9 @@ void zw_ssh_relay_destroy(ZW_SSH_RELAY *relay);
 void zw_ssh_relay_pause(void);
 #define ZW_SSH_RELAY_WAIT_MAX 16
 /* One bounded wait for sibling streams on the same owned session. Returns 1
-   when a productive round can continue without waiting, otherwise 0. */
+   when a productive round can continue without waiting, otherwise 0 (including
+   poll readiness: callers must step again). All-blocked consumers suppress SSH
+   input polling and cap the retry at 2 ms; count == 0 still polls pending opens. */
 int zw_ssh_relay_wait_many(ZW_SSH_RELAY *const *relays, size_t count,
     int transport_fd, LIBSSH2_SESSION *session, int timeout_ms);
 void zw_ssh_relay_wait(ZW_SSH_RELAY *relay, int transport_fd, LIBSSH2_SESSION *session, int timeout_ms);
@@ -176,6 +180,7 @@ LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_exclusive(LIBSSH2_SFTP *sftp, const ch
 int zw_libssh2_sftp_truncate(LIBSSH2_SFTP_HANDLE *handle, unsigned long long size);
 LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_append(LIBSSH2_SFTP *sftp, const char *path, unsigned long long offset);
 LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_read(LIBSSH2_SFTP *sftp, const char *path);
+void zw_libssh2_sftp_seek(LIBSSH2_SFTP_HANDLE *handle, unsigned long long offset);
 long zw_libssh2_sftp_read(LIBSSH2_SFTP_HANDLE *handle, unsigned char *buffer, size_t len);
 long zw_libssh2_sftp_write(LIBSSH2_SFTP_HANDLE *handle, const unsigned char *buffer, size_t len);
 long long zw_libssh2_sftp_size(LIBSSH2_SFTP *sftp, const char *path);

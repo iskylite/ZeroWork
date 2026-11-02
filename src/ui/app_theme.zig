@@ -41,6 +41,27 @@ var material_visible: bool = false;
 var material_transparency: f32 = 0;
 var material_blur: f32 = 0;
 
+pub const StateColors = @import("theme_states.zig").Palette;
+const StateCache = struct { colors: Colors, states: StateColors };
+var state_cache: [2]?StateCache = .{ null, null };
+/// Published component-state palette. Material opacity never fades these
+/// interaction fills; their own foreground/state contracts remain intact.
+pub fn states() StateColors {
+    return stateColors(baseColors());
+}
+fn stateColors(colors_: Colors) StateColors {
+    var normalized = colors_;
+    inline for (@typeInfo(Colors).@"struct".field_names) |role|
+        @field(normalized, role).a = 255;
+    for (state_cache) |cached| if (cached) |entry| {
+        if (std.meta.eql(entry.colors, normalized)) return entry.states;
+    };
+    const result = @import("theme_states.zig").derive(normalized);
+    state_cache[1] = state_cache[0];
+    state_cache[0] = .{ .colors = normalized, .states = result };
+    return result;
+}
+
 /// Maximum background transparency by role, not opacity and not tree opacity.
 /// Lower layers reveal more of the shared window backdrop; overlays stay readable.
 /// Current visual contract and native captures: docs/UI_V3/LAYER_MATERIALS.md.
@@ -104,7 +125,7 @@ fn unadjustedMaterialAlpha(comptime role: []const u8) u8 {
     return @intFromFloat(@round(255 * (1 - transparency)));
 }
 fn imageBackdropBounds(palette: Colors) [2]ui.Color {
-    const veil = palette.app.withAlpha(@intFromFloat(@round(material_transparency * 255 / 100)));
+    const veil = palette.app.withAlpha(@intFromFloat(@round((100 - material_transparency) * 255 / 100)));
     return .{ patchPaint(veil, ui.Color.BLACK), patchPaint(veil, ui.Color.WHITE) };
 }
 fn builtinTerminalForeground(palette: Colors) ?ui.Color {
@@ -231,12 +252,15 @@ pub fn paintSignal(comptime Value: type, cx: *ui.Cx, scope: *ui.Scope, comptime 
 /// Button forwards geometry/fill overrides but omits gradient and shadows.
 /// Keep the V3 primary paint on the native node without replacing its control state.
 pub fn stylePrimary(cx: *ui.Cx, scope: *ui.Scope, button: *ui.Node, disabled: ?*ui.Signal(bool)) !void {
-    try scope.createEffect(.{ .cx = cx, .node = button, .disabled = disabled, .publication = try cx.themeSignal(scope) }, struct {
+    try scope.createEffect(.{ .cx = cx, .node = button, .disabled = disabled, .hovered = try ui.hooks.useHover(scope, button), .pressed = try ui.hooks.usePressed(scope, cx, button), .focused = (try ui.hooks.useFocusState(scope, cx, button)).focused, .publication = try cx.themeSignal(scope) }, struct {
         fn paint(ctx: anytype) void {
             _ = ctx.publication.get();
             const unavailable = if (ctx.disabled) |value| value.get() else if (ctx.node.behavior.interaction.a11y) |attrs| attrs.disabled else false;
             const recipe = @import("shell_styles.zig").emptyButton(true);
-            ctx.node.setStyle(ctx.cx.allocator, .gradient, if (unavailable) null else recipe.gradient);
+            const s = states();
+            const pressed = ctx.pressed.get() and ctx.hovered.get();
+            const hot = ctx.hovered.get() or ctx.focused.get();
+            ctx.node.setStyle(ctx.cx.allocator, .gradient, if (unavailable) null else .{ .from = if (pressed) s.primary_pressed else if (hot) s.primary_hover else s.primary, .to = if (pressed) s.primary_pressed_to else if (hot) s.primary_hover_to else s.primary_to, .direction = .diagonal });
             ctx.node.setStyleInline(ctx.cx.allocator, .{
                 .shadow = if (unavailable) .{ .blur = 0, .color = ui.Color.TRANSPARENT } else recipe.shadow,
                 .inset_shadow = if (unavailable) .{ .blur = 0, .color = ui.Color.TRANSPARENT } else recipe.inset_shadow,
@@ -250,16 +274,13 @@ pub fn stylePrimary(cx: *ui.Cx, scope: *ui.Scope, button: *ui.Node, disabled: ?*
 /// lower-layer text ghosting. This samples app content, not the desktop.
 /// Quiet, opaque content surface inside an overlay; independent of wallpaper alpha.
 fn insetColor(c: Colors) ui.Color {
-    const overlay = c.overlay.withAlpha(255);
-    const well = c.well.withAlpha(255);
-    const blended = ui.Color.lerp(overlay, well, 0.3);
-    return if (contrast(overlay, blended) >= 1.1) blended else well;
+    return stateColors(c).control;
 }
 pub fn popupInset() ui.Color {
     return insetColor(current());
 }
 fn actionColor(c: Colors) ui.Color {
-    return ui.Color.lerp(c.overlay.withAlpha(255), c.fg_2.withAlpha(255), 0.12);
+    return stateColors(c).action;
 }
 pub fn popupAction() ui.Color {
     return actionColor(current());
@@ -268,8 +289,7 @@ pub fn popupBorder() ui.Color {
     return ui.Color.TRANSPARENT;
 }
 fn selectionColor(c: Colors) ui.Color {
-    const dark = @as(u32, c.app.r) * 299 + @as(u32, c.app.g) * 587 + @as(u32, c.app.b) * 114 < 128000;
-    return ui.Color.lerp(c.overlay.withAlpha(255), c.accent, if (dark) 0.16 else 0.10);
+    return stateColors(c).selected;
 }
 pub fn popupSelection() ui.Color {
     return selectionColor(current());
@@ -316,6 +336,10 @@ pub fn remapUiSurface(color: ui.Color, previous: Colors) ?ui.Color {
     if (ui.Color.eql(color, insetColor(previous))) return popupInset();
     if (ui.Color.eql(color, actionColor(previous))) return popupAction();
     if (ui.Color.eql(color, selectionColor(previous))) return popupSelection();
+    const old_states = stateColors(previous);
+    const next_states = states();
+    inline for (@typeInfo(StateColors).@"struct".field_names) |role|
+        if (ui.Color.eql(color, @field(old_states, role))) return @field(next_states, role);
     return null;
 }
 /// Foregrounds retain readable ink roles when a palette aliases base/ink RGB.
@@ -337,6 +361,14 @@ pub fn overlayPaint() ui.BoxStyle {
 pub fn styleInput(input: ui.widgets.input.InputResult) void {
     input.input_container.addBeforeRender(paintInputChrome);
 }
+fn inputSelectionBackground(c: Colors) ui.Color {
+    const focused_bg = stateColors(c).focus;
+    for ([_]ui.Color{ c.action_accent, c.accent_ink, c.fg_1 }) |candidate| {
+        const solid = candidate.withAlpha(255);
+        if (contrast(solid, focused_bg) >= 1.5) return solid;
+    }
+    return actionForeground(focused_bg);
+}
 fn paintInputChrome(node: *ui.Node) void {
     const state: *ui.widgets.input.TextInputState = @ptrCast(@alignCast(node.behavior.events.event_context orelse return));
     if (state.cx_ref) |cx| if (state.tokens != cx.tokens) {
@@ -344,11 +376,74 @@ fn paintInputChrome(node: *ui.Node) void {
         state.dirty = true;
     };
     const c = current();
-    const background = if (state.disabled) popupAction() else if (state.has_error) c.danger.withAlpha(24) else if (state.focused) popupSelection() else popupInset();
+    // Focus uses the theme focus fill. Text selection must
+    // remain distinct, with readable ink for both built-in and imported themes.
+    const selection_bg = inputSelectionBackground(c);
+    const selection_fg = actionForeground(selection_bg);
+    if (state.selection_bg_override == null or !ui.Color.eql(state.selection_bg_override.?, selection_bg) or
+        state.selection_fg_override == null or !ui.Color.eql(state.selection_fg_override.?, selection_fg))
+    {
+        state.selection_bg_override = selection_bg;
+        state.selection_fg_override = selection_fg;
+        state.dirty = true;
+    }
+    const background = if (state.disabled) states().disabled else if (state.has_error) (if (state.focused) states().error_focus else states().tag_danger) else if (state.focused) states().focus else popupInset();
     if (!ui.Color.eql(node.getBackground(), background)) node.setBackground(background);
     node.setBorderColor(ui.Color.TRANSPARENT);
     const outline = node.style.outline();
     if (outline != null and outline.?.width != 0) node.setStyleInline(state.allocator, .{ .outline = .{ .width = 0, .color = ui.Color.TRANSPARENT } });
+}
+
+test "input text selection stays visible and follows retained theme changes" {
+    const previous = currentName();
+    defer select(previous);
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(320, 80);
+    const input = try ui.widgets.Input(.{ .value = "https://172.20.3.225", .width = 280 }).mountResult(scope, cx);
+    styleInput(input);
+    cx.root = input.node;
+    input.state.focused = true;
+    input.state.selection_anchor = 8;
+    input.state.cursor_pos = 13;
+    var registry = try @import("../config/theme_registry.zig").Registry.init(std.testing.allocator);
+    defer registry.deinit();
+    for (registry.records.items) |record| {
+        errdefer std.debug.print("input selection theme: {s}\n", .{record.id});
+        selectTokens(record.ui_tokens);
+        cx.setTheme(widgetTheme(currentName()));
+        cx.layout();
+        _ = cx.render();
+        const spans = input.state.text_display_node.?.getText().?.spans;
+        try std.testing.expectEqual(@as(usize, 1), spans.len);
+        try std.testing.expectEqual(@as(u32, 8), spans[0].start);
+        try std.testing.expectEqual(@as(u32, 13), spans[0].end);
+        try std.testing.expectEqual(inputSelectionBackground(current()), spans[0].bg_color.?);
+        try std.testing.expect(contrast(spans[0].bg_color.?, input.input_container.getBackground()) >= 1.5);
+        try std.testing.expect(contrast(spans[0].bg_color.?, spans[0].color.?) >= 4.5);
+    }
+    // Imported middle-luminance accents need dark ink rather than fixed white.
+    var imported = @import("../config/theme_registry.zig").builtinTokens("light");
+    imported.action_accent = 0x808080ff;
+    selectTokens(imported);
+    cx.setTheme(widgetTheme(currentName()));
+    cx.layout();
+    _ = cx.render();
+    const span = input.state.text_display_node.?.getText().?.spans[0];
+    try std.testing.expect(contrast(span.bg_color.?, span.color.?) >= 4.5);
+    try std.testing.expectEqual(actionForeground(current().action_accent), span.color.?);
+    // An imported action color can exactly match the field's focus surface.
+    const focused_bg = states().focus;
+    imported.action_accent = (@as(u32, focused_bg.r) << 24) | (@as(u32, focused_bg.g) << 16) | (@as(u32, focused_bg.b) << 8) | 255;
+    selectTokens(imported);
+    cx.setTheme(widgetTheme(currentName()));
+    cx.layout();
+    _ = cx.render();
+    const fallback_span = input.state.text_display_node.?.getText().?.spans[0];
+    try std.testing.expect(contrast(fallback_span.bg_color.?, input.input_container.getBackground()) >= 1.5);
+    try std.testing.expect(contrast(fallback_span.bg_color.?, fallback_span.color.?) >= 4.5);
 }
 pub fn overlayGlass() ui.GlassParams {
     return .{ .backdrop_blur = @max(12, material_blur), .capture_current_target = false, .glass_intensity = 0, .specular_opacity = 0, .refraction_level = 0, .warp_gain = 0 };
@@ -469,8 +564,15 @@ fn deriveBubblePaint(palette: Colors, alpha: u8) BubblePaint {
 }
 /// An unchecked control stays neutral, including on pale single-hue palettes.
 pub fn switchTrackOff() ui.Color {
-    const c = baseColors();
-    return ui.Color.lerp(c.surface_2, c.fg_3, 0.35);
+    return states().choice_off;
+}
+pub fn choiceBackground(checked: bool, disabled: bool) ui.Color {
+    const s = states();
+    return if (disabled) (if (checked) s.choice_disabled_on else s.choice_disabled_off) else if (checked) s.choice_on else s.choice_off;
+}
+pub fn choiceThumb(checked: bool, disabled: bool) ui.Color {
+    const s = states();
+    return if (disabled) (if (checked) s.choice_disabled_ink else s.choice_disabled_thumb_off) else if (checked) s.choice_ink else s.choice_thumb_off;
 }
 fn luminance(c: ui.Color) f64 {
     var result: f64 = 0;
@@ -588,57 +690,78 @@ fn widgetTokens(name: Name) ui.ThemeTokens {
 fn widgetTokensFrom(c: Colors, dark: bool) ui.ThemeTokens {
     var value = if (dark) ui.theme.dark else ui.theme.light;
     const t = &value.tokens.color;
+    const s = stateColors(c);
     t.bg_base = c.app;
     t.bg_primary = c.surface_1;
     t.bg_secondary = c.surface_2;
     t.bg_tertiary = c.overlay;
-    t.bg_hover = c.hover;
-    // Action focus/press uses a neutral surface; selection stays with tabs and choices.
-    t.bg_active = c.hover;
+    t.bg_hover = s.hover;
+    t.bg_active = s.pressed;
+    t.bg_focus = s.focus;
     t.bg_inset = c.well;
     t.fg_primary = c.fg_1;
     t.fg_secondary = c.fg_2;
-    t.fg_tertiary = c.fg_2;
+    t.fg_tertiary = s.muted_ink;
     t.fg_disabled = c.fg_3;
     // Zenit uses accent for checked checkbox/radio/switch fills. V3 uses --primary.
     t.accent = c.action_accent;
-    t.accent_hover = c.action_accent;
+    t.accent_hover = s.primary_hover;
     t.accent_muted = selectionColor(c);
     t.accent_subtle = selectionColor(c);
     t.border = ui.Color.TRANSPARENT;
     t.border_strong = ui.Color.TRANSPARENT;
     t.border_focus = ui.Color.TRANSPARENT;
-    // Focus uses selection fill and caret, without a border or focus ring.
+    // Focus uses its theme state fill and caret, without a border or focus ring.
     t.focus_ring = ui.Color.TRANSPARENT;
     t.fg_inverse = actionForeground(c.action_accent);
     t.success = c.ok_ink;
-    t.success_subtle = c.ok.withAlpha(24);
-    t.warning_subtle = c.warn.withAlpha(24);
-    t.danger_subtle = c.danger.withAlpha(24);
+    t.success_subtle = s.feedback_ok;
+    t.warning_subtle = s.feedback_warn;
+    t.danger_subtle = s.feedback_danger;
     t.danger_hover = c.action_danger;
     t.info = c.accent_ink;
-    t.info_subtle = selectionColor(c);
+    t.info_subtle = s.feedback_info;
     t.warning = c.warn_ink;
     // Widget danger is text/icon ink. Filled app actions use action_danger explicitly.
     t.danger = c.danger_ink;
     t.selection_bg = selectionColor(c);
     t.button_primary_bg = c.action_accent;
     t.button_primary_fg = actionForeground(c.action_accent);
+    t.button_primary_hover = s.primary_hover;
+    t.button_primary_pressed = s.primary_pressed;
+    t.button_danger_bg = s.danger;
+    t.button_danger_fg = s.danger_ink;
+    t.button_danger_hover = s.danger_hover;
+    t.button_danger_pressed = s.danger_pressed;
     t.button_secondary_bg = actionColor(c);
     t.button_secondary_fg = if (dark) c.fg_2 else c.fg_1;
     t.input_bg = insetColor(c);
     t.input_border = ui.Color.TRANSPARENT;
-    t.checkbox_bg = ui.Color.lerp(c.overlay.withAlpha(255), c.fg_2.withAlpha(255), 0.4);
+    t.checkbox_bg = s.choice_off;
+    t.checkbox_fg = s.choice_ink;
+    t.checkbox_disabled_fg = s.choice_disabled_ink;
+    t.switch_thumb_on = s.choice_ink;
+    t.switch_disabled_thumb_off = s.choice_disabled_thumb_off;
+    t.range_track = s.range_track;
+    t.range_fill = s.range_fill;
+    t.range_hover = s.range_hover;
+    t.range_drag = s.range_drag;
+    t.range_thumb = s.range_thumb;
+    t.range_disabled = s.range_disabled;
+    t.range_disabled_thumb = s.range_disabled_thumb;
+    t.progress_success = s.progress_ok;
+    t.progress_warning = s.progress_warn;
+    t.progress_error = s.progress_danger;
     t.checkbox_border = ui.Color.TRANSPARENT;
-    t.checkbox_disabled_bg = c.surface_2;
+    t.checkbox_disabled_bg = s.choice_disabled_off;
     t.checkbox_disabled_border = ui.Color.TRANSPARENT;
-    t.checkbox_disabled_checked_bg = c.well_border;
-    t.switch_track_on = c.action_accent;
-    t.switch_thumb = ui.Color.WHITE;
-    t.switch_track_off = ui.Color.lerp(c.surface_2.withAlpha(255), c.fg_3, 0.35);
-    t.list_hover_bg = c.hover;
+    t.checkbox_disabled_checked_bg = s.choice_disabled_on;
+    t.switch_track_on = s.choice_on;
+    t.switch_thumb = s.choice_thumb_off;
+    t.switch_track_off = s.choice_off;
+    t.list_hover_bg = s.hover;
     t.list_selection_bg = selectionColor(c);
-    t.list_selection_hover_bg = selectionColor(c);
+    t.list_selection_hover_bg = s.selected_hover;
     t.table_header_bg = c.surface_2;
     t.separator = ui.Color.TRANSPARENT;
     t.tooltip_bg = c.overlay;
@@ -695,6 +818,64 @@ test "image readability floor preserves no-image material curves and palette ink
     try std.testing.expectEqual(imported_base, baseColors());
 }
 
+test "theme state contract covers every builtin and matches the editable design palette" {
+    const previous = currentName();
+    defer select(previous);
+    const reference = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "docs/UI_V3/theme-states.json", std.testing.allocator, .limited(256 * 1024));
+    defer std.testing.allocator.free(reference);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, reference, .{});
+    defer parsed.deinit();
+    const themes = parsed.value.object.get("themes").?.object;
+    const contract = @import("theme_states.zig");
+    for (@import("../config/theme_presets.zig").ids) |id| {
+        errdefer std.debug.print("theme state contract: {s}\n", .{id});
+        selectTokens(@import("../config/theme_registry.zig").builtinTokens(id));
+        const s = states();
+        const c = baseColors();
+        const expected = themes.get(id).?.object;
+        inline for (@typeInfo(StateColors).@"struct".field_names) |role| {
+            const value = expected.get(role).?.string;
+            try std.testing.expectEqual(hex(try std.fmt.parseInt(u24, value[1..], 16)), @field(s, role));
+        }
+        const pairs = [_][2]ui.Color{ .{ s.hover, s.action }, .{ s.pressed, s.hover }, .{ s.selected_hover, s.selected }, .{ s.disabled, s.control } };
+        for (pairs) |pair| try std.testing.expect(contrast(pair[0], pair[1]) >= contract.state_min);
+        for ([_][2]ui.Color{ .{ s.focus, s.control }, .{ s.drop_target, s.selected }, .{ s.error_focus, s.tag_danger } }) |pair|
+            try std.testing.expect(contrast(pair[0], pair[1]) >= contract.focus_min);
+        for ([_]ui.Color{ s.primary, s.primary_to, s.primary_hover, s.primary_hover_to, s.primary_pressed, s.primary_pressed_to }) |background|
+            try std.testing.expect(contrast(background, s.primary_ink) >= contract.text_min);
+        for ([_]ui.Color{ s.danger, s.danger_hover, s.danger_pressed }) |background|
+            try std.testing.expect(contrast(background, s.danger_ink) >= contract.text_min);
+        for ([_]ui.Color{ s.control, s.hover, s.pressed, s.focus, s.selected, s.selected_hover, s.drop_target }) |background|
+            for ([_]ui.Color{ c.fg_1, c.fg_2, s.muted_ink }) |ink|
+                try std.testing.expect(contrast(background, ink) >= contract.text_min);
+        for ([_][2]ui.Color{ .{ s.tag_ok, c.ok_ink }, .{ s.tag_warn, c.warn_ink }, .{ s.tag_danger, c.danger_ink }, .{ s.error_focus, c.danger_ink } }) |pair|
+            try std.testing.expect(contrast(pair[0], pair[1]) >= contract.text_min);
+        for ([_][2]ui.Color{
+            .{ s.choice_on, s.choice_ink },                          .{ s.choice_disabled_on, s.choice_disabled_ink },
+            .{ s.choice_disabled_off, s.choice_disabled_thumb_off }, .{ s.range_fill, s.range_thumb },
+            .{ s.range_disabled, s.range_disabled_thumb },           .{ s.feedback_info, c.accent_ink },
+            .{ s.feedback_ok, c.ok_ink },                            .{ s.feedback_warn, c.warn_ink },
+            .{ s.feedback_danger, c.danger_ink },                    .{ s.search_match, s.search_match_ink },
+            .{ s.search_current, s.search_current_ink },
+        }) |pair| try std.testing.expect(contrast(pair[0], pair[1]) >= contract.text_min);
+        for ([_]ui.Color{ s.range_fill, s.range_hover, s.range_drag, s.range_disabled, s.progress_ok, s.progress_warn, s.progress_danger }) |fill|
+            try std.testing.expect(contrast(fill, s.range_track) >= contract.graphic_min);
+        try std.testing.expect(contrast(s.choice_thumb_off, s.choice_off) >= contract.graphic_min);
+        try std.testing.expect(contrast(s.choice_on, s.choice_off) >= 1.5);
+        try std.testing.expect(contrast(s.choice_disabled_on, s.choice_disabled_off) >= 1.5);
+        try std.testing.expect(contrast(s.range_hover, s.range_fill) >= contract.state_min);
+        try std.testing.expect(contrast(s.range_drag, s.range_hover) >= contract.state_min);
+        for ([_]ui.Color{ s.range_hover, s.range_drag }) |edge|
+            try std.testing.expect(contrast(edge, s.range_thumb) >= contract.graphic_min);
+        for ([_]ui.Color{ s.feedback_info, s.feedback_ok, s.feedback_warn, s.feedback_danger }) |background|
+            for ([_]ui.Color{ c.fg_1, c.fg_2 }) |ink|
+                try std.testing.expect(contrast(background, ink) >= contract.text_min);
+        try std.testing.expect(contrast(s.search_match, c.terminal) >= 1.5);
+        try std.testing.expect(contrast(s.search_current, c.terminal) >= contract.graphic_min);
+        try std.testing.expect(contrast(s.search_current, s.search_match) >= contract.graphic_min);
+    }
+}
+
 test "all V3 themes publish independent filled action and readable state roles" {
     const previous = currentName();
     defer select(previous);
@@ -709,10 +890,10 @@ test "all V3 themes publish independent filled action and readable state roles" 
         try std.testing.expect(contrast(widget.button_primary_bg, widget.button_primary_fg) >= 4.49);
         try std.testing.expectEqual(ui.Color.TRANSPARENT, widget.focus_ring);
         try std.testing.expectEqual(c.fg_3, widget.fg_disabled);
-        try std.testing.expectEqual(c.surface_2, widget.checkbox_disabled_bg);
+        try std.testing.expectEqual(states().choice_disabled_off, widget.checkbox_disabled_bg);
         try std.testing.expectEqual(popupInset(), widget.input_bg);
         try std.testing.expectEqual(popupSelection(), widget.list_selection_bg);
-        try std.testing.expectEqual(c.hover, widget.bg_active);
+        try std.testing.expectEqual(states().pressed, widget.bg_active);
         if (!std.mem.eql(u8, id, "dark") and !std.mem.eql(u8, id, "light") and !std.mem.eql(u8, id, "sauber"))
             try std.testing.expect(!ui.Color.eql(c.action_accent, c.accent));
     }
@@ -848,7 +1029,7 @@ test "builtin terminal selection preserves readable default ink through RGBA com
                 const c = current();
                 for ([_]u8{ 0, 64, 128, 192, 255 }) |gray| {
                     const pixel = ui.Color.rgba(gray, gray, gray, 255);
-                    const parent = if (image) patchPaint(palette.app.withAlpha(@intFromFloat(@round(transparency * 255 / 100))), pixel) else palette.app;
+                    const parent = if (image) patchPaint(palette.app.withAlpha(@intFromFloat(@round((100 - transparency) * 255 / 100))), pixel) else palette.app;
                     const background = patchPaint(c.surface_1, parent);
                     // Selection alpha is part of the palette, including the
                     // translucent product Dark/Light selections.
@@ -876,19 +1057,16 @@ test "image material floor covers the complete parent interval and invalidates o
     _ = setMaterialVisible(true);
     for (@import("../config/theme_presets.zig").ids) |id| {
         selectTokens(@import("../config/theme_registry.zig").builtinTokens(id));
-        var first_surface_alpha: u8 = 0;
         for ([_]f32{ 0, 50, 100 }) |transparency| {
             _ = setMaterialParameters(transparency, 0);
             const palette = baseColors();
             const c = current();
-            if (transparency == 0) first_surface_alpha = c.surface_1.a;
-            if (transparency == 100) try std.testing.expect(c.surface_1.a < first_surface_alpha);
             inline for (material_roles) |role| {
                 const surface = @field(c, role);
                 try std.testing.expect(surface.a >= unadjustedMaterialAlpha(role));
                 for ([_]u8{ 0, 64, 128, 192, 255 }) |gray| {
                     const pixel = ui.Color.rgba(gray, gray, gray, 255);
-                    const parent = if (comptime std.mem.eql(u8, role, "overlay")) pixel else patchPaint(palette.app.withAlpha(@intFromFloat(@round(transparency * 255 / 100))), pixel);
+                    const parent = if (comptime std.mem.eql(u8, role, "overlay")) pixel else patchPaint(palette.app.withAlpha(@intFromFloat(@round((100 - transparency) * 255 / 100))), pixel);
                     const painted = patchPaint(surface, parent);
                     inline for (.{ "fg_1", "fg_2", "fg_3", "accent_ink", "ok_ink", "warn_ink", "danger_ink" }) |ink|
                         try std.testing.expect(contrast(@field(c, ink), painted) >= 4.5);
@@ -942,7 +1120,7 @@ test "execution PATCH opt-in ink covers actual approval impact and history warni
             const impact_ink = patchInk(unmodified.warn_ink, &.{impact});
             try std.testing.expect(contrast(impact_ink, impact) >= 4.5);
             if (contrast(unmodified.warn_ink, impact) >= 4.5) try std.testing.expectEqual(unmodified.warn_ink, impact_ink);
-            const veil = palette.app.withAlpha(@intFromFloat(@round(transparency * 255 / 100)));
+            const veil = palette.app.withAlpha(@intFromFloat(@round((100 - transparency) * 255 / 100)));
             const history_backgrounds = [_]ui.Color{
                 patchPaint(unmodified.overlay, patchPaint(veil, ui.Color.BLACK)),
                 patchPaint(unmodified.overlay, patchPaint(veil, ui.Color.WHITE)),
@@ -1039,4 +1217,64 @@ test "user bubble paints cover the full gradient and cache every palette and alp
     try std.testing.expectEqual(materialAlpha("overlay"), c.from.a);
     try std.testing.expect(c.from.a >= 214);
     try std.testing.expect(!std.meta.eql(b, c));
+}
+
+test "common theme controls retain checked disabled and range colors across builtin publications" {
+    const old = currentName();
+    defer select(old);
+    select(.dark);
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(600, 600);
+    const scope = try ui.Scope.init(std.testing.allocator, null, cx.owner);
+    defer scope.dispose();
+    const publication = try cx.bindState(@import("shell_styles.zig").ThemePublication, .{});
+    publication.publish(cx, widgetTheme(currentName()));
+    cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill(), .direction = .column }, .{});
+    const disabled = try scope.createSignal(bool, false);
+    const cb = try ui.widgets.Checkbox(.{ .checked = true, .disabled = disabled }).mount(scope, cx);
+    const mixed = try ui.widgets.Checkbox(.{ .indeterminate = true, .disabled = disabled }).mount(scope, cx);
+    const radio = try ui.widgets.Radio(.{ .checked = true, .disabled = disabled }).mount(scope, cx);
+    const on = try ui.widgets.Switch(.{ .checked = true, .disabled = disabled }).mount(scope, cx);
+    const off = try ui.widgets.Switch(.{ .checked = false, .disabled = disabled }).mount(scope, cx);
+    const slider = try ui.widgets.Slider(.{ .value = 60, .disabled = disabled }).mount(scope, cx);
+    const progress = try ui.widgets.Progress(.{ .value = 60 }).mount(scope, cx);
+    const alert = try ui.widgets.Alert(.{ .variant = .warning, .message = "Review" }).mount(scope, cx);
+    for ([_]*ui.Node{ cb, mixed, radio, on, off, slider.wrapper, progress, alert }) |node| try cx.root.?.appendChild(cx.allocator, node);
+    const slider_area = slider.wrapper.children.items[0];
+    const track = slider_area.children.items[0];
+    const thumb = slider_area.children.items[1];
+    for (@import("../config/theme_presets.zig").ids) |id| {
+        errdefer std.debug.print("common theme controls: {s}\n", .{id});
+        selectTokens(@import("../config/theme_registry.zig").builtinTokens(id));
+        publication.publish(cx, widgetTheme(currentName()));
+        const s = states();
+        for ([_]bool{ false, true }) |dis| {
+            disabled.set(dis);
+            for (0..18) |_| {
+                cx.frame_count += 1;
+                cx.frame_time_ms += 16;
+                cx.bindFrameClock();
+                _ = cx.render();
+            }
+            const fill = if (dis) s.choice_disabled_on else s.choice_on;
+            const ink = if (dis) s.choice_disabled_ink else s.choice_ink;
+            for ([_]*ui.Node{ cb, mixed, radio, on }) |control| {
+                try std.testing.expectEqual(fill, control.children.items[0].getBackground());
+                try std.testing.expectEqual(@as(f32, 1), control.getOpacity());
+            }
+            try std.testing.expectEqual(ink, cb.children.items[0].children.items[0].getIcon().?.tint);
+            try std.testing.expectEqual(ink, mixed.children.items[0].children.items[1].children.items[0].getIcon().?.tint);
+            try std.testing.expectEqual(ink, radio.children.items[0].children.items[0].getBackground());
+            try std.testing.expectEqual(ink, on.children.items[0].children.items[0].getBackground());
+            try std.testing.expectEqual(if (dis) s.choice_disabled_off else s.choice_off, off.children.items[0].getBackground());
+            try std.testing.expectEqual(if (dis) s.choice_disabled_thumb_off else s.choice_thumb_off, off.children.items[0].children.items[0].getBackground());
+            try std.testing.expectEqual(s.range_track, track.getBackground());
+            try std.testing.expectEqual(if (dis) s.range_disabled else s.range_fill, track.children.items[0].getBackground());
+            try std.testing.expectEqual(if (dis) s.range_disabled_thumb else s.range_thumb, thumb.getBackground());
+            try std.testing.expectEqual(s.range_track, progress.children.items[0].getBackground());
+            try std.testing.expectEqual(s.feedback_warn, alert.getBackground());
+            try std.testing.expectEqual(@as(f32, 60), slider.value.?.peek());
+        }
+    }
 }

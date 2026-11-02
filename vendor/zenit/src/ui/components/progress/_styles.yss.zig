@@ -1,4 +1,3 @@
-// GENERATED FILE, do not edit: generated from styles.yss; after editing the source run `zig build gen-yix` (yix-lsp regenerates it on save).
 //! Progress styles and rendering: state color, track, determined mode fill (vertical three-stop
 //! gradient), undetermined mode gloss bar (sweeps left-right per frame clock; see `barAt`). View in
 //! progress.yix.
@@ -10,37 +9,32 @@ const theme = core.theme;
 const Color = core.Color;
 const ProgressStatus = @import("mod.zig").ProgressStatus;
 
-const white = Color.rgba(255, 255, 255, 255);
-const black = Color.rgba(0, 0, 0, 255);
 
-/// State -> fill color (increase contrast against white background via lerp taper point here)
+/// Theme owns each fill/track pair; widgets do not derive local colors.
 pub fn statusColor(s: ProgressStatus, t: *const theme.ThemeTokens) Color {
-    const base = switch (s) {
-        .normal => t.tokens.color.accent,
-        .success => t.tokens.color.success,
-        .@"error" => t.tokens.color.danger,
+    return switch (s) {
+        .normal => t.tokens.color.range_fill,
+        .success => t.tokens.color.progress_success,
+        .@"error" => t.tokens.color.progress_error,
     };
-    // Storybook and real UI both need clearer fill contrast, avoid loss against light backgrounds.
-    return Color.lerp(base, t.tokens.color.fg_primary, 0.12);
 }
 
 /// Outer: track + percentage text horizontal; fill full width if no width given
 pub const container = ui.paramStyle(struct { width: ?f32, pub const declared = &[_][]const u8{ "width", "height", "direction", "align_items", "gap", }; pub fn resolve(args: @This(), t: *const ui.theme.Values) ui.BoxStyle { return ui.boxFrom(.{ .width = ui.orElse(args.width, .{ .grow = .{} }), .height = .fit, .direction = .row, .align_items = .center, .gap = 8, }, t); } });
 
 /// Track: rounded capsule, clip filled / gloss bar
-pub const track = ui.paramStyle(struct { height: f32, pub const declared = &[_][]const u8{ "width", "height", "background", "corner_radius", "overflow_hidden", }; pub fn resolve(args: @This(), t: *const ui.theme.Values) ui.BoxStyle { return ui.boxFrom(.{ .width = .{ .grow = .{} }, .height = args.height, .background = ui.mix(ui.tokenRef(.color, "bg-tertiary"), ui.tokenRef(.color, "fg-primary"), 0.06), .corner_radius = args.height / 2, .overflow_hidden = true, }, t); } });
+pub const track = ui.paramStyle(struct { height: f32, pub const declared = &[_][]const u8{ "width", "height", "background", "corner_radius", "overflow_hidden", }; pub fn resolve(args: @This(), t: *const ui.theme.Values) ui.BoxStyle { return ui.boxFrom(.{ .width = .{ .grow = .{} }, .height = args.height, .background = ui.tokenRef(.color, "range-track"), .corner_radius = args.height / 2, .overflow_hidden = true, }, t); } });
 
 /// Determined mode fill: capsule per percentage width; color see fillGradient
 pub const fill = ui.paramStyle(struct { percent: f32, height: f32, pub const declared = &[_][]const u8{ "width", "height", "corner_radius", }; pub fn resolve(args: @This(), t: *const ui.theme.Values) ui.BoxStyle { return ui.boxFrom(.{ .width = .{ .percent = args.percent }, .height = args.height, .corner_radius = args.height / 2, }, t); } });
 
-/// Fill vertical three-stop gradient (simulate lighting relief): stops from state color lerped to
-/// white/black; YSS lacks gradient syntax, stay in Zig
+/// Preserve the renderer shape while using the theme fill at every stop.
 pub fn fillGradient(status: ProgressStatus, t: *const theme.ThemeTokens) ui.BoxStyle {
     const c = statusColor(status, t);
     const stops = [_]core.GradientStop{
-        .{ .color = Color.lerp(c, white, 0.25), .position = 0.0 },
+        .{ .color = c, .position = 0.0 },
         .{ .color = c, .position = 0.5 },
-        .{ .color = Color.lerp(c, black, 0.10), .position = 1.0 },
+        .{ .color = c, .position = 1.0 },
     };
     return .{ .multi_gradient = core.MultiGradient.fromSlice(&stops, .vertical) };
 }
@@ -78,8 +72,7 @@ pub fn barAt(now_ms: f64) Edges {
     };
 }
 
-/// Gloss bar: horizontal three-stop gradient, peak (white mix 35%) left-biased, right decays to
-/// dark (black mix 15%)
+/// Moving bar uses the same contrast-checked fill as determined progress.
 pub fn drawBar(ctx: ui.DrawContext, b: Bar, frame: ui.view.Frame) anyerror!void {
     const e = barAt(frame.now_ms);
     const left = e.left * ctx.render_w;
@@ -90,9 +83,9 @@ pub fn drawBar(ctx: ui.DrawContext, b: Bar, frame: ui.view.Frame) anyerror!void 
     const c = statusColor(b.status, frame.tokens);
     var colors = @as([16]Color, @splat(Color.rgba(0, 0, 0, 0)));
     var positions = @as([16]f32, @splat(0));
-    colors[0] = Color.lerp(c, white, 0.35);
+    colors[0] = c;
     colors[1] = c;
-    colors[2] = Color.lerp(c, black, 0.15);
+    colors[2] = c;
     positions[1] = 0.55;
     positions[2] = 1.0;
     const r = b.height / 2;
@@ -110,4 +103,4 @@ pub fn drawBar(ctx: ui.DrawContext, b: Bar, frame: ui.view.Frame) anyerror!void 
     } });
 }
 
-//# yix-map styles.yss
+//# yix-map src/ui/components/progress/styles.yss

@@ -12,6 +12,8 @@
 
 ## 表面与派生颜色
 
+组件静态、hover、按下、聚焦、禁用、选择、拖入目标与 Tag 随主题统一派生，见[主题状态配色合同](THEME_STATE_CONTRACT.md)。修改基础配色后运行 `node scripts/sync_theme_states.mjs`；`theme_palette_contract.mjs` 与原生主题测试共同阻止生成色过期、HTML/原生漂移及状态碰色。
+
 表面遵循[全局主题合同](GLOBAL_THEME_CONTRACT.md)和[层级材质合同](LAYER_MATERIALS.md)。透明度只作用于表面，文字和图标不随整棵节点树淡化。
 
 图片可见时，六种材质按完整 palette、透明度和实际图片可见性缓存可读 alpha 下限，派生目标为 4.65:1。除七种语义 ink 外，`surface_1` 还检查原终端默认前景，以及既有 `action_accent`、alpha8=15 的输入行高亮合成。Solarized Dark 的 UI `surface_1` 为 `#002833`。

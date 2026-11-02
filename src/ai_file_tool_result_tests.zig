@@ -34,3 +34,43 @@ test "file tool result capacity errors never manufacture successful empty text" 
     failed.body = .{ .failure = .{ .remote = .permission_denied } };
     try std.testing.expectError(error.RemoteFileCaptureFailed, projection.project(allocator, failed, 65536));
 }
+
+test "pagination file projection returns exact byte continuation after UTF8 and wire-budget trimming" {
+    const a = std.testing.allocator;
+    const bytes = try a.alloc(u8, 60000);
+    defer a.free(bytes);
+    for (0..10000) |index| @memcpy(bytes[index * 6 ..][0..6], "你\n\"\\");
+    const value: capture.Value = .{ .metadata = metadata(), .body = .{ .text = .{ .bytes = bytes, .offset = 123, .source_version = 0xabcd, .original_size = 100000, .read_bytes = bytes.len + 1, .returned_bytes = bytes.len, .read_limit = 60000, .truncated = true } } };
+    const result = try projection.project(a, value, 65536);
+    defer result.deinit(a);
+    const encoded = try std.json.Stringify.valueAlloc(a, .{ .stdout = result.stdout, .stderr = result.stderr }, .{});
+    defer a.free(encoded);
+    try std.testing.expect(encoded.len < 65536);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, result.stderr, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqualStrings("000000000000abcd", parsed.value.object.get("source_version").?.string);
+    try std.testing.expectEqual(@as(i64, @intCast(123 + result.stdout.len)), parsed.value.object.get("next_offset").?.integer);
+    try std.testing.expect(result.stdout.len > 0 and std.unicode.utf8ValidateSlice(result.stdout));
+}
+
+test "pagination directory projection advances only by entries actually returned" {
+    const a = std.testing.allocator;
+    const Entry = @import("proto/ssh/sftp_readonly.zig").Entry;
+    const long_name = try a.alloc(u8, 3000);
+    defer a.free(long_name);
+    @memset(long_name, 'x');
+    var entries: [128]Entry = undefined;
+    for (&entries) |*entry| entry.* = .{ .raw_name = long_name, .display_name = long_name, .absolute_path = long_name, .attributes = .{ .kind = .file } };
+    const value: capture.Value = .{ .metadata = metadata(), .body = .{ .listing = .{ .entries = &entries, .offset = 4096, .source_version = 0xabcd, .next_offset = 4224, .page_count = 1, .entry_limit = 128, .truncated = true } } };
+    const result = try projection.project(a, value, 65536);
+    defer result.deinit(a);
+    const encoded = try std.json.Stringify.valueAlloc(a, .{ .stdout = result.stdout, .stderr = result.stderr }, .{});
+    defer a.free(encoded);
+    try std.testing.expect(encoded.len < 65536);
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, result.stdout, .{});
+    defer parsed.deinit();
+    const count = parsed.value.object.get("entries").?.array.items.len;
+    try std.testing.expect(count > 0 and count < entries.len);
+    try std.testing.expectEqual(@as(i64, @intCast(4096 + count)), parsed.value.object.get("next_offset").?.integer);
+    try std.testing.expectEqualStrings("000000000000abcd", parsed.value.object.get("source_version").?.string);
+}

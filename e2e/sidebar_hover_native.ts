@@ -1,5 +1,5 @@
 import {openSidebarHostMenu} from './sidebar_host_menu.ts';
-/** Restored independent host shortcuts: native hover, routes, edit/copy and keyboard dispatch.
+/** Host hover exposes only connect: native hover, routes and keyboard dispatch.
  * node e2e/sidebar_hover_native.ts OUTPUT [BINARY]
  * Owned /private/tmp data and synthetic public Harness input only.
  */
@@ -12,7 +12,7 @@ import * as h from '../zig-out/share/zenit/harness/client.ts';
 import {cleanupOwnedBridgeDirectories} from './native_owned_cleanup.ts';
 const out=resolve(process.argv[2]??'/tmp/zerowork-followup-sidebar/native'),binary=resolve(process.argv[3]??'zig-out/bin/zerowork');await mkdir(out,{recursive:true});
 const base=await realpath(await mkdtemp('/private/tmp/zerowork-sidebar-hover-'));let data=join(base,'data');await mkdir(data);
-const mode=process.argv[4]??'full';assert(['full','minimum','actions','double'].includes(mode));
+const mode=process.argv[4]??'full';assert(['full','minimum','actions','double','status'].includes(mode));
 const themes=process.env.ZW_SIDEBAR_THEMES?.split(',')??['dark','light','sauber'];
 const names=['X40-AI01','production-data-platform-primary-区域-01','files'];
 let hosts='[registry]\nschema_version=2\nrevision=1\nnext_connection_id=4\nnext_group_id=1\n';
@@ -36,27 +36,43 @@ async function action(index:number,id:string){await clean();const r=await hover(
 async function cap(theme:string,state:string){const name=theme+'-'+state;await h.sleep(100);const ids=['workspace.sidebar','sidebar.host','sidebar.host.name','sidebar.host.hops','sidebar.host.connect','sidebar.host.copy','sidebar.host.edit','context.menu','wizard.name','connection.progress'];const snapshot=Object.fromEntries(await Promise.all(ids.map(async id=>[id,await h.query(id)])));await writeFile(join(out,name+'.json'),JSON.stringify(snapshot,null,2));assert((await h.screenshot(join(out,name+'.png'))).ok);report.captures.push(name);}
 function identity(r:any){const n=part(r,'sidebar.host.name');assert(n);return n.rect;}
 const near=(a:number,b:number,s:string)=>assert(Math.abs(a-b)<.25,`${s}: ${a} vs ${b}`);
-async function stable(before:any[],state:string){const rows=await Promise.all(names.map((_,i)=>row(i)));for(let i=0;i<rows.length;i++){assert(rows[i],names[i]);const r=rows[i];near(r.rect.h,36,state+' row height');const n=identity(r);near(n.x,before[i].x,state+' name x');assert(n.w>0,'identity retains visible space');const route=part(r,'sidebar.host.hops');assert(route,'route identity remains visible');const actions=['connect','copy','edit'].map(id=>part(r,'sidebar.host.'+id));if(actions.every(Boolean)){for(let j=0;j<actions.length;j++){const a=actions[j];near(a.rect.w,24,'shortcut hit width');assert(a.rect.x>=n.x+n.w,'shortcut never overlaps identity');if(j)assert(a.rect.x>=actions[j-1].rect.x+actions[j-1].rect.w,'shortcuts never overlap');}assert(actions[2].rect.x+24<=r.rect.x+r.rect.w-8.9,'shortcuts remain within row');assert(route.rect.x+route.rect.w<=actions[0].rect.x,'route remains beside shortcuts');}}}
+async function stable(before:any[],state:string){const rows=await Promise.all(names.map((_,i)=>row(i)));for(let i=0;i<rows.length;i++){assert(rows[i],names[i]);const r=rows[i];near(r.rect.h,36,state+' row height');const n=identity(r);near(n.x,before[i].x,state+' name x');assert(n.w>0,'identity retains visible space');const route=part(r,'sidebar.host.hops');assert(route,'route identity remains visible');assert(!flat(r).some(n=>['sidebar.host.copy','sidebar.host.edit'].includes(n.test_id)),'copy and edit shortcuts are absent');const connect=part(r,'sidebar.host.connect');if(connect){near(connect.rect.w,24,'connect hit width');assert(connect.rect.x>=n.x+n.w,'connect never overlaps identity');assert(connect.rect.x+24<=r.rect.x+r.rect.w-8.9,'connect remains within row');assert(route.rect.x+route.rect.w<=connect.rect.x,'route remains beside connect');}}}
 async function launch(theme:string){data=join(base,'data-'+theme);await mkdir(data);await writeFile(join(data,'hosts.toml'),hosts);const rpc=join(base,'rpc-'+theme);await mkdir(rpc);process.env.ZENIT_E2E_FILE_RPC_DIR=rpc;await writeFile(join(data,'config.toml'),`[meta]\nconfig_revision=1\n[ui]\ntheme="${theme}"\nfont_family="Menlo"\nfont_size=14\n`);log=await open(join(out,theme+'.log'),'w');child=spawn(binary,[],{env:{...process.env,ZEROWORK_DATA_DIR:data,ZEROWORK_AUTOCONNECT:'0',ZENIT_E2E_BACKGROUND:'1',ZENIT_E2E_ISOLATE_POINTER:'1'},stdio:['ignore',log.fd,log.fd]});ended=new Promise(r=>child.once('close',r));await h.waitForServerReady(20000);assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),child.pid);await h.resizeWindow(1280,720);await node('sidebar.host');}
 async function stop(){if(child?.exitCode===null){child.kill('SIGTERM');await ended;}if(child)await cleanupOwnedBridgeDirectories(child.pid);await log?.close();}
 try{
  for(const theme of themes){
   if(mode==='actions'&&!['dark','light','sauber'].includes(theme)||mode==='double'&&theme!=='dark')continue;
   await launch(theme);
+  if(mode==='status'){
+   const sessions=await sessionCount();
+   await hover(0);
+   for(const area of ['icon','count','gap']){
+    const r=await row(0),route=part(r,'sidebar.host.route'),count=part(r,'sidebar.host.hops'),connect=part(r,'sidebar.host.connect');
+    assert(route&&count&&connect);
+    const x=area==='icon'?route.rect.x+4:area==='count'?count.rect.x+count.rect.w/2:(route.rect.x+route.rect.w+connect.rect.x)/2;
+    await h.clickAt(x,route.rect.y+route.rect.h/2);await h.sleep(120);
+    assert.equal(await sessionCount(),sessions,area+' status click must not create a session');
+    await clean();
+   }
+   await cap(theme,'status-clicks-no-connection');
+   await action(0,'connect');await h.waitFor(async()=>await sessionCount()===sessions+1||null);
+   await h.sleep(200);assert.equal(await sessionCount(),sessions+1,'connect opens exactly one session');
+   await cap(theme,'status-then-connect');
+   report.checks.push(theme+': route icon, count and gap create no session; explicit connect creates exactly one');
+   report.themes.push({theme});await stop();continue;
+  }
   if(mode==='double'){const r=await row(0);await h.clickAt(r.rect.x+50,r.rect.y+r.rect.h/2,2);await h.sleep(400);assert.equal(await sessionCount(),1,'a native double click creates exactly one host session');await h.sleep(300);assert.equal(await sessionCount(),1);await cap(theme,'double-click-single-session');report.themes.push({theme,sessions:1});await stop();console.log('PASS double-click sidebar',theme);continue;}
   if(mode==='minimum'){const grip=await node('sidebar.resize');await h.mouseDown(grip.rect.x+grip.rect.w/2,grip.rect.y+60);await h.mouseMove(grip.rect.x-120,grip.rect.y+60);await h.mouseUp(grip.rect.x-120,grip.rect.y+60);await h.sleep(120);near((await node('workspace.sidebar')).rect.w,220,'minimum sidebar');}
   await h.mouseMove(700,400);await h.sleep(100);const before=await Promise.all(names.map(async(_,i)=>identity(await row(i))));if(mode!=='minimum')near((await node('workspace.sidebar')).rect.w,238,'sidebar width');await cap(theme,'idle');
   await hover(0);await stable(before,'short hover');await cap(theme,'short-hover');await hover(1);await stable(before,'long hover');await cap(theme,'long-hover');
   const long=await row(1),name=part(long,'sidebar.host.name');await h.mouseMove(name.rect.x+Math.min(30,name.rect.w/2),name.rect.y+name.rect.h/2);await h.sleep(650);await cap(theme,'identity-tooltip');
-  await action(1,'edit');await node('wizard.name');assert.equal((await h.inputState('wizard.name')).buffer,names[1]);await cap(theme,'edit');await h.key('escape');await h.waitFor(async()=>!(await h.query('wizard.name')).some(shown)||null);
   await h.resizeWindow(860,480);await hover(1);await stable(before,'compact hover');await cap(theme,'compact-hover');
   if(['dark','light','sauber'].includes(theme)){
-   const sessions=await sessionCount();await action(0,'copy');await h.waitFor(async()=>(await h.query('sidebar.host')).filter(shown).length===4||null);assert.equal(await sessionCount(),sessions,'copy does not open a connection');report.checks.push(theme+': copy shortcut persists a fourth host without creating a session');
-   await hover(0);await keyboardAction('sidebar.host.edit');await h.key('enter');await node('wizard.name');assert.equal((await h.inputState('wizard.name')).buffer,names[0]);assert.equal(await sessionCount(),sessions,'keyboard edit does not connect');await cap(theme,'keyboard-edit');await h.key('escape');await h.waitFor(async()=>!(await h.query('wizard.name')).some(shown)||null);
+   const sessions=await sessionCount();await hover(0);await keyboardAction('sidebar.host.connect');
    await openSidebarHostMenu(await row(0));await node('context.menu.new_tab');await h.key('escape');await action(0,'connect');await h.waitFor(async()=>await sessionCount()===sessions+1||null);await cap(theme,'connect-dispatched');report.checks.push(theme+': independent connect shortcut creates exactly one target session');
   }
-  report.themes.push({theme,nameWidths:before.map(r=>r.w),states:['idle','short-hover','long-hover','identity-tooltip','edit','compact-hover']});await stop();console.log('PASS sidebar',theme);
+  report.themes.push({theme,nameWidths:before.map(r=>r.w),states:['idle','short-hover','long-hover','identity-tooltip','compact-hover']});await stop();console.log('PASS sidebar',theme);
  }
- report.status='passed';report.checks.push('Independent connect/copy/edit shortcuts remain clickable beside route counts at standard and compact native sizes; full identity tooltip is retained.');
+ report.status='passed';if(mode!=='status')report.checks.push('Only the connect shortcut is exposed beside route counts at standard and compact native sizes; copy/edit shortcuts are absent and full identity tooltip is retained.');
 }catch(error){report.status='failed';report.error=String(error);console.error(error);await h.screenshot(join(out,'failure.png')).catch(()=>{});}finally{await stop().catch(()=>{});await rm(base,{recursive:true,force:true});report.cleanup={isolated_removed:true};await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));}
 if(report.status!=='passed')process.exitCode=1;

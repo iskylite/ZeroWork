@@ -27,6 +27,20 @@ async function click(id:string){const n=await vis(id);assert((await clickAt(n.re
 async function press(name:string,mods?:any){assert((await key(name,mods)).ok)}
 async function type(text:string){assert((await type_(text)).ok)}
 async function capture(name:string){await sleep(180);assert((await screenshot(join(out,name+'.png'))).ok);report.captures.push(name)}
+async function checkThemeCommand(triggerId:string,width:number,height:number){
+ await resizeWindow(width,height);await mouseMove(400,200);await sleep(200);
+ await click(triggerId);await mouseMove(400,200);await sleep(200);
+ const expected=(await vis('status.theme')).rect;
+ await press('escape');await hidden('status.theme');await click('terminal.surface');
+ await type('@');await vis('terminal.commands');await type('theme');await press('right');await hidden('terminal.commands');await press('return');
+ await vis('status.theme');await mouseMove(400,200);await sleep(350);
+ const actual=(await vis('status.theme')).rect,trigger=(await vis(triggerId)).rect;
+ for(const axis of ['x','y','w','h'])assert(Math.abs(actual[axis]-expected[axis])<=1,`@theme ${triggerId} ${width}: ${axis} differs from statusbar click`);
+ assert(actual.x>=0&&actual.x+actual.w<=width&&actual.y>=0&&actual.y+actual.h<=trigger.y,'Theme popup stays above the visible statusbar and inside the window');
+ await capture(triggerId.replaceAll('.','-')+'-command-'+width);
+ await press('escape');await hidden('status.theme');await mouseMove(400,200);
+ report.checks.push(`@theme ${triggerId} ${width}x${height}: matches statusbar click geometry, stays open after pointer leaves, Escape closes`);
+}
 try{
  await waitForServerReady(60000);await resizeWindow(1440,900);const host=await vis('sidebar.host');assert((await clickAt(host.rect.x+host.rect.w/2,host.rect.y+host.rect.h/2,2)).ok);await waitFor(async()=>content(await vis('workspace.pane')).includes('sshrecords')||null,30000);await sleep(450);
  await mouseMove(700,300);await sleep(200);
@@ -49,6 +63,7 @@ try{
  }
  }
  await checkEntries(cases);
+ await checkThemeCommand('status.connection.theme',1440,900);await checkThemeCommand('status.connection.theme',860,480);await resizeWindow(1440,900);
  const transfer=await vis('status.transfer');
  await mouseMove(transfer.rect.x+transfer.rect.w/2,transfer.rect.y+transfer.rect.h/2);await sleep(300);
  await mouseMove(700,300);await hidden('transfer.session');
@@ -57,6 +72,7 @@ try{
  report.checks.push('status.transfer: idle hover and leave do not retain its panel or focus its trigger');
  await click('toolbar.new_session');await click('session.menu.local');await vis('local.status.identity');await mouseMove(700,300);
  await checkEntries([['local.status.identity','status.detail',''],['local.status.theme','status.theme','']]);
+ await checkThemeCommand('local.status.theme',1440,900);await checkThemeCommand('local.status.theme',860,480);await resizeWindow(1440,900);
  await click('terminal.surface');await key('d',{cmd:true});
  await waitFor(async()=>content(await vis('local.status.identity')).includes('运行中')||null,15000);
  await vis('status.group.broadcast');

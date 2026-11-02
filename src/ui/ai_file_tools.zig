@@ -113,7 +113,7 @@ pub const Bridge = struct {
                 return;
             }
             const host = (self.files orelse return).file_host orelse return;
-            self.reader = capture.Reader.start(self.allocator, host, context, current.invocation.call.path, if (current.invocation.call.tool == .list_remote_files) .{ .list = .{} } else .{ .read = .{ .max_bytes = current.invocation.call.max_bytes } }) catch |err| {
+            self.reader = capture.Reader.start(self.allocator, host, context, current.invocation.call.path, if (current.invocation.call.tool == .list_remote_files) .{ .list = .{ .paged = true, .offset = current.invocation.call.offset, .expected_version = current.invocation.call.expected_version, .max_entries = current.invocation.call.max_entries } } else .{ .read = .{ .max_bytes = current.invocation.call.max_bytes, .offset = current.invocation.call.offset, .expected_version = current.invocation.call.expected_version } }) catch |err| {
                 self.finish(.{ .session_id = @backingInt(source.owner.session_id), .status = .failed, .transport = .sftp, .error_code = @errorName(err) });
                 return;
             };

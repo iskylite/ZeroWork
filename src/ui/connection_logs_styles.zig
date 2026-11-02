@@ -81,7 +81,7 @@ pub fn closeIcon() ButtonStyle {
     return result;
 }
 pub fn hover() ButtonStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn icon(size: f32) ui.Style {
     return progress_styles.icon(size);

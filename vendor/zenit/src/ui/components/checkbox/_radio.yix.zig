@@ -1,4 +1,3 @@
-// GENERATED FILE, do not edit: generated from radio.yix; after editing the source run `zig build gen-yix` (yix-lsp regenerates it on save).
 //! Radio / RadioGroup view. Styling in styles.yss (RadioParts / RadioGroupLayout);
 //! public types and tests in mod.zig.
 const std = @import("std");
@@ -24,15 +23,15 @@ fn __yix_Radio(__yix_props: RadioProps, scope: *ui.Scope, cx: *ui.Cx) anyerror!*
     const label = __yix_props.label;
     const disabled = __yix_props.disabled;
     const __yix_root = try ui.view.render(scope, cx, ui.view.row(.{ .style = S.RadioParts.slot(.root, .{ .disabled = disabled }), .a11y = .{ .role = .radio, .checked = checked, .disabled = disabled, .label = label }, }, .{
-            ui.view.box(.{ .style = S.RadioParts.slot(.circle, .{ .checked = checked }), }, .{
-                ui.view.box(.{ .style = S.RadioParts.slot(.dot, .{ .checked = checked }), }, .{ }),
+            ui.view.box(.{ .style = S.RadioParts.slot(.circle, .{ .checked = checked, .disabled = disabled }), }, .{
+                ui.view.box(.{ .style = S.RadioParts.slot(.dot, .{ .checked = checked, .disabled = disabled }), }, .{ }),
             }),
             ui.view.lazyIf(__yix_d1: {
         const __yix_T = @TypeOf(label.peek().len != 0);
         break :__yix_d1 try scope.derive(__yix_T, .{ .label = label, }, struct { fn __yix_compute(__yix_ctx: anytype) __yix_T {
             return __yix_ctx.label.get().len != 0;
         } }.__yix_compute);
-    }, .{ .label = label, }, struct { fn __yix_b(__yix_b1_0: anytype, __yix_bs1_0: *ui.Scope, __yix_bc1_0: *ui.Cx, __yix_bk1_0: ui.view.Sink) anyerror!void { return ui.view.emit(__yix_bs1_0, __yix_bc1_0, __yix_bk1_0, .{ ui.view.text(.{ .style = S.RadioParts.slot(.label, .{}), }, ui.view.fmt(ui.view.yixFormat(@TypeOf(__yix_b1_0.label), ""), .{ __yix_b1_0.label, })) }); } }.__yix_b, null),
+    }, .{ .label = label, .disabled = disabled, }, struct { fn __yix_b(__yix_b1_0: anytype, __yix_bs1_0: *ui.Scope, __yix_bc1_0: *ui.Cx, __yix_bk1_0: ui.view.Sink) anyerror!void { return ui.view.emit(__yix_bs1_0, __yix_bc1_0, __yix_bk1_0, .{ ui.view.text(.{ .style = S.RadioParts.slot(.label, .{ .disabled = __yix_b1_0.disabled }), }, ui.view.fmt(ui.view.yixFormat(@TypeOf(__yix_b1_0.label), ""), .{ __yix_b1_0.label, })) }); } }.__yix_b, null),
         }));
     __yix_root.meta.ownership.meta.component_name = "Radio";
     return __yix_root;
@@ -66,10 +65,10 @@ fn __yix_RadioChoice(__yix_props: RadioChoiceProps, scope: *ui.Scope, cx: *ui.Cx
         } }.__yix_compute);
     };
     const __yix_root = try ui.view.render(scope, cx, ui.view.row(.{ .style = S.RadioParts.slot(.root, .{ .disabled = disabled }), .tag = .button, .focusable = enabled, .focus_ring = focusRing, .a11y = .{ .role = .radio, .label = label, .checked = checked, .disabled = disabled }, .on_click = onPick, .on_hover = try ui.on.bind(scope, .{ .hovered = hovered, .__yix_owner = scope.owner, }, struct { fn __yix_run(__yix_ctx: anytype) void { __yix_ctx.__yix_owner.beginBatch(); defer __yix_ctx.__yix_owner.endBatch(); __yix_ctx.hovered.set(true);  } }.__yix_run), .on_leave = try ui.on.bind(scope, .{ .hovered = hovered, .__yix_owner = scope.owner, }, struct { fn __yix_run(__yix_ctx: anytype) void { __yix_ctx.__yix_owner.beginBatch(); defer __yix_ctx.__yix_owner.endBatch(); __yix_ctx.hovered.set(false);  } }.__yix_run), }, .{
-            ui.view.box(.{ .style = S.RadioParts.slot(.circle, .{ .checked = checked, .hovered = hovered }), }, .{
-                ui.view.box(.{ .style = S.RadioParts.slot(.dot, .{ .checked = checked }), }, .{ }),
+            ui.view.box(.{ .style = S.RadioParts.slot(.circle, .{ .checked = checked, .hovered = hovered, .disabled = disabled }), }, .{
+                ui.view.box(.{ .style = S.RadioParts.slot(.dot, .{ .checked = checked, .disabled = disabled }), }, .{ }),
             }),
-            ui.view.text(.{ .style = S.RadioParts.slot(.label, .{}), }, ui.view.fmt(ui.view.yixFormat(@TypeOf(label), ""), .{ label, })),
+            ui.view.text(.{ .style = S.RadioParts.slot(.label, .{ .disabled = disabled }), }, ui.view.fmt(ui.view.yixFormat(@TypeOf(label), ""), .{ label, })),
         }));
     __yix_root.meta.ownership.meta.component_name = "RadioChoice";
     return __yix_root;
@@ -133,6 +132,6 @@ fn __yix_RadioGroup(__yix_props: RadioGroupProps, scope: *ui.Scope, cx: *ui.Cx) 
 
 }
 
-//# yix-map-data [[430,425],[2509,1162],[5417,2608]]
+//# yix-map-data [[430,425],[2608,1228],[5582,2740]]
 
-//# yix-map radio.yix
+//# yix-map src/ui/components/checkbox/radio.yix

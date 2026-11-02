@@ -563,47 +563,24 @@ pub fn validateToolMessages(request: provider.ChatRequest) !void {
 }
 
 fn writeToolDefinition(writer: *std.Io.Writer, definition: provider.ToolDefinition, kind: registry.Kind) !void {
-    if (definition.dynamic) |dynamic| {
-        if (kind == .anthropic) try writer.writeAll("{\"name\":\"") else try writer.writeAll("{\"type\":\"function\",\"function\":{\"name\":\"");
-        try writeJsonString(writer, dynamic.name);
-        try writer.writeAll("\",\"description\":\"");
-        try writeJsonString(writer, dynamic.description);
-        try writer.writeAll(if (kind == .anthropic) "\",\"input_schema\":" else "\",\"parameters\":");
-        try writer.writeAll(dynamic.schema);
-        try writer.writeAll(if (kind == .anthropic) "}" else "}}");
-        return;
-    }
-    if (kind == .anthropic) {
-        try writer.print("{{\"name\":\"{s}\",\"description\":\"", .{@tagName(definition.tool)});
-    } else try writer.print("{{\"type\":\"function\",\"function\":{{\"name\":\"{s}\",\"description\":\"", .{@tagName(definition.tool)});
-    try writeJsonString(writer, switch (definition.tool) {
-        .run_command => "Execute an explicit command through each session's independent exec service. The host validates permissions, captured identity and limits; never type into the interactive terminal.",
-        .read_terminal => "Read bounded recent plain terminal output from the specified sessions. Does not execute a command.",
-        .list_remote_files => "List a bounded, nonrecursive remote directory through the session's remote file service. Local filesystem paths are not supported.",
-        .read_remote_file => "Read a bounded text prefix from a remote file through the session's remote file service. Local filesystem paths are not supported.",
-    });
+    if (definition.dynamic) |dynamic| return writeDynamicToolDefinition(writer, dynamic, kind);
+    const canonical = @import("legacy_adapter.zig").builtinDefinition(definition.tool);
+    // Only the four bounded builtin schemas reach this compatibility branch.
+    // Keep requestBodySize allocation-free, including target narrowing.
+    var storage: [32 * 1024]u8 = undefined;
+    var fixed = std.heap.FixedBufferAllocator.init(&storage);
+    const schema = try @import("plugin_tools.zig").narrowSessionSchema(fixed.allocator(), canonical.schema, definition.session_ids);
+    try writeDynamicToolDefinition(writer, .{ .id = canonical.id, .name = canonical.id, .description = canonical.description, .schema = schema }, kind);
+}
+
+fn writeDynamicToolDefinition(writer: *std.Io.Writer, dynamic: provider.ToolDefinition.DynamicDefinition, kind: registry.Kind) !void {
+    try writer.writeAll(if (kind == .anthropic) "{\"name\":\"" else "{\"type\":\"function\",\"function\":{\"name\":\"");
+    try writeJsonString(writer, dynamic.name);
+    try writer.writeAll("\",\"description\":\"");
+    try writeJsonString(writer, dynamic.description);
     try writer.writeAll(if (kind == .anthropic) "\",\"input_schema\":" else "\",\"parameters\":");
-    try writer.writeAll("{\"type\":\"object\",\"additionalProperties\":false,\"properties\":{\"session_ids\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":");
-    try writer.print("{d}", .{definition.session_ids.len});
-    try writer.writeAll(",\"uniqueItems\":true,\"items\":{\"type\":\"integer\",\"enum\":[");
-    for (definition.session_ids, 0..) |id, index| {
-        if (index != 0) try writer.writeByte(',');
-        try writer.print("{d}", .{id});
-    }
-    try writer.writeAll("]}}");
-    switch (definition.tool) {
-        .run_command => try writer.writeAll(",\"command\":{\"type\":\"string\",\"minLength\":1}"),
-        .read_terminal => {},
-        .list_remote_files, .read_remote_file => try writer.writeAll(",\"path\":{\"type\":\"string\",\"minLength\":1,\"pattern\":\"^/\"}"),
-    }
-    if (definition.tool == .read_remote_file) try writer.writeAll(",\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":65536,\"default\":4096}");
-    try writer.writeAll("},\"required\":[\"session_ids\"");
-    switch (definition.tool) {
-        .run_command => try writer.writeAll(",\"command\""),
-        .read_terminal => {},
-        .list_remote_files, .read_remote_file => try writer.writeAll(",\"path\""),
-    }
-    try writer.writeAll(if (kind == .anthropic) "]}}" else "]}}}");
+    try writer.writeAll(dynamic.schema);
+    try writer.writeAll(if (kind == .anthropic) "}" else "}}");
 }
 
 fn systemAllowed(kind: registry.Kind) bool {
@@ -708,6 +685,7 @@ test "OpenAI tool declarations contain separate bounded capability and argument 
             .run_command => {
                 try std.testing.expectEqual(@as(usize, 2), properties.count());
                 try std.testing.expectEqualStrings("command", required[1].string);
+                try std.testing.expectEqual(@as(i64, 65534), properties.get("command").?.object.get("maxLength").?.integer);
                 try std.testing.expect(properties.get("path") == null and properties.get("max_bytes") == null);
             },
             .read_terminal => {
@@ -716,15 +694,49 @@ test "OpenAI tool declarations contain separate bounded capability and argument 
             },
             .list_remote_files, .read_remote_file => {
                 try std.testing.expectEqualStrings("path", required[1].string);
-                try std.testing.expectEqualStrings("^/", properties.get("path").?.object.get("pattern").?.string);
+                try std.testing.expectEqualStrings("Absolute remote path beginning with /", properties.get("path").?.object.get("description").?.string);
                 if (definition.tool == .read_remote_file) {
                     const cap = properties.get("max_bytes").?.object;
-                    try std.testing.expectEqual(@as(i64, 1), cap.get("minimum").?.integer);
+                    try std.testing.expectEqual(@as(i64, 4), cap.get("minimum").?.integer);
                     try std.testing.expectEqual(@as(i64, 65536), cap.get("maximum").?.integer);
                     try std.testing.expectEqual(@as(i64, 4096), cap.get("default").?.integer);
                 } else try std.testing.expect(properties.get("max_bytes") == null);
             },
         }
+    }
+}
+
+test "builtin tool declarations share one schema across compatibility dynamic and all provider protocols" {
+    const a = std.testing.allocator;
+    const tools = @import("plugin_tools.zig");
+    const legacy = @import("legacy_adapter.zig");
+    const Handler = struct {
+        fn invoke(_: *anyopaque, _: tools.Invocation, _: std.mem.Allocator) !tools.ToolResult {
+            return error.UnexpectedDispatch;
+        }
+    };
+    const ids = [_]u64{ 101, 102 };
+    var context: u8 = 0;
+    var bindings: [legacy.builtin_definitions.len]tools.ToolBinding = undefined;
+    var static: [legacy.builtin_definitions.len]provider.ToolDefinition = undefined;
+    for (legacy.builtin_definitions, &bindings, &static) |definition, *binding, *wire| {
+        binding.* = .{ .plugin_id = "fixture", .definition_id = definition.id, .handler = Handler.invoke };
+        wire.* = .{ .tool = std.meta.stringToEnum(provider.Tool, definition.id).?, .session_ids = &ids };
+    }
+    const members = [_]tools.Member{
+        .{ .owner = .{ .session_id = @fromBackingInt(ids[0]), .generation = 1 }, .plugin_id = "fixture", .context = &context, .bindings = &bindings },
+        .{ .owner = .{ .session_id = @fromBackingInt(ids[1]), .generation = 1 }, .plugin_id = "fixture", .context = &context, .bindings = &bindings },
+    };
+    var table = try tools.RequestTable.init(a, .{ .owner = .{ .group = 7 }, .members = .{ .ids = ids ++ @as([14]u64, @splat(0)), .len = ids.len } }, &legacy.builtin_definitions, &members);
+    defer table.deinit();
+    const dynamic = try tools.providerDefinitions(&table, table.arena.allocator());
+    for ([_]registry.Kind{ .openai_compat, .anthropic, .ollama }) |kind| {
+        const compatibility_body = try requestBody(a, kind, .{ .model = "fixture", .system = "", .messages = &.{}, .tools = &static }, 32768);
+        defer a.free(compatibility_body);
+        const dynamic_body = try requestBody(a, kind, .{ .model = "fixture", .system = "", .messages = &.{}, .tools = dynamic }, 32768);
+        defer a.free(dynamic_body);
+        try std.testing.expectEqualStrings(dynamic_body, compatibility_body);
+        try std.testing.expectEqual(compatibility_body.len, try requestBodySize(kind, .{ .model = "fixture", .system = "", .messages = &.{}, .tools = &static }, 32768));
     }
 }
 

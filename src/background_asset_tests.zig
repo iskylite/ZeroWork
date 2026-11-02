@@ -135,9 +135,9 @@ test "background asset late completions free their resources and failure preserv
 
 test "background asset alpha and disabled missing paths retain valid save semantics" {
     for ([_]struct { transparency: f32, alpha: f32 }{
-        .{ .transparency = 0, .alpha = 1 },
-        .{ .transparency = 12, .alpha = 0.88 },
-        .{ .transparency = 100, .alpha = 0 },
+        .{ .transparency = 0, .alpha = 0 },
+        .{ .transparency = 12, .alpha = 0.12 },
+        .{ .transparency = 100, .alpha = 1 },
     }) |case| {
         const background: asset.Background = .{ .transparency = case.transparency };
         try std.testing.expectApproxEqAbs(case.alpha, background.alpha(), 0.000001);

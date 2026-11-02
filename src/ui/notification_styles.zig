@@ -64,14 +64,13 @@ pub fn statusInk(severity: u8) ui.Color {
     };
 }
 pub fn statusTag(severity: u8) ui.BoxStyle {
-    const c = theme.current();
     const color = switch (severity) {
-        1 => c.ok,
-        2 => c.warn,
-        3 => c.danger,
-        else => c.fg_2,
+        1 => theme.states().tag_ok,
+        2 => theme.states().tag_warn,
+        3 => theme.states().tag_danger,
+        else => theme.states().tag,
     };
-    return .{ .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .padding = .{ .left = 6, .right = 6 }, .background = color.withAlpha(23), .border = .{ .radius = 4, .width = 0 }, .flex_shrink = 0 };
+    return .{ .height = .{ .px = 20 }, .direction = .row, .align_items = .center, .padding = .{ .left = 6, .right = 6 }, .background = color, .border = .{ .radius = 4, .width = 0 }, .flex_shrink = 0 };
 }
 pub fn actionHover() ui.BoxStyle {
     return .{ .background = theme.current().action_accent_2 };

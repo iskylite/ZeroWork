@@ -53,7 +53,7 @@ test "background SOCKS sidebar badge preserves row geometry route actions and co
     try std.testing.expectEqual(@as(f32, 72), find(row.node, "sidebar.host.tail").?.globalRect().w);
     try std.testing.expectEqualStrings(":65535后台", row.forward_label.getText().?.content);
     try std.testing.expect(row.forward.style.display == .flex and row.route.style.display == .none);
-    try std.testing.expect(ui.Color.eql(ui.Color.WHITE, row.dot.getIcon().?.tint));
+    try std.testing.expect(ui.Color.eql(T.current().fg_2, row.dot.getIcon().?.tint));
     try std.testing.expect(ui.Color.eql(T.current().ok_ink, row.forward_label.getText().?.color));
     row.setMenuOpen(true);
     h.frames();
@@ -64,7 +64,7 @@ test "background SOCKS sidebar badge preserves row geometry route actions and co
     T.select(.light);
     h.cx.setTheme(T.widgetTheme(.light));
     h.frames();
-    try std.testing.expect(ui.Color.eql(ui.Color.WHITE, row.dot.getIcon().?.tint));
+    try std.testing.expect(ui.Color.eql(T.current().fg_2, row.dot.getIcon().?.tint));
     try std.testing.expect(ui.Color.eql(T.current().ok_ink, row.forward_label.getText().?.color));
     row.setForwardBadge(.{ .port = 65535, .phase = .paused });
     try std.testing.expectEqualStrings("已暂停", row.node.behavior.interaction.a11y.?.description.?);
@@ -205,19 +205,48 @@ test "sidebar native chrome gives unused action space back to host names" {
     h.frames();
     try std.testing.expectEqual(@as(@TypeOf(row.route.style.display), .flex), row.route.style.display);
     try std.testing.expect(protocol.style.display == .none);
-    try std.testing.expectApproxEqAbs(before + protocol_width + 6 - (V.styles.action_size * 3 + 4), row.name.globalRect().w, 0.1);
+    try std.testing.expectApproxEqAbs(before + protocol_width + 6 - (V.styles.action_size + 4), row.name.globalRect().w, 0.1);
     h.click(find(row.node, "sidebar.host.connect").?);
     try std.testing.expectEqual(@as(usize, 1), c.connected);
-    h.click(find(row.node, "sidebar.host.edit").?);
-    try std.testing.expectEqual(@as(usize, 1), c.edited);
-    h.click(find(row.node, "sidebar.host.copy").?);
-    try std.testing.expectEqual(@as(usize, 1), c.copied);
+    try std.testing.expect(find(row.node, "sidebar.host.edit") == null);
+    try std.testing.expect(find(row.node, "sidebar.host.copy") == null);
     try std.testing.expectEqual(@as(usize, 0), c.selected);
     try std.testing.expectEqual(@as(usize, 1), c.connected);
     h.click(find(v.root, "sidebar.collapse").?);
     try std.testing.expectEqual(@as(usize, 1), c.collapsed);
 }
-test "sidebar host hover exposes connect copy and edit without activating the row" {
+test "sidebar host route status never activates the row connection" {
+    const h = try H.init();
+    defer h.deinit();
+    const column = try ui.box(h.cx, .{ .width = .{ .px = 212 }, .height = .fill(), .direction = .column }, .{});
+    try h.root.appendChild(h.cx.allocator, column);
+    var capture: Capture = .{};
+    const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "ScaleX40-AI01", .detail = "root@127.0.0.1:1", .route = "本机 → 主机", .hops = 0, .online = false }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu });
+    try column.appendChild(h.cx.allocator, row.node);
+    h.frames();
+    const r = row.node.globalRect();
+    h.cx.handleMouseMove(r.x + 20, r.y + r.h / 2);
+    h.frames();
+    const route = row.route.globalRect();
+    const count = find(row.node, "sidebar.host.hops").?.globalRect();
+    const trailing = row.trailing.globalRect();
+    const action = row.actions.globalRect();
+    for ([_]f32{ route.x + 4, count.x + count.w / 2, (route.x + route.w + action.x) / 2, trailing.x }) |x| {
+        h.cx.handleMouseDown(x, route.y + route.h / 2, .{});
+        h.cx.handleMouseUp(x, route.y + route.h / 2);
+        h.frames();
+        try std.testing.expectEqual(@as(usize, 0), capture.selected);
+        try std.testing.expectEqual(@as(usize, 0), capture.connected);
+    }
+    h.click(find(row.node, "sidebar.host.connect").?);
+    try std.testing.expectEqual(@as(usize, 1), capture.connected);
+    try std.testing.expectEqual(@as(usize, 0), capture.selected);
+    h.click(row.name);
+    try std.testing.expectEqual(@as(usize, 1), capture.selected);
+    try std.testing.expectEqual(@as(usize, 1), capture.connected);
+}
+
+test "sidebar host hover exposes only connect without activating the row" {
     const h = try H.init();
     defer h.deinit();
     const column = try ui.box(h.cx, .{ .width = .{ .px = 212 }, .height = .fill(), .direction = .column }, .{});
@@ -239,25 +268,22 @@ test "sidebar host hover exposes connect copy and edit without activating the ro
     try std.testing.expect(protocol.style.display == .flex);
     h.cx.handleMouseMove(rect.x + 10, rect.y + 12);
     h.frames();
-    for ([_][]const u8{ "sidebar.host.connect", "sidebar.host.copy", "sidebar.host.edit" }) |id| {
+    for ([_][]const u8{"sidebar.host.connect"}) |id| {
         const button = find(row.node, id) orelse return error.MissingHostShortcut;
         try std.testing.expect(button.globalRect().w >= 24);
         h.click(button);
     }
     try std.testing.expectEqual(@as(usize, 1), capture.connected);
-    try std.testing.expectEqual(@as(usize, 1), capture.copied);
-    try std.testing.expectEqual(@as(usize, 1), capture.edited);
+    try std.testing.expectEqual(@as(usize, 0), capture.copied);
+    try std.testing.expectEqual(@as(usize, 0), capture.edited);
     try std.testing.expectEqual(@as(usize, 0), capture.menus);
     try std.testing.expectEqual(@as(usize, 0), capture.selected);
-    h.cx.setFocus(find(row.node, "sidebar.host.copy").?);
+    try std.testing.expect(find(row.node, "sidebar.host.copy") == null);
+    try std.testing.expect(find(row.node, "sidebar.host.edit") == null);
+    h.cx.setFocus(find(row.node, "sidebar.host.connect").?);
     h.cx.handleKeyDown(.@"return", .{});
     h.frames();
-    h.cx.setFocus(find(row.node, "sidebar.host.edit").?);
-    h.cx.handleKeyDown(.space, .{});
-    h.frames();
-    try std.testing.expectEqual(@as(usize, 2), capture.copied);
-    try std.testing.expectEqual(@as(usize, 2), capture.edited);
-    try std.testing.expectEqual(@as(usize, 1), capture.connected);
+    try std.testing.expectEqual(@as(usize, 2), capture.connected);
     try std.testing.expectEqual(@as(usize, 0), capture.selected);
 }
 test "sidebar native group menu freezes revision and never changes persistent collapse before commit" {
@@ -585,7 +611,7 @@ test "main workspace sidebar follows V3 measured group search and footer geometr
         try std.testing.expect(row.actions.style.display == .flex);
         try std.testing.expect(row.route.style.display == .flex);
         try std.testing.expect(row.name.globalRect().w <= width);
-        try std.testing.expectEqual(V.styles.tail_width + 4 + V.styles.action_size * 3, row.trailing.globalRect().w);
+        try std.testing.expectEqual(V.styles.tail_width + 4 + V.styles.action_size, row.trailing.globalRect().w);
         const footer = find(view.root, "sidebar.footer.new").?;
         const frame = find(footer.parent.?, "sidebar.footer.frame").?;
         try std.testing.expectApproxEqAbs(@as(f32, 218), frame.globalRect().w, 0.1);
@@ -621,7 +647,7 @@ test "sidebar production mount follows V3 borderless footer without SVG texture 
     try std.testing.expect(h.cx.svg_textures.loader == null);
 }
 
-test "sidebar icons share Tab selection and keep saved asset tint across session state changes in three themes" {
+test "sidebar icons share Tab selection and keep theme ink across session state changes in three themes" {
     const Icon = @import("ui/session_icon.zig");
     const previous = T.currentName();
     defer T.select(previous);
@@ -637,20 +663,70 @@ test "sidebar icons share Tab selection and keep saved asset tint across session
             h.frames();
             const tab_icon = Icon.forTab(kind == .local, false, kind != .file);
             try std.testing.expectEqual(tab_icon.icon_id.?, row.dot.getIcon().?.icon_id);
-            try std.testing.expectEqual(ui.Color.WHITE, row.dot.getIcon().?.tint);
+            try std.testing.expectEqual(T.current().fg_2, row.dot.getIcon().?.tint);
             row.setSelected(true);
             h.frames();
-            try std.testing.expectEqual(ui.Color.WHITE, row.dot.getIcon().?.tint);
+            try std.testing.expectEqual(T.current().fg_2, row.dot.getIcon().?.tint);
             row.setOnline(true);
             h.frames();
-            try std.testing.expectEqual(ui.Color.WHITE, row.dot.getIcon().?.tint);
+            try std.testing.expectEqual(T.current().fg_2, row.dot.getIcon().?.tint);
             row.setOnline(false);
             h.frames();
-            try std.testing.expectEqual(ui.Color.WHITE, row.dot.getIcon().?.tint);
+            try std.testing.expectEqual(T.current().fg_2, row.dot.getIcon().?.tint);
             try std.testing.expectApproxEqAbs(@as(f32, 18), row.dot.globalRect().w, 0.1);
             try std.testing.expectApproxEqAbs(@as(f32, 18), row.dot.globalRect().h, 0.1);
         }
     }
+}
+
+test "sidebar KVM ink follows every retained theme while uploaded OS artwork keeps source colours" {
+    const icons = @import("ui/session_icon.zig");
+    const previous = T.currentName();
+    const parameters = T.materialParameters();
+    const material = T.materialVisible();
+    defer {
+        T.select(previous);
+        _ = T.setMaterialParameters(parameters.transparency, parameters.blur);
+        _ = T.setMaterialVisible(material);
+    }
+    T.select(.dark);
+    _ = T.setMaterialParameters(75, 24);
+    _ = T.setMaterialVisible(true);
+    const h = try H.init();
+    defer h.deinit();
+    var capture: Capture = .{};
+    const callbacks: V.HostCallbacks = .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu, .action = Capture.hostAction };
+    const row = try V.HostRow.mount(h.cx, h.scope, .{ .protocol = "bmc_ikvm", .supports_route = false, .icon = icons.forHost(.{}, "bmc_ikvm", .unknown), .name = "P3C9-KVM", .detail = "console", .route = "", .hops = 0, .online = false }, callbacks);
+    try h.root.appendChild(h.cx.allocator, row.node);
+    const os = try V.HostRow.mount(h.cx, h.scope, .{ .icon = icons.forHost(.{}, "ssh", .linux), .name = "Linux", .detail = "ops@host", .route = "", .hops = 0, .online = false }, callbacks);
+    try h.root.appendChild(h.cx.allocator, os.node);
+    try std.testing.expectEqual(ui.Color.WHITE, os.dot.getIcon().?.tint);
+    // Match the production upload, which replaces the coloured SVG with an image.
+    os.dot.setIcon(null);
+    os.dot.setImage(.{ .texture_id = 1, .tint = ui.Color.WHITE });
+    const publication = try h.cx.bindState(@import("ui/shell_styles.zig").ThemePublication, .{});
+    const retained_id = row.dot.id;
+    for (@import("config/theme_presets.zig").ids) |id| {
+        T.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        publication.publish(h.cx, T.widgetTheme(T.currentName()));
+        for ([_]bool{ false, true }) |selected| {
+            row.setSelected(selected);
+            row.setOnline(selected);
+            h.frames();
+            const rect = row.node.globalRect();
+            h.cx.handleMouseMove(if (selected) rect.x + 10 else 899, if (selected) rect.y + 10 else 793);
+            h.frames();
+            try std.testing.expectEqual(retained_id, row.dot.id);
+            try std.testing.expectEqual(ui.icons.screen_share.icon_id.?, row.dot.getIcon().?.icon_id);
+            try std.testing.expectEqual(V.styles.kvmIconInk(), row.dot.getIcon().?.tint);
+            try std.testing.expectEqual(ui.Color.WHITE, os.dot.getImage().?.tint);
+        }
+    }
+    try std.testing.expectEqual(ui.icons.screen_share.icon_id, icons.forHost(.{}, "bmc_ikvm", .linux).icon_id);
+    icons.setHostNode(row.dot, .{}, "ssh", .rocky);
+    try std.testing.expectEqual(ui.Color.WHITE, row.dot.getIcon().?.tint);
+    icons.setHostNode(row.dot, .{}, "bmc_ikvm", .unknown);
+    try std.testing.expectEqual(V.styles.kvmIconInk(), row.dot.getIcon().?.tint);
 }
 
 test "sidebar selected rail preserves theme hues as translucent surfaces" {
@@ -785,4 +861,31 @@ test "monospace styled input uses the painted font for caret selection scrolling
     h.cx.handleMouseUp(rect.x + state.padding_h + stop.x.value, rect.y + rect.h / 2);
     h.frames();
     try std.testing.expectEqual(@as(usize, 2), state.cursor_pos);
+}
+
+test "sidebar theme state selection acquired after focus survives focused paint and blur" {
+    const previous = T.currentName();
+    defer T.select(previous);
+    for (@import("config/theme_presets.zig").ids) |id| {
+        errdefer std.debug.print("sidebar selection theme: {s}\n", .{id});
+        T.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        const h = try H.init();
+        defer h.deinit();
+        var capture: Capture = .{};
+        const row = try V.HostRow.mount(h.cx, h.scope, .{ .name = "主机", .detail = "fixture@192.0.2.1", .route = "本机", .hops = 0, .online = false }, .{ .context = &capture, .select = Capture.select, .connect = Capture.connect, .menu = Capture.menu, .action = Capture.hostAction });
+        try h.root.appendChild(h.cx.allocator, row.node);
+        h.frames();
+        h.cx.setFocus(row.node);
+        h.frames();
+        const focused = row.node.getBackground();
+        row.setSelected(true);
+        h.frames();
+        try std.testing.expectEqual(T.states().selected_hover, row.node.getBackground());
+        try std.testing.expect(row.node.behavior.interaction.a11y.?.selected);
+        try std.testing.expect(!ui.Color.eql(focused, row.node.getBackground()));
+        h.cx.clearFocus();
+        h.frames();
+        try std.testing.expectEqual(T.states().selected, row.node.getBackground());
+        try std.testing.expectEqual(@as(usize, 0), capture.connected);
+    }
 }

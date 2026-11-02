@@ -7,7 +7,7 @@ pub fn trackStyle(p: SliderProps, t: *const core.ThemeTokens) core.BoxStyle {
     return .{
         .width = .{ .grow = .{} },
         .height = .{ .px = p.track_height },
-        .background = t.tokens.color.bg_tertiary,
+        .background = t.tokens.color.range_track,
         .border = .{ .radius = p.track_height / 2 },
     };
 }
@@ -22,7 +22,7 @@ pub fn fillStyle(p: SliderProps, accent: Color, ratio: f32) core.BoxStyle {
 }
 
 pub fn thumbBackground(disabled: bool, t: *const core.ThemeTokens) Color {
-    return if (disabled) t.tokens.color.fg_disabled else Color.hex(0xffffff);
+    return if (disabled) t.tokens.color.range_disabled_thumb else t.tokens.color.range_thumb;
 }
 
 pub fn thumbStyle(p: SliderProps, disabled: bool, accent: Color, t: *const core.ThemeTokens) core.BoxStyle {

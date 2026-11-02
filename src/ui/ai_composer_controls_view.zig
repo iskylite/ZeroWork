@@ -560,7 +560,8 @@ pub const View = struct {
             if (levels.written().len != 0) try levels.writer.writeAll(" / ");
             try levels.writer.writeAll(effortLabel(@fromBackingInt(@intCast(effort_index))));
         };
-        const full_name = try std.fmt.allocPrint(scope.allocator, "{s}\n{s} · {s}\n{s}上下文 {d} tokens · {s}\n{s} · 工具能力未声明\n{s}{s}", .{ id.peek(), provider_id.peek(), id.peek(), if (model.context_discovered) "已发现" else "配置", model.context_window, if (model.enabled) "可用" else "Provider 未配置或已禁用", if (model.vision) "支持图片输入" else "仅文本输入", if (model.reasoning) "推理档位：" else "无推理档位", levels.written() });
+        var token_buffer: [32]u8 = undefined;
+        const full_name = try std.fmt.allocPrint(scope.allocator, "{s}\n{s} · {s}\n{s}上下文 {s} tokens · {s}\n{s} · 工具能力未声明\n{s}{s}", .{ id.peek(), provider_id.peek(), id.peek(), if (model.context_discovered) "已发现" else "配置", try tokenText(&token_buffer, model.context_window), if (model.enabled) "可用" else "Provider 未配置或已禁用", if (model.vision) "支持图片输入" else "仅文本输入", if (model.reasoning) "推理档位：" else "无推理档位", levels.written() });
         defer scope.allocator.free(full_name);
         const description = try scope.createText(full_name, .{});
         // Tooltip has no fixed-width contract in this zenit revision. Its
@@ -568,6 +569,7 @@ pub const View = struct {
         // declared 284px width while retaining hover, flip and viewport clamp.
         const hint = try ui.widgets.Popover(.{ .trigger = .hover, .position = .right, .offset = .{ .static = 8 }, .width = 284, .max_height = 180, .constrain_width_to_viewport = true, .shift_main_axis = true, .tier = .tooltip, .close_on_outside_click = false, .close_on_escape = false }).mount(scope, cx);
         hint.chrome.meta.ownership.meta.test_id = "ai.model.details";
+        hint.chrome.behavior.interaction.a11y = .{ .role = .tooltip };
         hint.chrome.setHitTestVisible(false);
         hint.chrome.setStyleInline(cx.allocator, .{ .width = .{ .px = 284 }, .min_width = 284, .max_width = 284, .padding = .{ .left = 12, .right = 12, .top = 10, .bottom = 10 }, .background = S.theme.current().overlay, .border = .{ .radius = 9 } });
         var detail_style = S.text(11, 400, 18, true);
@@ -599,7 +601,7 @@ pub const View = struct {
         const name = try self.label(button, id.peek(), S.text(11, 400, 16, false), S.flexibleLabel(16));
         name.setTextColor(if (model.enabled) S.theme.current().fg_1 else S.theme.current().fg_3);
         var context_buffer: [32]u8 = undefined;
-        const context_text = if (model.context_window >= 1000000) try std.fmt.bufPrint(&context_buffer, "{s}{d}M", .{ if (model.context_discovered) "" else "配置", model.context_window / 1000000 }) else try std.fmt.bufPrint(&context_buffer, "{s}{d}k", .{ if (model.context_discovered) "" else "配置", model.context_window / 1000 });
+        const context_text = try std.fmt.bufPrint(&context_buffer, "{s}{s}", .{ if (model.context_discovered) "" else "配置", try tokenText(&token_buffer, model.context_window) });
         const context_width: f32 = 64;
         const context_label = try self.label(button, context_text, S.text(10, 400, 13, false), S.label(context_width, 13));
         if (context_label.getText()) |text| {
@@ -969,7 +971,7 @@ pub const View = struct {
         var hash = std.hash.Wyhash.init(0);
         hash.update(id orelse "");
         std.hash.autoHash(&hash, S.theme.current().fg_1);
-        std.hash.autoHash(&hash, S.theme.current().hover);
+        std.hash.autoHash(&hash, S.theme.states().hover);
         if (self.model_brand_hash == hash.final()) return;
         const next = if (id) |name| try brand.mount(self.cx, brand.model(name), brand.basename(name), 16) else null;
         while (self.model_brand.children.items.len > 0) {
@@ -1190,6 +1192,17 @@ pub const View = struct {
     }
     fn afterLayout(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *View = @ptrCast(@alignCast(raw));
+        var parent: ?*ui.Node = self.root;
+        while (parent) |node| : (parent = node.parent) if (node.style.display == .none) {
+            self.dismiss();
+            // Release a revoked snapshot even while hidden. Retain the clear
+            // flag so reopening still repaints the empty projection once.
+            if (self.clear_pending) if (self.source) |*old| {
+                old.deinit();
+                self.source = null;
+            };
+            return .done;
+        };
         self.flush() catch {};
         // The installed Button recipe forwards frame dimensions but omits
         // positioning. Send and Stop share this slot; position their native
@@ -1217,7 +1230,7 @@ pub const View = struct {
             const id = button.meta.ownership.meta.test_id orelse continue;
             if ((!std.mem.eql(u8, id, "ai.send") and !std.mem.eql(u8, id, "ai.stop")) or button.getOpacity() == 0) continue;
             const hovered = if (self.cx.hovered_node) |node| node == button or node.isDescendantOf(button) else false;
-            button.setBackground(if (hovered) S.theme.current().hover else S.theme.popupAction());
+            button.setBackground(if (hovered) S.theme.states().hover else S.theme.popupAction());
             if (!std.mem.eql(u8, id, "ai.send")) continue;
             const disabled = if (button.behavior.interaction.a11y) |attrs| attrs.disabled else false;
             button.setOpacityRaw(if (disabled) 0.45 else 1);
@@ -1225,11 +1238,6 @@ pub const View = struct {
                 if (child.getIcon() != null) _ = child.setTint(if (disabled) S.theme.current().fg_2 else S.theme.current().fg_1);
             }
         }
-        var parent: ?*ui.Node = self.root;
-        while (parent) |node| : (parent = node.parent) if (node.style.display == .none) {
-            self.dismiss();
-            return .done;
-        };
         if (self.focus_pending) |kind| {
             self.focus_pending = null;
             const node = switch (kind) {
@@ -1362,11 +1370,7 @@ fn percentText(buffer: []u8, usage: Usage) ![]const u8 {
     if (usage.used_tokens > 0 and percentage(usage) == 0) return "<1%";
     return std.fmt.bufPrint(buffer, "{d}%", .{percentage(usage)});
 }
-fn tokenText(buffer: []u8, value: u64) ![]const u8 {
-    if (value >= 1000000) return std.fmt.bufPrint(buffer, "{d:.1}M", .{@as(f64, @floatFromInt(value)) / 1000000});
-    if (value >= 1000) return std.fmt.bufPrint(buffer, "{d:.1}K", .{@as(f64, @floatFromInt(value)) / 1000});
-    return std.fmt.bufPrint(buffer, "{d}", .{value});
-}
+const tokenText = @import("ai_token_count.zig").format;
 
 test "composer readiness matches an unauthenticated local gateway without enabling remote endpoints" {
     var models = [_]config.AiModel{.{ .id = "local-model", .context_window = 8192, .default = true }};

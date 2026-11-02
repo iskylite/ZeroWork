@@ -1092,14 +1092,14 @@ fn toggle(cx: *ui.Cx, bound: *binding.Binding, key: binding.Key, label: []const 
     const current = values.read(bound.controller.model.value, key.section, key.key).?.boolean;
     const click = try Click.create(bound.scope, bound, .toggle, "");
     click.key = key;
-    const button = try ui.widgets.Button(.{ .a11y_label = label, .variant = .ghost, .disabled = disabled(bound), .on_click = cx.on(Click, click, Click.activate), .base_style = S.toggle(current) }).mount(bound.scope, cx);
-    button.setStyleInline(cx.allocator, S.toggle(current));
+    const button = try ui.widgets.Button(.{ .a11y_label = label, .variant = .ghost, .disabled = disabled(bound), .on_click = cx.on(Click, click, Click.activate), .base_style = S.toggle(current, disabled(bound)) }).mount(bound.scope, cx);
+    button.setStyleInline(cx.allocator, S.toggle(current, disabled(bound)));
     button.meta.ownership.meta.test_id = try id(bound.scope, "settings.toggle.", key.key);
     if (button.behavior.interaction.a11y) |*a| {
         a.role = .switch_role;
         a.checked = current;
     }
-    try button.appendChild(cx.allocator, try ui.boxStyled(cx, S.toggleKnob, .{}));
+    try button.appendChild(cx.allocator, try ui.box(cx, S.toggleKnob(current, disabled(bound)), .{}));
     return button;
 }
 fn aidsSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
@@ -1234,7 +1234,7 @@ fn sliderRow(cx: *ui.Cx, bound: *binding.Binding, label: []const u8, key: bindin
     try labels.appendChild(cx.allocator, try ui.textStyled(cx, S.label, label));
     if (std.mem.eql(u8, key.key, "transparency")) {
         labels.setStyleInline(cx.allocator, .{ .direction = .row, .align_items = .center, .gap = 4 });
-        try labels.appendChild(cx.allocator, try controls.inlineHint(cx, bound, "settings.appearance.help.transparency", "数值越大，图片越透明。", ui.icons.circle_help, S.theme.current().fg_2));
+        try labels.appendChild(cx.allocator, try controls.inlineHint(cx, bound, "settings.appearance.help.transparency", "数值越大，界面越透明，背景图片越明显；0% 隐藏图片，100% 完整显示图片。", ui.icons.circle_help, S.theme.current().fg_2));
     }
     try row.appendChild(cx.allocator, labels);
     const controls_group = try ui.box(cx, .{ .width = .{ .px = 350 }, .height = .{ .px = 32 }, .direction = .row, .gap = 12, .align_items = .center, .flex_shrink = 0 }, .{});

@@ -135,7 +135,7 @@ test "appearance prepared image and config publish together and keep image alpha
     try std.testing.expect(target.value.ui.materials.background.enabled);
     try std.testing.expectEqualStrings(target.value.ui.materials.background.path, state.asset.?.path);
     try std.testing.expectEqualSlices(u8, &.{ 255, 0, 0, 255 }, state.asset.?.image.pixels);
-    try std.testing.expectApproxEqAbs(@as(f32, 0.88), state.snapshot.?.value.ui.materials.background.alpha(), 0.000001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.12), state.snapshot.?.value.ui.materials.background.alpha(), 0.000001);
     try std.testing.expectEqual(target.value.config_revision, state.material_revision);
 }
 

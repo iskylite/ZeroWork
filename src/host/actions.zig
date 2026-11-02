@@ -154,7 +154,7 @@ pub const descriptors = [_]Descriptor{
     .{ .id = .export_record, .action_id = "record.export", .label = "导出记录", .rule = .{ .scope = .tab, .capabilities = &.{.recording} } },
     .{ .id = .close_other_tabs, .action_id = "workspace.close_other_tabs", .label = "关闭其他页签", .rule = .{ .scope = .tab, .needs_other_tabs = true } },
     .{ .id = .download, .action_id = "transfer.download", .label = "下载", .rule = .{ .scope = .tab, .capabilities = &.{.transfer} }, .unsupported_reason = "下载需要当前会话的传输能力" },
-    .{ .id = .join_group, .action_id = "group.join", .label = "加入或离开终端组", .rule = .{ .scope = .terminal, .capabilities = &.{ .terminal, .groups } } },
+    .{ .id = .join_group, .action_id = "group.join", .label = "加入或离开会话组", .rule = .{ .scope = .tab } },
     .{ .id = .toggle_pin, .action_id = "group.toggle_pin", .label = "组内置顶", .rule = .{ .scope = .terminal, .capabilities = &.{ .terminal, .groups }, .needs_group = true } },
     .{ .id = .toggle_timestamp, .action_id = "terminal.toggle_timestamp", .label = "切换终端时间列", .rule = .{ .scope = .terminal, .capabilities = &.{.terminal} } },
     .{ .id = .open_history, .action_id = "record.open_history", .label = "打开只读历史页", .rule = .{ .scope = .tab, .capabilities = &.{.recording} } },
@@ -251,7 +251,7 @@ pub const Context = struct {
 /// shortcuts and programmatic ingress consume the same declaration.
 pub fn requirements(id: ActionId) []const @import("plugin_services.zig").ServiceKey {
     return switch (id) {
-        .split_vertical, .split_horizontal, .search_terminal, .open_completion, .accept_completion, .toggle_broadcast, .duplicate_session, .join_group, .toggle_pin, .toggle_timestamp, .open_history, .export_record => &.{.{ .name = "terminal" }},
+        .split_vertical, .split_horizontal, .search_terminal, .open_completion, .accept_completion, .toggle_broadcast, .duplicate_session, .toggle_pin, .toggle_timestamp, .open_history, .export_record => &.{.{ .name = "terminal" }},
         .upload, .download => &.{.{ .name = "transfer" }},
         .open_route_details => &.{.{ .name = "route" }},
         .toggle_socks => &.{.{ .name = "forward" }},

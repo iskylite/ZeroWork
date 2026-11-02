@@ -26,7 +26,7 @@ textarea.command-input{resize:none;overflow:auto;min-height:23px;max-height:115p
 .assistant-composer textarea{display:block}
 
 /* V3 §3.1 shell geometry and overlay roles. */
-.app-window{--v3-title-height:36px;--v3-status-height:26px;padding:5px;gap:8px}.titlebar{height:36px}.workspace-body{gap:8px}.statusbar{height:26px;min-height:26px}.sidebar.collapsed{width:48px;min-width:48px}.popover,.context-menu,.modal,.assistant,#tooltip{background:var(--overlay,var(--panel))}.status-metric{cursor:default}
+.app-window{--v3-title-height:36px;--v3-status-height:26px;--v3-shell-spacing:5px;padding:var(--v3-shell-spacing);gap:var(--v3-shell-spacing)}.titlebar{height:36px}.workspace-body{gap:var(--v3-shell-spacing)}.statusbar{height:26px;min-height:26px}.sidebar.collapsed{width:48px;min-width:48px}.popover,.context-menu,.modal,.assistant,#tooltip{background:var(--overlay,var(--panel))}.status-metric{cursor:default}
 
 :root{--mono:"JetBrainsMono Nerd Font","JetBrains Mono",Menlo,monospace}.terminal-line,.command-line,.command-input,.shell-prompt{font-size:14px;line-height:21px}.terminal-scroll{--mono:Monaco,Menlo,monospace;font-family:var(--mono)}.review-scenarios{width:1440px;margin:14px auto;color:var(--muted);font-size:11px}.review-scenarios summary{cursor:pointer}.review-scenarios[open]{background:var(--panel);padding:12px;border-radius:9px}#review-controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding-top:10px}#review-controls .field,#review-controls .check-row{margin:0;min-width:170px}#review-controls .button,#review-controls .menu-item{background:var(--well);padding:7px 10px;border-radius:7px;max-width:280px}.compact-review .review-scenarios{width:860px}
 .app-window{overflow:hidden}.tab{font-size:12px;font-weight:500;line-height:18px}.sidebar-head strong,.popover-head strong,.modal h2{font-size:13px;font-weight:700;line-height:20px}.pane-head{font-size:11px}.terminal-toolbar{font-size:11px}.sidebar-head .icon-btn,.pane-head .icon-btn,.popover-head .icon-btn{width:24px;height:24px}.sidebar-head .icon-btn svg,.pane-head .icon-btn svg,.popover-head .icon-btn svg{width:14px;height:14px}.file-panel .filename{font-size:12px;max-width:220px}.file-panel .file-table th{font-size:11px}.file-panel .file-table td{font-size:12px}.file-panel .file-table td:nth-child(4),.file-panel .file-meta,.file-panel .file-title .badge{font-size:11px}.file-panel .file-title strong{font-size:13px}.command-time{font:9.5px/14px var(--mono)}body:has(.app-window[data-size=compact]){min-width:908px}body:has(.app-window[data-size=compact]) .review-bar,body:has(.app-window[data-size=compact]) .review-foot,body:has(.app-window[data-size=compact]) .review-scenarios{width:860px}
@@ -57,7 +57,7 @@ body[data-functional-component] #app{width:100%!important;height:100%!important;
 body[data-functional-component="host-sidebar"] .sidebar-head .side-collapse{display:flex!important}
 
 /* Terminal rows share the native timestamp gutter, including received output. */
-.terminal-line{display:flex;align-items:baseline;white-space:normal;min-height:21px}.terminal-row-content{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;flex:1}.terminal-line.pre{margin-bottom:0}.terminal-output{margin-bottom:7px}.timestamp{flex:0 0 64px;width:64px;min-width:64px;text-align:left;transform:none;margin:0 12px 0 0;font:11px/21px var(--mono);font-variant-numeric:tabular-nums}.terminal-timestamp .app-command{margin-left:calc(-1 * var(--command-inset))}.command-result-row{display:flex;align-items:baseline;min-height:21px}.command-result-row>span:last-child{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}.command-result-row .result-icon{flex:0 0 12px;margin-right:7px}.command-top>.timestamp{font:11px/21px var(--mono)}.terminal-timestamp .input-row{padding-left:76px}.terminal-timestamp .result-meta{padding-left:76px}
+.terminal-line{display:flex;align-items:baseline;white-space:normal;min-height:21px}.terminal-row-content{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere;flex:1}.terminal-line.pre{margin-bottom:0}.terminal-output{margin-bottom:7px}.timestamp{flex:0 0 auto;width:max-content;min-width:0;text-align:left;transform:none;margin:0 12px 0 0;font:11px/21px var(--mono);font-variant-numeric:tabular-nums}.terminal-timestamp .app-command{margin-left:calc(-1 * var(--command-inset))}.command-result-row{display:flex;align-items:baseline;min-height:21px}.command-result-row>span:last-child{min-width:0;white-space:pre-wrap;overflow-wrap:anywhere}.command-result-row .result-icon{flex:0 0 12px;margin-right:7px}.command-top>.timestamp{font:11px/21px var(--mono);margin-right:2px}.terminal-timestamp .input-row{padding-left:76px}.terminal-timestamp .result-meta{padding-left:76px}
 /* Explicit single chevron; no list-marker/pseudo-element collapse indicator. */
 .group-label{list-style:none}.group-label::before,.group-label::after{content:none}.group-label::-webkit-details-marker{display:none}.group-label>svg{flex:none}
 /* Hover cards never participate in the tab strip's intrinsic size. */
@@ -241,7 +241,7 @@ body:not([data-functional-component]) .app-window[data-size=compact]{width:860px
 .copy-path-field{display:flex;flex-direction:column;gap:4px;height:52px;min-height:52px}.copy-path-field>span{font-size:11px;line-height:16px;color:var(--muted)}.copy-path-well,.copy-path-field input{display:block;height:32px;min-height:32px;padding:8px 10px;border-radius:8px;background:var(--well);color:var(--fg);font:11px/16px var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.copy-options{display:flex;align-items:center;gap:20px;height:24px;min-height:24px;font-size:11px}.copy-options label{display:flex;align-items:center;gap:7px}.copy-options input{margin:0;width:14px;height:14px;accent-color:var(--accent)}.copy-policy{font-size:11px;line-height:16px;margin:0;color:var(--muted)}.transfer-copy-v3>footer{height:62px;min-height:62px;padding:14px 20px;gap:8px}.transfer-copy-v3>footer .button{height:34px;min-height:34px;font-size:12px;padding:0 14px}.transfer-copy-v3>footer .primary{width:112px}.transfer-copy-v3>footer .secondary{width:68px}
 .context-menu.file-context-v3{width:224px;padding:6px;border-radius:10px}.file-context-v3 .menu-item{height:34px;padding:0 10px;gap:10px;font-size:12px;line-height:18px;justify-content:flex-start}.file-context-v3 .menu-item+.menu-item{margin-top:2px}.file-context-v3 .menu-item span{text-align:left}
 
-.sidebar{flex-shrink:0}.sidebar-resize{position:relative;width:8px;flex:0 0 8px;margin:0 -8px;cursor:ew-resize;z-index:5;align-self:stretch}.sidebar-collapsed .sidebar-resize{display:none}
+.sidebar{flex-shrink:0}.sidebar-resize{position:relative;width:8px;flex:0 0 8px;margin:0 calc(-1 * var(--v3-shell-spacing)) 0 -8px;cursor:ew-resize;z-index:5;align-self:stretch}.sidebar-collapsed .sidebar-resize{display:none}
 
 /* Match the native window controls and local tab geometry. */
 .app-window .titlebar,.app-window[data-size=compact] .titlebar{padding-left:14px}.app-window .titlebar .traffic,.app-window[data-size=compact] .titlebar .traffic{gap:8px;margin-right:5px}.app-window .titlebar .traffic b{width:12px;height:12px}.app-window .titlebar .tab[data-session-type="local"]{min-width:159px;max-width:200px}
@@ -273,3 +273,27 @@ body:not([data-functional-component]) .app-window[data-size=compact]{width:860px
 
 /* Group members use spacing and header tint for focus; never a pane frame. */
 .pane-group .terminal-pane.focused .pane-head{background:var(--sel)}
+
+/* Mixed group layout reuses existing pane and file components. Native gutter: 4pt. */
+.pane-group:has(.group-split){gap:0}
+.group-split,.group-branch{display:flex;flex:1;min-width:0;min-height:0}
+.group-split>.group-branch{overflow:hidden}
+.group-branch>.terminal-pane{min-height:0}
+.group-divider{flex:0 0 4px;touch-action:none;outline:none;background:transparent}
+.group-split[data-axis=row]>.group-divider{cursor:ew-resize}
+.group-split[data-axis=column]>.group-divider{cursor:ns-resize}
+.group-divider:hover,.group-divider:focus-visible{background:var(--sel)}
+.pane-group .pane-head[draggable=true]{cursor:grab}
+.group-file-pane>.sftp-workspace{flex:1;min-height:0;padding:0}
+.group-file-pane .sftp-dual{min-height:0}
+.group-file-pane .file-column,.group-file-pane .file-table-wrap{min-height:0}
+
+.pane-group [data-group-drop]::after{content:"";position:absolute;pointer-events:none;background:var(--accent);z-index:2}
+.pane-group [data-group-drop=left]::after{left:0;top:0;bottom:0;width:4px}
+.pane-group [data-group-drop=right]::after{right:0;top:0;bottom:0;width:4px}
+.pane-group [data-group-drop=top]::after{left:0;right:0;top:0;height:4px}
+.pane-group [data-group-drop=bottom]::after{left:0;right:0;bottom:0;height:4px}
+
+/* Monochrome KVM glyphs follow theme ink; OS artwork keeps source colours. */
+.host-os.host-protocol-icon{background:none;color:light-dark(#2d5ca8,#88b4ff)}
+.host-protocol-icon svg{width:100%;height:100%}

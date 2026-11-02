@@ -112,6 +112,11 @@ pub const Host = struct {
             try self.ssh_status.updateActive(null);
             return;
         }
+        if (tab.plugin_renderer) |renderer| if (renderer.vtable.connection_status) |project| {
+            self.view.dismiss();
+            try self.ssh_status.updateGraphical(project(renderer.context));
+            return;
+        };
         if (tab.file_scope != null) {
             const owner = tab.content_owner.session;
             const source = tab.host_snapshot orelse {
@@ -180,6 +185,14 @@ pub const Host = struct {
     pub fn showForTab(self: *Host, index: usize) void {
         if (index >= self.workspace.tabs.items.len) return;
         const tab = self.workspace.tabs.items[index];
+        if (tab.plugin_renderer) |renderer| if (renderer.vtable.show_connection_details) |show| {
+            self.logs.hide();
+            self.view.dismiss();
+            self.ssh_status.info.dismiss();
+            self.ssh_status.detail.hide();
+            show(renderer.context);
+            return;
+        };
         if (tab.content_owner != .session or tab.local or tab.file_scope != null) return;
         const snapshot = self.application.sshConnectionDetails(tab.content_owner.session) catch |err| {
             self.workspace.statusFailure(@errorName(err));

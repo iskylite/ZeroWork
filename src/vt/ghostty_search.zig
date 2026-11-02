@@ -85,10 +85,18 @@ pub fn captureRange(adapter: anytype, allocator: std.mem.Allocator, start_row: u
     defer c.ghostty_render_state_free(state);
     const overscan: c.GhosttyRenderStateOverscan = .{ .above = @intCast(bar.offset -| start_row), .below = @intCast(below) };
     if (c.ghostty_render_state_set(state, c.GHOSTTY_RENDER_STATE_OPTION_OVERSCAN, @ptrCast(&overscan)) != c.GHOSTTY_SUCCESS) return error.SearchUnavailable;
-    // A second render state consumes native dirty flags. Force the display's
-    // own state dirty before the next capture so search cannot hide damage.
-    const dirty: c.GhosttyRenderStateDirty = c.GHOSTTY_RENDER_STATE_DIRTY_FULL;
-    defer _ = c.ghostty_render_state_set(adapter.render_state, c.GHOSTTY_RENDER_STATE_OPTION_DIRTY, @ptrCast(&dirty));
+    // A second render state consumes the terminal's row/page dirty flags.
+    // OPTION_DIRTY only requests repainting already-cached cells; it does not
+    // make beginUpdate recapture them. Retire the display cache so its next
+    // update reads every cell, including a prompt received just before search.
+    // Allocate first: failure must leave the existing display state usable.
+    var display_state: c.GhosttyRenderState = null;
+    if (c.ghostty_render_state_new(null, &display_state) != c.GHOSTTY_SUCCESS) return error.OutOfMemory;
+    defer {
+        c.ghostty_render_state_free(adapter.render_state);
+        adapter.render_state = display_state;
+        adapter.cells_dirty = true;
+    }
     if (c.ghostty_render_state_update(state, adapter.terminal) != c.GHOSTTY_SUCCESS) return error.SearchUnavailable;
     var iterator: c.GhosttyRenderStateRowIterator = null;
     if (c.ghostty_render_state_row_iterator_new(&native_allocator, &iterator) != c.GHOSTTY_SUCCESS) return error.OutOfMemory;

@@ -10,7 +10,7 @@ ZeroWork 是面向 Apple Silicon Mac 的 SSH 终端，架构定义见 [总体架
 
 ## 当前基线
 
-当前版本为 **0.3.0-rc1（插件宿主 API 2）**。实现与交互契约见[设计路线](docs/DESIGN/README.md)、[AI 会话执行设计](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)及[可编辑 V3 原型](docs/UI_V3/README.md)；构建与验证命令见[开发手册](docs/GUIDES/DEVELOPMENT.md)。
+当前版本为 **0.3.0-rc3（插件宿主 API 2）**。实现与交互契约见[设计路线](docs/DESIGN/README.md)、[AI 会话执行设计](docs/DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)及[可编辑 V3 原型](docs/UI_V3/README.md)；构建与验证命令见[开发手册](docs/GUIDES/DEVELOPMENT.md)。
 
 当前动态插件工具的操作历史在每个应用进程内最多保留 128 条记录，按目标会话计数。达到上限后，新操作会在审批和派发前被拒绝；需正常退出并重新启动应用后继续。历史不会自动驱逐，以保留未知结果及尚未释放资源的操作事实。
 

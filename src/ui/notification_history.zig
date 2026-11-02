@@ -283,7 +283,7 @@ pub const View = struct {
     }
     fn mountAction(self: *View, scope: *ui.Scope, parent: *ui.Node, record: host.notifications.NotificationRecord, index: usize) !void {
         const handler = try scope.createState(Action, .{ .view = self, .fact_id = record.fact_id, .index = index });
-        const button = try ui.widgets.Button(.{ .label = record.event.actions[index].label, .variant = .ghost, .size = .xs, .disabled = record.owner_ended, .base_style = S.action(), .hover_style = .{ .background = theme.current().hover }, .on_click = self.cx.on(Action, handler, Action.invoke) }).mount(scope, self.cx);
+        const button = try ui.widgets.Button(.{ .label = record.event.actions[index].label, .variant = .ghost, .size = .xs, .disabled = record.owner_ended, .base_style = S.action(), .hover_style = .{ .background = theme.states().hover }, .on_click = self.cx.on(Action, handler, Action.invoke) }).mount(scope, self.cx);
         button.setStyle(self.cx.allocator, .max_width, @max(1, @min(112, self.root.globalRect().w - 120)));
         button.meta.ownership.meta.test_id = "notifications.history.action";
         try parent.appendChild(self.cx.allocator, button);

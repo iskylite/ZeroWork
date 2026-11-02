@@ -34,8 +34,10 @@ int zw_ssh_socketpair(int *target_fd, int *relay_fd) {
             setsockopt(pair[i], SOL_SOCKET, SO_NOSIGPIPE, &no_sigpipe, sizeof(no_sigpipe)) < 0) {
             close(pair[0]); close(pair[1]); return -1;
         }
-        /* Per-socket tuning only: Darwin's 8 KiB default splits a 32 KiB
-           relay chunk. Leave the OS default usable if tuning is refused. */
+        /* The test Mac exposed 8 KiB defaults, splitting a 32 KiB relay batch.
+           Request room for two batches per endpoint/direction, without sysctl.
+           The OS may clamp/refuse this hint; keep usable defaults on refusal.
+           Capacity never replaces partial-write/EAGAIN handling below. */
         (void)setsockopt(pair[i], SOL_SOCKET, SO_SNDBUF, &buffer_bytes, sizeof(buffer_bytes));
         (void)setsockopt(pair[i], SOL_SOCKET, SO_RCVBUF, &buffer_bytes, sizeof(buffer_bytes));
     }
@@ -99,8 +101,9 @@ int zw_ssh_relay_step(ZW_SSH_RELAY *r) {
 
 int zw_ssh_relay_wait_many(ZW_SSH_RELAY *const *relays, size_t count,
     int transport_fd, LIBSSH2_SESSION *session, int timeout_ms) {
-    /* Drain available packets immediately. When a local socketpair fills,
-       wake on its writable edge instead of imposing a delay per short write. */
+    /* Drain available packets immediately: sleeping after each short write
+       makes local buffer capacity an artificial throughput limit. When a
+       socketpair fills, poll for writability instead of pacing every batch. */
     if (count > ZW_SSH_RELAY_WAIT_MAX) count = ZW_SSH_RELAY_WAIT_MAX;
     struct pollfd fds[ZW_SSH_RELAY_WAIT_MAX + 1];
     size_t used = 0;
@@ -116,6 +119,7 @@ int zw_ssh_relay_wait_many(ZW_SSH_RELAY *const *relays, size_t count,
     }
     /* A readable SSH fd cannot help a relay whose local consumer is blocked:
        step() preserves the pending bytes and deliberately skips channel_read.
+       Polling SSH POLLIN in that state would wake repeatedly without progress.
        Keep outbound readiness and retry other session work within 2 ms. */
     short events = can_read_channel ? POLLIN : 0;
     if (session && (libssh2_session_block_directions(session) & LIBSSH2_SESSION_BLOCK_OUTBOUND))
@@ -1077,6 +1081,7 @@ LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_append(LIBSSH2_SFTP *sftp, const char 
     return handle;
 }
 LIBSSH2_SFTP_HANDLE *zw_libssh2_sftp_open_read(LIBSSH2_SFTP *sftp, const char *path) { return libssh2_sftp_open(sftp, path, LIBSSH2_FXF_READ, 0); }
+void zw_libssh2_sftp_seek(LIBSSH2_SFTP_HANDLE *handle, unsigned long long offset) { libssh2_sftp_seek64(handle, (libssh2_uint64_t)offset); }
 long zw_libssh2_sftp_read(LIBSSH2_SFTP_HANDLE *handle, unsigned char *buffer, size_t len) { return (long)libssh2_sftp_read(handle, (char *)buffer, len); }
 long zw_libssh2_sftp_write(LIBSSH2_SFTP_HANDLE *handle, const unsigned char *buffer, size_t len) { return (long)libssh2_sftp_write(handle, (const char *)buffer, len); }
 long long zw_libssh2_sftp_size(LIBSSH2_SFTP *sftp, const char *path) {

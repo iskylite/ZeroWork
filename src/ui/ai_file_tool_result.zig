@@ -19,24 +19,40 @@ pub fn project(allocator: std.mem.Allocator, value: remote.Value, cap: usize) !P
         while (true) {
             while (keep > 0 and !std.unicode.utf8ValidateSlice(text.bytes[0..keep])) keep -= 1;
             const truncated = text.truncated or keep < text.bytes.len;
-            const metadata = try std.json.Stringify.valueAlloc(allocator, .{ .source = value.metadata, .original_size = text.original_size, .read_bytes = text.read_bytes, .returned_bytes = keep, .read_limit = text.read_limit, .encoding = "utf8", .truncated = truncated }, .{});
+            var version_buffer: [16]u8 = undefined;
+            const metadata = try std.json.Stringify.valueAlloc(allocator, .{ .source = value.metadata, .offset = text.offset, .source_version = try std.fmt.bufPrint(&version_buffer, "{x:0>16}", .{text.source_version}), .next_offset = if (truncated and keep > 0) @as(?u64, text.offset + keep) else null, .original_size = text.original_size, .read_bytes = text.read_bytes, .returned_bytes = keep, .read_limit = text.read_limit, .encoding = "utf8", .truncated = truncated }, .{});
             if (metadata.len > cap) {
                 allocator.free(metadata);
                 return error.ToolOutputTooLarge;
             }
-            if (metadata.len + keep <= cap) {
+            const encoded_metadata = try std.json.Stringify.valueAlloc(allocator, metadata, .{});
+            defer allocator.free(encoded_metadata);
+            const encoded_text = try std.json.Stringify.valueAlloc(allocator, text.bytes[0..keep], .{});
+            defer allocator.free(encoded_text);
+            if (metadata.len + keep <= cap and encoded_metadata.len + encoded_text.len + 2048 <= cap) {
                 errdefer allocator.free(metadata);
                 return .{ .stdout = try allocator.dupe(u8, text.bytes[0..keep]), .stderr = metadata, .truncated = truncated };
             }
-            keep = cap - metadata.len;
+            if (keep == 0) {
+                allocator.free(metadata);
+                return error.ToolOutputTooLarge;
+            }
+            keep = @min(keep - 1, @min(cap - metadata.len, keep / 2));
             allocator.free(metadata);
         }
     }
     const listing = value.body.listing;
     var count = listing.entries.len;
     while (true) {
-        const bytes = try std.json.Stringify.valueAlloc(allocator, .{ .source = value.metadata, .entries = listing.entries[0..count], .page_count = listing.page_count, .entry_limit = listing.entry_limit, .truncated = listing.truncated or count < listing.entries.len }, .{});
-        if (bytes.len <= cap) {
+        var version_buffer: [16]u8 = undefined;
+        const bytes = try std.json.Stringify.valueAlloc(allocator, .{ .source = value.metadata, .offset = listing.offset, .source_version = try std.fmt.bufPrint(&version_buffer, "{x:0>16}", .{listing.source_version}), .next_offset = if (count < listing.entries.len) @as(?u64, listing.offset + count) else listing.next_offset, .entries = listing.entries[0..count], .page_count = listing.page_count, .entry_limit = listing.entry_limit, .truncated = listing.truncated or count < listing.entries.len }, .{});
+        const encoded = try std.json.Stringify.valueAlloc(allocator, bytes, .{});
+        defer allocator.free(encoded);
+        if (bytes.len <= cap and encoded.len + 2048 <= cap) {
+            if (count == 0 and listing.entries.len != 0) {
+                allocator.free(bytes);
+                return error.ToolOutputTooLarge;
+            }
             errdefer allocator.free(bytes);
             return .{ .stdout = bytes, .stderr = try allocator.dupe(u8, ""), .truncated = listing.truncated or count < listing.entries.len };
         }

@@ -538,8 +538,8 @@ test "AI composer model identities expose provider and ID and unconfigured model
     defer f.deinit();
     f.enter(f.view.buttons[2]);
     const alpha = modelOption(f.cx.root.?, "alpha").?;
-    try std.testing.expectEqualStrings("alpha\nlab · alpha\n配置上下文 200000 tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.label.?);
-    try std.testing.expectEqualStrings("alpha\nlab · alpha\n配置上下文 200000 tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.description.?);
+    try std.testing.expectEqualStrings("alpha\nlab · alpha\n配置上下文 200.0K tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.label.?);
+    try std.testing.expectEqualStrings("alpha\nlab · alpha\n配置上下文 200.0K tokens · 可用\n支持图片输入 · 工具能力未声明\n推理档位：低 / 高", alpha.behavior.interaction.a11y.?.description.?);
     const Hook = struct {
         fn open(raw: *anyopaque) void {
             const fixture: *Fixture = @ptrCast(@alignCast(raw));
@@ -891,4 +891,35 @@ test "AI composer menus keep owner based layers and title icon alignment across 
             }
         }
     }
+}
+
+test "hidden maintenance composer defers a hidden projection and applies it on reopen" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.panel.setDisplay(.none);
+    var next = f.snapshot();
+    next.permission = .auto;
+    try f.view.update(next);
+    f.settle();
+    try std.testing.expectEqual(Controls.PermissionMode.confirm, f.view.source.?.value.permission);
+    try std.testing.expect(f.view.pending != null);
+    f.panel.setDisplay(.flex);
+    f.settle();
+    try std.testing.expectEqual(Controls.PermissionMode.auto, f.view.source.?.value.permission);
+    try std.testing.expect(f.view.pending == null);
+}
+
+test "hidden maintenance composer releases a revoked projection before reopening" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.panel.setDisplay(.none);
+    try f.view.update(null);
+    f.settle();
+    try std.testing.expect(f.view.source == null);
+    f.panel.setDisplay(.flex);
+    f.settle();
+    try std.testing.expect(!f.view.clear_pending);
+    try std.testing.expect(f.view.source == null);
 }

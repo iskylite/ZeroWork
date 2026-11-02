@@ -417,12 +417,12 @@ pub const ProviderView = struct {
         try heading.appendChild(self.cx.allocator, try ui.textStyled(self.cx, S.note, try controls.owned(self.render_scope.?, summary)));
         try result.header.appendChild(self.cx.allocator, heading);
         const badge = try ui.text(self.cx, "", .{ .font_size = 10, .line_height = 16.0 / 10.0, .color = if (p.enabled) S.theme.current().ok_ink else S.theme.current().fg_2 });
-        badge.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 52 }, .top = .{ .px = 21 } }, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = if (p.enabled) S.theme.popupInset() else S.theme.current().hover, .border = .{ .radius = 5 } });
+        badge.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 52 }, .top = .{ .px = 21 } }, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = if (p.enabled) S.theme.popupInset() else S.theme.states().hover, .border = .{ .radius = 5 } });
         badge.meta.ownership.meta.test_id = try self.id(i, null, "status");
         try self.badges.append(self.scope.allocator, .{ .index = i, .node = badge });
         try result.item.appendChild(self.cx.allocator, badge);
         const toggle_click = try self.click(.toggle_provider, i, 0);
-        const toggle = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "启用服务提供方", .disabled = self.disabled, .on_click = self.cx.on(Click, toggle_click, Click.run), .base_style = .{ .width = .{ .px = 30 }, .height = .{ .px = 18 }, .padding = ui.Padding.all(2), .background = if (p.enabled) S.theme.current().accent else S.theme.current().hover, .corner_radius = 9, .border_width = 0 } }).mount(self.render_scope.?, self.cx);
+        const toggle = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "启用服务提供方", .disabled = self.disabled, .on_click = self.cx.on(Click, toggle_click, Click.run), .base_style = .{ .width = .{ .px = 30 }, .height = .{ .px = 18 }, .padding = ui.Padding.all(2), .background = if (p.enabled) S.theme.current().accent else S.theme.states().hover, .corner_radius = 9, .border_width = 0 } }).mount(self.render_scope.?, self.cx);
         toggle.setStyleInline(self.cx.allocator, .{ .position = .absolute, .inset = .{ .right = .{ .px = 12 }, .top = .{ .px = 23 } }, .direction = .row, .align_items = .center, .justify = if (p.enabled) .end else .start });
         if (toggle.behavior.interaction.a11y) |*a11y| {
             a11y.role = .switch_role;

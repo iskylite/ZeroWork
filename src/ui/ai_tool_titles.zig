@@ -15,6 +15,7 @@ pub fn title(name: []const u8) ?[]const u8 {
         .{ "host.get_group", "读取会话组状态" },
         .{ "host.list_group_members", "列出组成员" },
         .{ "host.read_terminal", "读取终端片段" },
+        .{ "host.read_command_output", "读取批处理输出" },
         .{ "host.search_terminal", "搜索终端内容" },
         .{ "host.list_terminal_commands", "列出执行记录" },
         .{ "host.create_group", "创建会话组" },

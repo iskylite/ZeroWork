@@ -58,6 +58,8 @@ pub const Host = struct {
         panel.behavior.interaction.focus_scope = .{ .trap = true };
         const card = try ui.box(cx, S.card(), .{});
         card.meta.ownership.meta.test_id = "history.panel";
+        @import("floating_input.zig").protect(cx, panel);
+        @import("floating_input.zig").protect(cx, card);
         try panel.appendChild(cx.allocator, card);
         const head = try ui.box(cx, S.header(), .{});
         try card.appendChild(cx.allocator, head);
@@ -141,6 +143,7 @@ pub const Host = struct {
     }
     /// The host string is display context only. Filtering captures stable identity.
     pub fn show(self: *Host, _: []const u8, source: ?catalog.SourceFilter) !void {
+        if (self.panel.style.display == .none) self.cx.dispatcher.cancelScrollGesture();
         if (self.refresh_job != null or self.open_job != null) {
             if (self.panel.style.display == .none) {
                 self.source = source;

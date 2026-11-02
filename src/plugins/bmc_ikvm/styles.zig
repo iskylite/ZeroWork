@@ -3,15 +3,16 @@
 const ui = @import("ui");
 pub const theme = @import("../../ui/app_theme.zig");
 const shell = @import("../../ui/shell_styles.zig");
-pub const toolbar_height: f32 = 44;
-pub const video_card_radius: f32 = shell.card_radius;
+pub const toolbar_height: f32 = 48;
+// The workspace root owns the rounded outer edge, including the video bottom.
+pub const video_card_radius: f32 = 0;
 pub const popup_width: f32 = 296;
 pub const boot_width: f32 = 312;
 pub const select_width: f32 = 180;
 pub const popup_header_height: f32 = 55.5;
 pub const progress_width: f32 = 520;
 pub const progress_height: f32 = 441;
-pub const progress_header_height: f32 = 74;
+pub const progress_header_height: f32 = 26;
 pub const progress_padding: f32 = 20;
 pub const progress_gap: f32 = 12;
 pub const progress_action_height: f32 = 32;
@@ -30,22 +31,33 @@ pub fn workspaceRoot(tokens: *const ui.ThemeTokens) ui.BoxStyle {
     style.gap = 0;
     style.overflow_hidden = true;
     style.clip_shape = .{ .rounded_rect = shell.card_radius };
+    style.corner_radius = shell.card_radius;
+    // Composite the outer mask after the ScrollArea's rectangular clip.
+    style.composited_group = true;
     return style;
 }
 pub fn toolbar(_: *const ui.ThemeTokens) ui.BoxStyle {
     // Share the workspace material with the area outside the video's top corners.
-    return .{ .width = .fill(), .height = .{ .px = toolbar_height }, .direction = .row, .align_items = .center, .justify = .end, .gap = 6, .padding = .{ .top = 10, .bottom = 10, .left = 12, .right = 12 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .px = toolbar_height }, .direction = .row, .align_items = .center, .justify = .end, .gap = 6, .padding = .{ .top = 12, .bottom = 12, .left = 13, .right = 13 }, .background = ui.Color.TRANSPARENT, .flex_shrink = 0, .min_width = 0 };
+}
+pub fn connectionIdentity(_: *const ui.ThemeTokens) ui.BoxStyle {
+    return .{ .width = .fill(), .min_width = 0, .direction = .row, .align_items = .center, .gap = 8 };
 }
 pub fn connectionTitle(tokens: *const ui.ThemeTokens) ui.TextStyle {
     var style = title(tokens);
     style.text_overflow = .ellipsis;
     return style;
 }
+pub fn disconnect() ui.BoxStyle {
+    var style = tool();
+    style.opacity = 1;
+    return style;
+}
 pub fn tool() ui.BoxStyle {
     return .{ .width = .{ .px = 82 }, .height = .{ .px = 24 }, .min_height = 24, .padding = .{ .left = 8, .right = 8 }, .gap = 4, .border = .{ .width = 0, .radius = 12 }, .font_size = 12, .font_weight = 500, .text_color = theme.current().fg_1, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
 }
 pub fn toolHover() ui.BoxStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn videoWorkspace(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_width = 0, .min_height = 0, .padding = ui.Padding.ZERO, .gap = 0 };
@@ -81,6 +93,11 @@ pub fn title(_: *const ui.ThemeTokens) ui.TextStyle {
 }
 pub fn body(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 12, .font_weight = 400, .line_height = 1.5, .color = theme.current().fg_1, .selectable = false };
+}
+pub fn confirmationDetail(tokens: *const ui.ThemeTokens) ui.TextStyle {
+    var style = body(tokens);
+    style.wrap = .word;
+    return style;
 }
 pub fn value(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .font_weight = 700, .line_height = 1.5, .color = theme.current().fg_1, .selectable = false, .text_overflow = .ellipsis };
@@ -157,10 +174,10 @@ pub fn progressTitle(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 18, .font_weight = 500, .line_height = 26.0 / 18.0, .color = theme.current().fg_1, .selectable = false, .text_overflow = .ellipsis };
 }
 pub fn progressTiming(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 12, .line_height = 1.5, .color = progressSecondary(), .use_monospace_font = true, .text_align = .end, .selectable = false };
+    return .{ .font_size = 11, .line_height = 1.5, .color = progressSecondary(), .use_monospace_font = true, .text_align = .end, .selectable = false };
 }
 pub fn progressTimingLabel(_: *const ui.ThemeTokens) ui.TextStyle {
-    return .{ .font_size = 12, .line_height = 1.5, .color = progressSecondary(), .selectable = false };
+    return .{ .font_size = 11, .line_height = 1.5, .color = progressSecondary(), .selectable = false };
 }
 pub fn progressDetail(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 12, .line_height = 1.5, .color = progressSecondary(), .wrap = .word, .selectable = false };
@@ -172,10 +189,10 @@ pub fn progressSteps(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 8, .min_width = 0, .flex_shrink = 0 };
 }
 pub fn progressStep(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .min_height = 30, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{ .top = 6, .bottom = 6 }, .min_width = 0, .flex_shrink = 0, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .radius = 8 } };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 34, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{ .top = 8, .bottom = 8, .left = 10, .right = 10 }, .min_width = 0, .flex_shrink = 0, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .radius = 8 } };
 }
 pub fn progressStepBackdrop(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .gap = 0, .padding = ui.Padding.ZERO, .min_width = 0, .flex_shrink = 0, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .radius = 8 } };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 34, .direction = .row, .gap = 0, .padding = ui.Padding.ZERO, .min_width = 0, .flex_shrink = 0, .background = ui.Color.TRANSPARENT, .border = .{ .width = 0, .radius = 8 } };
 }
 pub fn progressDiagnostic(_: *const ui.ThemeTokens) ui.TextStyle {
     return .{ .font_size = 11, .line_height = 1.7, .color = theme.current().fg_1, .wrap = .word, .selectable = false, .use_monospace_font = true };

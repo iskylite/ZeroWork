@@ -12,6 +12,8 @@ pub const Window = struct {
     owns: *const fn (*anyopaque, notifications.Target) bool,
     activate: *const fn (*anyopaque, notifications.Target) bool,
     activate_ai: ?*const fn (*anyopaque, ConversationId) bool = null,
+    prepare_activity: ?*const fn (*anyopaque) bool = null,
+    tab_presentation: ?*const fn (*anyopaque, ContentOwner) ?@import("tab_presentation.zig").Presentation = null,
     feedback: *const fn (*anyopaque, []const u8) void,
     owner_name: ?*const fn (*anyopaque, ContentOwner) []const u8 = null,
     result_presented: ?*const fn (*anyopaque, notifications.Kind, ContentOwner) bool = null,
@@ -40,6 +42,7 @@ pub const Poll = struct { consumed: usize = 0, settings_changed: bool = false };
 
 pub const Host = struct {
     allocator: std.mem.Allocator,
+    activity: @import("activity_badge.zig").Tracker,
     driver: platform.Driver,
     coordinator: notifications.Coordinator,
     windows: std.ArrayList(Registration) = .empty,
@@ -58,7 +61,7 @@ pub const Host = struct {
     pub fn create(allocator: std.mem.Allocator, saved: config.Notify) !*Host {
         const self = try allocator.create(Host);
         errdefer allocator.destroy(self);
-        self.* = .{ .allocator = allocator, .driver = try platform.Driver.init(allocator), .coordinator = undefined };
+        self.* = .{ .allocator = allocator, .activity = .{ .allocator = allocator }, .driver = try platform.Driver.init(allocator), .coordinator = undefined };
         errdefer self.driver.deinit();
         self.coordinator = try notifications.Coordinator.init(allocator, saved, self.driver.sink());
         return self;
@@ -66,12 +69,13 @@ pub const Host = struct {
     pub fn createWithApi(allocator: std.mem.Allocator, saved: config.Notify, api: platform.Api) !*Host {
         const self = try allocator.create(Host);
         errdefer allocator.destroy(self);
-        self.* = .{ .allocator = allocator, .driver = try platform.Driver.initWithApi(allocator, api), .coordinator = undefined };
+        self.* = .{ .allocator = allocator, .activity = .{ .allocator = allocator }, .driver = try platform.Driver.initWithApi(allocator, api), .coordinator = undefined };
         errdefer self.driver.deinit();
         self.coordinator = try notifications.Coordinator.init(allocator, saved, self.driver.sink());
         return self;
     }
     pub fn destroy(self: *Host) void {
+        self.activity.deinit();
         self.driver.deinit();
         self.coordinator.deinit();
         self.windows.deinit(self.allocator);
@@ -146,6 +150,71 @@ pub const Host = struct {
         };
         return false;
     }
+    pub const ActivityRow = struct {
+        token: u64,
+        window_id: u64,
+        window_order: usize,
+        presentation: @import("tab_presentation.zig").Presentation,
+    };
+    pub fn activityRows(self: *Host, allocator: std.mem.Allocator) !std.ArrayList(ActivityRow) {
+        var rows: std.ArrayList(ActivityRow) = .empty;
+        errdefer rows.deinit(allocator);
+        for (self.activity.entries.items) |item| {
+            if (!item.pending) continue;
+            for (self.windows.items, 0..) |window, window_order| {
+                const project = window.value.tab_presentation orelse continue;
+                const presentation = project(window.value.context, item.owner) orelse continue;
+                var merged = false;
+                for (rows.items) |*row| if (row.window_id == @backingInt(window.id) and row.presentation.tab_id == presentation.tab_id) {
+                    // One visible group Tab may contain several active owners.
+                    if (item.ai_operation != null) row.token = item.token;
+                    merged = true;
+                    break;
+                };
+                if (!merged) try rows.append(allocator, .{ .token = item.token, .window_id = @backingInt(window.id), .window_order = window_order, .presentation = presentation });
+                break;
+            }
+        }
+        std.mem.sort(ActivityRow, rows.items, {}, struct {
+            fn less(_: void, a: ActivityRow, b: ActivityRow) bool {
+                return if (a.window_order != b.window_order) a.window_order < b.window_order else a.presentation.order < b.presentation.order;
+            }
+        }.less);
+        return rows;
+    }
+    pub fn activityTitle(self: *Host, owner: ContentOwner) []const u8 {
+        const target: notifications.Target = .{ .owner = owner, .kind = .reconnect, .operation_id = 0, .attempt_or_turn_id = null };
+        for (self.windows.items) |window| if (window.value.owns(window.value.context, target)) {
+            if (window.value.owner_name) |name| return name(window.value.context, owner);
+        };
+        if (owner == .group) for (self.ai_origins.items) |origin| {
+            const window = self.windowFor(origin.window) orelse continue;
+            if (window.owner_name) |name| {
+                const title = name(window.context, owner);
+                if (!std.mem.eql(u8, title, "原会话已关闭")) return title;
+            }
+        };
+        return "AI 助手会话";
+    }
+    pub fn activateActivity(self: *Host, token: u64) bool {
+        for (self.activity.entries.items) |item| if (item.token == token) {
+            const target: notifications.Target = .{ .owner = item.owner, .kind = if (item.ai_operation != null) .ai_ready else .reconnect, .operation_id = item.ai_operation orelse 0, .attempt_or_turn_id = null };
+            if (item.ai_operation != null) {
+                for (self.ai_origins.items) |origin| if (origin.operation_id == item.ai_operation.?) {
+                    const window = self.windowFor(origin.window) orelse break;
+                    if (window.prepare_activity) |prepare| if (!prepare(window.context)) return false;
+                    break;
+                };
+                if (self.activateAi(target)) return true;
+            }
+            for (self.windows.items) |window| if (window.value.owns(window.value.context, target)) {
+                if (window.value.prepare_activity) |prepare| if (!prepare(window.value.context)) return false;
+                return window.value.activate(window.value.context, target);
+            };
+            return false;
+        };
+        return false;
+    }
     pub fn refreshAuthorization(self: *Host) !void {
         _ = self.driver.refreshAuthorization() catch |err| switch (err) {
             error.AuthorizationQueryPending, error.AuthorizationRequestPending => return,
@@ -196,6 +265,7 @@ pub const Host = struct {
             .cancelled => "本次请求已停止。",
             .unverified => "执行结果尚未确认，请查看结果后核查。",
         } });
+        self.activity.observeAi(owner, operation_id, turn_id) catch |err| std.log.warn("menu bar AI activity: {s}", .{@errorName(err)});
     }
     pub fn publishTransfer(self: *Host, owner: ContentOwner, job: u64, attempt: u64, completion: TransferCompletion) !void {
         if (completion.result == .cancelled) return;
@@ -541,6 +611,7 @@ pub const Host = struct {
     }
     pub fn ownerEnded(self: *Host, owner: ContentOwner) void {
         self.coordinator.ownerEnded(owner);
+        self.activity.remove(owner);
         self.revokeActions(owner);
         var i: usize = 0;
         while (i < self.bound_owners.items.len) {

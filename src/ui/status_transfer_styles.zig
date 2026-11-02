@@ -6,7 +6,7 @@ pub fn button() ButtonStyle {
     return .{ .width = .{ .px = 264 }, .height = .{ .px = 26 }, .padding = .{}, .gap = 0, .background = ui.Color.TRANSPARENT, .corner_radius = 7, .border_width = 0, .flex_shrink = 0 };
 }
 pub fn hover() ButtonStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn row() ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 7 }, .top = .{ .px = 0 } }, .width = .{ .px = 248 }, .height = .{ .px = 26 }, .direction = .row, .align_items = .center, .gap = 6 };

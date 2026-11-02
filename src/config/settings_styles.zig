@@ -103,7 +103,7 @@ pub fn fieldButton() ButtonStyle {
     return .{ .width = .{ .px = geometry.control_width }, .height = .{ .px = geometry.control_height }, .padding = .{ .left = 10, .right = 8 }, .background = theme.current().well, .text_color = theme.current().fg_1, .corner_radius = 8, .border_width = 0, .font_size = 12, .font_weight = 400, .flex_shrink = 0 };
 }
 pub fn actionControl(danger: bool) ButtonStyle {
-    return .{ .height = .{ .px = 32 }, .padding = .{ .left = 12, .right = 12 }, .background = theme.current().hover, .text_color = if (danger) theme.current().danger_ink else theme.current().fg_1, .font_size = 12, .font_weight = 500, .corner_radius = 8, .border_width = 0, .flex_shrink = 0 };
+    return .{ .height = .{ .px = 32 }, .padding = .{ .left = 12, .right = 12 }, .background = theme.states().action, .text_color = if (danger) theme.current().danger_ink else theme.current().fg_1, .font_size = 12, .font_weight = 500, .corner_radius = 8, .border_width = 0, .flex_shrink = 0 };
 }
 pub fn fieldHelpButton() ButtonStyle {
     var style = button(24, false);
@@ -185,10 +185,11 @@ pub fn providerSelect() ButtonStyle {
 pub fn paintSwitch(cx: *ui.Cx, node: *ui.Node, enabled: bool) void {
     node.setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_width }, .height = .{ .px = geometry.switch_height }, .gap = 0, .padding = .ZERO, .flex_shrink = 0 });
     const track = node.children.items[0];
-    track.setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_width }, .height = .{ .px = geometry.switch_height }, .background = if (enabled) theme.current().action_accent else theme.switchTrackOff(), .border = .{ .width = 0, .radius = 9 } });
+    const disabled = if (node.behavior.interaction.a11y) |a| a.disabled else false;
+    track.setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_width }, .height = .{ .px = geometry.switch_height }, .background = theme.choiceBackground(enabled, disabled), .border = .{ .width = 0, .radius = 9 } });
     // Pin the thumb to the track's layout coordinates. A translated absolute
     // child can retain its old composite position inside a material overlay.
-    track.children.items[0].setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_thumb }, .height = .{ .px = geometry.switch_thumb }, .inset = .{ .left = .{ .px = if (enabled) 14 else 2 }, .top = .{ .px = 2 } }, .translate_x = 0, .translate_y = 0, .background = ui.Color.WHITE, .border = .{ .radius = 7 } });
+    track.children.items[0].setStyleInline(cx.allocator, .{ .width = .{ .px = geometry.switch_thumb }, .height = .{ .px = geometry.switch_thumb }, .inset = .{ .left = .{ .px = if (enabled) 14 else 2 }, .top = .{ .px = 2 } }, .translate_x = 0, .translate_y = 0, .background = theme.choiceThumb(enabled, disabled), .border = .{ .radius = 7 } });
 }
 pub fn shortcutGroup(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .height = .{ .px = 32 }, .direction = .row, .align_items = .center, .gap = 4, .flex_shrink = 0 };
@@ -270,7 +271,7 @@ pub fn textButton() ButtonStyle {
     return .{ .height = .{ .px = geometry.section_header }, .padding = .{ .left = 8, .right = 8 }, .background = theme.current().surface_2, .text_color = theme.current().fg_2, .corner_radius = 7, .border_width = 0, .font_size = 11.5, .font_weight = 400 };
 }
 pub fn buttonHover() ButtonStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 
 // Protocol-planning facts share the Figma row geometry without turning a

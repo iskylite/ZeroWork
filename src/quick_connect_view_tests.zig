@@ -350,7 +350,7 @@ test "quick connect native theme material changes preserve active draft and sele
         try std.testing.expectEqualStrings("DB", view.query.peek());
         try std.testing.expectEqual(owner_a, view.selected.?);
         try std.testing.expectEqual(T.current().overlay, view.chrome.getBackground());
-        try std.testing.expectEqual(T.popupSelection(), view.input.node.getBackground());
+        try std.testing.expectEqual(T.states().focus, view.input.node.getBackground());
         try std.testing.expectEqual(T.popupSelection().a, view.input.node.getBackground().a);
         try std.testing.expectEqual(V.styles.selectedFill(), view.scroll.content.children.items[0].getBackground());
         try std.testing.expectEqual(V.styles.actionFill(), view.primary.getBackground());

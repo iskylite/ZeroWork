@@ -546,8 +546,22 @@ test "SFTP AI registration prepares only file tools and rejects terminal or revo
     var bridge = Dynamic.Bridge.init(a);
     defer bridge.deinit();
     bridge.configureFiles(file_host);
+    const host_tools = @import("ai/host_tools.zig");
+    const Query = struct {
+        fn invoke(_: *anyopaque, _: host_tools.Invocation, _: std.mem.Allocator) !host_tools.Result {
+            return error.UnexpectedDispatch;
+        }
+    };
+    const host_contributions = @import("ai/host_queries.zig").contributions ++ @import("ai/host_terminal_queries.zig").contributions ++ @import("ai/host_execution.zig").contributions ++ .{@import("ai/batch_output.zig").contribution};
+    try bridge.configureHost(.{ .context = .{ .conversation_id = .{ .bytes = @splat(1) }, .task_id = .{ .bytes = @splat(2) }, .binding = .{ .session = @backingInt(accepted.handle.session_id) }, .binding_revision = 1, .grant_revision = 1 }, .handler_context = &adapter, .invoke = Query.invoke, .contributions = &host_contributions });
     try bridge.prepare(f.app, accepted.handle);
-    try std.testing.expectEqual(@as(usize, 2), bridge.requestTable().?.entries.len);
+    try std.testing.expectEqual(@as(usize, 8), bridge.requestTable().?.entries.len);
+    try std.testing.expect(bridge.requestTable().?.lookup("host__get_usession") != null);
+    for (@import("ai/host_terminal_queries.zig").contributions ++ @import("ai/host_execution.zig").contributions ++ .{@import("ai/batch_output.zig").contribution}) |contribution| {
+        var name: [64]u8 = undefined;
+        try std.testing.expect(bridge.requestTable().?.lookup(try @import("ai/plugin_tools.zig").encodeName(&name, contribution.definition.id)) == null);
+        for (bridge.host_binding.?.contributions) |advertised| try std.testing.expect(!std.mem.eql(u8, advertised.definition.id, contribution.definition.id));
+    }
     try std.testing.expectEqualSlices(u64, &.{@backingInt(accepted.handle.session_id)}, (try bridge.toolIds(.list_remote_files)).slice());
     try std.testing.expectEqual(@as(usize, 1), (try bridge.toolIds(.read_remote_file)).len);
     try std.testing.expectEqual(@as(usize, 0), (try bridge.toolIds(.run_command)).len);

@@ -10,6 +10,11 @@ pub const tail_width: f32 = 36;
 pub const action_size: f32 = 24;
 pub const host_icon_size: f32 = 14;
 
+/// Saved KVM consoles keep a blue identity in every theme family.
+pub fn kvmIconInk() ui.Color {
+    return ui.Color.hex(if (theme.currentName() == .dark) 0x88b4ff else 0x2d5ca8);
+}
+
 pub fn panel(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = expanded_width }, .height = .fill(), .direction = .column, .flex_shrink = 0, .background = theme.current().surface_1, .shadow = @import("shell_styles.zig").cardShadow(), .inset_shadow = @import("shell_styles.zig").cardHighlight(), .border = .{ .radius = 11 }, .overflow = .hidden };
 }
@@ -67,7 +72,7 @@ pub fn action(size: f32) ui.BoxStyle {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .flex_shrink = 0 };
 }
 pub fn host(selected: bool, hot: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = host_height }, .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 9 }, .background = if (selected) theme.popupSelection() else if (hot) theme.popupSelection() else ui.Color.TRANSPARENT, .border = .{ .radius = 9 }, .flex_shrink = 0, .min_width = 0 };
+    return .{ .width = .fill(), .height = .{ .px = host_height }, .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 9 }, .background = if (selected) (if (hot) theme.states().selected_hover else theme.states().selected) else if (hot) theme.states().hover else ui.Color.TRANSPARENT, .border = .{ .radius = 9 }, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn content() ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = 0 }, .top = .{ .px = 0 } }, .width = .fill(), .height = .fill(), .direction = .row, .align_items = .center, .gap = 9, .padding = .{ .left = 9, .right = 9 }, .min_width = 0 };

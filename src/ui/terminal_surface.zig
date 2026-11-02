@@ -105,6 +105,7 @@ pub const Surface = struct {
     recovered_input: std.ArrayList(u8) = .empty,
 
     options: Options,
+    timestamp_width: f32,
     command_info_visible: bool = true,
     command_snapshot_ns: i128 = 0,
     command_timer_ms: f64 = 0,
@@ -203,7 +204,7 @@ pub const Surface = struct {
         try message_root.appendChild(cx.allocator, message);
         message_root.setDisplay(.none);
         message.setDisplay(.none);
-        self.* = .{ .cx = cx, .host = host, .root = root, .viewport = viewport, .service = service, .owner = owner, .options = owned_options, .composite = @import("terminal_document.zig").Document.init(cx.allocator, service, owner), .caret = caret, .preedit_node = preedit, .message = message, .message_root = message_root };
+        self.* = .{ .cx = cx, .host = host, .root = root, .viewport = viewport, .service = service, .owner = owner, .options = owned_options, .timestamp_width = S.timestampWidth(cx, options.family_id), .composite = @import("terminal_document.zig").Document.init(cx.allocator, service, owner), .caret = caret, .preedit_node = preedit, .message = message, .message_root = message_root };
         self.service = self.composite.service();
         if (service.textSlot()) |slot| slot.enableStructured() else |_| {}
         self.scrollbar = try @import("terminal_scrollbar.zig").mount(cx, root);
@@ -352,6 +353,7 @@ pub const Surface = struct {
         self.cx.allocator.free(self.options.family_name);
         next.family_name = family;
         self.options = next;
+        self.timestamp_width = S.timestampWidth(self.cx, next.family_id);
         for (self.rows.items) |*row| row.hash = 0;
         self.force_snapshot = true;
     }
@@ -598,7 +600,7 @@ pub const Surface = struct {
         return S.contentPadding(self.options.grouped);
     }
     pub fn bodyX(self: *const Surface) f32 {
-        return if (self.options.timestamps) S.gutter else 0;
+        return if (self.options.timestamps) self.timestamp_width + S.timestamp_gap else 0;
     }
     fn render(self: *Surface, _: i64) !void {
         if (self.glyph_budget_frame != self.cx.frame_count) {
@@ -836,7 +838,7 @@ pub const Surface = struct {
             try absolute(self.cx, state, -@min(17, self.contentPadding().left - 1) + @import("command_annotation_styles.zig").status_inset, 0, 12, self.options.row_height);
             if (!self.command_info_visible) continue;
             if (row.command_info == null) {
-                const group = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .right = .{ .px = 0 }, .top = .{ .px = 0 } }, .height = .{ .px = self.options.row_height }, .direction = .row, .align_items = .center, .gap = 10, .padding = .{ .left = 12 }, .background = @import("app_theme.zig").current().surface_1.withAlpha(235), .hit_behavior = .pass_through, .z_index = 4 }, .{});
+                const group = try ui.box(self.cx, .{ .position = .absolute, .inset = .{ .right = .{ .px = 0 }, .top = .{ .px = 0 } }, .height = .{ .px = self.options.row_height }, .direction = .row, .align_items = .center, .gap = 10, .padding = .{ .left = 12 }, .background = ui.Color.TRANSPARENT, .hit_behavior = .pass_through, .z_index = 4 }, .{});
                 group.meta.ownership.meta.test_id = "terminal.command.metadata";
                 const ai = try @import("command_annotation_styles.zig").mountAiTag(self.cx, self.options.family_id, self.options.row_height);
                 const code = try self.annotationText("", "terminal.command.metadata.code");
@@ -860,7 +862,8 @@ pub const Surface = struct {
             var elapsed_buffer: [40]u8 = undefined;
             try row.command_elapsed.?.setTextContent(self.cx.allocator, try annotations.duration(&elapsed_buffer, self.commandElapsed(command)));
             row.command_elapsed.?.setTextColor(@import("app_theme.zig").current().fg_2);
-            row.command_info.?.setBackground(@import("app_theme.zig").current().surface_1.withAlpha(235));
+            // Share the terminal's glass material without adding an opaque tile.
+            row.command_info.?.setBackground(ui.Color.TRANSPARENT);
             row.command_info.?.setDisplay(.flex);
         }
         self.updateCommandHover();
@@ -905,7 +908,7 @@ pub const Surface = struct {
         var aligned = time.getText().?;
         aligned.line_height = self.options.row_height / aligned.font_size;
         time.setText(aligned);
-        try absolute(self.cx, time, S.timestamp_x, S.timestamp_y, S.timestamp_width, self.options.row_height);
+        try absolute(self.cx, time, S.timestamp_x, S.timestamp_y, self.timestamp_width, self.options.row_height);
     }
     fn rowText(self: *Surface, row: *Row, comptime field: []const u8, comptime style: anytype, content: []const u8, test_id: []const u8) !*ui.Node {
         if (@field(row, field)) |node| return node;

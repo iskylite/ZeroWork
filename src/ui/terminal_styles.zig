@@ -1,19 +1,29 @@
-//! Native terminal grid values. The timestamp column follows the final V3
-//! workspace CSS: 64px time + 12px gap, 11px text on the 22px row baseline.
+//! Native terminal grid values. Timestamp text uses its measured font width
+//! plus a 12px gap, with 11px text on the terminal row baseline.
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 // Final workspace CSS: .terminal-scroll and .pane-group .terminal-scroll.
 pub fn contentPadding(grouped: bool) ui.Padding {
     return if (grouped) .{ .top = 14, .right = 13, .bottom = 14, .left = 13 } else .{ .top = 18, .right = 20, .bottom = 18, .left = 20 };
 }
-pub const gutter: f32 = 76;
+pub const timestamp_gap: f32 = 12;
 pub const timestamp_x: f32 = 0;
 pub const timestamp_y: f32 = 0;
-pub const timestamp_width: f32 = 64;
 pub const timestamp_size: f32 = 11;
 pub const timestamp_height: f32 = 22;
 pub const body_size: f32 = 14;
 pub const body_height: f32 = 22;
+
+/// Match the timestamp painter: regular 11px text in the selected terminal
+/// family, without the terminal body's forced cell advance. Digits are tabular.
+pub fn timestampWidth(cx: *ui.Cx, family_id: u16) f32 {
+    const sample = "00:00:00";
+    if (cx.text.font_props_measure_fn) |measure| if (cx.text.font_resolve_ctx) |context| {
+        if (measure(context, sample, timestamp_size, 400, false, family_id == 0, family_id, false, 0)) |width| return width;
+    };
+    const run = cx.text.shapeText(.{ .text = sample, .font_family = "system", .font_family_id = family_id, .font_size = timestamp_size, .font_weight = 400, .use_monospace = family_id == 0 }) catch return sample.len * timestamp_size * 0.6;
+    return run.total_advance;
+}
 
 pub fn surface(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .direction = .column, .overflow = .hidden };
@@ -70,7 +80,7 @@ pub fn messageClose(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .{ .px = message_close_size }, .height = .{ .px = message_close_size }, .padding = .ZERO, .gap = 0, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .flex_shrink = 0 };
 }
 pub fn messageCloseHover() ui.BoxStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn messageIcon() ui.Style {
     return .{ .width = .{ .px = message_icon_size }, .height = .{ .px = message_icon_size }, .flex_shrink = 0 };

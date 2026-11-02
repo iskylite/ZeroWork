@@ -78,11 +78,10 @@ fn mountList(cx: *ui.Cx, bound: *binding.Binding, root: *ui.Node) !void {
         matched += group_matches;
         if (group_matches != 0 or bound.controller.search_query.len == 0) try root.appendChild(cx.allocator, section.root) else cx.destroyDetached(section.root);
     }
-    if (bound.controller.search_query.len == 0 or binding.matches(bound.controller.search_query, "协议扩展 BMC iKVM VNC RDP FTP")) {
-        const future = try card(cx, bound, "协议扩展", "远程桌面、文件传输与带外管理", ui.icons.layers, 42, false);
+    if (bound.controller.search_query.len == 0 or binding.matches(bound.controller.search_query, "协议扩展 VNC RDP FTP")) {
+        const future = try card(cx, bound, "协议扩展", "远程桌面与文件传输", ui.icons.layers, 42, false);
         future.root.meta.ownership.meta.test_id = "settings.plugins.future";
         future.body.meta.ownership.meta.test_id = "settings.plugins.future.body";
-        try future.body.appendChild(cx.allocator, try futureRow(cx, bound, "BMC iKVM", "远程查看服务器画面，使用键鼠控制和电源管理。", ui.icons.server));
         try future.body.appendChild(cx.allocator, try futureRow(cx, bound, "VNC / RDP / FTP", "连接远程桌面，或通过 FTP 传输文件。", ui.icons.layers));
         const note = try ui.text(cx, "连接配置通过连接编辑器管理。", .{ .font_size = 11, .line_height = 18.0 / 11.0, .color = S.theme.current().fg_2 });
         note.style.margin = .{ .top = 8, .bottom = 8 };
@@ -123,7 +122,7 @@ fn pluginRow(cx: *ui.Cx, bound: *binding.Binding, details: *Info, entry: registr
     try labels.appendChild(cx.allocator, detail);
     try row.appendChild(cx.allocator, labels);
     const tag = try ui.widgets.Tag(.{ .label = if (entry.origin == .builtin) @as([]const u8, "内置") else "随应用提供", .color = .neutral, .size = .sm }).mount(bound.scope, cx);
-    tag.setStyleInline(cx.allocator, .{ .height = .{ .px = 22 }, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = S.theme.current().hover, .border = .{ .radius = 5 }, .flex_shrink = 0 });
+    tag.setStyleInline(cx.allocator, .{ .height = .{ .px = 22 }, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = S.theme.states().tag, .border = .{ .radius = 5 }, .flex_shrink = 0 });
     for (tag.children.items) |child| if (child.getText()) |old| {
         var text = old;
         text.font_size = 10;
@@ -328,7 +327,7 @@ fn futureRow(cx: *ui.Cx, bound: *binding.Binding, name: []const u8, description_
     try labels.appendChild(cx.allocator, detail);
     try row.appendChild(cx.allocator, labels);
     const tag = try ui.widgets.Tag(.{ .label = "暂不可用", .color = .neutral, .size = .sm }).mount(bound.scope, cx);
-    tag.setStyleInline(cx.allocator, .{ .height = .{ .px = 22 }, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = S.theme.current().hover, .border = .{ .radius = 5 }, .flex_shrink = 0 });
+    tag.setStyleInline(cx.allocator, .{ .height = .{ .px = 22 }, .padding = .{ .left = 6, .right = 6, .top = 3, .bottom = 3 }, .background = S.theme.states().tag, .border = .{ .radius = 5 }, .flex_shrink = 0 });
     try row.appendChild(cx.allocator, tag);
     return row;
 }

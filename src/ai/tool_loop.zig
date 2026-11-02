@@ -27,6 +27,9 @@ pub const TargetResult = struct {
     cwd: ?[]const u8 = null,
     elapsed_ms: u64 = 0,
     truncated: bool = false,
+    output_ref: ?[]const u8 = null,
+    next_output_cursor: ?usize = null,
+    retained_truncated: bool = false,
     local_released: bool = true,
     remote_effect_unknown: bool = false,
     error_code: ?[]const u8 = null,
@@ -58,6 +61,7 @@ pub const Outcome = struct {
             target.stderr = stderr;
             target.cwd = cwd;
             target.error_code = error_code;
+            target.output_ref = if (value.output_ref) |reference| try allocator.dupe(u8, reference) else null;
             initialized += 1;
         }
         return .{ .targets = targets };
@@ -72,6 +76,7 @@ pub const Outcome = struct {
         allocator.free(value.stderr);
         if (value.cwd) |text| allocator.free(text);
         if (value.error_code) |text| allocator.free(text);
+        if (value.output_ref) |text| allocator.free(text);
     }
 };
 pub const Invocation = struct {
@@ -86,7 +91,22 @@ pub const Invocation = struct {
     policy_revision: u64,
     timeout_ms: u32 = 60_000,
     capture_bytes: u32 = 64 * 1024,
+    output_context: ?@import("batch_output.zig").Context = null,
 };
+pub fn retainedPage(invocation: Invocation, original: TargetResult, reference: *[32]u8) !TargetResult {
+    const context = invocation.output_context orelse return original;
+    if (invocation.call.tool != .run_command or original.stdout.len + original.stderr.len == 0) return original;
+    reference.* = try context.store.put(context, original);
+    const chunk = try @import("batch_output.zig").page(original.stdout, original.stderr, 0, @max(4, invocation.call.max_bytes));
+    var result = original;
+    result.stdout = chunk.stdout;
+    result.stderr = chunk.stderr;
+    result.output_ref = reference;
+    result.next_output_cursor = chunk.next;
+    result.retained_truncated = original.truncated;
+    result.truncated = chunk.next != null or original.truncated;
+    return result;
+}
 pub const Host = struct {
     context: *anyopaque,
     /// Borrow Invocation only until return. Capture exact generation, service
@@ -527,13 +547,13 @@ pub const Loop = struct {
         return std.json.Stringify.valueAlloc(self.arena.allocator(), .{ .status = Status.unknown, .error_code = code, .session_ids = targets.slice() }, .{});
     }
     fn outcomeBody(self: *Loop, outcome: Outcome) ![]const u8 {
-        const Encoded = struct { session_id: u64, status: Status, transport: Transport, stdout: []const u8, stderr: []const u8, stdout_encoding: []const u8, stderr_encoding: []const u8, exit: ?i32, signal: ?u8, cwd: ?[]const u8, elapsed_ms: u64, truncated: bool, local_released: bool, remote_effect_unknown: bool, error_code: ?[]const u8 };
+        const Encoded = struct { session_id: u64, status: Status, transport: Transport, stdout: []const u8, stderr: []const u8, stdout_encoding: []const u8, stderr_encoding: []const u8, exit: ?i32, signal: ?u8, cwd: ?[]const u8, elapsed_ms: u64, truncated: bool, output_ref: ?[]const u8, next_output_cursor: ?usize, retained_truncated: bool, local_released: bool, remote_effect_unknown: bool, error_code: ?[]const u8 };
         const a = self.arena.allocator();
         const encoded = try a.alloc(Encoded, outcome.targets.len);
         for (outcome.targets, encoded) |target, *value| {
             const stdout_utf8 = std.unicode.utf8ValidateSlice(target.stdout);
             const stderr_utf8 = std.unicode.utf8ValidateSlice(target.stderr);
-            value.* = .{ .session_id = target.session_id, .status = target.status, .transport = target.transport, .stdout = if (stdout_utf8) target.stdout else try base64(a, target.stdout), .stderr = if (stderr_utf8) target.stderr else try base64(a, target.stderr), .stdout_encoding = if (stdout_utf8) "utf-8" else "base64", .stderr_encoding = if (stderr_utf8) "utf-8" else "base64", .exit = target.exit, .signal = target.signal, .cwd = target.cwd, .elapsed_ms = target.elapsed_ms, .truncated = target.truncated, .local_released = target.local_released, .remote_effect_unknown = target.remote_effect_unknown, .error_code = target.error_code };
+            value.* = .{ .session_id = target.session_id, .status = target.status, .transport = target.transport, .stdout = if (stdout_utf8) target.stdout else try base64(a, target.stdout), .stderr = if (stderr_utf8) target.stderr else try base64(a, target.stderr), .stdout_encoding = if (stdout_utf8) "utf-8" else "base64", .stderr_encoding = if (stderr_utf8) "utf-8" else "base64", .exit = target.exit, .signal = target.signal, .cwd = target.cwd, .elapsed_ms = target.elapsed_ms, .truncated = target.truncated, .output_ref = target.output_ref, .next_output_cursor = target.next_output_cursor, .retained_truncated = target.retained_truncated, .local_released = target.local_released, .remote_effect_unknown = target.remote_effect_unknown, .error_code = target.error_code };
         }
         return std.json.Stringify.valueAlloc(a, .{ .targets = encoded }, .{});
     }
@@ -555,8 +575,8 @@ fn parseStrict(allocator: std.mem.Allocator, scope: scope_mod.Scope, name: []con
         const allowed = std.mem.eql(u8, key, "session_ids") or switch (tool) {
             .run_command => std.mem.eql(u8, key, "command"),
             .read_terminal => false,
-            .list_remote_files => std.mem.eql(u8, key, "path"),
-            .read_remote_file => std.mem.eql(u8, key, "path") or std.mem.eql(u8, key, "max_bytes"),
+            .list_remote_files => std.mem.eql(u8, key, "path") or std.mem.eql(u8, key, "offset") or std.mem.eql(u8, key, "source_version") or std.mem.eql(u8, key, "max_entries"),
+            .read_remote_file => std.mem.eql(u8, key, "path") or std.mem.eql(u8, key, "max_bytes") or std.mem.eql(u8, key, "offset") or std.mem.eql(u8, key, "source_version"),
         };
         if (!allowed) return error.InvalidToolArguments;
     }

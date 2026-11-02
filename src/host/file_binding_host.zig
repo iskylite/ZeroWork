@@ -255,6 +255,7 @@ pub const FileBindingHost = struct {
     }
 
     pub fn submit(self: *FileBindingHost, handle: sessions.ServiceHandle, key: operations.OperationKey, call: Call) !void {
+        try @import("../update/admission.zig").require();
         const binding = try self.resolve(handle, call.action);
         return self.enqueue(binding, handle, key, call, null);
     }

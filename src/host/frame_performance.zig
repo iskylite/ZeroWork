@@ -24,6 +24,7 @@ pub const Meter = struct {
     }
 
     /// One-second rolling count in 100 ms buckets. Keep warmup distinct from 0.
+    /// Approximate UI rate; benchmarks use counter deltas / actual elapsed time.
     pub fn fps(self: *const Meter, now: u64) ?f64 {
         const start = self.started_ms orelse return null;
         if (now < start or now - start < 1000) return null;

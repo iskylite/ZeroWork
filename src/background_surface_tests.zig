@@ -72,6 +72,50 @@ fn imageCount(items: []const ui.DisplayItem, texture: u32) usize {
     return count;
 }
 
+test "settings surface blocks blank area pointer and scroll hits from the terminal below" {
+    const w = try Window.init();
+    defer w.deinit();
+    const terminal = find(w.cx.root.?, "workspace.body").?;
+    terminal.setStyleInline(w.cx.allocator, .{ .hit_behavior = .@"opaque", .hit_roles = .{ .pointer = true, .scroll = true } });
+    _ = w.frame();
+    const rect = w.card.globalRect();
+    // A point inside both the terminal and the settings card, below its button.
+    const x = rect.x + rect.w / 2;
+    const y = rect.y + rect.h / 2;
+    try std.testing.expectEqual(w.card, w.cx.hitTest(x, y).?);
+    const wheel = w.cx.hitTestQuery(.{ .kind = .scroll, .world_x = x, .world_y = y }).?;
+    try std.testing.expectEqual(w.card.id, wheel.node_id);
+    w.card.setDisplay(.none);
+    _ = w.frame();
+    try std.testing.expectEqual(terminal, w.cx.hitTest(x, y).?);
+}
+
+test "background preview reveals image at full global transparency and blurs its own surface" {
+    const w = try Window.init();
+    defer w.deinit();
+    w.source.root.setStyleInline(w.cx.allocator, .{ .composited_group = true });
+    var materials: assets.Materials = .{ .background = .{ .enabled = true, .path = "/fixture" } };
+    const image: layers.Image = .{ .id = 777, .width = 640, .height = 256 };
+    var previous_alpha: u8 = 255;
+    for ([_]f32{ 0, 50, 100 }) |transparency| {
+        materials.background.transparency = transparency;
+        for ([_]u8{ 0, 24, 96 }) |blur| {
+            materials.blur_px = blur;
+            try w.source.update(image, materials, 1440, 900);
+            _ = w.frame();
+            const veil = w.source.veil.getBackground();
+            try std.testing.expect(veil.a <= previous_alpha);
+            previous_alpha = veil.a;
+            try std.testing.expectEqual(@as(u8, @intFromFloat(@round((100 - transparency) * 255 / 100))), veil.a);
+            const glass = w.source.blur.style.glass_params().?;
+            try std.testing.expect(glass.capture_current_target);
+            try std.testing.expect(glass.capture_clamp);
+            try std.testing.expectEqual(@as(f32, @floatFromInt(blur)), w.source.blur.style.backdrop_blur());
+            try std.testing.expect((w.source.blur.style.display == .none) == (blur == 0));
+        }
+    }
+}
+
 test "global background remains the only image through floating card move resize hide and reopen" {
     const previous_parameters = theme.materialParameters();
     defer _ = theme.setMaterialParameters(previous_parameters.transparency, previous_parameters.blur);

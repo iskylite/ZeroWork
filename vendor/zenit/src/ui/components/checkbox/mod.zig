@@ -356,7 +356,7 @@ test "Radio: checked render emits inner dot" {
     try std.testing.expect(saw_dot);
 }
 
-test "Radio: disabled checked keeps selected color and uses container opacity" {
+test "Radio: disabled checked uses its themed fill and mark without fading" {
     var ctx = try Cx.init(std.testing.allocator, std.testing.io);
     defer ctx.deinit();
 
@@ -376,9 +376,10 @@ test "Radio: disabled checked keeps selected color and uses container opacity" {
     }).mount(scope, ctx);
     try root.appendChild(std.testing.allocator, radio);
 
-    try std.testing.expectApproxEqAbs(@as(f32, 0.5), radio.getOpacity(), 0.001);
-    try std.testing.expectEqual(ctx.tokens.tokens.color.accent, radio.children.items[0].getBackground());
-    try std.testing.expectEqual(ctx.tokens.tokens.color.accent, radio.children.items[0].style.border.color);
+    try std.testing.expectApproxEqAbs(@as(f32, 1), radio.getOpacity(), 0.001);
+    try std.testing.expectEqual(ctx.tokens.tokens.color.checkbox_disabled_checked_bg, radio.children.items[0].getBackground());
+    try std.testing.expectEqual(ctx.tokens.tokens.color.checkbox_disabled_checked_bg, radio.children.items[0].style.border.color);
+    try std.testing.expectEqual(ctx.tokens.tokens.color.checkbox_disabled_fg, radio.children.items[0].children.items[0].getBackground());
 }
 
 test "RadioGroup: multiple options" {
@@ -513,8 +514,8 @@ test "Switch: structure and checked render emits track and thumb" {
     var saw_thumb = false;
     for (commands) |cmd| if (cmd.isFillRect()) {
         const r = cmd;
-        if (Color.eql(r.color.toColor(), ctx.tokens.tokens.color.accent) and r.geom.w >= 38 and r.geom.h >= 20) saw_track = true;
-        if (Color.eql(r.color.toColor(), Color.hex(0xFFFFFF)) and r.geom.w >= 16 and r.geom.h >= 16 and r.geom.w <= 20 and r.geom.h <= 20) saw_thumb = true;
+        if (Color.eql(r.color.toColor(), ctx.tokens.tokens.color.switch_track_on) and r.geom.w >= 38 and r.geom.h >= 20) saw_track = true;
+        if (Color.eql(r.color.toColor(), ctx.tokens.tokens.color.switch_thumb_on) and r.geom.w >= 16 and r.geom.h >= 16 and r.geom.w <= 20 and r.geom.h <= 20) saw_thumb = true;
     };
     try std.testing.expect(saw_track);
     try std.testing.expect(saw_thumb);

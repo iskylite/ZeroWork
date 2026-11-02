@@ -761,7 +761,7 @@ test "local recording captures real zsh output resize frozen policy and exit arc
     defer output.deinit(allocator);
     _ = try write(service, .{ .input_sequence = 1, .bytes = "printf '%s_%s\\n' 'RECORD' 'OUTPUT'\n" });
     try waitText(&rig, service, &output, "RECORD_OUTPUT");
-    try service.resize(.{ .revision = 2, .cols = 100, .rows = 30 });
+    try resize(service, .{ .revision = 2, .cols = 100, .rows = 30 });
     const until_resize = native.zw_local_monotonic_ms() + 5000;
     while ((try status(service)).geometry.revision != 2) {
         if (native.zw_local_monotonic_ms() > until_resize) return error.ResizeTimeout;

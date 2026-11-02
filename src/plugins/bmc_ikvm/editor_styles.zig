@@ -9,7 +9,7 @@ pub fn root(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .column, .gap = 0, .flex = 1 };
 }
 pub fn content(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .left = 24, .right = 40, .bottom = 20 }, .gap = 12, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .left = 24, .right = 24, .bottom = 20 }, .gap = 12, .flex_shrink = 0 };
 }
 pub fn row(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .row, .align_items = .start, .gap = 16, .min_width = 0, .flex_shrink = 0 };
@@ -21,7 +21,7 @@ pub fn label(tokens: *const ui.ThemeTokens) ui.TextStyle {
     return host.label(tokens);
 }
 pub fn section(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 10, .margin = .{ .top = 8 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .px = 18 }, .direction = .row, .align_items = .center, .gap = 10, .flex_shrink = 0 };
 }
 pub fn sectionLabel(_: *const ui.ThemeTokens) ui.TextStyle {
     return host.text(12, 700, false);
@@ -42,7 +42,7 @@ pub fn action(primary: bool) ui.BoxStyle {
     // HTML buttons hug their text plus 14px horizontal padding.
     value.width = .{ .fit = .{} };
     value.padding = .{ .left = 14, .right = 14, .top = 8, .bottom = 8 };
-    value.border.?.radius = 7;
+    value.border.?.radius = 8;
     value.font_size = 12;
     value.font_weight = 500;
     value.text_color = if (primary) host.action(true).color else theme.current().fg_2;

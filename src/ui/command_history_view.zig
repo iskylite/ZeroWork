@@ -48,6 +48,7 @@ pub const View = struct {
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, workspace: *Workspace, ssh_bar: *ui.Node, local_bar: *ui.Node) !*View {
         const self = try cx.allocator.create(View);
         const root = try ui.box(cx, S.panel(), .{});
+        @import("floating_input.zig").protect(cx, root);
         root.meta.ownership.meta.test_id = "terminal.command-history";
         root.setDisplay(.none);
         const header = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 7, .flex_shrink = 0 }, .{});
@@ -83,7 +84,7 @@ pub const View = struct {
         return self;
     }
     fn button(self: *View, bar: *ui.Node, id: []const u8) !*ui.Node {
-        const trigger = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "命令历史 · ⇧⌘B", .base_style = @import("status_connection_styles.zig").metricTrigger(28), .hover_style = .{ .background = S.theme.current().hover }, .on_click = self.cx.on(View, self, toggle) }).mount(self.scope, self.cx);
+        const trigger = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "命令历史 · ⇧⌘B", .base_style = @import("status_connection_styles.zig").metricTrigger(28), .hover_style = .{ .background = S.theme.states().hover }, .on_click = self.cx.on(View, self, toggle) }).mount(self.scope, self.cx);
         trigger.setStyleInline(self.cx.allocator, .{ .align_items = .center, .justify = .center, .padding = .{}, .gap = 0 });
         trigger.meta.ownership.meta.test_id = id;
         try trigger.appendChild(self.cx.allocator, try S.theme.icon(self.cx, ui.icons.list_restart, "fg_2", .{ .width = .{ .px = 15 }, .height = .{ .px = 15 } }));
@@ -99,6 +100,7 @@ pub const View = struct {
     }
     pub fn show(self: *View, enabled: bool) void {
         if (enabled and self.terminal() == null) return;
+        if (enabled and self.mode == .closed) self.cx.dispatcher.cancelScrollGesture();
         self.mode = if (enabled) .pinned else .closed;
         if (enabled) if (self.terminal()) |terminal_node| terminal_node.refreshCommandHistory(true);
         self.suppressed = !enabled;
@@ -137,6 +139,7 @@ pub const View = struct {
             }
             self.cx.scheduleRedrawAfterNs(50 * std.time.ns_per_ms);
         }
+        if (self.mode != .closed and self.root.style.display == .none) self.cx.dispatcher.cancelScrollGesture();
         self.root.setDisplay(if (self.mode == .closed) .none else .flex);
         if (self.mode == .closed) return;
         const terminal_node = active.?;

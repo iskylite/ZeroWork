@@ -1,3 +1,4 @@
+@import url("theme-states.css?v=f052faf0bbf3");
 @font-face{font-family:Inter;src:url("assets/fonts/InterVariable.woff2") format("woff2");font-style:normal;font-weight:100 900;font-display:swap}
 @font-face{font-family:"JetBrains Mono";src:url("assets/fonts/JetBrainsMono-Regular.ttf") format("truetype");font-style:normal;font-weight:400;font-display:swap}
 /* V3 semantic source: DESIGN_STANDARDS §2.2 + src/ui/app_theme.zig.
@@ -51,14 +52,8 @@ html[data-global-embedded=false] .settings-window.zw-background-root::after{cont
 .settings-window .settings-layout>aside{background:transparent;border-right:0}
 .settings-window nav button.active,.settings-window nav button.selected{background:var(--popup-selected);box-shadow:none}
 
-/* Control hierarchy: independent of wallpaper alpha, without perimeter frames. */
-:root,body[data-theme]{
-  --control-bg:color-mix(in srgb,rgb(from var(--overlay-base) r g b / 1) calc(100% - var(--control-inset-well-strength,30%)),rgb(from var(--well-base) r g b / 1));
-  --popup-action:color-mix(in srgb,rgb(from var(--overlay-base) r g b / 1) 88%,var(--fg-2));
-  --popup-selection-strength:16%;
-  --popup-selected:color-mix(in srgb,var(--accent-base) var(--popup-selection-strength),rgb(from var(--overlay-base) r g b / 1));
-}
-body:is([data-theme=light],[data-theme=sauber],[data-theme=paper],[data-theme=sand],[data-theme=ice]){--popup-selection-strength:10%}
+/* Component colors are published with each theme, independent of wallpaper alpha. */
+:root,body[data-theme]{--control-bg:var(--state-control);--popup-action:var(--state-action);--popup-selected:var(--state-selected)}
 #app :is(.popover,.context-menu,.modal,.assistant),.utility-layer,.settings-window{outline:none;border-width:0}
 :is(.modal,.popover,.settings-window,.field,.utility-layer) :is(input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]):not([type=file]),textarea,select){background:var(--control-bg);border:0;outline:none;box-shadow:none}
 :is(.modal,.popover,.settings-window,.field,.utility-layer) :is(input,textarea,select):focus{background:var(--popup-selected);border:0;outline:none;box-shadow:none}
@@ -99,3 +94,25 @@ body[data-theme="rose-pine"]{--bg-app:#191724;--surface-1-base:#22202d;--surface
 /* Keyboard focus follows filled surfaces, never an outline. */
 button:focus-visible:not(.primary):not(.btn-primary):not([role=switch]),a:focus-visible{outline:0;background:var(--popup-selected);color:var(--fg-1)}
 button.primary:focus-visible,button.btn-primary:focus-visible,button[role=switch]:focus-visible{outline:0;filter:brightness(.85)}
+
+/* Theme state roles, generated together for all builtin palettes. */
+:root,body[data-theme]{--control-bg:var(--state-control);--popup-action:var(--state-action);--popup-selected:var(--state-selected);--hover:var(--state-hover)}
+button.primary:not(:disabled),button.btn-primary:not(:disabled),a.primary{background:linear-gradient(135deg,var(--state-primary),var(--state-primary-to));color:var(--state-primary-ink)}
+button.primary:not(:disabled):is(:hover,:focus-visible),button.btn-primary:not(:disabled):is(:hover,:focus-visible),a.primary:is(:hover,:focus-visible){background:linear-gradient(135deg,var(--state-primary-hover),var(--state-primary-hover-to));filter:none}
+button.primary:not(:disabled):active,button.btn-primary:not(:disabled):active,a.primary:active{background:linear-gradient(135deg,var(--state-primary-pressed),var(--state-primary-pressed-to))}
+button.danger-solid:not(:disabled){background:var(--state-danger);color:var(--state-danger-ink)}
+button.danger-solid:not(:disabled):is(:hover,:focus-visible){background:var(--state-danger-hover)}
+button.danger-solid:not(:disabled):active{background:var(--state-danger-pressed)}
+button:focus-visible:not(.primary):not(.btn-primary):not(.danger-solid):not([role=switch]),a:focus-visible{background:var(--state-focus)}
+:is(.modal,.popover,.settings-window,.field,.utility-layer) :is(input,textarea,select):focus{background:var(--state-focus)}
+:is(.modal,.popover,.settings-window,.field,.utility-layer) :is(input,textarea,select):disabled{background:var(--state-disabled)}
+:is(.popover,.context-menu) [aria-selected=true]:hover{background:var(--state-selected-hover)}
+#component-stage input:focus:not([type=checkbox]):not([type=radio]):not([type=range]),#component-stage textarea:focus{background:var(--state-focus)}
+#component-stage input:disabled:not([type=checkbox]):not([type=radio]):not([type=range]),#component-stage textarea:disabled{background:var(--state-disabled)}
+#component-stage input[aria-invalid=true]{background:var(--state-tag-danger)}
+#component-stage input[aria-invalid=true]:focus{background:var(--state-error-focus)}
+#component-stage button:not(:disabled):not(.primary):not(.btn-primary):not([role=switch]):active{background:var(--state-pressed)}
+#component-stage :is(.tree-node.selected,[aria-selected=true],[aria-pressed=true]):hover{background:var(--state-selected-hover)}
+#component-stage .tag{background:var(--state-tag)}
+#component-stage .tag.good{background:var(--state-tag-ok)}
+#component-stage .tag.pending{background:var(--state-tag-warn)}

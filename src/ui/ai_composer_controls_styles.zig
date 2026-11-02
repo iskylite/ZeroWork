@@ -64,7 +64,7 @@ fn slot(x: f32, y: f32, slot_width: f32, slot_height: f32) ui.BoxStyle {
     return .{ .position = .absolute, .inset = .{ .left = .{ .px = x }, .top = .{ .px = y } }, .width = .{ .px = slot_width }, .height = .{ .px = slot_height }, .flex_shrink = 0, .min_width = 0 };
 }
 pub fn hover() ui.BoxStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn icon(size: f32) ui.Style {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .flex_shrink = 0 };

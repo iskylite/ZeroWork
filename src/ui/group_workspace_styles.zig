@@ -19,3 +19,8 @@ pub fn label() ui.TextStyle {
 pub fn tab(active: bool) ui.BoxStyle {
     return .{ .width = .{ .px = 148 }, .height = .{ .px = 32 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 10, .right = 4 }, .background = if (active) theme.current().surface_2 else theme.current().surface_1, .border = .{ .radius = 8 } };
 }
+
+// The existing 4pt gutter becomes an interactive native separator.
+pub fn separator(vertical: bool) ui.BoxStyle {
+    return .{ .width = if (vertical) .fill() else .{ .px = gap }, .height = if (vertical) .{ .px = gap } else .fill(), .flex_shrink = 0, .cursor = if (vertical) .ns_resize else .ew_resize, .hit_behavior = .@"opaque" };
+}

@@ -39,6 +39,7 @@ pub const Session = struct {
     }
     /// Partial writes consume only the returned count; caller keeps the rest.
     pub fn write(self: *Session, owner: identity.SessionHandle, bytes: []const u8) !Write {
+        try @import("../update/admission.zig").require();
         const process = try self.current(owner);
         if (self.closing) return error.SessionClosing;
         var count: usize = 0;

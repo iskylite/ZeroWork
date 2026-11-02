@@ -27,6 +27,7 @@ pub const Action = enum {
     reconnect,
     close_session,
     // Tab (page) context menu, mockup-tab-context.
+    join_session_group,
     rename_tab,
     tab_color,
     clone_session,
@@ -76,6 +77,7 @@ fn catalogAction(action: Action) ?actions.ActionId {
         .save_host => .save_connection,
         .reconnect => .reconnect,
         .close_session => .request_close,
+        .join_session_group => .join_group,
         .rename_tab => .rename_tab,
         .clone_session => .duplicate_session,
         .view_jump_chain => .open_route_details,
@@ -95,6 +97,7 @@ pub fn isEnabled(action: Action, context: Context) bool {
         .reconnect => context.session_ended,
         .paste => !context.read_only,
         .upload_file, .download_file => (context.capability_snapshot != null or context.transfer_available) and !context.read_only and !context.session_ended,
+        .join_session_group => !context.read_only and !context.session_ended,
         .close_others => context.multi_tabs,
         .start_background_socks => context.background_socks and !context.background_active,
         .manage_background_socks => context.background_socks and context.background_active,
@@ -133,6 +136,7 @@ pub fn items(kind: Kind, context: Context) []const Item {
 const tab_menu = [_]Item{
     .{ .action = .rename_tab, .label = "重命名页签", .icon = "pencil", .shortcut = "⌘⇧R" },
     .{ .action = .tab_color, .label = "页签颜色", .icon = "palette" },
+    .{ .action = .join_session_group, .label = "加入会话组…", .icon = "group" },
     .{ .action = .new_tab, .label = "新标签连接", .icon = "plus" },
     .{ .action = .reuse_connection, .label = "复用连接", .icon = "copy" },
     .{ .action = .new_window, .label = "新窗口连接", .icon = "app-window" },
@@ -151,6 +155,7 @@ const local_tab = [_]Item{
     .{ .action = .clone_session, .label = "复制会话与目录", .icon = "copy" },
     .{ .action = .rename_tab, .label = "重命名", .icon = "pencil", .shortcut = "⌘⇧R" },
     .{ .action = .tab_color, .label = "页签颜色", .icon = "palette" },
+    .{ .action = .join_session_group, .label = "加入会话组…", .icon = "group" },
     .{ .action = .command_history, .label = "命令历史", .icon = "list-restart", .shortcut = "⇧⌘B" },
     .{ .action = .history, .label = "当前会话历史", .icon = "history" },
     .{ .action = .search, .label = "搜索终端", .icon = "search", .shortcut = "⌘F" },
@@ -172,15 +177,16 @@ const local_terminal = [_]Item{
 test "local menus expose current local capabilities without remote or future operations" {
     for ([_]Kind{ .tab, .session_ended }) |kind| {
         const list = items(kind, .{ .local_session = true });
-        try std.testing.expectEqual(@as(usize, 9), list.len);
+        try std.testing.expectEqual(@as(usize, 10), list.len);
         try std.testing.expectEqual(Action.new_tab, list[0].action);
         try std.testing.expectEqual(Action.clone_session, list[1].action);
         try std.testing.expect(list[1].shortcut == null);
         try std.testing.expectEqual(Action.tab_color, list[3].action);
-        try std.testing.expectEqual(Action.command_history, list[4].action);
-        try std.testing.expectEqual(Action.history, list[5].action);
-        try std.testing.expectEqual(Action.search, list[6].action);
-        try std.testing.expectEqual(Action.export_session, list[7].action);
+        try std.testing.expectEqual(Action.join_session_group, list[4].action);
+        try std.testing.expectEqual(Action.command_history, list[5].action);
+        try std.testing.expectEqual(Action.history, list[6].action);
+        try std.testing.expectEqual(Action.search, list[7].action);
+        try std.testing.expectEqual(Action.export_session, list[8].action);
         for (list) |item| try std.testing.expect(item.action != .edit_host and item.action != .view_jump_chain and item.action != .reconnect);
     }
     const context: Context = .{ .local_session = true };
@@ -278,7 +284,7 @@ test "context menus keep terminal and host actions separate" {
 
 test "tab menu carries session lifecycle actions, disjoint from text ops" {
     const tab = items(.tab, .{});
-    try std.testing.expectEqual(@as(usize, 12), tab.len);
+    try std.testing.expectEqual(@as(usize, 13), tab.len);
     try std.testing.expectEqual(Action.rename_tab, tab[0].action);
     // Terminal text operations never appear on the tab menu (zero-overlap rule).
     for (tab) |item| {
@@ -287,8 +293,8 @@ test "tab menu carries session lifecycle actions, disjoint from text ops" {
         try std.testing.expect(item.action != .search);
     }
     // Danger styling on disconnect+close.
-    try std.testing.expect(tab[11].danger);
-    try std.testing.expectEqual(Action.close_session, tab[11].action);
+    try std.testing.expect(tab[12].danger);
+    try std.testing.expectEqual(Action.close_session, tab[12].action);
     // "Close others" requires multiple open tabs.
     try std.testing.expect(!isEnabled(.close_others, .{ .multi_tabs = false }));
     try std.testing.expect(isEnabled(.close_others, .{ .multi_tabs = true }));
@@ -296,9 +302,9 @@ test "tab menu carries session lifecycle actions, disjoint from text ops" {
 
 test "SSH connection actions are confined to the tab menu" {
     const tab = items(.tab, .{});
-    try std.testing.expectEqual(Action.new_tab, tab[2].action);
-    try std.testing.expectEqual(Action.reuse_connection, tab[3].action);
-    try std.testing.expectEqual(Action.new_window, tab[4].action);
+    try std.testing.expectEqual(Action.new_tab, tab[3].action);
+    try std.testing.expectEqual(Action.reuse_connection, tab[4].action);
+    try std.testing.expectEqual(Action.new_window, tab[5].action);
     for ([_]Context{ .{}, .{ .has_selection = true }, .{ .local_session = true } }) |context| {
         for (items(.terminal, context)) |item| {
             try std.testing.expect(item.action != .new_tab and item.action != .reuse_connection and item.action != .new_window);
@@ -319,4 +325,13 @@ test "tab menu connection actions distinguish saved assets from temporary remote
     try std.testing.expect(!isVisible(.save_host, saved));
     try std.testing.expect(!isEnabled(.save_host, .{}));
     for (items(.terminal, temporary)) |item| try std.testing.expect(item.action != .save_host);
+}
+
+test "mixed session group menu does not require terminal services" {
+    const owner: @import("../host/identity.zig").SessionHandle = .{ .session_id = @fromBackingInt(8) };
+    const context: Context = .{ .capability_snapshot = .{ .owner = owner, .revision = 1, .services = &.{} } };
+    try std.testing.expect(isEnabled(.join_session_group, context));
+    try std.testing.expect(!isEnabled(.join_session_group, .{ .read_only = true }));
+    try std.testing.expect(!isEnabled(.join_session_group, .{ .session_ended = true }));
+    try std.testing.expectEqual(@as(usize, 0), actions.requirements(.join_group).len);
 }

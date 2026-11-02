@@ -14,6 +14,7 @@ const ProcessWindows = struct {
     data_cleanup_pending: bool = false,
     data_cleanup_exit: bool = false,
     primary: ?*App = null,
+    updater: ?*@import("update/app_host.zig").Host(ProcessWindows) = null,
     runtime_config: ?*RuntimeConfig = null,
     font_system: ?@FieldType(App, "font_manager") = null,
     pending: std.ArrayList(PendingWindow) = .empty,
@@ -22,13 +23,20 @@ const ProcessWindows = struct {
         connection: application_host_mod.WindowConnection,
     };
 
+    pub fn navFor(app: *App) ?*AppNavHost {
+        const root = app.cx.root orelse return null;
+        return @ptrCast(@alignCast(root.behavior.events.capture_context orelse return null));
+    }
+
     fn queue(self: *ProcessWindows, source: *application_host_mod.ApplicationHost, host_id: ws.HostId) !void {
+        try @import("update/admission.zig").require();
         var connection = try source.freezeWindowConnection(host_id);
         errdefer connection.deinit();
         try self.pending.append(std.heap.c_allocator, .{ .source = .{ .window_id = source.window_id, .workspace_id = source.workspace_id }, .connection = connection });
     }
 
     fn queueTab(self: *ProcessWindows, source: *application_host_mod.ApplicationHost, id: ws.SessionId) !void {
+        try @import("update/admission.zig").require();
         var connection = try source.freezeTabWindowConnection(id);
         errdefer connection.deinit();
         try self.pending.append(std.heap.c_allocator, .{ .source = .{ .window_id = source.window_id, .workspace_id = source.workspace_id }, .connection = connection });
@@ -81,6 +89,137 @@ const ProcessWindows = struct {
         };
         _ = self.runtime.activateWindow(app.windowId());
         applog.info(.workspace, "workspace ready window={d} workspace={d} shared_sessions={d}", .{ @backingInt(host.window_id), @backingInt(host.workspace_id), self.domain.sessions.sessions.items.len });
+    }
+
+    pub fn updateDraftReason(self: *ProcessWindows) ?[]const u8 {
+        if (self.data_cleanup_owner != null) return "正在清除应用数据，请先完成该操作";
+        if (self.pending.items.len != 0) return "有窗口正在创建，请稍后重试";
+        for (self.runtime.windows.items) |managed| {
+            const nav = navFor(managed.app) orelse continue;
+            if (nav.native_close_pending) return "有窗口正在关闭，请等待收尾";
+            if (nav.settings) |settings| {
+                if (settings.busy()) return "请先完成设置资源操作";
+                if (settings.controller.state() != .clean) return "有未保存的设置，请返回工作区保存或放弃后再更新";
+            }
+            if (nav.wizard) |wizard| if (wizard.open) |editor_open| if (editor_open.get()) return "连接编辑器尚未关闭，请先保存或放弃编辑";
+            if (nav.quick_host) |quick| if (quick.view.isOpen()) return "请先关闭快捷连接输入，避免丢失未提交内容";
+            if (nav.ai) |ai| {
+                if (ai.controller.input.len != 0 or ai.controller.model.prompt.len != 0) return "有未发送的 AI 输入，请返回工作区发送或清空后再更新";
+                if (ai.assistant_states) |*store| for (store.states.items) |state| if (state.draft) |draft| if (std.mem.trim(u8, draft, " \t\r\n").len != 0) return "其他 AI 会话有未发送的输入，请先保存或清空后再更新";
+            }
+        }
+        return null;
+    }
+    pub fn updateTestTheme(self: *ProcessWindows, id: []const u8) !void {
+        const app = self.primary orelse return error.NoWindow;
+        const nav = navFor(app) orelse return error.NoWindow;
+        try AppNavHost.selectGlobalTheme(nav, id);
+        for (self.runtime.windows.items) |managed| if (navFor(managed.app)) |current| try current.refreshAppearance();
+    }
+    pub fn updateRevision(self: *ProcessWindows) u64 {
+        var hash = std.hash.Wyhash.init(0);
+        std.hash.autoHash(&hash, self.pending.items.len);
+        for (self.domain.sessions.sessions.items) |entry| std.hash.autoHash(&hash, .{ entry.handle, entry.state, entry.create_operation });
+        for (self.domain.attachments.items) |host| std.hash.autoHash(&hash, .{ host.window_id, host.workspace.model.order_revision });
+        return hash.final();
+    }
+    pub fn updateSnapshot(self: *ProcessWindows) ![:0]u8 {
+        var out = std.Io.Writer.Allocating.init(std.heap.c_allocator);
+        defer out.deinit();
+        const writer = &out.writer;
+        try writer.writeAll("{\"schema\":1,\"phase\":\"before-close\",\"replay_tasks\":false,\"windows\":[");
+        var first = true;
+        for (self.runtime.windows.items) |managed| {
+            const nav = navFor(managed.app) orelse continue;
+            const workspace = nav.workspace orelse continue;
+            if (!first) try writer.writeByte(',');
+            first = false;
+            try writer.print("{{\"window\":{d},\"workspace\":{d},\"tabs\":[", .{ @backingInt(nav.application_host.?.window_id), @backingInt(nav.application_host.?.workspace_id) });
+            for (workspace.tabs.items, 0..) |tab, index| {
+                if (index != 0) try writer.writeByte(',');
+                try std.json.Stringify.value(.{ .session = tab.id, .tab = @backingInt(tab.tab_id), .asset = tab.host_id, .local = tab.local, .title = tab.title[0..tab.title_len], .generation = tab.generation }, .{}, writer);
+            }
+            try writer.writeAll("],\"groups\":[");
+            for (nav.roster.groups.items, 0..) |group, index| {
+                if (index != 0) try writer.writeByte(',');
+                try std.json.Stringify.value(.{ .id = group.id, .name = group.name, .color = group.color, .members = group.members.items, .pinned = group.pinned_pane }, .{}, writer);
+            }
+            try writer.writeAll("],\"views\":[");
+            for (workspace.group_views.items, 0..) |view, index| {
+                if (index != 0) try writer.writeByte(',');
+                try std.json.Stringify.value(.{ .id = view.id, .layout = view.layout, .root = view.tree.root, .nodes = view.tree.nodes.items, .focused = view.focused }, .{}, writer);
+            }
+            try writer.writeAll("],\"active\":");
+            try std.json.Stringify.value(if (workspace.model.active) |id| @as(?u64, @backingInt(id)) else null, .{}, writer);
+            try writer.writeByte('}');
+        }
+        try writer.writeAll("]}");
+        return std.heap.c_allocator.dupeSentinel(u8, out.written(), 0);
+    }
+    pub fn updateCancelJob(self: *ProcessWindows, id: u64) !void {
+        const tasks = self.domain.tasks orelse return error.UnknownJob;
+        const progress = tasks.manager.progress(id) orelse return error.UnknownJob;
+        if (tasks.manager.retainedOwner(id)) |owner| {
+            if (progress.state == .cancelled and progress.job_cleanup == .released) return;
+            try tasks.retained_store.cancel(id, progress.attempt);
+            try tasks.manager.retainedCancelReceipt(id, progress.attempt, owner, .awaiting);
+        } else if (progress.state != .succeeded and progress.state != .failed and progress.state != .cancelled) try tasks.manager.cancel(id);
+    }
+    pub fn updateJobReceipt(self: *ProcessWindows, id: u64) @import("update/close_coordinator.zig").Receipt {
+        const tasks = self.domain.tasks orelse return .unknown;
+        const progress = tasks.manager.progress(id) orelse return .unknown;
+        if (progress.job_cleanup == .unknown) return .unknown;
+        if ((progress.state == .succeeded or progress.state == .failed or progress.state == .cancelled) and progress.job_cleanup == .released) return .released;
+        return .awaiting;
+    }
+    pub fn updateCancelAux(self: *ProcessWindows, id: @import("host/identity.zig").WindowId) void {
+        const host = self.domain.ownerForWindow(id) orelse return;
+        for (self.runtime.windows.items) |managed| {
+            const nav = navFor(managed.app) orelse continue;
+            if (nav.application_host != host) continue;
+            if (host.window_auxiliary) |aux| aux.cancel(aux.context);
+            if (nav.wizard_host) |wizard| wizard.probe_controller.cancelAll();
+            if (nav.ai) |ai| {
+                ai.request_cancel.cancel();
+                ai.model_discovery.cancelRequest();
+                for (ai.attachment_readers.items) |reader| reader.cancel();
+                for (ai.image_readers.items) |reader| reader.cancel();
+            }
+        }
+    }
+    pub fn updateAuxReceipt(self: *ProcessWindows, id: @import("host/identity.zig").WindowId) @import("update/close_coordinator.zig").Receipt {
+        const host = self.domain.ownerForWindow(id) orelse return .released;
+        if (host.window_auxiliary) |aux| if (!aux.released(aux.context)) return .awaiting;
+        for (self.runtime.windows.items) |managed| {
+            const nav = navFor(managed.app) orelse continue;
+            if (nav.application_host != host) continue;
+            if (nav.wizard_host) |wizard| if (wizard.probe_controller.jobs.items.len != 0) return .awaiting;
+            if (nav.ai) |ai| if (ai.thread_state.load(.acquire) != 0 or ai.model_discovery.busy() or ai.attachment_readers.items.len != 0 or ai.image_readers.items.len != 0) return .awaiting;
+        }
+        return .released;
+    }
+    pub fn updateFinalReceipt(self: *ProcessWindows) @import("update/close_coordinator.zig").Receipt {
+        for (self.domain.sessions.sessions.items) |entry| if (entry.state != .closed) return .awaiting;
+        if (self.domain.tasks) |tasks| {
+            for (0..tasks.manager.count()) |index| if (tasks.manager.progressAt(index)) |p| if (self.updateJobReceipt(p.job) != .released) return .awaiting;
+            for (tasks.auxiliary_connections.items) |c| if (!c.released) return .awaiting;
+            for (tasks.shared_connections.items) |c| if (!c.released) return .awaiting;
+            for (tasks.retained_connections.items) |c| if (!c.released) return .awaiting;
+        }
+        return .released;
+    }
+
+    /// AppKit menu actions originate outside the Zenit node tree. Apply the
+    /// selection while dispatching that native event, before tick renders it.
+    fn menuBarAction(raw: *anyopaque, action: u64) callconv(.c) void {
+        const self: *ProcessWindows = @ptrCast(@alignCast(raw));
+        if (action >= 3) if (process_notifications) |notifications| {
+            _ = notifications.activateActivity(action);
+        };
+        for (self.runtime.windows.items) |*managed| {
+            managed.app.cx.requestRedraw();
+            managed.force_frame = true;
+        }
     }
 
     fn deinit(self: *ProcessWindows) void {
@@ -2202,6 +2341,7 @@ const AiHost = struct {
     fn updatePresentation(self: *AiHost) void {
         const visible = self.controller.model.visible;
         const frame = self.reveal.update(visible, @import("platform/realtime.zig").milliseconds(self), self.cx.reduced_motion);
+        if (visible and self.panel.style.display == .none) self.cx.dispatcher.cancelScrollGesture();
         self.panel.setDisplay(if (visible or frame.opacity > 0.001) .flex else .none);
         self.panel.setStyleInline(self.cx.allocator, .{ .opacity = frame.opacity, .translate_y = if (self.cx.reduced_motion) 0 else -6 * (1 - frame.opacity) });
         self.panel.setHitTestVisible(visible);
@@ -2279,7 +2419,8 @@ const AiHost = struct {
         if (workspace.active_tab) |index| if (index < workspace.tabs.items.len) {
             const tab = workspace.tabs.items[index];
             if (tab.file_scope != null) if (self.file_application) |files| if (files.presentation) |presentation| {
-                if (tab.content_owner == .session) return presentation.assistantBounds(tab.content_owner.session);
+                // Plugin content also owns a file_scope; only SFTP has a file presentation.
+                if (tab.content_owner == .session) if (presentation.assistantBounds(tab.content_owner.session)) |bounds| return bounds;
             };
         };
         return if (self.ownerPane()) |pane| pane.globalRect() else null;
@@ -2346,6 +2487,14 @@ const AiHost = struct {
         const id = self.display_conversation orelse return;
         const state = store.find(id) orelse return;
         if (state.closed) return;
+        var running = self.conversationHasActiveWork(id);
+        if (self.current_turn.task_id) |task| if (self.execution_driver) |driver| if (driver.taskEvidence(task)) |facts| {
+            running = running or facts.active_executions > 0 or facts.pending_dispatch > 0;
+        };
+        if (!running and self.controller.stream.count() == 0 and self.last_user_text == null and self.history.items.len == 0 and !self.rollback_to_start) {
+            self.collapse();
+            return;
+        }
         self.close_confirmation_sequence = @import("host/identity.zig").advance(@max(1, self.close_confirmation_sequence)) catch return;
         self.close_confirmation = .{ .ticket = .{ .sequence = self.close_confirmation_sequence, .conversation_id = state.conversation_id }, .runtime_id = id, .owner = state.owner, .task_id = self.current_turn.task_id };
         self.dock.pin();
@@ -2403,8 +2552,13 @@ const AiHost = struct {
         };
         self.cancelConversationReaders(request.runtime_id);
         if (self.compaction.job != null) if (self.compaction.status_identity) |identity| if (identity.conversation == request.runtime_id) self.compaction.cancel();
-        // Window dismissal never closes/removes the conversation or changes
-        // its selection, binding, provider controls or retained wire history.
+        // Retain the ended conversation in history, including preview-opened
+        // sessions, before selecting a fresh welcome page. Late results keep
+        // their original conversation identity.
+        self.assistant_states.?.find(request.runtime_id).?.listed = true;
+        const welcome = try self.assistant_states.?.create(request.owner);
+        welcome.listed = false;
+        try self.syncOwner();
         self.collapse();
     }
     fn conversationHasActiveWork(self: *AiHost, id: u64) bool {
@@ -2550,6 +2704,9 @@ const AiHost = struct {
         if (self.list_requested) {
             self.list_requested = false;
             const store = if (self.assistant_states) |*v| v else return;
+            if (self.display_conversation) |id| if (store.find(id)) |state| {
+                state.listed = true;
+            };
             var entries: std.ArrayList(@import("ui/ai_sessions_view.zig").Entry) = .empty;
             defer {
                 for (entries.items) |entry| {
@@ -2735,6 +2892,7 @@ const AiHost = struct {
     }
 
     fn sendPrompt(self: *AiHost) void {
+        if (@import("update/admission.zig").blocked()) return;
         self.submit(self.prompt.get());
     }
 
@@ -2857,6 +3015,7 @@ const AiHost = struct {
     }
 
     fn submit(self: *AiHost, text: []const u8) void {
+        if (@import("update/admission.zig").blocked()) return;
         const submitted_at: u64 = @intCast(@max(0, @import("platform/realtime.zig").milliseconds(self)));
         if (self.compaction.job != null) self.compaction.cancel();
         // The on_submit `text` IS the user's input (the zenit Input
@@ -3475,6 +3634,7 @@ const AiHost = struct {
         if (app.workspace.app_config.config_revision != self.request_policy_revision) return error.ScopeChanged;
         const controller = lookupLifecycleTask(self, invocation.context.conversation_id, invocation.context.task_id) orelse return error.ScopeChanged;
         if (@import("ai/host_catalog.zig").supports(invocation.tool_id) and !@import("ai/host_catalog.zig").isMutation(invocation.tool_id)) return @import("ui/ai_host_catalog_controller.zig").execute(app, invocation, allocator);
+        if (@import("ai/batch_output.zig").supports(invocation.tool_id)) return self.tool_bridge.readBatchOutput(app, invocation, allocator);
         if (@import("ai/host_terminal_queries.zig").supports(invocation.tool_id)) {
             const handles = try allocator.alloc(@import("host/identity.zig").SessionHandle, self.tool_bridge.children.items.len);
             defer allocator.free(handles);
@@ -3543,6 +3703,8 @@ const AiHost = struct {
             self.host_catalog[self.host_catalog_len] = contribution;
             self.host_catalog_len += 1;
         }
+        self.host_catalog[self.host_catalog_len] = @import("ai/batch_output.zig").contribution;
+        self.host_catalog_len += 1;
         if (self.execution_driver != null) for (@import("ai/host_execution.zig").contributions) |contribution| {
             self.host_catalog[self.host_catalog_len] = contribution;
             self.host_catalog_len += 1;
@@ -3798,6 +3960,7 @@ const AiHost = struct {
                 return result;
             }
         }
+        if (@import("ai/batch_output.zig").supports(invocation.tool_id)) return bridge.queryHost(invocation, allocator, cancel);
         if (@import("ai/host_queries.zig").supports(invocation.tool_id)) return bridge.queryHost(invocation, allocator, cancel);
         if (@import("ai/host_terminal_queries.zig").supports(invocation.tool_id)) return bridge.queryHost(invocation, allocator, cancel);
         if (@import("ai/host_catalog.zig").supports(invocation.tool_id)) {
@@ -4137,6 +4300,7 @@ const AiHost = struct {
                 completion.result = .unverified;
                 completion.final_answer = false;
             }
+            notifications.activity.setForeground(@import("platform/menu_bar.zig").active());
             notifications.publishAi(pending.owner, pending.operation, pending.turn, completion) catch continue;
             slot.* = null;
         };
@@ -4457,9 +4621,12 @@ const AiHost = struct {
                 self.deferAiCompletion(context, owner, operation, self.manager.turn_id, completion) catch |err| {
                     if (self.workspace) |workspace| workspace.statusFailure(@errorName(err));
                 };
-            } else notifications.publishAi(owner, operation, self.manager.turn_id, completion) catch |err| {
-                if (self.workspace) |workspace| workspace.statusFailure(@errorName(err));
-            };
+            } else {
+                notifications.activity.setForeground(@import("platform/menu_bar.zig").active());
+                notifications.publishAi(owner, operation, self.manager.turn_id, completion) catch |err| {
+                    if (self.workspace) |workspace| workspace.statusFailure(@errorName(err));
+                };
+            }
             self.request_operation_id = null;
         };
         if (self.manager.tool_run) |run| {
@@ -5278,6 +5445,7 @@ const MenuHost = struct {
             .delete_host => "trash-2",
             .reconnect => "refresh-cw",
             .close_session => "power",
+            .join_session_group => "group",
             .rename_tab => "pencil",
             .tab_color => "palette",
             .view_jump_chain => "network",
@@ -5611,6 +5779,9 @@ const MenuHost = struct {
                 if (index >= workspace.tabs.items.len) return;
                 workspace.showTabColor(workspace.tabs.items[index].tab_id);
             },
+            .join_session_group => {
+                workspace.showGroupPicker(self.context_tab orelse return) catch |err| workspace.statusFailure(@errorName(err));
+            },
             .rename_tab => {
                 const tab_index = self.context_tab orelse return;
                 if (tab_index >= workspace.tabs.items.len) return;
@@ -5850,7 +6021,7 @@ const SettingsHost = struct {
     mounted_filtered: bool = false,
     mounted_theme_library_open: bool = false,
     mounted_plugin_preview: ?@import("config/plugin_page.zig").PreviewKind = null,
-    search_scroll_offsets: [8]f32 = @splat(0),
+    search_scroll_offsets: [9]f32 = @splat(0),
     plugin_preview_scroll_offsets: [2][7]f32 = @splat(@splat(0)),
     focus_return: ?*ui.Node = null,
     decision_open: ?*ui.Signal(bool) = null,
@@ -6182,6 +6353,7 @@ const SettingsHost = struct {
             self.open = true;
             self.validateFont();
             self.loadCurrentBackground();
+            self.cx.dispatcher.cancelScrollGesture();
             self.panel.setDisplay(.flex);
             self.status.setDisplay(.none);
             self.pending_rebuild = true;
@@ -6661,7 +6833,7 @@ const SettingsHost = struct {
         self.nav_scope = nav_scope;
         const c = app_theme.current();
         const current = self.controller.model.page_index;
-        const icons = [_]ui.SvgAsset{ ui.icons.palette, ui.icons.keyboard, ui.icons.network, ui.icons.arrow_down_up, ui.icons.sparkles, ui.icons.plug, ui.icons.bell, ui.icons.database };
+        const icons = [_]ui.SvgAsset{ ui.icons.palette, ui.icons.keyboard, ui.icons.network, ui.icons.arrow_down_up, ui.icons.sparkles, ui.icons.plug, ui.icons.bell, ui.icons.database, ui.icons.refresh_cw };
         for (settings_pages_mod.pages, 0..) |page, index| {
             const selected = index == current;
             const click = try self.cx.allocator.create(SettingsNavClick);
@@ -6671,7 +6843,7 @@ const SettingsHost = struct {
             btn.setStyleInline(self.cx.allocator, .{ .width = .fill(), .height = .{ .px = 36 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .justify = .start, .gap = 8, .padding = .{ .left = 6, .right = 6 }, .background = if (selected) app_theme.popupSelection() else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = c.border, .radius = 7 } });
             try btn.appendChild(self.cx.allocator, try ui.iconTint(self.cx, icons[index], if (selected) c.accent else c.fg_2, .{ .width = .{ .px = 16 }, .height = .{ .px = 16 }, .flex_shrink = 0 }));
             try btn.appendChild(self.cx.allocator, try ui.text(self.cx, page.name, .{ .font_size = 12, .font_weight = if (selected) @as(u16, 600) else 400, .color = if (selected) c.fg_1 else c.fg_2 }));
-            const test_ids = [_][]const u8{ "settings.nav.appearance", "settings.nav.keys", "settings.nav.ssh", "settings.nav.transfer", "settings.nav.ai", "settings.nav.plugins", "settings.nav.notifications", "settings.nav.data" };
+            const test_ids = [_][]const u8{ "settings.nav.appearance", "settings.nav.keys", "settings.nav.ssh", "settings.nav.transfer", "settings.nav.ai", "settings.nav.plugins", "settings.nav.notifications", "settings.nav.data", "settings.nav.updates" };
             btn.meta.ownership.meta.test_id = test_ids[index];
             try self.nav_list.appendChild(self.cx.allocator, btn);
         }
@@ -6779,6 +6951,83 @@ const SettingsHost = struct {
 
     fn readContentValue(raw: *anyopaque, key: settings_content_view.Key) ?settings_values_mod.Value {
         const self: *SettingsHost = @ptrCast(@alignCast(raw));
+        if (std.mem.eql(u8, key.section, "updates")) if (process_windows) |process| if (process.updater) |updater| if (!updater.coordinator.intent and updater.coordinator.draining() != 0) {
+            if (std.mem.eql(u8, key.key, "state")) return .{ .text = "draining" };
+            if (std.mem.eql(u8, key.key, "version_badge")) return .{ .text = "正在收尾" };
+            if (std.mem.eql(u8, key.key, "available_title")) return .{ .text = "更新已取消，部分工作正在收尾" };
+            if (std.mem.eql(u8, key.key, "status")) {
+                const Message = struct {
+                    var bytes: [192]u8 = undefined;
+                };
+                return .{ .text = std.fmt.bufPrint(&Message.bytes, "仍有 {d} 项工作正在收尾，其余工作继续运行", .{updater.coordinator.draining()}) catch "正在等待已发出的关闭请求" };
+            }
+        };
+        if (std.mem.eql(u8, key.section, "updates")) {
+            const Snapshot = struct {
+                var value: @import("update/client.zig").Status = .{};
+            };
+            @import("update/client.zig").zw_update_status(&Snapshot.value);
+            const state = Snapshot.value.state;
+            if (std.mem.eql(u8, key.key, "release_channel")) return .{ .text = "正式版" };
+            if (std.mem.eql(u8, key.key, "state")) return .{ .text = switch (state) {
+                1 => "checking",
+                2 => "available",
+                3 => "downloading",
+                4 => "verifying",
+                5, 9, 11 => "ready",
+                6, 7 => "preparing",
+                8 => "installing",
+                10 => "failed",
+                else => "idle",
+            } };
+            if (std.mem.eql(u8, key.key, "available_version")) return .{ .text = if (state >= 2 and state <= 8 or state == 9 or state == 11) Snapshot.value.versionText() else "" };
+            if (std.mem.eql(u8, key.key, "version_badge")) return .{ .text = switch (state) {
+                1 => "正在检查",
+                2 => "有新版本",
+                3 => "下载中",
+                4 => "校验中",
+                5, 9, 11 => "已准备",
+                6, 7 => "准备安装",
+                8 => "安装中",
+                10 => "更新未完成",
+                else => if (Snapshot.value.versionText().len != 0) "无需更新" else "待检查",
+            } };
+            if (std.mem.eql(u8, key.key, "available_title") and (state == 2 or state == 5 or state == 9 or state == 11)) {
+                const Title = struct {
+                    var bytes: [192]u8 = undefined;
+                };
+                return .{ .text = if (state == 2) (std.fmt.bufPrint(&Title.bytes, "{s} 正式版可用", .{Snapshot.value.versionText()}) catch "更新信息") else (std.fmt.bufPrint(&Title.bytes, "{s} · 已准备好安装", .{Snapshot.value.versionText()}) catch "更新信息") };
+            }
+            if (std.mem.eql(u8, key.key, "available_title")) return .{ .text = switch (state) {
+                1 => "正在检查新版本…",
+                2 => "发现可用的新版本",
+                3 => "正在下载更新",
+                4 => "正在检查更新包",
+                5, 9, 11 => "更新已准备好安装",
+                6, 7 => "正在准备安装",
+                8 => "正在安装更新",
+                10 => "本次更新未完成",
+                else => if (Snapshot.value.versionText().len != 0) "当前无需更新" else "检查应用更新",
+            } };
+        }
+        if (std.mem.eql(u8, key.section, "updates") and std.mem.eql(u8, key.key, "status")) {
+            const Native = struct {
+                extern fn zw_update_summary() [*:0]const u8;
+            };
+            return .{ .text = std.mem.span(Native.zw_update_summary()) };
+        }
+        if (std.mem.eql(u8, key.section, "updates") and std.mem.eql(u8, key.key, "last_check")) {
+            const Native = struct {
+                extern fn zw_update_last_check() [*:0]const u8;
+            };
+            return .{ .text = std.mem.span(Native.zw_update_last_check()) };
+        }
+        if (std.mem.eql(u8, key.section, "updates") and std.mem.eql(u8, key.key, "current_version")) {
+            const Native = struct {
+                extern fn zw_update_current_version() [*:0]const u8;
+            };
+            return .{ .text = std.mem.span(Native.zw_update_current_version()) };
+        }
         if (std.mem.eql(u8, key.section, "data")) {
             if (std.mem.eql(u8, key.key, "config_path")) return .{ .text = self.runtime.path };
             if (std.mem.eql(u8, key.key, "hosts_path")) return .{ .text = (self.workspace orelse return null).hosts_path };
@@ -6830,6 +7079,14 @@ const SettingsHost = struct {
     fn contentAction(raw: *anyopaque, action: settings_content_view.Action) void {
         const self: *SettingsHost = @ptrCast(@alignCast(raw));
         switch (action) {
+            .check_updates => {
+                @import("update/client.zig").zw_update_open();
+                return;
+            },
+            .open_update_release => {
+                @import("update/client.zig").zw_update_command(6);
+                return;
+            },
             .save => {
                 self.save();
                 return;
@@ -7574,6 +7831,10 @@ const AppNavHost = struct {
     last_status_sample_ms: f64 = -1000,
 
     fn nativeCloseRequest(raw: *anyopaque, window_id: NativeWindowId, _: App.CloseReason) void {
+        if (@import("update/admission.zig").blocked()) {
+            if (process_windows) |process| if (process.updater) |updater| updater.notifyCloseBlocked();
+            return;
+        }
         const self: *AppNavHost = @ptrCast(@alignCast(raw));
         const app = self.app_runtime orelse return;
         if (process_windows) |process| if (process.data_cleanup_owner != null) {
@@ -7654,6 +7915,15 @@ const AppNavHost = struct {
         host.selected_group = null;
         host.refreshAssets() catch return;
         remote_editor.loadDraft(host.wizard, .{ .protocol = .sftp, .port = 22 }) catch return;
+        host.wizard.show();
+    }
+    fn newKvmProfile(raw: *anyopaque) void {
+        const self: *AppNavHost = @ptrCast(@alignCast(raw));
+        const host = self.wizard_host orelse return;
+        host.selected_group = null;
+        host.refreshAssets() catch return;
+        host.wizard.selectContribution("bmc_ikvm") catch return;
+        host.wizard.reset() catch return;
         host.wizard.show();
     }
     fn quickSession(raw: *anyopaque) void {
@@ -7990,13 +8260,15 @@ const AppNavHost = struct {
             const status_capabilities = if (self.application_host) |application| if (workspace.active_tab) |index| if (index < workspace.tabs.items.len and workspace.tabs.items[index].content_owner == .session) application.sessions.capabilitySnapshot(workspace.tabs.items[index].content_owner.session) catch null else null else null else null;
             const route_status = if (status_capabilities) |snapshot| @import("host/actions.zig").project(.open_route_details, snapshot).visible else false;
             const transfer_status = if (status_capabilities) |snapshot| @import("host/actions.zig").project(.upload, snapshot).visible else false;
+            const plugin_status = if (workspace.active_tab) |index| index < workspace.tabs.items.len and workspace.tabs.items[index].plugin_renderer != null else false;
             const forward_status = if (status_capabilities) |snapshot| @import("host/actions.zig").project(.toggle_socks, snapshot).visible else false;
-            if (self.session_details) |details| details.setDisplay(if (has_session and (route_status or (terminal_active and !local_active))) .flex else .none);
+            if (self.session_details) |details| details.setDisplay(if (has_session and (plugin_status or route_status or (terminal_active and !local_active))) .flex else .none);
             if (self.socks_chip) |chip| chip.setDisplay(if (forward_status or (terminal_active and !local_active)) .flex else .none);
-            if (self.status_bar) |bar| bar.setDisplay(if (local_active or (has_session and !terminal_active and !route_status and !transfer_status)) .none else .flex);
+            if (self.status_bar) |bar| bar.setDisplay(if (local_active or (has_session and !terminal_active and !route_status and !transfer_status and !plugin_status)) .none else .flex);
             if (self.connection_details_host) |host| if (host.ssh_status.controls) |controls| {
                 controls.sidebar_width = self.quick.sidebar.width();
                 self.refreshBroadcastStatus(controls);
+                if (plugin_status) controls.broadcast_button.setDisplay(.none);
                 // Group status follows the focused member, including Local.
                 // Keep the same broadcast control on the visible status bar.
                 const local_status = if (local_active) self.local_status_view else null;
@@ -8477,8 +8749,17 @@ const AppNavHost = struct {
     }
     fn showThemeFromMenu(raw: *anyopaque) void {
         const self: *AppNavHost = @ptrCast(@alignCast(raw));
-        const status_view = self.local_status_view orelse return;
-        showGlobalTheme(raw, if (status_view.theme_button.style.display != .none) status_view.theme_button else status_view.more_button);
+        // Commands and menus use the visible statusbar entry, including its
+        // click-to-pin behavior. The Local bar is hidden during SSH sessions.
+        const trigger = trigger: {
+            if (self.local_status_view) |status_view| if (status_view.root.isDisplayedInTree()) {
+                break :trigger if (status_view.theme_button.style.display != .none) status_view.theme_button else status_view.more_button;
+            };
+            const host = self.connection_details_host orelse return;
+            const controls = host.ssh_status.controls orelse return;
+            break :trigger if (controls.theme_button.style.display != .none) controls.theme_button else controls.more_button;
+        };
+        if (trigger.behavior.events.on_click) |click| click.invoke();
     }
 
     fn refreshAppearance(self: *AppNavHost) !void {
@@ -9418,7 +9699,10 @@ const AppNavHost = struct {
                         return;
                     };
                     self.commandSuccess(help);
-                } else if (self.help_overlay) |help| help.setDisplay(.flex) else workspace.status("内置指令帮助暂不可用");
+                } else if (self.help_overlay) |help| {
+                    self.cx.dispatcher.cancelScrollGesture();
+                    help.setDisplay(.flex);
+                } else workspace.status("内置指令帮助暂不可用");
             },
             .ai => |question| if (self.ai) |ai| {
                 if (ai.currentBinding() == null) {
@@ -9931,7 +10215,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const ai_maximize_icon = try ui.iconTint(cx, ui.icons.get("maximize-2").?, app_theme.current().fg_2, ai_styles.windowIcon());
     try ai_maximize.appendChild(cx.allocator, ai_maximize_icon);
     try ai_header.appendChild(cx.allocator, ai_maximize);
-    const ai_close = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "关闭 AI 助手", .base_style = ai_window_base, .hover_style = ai_window_hovers[2], .on_click = cx.on(AiHost, ai_host, AiHost.closeAssistant) }).mount(scope, cx);
+    const ai_close = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "结束当前 AI 会话", .base_style = ai_window_base, .hover_style = ai_window_hovers[2], .on_click = cx.on(AiHost, ai_host, AiHost.closeAssistant) }).mount(scope, cx);
     ai_close.meta.ownership.meta.test_id = "ai.close";
     const ai_close_icon = try ui.iconTint(cx, ui.icons.x, app_theme.current().fg_2, ai_styles.windowIcon());
     try ai_close.appendChild(cx.allocator, ai_close_icon);
@@ -10112,11 +10396,14 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         .width = .fill(),
         .height = .fill(),
         .z_index = 400,
+        .hit_behavior = .@"opaque",
+        .hit_roles = .{ .pointer = true, .scroll = true },
         .direction = .column,
         .align_items = .center,
         .justify = .center,
         .background = ui.Color.BLACK.withAlpha(102),
     }, .{});
+    settings_panel.meta.ownership.meta.test_id = "settings.overlay";
     settings_panel.setDisplay(.none);
     const settings_card = try ui.boxStyled(cx, shell_styles.settingsPanel, .{});
     settings_card.meta.ownership.meta.test_id = "settings.panel";
@@ -10347,6 +10634,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     empty_choose.behavior.events.on_click = cx.on(AppNavHost, nav_host, AppNavHost.homeConnect);
     empty_local.behavior.events.on_click = cx.on(AppNavHost, nav_host, AppNavHost.newLocalSessionClick);
     nav_host.workspace = workspace;
+    nav_host.bindGroupWorkspace(workspace);
     nav_host.shell_root = root;
     nav_host.material_pane = terminal_area;
     settings_host.preview_viewport = terminal_area;
@@ -10368,7 +10656,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     if (cx.root) |window_root| try window_root.insertChildBefore(cx.allocator, background_view.root, if (window_root.children.items.len != 0) window_root.children.items[0] else null);
 
     settings_host.native_close_waiter = &nav_host.native_close_pending;
-    const session_menu = try session_menu_mod.View.mount(cx, scope, .{ .context = nav_host, .new_profile = AppNavHost.newSessionProfile, .new_sftp = AppNavHost.newSftpProfile, .quick = AppNavHost.quickSession, .local = AppNavHost.newLocalSession, .saved = AppNavHost.savedSession });
+    const session_menu = try session_menu_mod.View.mount(cx, scope, .{ .context = nav_host, .new_profile = AppNavHost.newSessionProfile, .new_sftp = AppNavHost.newSftpProfile, .new_kvm = AppNavHost.newKvmProfile, .quick = AppNavHost.quickSession, .local = AppNavHost.newLocalSession, .saved = AppNavHost.savedSession });
     session_menu.root.style.position = .absolute;
     session_menu.root.style.width = .{ .px = 0 };
     session_menu.root.style.height = .{ .px = 0 };
@@ -10421,7 +10709,8 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     if (workspace.sidebar_chrome) |view| try background_view.isolate(view.new_menu.scope, view.new_menu.chrome);
     nav_host.sidebar_panel = sidebar;
     try main_row.appendChild(cx.allocator, sidebar);
-    const sidebar_grip = try ui.box(cx, .{ .width = .{ .px = 8 }, .height = .fill(), .margin = .{ .left = -8, .right = -8 }, .flex_shrink = 0, .cursor = .ew_resize, .hit_behavior = .@"opaque" }, .{});
+    // Keep the 8pt hit target while cancelling the extra flex gap it introduces.
+    const sidebar_grip = try ui.box(cx, .{ .width = .{ .px = 8 }, .height = .fill(), .margin = .{ .left = -8, .right = -shell_styles.gap }, .flex_shrink = 0, .cursor = .ew_resize, .hit_behavior = .@"opaque" }, .{});
     sidebar_grip.meta.ownership.meta.test_id = "sidebar.resize";
     _ = try ui.interaction.drag.Binding.attach(scope, cx, sidebar_grip, .{ .axis = .horizontal, .activation_distance = 1 }, AppNavHost.resizeSidebar, nav_host);
     nav_host.sidebar_grip = sidebar_grip;
@@ -10446,6 +10735,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         .background = ui.Color.rgba(236, 255, 244, 102),
         .z_index = 250,
     }, .{});
+    @import("ui/floating_input.zig").protect(cx, help_overlay);
     try help_overlay.appendChild(cx.allocator, try @import("ui/command_help_view.zig").mountCard(cx));
     help_overlay.setDisplay(.none);
     try terminal_area.appendChild(cx.allocator, help_overlay);
@@ -10968,7 +11258,7 @@ const NotificationWindowHook = struct {
     fn mount(cx: *ui.Cx, scope: *ui.Scope, host: *NotificationHost, workspace: *ws.Workspace, settings: *SettingsHost, nav: *AppNavHost, transfer: *TransferHost) !*NotificationWindowHook {
         const self = try cx.allocator.create(NotificationWindowHook);
         self.* = .{ .host = host, .cx = cx, .workspace = workspace, .settings = settings, .nav = nav, .transfer = transfer, .id = undefined };
-        self.id = host.registerWindow(.{ .context = self, .owns = owns, .activate = activate, .activate_ai = activateAi, .feedback = feedback, .owner_name = ownerName, .result_presented = resultPresented, .transfer_presented = transferPresented }) catch |err| {
+        self.id = host.registerWindow(.{ .context = self, .owns = owns, .activate = activate, .activate_ai = activateAi, .prepare_activity = prepareActivity, .tab_presentation = tabPresentation, .feedback = feedback, .owner_name = ownerName, .result_presented = resultPresented, .transfer_presented = transferPresented }) catch |err| {
             cx.allocator.destroy(self);
             return err;
         };
@@ -10991,9 +11281,17 @@ const NotificationWindowHook = struct {
         }
         return true;
     }
+    fn tabPresentation(raw: *anyopaque, owner: @import("host/identity.zig").ContentOwner) ?@import("host/tab_presentation.zig").Presentation {
+        const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
+        if (self.workspace.shutting_down) return null;
+        return self.workspace.tabPresentation(owner);
+    }
     fn ownerName(raw: *anyopaque, owner: @import("host/identity.zig").ContentOwner) []const u8 {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
         for (self.workspace.tabs.items) |tab| if (tab.content_owner.eql(owner)) return tab.titleSlice();
+        if (owner == .group) if (self.nav.ai) |ai| if (ai.roster) |roster| {
+            for (roster.groups.items) |group| if (group.id == @backingInt(owner.group.id)) return group.name;
+        };
         return "原会话已关闭";
     }
     fn resultPresented(raw: *anyopaque, kind: @import("host/notification_coordinator.zig").Kind, owner: @import("host/identity.zig").ContentOwner) bool {
@@ -11041,6 +11339,16 @@ const NotificationWindowHook = struct {
         if (self.nav.application_host) |application| application.file_failure = null;
         self.host.removeWindow(self.id);
         self.cx.allocator.destroy(self);
+    }
+    fn prepareActivity(raw: *anyopaque) bool {
+        const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
+        if (self.workspace.shutting_down) return false;
+        if (self.nav.app_runtime) |app| app.win.activate();
+        // Keep the existing save/discard decision when settings contain edits.
+        if (self.settings.open) self.settings.toggle();
+        if (self.settings.open) return false;
+        if (self.nav.quick_host) |quick| quick.close();
+        return true;
     }
     fn hasDot(raw: ?*anyopaque, owner: @import("host/identity.zig").ContentOwner) bool {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw orelse return false));
@@ -11120,6 +11428,7 @@ const NotificationWindowHook = struct {
     fn run(raw: *anyopaque, _: u8, _: bool) ui.AfterLayoutResult {
         const self: *NotificationWindowHook = @ptrCast(@alignCast(raw));
         if (self.workspace.shutting_down) return .done;
+        self.host.activity.setForeground(@import("platform/menu_bar.zig").active());
         if (self.cx.window_active and !self.was_active) self.host.refreshAuthorization() catch |err| {
             if (err != error.NotificationUnavailable) applog.warn(.app, "notification authorization refresh: {s}", .{@errorName(err)});
         };
@@ -11140,6 +11449,7 @@ const NotificationWindowHook = struct {
                 if (!status.owner.eql(owner)) continue;
                 break :blk status.notification();
             } else if (tab.runtime) |runtime| runtime.workerPtr().notificationSnapshot(owner) catch continue else continue;
+            self.host.activity.observeTerminal(facts) catch |err| applog.warn(.app, "menu bar activity: {s}", .{@errorName(err)});
             self.host.publishRecordingStatus(self.id, owner, facts.recording_error) catch |err| applog.warn(.app, "recording risk notification: {s}", .{@errorName(err)});
             if (facts.output_sequence != 0) _ = self.host.coordinator.observeOutput(tab.content_owner, facts.output_sequence) catch false;
             if (facts.bell_count != 0) {
@@ -12923,6 +13233,9 @@ pub fn main() !void {
 
     var data_paths = try DataPaths.forApplication(std.heap.c_allocator);
     defer data_paths.deinit();
+    const update_data = try std.heap.c_allocator.dupeSentinel(u8, data_paths.directory, 0);
+    defer std.heap.c_allocator.free(update_data);
+    if (@import("update/client.zig").zw_update_startup_gate(update_data.ptr) == 0) return;
     var scope_lock = @import("platform/data_scope_lock.zig").Lock.acquire(std.heap.c_allocator, data_paths.directory, data_paths.is_override) catch |err| {
         _ = dataStartupAlert(err, false);
         return err;
@@ -13022,14 +13335,59 @@ pub fn main() !void {
     };
     app.setCloseRequestHandler(.{ .context = nav, .request = AppNavHost.nativeCloseRequest, .completed = AppNavHost.nativeCloseCompleted });
     @import("ui/multiwindow_test_routes.zig").install(domain, &windows);
+    const menu_bar = @import("platform/menu_bar.zig");
+    if (!menu_bar.start()) applog.warn(.app, "menu bar initialization failed", .{});
+    defer menu_bar.stop();
+    menu_bar.setActionHandler(&process, ProcessWindows.menuBarAction);
+    var badge_fingerprint: ?u64 = null;
+    var updater: @import("update/app_host.zig").Host(ProcessWindows) = .{ .process = &process };
+    process.updater = &updater;
+    if (application_test_mode) @import("ui/multiwindow_test_routes.zig").update_route = struct {
+        fn route(body: []const u8, buffer: []u8) ?[]const u8 {
+            const active_process = process_windows orelse return null;
+            return (active_process.updater orelse return null).testRoute(body, buffer);
+        }
+    }.route;
+    defer updater.deinit();
+    @import("update/client.zig").zw_update_start(@intFromBool(process.runtime_config.?.value.updates.auto_check));
+    var update_healthy_sent = false;
     // The callback has no Cx/window pointer and remains valid through worker cleanup.
     while (windows.shouldContinue()) {
+        const menu_action = menu_bar.takeAction();
+        if (menu_action == 2) {
+            windows.quit();
+            continue;
+        }
+        if (menu_action >= 3) _ = notifications.activateActivity(menu_action);
+        notifications.activity.setForeground(menu_bar.active());
+
         const changed = presentation.take();
         if (changed) for (windows.windows.items) |managed| managed.app.cx.requestRedraw();
         // A native empty event interrupts a blocking tick; consume its publication
         // at this next loop boundary without another timed wait before painting.
         windows.config.pump_timeout_ms = if (changed) 0 else 16;
         if (!try windows.tick()) break;
+        notifications.activity.setForeground(menu_bar.active());
+        var activity_rows = try notifications.activityRows(std.heap.c_allocator);
+        defer activity_rows.deinit(std.heap.c_allocator);
+        var menu_hash = std.hash.Wyhash.init(0);
+        for (activity_rows.items) |row| {
+            const item = row.presentation;
+            std.hash.autoHash(&menu_hash, .{ row.token, row.window_id, item.tab_id, item.order, item.icon_id, item.icon_tint, item.current });
+            menu_hash.update(item.title);
+            menu_hash.update(item.status);
+        }
+        const fingerprint = menu_hash.final();
+        if (badge_fingerprint == null or badge_fingerprint.? != fingerprint) {
+            badge_fingerprint = fingerprint;
+            menu_bar.update(activity_rows.items.len);
+            for (activity_rows.items) |row| {
+                menu_bar.addSession(row.token, row.presentation);
+                if (application_test_mode) std.debug.print("MENU_BAR_ROW {{\"token\":{d},\"window\":{d},\"tab\":{d},\"order\":{d},\"icon\":{d},\"tint\":{d},\"current\":{},\"title\":{f},\"status\":{f}}}\n", .{ row.token, row.window_id, @backingInt(row.presentation.tab_id), row.presentation.order, row.presentation.icon_id, row.presentation.icon_tint, row.presentation.current, std.json.fmt(row.presentation.title, .{}), std.json.fmt(row.presentation.status, .{}) });
+            }
+            menu_bar.finish();
+            if (application_test_mode) std.debug.print("MENU_BAR_BADGE {{\"count\":{d},\"foreground\":{}}}\n", .{ activity_rows.items.len, menu_bar.active() });
+        }
         for (windows.windows.items) |managed| @import("ui/plugin_window_host.zig").Host.observePresentedFrame(managed.app);
         @import("vt/input_timing.zig").frameReturned();
         if (process.data_cleanup_exit) break;
@@ -13038,7 +13396,18 @@ pub fn main() !void {
             if (process.data_cleanup_owner) |owner| owner.performDataCleanup();
             if (process.data_cleanup_exit) break;
         }
-        if (process.data_cleanup_owner == null) process.drain(&registry);
+        if (process.data_cleanup_owner == null and !@import("update/admission.zig").blocked()) process.drain(&registry);
+        @import("update/client.zig").zw_update_set_automatic(@intFromBool(process.runtime_config.?.value.updates.auto_check));
+        updater.tick() catch |err| {
+            applog.warn(.app, "updater: {s}", .{@errorName(err)});
+            updater.coordinator.cancel();
+            @import("update/admission.zig").set(false);
+        };
+        if (!update_healthy_sent) {
+            @import("update/client.zig").zw_update_healthy();
+            update_healthy_sent = true;
+        }
+        if (updater.exit) break;
     }
 }
 

@@ -16,11 +16,12 @@ const frames = @import("host/frame_texture_sink.zig");
 const access_api = @import("host/session_service_access.zig");
 const identity = @import("host/identity.zig");
 const theme = @import("ui/app_theme.zig");
+const status_ui = @import("ui/ssh_status_host.zig");
 
 const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(320), .generation = 7 };
 const operation: services.OperationKey = .{ .owner = .{ .session = owner }, .operation_id = 1, .attempt_id = 1 };
 const State = enum { controlled, read_only, no_signal, disconnected, partial, unknown, progress_log, management };
-const ProgressFixture = struct { revision: u64 = 1, stage: console.progress.Stage = .public_script, elapsed_ms: u64 = 9900, stage_elapsed_ms: u64 = 9900, long_route: bool = false, failure: bool = false, log_generation: u64 = 1 };
+const ProgressFixture = struct { revision: u64 = 1, stage: console.progress.Stage = .public_script, elapsed_ms: u64 = 9900, stage_elapsed_ms: u64 = 9900, long_route: bool = false, event_count: ?u8 = null, completed_stage_ms: [@typeInfo(console.progress.Stage).@"enum".field_names.len]?u64 = @splat(null), failure: bool = false, log_generation: u64 = 1 };
 var selected_state: State = .controlled;
 var selected_theme: theme.Name = .dark;
 var app_instance: ?*App = null;
@@ -59,6 +60,8 @@ const Fixture = struct {
     fb: framebuffer.Service = undefined,
     remote: input.Service = input.Service.init(owner),
     renderer: ?contract.RendererInstance = null,
+    status_host: ?*status_ui.Host = null,
+    disconnect_requests: usize = 0,
     state: State = .controlled,
     progress_log_generation: u64 = 0,
     progress_wall_started_ms: i64 = 0,
@@ -131,6 +134,7 @@ const Fixture = struct {
         try self.validate(binding, console.definition);
         self.console_reads += 1;
         const disconnected = self.state == .disconnected;
+        const ended = disconnected and self.disconnect_requests != 0;
         const no_signal = self.state == .no_signal;
         const progress_log = self.state == .progress_log;
         const failed_progress = if (self.progress_fixture) |fixture| progress_log and fixture.failure else false;
@@ -141,10 +145,10 @@ const Fixture = struct {
             .name = "LOCAL BMC fixture",
             .target = "local.synthetic.invalid:443",
             .route_summary = if (progress_log and self.progress_fixture != null and self.progress_fixture.?.long_route) "本机 → first.synthetic.invalid:22 → a-long-hostname-for-layout-measurement.synthetic.invalid:22 → another-long-hostname-for-layout-measurement.synthetic.invalid:22 → local.synthetic.invalid:443" else "本机 → local.synthetic.invalid:443",
-            .route = if (disconnected or failed_progress) .failed else .connected,
-            .video = if (disconnected or failed_progress) .failed else if (no_signal or progress_log) .awaiting_frame else .streaming,
-            .cleanup = if (failed_progress) .released else .not_started,
-            .management = .available,
+            .route = if (ended) .closed else if (disconnected or failed_progress) .failed else .connected,
+            .video = if (ended) .closed else if (disconnected or failed_progress) .failed else if (no_signal or progress_log) .awaiting_frame else .streaming,
+            .cleanup = if (ended or failed_progress) .released else .not_started,
+            .management = if (ended) .closed else .available,
             .input = snap,
             .control = if (snap.controlled) .major else .read_only,
             .width = self.fb.width,
@@ -156,8 +160,8 @@ const Fixture = struct {
             .rfb_ready = !disconnected and !progress_log,
             .progress = if (progress_log) self.syntheticProgressLog() else .{},
             .read_only_requested = self.state == .read_only,
-            .failure_stage = if (disconnected) .video else null,
-            .failure_code = if (disconnected) "LOCAL_FIXTURE_DISCONNECTED" else null,
+            .failure_stage = if (disconnected and !ended) .video else null,
+            .failure_code = if (disconnected and !ended) "LOCAL_FIXTURE_DISCONNECTED" else null,
         });
     }
     /// Explicit acceptance data only. No Runtime, transport or response parser
@@ -176,10 +180,11 @@ const Fixture = struct {
         }
         if (self.progress_fixture) |fixture| {
             result.revision = fixture.revision;
-            if (fixture.revision == 0) result.event_count = 0;
+            result.event_count = if (fixture.revision == 0) 0 else @min(fixture.event_count orelse result.event_count, console.progress.capacity);
             result.stage = if (fixture.failure) .failed else fixture.stage;
             result.elapsed_ms = fixture.elapsed_ms;
             result.stage_elapsed_ms = fixture.stage_elapsed_ms;
+            result.completed_stage_ms = fixture.completed_stage_ms;
             result.waiting_for_user = fixture.stage == .waiting_certificate or fixture.stage == .waiting_video_certificate or fixture.stage == .waiting_credentials;
             if (fixture.failure) {
                 result.failure_stage = fixture.stage;
@@ -235,7 +240,21 @@ const Fixture = struct {
         self.management_result = .{ .operation = request.execution().operation, .phase = .awaiting_approval };
         return .{ .accepted = request.execution().operation };
     }
-    const console_table: console.Interface = .{ .snapshot = consoleSnapshot, .request_control = requestControl, .reply_control = replyControl, .refresh = refresh, .set_focus = focus, .retry = retry, .request_management = requestManagement };
+    fn disconnect(raw: *anyopaque, binding: typed.Binding) !void {
+        const self = from(raw);
+        try self.validate(binding, console.definition);
+        self.disconnect_requests += 1;
+        try self.applyState(.disconnected);
+    }
+    fn captureDetails(_: *anyopaque, _: @import("ui/connection_details_view.zig").Snapshot) !void {}
+    fn copyStatus(_: *anyopaque, _: services.OperationKey, _: []const u8) !void {}
+    fn statusAction(_: *anyopaque, _: services.OperationKey) !void {}
+    fn hideStatus(_: *anyopaque) void {}
+    fn showTheme(_: *anyopaque, _: *ui.Node) void {}
+    fn showDetails(raw: *anyopaque) void {
+        if (from(raw).renderer) |renderer| if (renderer.vtable.show_connection_details) |show| show(renderer.context);
+    }
+    const console_table: console.Interface = .{ .snapshot = consoleSnapshot, .request_control = requestControl, .reply_control = replyControl, .refresh = refresh, .set_focus = focus, .retry = retry, .cancel = disconnect, .request_management = requestManagement };
     fn inputSnapshot(raw: *anyopaque, binding: typed.Binding) !input.Snapshot {
         const self = from(raw);
         try self.validate(binding, input.definition);
@@ -357,6 +376,9 @@ const Fixture = struct {
         if (!self.closed) {
             _ = self.sink.drain() catch false;
             self.pump();
+            if (self.status_host) |host| if (self.renderer) |renderer| {
+                if (renderer.vtable.connection_status) |project| host.updateGraphical(project(renderer.context)) catch {};
+            };
         }
         return .done;
     }
@@ -444,11 +466,13 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     const slot = try ui.box(cx, @import("ui/local_session_styles.zig").pane(), .{});
     slot.meta.ownership.meta.test_id = "fixture.content_slot";
     try pane.appendChild(cx.allocator, slot);
-    const status = try ui.boxStyled(cx, shell.status, .{});
-    status.meta.ownership.meta.test_id = "fixture.shell.status";
-    try root.appendChild(cx.allocator, status);
-    try status.appendChild(cx.allocator, try ui.text(cx, "LOCAL ONLY  ·  1920 × 1200 synthetic RGBA  ·  management read only", .{ .font_size = 11, .color = theme.current().fg_2 }));
+    const status = try status_ui.mountStatusBar(cx, scope, try ui.text(cx, "连接中", .{}));
+    try root.appendChild(cx.allocator, status.bar);
     const self = try scope.createState(Fixture, .{ .cx = cx, .main_thread = std.Thread.getCurrentId(), .root = root, .slot = slot });
+    self.status_host = try status_ui.Host.mount(cx, scope, .{ .context = self, .capture = Fixture.captureDetails, .copy = Fixture.copyStatus, .logs = Fixture.statusAction, .reconnect = Fixture.statusAction, .hide_chain = Fixture.hideStatus });
+    self.status_host.?.bind(status.controls, self, Fixture.showTheme);
+    status.chain_trigger.behavior.events.on_click = .{ .context = self, .callback = Fixture.showDetails };
+    try status.controls.setThemeName(cx, @tagName(selected_theme));
     self.fb = framebuffer.Service.init(cx.allocator, owner, &self.budget);
     self.sink = frames.Sink.initWithBudget(owner, frames.backendFor((app_instance orelse return error.AppUnavailable).sharedImageStore() orelse return error.ImageStoreUnavailable), &self.budget, .kvm);
     try scope.onCleanup(Fixture, self, Fixture.cleanup);
@@ -605,6 +629,7 @@ fn route(path: []const u8, body: []const u8, out: []u8) ?[]const u8 {
         .boot_writes = self.boot_writes,
         .management_requests = self.management_requests,
         .management_result = self.management_result,
+        .disconnect_requests = self.disconnect_requests,
         .release_count = self.release_count,
         .last_release = @tagName(self.last_release),
         .keys = self.key_count,

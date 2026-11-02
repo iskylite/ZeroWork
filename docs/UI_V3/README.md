@@ -7,8 +7,14 @@ AI 会话执行专项：[0.2.6 AI 执行与统一历史效果稿](ai-session-exe
 
 当前分层与范围以[组件组合合同](COMPONENT_MAP.md)为准：通用组件→功能组件→功能模块→整机；VNC/RDP/FTP独立归未来设计，默认预览保留KVM。
 
+v0.3 混合会话组已按原生 APP 同步：[一上两下效果稿](workspace/index.html?mode=group)（上 SFTP、下左本地终端约 60%／右 SSH 约 40%）· [布局、拖动分隔线与保存比例](workspace/session-group-spec.md)。卡片复用现有样式；原生支持 KVM 混合入组，真实设备视频在线仍待验证。
+
 整机融合入口：[启动预览](app/index.html) · [操作与连线](app/README.md)。
 
+0.3 应用内更新：[主题可切换原型](app-update/index.html) · [状态与原生映射](app-update/README.md) · [实施设计](../DESIGN/V0.3_APP_UPDATE.md)。包含用户一次确认结束全部工作再安装、关闭进度与失败恢复；原生更新器已接入并完成针对性验证，具体证据和正式发布边界见实施设计末尾。
+
+
+0.3 菜单栏会话活动：[效果总览](menu-bar/effects.html) · [效果图](menu-bar/assets/design-preview.png) · [交互原型](menu-bar/index.html) · [0.3 设计与实际交付状态](../DESIGN/V0.3_MENU_BAR_ACTIVITY.md)。Tab 一致性已原生接入并完成针对性验证，签名正式包已更新本地安装版；前台恢复延迟及系统实际点击耗时仍待回归。图中的角标为原生导出，右键列表为目标设计。
 
 本目录是 UI 后续落地的 HTML/CSS/JS 基准。效果图与状态预览直接使用可编辑原型，不保留效果图图片或历史截图；明确引用的必要配图和 SVG 资源可以保留。按用户最新要求补全完整功能区、模块、组件和未来协议页面；所有内容待用户确认，不以当前 App 是否已经实现限制原型范围。使用 V3 颜色、字体、卡片、窗口与浮层规则，不把旧 V2 页面改名作为新稿。
 

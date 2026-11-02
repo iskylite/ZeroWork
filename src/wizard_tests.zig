@@ -760,7 +760,7 @@ test "wizard review actual pointer reaches test action in fixed footer with curr
     try std.testing.expectEqual(@as(usize, 0), f.calls);
 }
 
-test "SFTP wizard stepper keeps plain numerals and only the current selection after navigation and theme change" {
+test "SFTP wizard stepper uses current badges and completed checks after navigation and theme change" {
     const theme = @import("ui/app_theme.zig");
     const previous = theme.currentName();
     defer theme.select(previous);
@@ -775,10 +775,10 @@ test "SFTP wizard stepper keeps plain numerals and only the current selection af
     }
     try std.testing.expectEqual(ui.Color.TRANSPARENT, f.wizard.step_buttons[0].?.getBackground());
     try std.testing.expectEqual(ui.Color.TRANSPARENT, f.wizard.step_buttons[1].?.getBackground());
-    try std.testing.expectEqual(theme.popupSelection(), f.wizard.step_buttons[2].?.getBackground());
+    try std.testing.expectEqual(theme.current().action_accent, f.wizard.step_numbers[2].?.getBackground());
     for ([_][]const u8{ "wizard.step.identity.check", "wizard.step.route.check" }) |id| {
         const check = findId(f.wizard.root.?, id) orelse return error.CompletedStepCheckMissing;
-        try std.testing.expectEqual(@as(@TypeOf(check.style.display), .none), check.style.display);
+        try std.testing.expectEqual(@as(@TypeOf(check.style.display), .flex), check.style.display);
     }
     const route = f.wizard.step_buttons[1].?.globalRect();
     f.cx.handleClick(route.x + route.w / 2, route.y + route.h / 2);
@@ -791,9 +791,17 @@ test "SFTP wizard stepper keeps plain numerals and only the current selection af
         _ = f.cx.render();
     }
     try std.testing.expectEqual(ui.Color.TRANSPARENT, f.wizard.step_buttons[0].?.getBackground());
-    try std.testing.expectEqual(theme.popupSelection(), f.wizard.step_buttons[1].?.getBackground());
+    try std.testing.expectEqual(theme.current().action_accent, f.wizard.step_numbers[1].?.getBackground());
     try std.testing.expectEqual(ui.Color.TRANSPARENT, f.wizard.step_buttons[2].?.getBackground());
     try std.testing.expectEqual(@as(@TypeOf(findId(f.wizard.root.?, "wizard.step.route.check").?.style.display), .none), findId(f.wizard.root.?, "wizard.step.route.check").?.style.display);
+    for (0..2) |i| {
+        const line = findId(f.wizard.root.?, if (i == 0) "wizard.steps.connector.0" else "wizard.steps.connector.1").?.globalRect();
+        const left = f.wizard.step_buttons[i].?.globalRect();
+        const right = f.wizard.step_buttons[i + 1].?.globalRect();
+        try std.testing.expectApproxEqAbs(@as(f32, 20), line.x - left.x - left.w, 0.1);
+        try std.testing.expectApproxEqAbs(@as(f32, 20), right.x - line.x - line.w, 0.1);
+        try std.testing.expectApproxEqAbs(left.y + left.h / 2, line.y + line.h / 2, 0.1);
+    }
     try std.testing.expectEqual(@as(usize, 1), f.wizard.currentDraft().route.len);
     try std.testing.expectEqual(@as(usize, 0), f.calls);
 }

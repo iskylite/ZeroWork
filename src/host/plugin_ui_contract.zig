@@ -101,6 +101,9 @@ pub const RendererInstance = struct {
         /// Presentation readiness does not imply an online remote service.
         /// Labels are borrowed for the synchronous host projection only.
         connection_status: ?*const fn (*anyopaque) ConnectionStatus = null,
+        /// Open the renderer's existing connection diagnostics for the shared
+        /// status-bar connection/route entries.
+        show_connection_details: ?*const fn (*anyopaque) void = null,
     };
 };
 pub const ConnectionStatus = struct {

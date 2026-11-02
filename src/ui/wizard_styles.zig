@@ -80,8 +80,8 @@ pub fn disclosure() ui.BoxStyle {
     style.background = ui.Color.TRANSPARENT;
     return style;
 }
-pub fn step(selected: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .flex = 1, .min_width = 0, .height = .{ .px = 36 }, .padding = .{ .left = 8, .right = 8, .top = 5, .bottom = 5 }, .direction = .row, .align_items = .center, .justify = .center, .gap = 12, .background = if (selected) theme.popupSelection() else ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .flex_shrink = 0 };
+pub fn step(_: bool) ui.BoxStyle {
+    return .{ .width = .{ .fit = .{} }, .flex = 0, .min_width = 0, .height = .{ .px = 36 }, .padding = .{}, .direction = .row, .align_items = .center, .justify = .start, .gap = 10, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 7 }, .flex_shrink = 0 };
 }
 pub fn stepCopy() ui.BoxStyle {
     return .{ .width = .{ .fit = .{} }, .height = .{ .px = 18 }, .direction = .column, .gap = 0, .flex_shrink = 0 };
@@ -109,9 +109,8 @@ pub const test_action_width: f32 = 76;
 pub const test_action_height: f32 = 34;
 pub const unavailable_test_width: f32 = 196;
 pub const unavailable_test_height: f32 = 32;
-pub fn number(_: bool) ui.BoxStyle {
-    // The approved HTML uses an ordinary step numeral, without a badge.
-    return .{ .width = .{ .px = 8 }, .height = .{ .px = 18 }, .align_items = .center, .justify = .center, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
+pub fn number(selected: bool) ui.BoxStyle {
+    return .{ .width = .{ .px = 22 }, .height = .{ .px = 22 }, .align_items = .center, .justify = .center, .background = if (selected) theme.current().action_accent else theme.popupInset(), .border = .{ .radius = 11 }, .flex_shrink = 0 };
 }
 pub fn accessChoice(selected: bool) ButtonStyle {
     return .{ .width = .fill(), .height = .{ .px = 61 }, .flex = 1, .min_width = 0, .flex_shrink = 0, .background = if (selected) theme.popupSelection() else theme.popupInset(), .corner_radius = 8, .border_width = 0, .padding = .{} };

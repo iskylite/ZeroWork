@@ -89,7 +89,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, state: Snapshot, actions: Actions) !*
             button_style.width = .{ .fit = .{} };
             button_style.min_width = 53;
         }
-        const button = try ui.widgets.Button(.{ .label = if (action == .answer) action_label else if (action == .regenerate) "新计划" else label, .icon_only = false, .icon_asset = null, .icon_size = @as(f32, 12), .a11y_label = label, .variant = @as(ui.widgets.button.ButtonVariant, if (action == .answer) .primary else .secondary), .hover_style = .{ .background = @import("app_theme.zig").current().hover }, .disabled = !enabled, .base_style = button_style, .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
+        const button = try ui.widgets.Button(.{ .label = if (action == .answer) action_label else if (action == .regenerate) "新计划" else label, .icon_only = false, .icon_asset = null, .icon_size = @as(f32, 12), .a11y_label = label, .variant = @as(ui.widgets.button.ButtonVariant, if (action == .answer) .primary else .secondary), .hover_style = .{ .background = @import("app_theme.zig").states().hover }, .disabled = !enabled, .base_style = button_style, .on_click = cx.on(Click, click, Click.click) }).mount(scope, cx);
         if (action == .answer) try @import("app_theme.zig").stylePrimary(cx, scope, button, null);
         button.meta.ownership.meta.test_id = id;
         try action_row.appendChild(cx.allocator, button);

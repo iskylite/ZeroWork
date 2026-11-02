@@ -213,3 +213,36 @@ test "BMC connection progress video TLS and certificate wait remain explicit vid
     try std.testing.expectEqualStrings("视频 TLS 握手", progress.stageLabel(.video_tls_handshake));
     try std.testing.expectEqualStrings("等待用户确认视频通道证书", progress.stageLabel(.waiting_video_certificate));
 }
+
+test "BMC connection step durations accumulate protocol visits and freeze through failures and ring rollover" {
+    const vm = @import("plugins/bmc_ikvm/view_model.zig");
+    var tracker = progress.Tracker.initAt(1, 1000);
+    try std.testing.expectEqual(@as(?u64, null), vm.progressGroupDuration(tracker.snapshotAt(1000), .route));
+    tracker.setStageAt(.route, 1000);
+    tracker.setStageAt(.tls_handshake, 1300);
+    tracker.setStageAt(.waiting_certificate, 1500);
+    tracker.setStageAt(.tls_handshake, 2500);
+    tracker.setStageAt(.public_identity, 2800);
+    tracker.setStageAt(.public_script, 3000);
+    var value = tracker.snapshotAt(3400);
+    try std.testing.expectEqual(@as(?u64, 300), vm.progressGroupDuration(value, .route));
+    try std.testing.expectEqual(@as(?u64, 1500), vm.progressGroupDuration(value, .tls));
+    try std.testing.expectEqual(@as(?u64, 600), vm.progressGroupDuration(value, .identity));
+    try std.testing.expectEqual(@as(?u64, null), vm.progressGroupDuration(value, .video));
+    tracker.failAt(error.HttpTimeout, 3500);
+    tracker.setStageAt(.cleanup, 3600);
+    for (0..40) |index| tracker.noteAt(.{ .code = .remote_logout_confirmed }, 3700 + index);
+    tracker.finishAt(false, 4000);
+    value = tracker.snapshotAt(100000);
+    try std.testing.expectEqual(@as(?u64, 700), vm.progressGroupDuration(value, .identity));
+    try std.testing.expectEqual(@as(?u64, 300), vm.progressGroupDuration(value, .route));
+    try std.testing.expectEqual(@as(?u64, 1500), vm.progressGroupDuration(value, .tls));
+    var video = progress.Tracker.initAt(0, 0);
+    video.setStageAt(.awaiting_first_frame, 100);
+    video.setStageAt(.streaming, 500);
+    try std.testing.expectEqual(@as(?u64, 400), vm.progressGroupDuration(video.snapshotAt(100000), .video));
+    var cancelled = progress.Tracker.initAt(0, 0);
+    cancelled.setStageAt(.web_login, 100);
+    cancelled.failAt(error.Cancelled, 750);
+    try std.testing.expectEqual(@as(?u64, 650), vm.progressGroupDuration(cancelled.snapshotAt(100000), .authentication));
+}

@@ -106,7 +106,7 @@ pub fn action(size: f32, surface: bool) ButtonStyle {
     return .{ .width = .{ .px = size }, .height = .{ .px = size }, .padding = .{}, .gap = 0, .corner_radius = 7, .border_width = 0, .background = if (surface) theme.popupAction() else ui.Color.TRANSPARENT, .flex_shrink = 0 };
 }
 pub fn hover() ButtonStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn footer() ui.BoxStyle {
     return row(30);
@@ -127,7 +127,7 @@ pub fn trigger() ButtonStyle {
     return .{ .width = .{ .px = 28 }, .height = .{ .px = 26 }, .padding = .{}, .gap = 0, .corner_radius = 7, .background = ui.Color.TRANSPARENT, .border_width = 0, .flex_shrink = 0 };
 }
 pub fn triggerHover() ButtonStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn nodeHeader() ui.BoxStyle {
     var result = row(40);

@@ -348,7 +348,7 @@ pub fn validate(source: Snapshot) !void {
     if (source.key.owner == .session and (@backingInt(source.key.owner.session.session_id) == 0 or source.key.owner.session.generation == 0)) return error.InvalidLogOwner;
     if (source.endpoint.host.len > source.endpoint.host.bytes.len or source.endpoint.user.len > source.endpoint.user.bytes.len or source.endpoint.name.len > source.endpoint.name.bytes.len or source.endpoint.port == 0) return error.InvalidEndpoint;
     for (source.records, 0..) |record, index| {
-        if (!belongs(record.key, source.key) or record.entry.hop_count == 0 or record.entry.hop_count > details.max_hops or record.entry.hop >= record.entry.hop_count or record.entry.host_len > record.entry.host.len) return error.InvalidLogOwner;
+        if (!belongs(record.key, source.key) or record.entry.hop_count == 0 or record.entry.hop_count > details.max_hops or record.entry.hop >= record.entry.hop_count or record.entry.host_len > record.entry.host.len or record.entry.diagnostic.len > record.entry.diagnostic.bytes.len) return error.InvalidLogOwner;
         for (source.records[0..index]) |previous| if (previous.key.eql(record.key) and previous.entry.sequence >= record.entry.sequence) return error.InvalidLogOrder;
         if (index != 0) {
             const previous = source.records[index - 1];
@@ -363,25 +363,15 @@ fn belongs(record: OperationKey, captured: OperationKey) bool {
     return record.owner == .app and captured.owner == .app and record.operation_id == captured.operation_id;
 }
 fn writeDisplayRecords(writer: *std.Io.Writer, records: []const LogRecord) !void {
-    for (records, 0..) |record, index| {
-        var start = record.entry.timestamp_ns;
-        for (records[0..index]) |earlier| if (earlier.key.eql(record.key)) {
-            start = earlier.entry.timestamp_ns;
-            break;
-        };
-        const ms = @divTrunc(@max(0, record.entry.timestamp_ns - start), std.time.ns_per_ms);
-        try writer.print("+{d}.{d:0>3}s  {s} · {s}\n         {s}:{d} · 第 {d} 跳 · 尝试 {d} · #{d}\n", .{ @divTrunc(ms, 1000), @mod(ms, 1000), Progress.phaseName(record.entry.phase), resultText(record.entry), record.entry.hostSlice(), record.entry.port, record.entry.hop + 1, record.key.attempt_id.?, record.entry.sequence });
-    }
+    try writeLogRecords(writer, records, false);
 }
 fn writeRecords(writer: *std.Io.Writer, records: []const LogRecord) !void {
-    for (records, 0..) |record, index| {
-        var start = record.entry.timestamp_ns;
-        for (records[0..index]) |earlier| if (earlier.key.eql(record.key)) {
-            start = earlier.entry.timestamp_ns;
-            break;
-        };
-        const ms = @divTrunc(@max(0, record.entry.timestamp_ns - start), std.time.ns_per_ms);
-        try writer.print("+{d}.{d:0>3}s [尝试 {d} · #{d}] 第 {d} 跳 {s}:{d} | {s} | {s}\n", .{ @divTrunc(ms, 1000), @mod(ms, 1000), record.key.attempt_id.?, record.entry.sequence, record.entry.hop + 1, record.entry.hostSlice(), record.entry.port, Progress.phaseName(record.entry.phase), resultText(record.entry) });
+    try writeLogRecords(writer, records, true);
+}
+fn writeLogRecords(writer: *std.Io.Writer, records: []const LogRecord, include_raw: bool) !void {
+    for (records) |record| {
+        try record.entry.writeLine(writer, "{s} · {s} · {s}:{d} · 第 {d} 跳 · 尝试 {d} · #{d}", .{ Progress.phaseName(record.entry.phase), Progress.inlineFailureText(resultText(record.entry), record.entry.diagnostic.len != 0), record.entry.hostSlice(), record.entry.port, record.entry.hop + 1, record.key.attempt_id.?, record.entry.sequence });
+        if (include_raw) try record.entry.writeDiagnostic(writer);
     }
 }
 fn resultText(entry: Progress.progress.Journal.Entry) []const u8 {

@@ -84,9 +84,9 @@ test "AI close confirmation running and idle labels confirm the captured ticket 
         defer f.deinit();
         try std.testing.expect(!f.view.open.peek());
         const ticket = try f.show(4, 1, running, true);
-        try std.testing.expectEqualStrings(if (running) "停止本轮并关闭？" else "关闭助手？", text(f.view.title));
-        try std.testing.expectEqualStrings("对话和历史会保留", text(f.view.detail));
-        try std.testing.expectEqualStrings(if (running) "停止并关闭" else "关闭窗口", text(f.view.confirm));
+        try std.testing.expectEqualStrings(if (running) "停止并结束当前会话？" else "结束当前会话？", text(f.view.title));
+        try std.testing.expectEqualStrings("历史会保留，下次打开显示欢迎页", text(f.view.detail));
+        try std.testing.expectEqualStrings(if (running) "停止并结束" else "结束会话", text(f.view.confirm));
         f.click(f.view.confirm);
         try std.testing.expectEqual(@as(usize, 1), f.confirms);
         try std.testing.expectEqual(@as(usize, 0), f.cancels);
@@ -209,7 +209,7 @@ test "AI close confirmation replay of absent and unchanged snapshots does not re
 
     try f.view.update(.{ .ticket = ticket, .running = false });
     try std.testing.expect(f.cx.needs_redraw);
-    try std.testing.expectEqualStrings("关闭助手？", text(f.view.title));
+    try std.testing.expectEqualStrings("结束当前会话？", text(f.view.title));
     f.frame();
     f.cx.needs_redraw = false;
     try f.view.update(.{ .ticket = ticket, .running = false });

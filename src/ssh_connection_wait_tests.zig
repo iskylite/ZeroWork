@@ -68,7 +68,12 @@ fn silentHandshake(pair: Pair, cancel: bool) !void {
     try expectClosed(pair.target);
     const failed = progress.snapshot().failure.?;
     try std.testing.expectEqual(ssh.ConnectionProgress.Phase.handshake, failed.phase);
+    try std.testing.expect(failed.timestamp_ms > 1_500_000_000_000);
+    try std.testing.expect(failed.elapsed_us != null and failed.elapsed_us.? > 0);
     try std.testing.expectEqual(@as(anyerror, if (cancel) error.Cancelled else error.ConnectionTimedOut), failed.failure.?);
+    try std.testing.expect(std.mem.indexOf(u8, failed.diagnostic.slice(), "handshake failed host=loopback-fixture:22") != null);
+    try std.testing.expect(std.mem.indexOf(u8, failed.diagnostic.slice(), "libssh2_code=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, failed.diagnostic.slice(), "received_bytes=") != null);
     // The real client banner was transmitted before cancel/timeout. Drain it
     // and prove the remote endpoint sees actual EOF, not a fabricated receipt.
     try std.testing.expectEqual(@as(c_int, 0), c.zw_ssh_socket_set_nonblocking(pair.peer));

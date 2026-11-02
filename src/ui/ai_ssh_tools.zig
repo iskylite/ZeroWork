@@ -59,7 +59,7 @@ const TraceResult = struct {
         defer if (!stdout_utf8) std.heap.c_allocator.free(stdout);
         const stderr = if (stderr_utf8) value.stderr else try encodeOutput(value.stderr);
         defer if (!stderr_utf8) std.heap.c_allocator.free(stderr);
-        try writer.write(.{ .session_id = value.session_id, .status = value.status, .transport = value.transport, .stdout = stdout, .stderr = stderr, .stdout_encoding = if (stdout_utf8) "utf-8" else "base64", .stderr_encoding = if (stderr_utf8) "utf-8" else "base64", .exit = value.exit, .signal = value.signal, .cwd = value.cwd, .elapsed_ms = value.elapsed_ms, .truncated = value.truncated, .local_released = value.local_released, .remote_effect_unknown = value.remote_effect_unknown, .error_code = value.error_code });
+        try writer.write(.{ .session_id = value.session_id, .status = value.status, .transport = value.transport, .stdout = stdout, .stderr = stderr, .stdout_encoding = if (stdout_utf8) "utf-8" else "base64", .stderr_encoding = if (stderr_utf8) "utf-8" else "base64", .exit = value.exit, .signal = value.signal, .cwd = value.cwd, .elapsed_ms = value.elapsed_ms, .truncated = value.truncated, .output_ref = value.output_ref, .next_output_cursor = value.next_output_cursor, .retained_truncated = value.retained_truncated, .local_released = value.local_released, .remote_effect_unknown = value.remote_effect_unknown, .error_code = value.error_code });
     }
     fn encodeOutput(bytes: []const u8) error{WriteFailed}![]const u8 {
         const encoder = std.base64.standard.Encoder;
@@ -268,8 +268,14 @@ pub const Bridge = struct {
         if (state.phase == .connecting) return error.WorkerBusy;
         if (state.phase != .ready) return error.RemoteFilesUnavailable;
     }
-    fn finish(current: *Exchange, result: loop.TargetResult) void {
+    fn finish(current: *Exchange, original: loop.TargetResult) void {
         if (current.ready.load(.acquire)) return;
+        var reference: [32]u8 = undefined;
+        const result = loop.retainedPage(current.invocation, original, &reference) catch |err| {
+            current.failure = err;
+            current.ready.store(true, .release);
+            return;
+        };
         if (result.local_released) if (current.operation_key) |key| if (current.operation_journal) |journal| {
             if (result.status == .succeeded) {
                 _ = journal.completeReleased(key, "SSH tool finished") catch {};
@@ -334,9 +340,11 @@ pub const Bridge = struct {
         // turn a retained resource into a released one.
         _ = active.journal.completeReleased(active.key, "SSH tool finished") catch {};
         if (self.exchange) |current| {
-            const text_output = std.unicode.utf8ValidateSlice(value.stdout) and std.unicode.utf8ValidateSlice(value.stderr);
+            const stdout = @import("../ai/batch_output.zig").capturedText(value.stdout, value.truncated);
+            const stderr = @import("../ai/batch_output.zig").capturedText(value.stderr, value.truncated);
+            const text_output = std.unicode.utf8ValidateSlice(stdout) and std.unicode.utf8ValidateSlice(stderr);
             const status: loop.Status = if (active.stale) .rejected else if (value.status == .cancelled) .cancelled else if (value.status == .timed_out) .timed_out else if (!text_output) .failed else if (value.status == .completed and value.exit_code != null and value.exit_code.? == 0) .succeeded else .failed;
-            finish(current, .{ .session_id = @backingInt(capture.owner.session_id), .status = status, .transport = .ssh, .stdout = if (text_output and !active.stale) value.stdout else "", .stderr = if (text_output and !active.stale) value.stderr else "", .exit = value.exit_code, .cwd = value.cwd, .elapsed_ms = value.elapsed_ms, .truncated = value.truncated, .remote_effect_unknown = active.stale or remoteEffectUnknown(value), .error_code = if (active.stale) "StaleBinding" else if (!text_output) "NonTextToolOutput" else value.failure });
+            finish(current, .{ .session_id = @backingInt(capture.owner.session_id), .status = status, .transport = .ssh, .stdout = if (text_output and !active.stale) stdout else "", .stderr = if (text_output and !active.stale) stderr else "", .exit = value.exit_code, .cwd = value.cwd, .elapsed_ms = value.elapsed_ms, .truncated = value.truncated, .remote_effect_unknown = active.stale or remoteEffectUnknown(value), .error_code = if (active.stale) "StaleBinding" else if (!text_output) "NonTextToolOutput" else value.failure });
         }
     }
     /// Controller only. The close hook must hold the original runtime until
@@ -390,7 +398,7 @@ pub const Bridge = struct {
                     current.operation_journal = &app.sessions.journal;
                 }
                 const key = current.operation_key.?;
-                const handle = facade.exec(current.invocation.call.command, .{ .key = key, .call_id = key.operation_id, .service_binding = capture.exec_binding, .cwd = capture.cwd, .timeout_ms = current.invocation.timeout_ms, .capture_cap = @min(current.invocation.call.max_bytes, current.invocation.capture_bytes) }) catch |err| {
+                const handle = facade.exec(current.invocation.call.command, .{ .key = key, .call_id = key.operation_id, .service_binding = capture.exec_binding, .cwd = capture.cwd, .timeout_ms = current.invocation.timeout_ms, .capture_cap = if (current.invocation.output_context != null) @import("../ai/batch_output.zig").capture_limit else @min(current.invocation.call.max_bytes, current.invocation.capture_bytes) }) catch |err| {
                     if (err == error.WorkerBusy) return;
                     _ = app.sessions.journal.failReleased(key, .{ .domain = .host, .code = @errorName(err), .cleanup = .released, .safe_message = "SSH tool did not start" }) catch {};
                     return failure(current, .failed, err);
@@ -418,7 +426,7 @@ pub const Bridge = struct {
                 }
                 if (state.phase != .ready) return failure(current, .failed, error.RemoteFilesUnavailable);
                 const context: file_capture.Context = .{ .scope = current.invocation.scope, .source = .{ .session = capture.owner, .revision = current.sequence, .bindings = bindings } };
-                self.file_reader = file_capture.Reader.start(self.allocator, host, context, current.invocation.call.path, if (current.invocation.call.tool == .list_remote_files) .{ .list = .{} } else .{ .read = .{ .max_bytes = current.invocation.call.max_bytes } }) catch |err| return failure(current, .failed, err);
+                self.file_reader = file_capture.Reader.start(self.allocator, host, context, current.invocation.call.path, if (current.invocation.call.tool == .list_remote_files) .{ .list = .{ .paged = true, .offset = current.invocation.call.offset, .expected_version = current.invocation.call.expected_version, .max_entries = current.invocation.call.max_entries } } else .{ .read = .{ .max_bytes = current.invocation.call.max_bytes, .offset = current.invocation.call.offset, .expected_version = current.invocation.call.expected_version } }) catch |err| return failure(current, .failed, err);
 
                 self.file_timed_out = false;
             },

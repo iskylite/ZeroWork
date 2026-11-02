@@ -61,3 +61,6 @@ for(const [id,palette] of Object.entries(design)){
 }
 console.log(`PASS: ${helperChecks} auxiliary text/material cases at 4.5:1; minimum ${minHelper.toFixed(3)}:1 with three distinct ink levels`);
 console.log(`PASS: ${insetChecks} HTML inset strengths match native opaque fill derivation`);
+
+// State palettes are generated from the same bases; drift is a theme failure.
+const {publish}=await import('../scripts/sync_theme_states.mjs');publish(true);

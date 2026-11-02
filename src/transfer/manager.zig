@@ -308,6 +308,7 @@ pub const Manager = struct {
 
     /// Returns the existing non-terminal job for an identical spec.
     pub fn enqueue(self: *Manager, spec: JobSpec) !JobId {
+        try @import("../update/admission.zig").require();
         if (spec.sources.len == 0) return error.NoSources;
         for (spec.sources) |source| if (source.len == 0) return error.EmptySource;
         if (spec.direction == .upload and spec.remote_dir.len == 0) return error.MissingRemoteDirectory;
@@ -417,6 +418,7 @@ pub const Manager = struct {
     }
 
     pub fn resumeJob(self: *Manager, id: JobId) !void {
+        try @import("../update/admission.zig").require();
         const job = self.find(id) orelse return error.UnknownJob;
         defer job.record();
         if (job.job_cleanup == .unknown) return error.CleanupUnknown;
@@ -435,6 +437,7 @@ pub const Manager = struct {
 
     /// Requeues a terminal failed job while preserving its cumulative progress.
     pub fn retry(self: *Manager, id: JobId) !void {
+        try @import("../update/admission.zig").require();
         const job = self.find(id) orelse return error.UnknownJob;
         defer job.record();
         try requireReleased(job);

@@ -20,7 +20,8 @@ const Work = struct {
     entries: std.ArrayList(readonly.Entry) = .empty,
     page_index: u32 = 0,
     count: usize = 0,
-    phase: enum { init, resolve, stat, open, fstat, read, after, path_after, directory, close, done } = .init,
+    scan: readonly.DirectoryScan = .{},
+    phase: enum { init, resolve, stat, open, fstat, read, after, path_after, directory, directory_after, close, done } = .init,
     cancel: bool = false,
     retry: bool = false,
     deadline: i128,
@@ -222,7 +223,7 @@ pub const Mailbox = struct {
                 if (w.action == .realpath) {
                     w.result.value.body = .{ .realpath = w.resolved.? };
                     w.phase = .done;
-                } else w.phase = if (w.action == .read_text) .stat else .open;
+                } else w.phase = if (w.action == .read_text or (w.action == .list and w.action.list.paged)) .stat else .open;
             },
             .stat => {
                 const attrs = try session.sftpStat(w.resolved orelse w.path, false);
@@ -230,7 +231,7 @@ pub const Mailbox = struct {
                     w.result.value.body = .{ .stat = attrs };
                     w.phase = .done;
                 } else {
-                    if (attrs.kind != .file) return error.NotRegularFile;
+                    if (w.action == .read_text and attrs.kind != .file) return error.NotRegularFile;
                     w.before = attrs;
                     w.phase = .open;
                 }
@@ -242,6 +243,9 @@ pub const Mailbox = struct {
             .fstat => {
                 w.opened = try w.handle.?.stat();
                 if (readonly.changed(w.before, w.opened)) return error.SourceChanged;
+                try readonly.validateContinuation(w.action.read_text.offset, w.action.read_text.expected_version, readonly.sourceVersion(self.endpoint, w.resolved.?, w.before));
+                if (w.action.read_text.offset > (w.before.size orelse std.math.maxInt(u64))) return error.SourceChanged;
+                try w.handle.?.seek(w.action.read_text.offset);
                 w.bytes = try a.alloc(u8, w.action.read_text.max_bytes + 1);
                 w.phase = .read;
             },
@@ -257,7 +261,7 @@ pub const Mailbox = struct {
             .path_after => {
                 if (readonly.changed(w.before, try session.sftpStat(w.resolved.?, false))) return error.SourceChanged;
                 const limit = w.action.read_text.max_bytes;
-                w.result.value.body = .{ .text = .{ .text = try readonly.validateText(w.bytes[0..w.used], limit, w.used > limit), .original_size = w.before.size, .read_bytes = w.used, .captured_at_ms = clock.milliseconds(undefined), .truncated = w.used > limit } };
+                w.result.value.body = .{ .text = .{ .text = try readonly.validateText(w.bytes[0..w.used], limit, w.used > limit), .original_size = w.before.size, .offset = w.action.read_text.offset, .source_version = readonly.sourceVersion(self.endpoint, w.resolved.?, w.before), .read_bytes = w.used, .captured_at_ms = clock.milliseconds(undefined), .truncated = w.used > limit } };
                 w.phase = .close;
             },
             .directory => {
@@ -265,16 +269,31 @@ pub const Mailbox = struct {
                 if (next) |entry| {
                     if (std.mem.eql(u8, entry.name, ".") or std.mem.eql(u8, entry.name, "..")) return;
                     if (entry.name.len == 0 or std.mem.indexOfScalar(u8, entry.name, 0) != null or std.mem.indexOfScalar(u8, entry.name, '/') != null) return error.Protocol;
-                    if (w.count == w.action.list.max_entries) return error.EntryLimit;
-                    w.count += 1;
+                    if (w.action.list.paged) {
+                        if (!try w.scan.observe(entry.name, entry.attributes, w.action.list.offset, w.action.list.max_entries)) return;
+                    } else {
+                        if (w.count == w.action.list.max_entries) return error.EntryLimit;
+                        w.count += 1;
+                    }
                     const name = try a.dupe(u8, entry.name);
                     try w.entries.append(a, .{ .raw_name = name, .display_name = if (std.unicode.utf8ValidateSlice(name)) name else "[invalid UTF-8 name]", .absolute_path = try readonly.joinPath(a, w.resolved.?, name), .attributes = entry.attributes });
                     // bounded pages are published without moving the work arena
-                    if (w.entries.items.len == w.action.list.page_entries) try self.page(w);
+                    if (!w.action.list.paged and w.entries.items.len == w.action.list.page_entries) try self.page(w);
+                } else if (w.action.list.paged) {
+                    w.phase = .directory_after;
                 } else {
                     w.result.value.body = .{ .page = .{ .index = w.page_index, .entries = w.entries.items } };
                     w.phase = .close;
                 }
+            },
+            .directory_after => {
+                if (readonly.changed(w.before, try session.sftpStat(w.resolved.?, false))) return error.SourceChanged;
+                const version = w.scan.version(self.endpoint, w.resolved.?, w.before);
+                const options = w.action.list;
+                try readonly.validateContinuation(options.offset, options.expected_version, version);
+                if (options.offset > w.scan.count) return error.SourceChanged;
+                w.result.value.body = .{ .page = .{ .index = 0, .entries = w.entries.items, .offset = options.offset, .source_version = version, .next_offset = if (options.offset + w.entries.items.len < w.scan.count) options.offset + w.entries.items.len else null } };
+                w.phase = .close;
             },
             .close => {
                 if (w.handle) |*handle| {

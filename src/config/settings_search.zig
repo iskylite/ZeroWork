@@ -10,6 +10,7 @@ pub const page_terms = [_][]const u8{
     "协议 插件 Local zsh SSH SFTP 已内置 权限 版本",
     "通知 事件提醒 传输完成 断线 重连 AI 助手 回合 结束 终端 Bell 声音 transfer_done reconnect ai_ready bell 注意标记 勿扰 非活跃 标签 圆点 时段 tab_dot quiet_hours",
     "数据 日志 位置 凭据 本地 配置目录 明文 600 config_dir 会话记录 缓冲 上限 快照 间隔 保留 天数 导出格式 ring_mb checkpoint_sec retention_days export_format 导出 清理 清空 删除 会话 诊断 export clear",
+    "关于 更新 版本 自动 检查 偏好 正式版 通道 GitHub release update version auto_check channel",
 };
 
 pub fn matches(query: []const u8, text: []const u8) bool {
@@ -25,6 +26,6 @@ pub fn pageMatches(query: []const u8, page: usize) bool {
 pub fn firstPage(query: []const u8) ?usize {
     // Scalar settings take precedence over shortcut rows mentioning the same
     // action, e.g. “重连” opens the four SSH fields before its key binding.
-    for ([_]usize{ 0, 2, 3, 4, 5, 6, 7, 1 }) |index| if (matches(query, page_terms[index])) return index;
+    for ([_]usize{ 0, 2, 3, 4, 5, 6, 7, 8, 1 }) |index| if (matches(query, page_terms[index])) return index;
     return null;
 }

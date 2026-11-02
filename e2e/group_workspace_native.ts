@@ -79,7 +79,7 @@ try {
  const ids=(await panes()).map(n=>n.test_id);assert(ids.includes(firstPane));assert.equal(new Set(ids).size,2);assert.equal((await tabs()).length,2);check("two actual sessions plus one group tab",{sessionTabs:[firstTab,secondTab],panes:ids});
  const firstId=firstPane.split(".").at(-1)!, secondId=ids.find(id=>id!==firstPane)!.split(".").at(-1)!;
  let pp=await panes();assert(Math.abs(pp[0].rect.y-pp[1].rect.y)<1);assert(Math.abs(pp[1].rect.x-pp[0].rect.x-pp[0].rect.w-4)<=1);await capture("02-side-by-side");
- await click(`groups.menu.${firstId}`);await menuItem("切换上下布局");await sleep(200);pp=await panes();assert(Math.abs(pp[0].rect.x-pp[1].rect.x)<1);assert(Math.abs(pp[1].rect.y-pp[0].rect.y-pp[0].rect.h-4)<=1);await capture("03-stacked");
+ await click(`groups.menu.${firstId}`);await menuItem("全部改为上下排列");await sleep(200);pp=await panes();assert(Math.abs(pp[0].rect.x-pp[1].rect.x)<1);assert(Math.abs(pp[1].rect.y-pp[0].rect.y-pp[0].rect.h-4)<=1);await capture("03-stacked");
  for(const [sessionId,marker] of [[firstId,"first"],[secondId,"second"]]) {
    const pane=await visible(`groups.pane.${sessionId}`);const terminal=flat(pane).find(n=>n.test_id==="terminal.input"&&shown(n));await clickNode(terminal);
    const path=join(isolated,`${marker}.txt`);await type(`printf '${marker}' > ${JSON.stringify(path)}`);await press("enter");await waitFor(async()=>{try{return await readFile(path,"utf8")===marker||null}catch{return null}},10000);

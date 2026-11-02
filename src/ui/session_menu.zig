@@ -11,11 +11,12 @@ pub const Callbacks = struct {
     quick: *const fn (*anyopaque) void,
     local: ?*const fn (*anyopaque) void = null,
     new_sftp: ?*const fn (*anyopaque) void = null,
+    new_kvm: ?*const fn (*anyopaque) void = null,
     saved: ?*const fn (*anyopaque, identity.AssetOwner) void = null,
 };
-const Action = enum(usize) { local, new_profile, new_sftp };
-const labels = [_][]const u8{ "本地终端", "新建主机", "新建 SFTP" };
-const ids = [_][]const u8{ "session.menu.local", "session.menu.new_profile", "session.menu.new_sftp" };
+const Action = enum(usize) { local, new_profile, new_sftp, new_kvm };
+const labels = [_][]const u8{ "本地终端", "新建主机", "新建 SFTP", "新建 KVM" };
+const ids = [_][]const u8{ "session.menu.local", "session.menu.new_profile", "session.menu.new_sftp", "session.menu.new_kvm" };
 
 pub const View = struct {
     cx: *ui.Cx,
@@ -29,10 +30,10 @@ pub const View = struct {
     selected: Action = .local,
     chosen: bool = false,
     paint_revision: u32 = 0,
-    buttons: [3]*ui.Node = undefined,
-    highlights: [3]*ui.Node = undefined,
-    labels: [3]*ui.Node = undefined,
-    icons: [3]*ui.Node = undefined,
+    buttons: [labels.len]*ui.Node = undefined,
+    highlights: [labels.len]*ui.Node = undefined,
+    labels: [labels.len]*ui.Node = undefined,
+    icons: [labels.len]*ui.Node = undefined,
     separator: *ui.Node = undefined,
     saved_area: *ui.Node = undefined,
     saved_content: *ui.Node = undefined,
@@ -59,7 +60,7 @@ pub const View = struct {
         const self = try cx.allocator.create(View);
         var adopted = false;
         errdefer if (!adopted) cx.allocator.destroy(self);
-        self.* = .{ .cx = cx, .scope = scope, .callbacks = callbacks, .open = try scope.createSignal(bool, false), .hover_style = try scope.createSignal(?ui.BoxStyle, .{ .background = S.theme.current().hover }) };
+        self.* = .{ .cx = cx, .scope = scope, .callbacks = callbacks, .open = try scope.createSignal(bool, false), .hover_style = try scope.createSignal(?ui.BoxStyle, .{ .background = S.theme.states().hover }) };
         try scope.onCleanup(View, self, cleanup);
         adopted = true;
         const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .anchor = .{ .virtual = .{ .ctx = self, .getRect = anchorRect } }, .position = .bottom_start, .width = S.width, .max_width = S.width, .offset = .{ .static = 0 }, .viewport_padding = 8, .constrain_width_to_viewport = true, .shift_main_axis = true, .size_policy = .fit_content, .close_on_escape = true, .on_open_change = cx.on(View, self, openChanged) }).mount(scope, cx);
@@ -71,7 +72,7 @@ pub const View = struct {
         self.chrome.behavior.interaction.a11y = .{ .role = .menu, .label = "新建会话" };
         self.chrome.behavior.events.capture_context = self;
         self.chrome.behavior.events.on_event_capture = onEvent;
-        const icons = [_]ui.SvgAsset{ ui.icons.terminal, ui.icons.server, ui.icons.folder };
+        const icons = [_]ui.SvgAsset{ ui.icons.terminal, ui.icons.server, ui.icons.folder, ui.icons.monitor };
         for (labels, 0..) |label, index| {
             if (index == 1) {
                 const area = try ui.widgets.ScrollArea(.{}).mount(self.scope, cx);
@@ -167,22 +168,23 @@ pub const View = struct {
         switch (key) {
             .escape => self.hide(),
             .up, .down => {
-                const total = self.saved_rows.items.len + 4;
-                const current = if (self.selected_saved) |i| i + 1 else if (self.selected_more_trigger) total - 3 else switch (self.selected) {
+                const total = self.saved_rows.items.len + 5;
+                const current = if (self.selected_saved) |i| i + 1 else if (self.selected_more_trigger) total - 4 else switch (self.selected) {
                     .local => @as(usize, 0),
-                    .new_profile => total - 2,
-                    .new_sftp => total - 1,
+                    .new_profile => total - 3,
+                    .new_sftp => total - 2,
+                    .new_kvm => total - 1,
                 };
                 var next = if (key == .down) (current + 1) % total else (current + total - 1) % total;
                 if (next == 0 and self.callbacks.local == null) next = if (key == .down) 1 else total - 1;
                 self.selected_saved = if (next > 0 and next <= self.saved_rows.items.len) next - 1 else null;
-                self.selected_more_trigger = next == total - 3;
+                self.selected_more_trigger = next == total - 4;
                 if (self.selected_saved) |i| {
                     self.cx.setFocus(self.saved_rows.items[i].button);
                 } else if (self.selected_more_trigger) {
                     self.cx.setFocus(self.more_button);
                 } else {
-                    self.selected = if (next == 0) .local else if (next == total - 2) .new_profile else .new_sftp;
+                    self.selected = if (next == 0) .local else if (next == total - 3) .new_profile else if (next == total - 2) .new_sftp else .new_kvm;
                     self.cx.setFocus(self.buttons[@backingInt(self.selected)]);
                 }
                 self.paintSelection();
@@ -200,6 +202,7 @@ pub const View = struct {
             .local => self.callbacks.local.?(self.callbacks.context),
             .new_profile => self.callbacks.new_profile(self.callbacks.context),
             .new_sftp => if (self.callbacks.new_sftp) |create| create(self.callbacks.context),
+            .new_kvm => if (self.callbacks.new_kvm) |create| create(self.callbacks.context),
         }
     }
     fn paintSelection(self: *View) void {
@@ -346,7 +349,7 @@ pub const View = struct {
     fn retheme(self: *View) void {
         const colors = S.theme.current();
         self.chrome.setStyleInline(self.cx.allocator, S.panel());
-        self.hover_style.set(.{ .background = colors.hover });
+        self.hover_style.set(.{ .background = S.theme.states().hover });
         self.separator.setTextColor(colors.fg_2);
         self.more_popup.chrome.setStyleInline(self.cx.allocator, S.panel());
         for (self.labels, self.icons) |label, icon| {
@@ -435,6 +438,11 @@ const Probe = struct {
     local: usize = 0,
     quick: usize = 0,
     saved: usize = 0,
+    kvm: usize = 0,
+    fn onKvm(raw: *anyopaque) void {
+        const self: *Probe = @ptrCast(@alignCast(raw));
+        self.kvm += 1;
+    }
     fn onLocal(raw: *anyopaque) void {
         const self: *Probe = @ptrCast(@alignCast(raw));
         self.local += 1;
@@ -459,9 +467,9 @@ test "new session menu maps each creation command once and restores focus" {
     anchor.behavior.interaction.focusable = true;
     try cx.root.?.appendChild(cx.allocator, anchor);
     var probe: Probe = .{};
-    const view = try View.mount(cx, scope, .{ .context = &probe, .local = Probe.onLocal, .quick = Probe.onQuick, .new_profile = Probe.onSaved });
+    const view = try View.mount(cx, scope, .{ .context = &probe, .local = Probe.onLocal, .quick = Probe.onQuick, .new_profile = Probe.onSaved, .new_kvm = Probe.onKvm });
     try cx.root.?.appendChild(cx.allocator, view.root);
-    for ([_]Action{ .local, .new_profile, .new_sftp }) |action| {
+    for ([_]Action{ .local, .new_profile, .new_sftp, .new_kvm }) |action| {
         try view.show(anchor);
         view.selected = action;
         _ = view.handleKey(.@"return");
@@ -471,7 +479,16 @@ test "new session menu maps each creation command once and restores focus" {
     }
     try std.testing.expectEqual(@as(usize, 1), probe.local);
     try std.testing.expectEqual(@as(usize, 0), probe.quick);
+    try std.testing.expectEqual(@as(usize, 1), probe.kvm);
     try std.testing.expectEqual(@as(usize, 1), probe.saved);
+    try view.show(anchor);
+    _ = view.handleKey(.up);
+    try std.testing.expectEqual(Action.new_kvm, view.selected);
+    _ = view.handleKey(.down);
+    try std.testing.expectEqual(Action.local, view.selected);
+    _ = view.handleKey(.up);
+    _ = view.handleKey(.@"return");
+    try std.testing.expectEqual(@as(usize, 2), probe.kvm);
     try view.show(anchor);
     _ = view.handleKey(.escape);
     try std.testing.expectEqual(@as(usize, 1), probe.local);
@@ -486,7 +503,7 @@ test "new session menu maps each creation command once and restores focus" {
     _ = cx.render();
     try std.testing.expectEqual(retained_id, view.chrome.id);
     try std.testing.expect(view.isOpen());
-    try std.testing.expectEqual(S.theme.current().hover, view.hover_style.get().?.background.?);
+    try std.testing.expectEqual(S.theme.states().hover, view.hover_style.get().?.background.?);
     try std.testing.expectEqual(@as(usize, 1), probe.local);
     for ([_]S.theme.Name{ .light, .dark }) |target| {
         S.theme.select(target);
@@ -495,7 +512,7 @@ test "new session menu maps each creation command once and restores focus" {
         cx.layout();
         _ = cx.render();
         for (view.labels) |label| try std.testing.expectEqual(S.theme.current().fg_1, label.getText().?.color);
-        try std.testing.expectEqual(S.theme.current().hover, view.hover_style.get().?.background.?);
+        try std.testing.expectEqual(S.theme.states().hover, view.hover_style.get().?.background.?);
     }
     view.hide();
 }
@@ -509,7 +526,7 @@ test "new session menu skips unavailable local command and clamps compact menu" 
     const anchor = try ui.box(cx, .{ .width = .{ .px = 24 }, .height = .{ .px = 24 } }, .{});
     try cx.root.?.appendChild(cx.allocator, anchor);
     var probe: Probe = .{};
-    const view = try View.mount(cx, scope, .{ .context = &probe, .quick = Probe.onQuick, .new_profile = Probe.onSaved });
+    const view = try View.mount(cx, scope, .{ .context = &probe, .quick = Probe.onQuick, .new_profile = Probe.onSaved, .new_kvm = Probe.onKvm });
     try cx.root.?.appendChild(cx.allocator, view.root);
     try view.show(anchor);
     _ = view.handleKey(.up);

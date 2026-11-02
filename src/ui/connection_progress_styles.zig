@@ -79,7 +79,7 @@ pub fn attemptText() ui.TextStyle {
     return result;
 }
 pub fn notice(failed: bool) ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 66, .padding = .{ .left = 14, .right = 14, .top = 12, .bottom = 12 }, .gap = 4, .direction = .column, .background = (if (failed) theme.current().danger else theme.current().accent).withAlpha(if (failed) 13 else 16), .border = .{ .radius = 9 }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_height = 66, .padding = .{ .left = 14, .right = 14, .top = 12, .bottom = 12 }, .gap = 4, .direction = .column, .background = if (failed) theme.states().feedback_danger else theme.states().feedback_info, .border = .{ .radius = 9 }, .flex_shrink = 0 };
 }
 pub fn logs() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 124 }, .background = theme.popupInset(), .border = .{ .radius = 9 }, .flex_shrink = 0, .overflow_hidden = true };
@@ -138,4 +138,11 @@ pub fn disclosure() ui.BoxStyle {
 }
 pub fn copyButton() ui.BoxStyle {
     return .{ .width = .{ .px = 96 }, .height = .{ .px = 28 }, .direction = .row, .align_items = .center, .justify = .center, .gap = 6, .padding = .ZERO, .background = ui.Color.TRANSPARENT, .border = .{ .radius = 6 }, .flex_shrink = 0 };
+}
+
+pub fn logRow() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .fit = .{} }, .min_width = 0, .flex_shrink = 0, .hit_behavior = .@"opaque" };
+}
+pub fn diagnosticPanel() ui.BoxStyle {
+    return .{ .height = .{ .fit = .{} }, .direction = .column, .padding = ui.Padding.all(12), .gap = 8, .background = theme.current().overlay, .border = .{ .radius = 9, .width = 1, .color = theme.current().fg_2.withAlpha(20) } };
 }

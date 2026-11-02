@@ -25,10 +25,11 @@ test "notification replacement and action revision cancel an old press before di
         cx.setViewport(860, 480);
         cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
         const scope = try ui.Scope.init(a, null, cx.owner);
-        var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+        var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
         defer {
             scope.dispose();
             notice.coordinator.deinit();
+            notice.activity.deinit();
             notice.windows.deinit(a);
         }
         var probe: Probe = .{};
@@ -81,10 +82,11 @@ test "notification presenter bounds longest admitted content and all actions at 
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    var notice_host: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    var notice_host: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
     defer {
         scope.dispose();
         notice_host.coordinator.deinit();
+        notice_host.activity.deinit();
     }
     try notice_host.coordinator.registerDefinition(.{ .id = "audit.feedback", .category = .operation_result, .default_channels = .{ .system = false, .attention = false } });
     const view = try Presenter.mount(cx, scope, &notice_host, @fromBackingInt(1));
@@ -164,10 +166,11 @@ test "notification sources appear once below event titles for every built-in kin
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
     defer {
         scope.dispose();
         notice.coordinator.deinit();
+        notice.activity.deinit();
     }
     defer notice.windows.deinit(a);
     var probe: u8 = 0;
@@ -247,9 +250,10 @@ test "notification host retains structured details and dispatches built-in actio
         }
     };
     var probe: Probe = .{};
-    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
     defer {
         notice.coordinator.deinit();
+        notice.activity.deinit();
     }
     defer notice.windows.deinit(a);
     defer notice.ai_origins.deinit(a);
@@ -309,10 +313,11 @@ test "notification countdown follows actual timer pauses and excludes persistent
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    var notice_host: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    var notice_host: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
     defer {
         scope.dispose();
         notice_host.coordinator.deinit();
+        notice_host.activity.deinit();
     }
     const view = try Presenter.mount(cx, scope, &notice_host, @fromBackingInt(1));
     const owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(1) } };
@@ -335,10 +340,11 @@ test "notification history compact rows retain full long detail behind an explic
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
     defer {
         scope.dispose();
         notice.coordinator.deinit();
+        notice.activity.deinit();
     }
     const trigger = try ui.widgets.Button(.{ .label = "通知" }).mount(scope, cx);
     try cx.root.?.appendChild(a, trigger);
@@ -395,10 +401,11 @@ test "notification history background blur follows material changes without repl
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
     defer {
         scope.dispose();
         notice.coordinator.deinit();
+        notice.activity.deinit();
     }
     const trigger = try ui.widgets.Button(.{ .label = "通知" }).mount(scope, cx);
     try cx.root.?.appendChild(a, trigger);
@@ -426,10 +433,11 @@ test "notification history expands only independent details without repeating ti
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
     defer {
         scope.dispose();
         notice.coordinator.deinit();
+        notice.activity.deinit();
     }
     const trigger = try ui.widgets.Button(.{ .label = "通知" }).mount(scope, cx);
     try cx.root.?.appendChild(a, trigger);
@@ -468,10 +476,11 @@ test "notification visible migration preserves expanded content and paused prese
     cx.setViewport(860, 480);
     cx.root = try ui.box(cx, .{ .width = .fill(), .height = .fill() }, .{});
     const scope = try ui.Scope.init(a, null, cx.owner);
-    var notice: host.Host = .{ .allocator = a, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
+    var notice: host.Host = .{ .allocator = a, .activity = .{ .allocator = a }, .driver = undefined, .coordinator = try host.notifications.Coordinator.init(a, .{ .quiet_hours = "00:00-00:00" }, .{}) };
     defer {
         scope.dispose();
         notice.coordinator.deinit();
+        notice.activity.deinit();
     }
     const view = try Presenter.mount(cx, scope, &notice, @fromBackingInt(1));
     const owner: host.ContentOwner = .{ .session = .{ .session_id = @fromBackingInt(1) } };

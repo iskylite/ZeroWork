@@ -84,6 +84,8 @@ pub const Presenter = struct {
         errdefer cx.destroyDetached(root);
         root.meta.ownership.meta.component_name = "HostNotificationPresenter";
         root.meta.ownership.meta.test_id = "notifications.presenter";
+        // Let cards bubble wheel input to the shared scroll viewport first.
+        @import("floating_input.zig").protect(cx, root);
         const scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
         scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 0 }, .flex_shrink = 0 });
         scroll.container.meta.ownership.meta.test_id = "notifications.viewport";
@@ -154,7 +156,7 @@ pub const Presenter = struct {
             card.behavior.events.on_hover = cx.on(Slot, slot, Slot.enter);
             card.behavior.events.on_leave = cx.on(Slot, slot, Slot.leave);
             inline for (&slot.actions, 0..) |*action, j| {
-                const button = try ui.widgets.Button(.{ .a11y_label = "通知操作", .variant = if (j == 0) .primary else .secondary, .size = .xs, .base_style = @import("notification_history_styles.zig").action(), .hover_style = .{ .background = theme.current().hover }, .on_click = cx.on(Action, action, Action.invoke) }).mount(scope, cx);
+                const button = try ui.widgets.Button(.{ .a11y_label = "通知操作", .variant = if (j == 0) .primary else .secondary, .size = .xs, .base_style = @import("notification_history_styles.zig").action(), .hover_style = .{ .background = theme.states().hover }, .on_click = cx.on(Action, action, Action.invoke) }).mount(scope, cx);
                 const label = try ui.textStyled(cx, S.actionLabel, "");
                 label.setTextColor(theme.current().accent_ink);
                 label.setStyleInline(cx.allocator, .{ .height = .{ .px = 18 }, .min_width = 0, .flex_shrink = 1 });

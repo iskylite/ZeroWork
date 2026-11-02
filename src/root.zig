@@ -32,6 +32,7 @@ test {
     _ = @import("ai/host_execution_driver.zig");
     _ = @import("ui/ai_host_queries.zig");
     _ = @import("ai/host_terminal_queries.zig");
+    _ = @import("ai/batch_output.zig");
     _ = @import("host_terminal_queries_tests.zig");
 }
 pub const plugin_content_context = @import("host/content_context.zig");
@@ -225,6 +226,7 @@ test {
     _ = @import("settings_quiet_hours_tests.zig");
     _ = @import("ai_request_budget_tests.zig");
     _ = @import("ai_local_text_attachment_tests.zig");
+    _ = @import("host/activity_badge.zig");
     _ = @import("notification_coordinator_tests.zig");
     _ = @import("notification_platform_tests.zig");
     _ = @import("socks_route_host_tests.zig");

@@ -11,6 +11,7 @@ var runtime: ?*zenit.MultiWindowApp = null;
 // App routes run serially on the main thread and CommandQueue copies the
 // returned slice immediately. Its result capacity is 256 KiB; the supplied
 // route scratch slice is only 1 KiB and cannot hold a multi-window snapshot.
+pub var update_route: ?*const fn ([]const u8, []u8) ?[]const u8 = null;
 var response_buffer: [256 * 1024]u8 = undefined;
 
 pub fn install(app_domain: *application.Domain, windows: *zenit.MultiWindowApp) void {
@@ -22,6 +23,8 @@ pub fn install(app_domain: *application.Domain, windows: *zenit.MultiWindowApp) 
 
 fn route(path: []const u8, body: []const u8, _: []u8) ?[]const u8 {
     if (!zenit.test_harness.enabled) return null;
+    if (std.mem.eql(u8, path, "/zerowork/update")) if (update_route) |handle| return handle(body, &response_buffer);
+    if (std.mem.eql(u8, path, "/zerowork/menu-bar")) return @import("../platform/menu_bar.zig").testSnapshot(&response_buffer);
     if (std.mem.eql(u8, path, "/zerowork/terminal")) return terminalRoute(body);
     if (!std.mem.eql(u8, path, "/zerowork/windows")) return null;
     const app_domain = domain orelse return "{\"ok\":false}";

@@ -30,8 +30,8 @@ pub const Source = struct {
 /// every delivery, so removing a group member cannot publish an old capture.
 pub const Context = struct { scope: scope.Scope, source: Source };
 pub const Action = union(enum) {
-    list: struct { max_entries: u32 = default_list_entries },
-    read: struct { max_bytes: u32 = default_read_bytes },
+    list: struct { max_entries: u32 = default_list_entries, paged: bool = false, offset: u64 = 0, expected_version: ?u64 = null },
+    read: struct { max_bytes: u32 = default_read_bytes, offset: u64 = 0, expected_version: ?u64 = null },
 };
 pub const Metadata = struct {
     owner: scope.Owner,
@@ -44,6 +44,9 @@ pub const Metadata = struct {
 };
 pub const Listing = struct {
     entries: []const remote.Entry,
+    offset: u64 = 0,
+    source_version: u64 = 0,
+    next_offset: ?u64 = null,
     page_count: u32,
     entry_limit: u32,
     /// True only after native READDIR observed at least one additional entry.
@@ -51,6 +54,8 @@ pub const Listing = struct {
 };
 pub const Text = struct {
     bytes: []const u8,
+    offset: u64 = 0,
+    source_version: u64 = 0,
     original_size: ?u64,
     /// Actual native read count, including the bounded look-ahead byte which
     /// proves truncation. returned_bytes can be smaller at a UTF-8 boundary.
@@ -137,8 +142,8 @@ pub const Reader = struct {
         const entries = try arena.allocator().alloc(remote.Entry, if (action == .list) action.list.max_entries else 0);
         const binding = if (action == .list) original.source.bindings.directory else original.source.bindings.file_read;
         const key = try host.begin(binding, .{ .path = owned_path, .directory_revision = original.source.revision, .action = switch (action) {
-            .list => |options| .{ .list = .{ .max_entries = options.max_entries, .page_entries = pageSize(options.max_entries) } },
-            .read => |options| .{ .read_text = .{ .max_bytes = options.max_bytes } },
+            .list => |options| .{ .list = .{ .max_entries = options.max_entries, .page_entries = pageSize(options.max_entries), .paged = options.paged, .offset = options.offset, .expected_version = options.expected_version } },
+            .read => |options| .{ .read_text = .{ .max_bytes = options.max_bytes, .offset = options.offset, .expected_version = options.expected_version } },
         } });
         snapshot.* = .{ .allocator = allocator, .arena = arena, .value = .{
             .metadata = .{ .owner = original.scope.owner, .source = original.source.session, .source_revision = original.source.revision, .operation = key, .requested_path = owned_path },
@@ -262,14 +267,19 @@ pub const Reader = struct {
                     self.entry_count += 1;
                 }
                 self.page_count += 1;
-                if (result.final) try self.finishList(false);
+                if (result.final) {
+                    try self.finishList(page.next_offset != null);
+                    snapshot.value.body.listing.offset = page.offset;
+                    snapshot.value.body.listing.source_version = page.source_version;
+                    snapshot.value.body.listing.next_offset = page.next_offset;
+                }
             },
             .text => |text| {
                 if (self.action != .read or !result.final or snapshot.value.metadata.actual_path == null or
                     text.text.len > self.action.read.max_bytes or text.read_bytes > self.action.read.max_bytes + 1 or
                     text.text.len > text.read_bytes or !std.unicode.utf8ValidateSlice(text.text) or
                     std.mem.indexOfScalar(u8, text.text, 0) != null or text.truncated != (text.read_bytes > self.action.read.max_bytes)) return error.InvalidRemoteText;
-                snapshot.value.body = .{ .text = .{ .bytes = try allocator.dupe(u8, text.text), .original_size = text.original_size, .read_bytes = text.read_bytes, .returned_bytes = text.text.len, .read_limit = self.action.read.max_bytes, .truncated = text.truncated } };
+                snapshot.value.body = .{ .text = .{ .bytes = try allocator.dupe(u8, text.text), .offset = text.offset, .source_version = text.source_version, .original_size = text.original_size, .read_bytes = text.read_bytes, .returned_bytes = text.text.len, .read_limit = self.action.read.max_bytes, .truncated = text.truncated } };
                 snapshot.value.metadata.captured_at_ms = text.captured_at_ms;
             },
             .failure => |failure| {

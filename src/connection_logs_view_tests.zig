@@ -69,8 +69,14 @@ test "connection logs view copies input records and uses the existing well dimen
     try f.init();
     defer f.deinit();
     var records = [_]Logs.LogRecord{ record(key, 0), record(key, 1), record(key, 2) };
+    records[0].entry.timestamp_ms = 1793600000000;
+    records[0].entry.elapsed_us = 50000;
     var source = try snapshot(&records);
     try f.show(source);
+    try std.testing.expect(contains(f.view.logs_text, " - 50.000 ms\n"));
+    try std.testing.expect(!contains(f.view.logs_text, "+0."));
+    f.view.copyLogs();
+    try std.testing.expect(std.mem.indexOf(u8, f.copied.?, " - 50.000 ms\n") != null);
     records[0].entry.host[0] = 'x';
     source.endpoint.name.bytes[0] = 'x';
     try std.testing.expectEqualStrings("db.example", f.view.source.?.records[0].entry.hostSlice());

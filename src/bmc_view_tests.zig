@@ -384,8 +384,8 @@ test "BMC view native renderer uses real sink, captures on image, releases on me
     try std.testing.expectEqual(.online, renderer.vtable.connection_status.?(renderer.context).state);
     try std.testing.expect(!view.captured);
     const rect = view.viewport.?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 44), view.toolbar.?.globalRect().h, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 74), view.tool_nodes[0].?.globalRect().w, 0.01);
+    try std.testing.expectApproxEqAbs(@import("plugins/bmc_ikvm/styles.zig").toolbar_height, view.toolbar.?.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 58), view.tool_nodes[0].?.globalRect().w, 0.01);
     const event: ui.events.Event = .{ .mouse_down = .{ .x = rect.x + rect.w / 2, .y = rect.y + rect.h / 2 } };
     _ = view.viewport.?.behavior.events.on_event_capture.?(event, view);
     try std.testing.expect(view.captured);
@@ -650,8 +650,34 @@ test "BMC view progress compact card scrolls independently and log close never c
     const view: *views.View = @ptrCast(@alignCast(renderer.context));
     renderFrames(cx, 8);
     try std.testing.expectEqualStrings("验证公开脚本摘要", view.waiting_title.?.getText().?.content);
-    try std.testing.expectEqualStrings("3.4", view.progress_stage_time.?.getText().?.content);
-    try std.testing.expectEqualStrings("12.3", view.progress_total_time.?.getText().?.content);
+    try std.testing.expectEqualStrings("3.4 秒", view.progress_durations[2].?.getText().?.content);
+    try std.testing.expectEqualStrings("12.3 秒", view.progress_total_time.?.getText().?.content);
+    try std.testing.expectEqualStrings("连接中", view.progress_status.?.getText().?.content);
+    const title_bounds = view.waiting_title.?.globalRect();
+    const route_bounds = view.progress_route.?.globalRect();
+    const timing_bounds = view.progress_timing.?.globalRect();
+    try std.testing.expectApproxEqAbs(@as(f32, 12), route_bounds.y - title_bounds.y - title_bounds.h, 0.1);
+    try std.testing.expectEqual(@as(f32, 11), view.progress_total_time.?.getText().?.font_size);
+    for (view.progress_timing.?.children.items) |node| try std.testing.expectEqual(@as(f32, 11), node.getText().?.font_size);
+    try std.testing.expectApproxEqAbs(route_bounds.x + route_bounds.w - 30, timing_bounds.x + timing_bounds.w, 0.1);
+    const step_time = view.progress_durations[2].?.globalRect();
+    const total_time = view.progress_total_time.?.globalRect();
+    const step_status = view.progress_states[2].?.globalRect();
+    const overall_status = view.progress_status.?.globalRect();
+    try std.testing.expectApproxEqAbs(step_time.x + step_time.w, total_time.x + total_time.w, 0.1);
+    try std.testing.expectApproxEqAbs(step_status.x + step_status.w, overall_status.x + overall_status.w, 0.1);
+    try std.testing.expectEqualStrings("—", view.progress_durations[5].?.getText().?.content);
+    for (view.progress_rows, view.progress_names, view.progress_durations, view.progress_states) |row, name, duration, status| {
+        const backdrop = row.?.globalRect();
+        try std.testing.expect(backdrop.h >= 34);
+        for ([_]*ui.Node{ name.?, duration.?, status.? }) |node| {
+            const bounds = node.globalRect();
+            try std.testing.expect(bounds.x >= backdrop.x + 9.9);
+            try std.testing.expect(bounds.x + bounds.w <= backdrop.x + backdrop.w - 9.9);
+            try std.testing.expect(bounds.y >= backdrop.y + 7.9);
+            try std.testing.expect(bounds.y + bounds.h <= backdrop.y + backdrop.h - 7.9);
+        }
+    }
     try std.testing.expectEqualStrings("建立独立 SSH 路由 · 2 跳", view.progress_names[0].?.getText().?.content);
     try std.testing.expectEqualStrings("等待", view.progress_states[4].?.getText().?.content);
     try std.testing.expect(std.mem.indexOf(u8, view.progress_route_text.?.getText().?.content, "offline.invalid") != null);
@@ -659,7 +685,7 @@ test "BMC view progress compact card scrolls independently and log close never c
     const card = view.waiting.?.globalRect();
     const body = view.waiting_body.?;
     const actions = view.waiting_actions.?.globalRect();
-    try std.testing.expectApproxEqAbs(@as(f32, 346), video.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 390) - @import("plugins/bmc_ikvm/styles.zig").toolbar_height, video.h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 520), card.w, 0.01);
     try std.testing.expect(card.h <= video.h - 23.9);
     try std.testing.expect(card.y >= video.y + 11.9 and card.y + card.h <= video.y + video.h - 11.9);
@@ -751,11 +777,22 @@ test "BMC view progress compact card scrolls independently and log close never c
     try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 3, .title = "Synthetic", .status = "" });
     renderFrames(cx, 3);
     try std.testing.expectEqualStrings("连接已取消", view.waiting_title.?.getText().?.content);
+    try std.testing.expectEqualStrings("已取消", view.progress_status.?.getText().?.content);
     try std.testing.expectEqual(.none, view.cancel_node.?.style.display);
     try std.testing.expectEqual(.flex, view.retry_node.?.style.display);
     try std.testing.expect(!view.retry_disabled.peek());
     view.retry_node.?.behavior.events.on_click.?.invoke();
     try std.testing.expectEqual(@as(usize, 1), fixture.retry_requests);
+    // Production retry mounts a fresh renderer; the local service fixture
+    // keeps this instance, so clear its prior cancellation for the new attempt.
+    view.cancel_pending = false;
+    fixture.progress.stage = .streaming;
+    fixture.progress.revision += 1;
+    fixture.route = .connected;
+    fixture.video = .streaming;
+    fixture.cleanup = .not_started;
+    try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = 4, .title = "Synthetic", .status = "" });
+    try std.testing.expectEqualStrings("连接成功", view.progress_status.?.getText().?.content);
 }
 
 test "BMC view progress slots remain fixed across phase timing legacy and long diagnostics" {
@@ -784,7 +821,7 @@ test "BMC view progress slots remain fixed across phase timing legacy and long d
         try std.testing.expectEqual(@as(f32, 0), surface.style.border.width);
         try std.testing.expect(surface.style.glass_params().?.backdrop_blur >= 24);
         try std.testing.expectEqualDeep(view.waiting.?.globalRect(), surface.globalRect());
-        const nodes = [_]*ui.Node{ view.waiting.?, view.waiting_header.?, view.waiting_title.?, view.progress_timing.?, view.progress_stage_time.?, view.progress_total_time.?, view.progress_notice.?, view.waiting_body.?.container, view.progress_route.?, view.waiting_actions.?, findById(view.waiting.?, "bmc.connection_log").? };
+        const nodes = [_]*ui.Node{ view.waiting.?, view.waiting_header.?, view.waiting_title.?, view.progress_timing.?, view.progress_total_time.?, view.waiting_body.?.container, view.progress_route.?, view.waiting_actions.?, findById(view.waiting.?, "bmc.connection_log").? };
         var baseline: [nodes.len]ui.ComputedRect = undefined;
         for (nodes, &baseline) |node, *rect| rect.* = node.globalRect();
         const stages = [_]console.progress.Stage{ .public_script, .public_script, .public_script, .public_script, .waiting_certificate, .waiting_credentials, .redfish_discovery, .failed };
@@ -796,6 +833,7 @@ test "BMC view progress slots remain fixed across phase timing legacy and long d
                 fixture.progress.failure_code = "UnsupportedProfilePublicEvidenceUnavailable";
             }
             try renderer.vtable.update(renderer.context, .{ .owner = owner, .revision = index + 2, .title = "Synthetic", .status = "" });
+            try std.testing.expectEqualStrings(if (stage == .failed) "连接失败" else "连接中", view.progress_status.?.getText().?.content);
             for (0..3) |_| {
                 renderFrames(cx, 1);
                 for (nodes, baseline) |node, expected| {
@@ -818,8 +856,8 @@ test "BMC view progress slots remain fixed across phase timing legacy and long d
                 }
             }
         }
-        try std.testing.expectApproxEqAbs(@as(f32, 64), view.progress_stage_time.?.globalRect().w, 0.01);
-        try std.testing.expect(view.progress_stage_time.?.getText().?.use_monospace_font);
+        try std.testing.expectApproxEqAbs(@as(f32, 76), view.progress_durations[2].?.globalRect().w, 0.01);
+        try std.testing.expect(view.progress_durations[2].?.getText().?.use_monospace_font);
         const title_ink = view.waiting_title.?.getText().?.color;
         _ = theme.setMaterialParameters(100, 40);
         // Publish a new token identity, as the application theme publication
@@ -1096,7 +1134,7 @@ const InputWire = struct {
     }
 };
 
-test "BMC view workspace and rounded video fill the shared slot without padding across resize" {
+test "BMC view workspace owns outer corners and aligns host identity across resize" {
     var service = remote.Service.init(owner);
     try service.setConnected(true, 1);
     try service.setControl(true, 2);
@@ -1111,22 +1149,26 @@ test "BMC view workspace and rounded video fill the shared slot without padding 
         const viewport = view.viewport.?.globalRect();
         const image = view.image_node.?.globalRect();
         try std.testing.expectApproxEqAbs(@as(f32, 0), card.x, 0.01);
-        try std.testing.expectApproxEqAbs(@as(f32, 44), card.y, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 48), card.y, 0.01);
         try std.testing.expectEqual(card, viewport);
         try std.testing.expectApproxEqAbs(size[0], viewport.w, 0.01);
-        try std.testing.expectApproxEqAbs(size[1] - 44, viewport.h, 0.01);
+        try std.testing.expectApproxEqAbs(size[1] - 48, viewport.h, 0.01);
         try std.testing.expectEqual(ui.Padding.ZERO, card_node.style.padding);
         try std.testing.expectEqual(ui.Padding.ZERO, findById(view.root.?, "bmc.video_workspace").?.style.padding);
         try std.testing.expectEqual(@as(f32, 11), view.root.?.style.border.radius);
-        try std.testing.expectEqual(@as(f32, 11), view.viewport.?.style.border.radius);
-        try std.testing.expectEqual(@as(f32, 11), view.image_node.?.style.border.radius);
+        try std.testing.expectEqual(@as(f32, 0), view.viewport.?.style.border.radius);
+        try std.testing.expectEqual(@as(f32, 0), view.image_node.?.style.border.radius);
+        const icon = findById(view.root.?, "bmc.title.icon").?.globalRect();
+        try std.testing.expectApproxEqAbs(@as(f32, 13), icon.x, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 18), icon.w, 0.01);
+        try std.testing.expectApproxEqAbs(@as(f32, 24), icon.y + icon.h / 2, 0.01);
         try std.testing.expectEqual(@import("ui/app_theme.zig").current().surface_1, view.root.?.getBackground());
         try std.testing.expectApproxEqAbs(@as(f32, 1.6), image.w / image.h, 0.0001);
         try std.testing.expect(image.x >= card.x and image.y >= card.y);
         try std.testing.expect(image.x + image.w <= card.x + card.w + 0.01);
         try std.testing.expect(image.y + image.h <= card.y + card.h + 0.01);
-        // Rounded clipped corners and letterbox remain local, while geometry
-        // still maps the complete frame's four corners and center once.
+        // Header and letterbox stay local; the square frame preserves all
+        // four remote corners and maps each input coordinate exactly once.
         for ([_][2]f32{ .{ 1, 45 }, .{ card.x + 2, card.y + 2 }, .{ viewport.x + 1, viewport.y + viewport.h / 2 } }) |point| {
             harness.cx.handleMouseDown(point[0], point[1], .{});
             harness.cx.handleMouseUp(point[0], point[1]);
@@ -1590,4 +1632,108 @@ test "BMC Select keyboard highlight remains visible inside compact dropdown" {
     ui.widgets.scroll_area.setScrollY(scroll_ctx.state, content, 0);
     renderFrames(cx, 4);
     try std.testing.expectEqual(@as(f32, 0), scroll_ctx.state.scroll_y);
+}
+
+test "BMC view toolbar disconnect is owner bound and updates connection state" {
+    var service = remote.Service.init(owner);
+    defer service.close();
+    try service.setConnected(true, 1);
+    try service.setControl(true, 1);
+    var harness = try InputViewHarness.init(&service);
+    defer harness.deinit();
+    const view = harness.view;
+    try std.testing.expectEqualStrings("已连接", view.connection_hint.peek());
+    // Include the sidebar at the minimum supported width; every action remains
+    // inside the toolbar and the connection state retains its own width.
+    harness.cx.root.?.setStyleInline(a, .{ .width = .{ .px = 604 } });
+    renderFrames(harness.cx, 4);
+    const bar = view.toolbar.?.globalRect();
+    for (view.tool_nodes) |maybe| {
+        const rect = maybe.?.globalRect();
+        try std.testing.expect(rect.x >= bar.x and rect.x + rect.w <= bar.x + bar.w + 0.5);
+    }
+    const button = view.disconnect_node.?;
+    const rect = button.globalRect();
+    try std.testing.expect(rect.x + rect.w <= bar.x + bar.w + 0.5);
+    try std.testing.expectApproxEqAbs(@as(f32, 82), rect.w, 0.01);
+    try std.testing.expectEqualStrings("已连接", view.connection_label.peek());
+    try std.testing.expectEqual(ui.icons.circle_check.icon_id, view.connection_symbol.peek().?.icon_id);
+    harness.cx.handleMouseMove(rect.x + rect.w / 2, rect.y + rect.h / 2);
+    renderFrames(harness.cx, 4);
+    try std.testing.expectEqual(ui.icons.unplug.icon_id, view.connection_symbol.peek().?.icon_id);
+    try std.testing.expectEqualStrings("断开连接", view.connection_hint.peek());
+    try std.testing.expectEqualStrings("断开连接", view.connection_label.peek());
+    harness.cx.handleMouseMove(20, 100);
+    renderFrames(harness.cx, 4);
+    try std.testing.expectEqual(ui.icons.circle_check.icon_id, view.connection_symbol.peek().?.icon_id);
+    harness.fixture.video = .awaiting_frame;
+    try harness.renderer.vtable.update(harness.renderer.context, .{ .owner = owner, .revision = 2, .title = "Synthetic", .status = "" });
+    try std.testing.expectEqual(ui.icons.loader_circle.icon_id, view.connection_symbol.peek().?.icon_id);
+    button.behavior.events.on_click.?.invoke();
+    try std.testing.expect(view.disconnect_confirm_open.peek());
+    try std.testing.expectEqualStrings("取消连接？", view.disconnect_confirm_title.peek());
+    try std.testing.expectEqual(@as(usize, 0), harness.fixture.cancel_requests);
+    findById(harness.cx.root.?, "bmc.disconnect.return").?.behavior.events.on_click.?.invoke();
+    try std.testing.expect(!view.disconnect_confirm_open.peek());
+    harness.fixture.route = .failed;
+    harness.fixture.video = .failed;
+    try harness.renderer.vtable.update(harness.renderer.context, .{ .owner = owner, .revision = 3, .title = "Synthetic", .status = "" });
+    try std.testing.expectEqual(ui.icons.circle_x.icon_id, view.connection_symbol.peek().?.icon_id);
+    harness.fixture.route = .connected;
+    harness.fixture.video = .streaming;
+    try harness.renderer.vtable.update(harness.renderer.context, .{ .owner = owner, .revision = 4, .title = "Synthetic", .status = "" });
+    button.behavior.events.on_click.?.invoke();
+    button.behavior.events.on_click.?.invoke();
+    try std.testing.expectEqual(@as(usize, 0), harness.fixture.cancel_requests);
+    try std.testing.expect(view.disconnect_confirm_open.peek());
+    try std.testing.expectEqualStrings("断开连接？", view.disconnect_confirm_title.peek());
+    findById(harness.cx.root.?, "bmc.disconnect.return").?.behavior.events.on_click.?.invoke();
+    try std.testing.expectEqual(@as(usize, 0), harness.fixture.cancel_requests);
+    button.behavior.events.on_click.?.invoke();
+    const confirm = findById(harness.cx.root.?, "bmc.disconnect.confirm").?;
+    confirm.behavior.events.on_click.?.invoke();
+    confirm.behavior.events.on_click.?.invoke();
+    try std.testing.expectEqual(@as(usize, 1), harness.fixture.cancel_requests);
+    try std.testing.expect(view.disconnect_disabled.peek());
+    try std.testing.expect(!view.captured);
+    harness.fixture.cleanup = .released;
+    harness.fixture.route = .closed;
+    harness.fixture.video = .closed;
+    try harness.renderer.vtable.update(harness.renderer.context, .{ .owner = owner, .revision = 2, .title = "Synthetic", .status = "" });
+    const ended = harness.renderer.vtable.connection_status.?(harness.renderer.context);
+    try std.testing.expectEqual(.ended, ended.state);
+    try std.testing.expectEqualStrings("已断开", view.connection_hint.peek());
+}
+
+test "BMC theme standard buttons and inputs consume their own surface roles across every palette" {
+    const theme = @import("ui/app_theme.zig");
+    const previous = theme.currentName();
+    const parameters = theme.materialParameters();
+    defer {
+        theme.select(previous);
+        _ = theme.setMaterialParameters(parameters.transparency, parameters.blur);
+    }
+    for (@import("config/theme_presets.zig").ids) |id| {
+        theme.selectTokens(@import("config/theme_registry.zig").builtinTokens(id));
+        _ = theme.setMaterialParameters(100, 0);
+        const cx = try ui.Cx.init(a, std.testing.io);
+        defer cx.deinit();
+        cx.setTheme(theme.widgetTheme(theme.currentName()));
+        cx.setViewport(600, 400);
+        const scope = try ui.Scope.init(a, null, cx.owner);
+        defer scope.dispose();
+        cx.root = try ui.vstack(cx, .{ .width = .fill(), .height = .fill(), .background = theme.current().overlay }, .{});
+        const secondary = try ui.widgets.Button(.{ .label = "连接日志", .variant = .secondary }).mount(scope, cx);
+        const primary = try ui.widgets.Button(.{ .label = "连接", .variant = .primary }).mount(scope, cx);
+        const field = try ui.widgets.Input(.{}).mountResult(scope, cx);
+        try cx.root.?.appendChild(a, secondary);
+        try cx.root.?.appendChild(a, primary);
+        try cx.root.?.appendChild(a, field.node);
+        renderFrames(cx, 4);
+        errdefer std.debug.print("palette={s}\n", .{id});
+        try std.testing.expectEqual(theme.popupAction(), secondary.getBackground());
+        try std.testing.expectEqual(theme.current().action_accent, primary.getBackground());
+        try std.testing.expectEqual(theme.popupInset(), field.input_container.getBackground());
+        try std.testing.expect(!std.meta.eql(secondary.getBackground(), theme.current().overlay));
+    }
 }

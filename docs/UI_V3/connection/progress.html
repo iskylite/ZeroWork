@@ -11,16 +11,18 @@
 /* Standalone previews share the filled keyboard focus contract. */
 button:focus-visible:not(.primary):not(.btn-primary),input:focus-visible:not([type=checkbox]):not([type=radio]),select:focus-visible{outline:0;background:var(--popup-selected,color-mix(in srgb,var(--accent-ink,var(--accent,#6366f1)) 16%,var(--overlay-base,var(--well,#1b1b1f))));color:var(--fg-1,var(--fg,#f4f4f5))}
 button.primary:focus-visible,button.btn-primary:focus-visible{outline:0;filter:brightness(.85)}
+.log-row{display:block;white-space:pre-wrap}.log-row.failed:hover{background:#a1a1aa14}.raw-popover{position:fixed;z-index:110;width:520px;max-width:calc(100vw - 16px);padding:12px;background:var(--panel);border:1px solid #ffffff14;border-radius:9px;box-shadow:0 8px 24px #0005}.raw-popover h3{margin:0 0 8px;font-size:12px;line-height:18px;font-weight:600}.raw-popover pre{margin:0;height:200px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/16px ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--fg)}
 </style>
 <div class="scrim"><section class="dialog" role="dialog" aria-label="连接进度"><header class="header"><svg class="header-mark" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="6"/><rect x="2" y="16" width="6" height="6"/><rect x="16" y="16" width="6" height="6"/><path d="M12 8v4M5 16v-4h14v4"/></svg><div class="identity"><h1>ScaleX40-AI01</h1><div class="endpoint">root@10.2.209.201:22</div></div><span class="badge" id="state-badge">正在连接</span><button class="close" id="close" aria-label="取消连接">×</button></header><div class="body"><section class="summary" id="summary"><h2 id="phase">正在准备终端</h2><p id="detail">SSH 认证已完成，正在创建终端通道。</p></section><div class="resource" id="resource" hidden>正在结束上一次连接，完成后可重试。</div><div class="route-heading"><strong id="route-title">连接路径 · 直连</strong><span class="attempt">第 1 次尝试</span></div><div class="chain" id="chain"></div><div class="log-controls"><button class="disclosure" id="toggle" aria-expanded="false"><span id="chevron">›</span><span id="log-label">查看连接日志</span></button><span class="log-note" id="log-note">日志不含凭据</span><button class="copy" id="copy"><svg viewBox="0 0 24 24"><rect x="8" y="8" width="13" height="13" rx="2"/><path d="M16 3H5a2 2 0 0 0-2 2v11"/></svg>复制日志</button></div><pre class="logs" id="logs" hidden>+0.000s  TCP 连接 · 完成
 +0.122s  SSH 握手 · 完成
 +0.208s  主机密钥核对 · 完成
 +0.305s  SSH 认证 · 完成
 +0.520s  终端准备 · 进行中</pre></div><footer class="footer"><span class="hint" id="footer-hint">关闭窗口将取消本次连接</span><button id="dismiss" hidden>关闭</button><button id="cancel">取消连接</button><button class="primary" id="retry" hidden>重新连接</button></footer></section></div>
+<section id="raw-popover" class="raw-popover" role="tooltip" aria-label="原始 SSH 日志" hidden><h3>原始 SSH 日志</h3><pre id="raw-text"></pre></section>
 <div id="full-value-tooltip" class="value-tooltip" role="tooltip" hidden></div>
 <script>
 const q=new URLSearchParams(location.search),state=q.get('state')||'connecting',routed=q.get('route')==='3';
-const $=s=>document.querySelector(s);const long=q.has('long');const targetName=long?'ScaleX40-AI01 · production-east-primary-cluster':'ScaleX40-AI01',targetAddress=long?'operations-administrator@[2001:db8:1234:5678:abcd:ef01:2345:6789]:2222':'root@10.2.209.201:22';$('.identity h1').textContent=targetName;$('.endpoint').textContent=targetAddress;const failed=state==='failed'||state==='releasing',cancelled=state==='cancelled';
+const $=s=>document.querySelector(s);const long=q.has('long');const targetName=long?'ScaleX40-AI01 · production-east-primary-cluster':'ScaleX40-AI01',targetAddress=long?'operations-administrator@[2001:db8:1234:5678:abcd:ef01:2345:6789]:2222':'root@10.2.209.201:22';$('.identity h1').textContent=targetName;$('.endpoint').textContent=targetAddress;const failed=state==='failed'||state==='handshake'||state==='releasing',cancelled=state==='cancelled';
 const headerMark=$('.header-mark');if(failed){headerMark.innerHTML='<path d="M10.3 3.9 2.1 18.1A2 2 0 0 0 3.8 21h16.4a2 2 0 0 0 1.7-2.9L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4m0 4h.01"/>';headerMark.style.color='var(--danger)'}else if(!cancelled){headerMark.innerHTML='<circle cx="12" cy="12" r="9" stroke-dasharray="34 57"/>';headerMark.classList.add('spinning')}
 if(routed){$('#route-title').textContent='连接路径 · 2 级跳板';if(!failed&&!cancelled){$('#phase').textContent='SSH 认证中';$('#detail').textContent='正在认证第 2 跳 · Bastion-02，目标主机等待上游连接。';}}
 const nodes=[['本机','连接起点','已就绪','done'],...(routed?[['Bastion-01','admin@b1.example:22',failed?'已释放':'已认证',failed?'released':'done'],['Bastion-02','admin@b2.example:22',failed?'失败 · 已释放':'SSH 认证中',failed?'failed':'current']]:[]),[targetName,'目标主机',routed?(failed?'受阻 · 未连接':'等待上游'):failed?'终端准备失败':'终端准备中',routed?'pending':failed?'failed':'current']];
@@ -34,7 +36,7 @@ if(cancelled)stageLogs.push('+0.600s  连接已取消 · 资源已释放');else 
 $('#logs').textContent=stageLogs.join('\n');
 $('#toggle').onclick=()=>{const open=$('#logs').hidden;$('#logs').hidden=!open;$('#toggle').setAttribute('aria-expanded',String(open));$('#chevron').textContent=open?'⌄':'›';$('#log-label').textContent=open?'收起连接日志':'查看连接日志'};
 document.querySelectorAll('.hop').forEach((row,i)=>row.onclick=()=>{const selected=row.classList.toggle('selected');document.querySelectorAll('.hop').forEach(other=>{if(other!==row)other.classList.remove('selected')});$('#log-note').textContent=selected&&i>0?'第 '+i+' 跳 · 日志不含凭据':'日志不含凭据';if($('#logs').hidden)$('#toggle').click()});
-$('#copy').onclick=async()=>{try{await navigator.clipboard.writeText($('#logs').textContent);$('#log-note').textContent='已复制阶段日志'}catch{$('#log-note').textContent='复制失败，请重试'}};
+$('#copy').onclick=async()=>{try{await navigator.clipboard.writeText($('#logs').innerText);$('#log-note').textContent='已复制阶段日志'}catch{$('#log-note').textContent='复制失败，请重试'}};
 $('#cancel').onclick=()=>{q.set('state','cancelled');location.search=q.toString()};$('#retry').onclick=()=>{q.delete('state');location.search=q.toString()};$('#dismiss').onclick=()=>{$('.dialog').hidden=true;$('#full-value-tooltip').hidden=true};$('#close').onclick=()=>{if(failed||cancelled)$('#dismiss').click();else $('#cancel').click()};
 
 document.addEventListener('keydown',event=>{if(event.key==='Escape'&&!$('.dialog').hidden&&!$('#close').disabled){event.preventDefault();$('#close').click()}});
@@ -48,6 +50,23 @@ function fullValue(node,value){
 fullValue($('.identity'),targetName+'\n'+targetAddress);
 document.querySelectorAll('.hop').forEach((row,i)=>{const n=nodes[i];fullValue(row,n[0]+'\n'+(i===nodes.length-1?targetAddress:n[1]))});
 
+const rawLog='handshake transport host=10.2.209.201:22 hop=0 rc=-13 peer=10.2.209.201:22 local_port=55120 flags=4 identification_bytes=22 identification_hash=ab12 identification_complete=1\nhandshake failed host=10.2.209.201:22 hop=0 rc=-13 libssh2_code=-13 fd=12 recv_code=0 recv_errno=0 received_bytes=22 send_code=24 send_errno=0 sent_bytes=24 message=Failed getting banner';
+if(state==='handshake'){
+ $('#chain .hop:last-child .status').textContent='失败 · 已释放';$('#phase').textContent='SSH 握手失败';$('#detail').textContent='SSH 握手期间连接已断开';
+ $('#logs').textContent='+0.002s  TCP 连接 · 完成\n+0.003s  SSH 握手 · 进行中\n+0.004s  SSH 握手 · SSH 握手期间连接已断开';
+ $('#raw-text').textContent='尝试 1 · 第 1 跳 · SSH 握手\n'+rawLog.split('\n').map(line=>'14:13:20.004 - '+line+' - 1.000 ms').join('\n');
+ $('#copy').onclick=async()=>{try{await navigator.clipboard.writeText($('#logs').innerText+'\n'+$('#raw-text').textContent);$('#log-note').textContent='已复制连接日志'}catch{$('#log-note').textContent='复制失败，请重试'}};
+}
+let rawTimer;
+function closeRaw(){clearTimeout(rawTimer);$('#raw-popover').hidden=true}
+function showRaw(row){if(!row)return;const panel=$('#raw-popover');panel.hidden=false;const r=row.getBoundingClientRect();panel.style.left=Math.max(8,Math.min(r.left,innerWidth-panel.offsetWidth-8))+'px';panel.style.top=Math.max(8,r.bottom+6+panel.offsetHeight<=innerHeight-8?r.bottom+6:r.top-panel.offsetHeight-6)+'px'}
+document.addEventListener('keydown',e=>{if(e.key==='Escape'&&!$('#raw-popover').hidden){e.stopImmediatePropagation();closeRaw()}},true);
+$('#logs').addEventListener('scroll',closeRaw);
+$('#toggle').addEventListener('click',closeRaw);
+$('#logs').textContent=$('#logs').textContent.split('\n').map(line=>{const m=line.match(/^\+(\d+)\.(\d+)s\s+(.*)$/);if(!m)return line;const ms=Number(m[1])*1000+Number(m[2]),duration=m[3].includes('进行中')?'—':(state==='handshake'?(ms===2?'2.000 ms':'1.000 ms'):'—');return '14:13:'+String(20+Math.floor(ms/1000)).padStart(2,'0')+'.'+String(ms%1000).padStart(3,'0')+' - '+m[3]+' - '+duration}).join('\n');
+const lines=$('#logs').textContent.split('\n');$('#logs').textContent='';
+lines.forEach((line,i)=>{const row=document.createElement('span');row.className='log-row';row.textContent=line;if(state==='handshake'&&i===lines.length-1){row.classList.add('failed');row.onmouseenter=()=>{rawTimer=setTimeout(()=>showRaw(row),350)};row.onmouseleave=closeRaw;}$('#logs').append(row)});
 if(q.has('logs'))$('#toggle').click();
+if(q.has('raw'))showRaw(document.querySelector('.log-row.failed'));
 </script>
 </html>

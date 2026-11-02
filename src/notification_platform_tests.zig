@@ -732,3 +732,84 @@ test "notification a genuinely new recording failure still alerts after cleared 
     try std.testing.expect(host.coordinator.notification_records.items[0].event.operation_id > first);
     try std.testing.expectEqualStrings("AccessDenied", host.coordinator.notification_records.items[0].event.detail);
 }
+
+test "activity badge host opens the owning window and original AI conversation after foreground clear" {
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{}, fake.api());
+    defer host.destroy();
+    const conversation: @import("host/identity.zig").ConversationId = .{ .bytes = @splat(3) };
+    var window: WindowProbe = .{ .conversation = conversation };
+    var foreign: WindowProbe = .{ .owner = .{ .session = .{ .session_id = @fromBackingInt(999), .generation = 1 } } };
+    const id = try host.registerWindow(window.callbacks());
+    _ = try host.registerWindow(foreign.callbacks());
+    const operation = try host.reserveAiConversation(id, conversation);
+    host.activity.setForeground(false);
+    try host.publishAi(window.owner, operation, 1, .{ .result = .succeeded, .resources_released = true, .final_answer = true });
+    const token = host.activity.entries.items[0].token;
+    try std.testing.expectEqual(@as(u64, 1), host.activity.count());
+    host.activity.setForeground(true);
+    try std.testing.expectEqual(@as(u64, 0), host.activity.count());
+    try std.testing.expect(host.activateActivity(token));
+    try std.testing.expect(window.selected.?.eql(conversation));
+    try std.testing.expectEqual(@as(usize, 1), window.conversation_activates);
+    try std.testing.expectEqual(@as(usize, 0), foreign.activates);
+    host.ownerEnded(window.owner);
+    try std.testing.expect(!host.activateActivity(token));
+    // A new owner never inherits the removed menu item's identity.
+    host.activity.setForeground(false);
+    try host.activity.observeAi(foreign.owner, operation + 1, 1);
+    const next = host.activity.entries.items[0].token;
+    try std.testing.expect(next != token);
+    try std.testing.expect(host.activateActivity(next));
+    try std.testing.expectEqual(@as(usize, 1), foreign.activates);
+}
+
+test "activity badge menu follows Tab projection, refreshes metadata and merges visible group rows" {
+    const Projection = @import("host/tab_presentation.zig").Presentation;
+    const Probe = struct {
+        order: usize,
+        name: []const u8,
+        tint: u32,
+        current: bool,
+        tab: u64,
+        fn owns(_: *anyopaque, _: notifications.Target) bool {
+            return true;
+        }
+        fn activate(_: *anyopaque, _: notifications.Target) bool {
+            return false;
+        }
+        fn feedback(_: *anyopaque, _: []const u8) void {}
+        fn project(raw: *anyopaque, _: notifications.Owner) ?Projection {
+            const self: *@This() = @ptrCast(@alignCast(raw));
+            return .{ .tab_id = @fromBackingInt(self.tab), .order = self.order, .title = self.name, .icon_svg = "<svg/>", .icon_id = 7, .icon_tint = self.tint, .current = self.current, .status = "在线" };
+        }
+    };
+    var fake: Fake = .{};
+    const host = try notification_host.Host.createWithApi(a, .{}, fake.api());
+    defer host.destroy();
+    const one: notifications.Owner = .{ .session = .{ .session_id = @fromBackingInt(1), .generation = 1 } };
+    const two: notifications.Owner = .{ .session = .{ .session_id = @fromBackingInt(2), .generation = 1 } };
+    var probe: Probe = .{ .order = 2, .name = "Tab title", .tint = 0x35a468ff, .current = true, .tab = 10 };
+    // Two sources projected to the same visible group Tab occupy one row.
+    const callbacks: notification_host.Window = .{ .context = &probe, .owns = Probe.owns, .activate = Probe.activate, .feedback = Probe.feedback, .tab_presentation = Probe.project };
+    _ = try host.registerWindow(callbacks);
+    host.activity.setForeground(false);
+    try host.activity.observeAi(one, 1, 1);
+    try host.activity.observeAi(two, 2, 1);
+    var rows = try host.activityRows(a);
+    defer rows.deinit(a);
+    try std.testing.expectEqual(@as(usize, 1), rows.items.len);
+    try std.testing.expectEqualStrings("Tab title", rows.items[0].presentation.title);
+    try std.testing.expectEqual(probe.tint, rows.items[0].presentation.icon_tint);
+    try std.testing.expect(rows.items[0].presentation.current);
+    probe.name = "Renamed Tab";
+    probe.order = 0;
+    probe.tint = 0x888888ff;
+    probe.current = false;
+    var changed = try host.activityRows(a);
+    defer changed.deinit(a);
+    try std.testing.expectEqualStrings("Renamed Tab", changed.items[0].presentation.title);
+    try std.testing.expectEqual(@as(usize, 0), changed.items[0].presentation.order);
+    try std.testing.expectEqual(probe.tint, changed.items[0].presentation.icon_tint);
+    try std.testing.expect(!changed.items[0].presentation.current);
+}

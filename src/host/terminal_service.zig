@@ -134,6 +134,7 @@ pub const NotificationSnapshot = struct {
     output_sequence: u64,
     bell_count: u64,
     recording_error: ?[]const u8 = null,
+    eof_seen: bool = false,
 };
 pub const Status = struct {
     owner: identity.SessionHandle,
@@ -153,7 +154,7 @@ pub const Status = struct {
     modes: Modes = .{},
 
     pub fn notification(self: Status) NotificationSnapshot {
-        return .{ .owner = self.owner, .output_sequence = self.output_sequence, .bell_count = self.bell_count, .recording_error = self.recording_error };
+        return .{ .owner = self.owner, .output_sequence = self.output_sequence, .bell_count = self.bell_count, .recording_error = self.recording_error, .eof_seen = self.eof_seen };
     }
 };
 
@@ -328,6 +329,7 @@ pub const Service = struct {
         return call(self.context, self.binding);
     }
     pub fn write(self: Service, request: WriteRequest) !Submission {
+        try @import("../update/admission.zig").require();
         if (request.input_sequence == 0 or request.mode_revision == 0 or request.bytes.len == 0) return error.InvalidInput;
         return self.vtable.write(self.context, self.binding, request);
     }
@@ -357,9 +359,11 @@ pub const Service = struct {
         return self.vtable.commit_paste(self.context, self.binding, paste, input_sequence, confirmed);
     }
     pub fn writeKey(self: Service, request: KeyRequest) !Submission {
+        try @import("../update/admission.zig").require();
         return self.vtable.key(self.context, self.binding, request);
     }
     pub fn writeMouse(self: Service, request: MouseRequest) !Submission {
+        try @import("../update/admission.zig").require();
         return self.vtable.mouse(self.context, self.binding, request);
     }
     pub fn createAnchor(self: Service, point: Point) !Anchor {

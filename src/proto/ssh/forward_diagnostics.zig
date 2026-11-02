@@ -45,5 +45,5 @@ pub fn formatTimestamp(buffer: []u8, wall_ms: i64) []const u8 {
     const seconds: c_long = @intCast(@divFloor(wall_ms, 1000));
     var value: Time = undefined;
     if (localtime_r(&seconds, &value) == null) return "时间未知";
-    return std.fmt.bufPrint(buffer, "{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{ value.hour, value.min, value.sec, @mod(wall_ms, 1000) }) catch "时间未知";
+    return std.fmt.bufPrint(buffer, "{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}", .{ @as(u8, @intCast(value.hour)), @as(u8, @intCast(value.min)), @as(u8, @intCast(value.sec)), @as(u16, @intCast(@mod(wall_ms, 1000))) }) catch "时间未知";
 }

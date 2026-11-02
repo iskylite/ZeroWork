@@ -96,7 +96,7 @@ pub fn sortButton(width: f32) ButtonStyle {
     return .{ .width = .{ .px = width }, .height = .{ .px = header_height }, .padding = .{ .left = 7, .right = 7 }, .gap = 0, .flex_shrink = 0, .background = ui.Color.TRANSPARENT };
 }
 pub fn fileRow(width: f32, selected: bool, focused: bool) ButtonStyle {
-    return .{ .width = .{ .px = width }, .height = .{ .px = row_height }, .padding = .{}, .gap = 0, .flex_shrink = 0, .corner_radius = 0, .background = if (selected or focused) theme.popupSelection() else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT } };
+    return .{ .width = .{ .px = width }, .height = .{ .px = row_height }, .padding = .{}, .gap = 0, .flex_shrink = 0, .corner_radius = 0, .background = if (selected) theme.states().selected else if (focused) theme.states().focus else ui.Color.TRANSPARENT, .border = .{ .width = 0, .color = ui.Color.TRANSPARENT } };
 }
 pub fn viewport() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_height = 0, .min_width = 0 };

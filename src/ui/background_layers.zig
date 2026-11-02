@@ -52,6 +52,7 @@ pub const View = struct {
     /// Its own text and controls render afterward; no image/floor nodes,
     /// layout hooks or target borrows are retained by the global material.
     pub fn isolate(self: *View, scope: *ui.Scope, target: *ui.Node) !void {
+        @import("floating_input.zig").protect(self.cx, target);
         try scope.createEffect(.{ .cx = self.cx, .target = target, .publication = try self.cx.themeSignal(scope) }, struct {
             fn paint(ctx: anytype) void {
                 _ = ctx.publication.get();
@@ -111,10 +112,12 @@ pub const View = struct {
         self.root.setBackground(theme.baseColors().app);
         self.images.setDisplay(.flex);
         self.veil.setDisplay(.flex);
-        self.blur.setStyleInline(self.cx.allocator, .{ .glass = .{ .backdrop_blur = @floatFromInt(materials.blur_px), .glass_intensity = 0, .specular_opacity = 0, .refraction_level = 0, .warp_gain = 0 }, .background = ui.Color.TRANSPARENT });
+        // Preview surfaces are composited offscreen. Sample their own image,
+        // not the settings/terminal pixels behind the preview's surface.
+        self.blur.setStyleInline(self.cx.allocator, .{ .glass = .{ .backdrop_blur = @floatFromInt(materials.blur_px), .glass_intensity = 0, .specular_opacity = 0, .refraction_level = 0, .warp_gain = 0, .capture_current_target = true, .capture_clamp = true, .a11y_exempt = true }, .background = ui.Color.TRANSPARENT });
         self.blur.setDisplay(if (materials.blur_px == 0) .none else .flex);
         // Alpha applies to the image result only: foreground nodes remain 1.0.
-        self.veil.setBackground(theme.baseColors().app.withAlpha(@intFromFloat(@round(background.transparency * 255 / 100))));
+        self.veil.setBackground(theme.baseColors().app.withAlpha(@intFromFloat(@round((1 - background.alpha()) * 255))));
         self.root.setDisplay(.flex);
         self.fingerprint = fingerprint;
         self.cx.requestRedraw();
@@ -191,7 +194,7 @@ test "global material leaves the single image veil and window geometry independe
             cx.layout();
             try std.testing.expectEqual(@as(u8, 0), theme.current().app.a);
             try std.testing.expectEqual(theme.baseColors().app, view.root.getBackground());
-            try std.testing.expectEqual(theme.baseColors().app.withAlpha(@intFromFloat(@round(percent * 255 / 100))), view.veil.getBackground());
+            try std.testing.expectEqual(theme.baseColors().app.withAlpha(@intFromFloat(@round((100 - percent) * 255 / 100))), view.veil.getBackground());
             const rect = view.tiles.items[0].globalRect();
             try std.testing.expectApproxEqAbs(@as(f32, 0), rect.x, 0.01);
             try std.testing.expectApproxEqAbs(@as(f32, 45), rect.y, 0.01);

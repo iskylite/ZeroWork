@@ -26,7 +26,7 @@ try{
    await h.resizeWindow(320,360);await absent('ai.close.confirmation');
    await click('ai.close');
    const panel=await visible('ai.close.confirmation'),title=await visible('ai.close.confirmation.title'),detail=await visible('ai.close.confirmation.detail'),confirm=await visible('ai.close.confirmation.confirm'),cancel=await visible('ai.close.confirmation.cancel');
-   assert.equal(text(title),'停止本轮并关闭？');assert.equal(text(detail),'对话和历史会保留');assert.equal(text(confirm),'停止并关闭');
+   assert.equal(text(title),'停止并结束当前会话？');assert.equal(text(detail),'历史会保留，下次打开显示欢迎页');assert.equal(text(confirm),'停止并结束');
    assert.equal(panel.rect.w,288);assert.equal(panel.rect.h,106);assert(panel.rect.x>=8&&panel.rect.x+panel.rect.w<=312);
    assert.equal(title.rect.y,panel.rect.y+12);assert.equal(detail.rect.y,title.rect.y+24);
    for(const node of [confirm,cancel]){assert.equal(node.rect.h,28);assert(node.rect.w<100);assert(node.rect.x>=panel.rect.x+12&&node.rect.x+node.rect.w<=panel.rect.x+panel.rect.w-11.9);assert.equal(node.rect.y+node.rect.h,panel.rect.y+panel.rect.h-12)}
@@ -38,7 +38,7 @@ try{
    await click('ai.close');await visible('ai.close.confirmation');await click('ai.close.preview.toggle');await absent('ai.close.confirmation');assert((await result()).includes('confirm 0 · cancel 3'));assert((await result()).includes('running true'));
    await click('ai.minimize');assert((await result()).includes('minimize 1 · running true'));
    await click('ai.close');await visible('ai.close.confirmation');await click('ai.close.confirmation.confirm');await absent('ai.close.confirmation');assert((await result()).includes('confirm 1 · cancel 3'));assert((await result()).includes('running false'));
-   await click('ai.close');await visible('ai.close.confirmation');assert.equal(text(await visible('ai.close.confirmation.title')),'关闭助手？');assert.equal(text(await visible('ai.close.confirmation.confirm')),'关闭窗口');
+   await click('ai.close');await visible('ai.close.confirmation');assert.equal(text(await visible('ai.close.confirmation.title')),'结束当前会话？');assert.equal(text(await visible('ai.close.confirmation.confirm')),'结束会话');
    await h.mouseMove(1,1);assert((await h.screenshot(join(out,`${theme}-320-idle.png`))).ok);
    await click('ai.close.confirmation.cancel');await absent('ai.close.confirmation');await click('ai.close.preview.replace');assert((await result()).includes('旧确认已撤销'));
    await click('ai.close');await visible('ai.close.confirmation');await h.key('tab');assert.equal((await h.focused()).test_id,'ai.close.confirmation.confirm');await h.key('return');await absent('ai.close.confirmation');assert((await result()).includes('confirm 2'));

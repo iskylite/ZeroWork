@@ -166,7 +166,14 @@ pub const Bridge = struct {
         if (invocation.call.tool == .list_remote_files or invocation.call.tool == .read_remote_file) return error.UnsupportedTool;
         if (invocation.call.tool == .run_command and self.capture.?.cwd == null) return error.UnknownDirectory;
     }
-    fn finish(exchange: *Exchange, result: loop.TargetResult) void {
+    fn finish(exchange: *Exchange, original: loop.TargetResult) void {
+        if (exchange.ready.load(.acquire)) return;
+        var reference: [32]u8 = undefined;
+        const result = loop.retainedPage(exchange.invocation, original, &reference) catch |err| {
+            exchange.failure = err;
+            exchange.ready.store(true, .release);
+            return;
+        };
         trace.emit(.{ .event = "host_result", .sequence = exchange.sequence, .turn_id = exchange.invocation.key.turn_id, .call_id = exchange.invocation.key.call_id, .result = result });
         exchange.outcome = loop.Outcome.copy(exchange.allocator, &.{result}) catch |err| {
             exchange.failure = err;
@@ -207,8 +214,10 @@ pub const Bridge = struct {
             };
             self.active = null;
             if (exchange) |current| {
-                const text_output = std.unicode.utf8ValidateSlice(snapshot.stdout) and std.unicode.utf8ValidateSlice(snapshot.stderr);
-                finish(current, .{ .session_id = @backingInt(active.handle.owner.session_id), .transport = .local, .status = if (snapshot.timed_out) .timed_out else if (snapshot.cancelled) .cancelled else if (!text_output) .failed else if (snapshot.exit) |exit| if (exit == .exited and exit.exited == 0) .succeeded else .failed else .failed, .stdout = if (text_output) snapshot.stdout else "", .stderr = if (text_output) snapshot.stderr else "", .exit = if (snapshot.exit) |exit| if (exit == .exited) exit.exited else null else null, .signal = if (snapshot.exit) |exit| if (exit == .signal) exit.signal else null else null, .cwd = self.capture.?.cwd, .elapsed_ms = elapsed(active.started_ms), .truncated = snapshot.truncated, .error_code = if (text_output) null else "NonTextToolOutput" });
+                const stdout = @import("../ai/batch_output.zig").capturedText(snapshot.stdout, snapshot.truncated);
+                const stderr = @import("../ai/batch_output.zig").capturedText(snapshot.stderr, snapshot.truncated);
+                const text_output = std.unicode.utf8ValidateSlice(stdout) and std.unicode.utf8ValidateSlice(stderr);
+                finish(current, .{ .session_id = @backingInt(active.handle.owner.session_id), .transport = .local, .status = if (snapshot.timed_out) .timed_out else if (snapshot.cancelled) .cancelled else if (!text_output) .failed else if (snapshot.exit) |exit| if (exit == .exited and exit.exited == 0) .succeeded else .failed else .failed, .stdout = if (text_output) stdout else "", .stderr = if (text_output) stderr else "", .exit = if (snapshot.exit) |exit| if (exit == .exited) exit.exited else null else null, .signal = if (snapshot.exit) |exit| if (exit == .signal) exit.signal else null else null, .cwd = self.capture.?.cwd, .elapsed_ms = elapsed(active.started_ms), .truncated = snapshot.truncated, .error_code = if (text_output) null else "NonTextToolOutput" });
             }
             return;
         }
@@ -244,7 +253,7 @@ pub const Bridge = struct {
             .run_command => {
                 if (capture.cwd == null) return failure(current, .rejected, error.UnknownDirectory);
                 const key = app.sessions.journal.begin(.{ .session = capture.owner }, null) catch |err| return failure(current, .failed, err);
-                const handle = app.local_adapter.startExec(capture.exec_binding, .{ .operation = key, .call_id = key.operation_id, .command = current.invocation.call.command, .cwd = capture.cwd, .limits = .{ .timeout_ms = current.invocation.timeout_ms, .capture_bytes = @min(current.invocation.call.max_bytes, current.invocation.capture_bytes) } }) catch |err| {
+                const handle = app.local_adapter.startExec(capture.exec_binding, .{ .operation = key, .call_id = key.operation_id, .command = current.invocation.call.command, .cwd = capture.cwd, .limits = .{ .timeout_ms = current.invocation.timeout_ms, .cancel_on_capture_limit = current.invocation.output_context == null, .capture_bytes = if (current.invocation.output_context != null) @import("../ai/batch_output.zig").capture_limit else @min(current.invocation.call.max_bytes, current.invocation.capture_bytes) } }) catch |err| {
                     _ = app.sessions.journal.failReleased(key, .{ .domain = .host, .code = @errorName(err), .cleanup = .released, .safe_message = "Local tool did not start" }) catch {};
                     if (err == error.WorkerBusy) return;
                     return failure(current, .failed, err);

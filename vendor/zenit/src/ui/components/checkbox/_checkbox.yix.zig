@@ -54,14 +54,14 @@ fn __yix_Checkbox(__yix_props: CheckboxProps, scope: *ui.Scope, cx: *ui.Cx) anye
         } }.__yix_compute);
     }, .focus_ring = focusRing, .a11y = .{ .role = .checkbox, .checked = checked, .indeterminate = mixed, .disabled = disabled, .label = label }, .on_click = try ui.on.bind(scope, .{ .disabled = disabled, .checked = checked, .__yix_model_checked = __yix_model_checked, .onChange = onChange, .__yix_owner = scope.owner, }, struct { fn __yix_run(__yix_ctx: anytype) void { __yix_ctx.__yix_owner.beginBatch(); defer __yix_ctx.__yix_owner.endBatch(); if (!__yix_ctx.disabled.peek()) { __yix_ctx.__yix_model_checked.propose(!__yix_ctx.checked.peek(), __yix_ctx.onChange); }  } }.__yix_run), }, .{
             ui.view.box(.{ .style = .{ S.CheckboxParts.slot(.box, .{ .on = on, .disabled = disabled }), ui.view.styleBy(boxSize, S.checkboxSize) }, }, .{
-                ui.view.icon(.{ .style = .{ S.CheckboxParts.slot(.check, .{ .shown = checked }), ui.view.styleBy(boxSize, S.checkboxCheckSize) }, }, __yix_d4: {
+                ui.view.icon(.{ .style = .{ S.CheckboxParts.slot(.check, .{ .shown = checked, .disabled = disabled }), ui.view.styleBy(boxSize, S.checkboxCheckSize) }, }, __yix_d4: {
         const __yix_T = @TypeOf(checkIconAsset.peek() orelse ui.icons.check);
         break :__yix_d4 try scope.derive(__yix_T, .{ .checkIconAsset = checkIconAsset, }, struct { fn __yix_compute(__yix_ctx: anytype) __yix_T {
             return __yix_ctx.checkIconAsset.get() orelse ui.icons.check;
         } }.__yix_compute);
     }),
                 ui.view.box(.{ .style = .{ S.CheckboxParts.slot(.indet, .{ .shown = mixed }), ui.view.styleBy(boxSize, S.checkboxSize) }, }, .{
-                    ui.view.icon(.{ .style = .{ S.CheckboxParts.slot(.check, .{ .shown = true }), ui.view.styleBy(boxSize, S.checkboxCheckSize) }, }, ui.icons.minus),
+                    ui.view.icon(.{ .style = .{ S.CheckboxParts.slot(.check, .{ .shown = true, .disabled = disabled }), ui.view.styleBy(boxSize, S.checkboxCheckSize) }, }, ui.icons.minus),
                 }),
             }),
             ui.view.lazyIf(__yix_d1: {

@@ -14,6 +14,7 @@ pub const Config = struct {
     ai: Ai = .{},
     log: Log = .{},
     notify: Notify = .{},
+    updates: Updates = .{},
     keys: keybindings.Map = .{},
     plugin_preferences: []const PluginPreference = &.{},
 
@@ -125,6 +126,7 @@ pub const Config = struct {
         try writer.print("[ui.materials]\nblur_px = {d}\n\n[ui.materials.background]\nenabled = {}\npath = ", .{ self.ui.materials.blur_px, background.enabled });
         try std.json.Stringify.value(background.path, .{}, &writer);
         try writer.print("\nfit = \"{s}\"\nalignment_x = \"{s}\"\nalignment_y = \"{s}\"\ntransparency = {d}\n\n", .{ @tagName(background.fit), @tagName(background.alignment_x), @tagName(background.alignment_y), background.transparency });
+        try writer.print("[updates]\nauto_check = {}\n\n", .{self.updates.auto_check});
         try writer.print("[completion]\nenabled = {}\n\n", .{self.completion.enabled});
         try writer.print("[transfer]\ndedicated_connection = {}\nwindow_chunks = {d}\nchunk_kb = {d}\ndownload_dir = \"{s}\"\nverify_md5 = {}\nshared_pacing_kbps = {d}\nresume = {}\nmax_tasks = {d}\nconflict_policy = \"{s}\"\n\n", .{ self.transfer.dedicated_connection, self.transfer.window_chunks, self.transfer.chunk_kb, self.transfer.download_dir, self.transfer.verify_md5, self.transfer.shared_pacing_kbps, self.transfer.@"resume", self.transfer.max_tasks, self.transfer.conflict_policy });
         try writer.print("[ssh]\nkeepalive_sec = {d}\nreconnect_max = {d}\nreconnect_backoff = [{d},{d},{d},{d},{d}]\nconnect_timeout_sec = {d}\nterm = \"{s}\"\ncompression = {}\nauto_shell_integration = {}\nauto_reconnect = {}\nbuffer_input = {}\nsocks_port = {d}\nsocks_bind = \"{s}\"\notp_modal = {}\ntotp_autofill = {}\n\n", .{ self.ssh.keepalive_sec, self.ssh.reconnect_max, self.ssh.reconnect_backoff[0], self.ssh.reconnect_backoff[1], self.ssh.reconnect_backoff[2], self.ssh.reconnect_backoff[3], self.ssh.reconnect_backoff[4], self.ssh.connect_timeout_sec, self.ssh.term, self.ssh.compression, self.ssh.auto_shell_integration, self.ssh.auto_reconnect, self.ssh.buffer_input, self.ssh.socks_port, self.ssh.socks_bind, self.ssh.otp_modal, self.ssh.totp_autofill });
@@ -224,6 +226,7 @@ pub const Config = struct {
             .log => {
                 if (eq(key, "ring_mb")) self.log.ring_mb = try parseInt(u16, value) else if (eq(key, "checkpoint_sec")) self.log.checkpoint_sec = try parseInt(u16, value) else if (eq(key, "retention_days")) self.log.retention_days = try parseInt(u16, value) else if (eq(key, "export_format")) self.log.export_format = try parseString(value) else return error.UnknownKey;
             },
+            .updates => { if (eq(key, "auto_check")) self.updates.auto_check = try parseBool(value) else return error.UnknownKey; },
             .notify => {
                 if (eq(key, "transfer_done")) self.notify.transfer_done = try parseBool(value) else if (eq(key, "reconnect")) self.notify.reconnect = try parseBool(value) else if (eq(key, "ai_ready")) self.notify.ai_ready = try parseBool(value) else if (eq(key, "bell")) self.notify.bell = try parseBool(value) else if (eq(key, "tab_dot")) self.notify.tab_dot = try parseBool(value) else if (eq(key, "quiet_hours")) self.notify.quiet_hours = try parseString(value) else return error.UnknownKey;
             },
@@ -423,9 +426,11 @@ pub const Ai = struct {
 };
 pub const Log = struct { ring_mb: u16 = 64, checkpoint_sec: u16 = 30, retention_days: u16 = 14, export_format: []const u8 = "txt_cast" };
 
+pub const Updates = struct { auto_check: bool = true };
+
 pub const Notify = struct { transfer_done: bool = false, reconnect: bool = true, ai_ready: bool = false, bell: bool = false, tab_dot: bool = true, quiet_hours: []const u8 = "22:00-08:00" };
 
-const Section = enum { plugin_preferences, none, meta, ui, @"ui.materials", @"ui.materials.background", completion, transfer, ssh, ai, log, notify, keys };
+const Section = enum { plugin_preferences, none, meta, ui, @"ui.materials", @"ui.materials.background", completion, transfer, ssh, ai, log, notify, updates, keys };
 pub const ParseError = error{ InvalidSection, InvalidAssignment, InvalidValue, InvalidExecutionMode, InvalidSessionRetention, UnknownKey, MissingSection, OutOfRange, Overflow, RequiresAllocator, OutOfMemory };
 
 fn parseSection(line: []const u8) ParseError!Section {

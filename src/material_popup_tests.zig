@@ -256,7 +256,7 @@ test "production auth content inherits modal and inline material across retheme 
                 try std.testing.expectEqual(ui.widgets.input.InputType.password, input.input_type);
                 try std.testing.expect(!view.submit_disabled.peek());
                 try std.testing.expect(input.focused);
-                try std.testing.expectEqual(theme.popupSelection(), view.fields[0].input.input_container.getBackground());
+                try std.testing.expectEqual(theme.states().focus, view.fields[0].input.input_container.getBackground());
                 try std.testing.expectEqual(ui.Color.TRANSPARENT, view.fields[0].input.input_container.style.border.color);
                 if (view.fields[0].input.input_container.style.outline()) |outline| try std.testing.expectEqual(@as(f32, 0), outline.width);
                 var projected: usize = 0;

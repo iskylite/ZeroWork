@@ -21,7 +21,8 @@ for(const [id,colors]of Object.entries(data.themes)){
   }
   effective.imageEnabled=true;const alphas=Object.fromEntries(Object.keys(api.roles).map(role=>[role,Math.round(255*api.materialAlpha(role,t))]));let weakest=Infinity;
   for(const role of ['surface-1','surface-2','well','overlay','hover','tab-on'])for(const gray of [0,64,128,192,255]){
-   const parent=role==='overlay'?[gray,gray,gray]:paint(rgb(colors['--bg-app']),[gray,gray,gray],Math.round(255*t)),background=paint(rgb(colors['--'+role+'-base']),parent,alphas[role]);
+   // Match imageBackdropBounds/global-background: theme veil is 1-T; image is T.
+   const parent=role==='overlay'?[gray,gray,gray]:paint(rgb(colors['--bg-app']),[gray,gray,gray],Math.round(255*(1-t))),background=paint(rgb(colors['--'+role+'-base']),parent,alphas[role]);
    const inks=['fg-1','fg-2','fg-3','accent-ink','ok-ink','warn-ink','danger-ink',...(role==='surface-1'?['terminal-default-fg']:[])];
    for(const ink of inks){const backgrounds=ink==='terminal-default-fg'?[background,paint(rgb(palette['--action-accent']),background,15)]:[background];for(const actual of backgrounds){const value=contrast(rgb(palette['--'+ink]),actual);assert(value>=4.5,`${id} T=${t*100} ${role} gray=${gray} ${ink} ${value}`);weakest=Math.min(weakest,value);cases++;}}
   }

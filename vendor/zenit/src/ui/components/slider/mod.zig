@@ -80,6 +80,7 @@ pub const SliderRuntime = struct {
     accent: Color,
     accent_hover: Color,
     tokens: *const core.ThemeTokens,
+    theme_signal: *Signal(*const core.ThemeTokens),
     hovered: *Signal(bool),
     dragging: bool = false,
     /// Currently displayed value (data source value clamped to [min, max])
@@ -123,7 +124,7 @@ pub const SliderRuntime = struct {
             self.applyDisabled();
         }
         // When disabled, hover highlight not shown; color transitions via border-color
-        self.thumb_node.setBorderColor(if (dis) self.tokens.tokens.color.fg_disabled else if (hov) self.accent_hover else self.accent);
+        self.thumb_node.setBorderColor(if (dis) self.tokens.tokens.color.range_disabled else if (self.dragging) self.tokens.tokens.color.range_drag else if (hov) self.accent_hover else self.accent);
         if (v != self.shown) {
             self.shown = v;
             try self.updateVisuals();
@@ -131,6 +132,13 @@ pub const SliderRuntime = struct {
     }
 
     fn viewEffect(self: *SliderRuntime) void {
+        _ = self.theme_signal.get();
+        self.tokens = self.cx.tokens;
+        self.accent = self.tokens.tokens.color.range_fill;
+        self.accent_hover = self.tokens.tokens.color.range_hover;
+        self.track_node.setBackground(self.tokens.tokens.color.range_track);
+        self.applyDisabled();
+        if (self.value_text_node) |text| text.setTextColor(self.tokens.tokens.color.fg_secondary);
         self.view(true) catch |err| std.log.err("[Slider] update failed: {}", .{err});
     }
 
@@ -141,7 +149,7 @@ pub const SliderRuntime = struct {
         self.container_node.style.cursor = if (dis) .not_allowed else .default;
         self.thumb_node.style.cursor = if (dis) .not_allowed else .pointer;
         if (self.container_node.behavior.interaction.a11y) |*a| a.disabled = dis;
-        self.fill_node.setBackground(if (dis) t.tokens.color.fg_disabled else self.accent);
+        self.fill_node.setBackground(if (dis) t.tokens.color.range_disabled else self.accent);
         self.thumb_node.setBackground(styles.thumbBackground(dis, t));
         if (dis and self.dragging) {
             self.dragging = false;
@@ -258,7 +266,7 @@ pub const SliderBuilder = struct {
         reactive.checkBorrow(my_scope, p.haptic_pattern);
         const value = try reactive.resolveModel(f32, my_scope, p.value);
         const initially_disabled = p.disabled.read(false);
-        const accent = t.tokens.color.accent;
+        const accent = t.tokens.color.range_fill;
 
         // Outer container: track region (track + fill + thumb) + optional value display
         const Parts = struct { track_area: *Node = undefined, track: *Node = undefined, fill: *Node = undefined, thumb: *Node = undefined, text: ?*Node = null };
@@ -316,6 +324,11 @@ pub const SliderBuilder = struct {
 
         const hovered = try hooks.useHover(my_scope, track_area);
 
+        const theme_signal = try cx.themeSignal(blk: {
+            var root_scope = scope;
+            while (root_scope.parent) |parent| root_scope = parent;
+            break :blk root_scope;
+        });
         const rt = try my_scope.allocator.create(SliderRuntime);
         rt.* = .{
             .value = value,
@@ -328,8 +341,9 @@ pub const SliderBuilder = struct {
             .step = p.step,
             .thumb_size = p.thumb_size,
             .accent = accent,
-            .accent_hover = t.tokens.color.accent_hover,
+            .accent_hover = t.tokens.color.range_hover,
             .tokens = t,
+            .theme_signal = theme_signal,
             .hovered = hovered,
             // Not equal to any display value: first view must apply
             .shown = std.math.nan(f32),
@@ -396,6 +410,7 @@ fn sliderCaptureLost(node: *Node) void {
     const context = node.behavior.events.event_context orelse return;
     const rt: *SliderRuntime = @ptrCast(@alignCast(context));
     rt.dragging = false;
+    rt.view(false) catch {};
 }
 
 fn sliderOwnsCapture(rt: *const SliderRuntime) bool {
@@ -421,6 +436,7 @@ fn sliderEventHandler(event: Event, context: ?*anyopaque) EventResult {
                 rt.dragging = false;
                 return .stop;
             }
+            rt.view(false) catch {};
             rt.setFromScreenX(e.x);
             return .stop;
         },
@@ -435,6 +451,7 @@ fn sliderEventHandler(event: Event, context: ?*anyopaque) EventResult {
             if (rt.dragging) {
                 rt.dragging = false;
                 if (sliderOwnsCapture(rt)) rt.cx.releasePointerCapture();
+                rt.view(false) catch {};
                 return .stop;
             }
             return .ignored;
@@ -635,7 +652,7 @@ test "Slider: render emits fill highlight" {
     var saw_fill = false;
     for (commands) |cmd| if (cmd.isFillRect()) {
         const r = cmd;
-        if (Color.eql(r.color.toColor(), ctx.tokens.tokens.color.accent) and r.geom.w > 100 and r.geom.h >= 4) {
+        if (Color.eql(r.color.toColor(), ctx.tokens.tokens.color.range_fill) and r.geom.w > 100 and r.geom.h >= 4) {
             saw_fill = true;
         }
     };
@@ -717,22 +734,22 @@ test "Slider: dynamic disabled blocks input and updates focus / a11y / colors" {
     defer ctx.freeNode(result.wrapper);
     const rt = runtimeOf(result);
     try std.testing.expect(result.wrapper.behavior.interaction.focusable);
-    try std.testing.expect(Color.eql(rt.fill_node.getBackground(), ctx.tokens.tokens.color.accent));
+    try std.testing.expect(Color.eql(rt.fill_node.getBackground(), ctx.tokens.tokens.color.range_fill));
 
     off.set(true);
     try std.testing.expect(!result.wrapper.behavior.interaction.focusable);
     try std.testing.expect(result.wrapper.behavior.interaction.a11y.?.disabled);
-    try std.testing.expect(Color.eql(rt.fill_node.getBackground(), ctx.tokens.tokens.color.fg_disabled));
+    try std.testing.expect(Color.eql(rt.fill_node.getBackground(), ctx.tokens.tokens.color.range_disabled));
     try std.testing.expectEqual(EventResult.ignored, sliderKeyHandler(.right, .{}, @ptrCast(rt)));
     try std.testing.expect(!setA11ySliderValue(rt, 80));
     try std.testing.expectEqual(@as(f32, 30), result.value.?.peek());
 
     // When disabled, hover highlight not shown
     rt.hovered.set(true);
-    try std.testing.expect(Color.eql(thumbBorderTarget(rt), ctx.tokens.tokens.color.fg_disabled));
+    try std.testing.expect(Color.eql(thumbBorderTarget(rt), ctx.tokens.tokens.color.range_disabled));
 
     off.set(false);
-    try std.testing.expect(Color.eql(thumbBorderTarget(rt), ctx.tokens.tokens.color.accent_hover));
+    try std.testing.expect(Color.eql(thumbBorderTarget(rt), ctx.tokens.tokens.color.range_hover));
     try std.testing.expect(result.wrapper.behavior.interaction.focusable);
     _ = sliderKeyHandler(.right, .{}, @ptrCast(rt));
     try std.testing.expectEqual(@as(f32, 31), result.value.?.peek());

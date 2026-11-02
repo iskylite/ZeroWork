@@ -494,6 +494,9 @@ pub const Decoder = struct {
         try self.requestUpdate(false);
     }
     fn requestUpdate(self: *Decoder, incremental: bool) !void {
+        // One outstanding FBU: completion queues the next request for the
+        // pipeline to write. Receive/decode and request latency affect FPS;
+        // this mode has no fixed-FPS timer or negotiated ContinuousUpdates.
         if (self.request_outstanding) return error.InvalidRfbState;
         var message: [10]u8 = @splat(0);
         message[0] = 3;

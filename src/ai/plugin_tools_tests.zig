@@ -77,6 +77,48 @@ test "dynamic terminal read advertises only its captured capable targets without
     }
 }
 
+test "host terminal read replaces the legacy catalog and advertises authorized history references" {
+    const a = std.testing.allocator;
+    var fake: Fake = .{};
+    const read_binding: tools.ToolBinding = .{ .plugin_id = "example", .definition_id = "read_terminal", .handler = Fake.handler };
+    var members = [_]tools.Member{ member(&fake, 101, &.{read_binding}), member(&fake, 102, &.{read_binding}) };
+    members[1].authorized = false;
+    const context: @import("host_tools.zig").Context = .{ .conversation_id = .{ .bytes = @splat(1) }, .task_id = .{ .bytes = @splat(2) }, .binding = captured.owner, .binding_revision = 1, .grant_revision = 1 };
+    var table = try tools.RequestTable.initWithHost(a, captured, &.{@import("legacy_adapter.zig").builtin_definitions[1]}, &members, context, &@import("host_terminal_queries.zig").contributions);
+    defer table.deinit();
+    try std.testing.expect(table.lookup("read_terminal") == null);
+    try std.testing.expectError(error.ToolNotInRequest, table.parse(a, "read_terminal", "{\"session_ids\":[101]}"));
+    try std.testing.expectEqual(@as(usize, 3), table.entries.len);
+    var cloned = try tools.cloneTable(&table, a);
+    defer cloned.deinit();
+    const wire = try tools.providerDefinitions(&cloned, cloned.arena.allocator());
+    try std.testing.expectEqual(@as(usize, 0), wire[0].session_ids.len);
+    const body = try @import("provider_http.zig").requestBody(a, .openai_compat, .{ .model = "fixture", .system = "", .messages = &.{}, .tools = wire }, 200000);
+    defer a.free(body);
+    const read = wire[0].dynamic.?;
+    try std.testing.expectEqualStrings("host.read_terminal", read.id);
+    try std.testing.expectEqualStrings(cloned.lookup(read.name).?.definition.schema, read.schema);
+    var loop = @import("tool_loop.zig").Loop.init(a, captured, 1, .{});
+    defer loop.deinit();
+    try loop.start(.{ .model = "fixture", .system = "", .messages = &.{}, .tools = wire, .tool_table = &cloned });
+    const schema_value = try std.json.parseFromSlice(std.json.Value, a, read.schema, .{});
+    defer schema_value.deinit();
+    const properties = schema_value.value.object.get("properties").?.object;
+    const references = properties.get("session_ref").?.object.get("enum").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), references.len);
+    const expected = try @import("host_queries.zig").sessionRef(a, context, members[0].owner);
+    defer a.free(expected);
+    try std.testing.expectEqualStrings(expected, references[0].string);
+    for ([_][]const u8{ "recording_ref", "range_kind", "start_line", "end_line", "cursor", "max_lines", "max_bytes" }) |field| try std.testing.expect(properties.contains(field));
+    const arguments = try std.fmt.allocPrint(a, "{{\"session_ref\":\"{s}\",\"range_kind\":\"lines\",\"start_line\":0,\"end_line\":200,\"max_lines\":20}}", .{expected});
+    defer a.free(arguments);
+    var parsed_call = try cloned.parse(a, read.name, arguments);
+    defer parsed_call.deinit();
+    const request = try @import("host_terminal_queries.zig").parse(read.id, parsed_call.json.value);
+    try std.testing.expectEqual(.lines, request.range_kind);
+    try std.testing.expectEqual(@as(usize, 20), request.max_lines);
+}
+
 test "dynamic tool directory keeps 300 frozen members while each call stays bounded" {
     const a = std.testing.allocator;
     var fake: Fake = .{};

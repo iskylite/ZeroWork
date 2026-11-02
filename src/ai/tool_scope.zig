@@ -80,6 +80,9 @@ pub const Call = struct {
     path: []const u8 = "",
     targets: Targets,
     max_bytes: u32 = 4096,
+    offset: u64 = 0,
+    max_entries: u32 = 128,
+    expected_version: ?u64 = null,
 };
 pub const ParsedCall = struct {
     json: std.json.Parsed(Arguments),
@@ -88,7 +91,7 @@ pub const ParsedCall = struct {
         self.json.deinit();
     }
 };
-const Arguments = struct { session_ids: []const u64, command: []const u8 = "", path: []const u8 = "", max_bytes: u32 = 4096 };
+const Arguments = struct { session_ids: []const u64, command: []const u8 = "", path: []const u8 = "", max_bytes: u32 = 4096, offset: u64 = 0, max_entries: u32 = 128, source_version: []const u8 = "" };
 
 pub fn parse(allocator: std.mem.Allocator, scope: Scope, name: []const u8, arguments: []const u8) !ParsedCall {
     const tool = std.meta.stringToEnum(Tool, name) orelse return error.UnsupportedTool;
@@ -104,7 +107,11 @@ pub fn parse(allocator: std.mem.Allocator, scope: Scope, name: []const u8, argum
         .read_terminal => if (value.command.len != 0 or value.path.len != 0) return error.InvalidToolArguments,
     }
     if (value.max_bytes == 0 or value.max_bytes > 64 * 1024) return error.InvalidToolArguments;
-    return .{ .json = json, .call = .{ .tool = tool, .command = value.command, .path = value.path, .targets = targets, .max_bytes = value.max_bytes } };
+    if (tool == .read_remote_file and value.max_bytes < 4) return error.InvalidToolArguments;
+    if (value.max_entries == 0 or value.max_entries > 128) return error.InvalidToolArguments;
+    const version = if (value.source_version.len == 0) null else if (value.source_version.len == 16) std.fmt.parseInt(u64, value.source_version, 16) catch return error.InvalidToolArguments else return error.InvalidToolArguments;
+    if (value.offset != 0 and version == null) return error.InvalidToolArguments;
+    return .{ .json = json, .call = .{ .offset = value.offset, .max_entries = value.max_entries, .expected_version = version, .tool = tool, .command = value.command, .path = value.path, .targets = targets, .max_bytes = value.max_bytes } };
 }
 
 /// Dispatcher binding lives with the assistant, not the selected UI tab.

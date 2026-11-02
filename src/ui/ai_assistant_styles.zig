@@ -28,7 +28,7 @@ pub fn windowControl() ButtonStyle {
 }
 pub fn controlHover(kind: enum { collapse, maximize, close }) ButtonStyle {
     _ = kind;
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn icon() ui.Style {
     return .{ .width = .{ .px = 14 }, .height = .{ .px = 14 } };
@@ -62,7 +62,7 @@ pub fn messageRow(user: bool) ui.BoxStyle {
     return .{ .width = .fill(), .direction = .column, .align_items = if (user) .end else .start, .padding = .{}, .flex_shrink = 0 };
 }
 pub fn conversation(_: *const ui.ThemeTokens) ui.BoxStyle {
-    return .{ .width = .fill(), .direction = .column, .gap = 12, .padding = .{ .left = 14, .right = 14 }, .height = .{ .fit = .{} }, .flex_shrink = 0 };
+    return .{ .width = .fill(), .direction = .column, .gap = 6, .padding = .{ .left = 14, .right = 14 }, .height = .{ .fit = .{} }, .flex_shrink = 0 };
 }
 // Feedback belongs to the scrollable transcript, never the composer flex stack.
 pub fn noticeHolder(_: *const ui.ThemeTokens) ui.BoxStyle {

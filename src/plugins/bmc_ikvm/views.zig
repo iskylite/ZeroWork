@@ -55,7 +55,25 @@ pub const View = struct {
     closed: bool = false,
     root: ?*ui.Node = null,
     toolbar: ?*ui.Node = null,
+    connection_icon: ?*ui.Node = null,
     connection_title: ?*ui.Node = null,
+    connection_state: ?*ui.Node = null,
+    disconnect_node: ?*ui.Node = null,
+    disconnect_disabled: *ui.Signal(bool) = undefined,
+    disconnect_style: *ui.Signal(ui.BoxStyle) = undefined,
+    connection_symbol: *ui.Signal(?ui.SvgAsset) = undefined,
+    connection_tint: *ui.Signal(?ui.Color) = undefined,
+    connection_hint: *ui.Signal([]const u8) = undefined,
+    connection_label: *ui.Signal([]const u8) = undefined,
+    disconnect_confirm_open: *ui.Signal(bool) = undefined,
+    disconnect_confirm_title: *ui.Signal([]const u8) = undefined,
+    disconnect_confirm_action: *ui.Signal([]const u8) = undefined,
+    disconnect_confirm_dialog: ?*ui.Node = null,
+    disconnect_confirm_target: ?*ui.Node = null,
+    disconnect_confirm_detail: ?*ui.Node = null,
+    disconnect_confirm_return: ?*ui.Node = null,
+    connection_hovered: ?*ui.Signal(bool) = null,
+    connection_focused: ?*ui.Signal(bool) = null,
     tool_nodes: [5]?*ui.Node = @splat(null),
     tool_styles: [5]*ui.Signal(ui.BoxStyle) = undefined,
     tool_hover: *ui.Signal(?ui.BoxStyle) = undefined,
@@ -79,8 +97,9 @@ pub const View = struct {
     progress_last_stage: ?console.progress.Stage = null,
     progress_attempt: ?services.OperationKey = null,
     progress_timing: ?*ui.Node = null,
-    progress_stage_time: ?*ui.Node = null,
+    progress_durations: [vm.progress_group_count]?*ui.Node = @splat(null),
     progress_total_time: ?*ui.Node = null,
+    progress_status: ?*ui.Node = null,
     progress_notice: ?*ui.Node = null,
     progress_steps: ?*ui.Node = null,
     progress_rows: [vm.progress_group_count]?*ui.Node = @splat(null),
@@ -490,6 +509,7 @@ pub const View = struct {
             self.refresh(now) catch |err| self.showMessage(@errorName(err));
         }
         self.updateGeometry();
+        self.syncConnectionIndicator();
         _ = self.updatePopovers();
         self.flushPointerWhenDue();
         if (self.mount_request.frame_sink) |sink| {
@@ -551,6 +571,8 @@ pub const View = struct {
         try self.presentFrame(value);
         try self.updatePerformance(value);
         try self.projectProgress(value);
+        self.disconnect_disabled.set(self.cancel_pending or service.table.cancel == null or value.cleanup != .not_started or value.route == .closed or value.route == .failed);
+        self.syncConnectionIndicator();
         if (self.mount_request.content_context) |context| self.fullscreen_label.set(if (context.fullscreen()) "退出全屏" else "进入全屏");
         if (value.cleanup == .not_started and value.route != .closed and (now - self.last_management_ms >= 1000 or now < self.last_management_ms)) {
             self.last_management_ms = now;
@@ -665,13 +687,15 @@ pub const View = struct {
         }
         var writer: std.Io.Writer.Allocating = .init(cx.allocator);
         defer writer.deinit();
-        if (self.progress_active) try writer.writer.print("{d}.{d}", .{ progress.stage_elapsed_ms / 1000, (progress.stage_elapsed_ms % 1000) / 100 }) else try writer.writer.writeAll("—");
-        try setText(self, self.progress_stage_time, writer.written());
-        writer.clearRetainingCapacity();
-        if (self.progress_active) try writer.writer.print("{d}.{d}", .{ progress.elapsed_ms / 1000, (progress.elapsed_ms % 1000) / 100 }) else try writer.writer.writeAll("—");
+        if (self.progress_active) try vm.writeDuration(&writer.writer, progress.elapsed_ms) else try writer.writer.writeAll("—");
         try setText(self, self.progress_total_time, writer.written());
         writer.clearRetainingCapacity();
         const failure_code = progress.failure_code orelse value.failure_code;
+        const overall_failed = failure_code != null or value.route == .failed or value.video == .failed;
+        const overall_success = !overall_failed and (progress.stage == .streaming or value.video == .streaming);
+        const overall_status: []const u8 = if (overall_failed) "连接失败" else if (progress.stage == .cancelled) "已取消" else if (value.cleanup == .released or value.route == .closed or value.video == .closed) "已结束" else if (self.cancel_pending) "取消中" else if (overall_success) "连接成功" else "连接中";
+        try setText(self, self.progress_status, overall_status);
+        if (self.progress_status) |node| setTextColorIfChanged(node, if (overall_failed) S.theme.current().danger_ink else if (overall_success) S.theme.current().ok_ink else S.progressSecondary());
         if (failure_code) |code| {
             try writer.writer.print("错误码：{s}", .{code});
         } else if (progress.waiting_for_user) {
@@ -680,6 +704,7 @@ pub const View = struct {
             try writer.writer.writeAll("正在取消连接，等待本次资源释放");
         } else if (progress.stage == .cancelled) try writer.writer.writeAll("本次连接已取消，目标与路由配置已保留");
         try setText(self, self.progress_notice, writer.written());
+        if (self.progress_notice) |node| node.setDisplay(if (writer.written().len == 0) .none else .flex);
         if (self.progress_notice) |node| setTextColorIfChanged(node, if (failure_code != null) S.theme.current().danger_ink else S.progressSecondary());
         writer.clearRetainingCapacity();
         if (failure_code != null and progress.failure_stage == null) {
@@ -701,6 +726,10 @@ pub const View = struct {
             const state = self.progress_projection.state(progress, group);
             try setText(self, icon, vm.stepPrefix(state));
             try setText(self, status, vm.stepLabel(state));
+            writer.clearRetainingCapacity();
+            if (vm.progressGroupDuration(progress, group)) |ms| try vm.writeDuration(&writer.writer, ms) else try writer.writer.writeAll("—");
+            try setText(self, self.progress_durations[index], writer.written());
+            writer.clearRetainingCapacity();
             const color = switch (state) {
                 .current, .waiting_for_user => S.theme.current().accent_ink,
                 .done => S.theme.current().fg_1,
@@ -712,6 +741,7 @@ pub const View = struct {
             if (name) |node| setTextColorIfChanged(node, color);
             const current = state == .current or state == .waiting_for_user;
             if (status) |node| setTextColorIfChanged(node, if (current) color else S.progressSecondary());
+            if (self.progress_durations[index]) |node| setTextColorIfChanged(node, if (current) color else S.progressSecondary());
             if (self.progress_rows[index]) |row| {
                 const fill = if (current) S.progressCurrentFill() else ui.Color.TRANSPARENT;
                 if (!std.meta.eql(row.getBackground(), fill)) row.setBackground(fill);
@@ -901,6 +931,14 @@ pub const View = struct {
             const route_height = if (self.progress_route) |route| route.globalRect().h else 0;
             const body_height = @max(0, waiting.globalRect().h - S.progress_padding * 2 - S.progress_header_height - S.progress_action_height - S.progress_gap * 3 - route_height);
             changed = setHeight(cx, body.container, body_height) or changed;
+            // Collapsing diagnostics can make the content shorter than the
+            // viewport. Drop the old offset before it clips the first row.
+            body.state.content_height = body.content.globalRect().h;
+            body.state.viewport_height = body.container.globalRect().h;
+            if (body.state.scroll_y > body.state.maxScrollY()) {
+                ui.widgets.scroll_area.setScrollY(body.state, body.content, body.state.maxScrollY());
+                changed = true;
+            }
         };
         if (self.log_modal) |modal| {
             const compact = cx.viewport.height < 600;
@@ -1069,20 +1107,24 @@ pub const View = struct {
                 self.bounds_layout_pending = true;
             }
         }
-        if (self.toolbar) |bar| {
+        if (self.toolbar != null) {
             // The measured compact prototype reduces button width, retaining all
             // five entries in one row at the product's minimum window width.
             const compact = rect.w < 1000;
-            bar.setStyleInline(alloc, .{ .gap = 6, .padding = .{ .left = 12, .right = 12, .top = 10, .bottom = 10 } });
             if (self.last_compact == null or self.last_compact.? != compact or self.last_theme_version != self.mount_request.cx.theme_version) {
                 self.last_compact = compact;
                 self.last_theme_version = self.mount_request.cx.theme_version;
+                if (self.connection_icon) |icon| _ = icon.setTint(S.theme.current().fg_2);
                 var style = S.tool();
-                style.width = .{ .px = if (compact) 74 else 82 };
+                style.width = .{ .px = if (compact) 58 else 82 };
                 style.font_size = if (compact) 11 else 12;
                 for (self.tool_styles) |source| source.set(style);
                 self.tool_hover.set(S.toolHover());
                 self.key_style.set(S.keyButton());
+                var disconnect_style = S.disconnect();
+                disconnect_style.font_size = if (compact) 11 else 12;
+                self.disconnect_style.set(disconnect_style);
+                if (self.disconnect_confirm_dialog) |dialog| dialog.setStyleInline(alloc, .{ .background = S.theme.current().overlay });
                 self.fit_style.set(S.segment(self.mode == .fit));
                 self.original_style.set(S.segment(self.mode == .original));
                 for (self.menus) |maybe| if (maybe) |popup| popup.chrome.setStyleInline(alloc, S.popup());
@@ -1097,9 +1139,49 @@ pub const View = struct {
     }
     fn connectionStatus(raw: *anyopaque) contract.ConnectionStatus {
         const self: *View = @ptrCast(@alignCast(raw));
+        return self.connectionState();
+    }
+    fn showConnectionDetails(raw: *anyopaque) void {
+        const self: *View = @ptrCast(@alignCast(raw));
+        self.showLog();
+    }
+    fn syncConnectionIndicator(self: *View) void {
+        if (self.connection_state) |node| if (node.behavior.interaction.a11y) |*a11y| {
+            a11y.disabled = self.disconnect_disabled.peek();
+        };
+        const status = self.connectionState();
+        const hovered = if (self.connection_hovered) |signal| signal.peek() else false;
+        const focused = if (self.connection_focused) |signal| signal.peek() else false;
+        const hot = (hovered or focused) and !self.disconnect_disabled.peek();
+        const asset: ui.SvgAsset = if (hot) ui.icons.unplug else switch (status.state) {
+            .connecting => ui.icons.loader_circle,
+            .online => ui.icons.circle_check,
+            .degraded => ui.icons.circle_x,
+            .ended => ui.icons.unplug,
+        };
+        const color = if (hot) S.theme.current().danger else switch (status.state) {
+            .connecting => S.theme.current().accent_ink,
+            .online => S.theme.current().ok,
+            .degraded => S.theme.current().danger,
+            .ended => S.theme.current().fg_2,
+        };
+        if (self.connection_symbol.peek() == null or self.connection_symbol.peek().?.icon_id != asset.icon_id) self.connection_symbol.set(asset);
+        if (self.connection_tint.peek() == null or !std.meta.eql(self.connection_tint.peek().?, color)) self.connection_tint.set(color);
+        const hint = if (hot) (if (status.state == .connecting) "取消连接" else "断开连接") else if (status.state == .online) "已连接" else status.label;
+        if (!std.mem.eql(u8, self.connection_hint.peek(), hint)) self.connection_hint.set(hint);
+        const label = if (hot) hint else switch (status.state) {
+            .connecting => "连接中",
+            .online => "已连接",
+            .degraded => "连接失败",
+            .ended => "已断开",
+        };
+        if (!std.mem.eql(u8, self.connection_label.peek(), label)) self.connection_label.set(label);
+    }
+    fn connectionState(self: *View) contract.ConnectionStatus {
         if (self.closed) return .{ .state = .ended, .label = "已结束" };
         const snapshot = self.snapshot orelse return .{ .state = .connecting, .label = "正在准备连接" };
         const value = snapshot.value;
+        if (self.cancel_pending) return if (value.cleanup == .released) .{ .state = .ended, .label = "已断开" } else if (value.cleanup == .unknown) .{ .state = .degraded, .label = "清理结果待确认" } else .{ .state = .connecting, .label = "断开中" };
         if (value.cleanup == .unknown) return .{ .state = .degraded, .label = "清理结果待确认" };
         if (value.cleanup == .awaiting) return .{ .state = .connecting, .label = "正在释放连接" };
         if (value.progress.stage == .cancelled) return .{ .state = .ended, .label = "连接已取消" };
@@ -1162,7 +1244,16 @@ pub const View = struct {
         // owned. Unmount releases presentation references and never joins IO.
         self.root = null;
         self.toolbar = null;
+        self.connection_icon = null;
         self.connection_title = null;
+        self.connection_state = null;
+        self.connection_hovered = null;
+        self.connection_focused = null;
+        self.disconnect_node = null;
+        self.disconnect_confirm_dialog = null;
+        self.disconnect_confirm_target = null;
+        self.disconnect_confirm_detail = null;
+        self.disconnect_confirm_return = null;
         self.viewport = null;
         self.scroll = null;
         self.image_node = null;
@@ -1173,8 +1264,9 @@ pub const View = struct {
         self.waiting_body = null;
         self.waiting_actions = null;
         self.progress_timing = null;
-        self.progress_stage_time = null;
+        self.progress_durations = @splat(null);
         self.progress_total_time = null;
+        self.progress_status = null;
         self.progress_notice = null;
         self.progress_steps = null;
         self.progress_rows = @splat(null);
@@ -1279,6 +1371,27 @@ pub const View = struct {
         const service = self.borrowConsole() catch return;
         service.table.retry(service.binding.context, service.binding) catch |err| self.showMessage(@errorName(err));
     }
+    fn disconnectConnection(self: *View) void {
+        if (self.closed or self.disconnect_disabled.peek() or self.disconnect_confirm_open.peek()) return;
+        const connecting = self.connectionState().state == .connecting;
+        self.disconnect_confirm_title.set(if (connecting) "取消连接？" else "断开连接？");
+        self.disconnect_confirm_action.set(if (connecting) "取消连接" else "断开连接");
+        setText(self, self.disconnect_confirm_target, if (self.connection_title) |node| node.getText().?.content else "KVM 控制台") catch return;
+        setText(self, self.disconnect_confirm_detail, if (connecting) "将取消当前 KVM 连接尝试。" else "将结束当前 KVM 会话并释放键盘鼠标，主机将继续运行。") catch return;
+        self.releaseInput(.released);
+        self.closeMenus();
+        self.disconnect_confirm_open.set(true);
+        if (self.disconnect_confirm_return) |node| self.mount_request.cx.setFocus(node);
+        self.mount_request.cx.requestRedraw();
+    }
+    fn dismissDisconnect(self: *View) void {
+        self.disconnect_confirm_open.set(false);
+    }
+    fn confirmDisconnect(self: *View) void {
+        if (self.closed or !self.disconnect_confirm_open.peek()) return;
+        self.disconnect_confirm_open.set(false);
+        if (!self.disconnect_disabled.peek()) self.cancel();
+    }
     fn cancel(self: *View) void {
         if (self.closed or self.cancel_pending) return;
         self.releaseInput(.released);
@@ -1290,6 +1403,8 @@ pub const View = struct {
         };
         self.cancel_pending = true;
         self.cancel_disabled.set(true);
+        self.disconnect_disabled.set(true);
+        self.closeMenus();
         self.mount_request.cx.requestRedraw();
     }
     fn showLog(self: *View) void {
@@ -1540,6 +1655,15 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     state.order_open = try scope.createSignal(bool, false);
     state.log_open = try scope.createSignal(bool, false);
     state.cancel_disabled = try scope.createSignal(bool, false);
+    state.disconnect_disabled = try scope.createSignal(bool, true);
+    state.disconnect_style = try scope.createSignal(ui.BoxStyle, S.disconnect());
+    state.connection_symbol = try scope.createSignal(?ui.SvgAsset, ui.icons.loader_circle);
+    state.connection_tint = try scope.createSignal(?ui.Color, S.theme.current().accent_ink);
+    state.connection_hint = try scope.createSignal([]const u8, "连接中");
+    state.connection_label = try scope.createSignal([]const u8, "连接中");
+    state.disconnect_confirm_open = try scope.createSignal(bool, false);
+    state.disconnect_confirm_title = try scope.createSignal([]const u8, "断开连接？");
+    state.disconnect_confirm_action = try scope.createSignal([]const u8, "断开连接");
     state.retry_disabled = try scope.createSignal(bool, true);
     state.fit_style = try scope.createSignal(ui.BoxStyle, S.segment(true));
     state.original_style = try scope.createSignal(ui.BoxStyle, S.segment(false));
@@ -1553,11 +1677,24 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     const bar = try ui.hstackStyled(cx, S.toolbar, .{});
     try root.appendChild(cx.allocator, bar);
     state.toolbar = bar;
+    const identity = try ui.hstackStyled(cx, S.connectionIdentity, .{});
+    try bar.appendChild(cx.allocator, identity);
+    const connection_icon = try ui.iconTint(cx, ui.icons.monitor, S.theme.current().fg_2, .{ .width = .{ .px = 18 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+    connection_icon.meta.ownership.meta.test_id = "bmc.title.icon";
+    try identity.appendChild(cx.allocator, connection_icon);
+    state.connection_icon = connection_icon;
     const connection_title = try ui.textStyled(cx, S.connectionTitle, "KVM 控制台");
     connection_title.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
     connection_title.meta.ownership.meta.test_id = "bmc.title";
-    try bar.appendChild(cx.allocator, connection_title);
+    try identity.appendChild(cx.allocator, connection_title);
     state.connection_title = connection_title;
+    const disconnect = try ui.widgets.Button(.{ .label = state.connection_label, .variant = .ghost, .icon_asset = state.connection_symbol, .icon_tint = state.connection_tint, .icon_size = @as(f32, 14), .a11y_label = state.connection_hint, .base_style = state.disconnect_style, .hover_style = state.tool_hover, .on_click = cx.on(View, state, View.disconnectConnection) }).mount(scope, cx);
+    disconnect.meta.ownership.meta.test_id = "bmc.disconnect";
+    try bar.appendChild(cx.allocator, disconnect);
+    state.disconnect_node = disconnect;
+    state.connection_state = disconnect;
+    state.connection_hovered = try ui.hooks.useHover(scope, disconnect);
+    state.connection_focused = (try ui.hooks.useFocusState(scope, cx, disconnect)).focused;
     for (menu_names, menu_ids, menu_icons, 0..) |name, id, icon, index| {
         const action = try cx.bindState(MenuAction, .{ .view = state, .menu = @fromBackingInt(@intCast(index)) });
         var popup = try ui.widgets.Popover(.{ .trigger = .manual, .open = state.open[index], .position = .bottom_start, .width = if (index == 4) S.boot_width else S.popup_width, .max_width = if (index == 4) S.boot_width else S.popup_width, .constrain_width_to_viewport = true, .max_height = @as(f32, 730), .viewport_padding = @as(f32, 12), .shift_main_axis = true, .offset = .{ .static = 8 }, .size_policy = .fit_content, .enter_transition = .fade, .exit_transition = .fade, .on_open_change = cx.on(MenuAction, action, MenuAction.changed) }).mount(scope, cx);
@@ -1634,6 +1771,7 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     try video_card.appendChild(cx.allocator, fps_hud);
     try mountProgress(state, scroll.container);
     try mountConnectionLog(state);
+    try mountDisconnectConfirmation(state);
     try scope.onCleanup(View, state, View.release);
     root.meta.per_frame.hooks.slots.anim_state = state;
     root.addBeforeRender(View.beforeRender);
@@ -1641,7 +1779,35 @@ pub fn mount(_: ?*anyopaque, request: contract.ContentMount) !contract.RendererI
     state.after_layout_registered = true;
     try state.refresh(cx.frame_time_ms);
     cx.requestRedraw();
-    return .{ .context = state, .vtable = &.{ .update = View.update, .focus_changed = View.focus, .unmount = View.unmount, .connection_status = View.connectionStatus } };
+    return .{ .context = state, .vtable = &.{ .update = View.update, .focus_changed = View.focus, .unmount = View.unmount, .connection_status = View.connectionStatus, .show_connection_details = View.showConnectionDetails } };
+}
+
+fn mountDisconnectConfirmation(state: *View) !void {
+    const cx = state.mount_request.cx;
+    const scope = state.mount_request.scope;
+    const modal = try ui.widgets.Modal(.{ .title = state.disconnect_confirm_title, .open = state.disconnect_confirm_open, .width = @as(f32, 440), .max_height = @as(f32, 320), .background = S.theme.current().overlay, .close_icon_asset = ui.icons.x, .enter_transition = .fade, .exit_transition = .fade }).mount(scope, cx);
+    if (!modal.portaled) try state.root.?.appendChild(cx.allocator, modal.overlay);
+    modal.dialog.meta.ownership.meta.test_id = "bmc.disconnect.confirmation";
+    state.disconnect_confirm_dialog = modal.dialog;
+    modal.body.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 12, .padding = ui.Padding.all(18), .min_width = 0 });
+    const target = try ui.textStyled(cx, S.title, "KVM 控制台");
+    target.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
+    try modal.body.appendChild(cx.allocator, target);
+    state.disconnect_confirm_target = target;
+    const detail = try ui.textStyled(cx, S.confirmationDetail, "");
+    detail.setStyleInline(cx.allocator, .{ .width = .fill() });
+    try modal.body.appendChild(cx.allocator, detail);
+    state.disconnect_confirm_detail = detail;
+    const actions = try ui.hstackStyled(cx, S.actions, .{});
+    actions.setStyleInline(cx.allocator, .{ .margin = .{ .top = 8 } });
+    try modal.body.appendChild(cx.allocator, actions);
+    const back = try ui.widgets.Button(.{ .label = "返回", .variant = .secondary, .base_style = S.action(), .on_click = cx.on(View, state, View.dismissDisconnect) }).mount(scope, cx);
+    back.meta.ownership.meta.test_id = "bmc.disconnect.return";
+    try actions.appendChild(cx.allocator, back);
+    state.disconnect_confirm_return = back;
+    const confirm = try ui.widgets.Button(.{ .label = state.disconnect_confirm_action, .variant = .danger, .base_style = S.action(), .on_click = cx.on(View, state, View.confirmDisconnect) }).mount(scope, cx);
+    confirm.meta.ownership.meta.test_id = "bmc.disconnect.confirm";
+    try actions.appendChild(cx.allocator, confirm);
 }
 
 fn mountProgress(state: *View, parent: *ui.Node) !void {
@@ -1656,15 +1822,6 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
     const surface = try ui.boxStyled(cx, S.progressSurface, .{});
     surface.meta.ownership.meta.test_id = "bmc.progress.surface";
     try waiting.appendChild(cx.allocator, surface);
-    const route = try ui.boxStyled(cx, S.progressRouteBox, .{});
-    route.meta.ownership.meta.test_id = "bmc.progress.route";
-    try waiting.appendChild(cx.allocator, route);
-    state.progress_route = route;
-    try route.appendChild(cx.allocator, try ui.textStyled(cx, S.progressRouteLabel, "连接路径"));
-    state.progress_route_text = try ui.textStyled(cx, S.progressRoute, "");
-    state.progress_route_text.?.meta.ownership.meta.test_id = "bmc.progress.target";
-    state.progress_route_text.?.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
-    try route.appendChild(cx.allocator, state.progress_route_text.?);
     const header = try ui.vstackStyled(cx, S.progressHeader, .{});
     try waiting.appendChild(cx.allocator, header);
     state.waiting_header = header;
@@ -1672,25 +1829,34 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
     state.waiting_title.?.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 26 }, .flex_shrink = 0 });
     state.waiting_title.?.meta.ownership.meta.test_id = "bmc.progress.stage";
     try header.appendChild(cx.allocator, state.waiting_title.?);
-    const timing = try ui.hstack(cx, .{ .width = .fill(), .height = .{ .px = 18 }, .gap = 6, .align_items = .center, .flex_shrink = 0 }, .{});
+    const route = try ui.boxStyled(cx, S.progressRouteBox, .{});
+    route.meta.ownership.meta.test_id = "bmc.progress.route";
+    try waiting.appendChild(cx.allocator, route);
+    state.progress_route = route;
+    const route_heading = try ui.hstack(cx, .{ .width = .fill(), .height = .{ .px = 18 }, .gap = 12, .padding = .{ .right = 20 }, .align_items = .center, .flex_shrink = 0 }, .{});
+    try route.appendChild(cx.allocator, route_heading);
+    try route_heading.appendChild(cx.allocator, try ui.textStyled(cx, S.progressRouteLabel, "连接路径"));
+    try route_heading.appendChild(cx.allocator, try ui.spacer(cx));
+    const timing = try ui.hstack(cx, .{ .width = .{ .fit = .{} }, .height = .{ .px = 18 }, .gap = 8, .align_items = .center, .flex_shrink = 0 }, .{});
     timing.meta.ownership.meta.test_id = "bmc.progress.timing";
-    try header.appendChild(cx.allocator, timing);
+    try route_heading.appendChild(cx.allocator, timing);
     state.progress_timing = timing;
-    try timing.appendChild(cx.allocator, try ui.textStyled(cx, S.progressTimingLabel, "当前阶段"));
-    state.progress_stage_time = try ui.textStyled(cx, S.progressTiming, "—");
-    state.progress_stage_time.?.setStyleInline(cx.allocator, .{ .width = .{ .px = 64 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
-    state.progress_stage_time.?.meta.ownership.meta.test_id = "bmc.progress.stage_time";
-    try timing.appendChild(cx.allocator, state.progress_stage_time.?);
-    try timing.appendChild(cx.allocator, try ui.textStyled(cx, S.progressTimingLabel, "秒 · 总计"));
     state.progress_total_time = try ui.textStyled(cx, S.progressTiming, "—");
-    state.progress_total_time.?.setStyleInline(cx.allocator, .{ .width = .{ .px = 64 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+    state.progress_total_time.?.setStyleInline(cx.allocator, .{ .width = .{ .px = 76 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
     state.progress_total_time.?.meta.ownership.meta.test_id = "bmc.progress.total_time";
     try timing.appendChild(cx.allocator, state.progress_total_time.?);
-    try timing.appendChild(cx.allocator, try ui.textStyled(cx, S.progressTimingLabel, "秒"));
+    state.progress_status = try ui.textStyled(cx, S.progressState, "连接中");
+    state.progress_status.?.setStyleInline(cx.allocator, .{ .width = .{ .px = 55 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
+    state.progress_status.?.meta.ownership.meta.test_id = "bmc.progress.status";
+    try timing.appendChild(cx.allocator, state.progress_status.?);
+    state.progress_route_text = try ui.textStyled(cx, S.progressRoute, "");
+    state.progress_route_text.?.meta.ownership.meta.test_id = "bmc.progress.target";
+    state.progress_route_text.?.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
+    try route.appendChild(cx.allocator, state.progress_route_text.?);
     state.progress_notice = try ui.textStyled(cx, S.progressNotice, "");
     state.progress_notice.?.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 18 }, .flex_shrink = 0 });
     state.progress_notice.?.meta.ownership.meta.test_id = "bmc.progress.notice";
-    try header.appendChild(cx.allocator, state.progress_notice.?);
+
     const body = try ui.widgets.ScrollArea(.{ .height = @as(f32, 1), .direction = .vertical, .rubber_band_y = false }).mount(scope, cx);
     body.container.setStyleInline(cx.allocator, .{ .width = .fill(), .flex_shrink = 0, .min_width = 0 });
     body.container.meta.ownership.meta.test_id = "bmc.progress.body";
@@ -1700,6 +1866,7 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
     body.content.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .gap = 12, .min_width = 0, .flex_shrink = 0 });
     try waiting.appendChild(cx.allocator, body.container);
     state.waiting_body = body;
+    try body.content.appendChild(cx.allocator, state.progress_notice.?);
     const steps = try ui.vstackStyled(cx, S.progressSteps, .{});
     steps.meta.ownership.meta.test_id = "bmc.progress.steps";
     try body.content.appendChild(cx.allocator, steps);
@@ -1727,6 +1894,12 @@ fn mountProgress(state: *View, parent: *ui.Node) !void {
         name.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try button.appendChild(cx.allocator, name);
         state.progress_names[index] = name;
+        const duration = try ui.textStyled(cx, S.progressTiming, "—");
+        duration.setStyleInline(cx.allocator, .{ .width = .{ .px = 76 }, .height = .{ .px = 18 }, .font_size = 11, .flex_shrink = 0 });
+        setTextLayout(duration, 18.0 / 11.0, .end);
+        duration.meta.ownership.meta.test_id = try scopedId(scope, "bmc.progress.duration.", @tagName(group));
+        try button.appendChild(cx.allocator, duration);
+        state.progress_durations[index] = duration;
         const status = try ui.textStyled(cx, S.progressState, "等待");
         status.setStyleInline(cx.allocator, .{ .width = .{ .px = 55 }, .flex_shrink = 0 });
         setTextLayout(status, 18.0 / 11.0, .end);

@@ -27,7 +27,8 @@ pub fn elapsedMs(turn: *const Turn, now_wall: u64, now_mono: u64) u64 {
 pub fn usageLabel(buffer: []u8, turn: *const Turn) ![]const u8 {
     const input = turn.input_tokens orelse return "Token 用量未返回";
     const output = turn.output_tokens orelse return "Token 用量未返回";
-    return std.fmt.bufPrint(buffer, "Token {d}", .{input +| output});
+    var count_buffer: [32]u8 = undefined;
+    return std.fmt.bufPrint(buffer, "Token {s}", .{try @import("ai_token_count.zig").format(&count_buffer, input +| output)});
 }
 pub fn waveOffset(time_ms: f64, index: usize, reduced_motion: bool) f32 {
     if (reduced_motion) return 0;

@@ -39,6 +39,7 @@ pub fn writeConfig(value: *config.Config, section: []const u8, key: []const u8, 
         if (std.mem.eql(u8, section, "notify") and std.mem.eql(u8, key, "quiet_hours") and !config.validQuietHours(next.text)) return error.InvalidValue;
         if (std.mem.eql(u8, section, "log") and std.mem.eql(u8, key, "export_format") and !std.mem.eql(u8, next.text, "txt") and !std.mem.eql(u8, next.text, "cast") and !std.mem.eql(u8, next.text, "txt_cast")) return error.InvalidValue;
     }
+    if (std.mem.eql(u8, section, "updates") and std.mem.eql(u8, key, "auto_check")) return setBool(&value.updates.auto_check, next);
     if (std.mem.eql(u8, section, "completion") and std.mem.eql(u8, key, "enabled")) return setBool(&value.completion.enabled, next);
     if (std.mem.eql(u8, section, "ui.materials") and std.mem.eql(u8, key, "blur_px")) return setUnsigned(&value.ui.materials.blur_px, next, 0, 96);
     if (std.mem.eql(u8, section, "ui.materials.background")) {
@@ -179,6 +180,7 @@ pub fn read(value: config.Config, section: []const u8, key: []const u8) ?Value {
         if (std.mem.eql(u8, key, "alignment_y")) return .{ .text = @tagName(background.alignment_y) };
         if (std.mem.eql(u8, key, "transparency")) return .{ .decimal = background.transparency };
     }
+    if (std.mem.eql(u8, section, "updates") and std.mem.eql(u8, key, "auto_check")) return .{ .boolean = value.updates.auto_check };
     if (std.mem.eql(u8, section, "completion") and std.mem.eql(u8, key, "enabled")) return .{ .boolean = value.completion.enabled };
     if (std.mem.eql(u8, section, "ui")) {
         if (std.mem.eql(u8, key, "theme")) return .{ .text = value.ui.theme };

@@ -35,9 +35,9 @@ try{
  await h.screenshot(join(out,'group-focused.png'));
  const source=panes[0].rect,target=panes[1].rect;
  await h.mouseDown(source.x+16,source.y+18);await h.mouseMove(target.x+target.w/2,target.y+18);await h.mouseUp(target.x+target.w/2,target.y+18);
- const reordered=flat(await h.query('groups.workspace')).filter((n:any)=>/^groups\.pane\.\d+$/.test(n.test_id??''));assert.equal(reordered[0].test_id,panes[1].test_id,'drag reordered the real panes');
+ const reordered=flat(await h.query('groups.workspace')).filter((n:any)=>/^groups\.pane\.\d+$/.test(n.test_id??''));const moved=reordered.find(n=>n.test_id===panes[0].test_id),sibling=reordered.find(n=>n.test_id===panes[1].test_id);assert(moved&&sibling);assert(Math.abs(moved.rect.x-sibling.rect.x)<1&&moved.rect.y<sibling.rect.y,'dropping at the top edge creates a nested vertical split');
  await h.screenshot(join(out,'group-after-drag.png'));
  await writeFile(join(out,'group.tree.json'),JSON.stringify(await h.query('groups.workspace'),null,2));
- report.status='passed';report.checks=['two real Local panes','4px spacing','focus changes without a frame','drag completion retains borderless panes'];
+ report.status='passed';report.checks=['two real Local panes','4px spacing','focus changes without a frame','edge docking creates a nested split and retains borderless panes'];
 }catch(error){report.status='failed';report.error=String(error);await h.screenshot(join(out,'failure.png')).catch(()=>{});process.exitCode=1}
 finally{app.kill('SIGTERM');await new Promise<void>(r=>{if(app.exitCode!==null||app.signalCode!==null)return r();app.once('close',()=>r());setTimeout(()=>{app.kill('SIGKILL');r()},3000)});await log.close();await rm(iso,{recursive:true,force:true});await writeFile(join(out,'report.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report))}

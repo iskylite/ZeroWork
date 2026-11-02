@@ -1,4 +1,3 @@
-// GENERATED FILE, do not edit: generated from switch.yix; after editing the source run `zig build gen-yix` (yix-lsp regenerates it on save).
 //! Switch view. Styles in styles.yss (SwitchParts), tests in mod.zig.
 const ui = @import("../../ui.zig");
 const S = @import("_styles.yss.zig");
@@ -34,8 +33,8 @@ fn __yix_Switch(__yix_props: SwitchProps, scope: *ui.Scope, cx: *ui.Cx) anyerror
         } }.__yix_compute);
     };
     const __yix_root = try ui.view.render(scope, cx, ui.view.row(.{ .style = S.SwitchParts.slot(.root, .{ .disabled = disabled }), .tag = .button, .focusable = enabled, .focus_ring = focusRing, .a11y = .{ .role = .switch_role, .checked = checked, .disabled = disabled, .label = label }, .on_click = try ui.on.bind(scope, .{ .disabled = disabled, .checked = checked, .__yix_model_checked = __yix_model_checked, .onChange = onChange, .__yix_owner = scope.owner, }, struct { fn __yix_run(__yix_ctx: anytype) void { __yix_ctx.__yix_owner.beginBatch(); defer __yix_ctx.__yix_owner.endBatch(); if (!__yix_ctx.disabled.peek()) { __yix_ctx.__yix_model_checked.propose(!__yix_ctx.checked.peek(), __yix_ctx.onChange); }  } }.__yix_run), }, .{
-            ui.view.box(.{ .style = S.SwitchParts.slot(.track, .{ .checked = checked }), }, .{
-                ui.view.box(.{ .style = S.SwitchParts.slot(.thumb, .{ .checked = checked }), }, .{ }),
+            ui.view.box(.{ .style = S.SwitchParts.slot(.track, .{ .checked = checked, .disabled = disabled }), }, .{
+                ui.view.box(.{ .style = S.SwitchParts.slot(.thumb, .{ .checked = checked, .disabled = disabled }), }, .{ }),
             }),
             ui.view.lazyIf(__yix_d1: {
         const __yix_T = @TypeOf(label.peek().len != 0);
@@ -51,4 +50,4 @@ fn __yix_Switch(__yix_props: SwitchProps, scope: *ui.Scope, cx: *ui.Cx) anyerror
 
 //# yix-map-data [[459,454]]
 
-//# yix-map switch.yix
+//# yix-map src/ui/components/checkbox/switch.yix

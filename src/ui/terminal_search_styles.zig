@@ -74,7 +74,7 @@ pub fn paintInput(cx: *ui.Cx, input: ui.widgets.input.InputResult, focus_ring: *
     input.state.tokens = cx.tokens;
     input.state.placeholder_color = c.fg_2;
     input.state.dirty = true;
-    input.input_container.setBackground(if (input.state.focused) theme.popupSelection() else theme.popupInset());
+    input.input_container.setBackground(if (input.state.focused) theme.states().focus else theme.states().control);
     input.input_container.setBorderColor(ui.Color.TRANSPARENT);
     focus_ring.setStyleInline(cx.allocator, .{ .border = .{ .width = 0, .color = ui.Color.TRANSPARENT, .radius = 8 } });
     input.input_container.markRenderDirty();

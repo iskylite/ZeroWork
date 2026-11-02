@@ -633,7 +633,7 @@ const FocusSurfaceRole = enum { custom, transparent, input, primary, danger, dan
 
 fn focusSurfaceRole(color: Color, t: *const @import("theme.zig").ThemeTokens) FocusSurfaceRole {
     if (color.a == 0) return .transparent;
-    inline for (.{ .{ "button_primary_bg", .primary }, .{ "danger", .danger }, .{ "danger_hover", .danger_hover }, .{ "input_bg", .input }, .{ "bg_primary", .base }, .{ "bg_secondary", .secondary }, .{ "bg_tertiary", .tertiary }, .{ "bg_hover", .hover } }) |entry| {
+    inline for (.{ .{ "button_primary_bg", .primary }, .{ "button_danger_bg", .danger }, .{ "button_danger_hover", .danger_hover }, .{ "input_bg", .input }, .{ "bg_primary", .base }, .{ "bg_secondary", .secondary }, .{ "bg_tertiary", .tertiary }, .{ "bg_hover", .hover } }) |entry| {
         if (Color.eql(color, @field(t.tokens.color, entry[0]))) return entry[1];
     }
     return .custom;
@@ -645,8 +645,8 @@ fn focusSurfaceRestingColor(role: FocusSurfaceRole, t: *const @import("theme.zig
         .transparent => Color.TRANSPARENT,
         .input => t.tokens.color.input_bg,
         .primary => t.tokens.color.button_primary_bg,
-        .danger => t.tokens.color.danger,
-        .danger_hover => t.tokens.color.danger_hover,
+        .danger => t.tokens.color.button_danger_bg,
+        .danger_hover => t.tokens.color.button_danger_hover,
         .base => t.tokens.color.bg_primary,
         .secondary => t.tokens.color.bg_secondary,
         .tertiary => t.tokens.color.bg_tertiary,
@@ -655,9 +655,14 @@ fn focusSurfaceRestingColor(role: FocusSurfaceRole, t: *const @import("theme.zig
 }
 
 fn focusSurfaceActiveColor(state: *const FocusRingAnimState, cx: *const Cx) Color {
+    // Selection belongs to the control, and can change after mouse-down focus.
+    // Do not replace a newly selected row with the generic focus surface.
+    if (state.node) |node| if (node.behavior.interaction.a11y) |attrs|
+        if (attrs.selected) return cx.tokens.tokens.color.list_selection_hover_bg;
     return switch (state.resting_surface) {
-        .primary, .danger, .danger_hover => Color.lerp(focusSurfaceRestingColor(state.resting_surface, cx.tokens).?, Color.BLACK, 0.12),
-        else => cx.tokens.tokens.color.bg_active,
+        .primary => if (cx.pressed_node == state.node) cx.tokens.tokens.color.button_primary_pressed else cx.tokens.tokens.color.button_primary_hover,
+        .danger, .danger_hover => if (cx.pressed_node == state.node) cx.tokens.tokens.color.button_danger_pressed else cx.tokens.tokens.color.button_danger_hover,
+        else => if (cx.pressed_node == state.node) cx.tokens.tokens.color.bg_active else cx.tokens.tokens.color.bg_focus,
     };
 }
 
@@ -841,7 +846,10 @@ fn focusRingOnBlur(context: *anyopaque) void {
     const epoch = fm.transition_epoch;
     rc.active = false;
     if (rc.anim_state) |state| if (state.surface_cx) |cx| {
-        if (state.node) |node| if (focusSurfaceRestingColor(state.resting_surface, cx.tokens) orelse state.resting_background) |color| paintFocusSurface(node, color);
+        if (state.node) |node| {
+            const selected = if (node.behavior.interaction.a11y) |attrs| attrs.selected else false;
+            if (selected) paintFocusSurface(node, cx.tokens.tokens.color.selection_bg) else if (focusSurfaceRestingColor(state.resting_surface, cx.tokens) orelse state.resting_background) |color| paintFocusSurface(node, color);
+        }
         state.resting_background = null;
         state.resting_surface = .custom;
     };

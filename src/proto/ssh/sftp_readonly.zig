@@ -43,8 +43,8 @@ pub const Connector = struct {
 pub const Action = union(enum) {
     realpath,
     stat,
-    list: struct { page_entries: u16 = page_limit, max_entries: u32 = entry_limit },
-    read_text: struct { max_bytes: u32 = 4096 },
+    list: struct { page_entries: u16 = page_limit, max_entries: u32 = entry_limit, paged: bool = false, offset: u64 = 0, expected_version: ?u64 = null },
+    read_text: struct { max_bytes: u32 = 4096, offset: u64 = 0, expected_version: ?u64 = null },
     mkdir: struct { name: []const u8 },
 };
 pub const Request = struct {
@@ -63,6 +63,8 @@ pub const Entry = struct {
 pub const Text = struct {
     text: []const u8,
     original_size: ?u64,
+    offset: u64 = 0,
+    source_version: u64 = 0,
     read_bytes: usize,
     captured_at_ms: i64,
     truncated: bool,
@@ -89,7 +91,7 @@ pub const Body = union(enum) {
     ready,
     realpath: []const u8,
     stat: Attributes,
-    page: struct { index: u32, entries: []const Entry },
+    page: struct { index: u32, entries: []const Entry, offset: u64 = 0, source_version: u64 = 0, next_offset: ?u64 = null },
     text: Text,
     /// A completed mutation stays factual even if its owner later expires.
     created: []const u8,
@@ -466,8 +468,8 @@ const Context = struct {
         switch (work.request.action) {
             .realpath => result.value.body = .{ .realpath = resolved },
             .stat => unreachable,
-            .list => |options| try self.list(result, resolved, options.page_entries, options.max_entries),
-            .read_text => |options| try self.readText(result, resolved, options.max_bytes),
+            .list => |options| if (options.paged) try self.listPage(result, resolved, options) else try self.list(result, resolved, options.page_entries, options.max_entries),
+            .read_text => |options| try self.readText(result, resolved, options),
             .mkdir => |options| {
                 // Allocate before native acceptance: OOM/cancel after success
                 // must never hide a directory which was actually created.
@@ -540,13 +542,40 @@ const Context = struct {
             }
         }
     }
-    fn readText(self: *Context, result: *OwnedResult, resolved: [:0]const u8, max_bytes: usize) !void {
+    fn listPage(self: *Context, result: *OwnedResult, resolved: [:0]const u8, options: @FieldType(Action, "list")) !void {
+        const before = try self.call(ssh.Session.sftpStat, .{ &self.service.session.?, resolved, false });
+        var handle = try self.call(ssh.Session.sftpOpenReadonly, .{ &self.service.session.?, resolved, true });
+        defer self.closeHandle(&handle);
+        var page: DirectoryScan = .{};
+        var entries: std.ArrayList(Entry) = .empty;
+        const a = result.arena.allocator();
+        var buffer: [path_limit + 1]u8 = undefined;
+        while (try self.call(ssh.SftpReadonlyHandle.readDirectory, .{ &handle, &buffer })) |item| {
+            try self.check();
+            if (std.mem.eql(u8, item.name, ".") or std.mem.eql(u8, item.name, "..")) continue;
+            if (try page.observe(item.name, item.attributes, options.offset, options.max_entries)) {
+                const name = try a.dupe(u8, item.name);
+                try entries.append(a, .{ .raw_name = name, .display_name = if (std.unicode.utf8ValidateSlice(name)) name else "[invalid UTF-8 name]", .absolute_path = try joinPath(a, resolved, name), .attributes = item.attributes });
+            }
+        }
+        if (changed(before, try self.call(ssh.Session.sftpStat, .{ &self.service.session.?, resolved, false }))) return error.SourceChanged;
+        const version = page.version(self.service.endpoint, resolved, before);
+        try validateContinuation(options.offset, options.expected_version, version);
+        if (options.offset > page.count) return error.SourceChanged;
+        result.value.body = .{ .page = .{ .index = 0, .entries = entries.items, .offset = options.offset, .source_version = version, .next_offset = if (options.offset + entries.items.len < page.count) options.offset + entries.items.len else null } };
+    }
+    fn readText(self: *Context, result: *OwnedResult, resolved: [:0]const u8, options: @FieldType(Action, "read_text")) !void {
+        const max_bytes = options.max_bytes;
         const before = try self.call(ssh.Session.sftpStat, .{ &self.service.session.?, resolved, false });
         if (before.kind != .file) return error.NotRegularFile;
+        const version = sourceVersion(self.service.endpoint, resolved, before);
+        try validateContinuation(options.offset, options.expected_version, version);
+        if (options.offset > (before.size orelse std.math.maxInt(u64))) return error.SourceChanged;
         var handle = try self.call(ssh.Session.sftpOpenReadonly, .{ &self.service.session.?, resolved, false });
         defer self.closeHandle(&handle);
         const opened = try self.call(ssh.SftpReadonlyHandle.stat, .{&handle});
         if (opened.kind != .file or changed(before, opened)) return error.SourceChanged;
+        try handle.seek(options.offset);
         const bytes = try result.arena.allocator().alloc(u8, max_bytes + 1);
         var used: usize = 0;
         var eof = false;
@@ -568,10 +597,44 @@ const Context = struct {
         result.value.body = .{ .text = .{
             .text = shown,
             .original_size = before.size,
+            .offset = options.offset,
+            .source_version = version,
             .read_bytes = used,
             .captured_at_ms = clock.milliseconds(undefined),
             .truncated = truncated,
         } };
+    }
+};
+
+/// Fingerprints bind a continuation to its exact IO source, path and metadata.
+pub fn sourceVersion(endpoint: EndpointRef, path: []const u8, attrs: Attributes) u64 {
+    var hash = std.hash.Wyhash.init(0);
+    std.hash.autoHash(&hash, endpoint);
+    hash.update(path);
+    std.hash.autoHash(&hash, attrs);
+    return hash.final();
+}
+pub fn validateContinuation(offset: u64, expected: ?u64, actual: u64) !void {
+    if (offset != 0 and expected == null) return error.SourceChanged;
+    if (expected) |version| if (version != actual) return error.SourceChanged;
+}
+/// Scan the complete directory in native order, retaining only this page.
+/// Hashing the full listing detects changed entries and changed iteration order.
+pub const DirectoryScan = struct {
+    count: u64 = 0,
+    hash: std.hash.Wyhash = .init(0),
+    pub fn observe(self: *DirectoryScan, name: []const u8, attrs: Attributes, offset: u64, limit: u32) !bool {
+        if (name.len == 0 or std.mem.indexOfScalar(u8, name, 0) != null or std.mem.indexOfScalar(u8, name, '/') != null) return error.Protocol;
+        std.hash.autoHash(&self.hash, name.len);
+        self.hash.update(name);
+        std.hash.autoHash(&self.hash, attrs);
+        const keep = self.count >= offset and self.count - offset < limit;
+        self.count = std.math.add(u64, self.count, 1) catch return error.EntryLimit;
+        return keep;
+    }
+    pub fn version(self: *const DirectoryScan, endpoint: EndpointRef, path: []const u8, attrs: Attributes) u64 {
+        var hash = self.hash;
+        return hash.final() ^ sourceVersion(endpoint, path, attrs);
     }
 };
 
@@ -691,6 +754,30 @@ test "sftp readonly UTF8 bounds reject binary and malformed EOF but trim only bu
     try std.testing.expectError(error.UnsupportedEncoding, validateText("\xed\xa0\x80", 3, false));
     try std.testing.expectError(error.UnsupportedEncoding, validateText("\xc0\x80", 1, true));
     try std.testing.expectError(error.UnsupportedEncoding, validateText("\xed\xa0", 1, true));
+}
+
+test "pagination directory pages pass the former entry limit and reject reordered or changed sources" {
+    const endpoint: EndpointRef = .{ .binding_id = 1, .binding_generation = 2, .resource_owner = .{ .session = .{ .session_id = @fromBackingInt(7), .generation = 3 } } };
+    const attrs: Attributes = .{ .kind = .directory, .modified_at = 9 };
+    var first: DirectoryScan = .{};
+    var repeated: DirectoryScan = .{};
+    var changed_order: DirectoryScan = .{};
+    var kept: usize = 0;
+    for (0..5000) |index| {
+        var buffer: [32]u8 = undefined;
+        const name = try std.fmt.bufPrint(&buffer, "entry-{d}", .{index});
+        if (try first.observe(name, .{ .kind = .file, .size = index }, 4096, 3)) kept += 1;
+        _ = try repeated.observe(name, .{ .kind = .file, .size = index }, 0, 3);
+        _ = try changed_order.observe(name, .{ .kind = .file, .size = index + @intFromBool(index == 4999) }, 0, 3);
+    }
+    try std.testing.expectEqual(@as(usize, 3), kept);
+    const version = first.version(endpoint, "/directory", attrs);
+    try validateContinuation(4096, version, repeated.version(endpoint, "/directory", attrs));
+    try std.testing.expectError(error.SourceChanged, validateContinuation(4096, version, changed_order.version(endpoint, "/directory", attrs)));
+    var replacement = endpoint;
+    replacement.binding_generation += 1;
+    try std.testing.expectError(error.SourceChanged, validateContinuation(4096, version, repeated.version(replacement, "/directory", attrs)));
+    try std.testing.expectError(error.SourceChanged, validateContinuation(1, null, version));
 }
 test "sftp readonly metadata keeps unknown size separate and detects source change" {
     try std.testing.expect(!changed(.{ .kind = .file }, .{ .kind = .file }));

@@ -139,3 +139,38 @@ test "search snapshot timestamps follow logical wraps and submission precedence"
     const last = document.rows[document.spanAt(std.mem.indexOf(u8, document.text, "next").?).?.row];
     try std.testing.expectEqual(@as(?i64, 5678), last.timestamp_ms);
 }
+
+test "search capture preserves a prompt received after the last display snapshot" {
+    const prompt = "[user@host ~]$ ";
+    for ([_]bool{ false, true }) |tail| {
+        for ([_]bool{ false, true }) |appearance_changed| {
+            var adapter = try Adapter.init(a, 4, 80);
+            defer adapter.destroy();
+            if (appearance_changed) {
+                // Disabling the timestamp gutter grows the PTY; applying a theme
+                // restores its configured width and changes the default palette.
+                try adapter.resize(90, 4);
+                var wider = try adapter.copyProjection(a);
+                wider.deinit(a);
+                try adapter.resize(80, 4);
+                try adapter.setTheme(.{ .revision = 2, .foreground = 0xaabbccff, .background = 0x20242aff, .cursor = 0xffffffff, .selection = 0x66666640, .ansi = @splat(0x777777ff) });
+            }
+            _ = try adapter.feed("listing\r\n\x1b]133;A\x07");
+            var before = try adapter.copyProjection(a);
+            defer before.deinit(a);
+            _ = try adapter.feed(prompt ++ "\x1b]133;B\x07");
+            var document = if (tail)
+                try adapter.searchTail(a, 0, 8, adapter.version)
+            else
+                try adapter.searchSnapshot(a);
+            defer document.deinit(a);
+            try std.testing.expect(std.mem.indexOf(u8, document.text, prompt) != null);
+            var after = try adapter.copyProjection(a);
+            defer after.deinit(a);
+            try std.testing.expectEqual(@as(u16, prompt.len), after.cursor.col);
+            try std.testing.expect(std.mem.indexOf(u8, after.graphemes, prompt) != null);
+            try std.testing.expectEqual(@as(u16, 80), after.cols);
+            if (appearance_changed) try std.testing.expectEqual(@as(u24, 0xaabbcc), after.colors.foreground);
+        }
+    }
+}

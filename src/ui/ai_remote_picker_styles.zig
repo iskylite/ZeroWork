@@ -27,7 +27,7 @@ pub fn filenameLabel() ui.BoxStyle {
     return .{ .width = .fill(), .min_width = 0, .height = .{ .px = 16 }, .flex = 1 };
 }
 pub fn hover() ButtonStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn list() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 129 }, .min_height = 0, .flex_shrink = 0 };

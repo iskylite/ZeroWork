@@ -73,7 +73,7 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
     self.owner = try text(self, "", 12, 400, .secondary, false);
     self.owner.setStyleInline(cx.allocator, .{ .width = .fill(), .flex = 1, .min_width = 0 });
     try self.header.appendChild(cx.allocator, self.owner);
-    self.close_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "关闭端口转发信息", .base_style = S.iconButton(28), .hover_style = .{ .background = S.theme.current().hover }, .on_click = cx.on(View, self, View.hide) }).mount(scope, cx);
+    self.close_button = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .a11y_label = "关闭端口转发信息", .base_style = S.iconButton(28), .hover_style = .{ .background = S.theme.states().hover }, .on_click = cx.on(View, self, View.hide) }).mount(scope, cx);
     self.close_button.setStyleInline(cx.allocator, S.iconButton(28));
     try self.close_button.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.x, S.theme.current().fg_2, S.icon(14)));
     self.close_button.meta.ownership.meta.test_id = "socks.info.close";
@@ -531,7 +531,7 @@ fn button(self: *View, parent: *ui.Node, label: []const u8, action: Action) !*ui
     try self.scope.onCleanup(Click, click, Click.cleanup);
     const disabled = if (action == .test_proxy or action == .copy_export) self.test_disabled else if (action == .start) self.control_disabled else null;
     const paint = try self.scope.createSignal(ButtonStyle, buttonStyle(action));
-    const interaction = try self.scope.createSignal(?ButtonStyle, .{ .background = S.theme.current().hover });
+    const interaction = try self.scope.createSignal(?ButtonStyle, .{ .background = S.theme.states().hover });
     self.button_paints[self.button_count] = .{ .style = paint, .interaction = interaction, .action = action };
     self.button_count += 1;
     const node = try ui.widgets.Button(.{ .base_style = ui.Source(ButtonStyle){ .signal = paint }, .variant = .ghost, .hover_style = ui.Source(?ButtonStyle){ .signal = interaction }, .pressed_style = ui.Source(?ButtonStyle){ .signal = interaction }, .icon_only = icon_only, .a11y_label = label, .disabled = if (disabled) |signal| ui.Source(bool){ .signal = signal } else ui.Source(bool){ .value = false }, .on_click = self.cx.on(Click, click, Click.invoke) }).mount(self.scope, self.cx);

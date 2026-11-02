@@ -43,13 +43,11 @@ for(const theme of ['dark','light','empty']){
   report.checks.push(`${theme}: home action opens ${theme==='empty'?'new connection':'original quick connection'}`);
   if(theme==='empty')continue;
   const side=await visible('workspace.sidebar');assert.equal(side.rect.w,300);assert.equal((await query('sidebar.host')).filter(shown).length,5);
-  const row=(await query('sidebar.host')).filter(shown)[1];await mouseMove(row.rect.x+40,row.rect.y+18);await sleep(100);await visible('sidebar.host.copy');await visible('sidebar.host.edit');assert.deepEqual((await query('sidebar.host.hops')).filter(shown).map(n=>n.text),['0','1','2','0','0']);await capture(`${theme}-hover`);
-  const more=flat((await query('sidebar.host')).filter(shown)[1]).find(n=>n.test_id==='sidebar.host.copy'&&shown(n))!;await clickAt(more.rect.x+12,more.rect.y+12);await sleep(200);assert.equal((await query('sidebar.host')).filter(shown).length,6);
-  await mouseMove(row.rect.x+40,row.rect.y+18);await sleep(100);const edit=flat((await query('sidebar.host')).filter(shown)[1]).find(n=>n.test_id==='sidebar.host.edit'&&shown(n))!;await clickAt(edit.rect.x+12,edit.rect.y+12);await sleep(200);await visible('wizard.cancel');await key('escape');await sleep(100);
+  const row=(await query('sidebar.host')).filter(shown)[1];await mouseMove(row.rect.x+40,row.rect.y+18);await sleep(100);await visible('sidebar.host.connect');assert.equal((await query('sidebar.host.copy')).length,0);assert.equal((await query('sidebar.host.edit')).length,0);assert.deepEqual((await query('sidebar.host.hops')).filter(shown).map(n=>n.text),['0','1','2','0','0']);await capture(`${theme}-hover`);
   await clickTestId('sidebar.group');await sleep(200);assert.equal((await query('sidebar.host')).filter(shown).length,2);await clickTestId('sidebar.group');
   await clickTestId('workspace.empty.local');await sleep(600);await visible('workspace.sidebar');await capture(`${theme}-local`);
   await clickTestId('sidebar.collapse');await sleep(150);assert(!(await query('workspace.sidebar')).some(shown));await clickTestId('sidebar.restore');await sleep(150);await visible('workspace.sidebar');
-  report.checks.push(`${theme}: colour host fixtures, hover actions, copy persisted and edit dialog, independent groups, local session keeps sidebar, manual sidebar toggle`);
+  report.checks.push(`${theme}: colour host fixtures, connect hover action with copy/edit shortcuts absent, independent groups, local session keeps sidebar, manual sidebar toggle`);
  }catch(e){await writeFile(join(output,'fixture-hosts.toml'),hosts);report.error=String(e);report.process={exitCode:child.exitCode,signal:child.signalCode,pid:child.pid};await capture(`${theme}-failure`).catch(()=>{});throw e;}
  finally{if(child.exitCode===null)child.kill('SIGTERM');await ended;await log.close();await cleanupOwnedBridgeDirectories(child.pid!);await rm(iso,{recursive:true,force:true});await writeFile(join(output,'report.json'),JSON.stringify(report,null,2));}
 }

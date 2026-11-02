@@ -68,6 +68,7 @@ pub const Dispatcher = struct {
     }
 
     pub fn submit(self: *Dispatcher, command: UiCommand, live: LiveContext, handler: ?Handler) !Decision {
+        try @import("../update/admission.zig").require();
         if (self.dispatching) return error.ReentrantDispatch;
         if (command.command_id == 0 or (!self.exhausted and command.command_id >= self.next_command_id)) return reject(.invalid_command_id, "输入命令身份无效或尚未分配");
         if (command.command_id <= self.retired_through) return reject(.already_consumed, "此输入命令已处理并释放");

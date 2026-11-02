@@ -33,6 +33,8 @@ pub const Performance = struct {
     idle_waits: u64 = 0,
     idle_wait_ms: u64 = 0,
     active_yields: u64 = 0,
+    /// Elapsed pipeline.feed time: WS/RFB parsing, decode and CPU publication.
+    /// Excludes driver.read/TLS, SSH, waits and rendering; not process CPU usage.
     feed_ns: u64 = 0,
     max_feed_ns: u64 = 0,
     last_read_ns: u64 = 0,
@@ -400,7 +402,8 @@ pub const Controller = struct {
             self.unlock();
             self.connection_progress.setStage(connection_stage);
             // Drain ready TLS records without a sleep per record. Yield after
-            // 256KiB of productive turns; only a fully idle turn backs off.
+            // 16 productive turns (at most 256 KiB of video; writes also count).
+            // The 2 ms wait applies only when neither read nor write progressed.
             if (yield_active) std.Thread.yield() catch {};
             if (!progressed) driver.wait(driver.context, 2);
         }

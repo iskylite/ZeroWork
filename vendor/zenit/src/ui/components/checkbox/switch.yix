@@ -24,8 +24,8 @@ pub fn Switch(
             a11y={.{ .role = .switch_role, .checked = checked, .disabled = disabled, .label = label }}
             onClick={if (!disabled) checked = !checked}
         >
-            <box style={S.SwitchParts.slot(.track, .{ .checked = checked })}>
-                <box style={S.SwitchParts.slot(.thumb, .{ .checked = checked })} />
+            <box style={S.SwitchParts.slot(.track, .{ .checked = checked, .disabled = disabled })}>
+                <box style={S.SwitchParts.slot(.thumb, .{ .checked = checked, .disabled = disabled })} />
             </box>
             {if (label.len != 0) <text style={S.SwitchParts.slot(.label, .{ .checked = checked, .disabled = disabled })}>{label}</text>}
         </row>

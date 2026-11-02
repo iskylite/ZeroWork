@@ -10,13 +10,11 @@ const probes = @import("../../host/probe_contract.zig");
 const model = @import("model.zig");
 const draft_mod = @import("editor_model.zig");
 const S = @import("editor_styles.zig");
+const Stepper = @import("../../ui/connection_stepper.zig");
 
 const scale_options = [_]ui.widgets.SelectOption{
     .{ .value = "fit", .label = "适应窗口", .test_id = "bmc.editor.scale.fit" },
     .{ .value = "original", .label = "原始比例 100%", .test_id = "bmc.editor.scale.original" },
-};
-const auth_options = [_]ui.widgets.checkbox.RadioOption{
-    .{ .value = "password", .label = "密码", .test_id = "bmc.editor.auth.password" },
 };
 const Pending = enum { save, save_and_open, temporary, probe, cancel, child };
 const RouteAction = enum { up, down, remove };
@@ -49,6 +47,20 @@ pub const EditorView = struct {
     arena: ?std.heap.ArenaAllocator = null,
     root: ?*ui.Node = null,
     body: ?*ui.Node = null,
+    step: usize = 0,
+    furthest_step: usize = 0,
+    panels: [3]?*ui.Node = @splat(null),
+    steps: [3]?Stepper.Entry = @splat(null),
+    step_disabled: [3]?*ui.Signal(bool) = @splat(null),
+    step_styles: [3]?*ui.Signal(ui.BoxStyle) = @splat(null),
+    back_button: ?*ui.Node = null,
+    next_button: ?*ui.Node = null,
+    cancel_button: ?*ui.Node = null,
+    review_actions: [3]?*ui.Node = @splat(null),
+    summary: [5]?*ui.Node = @splat(null),
+    review_route: ?*ui.Node = null,
+    feedback_visible: bool = false,
+
     footer: ?*ui.Node = null,
     scroll: ?ui.widgets.ScrollAreaResult = null,
     pending_focus: ?usize = null,
@@ -68,6 +80,7 @@ pub const EditorView = struct {
     options_key: ?u64 = null,
     advanced: ?*ui.Node = null,
     advanced_open: bool = false,
+    advanced_label: ?*ui.Signal([]const u8) = null,
     inputs: [4]?ui.widgets.input.InputResult = @splat(null),
     errors: [4]?*ui.Signal([]const u8) = @splat(null),
     name_value: ?*ui.Signal([]const u8) = null,
@@ -122,6 +135,17 @@ pub const EditorView = struct {
         self.access_titles = @splat(null);
         self.root = null;
         self.body = null;
+        self.panels = @splat(null);
+        self.steps = @splat(null);
+        self.step_disabled = @splat(null);
+        self.step_styles = @splat(null);
+        self.summary = @splat(null);
+        self.review_actions = @splat(null);
+        self.review_route = null;
+        self.back_button = null;
+        self.next_button = null;
+        self.cancel_button = null;
+        self.advanced_label = null;
         self.footer = null;
         self.scroll = null;
         self.feedback_area = null;
@@ -148,6 +172,67 @@ pub const EditorView = struct {
         self.pending = pending;
         self.mount.cx.requestRedraw();
     }
+    fn validateIdentity(self: *EditorView) !void {
+        var payload = self.draft.?.payload(null);
+        payload.access = .direct;
+        try model.validate(payload);
+    }
+    fn navigate(self: *EditorView, step: usize) void {
+        if (self.locked.?.peek() or step > 2) return;
+        if (step > 0) self.validateIdentity() catch |err| return self.reportError(err);
+        if (step == 2) self.draft.?.validateRuntime(self.mount.connection_configs, self.mount.cx.allocator) catch |err| return self.reportError(err);
+        self.step = step;
+        self.furthest_step = @max(self.furthest_step, step);
+        self.feedback_visible = false;
+        if (self.probe_log.count == 0) if (self.message) |node| node.setTextContent(self.mount.cx.allocator, if (self.mount.initial != null) "保存的修改在下次新建连接时生效" else "尚未测试") catch {};
+        self.applyStep();
+        if (self.scroll) |scroll| ui.widgets.setScrollY(scroll.state, scroll.content, 0);
+        self.mount.cx.requestRedraw();
+    }
+    fn next(self: *EditorView) void {
+        self.navigate(@min(self.step + 1, 2));
+    }
+    fn back(self: *EditorView) void {
+        self.navigate(self.step -| 1);
+    }
+    fn editIdentity(self: *EditorView) void {
+        self.navigate(0);
+    }
+    fn editRoute(self: *EditorView) void {
+        self.navigate(1);
+    }
+    fn applyStep(self: *EditorView) void {
+        for (self.panels, 0..) |panel, i| if (panel) |node| node.setDisplay(if (i == self.step) .flex else .none);
+        for (self.steps, 0..) |entry, i| if (entry) |value| {
+            self.step_disabled[i].?.set(i > self.furthest_step);
+            Stepper.paint(self.mount.cx, value, i == self.step, i < self.step, false);
+        };
+        if (self.back_button) |node| node.setDisplay(if (self.step == 0) .none else .flex);
+        if (self.cancel_button) |node| node.setDisplay(if (self.step == 0) .flex else .none);
+        if (self.next_button) |node| node.setDisplay(if (self.step == 2) .none else .flex);
+        for (self.review_actions) |action| if (action) |node| node.setDisplay(if (self.step == 2) .flex else .none);
+        if (self.feedback_area) |node| node.setDisplay(if (self.step == 2 or self.feedback_visible) .flex else .none);
+        if (self.step == 2) self.refreshSummary();
+    }
+    fn refreshSummary(self: *EditorView) void {
+        const draft = &self.draft.?;
+        const a = self.alloc();
+        const values = [_][]const u8{
+            if (draft.name.len == 0) draft.host else draft.name,
+            std.fmt.allocPrint(a, "{s}:{d}", .{ draft.host, draft.https_port }) catch draft.host,
+            draft.username,
+            if (draft.password.len != 0) "密码 · 当前输入" else if (draft.credential_ref != null) "密码 · 已保存" else "密码 · 连接时输入",
+            std.fmt.allocPrint(a, "显示：{s} · 只读：{s}", .{ if (draft.scale == .fit) @as([]const u8, "适应窗口") else "原始比例 100%", if (draft.read_only_requested) @as([]const u8, "开启") else "关闭" }) catch "",
+        };
+        for (self.summary, values) |node, value| if (node) |label| label.setTextContent(self.mount.cx.allocator, value) catch {};
+    }
+    const StepClick = struct {
+        editor: *EditorView,
+        step: usize,
+        fn click(self: *@This()) void {
+            self.editor.navigate(self.step);
+        }
+    };
     fn save(self: *EditorView) void {
         self.queue(.save);
     }
@@ -246,6 +331,7 @@ pub const EditorView = struct {
     fn toggleAdvanced(self: *EditorView) void {
         self.advanced_open = !self.advanced_open;
         self.advanced.?.setDisplay(if (self.advanced_open) .flex else .none);
+        self.advanced_label.?.set(if (self.advanced_open) "⌄ 高级选项" else "› 高级选项");
         self.mount.cx.requestRedraw();
     }
     fn changed(self: *EditorView, previous_revision: u64) void {
@@ -269,6 +355,8 @@ pub const EditorView = struct {
             if (node.getText()) |old| if (std.mem.eql(u8, old.content, message)) return;
             node.setTextContent(self.mount.cx.allocator, message) catch {};
         }
+        self.feedback_visible = true;
+        if (self.feedback_area) |area| area.setDisplay(.flex);
         self.mount.cx.requestRedraw();
     }
     fn reportError(self: *EditorView, err: anyerror) void {
@@ -296,6 +384,8 @@ pub const EditorView = struct {
             else => null,
         };
         if (field_index) |i| {
+            self.step = 0;
+            self.applyStep();
             if (self.errors[i]) |signal| signal.set(message);
             self.pending_focus = i;
         }
@@ -365,7 +455,7 @@ pub const EditorView = struct {
             } else self.feedback("管理连接测试已取消，配置草稿已保留");
         }
         self.probe_running.?.set(self.probe.token != null);
-        self.probe_label.?.set(if (self.probe.token != null) "取消测试" else "测试连接");
+        self.probe_label.?.set(if (self.probe.token != null) "取消测试" else "测试管理连接");
         if (self.probe.token != null) self.mount.cx.scheduleRedrawAfterNs(100 * std.time.ns_per_ms);
     }
     fn showProbeLog(self: *EditorView) void {
@@ -470,7 +560,7 @@ pub const EditorView = struct {
         const self: *EditorView = @ptrCast(@alignCast(raw));
         if (self.draft == null) return .done;
         const compact = self.mount.cx.viewport.width <= 860 or self.mount.cx.viewport.height <= 480;
-        const body_padding: ui.Padding = if (compact) .{ .left = 18, .right = 34, .bottom = 12 } else .{ .left = 24, .right = 40, .bottom = 20 };
+        const body_padding: ui.Padding = if (compact) .{ .left = 18, .right = 18, .top = 12, .bottom = 12 } else .{ .left = 24, .right = 24, .top = 14, .bottom = 20 };
         const footer_padding: ui.Padding = if (compact) .{ .left = 18, .right = 18, .top = 10, .bottom = 10 } else .{ .left = 24, .right = 24, .top = 14, .bottom = 14 };
         const footer_height: f32 = if (compact) 54 else 62;
         const feedback_padding: ui.Padding = .{ .left = if (compact) 18 else 24, .right = if (compact) 18 else 24, .top = 4, .bottom = 4 };
@@ -605,6 +695,7 @@ pub const EditorView = struct {
         };
         try writer.writer.print(" → {s}:{d} · BMC", .{ if (draft.host.len == 0) "目标主机" else draft.host, draft.https_port });
         try self.route_preview.?.setTextContent(self.mount.cx.allocator, writer.written());
+        if (self.review_route) |node| try node.setTextContent(self.mount.cx.allocator, writer.written());
     }
     fn snapshot(raw: *anyopaque, allocator: std.mem.Allocator) !envelopes.Envelope {
         const self: *EditorView = @ptrCast(@alignCast(raw));
@@ -632,9 +723,7 @@ pub const EditorView = struct {
         const self: *EditorView = @ptrCast(@alignCast(raw));
         if (self.draft == null) return null;
         if (self.mount.cx.viewport.width <= 860 or self.mount.cx.viewport.height <= 480) return 400;
-        // Natural direct-form reference 590.5; route and options add content
-        // inside its bounded ScrollArea, while footer remains reachable.
-        return @min(S.host.max_height, 590.5 + (if (self.draft.?.routed) @as(f32, 94) else 0) + (if (self.advanced_open) @as(f32, 67.5) else 0));
+        return 590;
     }
     fn parentVisible(raw: *anyopaque) bool {
         const self: *EditorView = @ptrCast(@alignCast(raw));
@@ -668,10 +757,11 @@ pub fn mountEditor(_: ?*anyopaque, mount: contract.EditorMount) !contract.Editor
     }
     self.locked = try scope.createSignal(bool, false);
     self.probe_running = try scope.createSignal(bool, false);
-    self.probe_label = try scope.createText("测试连接", .{});
+    self.probe_label = try scope.createText("测试管理连接", .{});
     self.log_open = try scope.createSignal(bool, false);
     self.asset_filter = try scope.createText("", .{});
     self.add_disabled = try scope.createSignal(bool, false);
+    self.advanced_label = try scope.createText("› 高级选项", .{});
     self.name_value = try scope.createText(self.draft.?.name, .{});
     self.host_value = try scope.createText(self.draft.?.host, .{});
     self.username_value = try scope.createText(self.draft.?.username, .{});
@@ -687,14 +777,26 @@ pub fn mountEditor(_: ?*anyopaque, mount: contract.EditorMount) !contract.Editor
     root.meta.ownership.meta.test_id = "bmc.editor";
     try mount.slot.appendChild(cx.allocator, root);
     self.root = root;
+    const step_shell = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 60 }, .padding = .{ .left = 20, .right = 20 }, .flex_shrink = 0 }, .{});
+    const steps = try Stepper.row(cx);
+    for (0..3) |i| {
+        self.step_disabled[i] = try scope.createSignal(bool, i != 0);
+        self.step_styles[i] = try scope.createSignal(ui.BoxStyle, S.host.step(i == 0));
+        const click = try scope.createState(EditorView.StepClick, .{ .editor = self, .step = i });
+        self.steps[i] = try Stepper.append(cx, scope, steps, i, ([_][]const u8{ "wizard.step.identity", "wizard.step.route", "wizard.step.review" })[i], self.step_disabled[i].?, self.step_styles[i].?, cx.on(EditorView.StepClick, click, EditorView.StepClick.click));
+    }
+    try step_shell.appendChild(cx.allocator, steps);
+    try root.appendChild(cx.allocator, step_shell);
     const scroll = try ui.widgets.ScrollArea(.{}).mount(scope, cx);
     scroll.container.meta.ownership.meta.test_id = "bmc.editor.scroll";
-    const body = try ui.boxStyled(cx, S.content, .{});
-    try scroll.content.appendChild(cx.allocator, body);
+    const content_root = try ui.boxStyled(cx, S.content, .{});
+    var body = try ui.boxStyled(cx, S.host.formSection, .{});
+    self.panels[0] = body;
+    try content_root.appendChild(cx.allocator, body);
+    try scroll.content.appendChild(cx.allocator, content_root);
     try root.appendChild(cx.allocator, scroll.container);
     self.scroll = scroll;
-    self.body = body;
-    if (mount.protocol_picker) |picker| try body.appendChild(cx.allocator, try picker.mount(picker.context, cx, scope));
+    self.body = content_root;
     try section(self, body, "连接信息");
     const identity_row = try ui.boxStyled(cx, S.row, .{});
     self.inputs[0] = try field(self, identity_row, "连接名称", "bmc.editor.name", self.name_value.?, "例如：compute-bmc-01", self.errors[0], EditorView.nameChanged);
@@ -710,9 +812,9 @@ pub fn mountEditor(_: ?*anyopaque, mount: contract.EditorMount) !contract.Editor
     const auth_row = try ui.boxStyled(cx, S.row, .{});
     self.inputs[3] = try field(self, auth_row, "用户名", "bmc.editor.username", self.username_value.?, "BMC 用户名", self.errors[3], EditorView.usernameChanged);
     const auth_field = try fieldBox(self, auth_row, "认证方式");
-    const auth = try ui.widgets.RadioGroup(.{ .options = &auth_options, .value = @as(?[]const u8, "password"), .horizontal = true, .disabled = self.locked.?, .focus_ring = S.host.radioFocus() }).mount(scope, cx);
-    auth.setStyleInline(cx.allocator, .{ .height = .{ .px = 34 }, .align_items = .center });
-    auth.addBeforeRender(paintActionTypography);
+    const auth = try ui.box(cx, .{ .height = .{ .px = 34 }, .direction = .row, .align_items = .center, .gap = 8 }, .{});
+    try auth.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.lock, S.theme.current().fg_2, S.host.icon(14)));
+    try auth.appendChild(cx.allocator, try ui.text(cx, "密码", S.host.text(12, 400, false)));
     try auth_field.appendChild(cx.allocator, auth);
     try body.appendChild(cx.allocator, auth_row);
     const password_row = try ui.boxStyled(cx, S.row, .{});
@@ -728,6 +830,9 @@ pub fn mountEditor(_: ?*anyopaque, mount: contract.EditorMount) !contract.Editor
     remember.addBeforeRender(paintCheckboxTypography);
     try password_row.appendChild(cx.allocator, remember);
     try body.appendChild(cx.allocator, password_row);
+    body = try ui.boxStyled(cx, S.host.formSection, .{});
+    self.panels[1] = body;
+    try content_root.appendChild(cx.allocator, body);
     try section(self, body, "连接路径");
     const access = try ui.boxStyled(cx, S.row, .{});
     try accessChoice(self, access, 0, "从本机直接连接", "本机 → BMC", "bmc.editor.access.direct", EditorView.direct);
@@ -783,15 +888,53 @@ pub fn mountEditor(_: ?*anyopaque, mount: contract.EditorMount) !contract.Editor
     const scale = try ui.widgets.Select(.{ .options = &scale_options, .value = self.scale_value.?, .width = 340, .disabled = self.locked.?, .on_change = cx.on(EditorView, self, EditorView.scaleChanged) }).mount(scope, cx);
     try skinSelect(self, scale, "bmc.editor.scale");
     try scale_field.appendChild(cx.allocator, scale.wrapper);
+    const readonly_field = try ui.boxStyled(cx, S.field, .{});
+    try advanced.appendChild(cx.allocator, readonly_field);
     const read_only = try ui.widgets.Checkbox(.{ .label = "以只读模式进入", .box_size = @as(f32, 14), .label_font_size = @as(f32, 11), .checked = self.read_only.?, .disabled = self.locked.?, .focus_ring = S.host.radioFocus(), .on_change = cx.on(EditorView, self, EditorView.readOnlyChanged) }).mount(scope, cx);
     read_only.meta.ownership.meta.test_id = "bmc.editor.readonly";
-    read_only.setStyleInline(cx.allocator, .{ .height = .{ .px = 34 }, .margin = .{ .top = 21.5 }, .flex = 1 });
+    read_only.setStyleInline(cx.allocator, .{ .height = .{ .px = 34 }, .margin = .{ .top = 21.5 }, .flex_shrink = 0 });
     read_only.addBeforeRender(paintCheckboxTypography);
-    try advanced.appendChild(cx.allocator, read_only);
+    try readonly_field.appendChild(cx.allocator, read_only);
     try body.appendChild(cx.allocator, advanced);
+    const review = try ui.boxStyled(cx, S.host.formSection, .{});
+    self.panels[2] = review;
+    review.meta.ownership.meta.test_id = "bmc.editor.review";
+    try content_root.appendChild(cx.allocator, review);
+    const review_head = try ui.boxStyled(cx, S.row, .{});
+    self.summary[0] = try ui.text(cx, "", S.host.text(13, 700, false));
+    try review_head.appendChild(cx.allocator, self.summary[0].?);
+    try review_head.appendChild(cx.allocator, try ui.spacer(cx));
+    try button(self, review_head, "编辑连接信息", "bmc.editor.review.edit_identity", false, self.locked.?, EditorView.editIdentity);
+    try review.appendChild(cx.allocator, review_head);
+    const labels = [_][]const u8{ "目标地址", "认证账户", "认证方式", "高级选项" };
+    for (0..2) |row_index| {
+        const row = try ui.boxStyled(cx, S.row, .{});
+        for (0..2) |column| {
+            const index = row_index * 2 + column;
+            const cell = try fieldBox(self, row, labels[index]);
+            self.summary[index + 1] = try ui.text(cx, "", S.host.text(12, 400, false));
+            try cell.appendChild(cx.allocator, self.summary[index + 1].?);
+        }
+        try review.appendChild(cx.allocator, row);
+    }
+    const route_head = try ui.boxStyled(cx, S.row, .{});
+    try route_head.appendChild(cx.allocator, try ui.text(cx, "连接路径", S.host.text(12, 700, false)));
+    try route_head.appendChild(cx.allocator, try ui.spacer(cx));
+    try button(self, route_head, "编辑路径", "bmc.editor.review.edit_route", false, self.locked.?, EditorView.editRoute);
+    try review.appendChild(cx.allocator, route_head);
+    const review_route = try ui.boxStyled(cx, S.routePreview, .{});
+    self.review_route = try ui.textStyled(cx, S.previewText, "");
+    try review_route.appendChild(cx.allocator, self.review_route.?);
+    try review.appendChild(cx.allocator, review_route);
+    const test_head = try ui.boxStyled(cx, S.row, .{});
+    try test_head.appendChild(cx.allocator, try ui.text(cx, "管理连接测试", S.host.text(12, 700, false)));
+    try test_head.appendChild(cx.allocator, try ui.spacer(cx));
+    try button(self, test_head, "测试管理连接", "bmc.editor.probe", false, self.locked.?, EditorView.testConnection);
+    try review.appendChild(cx.allocator, test_head);
+    try review.appendChild(cx.allocator, try ui.textStyled(cx, S.feedback, "测试仅验证管理连接，打开控制台后才验证视频；可跳过测试直接保存或连接。"));
     const feedback_area = try ui.boxStyled(cx, S.feedbackArea, .{});
     feedback_area.meta.ownership.meta.test_id = "bmc.editor.feedback";
-    self.message = try ui.textStyled(cx, S.feedback, if (mount.initial != null) "保存的修改在下次新建连接时生效" else "可离线保存；测试仅验证管理连接，打开控制台后才验证视频");
+    self.message = try ui.textStyled(cx, S.feedback, if (mount.initial != null) "保存的修改在下次新建连接时生效" else "尚未测试");
     self.message.?.setStyleInline(cx.allocator, .{ .flex = 1, .min_width = 0 });
     self.message.?.meta.ownership.meta.test_id = "bmc.editor.message";
     try feedback_area.appendChild(cx.allocator, self.message.?);
@@ -806,8 +949,9 @@ pub fn mountEditor(_: ?*anyopaque, mount: contract.EditorMount) !contract.Editor
     const footer = try ui.boxStyled(cx, S.footer, .{});
     footer.meta.ownership.meta.test_id = "bmc.editor.footer";
     try button(self, footer, "取消", "bmc.editor.cancel", false, self.locked.?, EditorView.cancelClicked);
+    try button(self, footer, "上一步", "bmc.editor.back", false, self.locked.?, EditorView.back);
     try footer.appendChild(cx.allocator, try ui.spacer(cx));
-    try button(self, footer, "测试连接", "bmc.editor.probe", false, self.locked.?, EditorView.testConnection);
+    try button(self, footer, "下一步", "bmc.editor.next", true, self.locked.?, EditorView.next);
     try button(self, footer, "临时连接", "bmc.editor.temporary", false, self.locked.?, EditorView.temporary);
     try button(self, footer, "仅保存", "bmc.editor.save", false, self.locked.?, EditorView.save);
     try button(self, footer, "保存并连接", "bmc.editor.save_and_open", true, self.locked.?, EditorView.saveAndOpen);
@@ -844,6 +988,7 @@ pub fn mountEditor(_: ?*anyopaque, mount: contract.EditorMount) !contract.Editor
     self.log_scroll = log_scroll;
     try self.refreshGroups();
     try self.refreshRoutes();
+    self.applyStep();
     try cx.addAfterLayoutHook(self, EditorView.tick);
     self.hook_registered = true;
     return .{ .context = self, .vtable = &vtable, .handles_actions = true };
@@ -880,8 +1025,6 @@ fn stageLabel(stage: probes.Stage, cleanup: probes.CloseReceipt) []const u8 {
 fn section(editor: *EditorView, parent: *ui.Node, label: []const u8) !void {
     const node = try ui.boxStyled(editor.mount.cx, S.section, .{});
     try node.appendChild(editor.mount.cx.allocator, try ui.textStyled(editor.mount.cx, S.sectionLabel, label));
-    const line = try ui.box(editor.mount.cx, .{ .width = .fill(), .height = .{ .px = 1 }, .flex = 1, .background = S.theme.current().border }, .{});
-    try node.appendChild(editor.mount.cx.allocator, line);
     try parent.appendChild(editor.mount.cx.allocator, node);
 }
 fn fieldBox(editor: *EditorView, parent: *ui.Node, label: []const u8) !*ui.Node {
@@ -948,10 +1091,11 @@ fn paintLogActionTypography(node: *ui.Node) void {
 }
 fn paintCheckboxTypography(node: *ui.Node) void {
     if (node.getText()) |old| {
-        if (old.font_size != 11 or old.line_height != 1.5) {
+        if (old.font_size != 11 or old.line_height != 1.5 or !std.meta.eql(old.color, S.theme.current().fg_2)) {
             var text = old;
             text.font_size = 11;
             text.line_height = 1.5;
+            text.color = S.theme.current().fg_2;
             node.setText(text);
         }
     }
@@ -971,9 +1115,22 @@ fn skinSelect(editor: *EditorView, result: ui.widgets.SelectResult, id: []const 
 }
 fn button(editor: *EditorView, parent: *ui.Node, label: []const u8, id: []const u8, primary: bool, disabled: *ui.Signal(bool), comptime clicked: *const fn (*EditorView) void) !void {
     const cx = editor.mount.cx;
-    const label_source: ui.Source([]const u8) = if (std.mem.eql(u8, id, "bmc.editor.probe")) .{ .signal = editor.probe_label.? } else .{ .value = label };
-    const node = try ui.widgets.Button(.{ .label = label_source, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .ghost), .disabled = disabled, .base_style = S.action(primary), .on_click = cx.on(EditorView, editor, clicked) }).mount(editor.mount.scope, cx);
+    const label_source: ui.Source([]const u8) = if (std.mem.eql(u8, id, "bmc.editor.probe")) .{ .signal = editor.probe_label.? } else if (std.mem.eql(u8, id, "bmc.editor.advanced")) .{ .signal = editor.advanced_label.? } else .{ .value = label };
+    var action_style = S.action(primary);
+    if (std.mem.startsWith(u8, id, "bmc.editor.review.edit_") or std.mem.eql(u8, id, "bmc.editor.advanced")) {
+        action_style.height = .{ .px = 24 };
+        action_style.padding = .{};
+        action_style.background = ui.Color.TRANSPARENT;
+        action_style.text_color = if (std.mem.eql(u8, id, "bmc.editor.advanced")) S.theme.current().fg_2 else S.theme.current().accent_ink;
+    }
+    const node = try ui.widgets.Button(.{ .label = label_source, .variant = @as(ui.widgets.ButtonVariant, if (primary) .primary else .ghost), .disabled = disabled, .base_style = action_style, .on_click = cx.on(EditorView, editor, clicked) }).mount(editor.mount.scope, cx);
     node.meta.ownership.meta.test_id = id;
+    if (std.mem.eql(u8, id, "bmc.editor.back")) editor.back_button = node;
+    if (std.mem.eql(u8, id, "bmc.editor.next")) editor.next_button = node;
+    if (std.mem.eql(u8, id, "bmc.editor.cancel")) editor.cancel_button = node;
+    inline for (.{ "bmc.editor.temporary", "bmc.editor.save", "bmc.editor.save_and_open" }, 0..) |action, i| if (std.mem.eql(u8, id, action)) {
+        editor.review_actions[i] = node;
+    };
     node.addBeforeRender(paintActionTypography);
     try parent.appendChild(cx.allocator, node);
 }

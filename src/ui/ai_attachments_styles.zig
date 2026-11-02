@@ -30,7 +30,7 @@ pub fn iconButton() ButtonStyle {
     return .{ .width = .{ .px = 18.6171875 }, .height = .{ .px = 14 }, .padding = .{}, .gap = 0, .corner_radius = 7, .background = ui.Color.TRANSPARENT, .flex_shrink = 0 };
 }
 pub fn hover() ButtonStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn previewSlot() ui.BoxStyle {
     return .{ .width = .{ .fit = .{} }, .min_width = 12, .height = .{ .px = 14 }, .direction = .row, .align_items = .center, .gap = 5, .padding = .{}, .flex_shrink = 0 };

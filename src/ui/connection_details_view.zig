@@ -361,7 +361,7 @@ pub const View = struct {
     fn textAction(self: *View, scope: *ui.Scope, kind: ActionKind, name: []const u8, test_id: []const u8, disabled: bool, owner: ?identity.AssetOwner, width: f32, primary_action: bool) !*ui.Node {
         const context = try self.action(scope, kind);
         context.asset_owner = owner;
-        const button = try ui.widgets.Button(.{ .label = name, .variant = @as(ui.widgets.ButtonVariant, if (primary_action) .primary else .secondary), .base_style = S.chainAction(width, primary_action), .hover_style = .{ .background = if (primary_action) S.theme.current().accent else S.theme.current().hover }, .disabled = disabled, .on_click = self.cx.on(Action, context, Action.click) }).mount(scope, self.cx);
+        const button = try ui.widgets.Button(.{ .label = name, .variant = @as(ui.widgets.ButtonVariant, if (primary_action) .primary else .secondary), .base_style = S.chainAction(width, primary_action), .hover_style = .{ .background = if (primary_action) S.theme.current().accent else S.theme.states().hover }, .disabled = disabled, .on_click = self.cx.on(Action, context, Action.click) }).mount(scope, self.cx);
         if (primary_action) try S.theme.stylePrimary(self.cx, scope, button, null);
         button.meta.ownership.meta.test_id = test_id;
         return button;

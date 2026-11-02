@@ -103,11 +103,14 @@ def run_case(binary, mode, directory, key):
     text = "".join(output)
     (folder / "runner.log").write_text(text)
     handles_closed = sorted(state.opens) == sorted(state.closes)
-    passed = code == 0 and "PASS " in text and gate_ok and peer_released and handles_closed and not errors and not state.errors and not state.writes and state.shells == 0 and state.execs == 0 and not store.exists()
+    # The connection layer may request its fixed OS probe. The RAM peer
+    # rejects every exec request; any different request still fails acceptance.
+    only_known_probe = all(command == fixture.OS_PROBE for command in state.exec_commands)
+    passed = code == 0 and "PASS " in text and gate_ok and peer_released and handles_closed and not errors and not state.errors and not state.writes and state.shells == 0 and only_known_probe and not store.exists()
     return {"case": mode, "passed": passed, "exit_code": code, "elapsed_ms": round((time.monotonic() - start) * 1000),
             "real_blocked_read_cancel_gate": gate_ok if blocked else None, "native_peer_released_before_forced_cleanup": peer_released,
-            "reads_opened": state.opens, "reads_closed": state.closes, "read_handles_closed": handles_closed,
-            "no_remote_write": not state.writes, "no_shell_exec": state.shells == 0 and state.execs == 0,
+            "exec_requests": state.exec_commands, "reads_opened": state.opens, "reads_closed": state.closes, "read_handles_closed": handles_closed,
+            "no_remote_write": not state.writes, "no_shell_exec": state.shells == 0 and only_known_probe,
             "isolated_known_hosts_unchanged": not store.exists(), "errors": errors + state.errors, "runner_output": text}
 
 
@@ -122,11 +125,11 @@ def main():
     binary = directory / "ai-remote-file-frozen"
     shutil.copy2(args.runner.resolve(), binary)
     key = paramiko.RSAKey.generate(2048)
-    modes = ("close-pending",) if args.close_pending_only else ("bounds", "cancel", "late-source", "member-removed", "queued-cancel", "oom")
+    modes = ("close-pending",) if args.close_pending_only else ("pagination", "bounds", "cancel", "late-source", "member-removed", "queued-cancel", "oom")
     cases = [run_case(binary, prefix + mode, directory, key) for prefix in ("", "aux-") for mode in modes]
     report = {"passed": all(case["passed"] for case in cases), "scope": "Production AI Reader + FileBindingHost + SourceFactory + readonly SFTP against owned RAM-only 127.0.0.1 server",
               "limits": ["Fixture lifecycle adapter supplies original domain session; aux-* cases exercise production SSH readonly reservation, real native readiness, FileBindingHost and cleanup. Native picker UI and shared SSH worker are separate evidence.",
-                         "No UI, AI endpoint, external/user host, shell, exec, remote write, or local file pretending to be remote."],
+                         "No UI, AI endpoint, external/user host, accepted shell/exec, remote write, or local file pretending to be remote. The fixed connection OS probe may be requested but is explicitly rejected by the peer; all other exec requests fail acceptance."],
               "runner_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(), "cases": cases}
     (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")
     for case in cases:

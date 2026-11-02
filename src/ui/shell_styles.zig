@@ -2,9 +2,9 @@ const std = @import("std");
 const ui = @import("ui");
 const theme = @import("app_theme.zig");
 
-// Final shell geometry in macOS points: outer 5, gap 8, title 36, status 26.
+// Final shell geometry in macOS points: outer/gap 5, title 36, status 26.
 pub const outer: f32 = 5;
-pub const gap: f32 = 8;
+pub const gap: f32 = outer;
 pub const title_height: f32 = @import("v3_geometry.zig").title_height;
 pub const status_height: f32 = @import("v3_geometry.zig").status_height;
 pub const sidebar_width: f32 = @import("sidebar_model.zig").default_width;
@@ -74,7 +74,7 @@ pub fn status(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn settingsPanel(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
-    return .{ .width = .{ .px = @import("v3_geometry.zig").settings_width }, .height = .{ .px = @import("v3_geometry.zig").settings_height }, .direction = .column, .gap = 0, .padding = .{}, .background = c.overlay, .border = .{ .width = 0, .color = c.border, .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 24, .color = c.shadow } };
+    return .{ .width = .{ .px = @import("v3_geometry.zig").settings_width }, .height = .{ .px = @import("v3_geometry.zig").settings_height }, .direction = .column, .gap = 0, .padding = .{}, .background = c.overlay, .border = .{ .width = 0, .color = c.border, .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 24, .color = c.shadow }, .hit_behavior = .@"opaque", .hit_roles = .{ .pointer = true, .scroll = true } };
 }
 pub fn settingsBody(_: *const ui.ThemeTokens) ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .min_height = 0, .direction = .row, .gap = 10, .padding = .{ .left = 14, .right = 14, .bottom = 12 } };
@@ -221,7 +221,7 @@ pub fn emptyIcon(_: *const ui.ThemeTokens) ui.BoxStyle {
 }
 pub fn emptyButton(primary: bool) ui.BoxStyle {
     const c = theme.current();
-    var style: ui.BoxStyle = .{ .width = .{ .px = 156 }, .height = .{ .px = 38 }, .padding = .{ .left = 14, .right = 14 }, .gap = 7, .font_size = 12, .font_weight = 500, .background = if (primary) c.action_accent else c.hover, .text_color = if (primary) theme.actionForeground(c.action_accent) else c.fg_1, .border = .{ .radius = 8 }, .shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .inset_shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .flex_shrink = 0 };
+    var style: ui.BoxStyle = .{ .width = .{ .px = 156 }, .height = .{ .px = 38 }, .padding = .{ .left = 14, .right = 14 }, .gap = 7, .font_size = 12, .font_weight = 500, .background = if (primary) c.action_accent else theme.states().action, .text_color = if (primary) theme.actionForeground(c.action_accent) else c.fg_1, .border = .{ .radius = 8 }, .shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .inset_shadow = .{ .color = ui.Color.TRANSPARENT, .blur = 0, .offset_y = 0 }, .flex_shrink = 0 };
     if (primary) {
         const family = theme.currentName();
         style.gradient = .{ .from = c.action_accent, .to = c.action_accent_2, .direction = .diagonal };

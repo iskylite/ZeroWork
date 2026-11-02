@@ -37,7 +37,7 @@ pub const View = struct {
     callbacks: Callbacks,
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, anchor: *ui.Node, callbacks: Callbacks) !*View {
-        const self = try scope.createState(View, .{ .cx = cx, .anchor = anchor, .callbacks = callbacks, .open = try scope.createSignal(bool, false), .disabled = try scope.createSignal(bool, true), .confirm_label = try scope.createSignal([]const u8, "关闭窗口") });
+        const self = try scope.createState(View, .{ .cx = cx, .anchor = anchor, .callbacks = callbacks, .open = try scope.createSignal(bool, false), .disabled = try scope.createSignal(bool, true), .confirm_label = try scope.createSignal([]const u8, "结束会话") });
         const popup = try ui.widgets.Popover(.{ .open = self.open, .trigger = .manual, .anchor = .{ .node = anchor }, .position = .bottom_end, .offset = .{ .static = 8 }, .width = S.width, .max_width = S.width, .constrain_width_to_viewport = true, .viewport_padding = 8, .flip = true, .shift_main_axis = true, .size_policy = .fit_content, .close_on_outside_click = true, .consume_outside_click = true, .close_on_escape = true, .on_open_change = cx.on(View, self, openChanged), .enter_transition = .none, .exit_transition = .none, .a11y_role = .dialog }).mount(scope, cx);
         // Caller mounts this zero-layout owner; Popover independently portals its content.
         self.root = popup.wrapper;
@@ -49,11 +49,11 @@ pub const View = struct {
         self.panel.meta.per_frame.hooks.on_theme = chromeTheme;
         const body = try ui.boxStyled(cx, S.panel, .{});
         try popup.content.appendChild(cx.allocator, body);
-        self.title = try ui.textStyled(cx, S.title, "关闭助手？");
+        self.title = try ui.textStyled(cx, S.title, "结束当前会话？");
         self.title.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         self.title.meta.ownership.meta.test_id = "ai.close.confirmation.title";
         try body.appendChild(cx.allocator, self.title);
-        self.detail = try ui.textStyled(cx, S.detail, "对话和历史会保留");
+        self.detail = try ui.textStyled(cx, S.detail, "历史会保留，下次打开显示欢迎页");
         self.detail.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0, .flex_shrink = 0 });
         self.detail.meta.ownership.meta.test_id = "ai.close.confirmation.detail";
         try body.appendChild(cx.allocator, self.detail);
@@ -89,8 +89,8 @@ pub const View = struct {
         self.snapshot = snapshot;
         self.resolved_ticket = null;
         self.disabled.set(!snapshot.enabled);
-        try self.title.setTextContent(self.cx.allocator, if (snapshot.running) "停止本轮并关闭？" else "关闭助手？");
-        self.confirm_label.set(if (snapshot.running) "停止并关闭" else "关闭窗口");
+        try self.title.setTextContent(self.cx.allocator, if (snapshot.running) "停止并结束当前会话？" else "结束当前会话？");
+        self.confirm_label.set(if (snapshot.running) "停止并结束" else "结束会话");
         self.open.set(true);
         if (newly_opened or changed) self.focus_pending = true;
         self.cx.requestRedraw();

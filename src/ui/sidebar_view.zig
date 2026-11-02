@@ -66,7 +66,7 @@ pub const View = struct {
         const title = try text(cx, header, "主机与连接", 13, 700, false);
         title.setStyleInline(cx.allocator, .{ .width = .{ .grow = .{ .min = 0 } }, .min_width = 0 });
         const tint = try scope.createSignal(?ui.Color, T.current().fg_2);
-        const hover = try scope.createSignal(?ui.BoxStyle, .{ .background = T.current().hover });
+        const hover = try scope.createSignal(?ui.BoxStyle, .{ .background = T.states().hover });
         const host_disabled = try scope.createSignal(bool, actions.bridge.new_host == null);
         const group_disabled = try scope.createSignal(bool, actions.bridge.new_group == null);
         const footer_style = try scope.createSignal(ui.BoxStyle, S.footer());
@@ -305,7 +305,7 @@ pub const View = struct {
         S.repaint(self.new_menu.content, self.colors);
         self.colors = T.current();
         self.tint.set(self.colors.fg_2);
-        self.hover.set(.{ .background = self.colors.hover });
+        self.hover.set(.{ .background = T.states().hover });
         self.footer_style.set(S.footer());
         self.empty_footer_style.set(S.emptyFooter());
         self.search_box.setBackground(if (self.search_open or self.search_animating) self.colors.well_border else ui.Color.TRANSPARENT);
@@ -380,17 +380,20 @@ pub const HostRow = struct {
         const selected = try scope.createSignal(bool, data.selected);
         const menu_open = try scope.createSignal(bool, false);
         const base = try scope.createSignal(ui.BoxStyle, S.host(data.selected, false));
-        const hover = try scope.createSignal(?ui.BoxStyle, .{ .background = T.current().hover });
+        const hover = try scope.createSignal(?ui.BoxStyle, .{ .background = T.states().hover });
         const tint = try scope.createSignal(?ui.Color, T.current().fg_2);
         const self = try scope.createState(HostRow, .{ .cx = cx, .node = undefined, .name = undefined, .trailing = undefined, .tail = undefined, .supports_route = data.supports_route, .route = undefined, .actions = undefined, .dot = undefined, .online = data.online, .forward = undefined, .forward_label = undefined, .selected = selected, .menu_open = menu_open, .base = base, .hover = hover, .tint = tint, .callbacks = callbacks, .colors = T.current() });
         const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = try scope.createText(data.name, .{}), .base_style = base, .hover_style = ui.BoxStyle{}, .on_click = cx.on(HostRow, self, HostRow.select), .on_event = onEvent, .event_context = @as(?*anyopaque, self) }).mount(scope, cx);
         node.meta.ownership.meta.test_id = "sidebar.host";
+        node.behavior.events.on_event_capture = captureStatusClick;
+        node.behavior.events.capture_context = self;
         setFocusRing(node);
         self.node = node;
         self.menu_trigger = node;
         const content = try ui.box(cx, S.content(), .{});
         try node.appendChild(cx.allocator, content);
         self.dot = try ui.iconTint(cx, data.icon orelse @import("session_icon.zig").resolve(data.kind), ui.Color.WHITE, S.icon(18));
+        @import("session_icon.zig").refreshHostTint(self.dot);
         self.dot.meta.ownership.meta.test_id = "sidebar.host.icon";
         try content.appendChild(cx.allocator, self.dot);
         const metadata = try ui.box(cx, .{ .width = .{ .grow = .{ .min = 0 } }, .flex_shrink = 1, .height = .{ .px = 24 }, .direction = .row, .align_items = .center, .gap = 6, .min_width = 0 }, .{});
@@ -425,6 +428,7 @@ pub const HostRow = struct {
         tail.meta.ownership.meta.test_id = "sidebar.host.tail";
         try trailing.appendChild(cx.allocator, tail);
         const route = try ui.box(cx, S.route(), .{});
+        route.meta.ownership.meta.test_id = "sidebar.host.route";
         if (data.supports_route) {
             try route.appendChild(cx.allocator, try ui.iconTint(cx, ui.icons.get("route").?, T.current().fg_2, S.icon(S.host_icon_size)));
             var count: [24]u8 = undefined;
@@ -445,35 +449,28 @@ pub const HostRow = struct {
         self.forward_label.setStyleInline(cx.allocator, .{ .width = .fill(), .min_width = 0 });
         try self.forward.appendChild(cx.allocator, self.forward_label);
         try tail.appendChild(cx.allocator, self.forward);
-        const actions = try ui.box(cx, .{ .width = .{ .px = S.action_size * 3 }, .height = .{ .px = S.action_size }, .direction = .row, .align_items = .center, .flex_shrink = 0 }, .{});
+        const actions = try ui.box(cx, .{ .width = .{ .px = S.action_size }, .height = .{ .px = S.action_size }, .direction = .row, .align_items = .center, .flex_shrink = 0 }, .{});
         self.actions = actions;
         const connect_button = try iconButtonWithSize(cx, scope, "play", "新标签连接", "sidebar.host.connect", S.action(S.action_size), S.host_icon_size, tint, hover, cx.on(HostRow, self, HostRow.connect), swallowDoubleClick);
-        const copy_button = try iconButtonWithSize(cx, scope, "copy", "复制配置", "sidebar.host.copy", S.action(S.action_size), S.host_icon_size, tint, hover, cx.on(HostRow, self, HostRow.copy), swallowDoubleClick);
-        const edit_button = try iconButtonWithSize(cx, scope, "pencil", "编辑配置", "sidebar.host.edit", S.action(S.action_size), S.host_icon_size, tint, hover, cx.on(HostRow, self, HostRow.edit), swallowDoubleClick);
         try actions.appendChild(cx.allocator, try hint(cx, scope, connect_button, "新标签连接", .right));
-        try actions.appendChild(cx.allocator, try hint(cx, scope, copy_button, "复制配置", .right));
-        try actions.appendChild(cx.allocator, try hint(cx, scope, edit_button, "编辑配置", .right));
         try trailing.appendChild(cx.allocator, actions);
         const hovered = try ui.hooks.useHover(scope, node);
         const name_hover = try ui.hooks.useHover(scope, identity_hint.trigger);
         const connect_hover = try ui.hooks.useHover(scope, connect_button);
-        const copy_hover = try ui.hooks.useHover(scope, copy_button);
-        const edit_hover = try ui.hooks.useHover(scope, edit_button);
         const focus = try ui.hooks.useFocusState(scope, cx, node);
         const connect_focus = try ui.hooks.useFocusState(scope, cx, connect_button);
-        const copy_focus = try ui.hooks.useFocusState(scope, cx, copy_button);
-        const edit_focus = try ui.hooks.useFocusState(scope, cx, edit_button);
-        try scope.createEffect(.{ .self = self, .protocol = tag, .hovered = hovered, .name_hover = name_hover, .connect_hover = connect_hover, .copy_hover = copy_hover, .edit_hover = edit_hover, .focus = focus.focused, .focus_visible = focus.visible, .connect_focus = connect_focus.focused, .copy_focus = copy_focus.focused, .edit_focus = edit_focus.focused, .identity_open = identity_hint.open.?, .last_identity_focus = try scope.createState(bool, false), .theme = try cx.themeSignal(scope) }, struct {
+        try scope.createEffect(.{ .self = self, .protocol = tag, .hovered = hovered, .name_hover = name_hover, .connect_hover = connect_hover, .focus = focus.focused, .focus_visible = focus.visible, .connect_focus = connect_focus.focused, .identity_open = identity_hint.open.?, .last_identity_focus = try scope.createState(bool, false), .theme = try cx.themeSignal(scope) }, struct {
             fn run(ctx: anytype) void {
                 _ = ctx.theme.get();
                 const picked = ctx.self.selected.get();
-                const hot = ctx.hovered.get() or ctx.name_hover.get() or ctx.connect_hover.get() or ctx.copy_hover.get() or ctx.edit_hover.get() or ctx.focus.get() or ctx.connect_focus.get() or ctx.copy_focus.get() or ctx.edit_focus.get() or ctx.self.menu_open.get();
+                const hot = ctx.hovered.get() or ctx.name_hover.get() or ctx.connect_hover.get() or ctx.focus.get() or ctx.connect_focus.get() or ctx.self.menu_open.get();
                 const identity_focus = ctx.focus_visible.get();
                 if (ctx.last_identity_focus.* != identity_focus) {
                     ctx.last_identity_focus.* = identity_focus;
                     ctx.identity_open.set(identity_focus);
                 }
                 S.repaint(ctx.self.node, ctx.self.colors);
+                @import("session_icon.zig").refreshHostTint(ctx.self.dot);
                 ctx.self.colors = T.current();
                 ctx.self.tint.set(T.current().fg_2);
                 ctx.self.hover.set(.{ .background = T.current().well });
@@ -519,7 +516,6 @@ pub const HostRow = struct {
     pub fn setOnline(self: *HostRow, online: bool) void {
         if (self.online == online) return;
         self.online = online;
-        _ = self.dot.setTint(ui.Color.WHITE);
     }
     pub fn setSelected(self: *HostRow, selected: bool) void {
         self.selected.set(selected);
@@ -533,14 +529,22 @@ pub const HostRow = struct {
     fn connect(self: *HostRow) void {
         self.callbacks.connect(self.callbacks.context);
     }
-    fn copy(self: *HostRow) void {
-        if (self.callbacks.action) |action| action(self.callbacks.context, .copy);
-    }
-    fn edit(self: *HostRow) void {
-        if (self.callbacks.action) |action| action(self.callbacks.context, .edit);
-    }
     fn menu(self: *HostRow) void {
         self.callbacks.menu(self.callbacks.context, self.node);
+    }
+    fn captureStatusClick(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
+        const self: *HostRow = @ptrCast(@alignCast(raw orelse return .ignored));
+        const click = switch (event) {
+            .click => |value| value,
+            else => return .ignored,
+        };
+        const trailing = self.trailing.globalRect();
+        if (click.x < trailing.x or click.x >= trailing.x + trailing.w or click.y < trailing.y or click.y >= trailing.y + trailing.h) return .ignored;
+        const actions = self.actions.globalRect();
+        if (self.actions.style.display != .none and click.x >= actions.x and click.x < actions.x + actions.w and click.y >= actions.y and click.y < actions.y + actions.h) return .ignored;
+        // A pass-through status node may hit the row itself. Capture must run
+        // before Button's target on_click; a bubble handler would be too late.
+        return .handled;
     }
     fn onEvent(event: ui.events.Event, raw: ?*anyopaque) ui.events.EventResult {
         const self: *HostRow = @ptrCast(@alignCast(raw orelse return .ignored));
@@ -550,8 +554,8 @@ pub const HostRow = struct {
                 return .handled;
             },
             .click => |click| {
-                // A row activates on the first click. The second click of a
-                // double click must not open another connection attempt.
+                // A row click only selects. Repeated clicks do not connect;
+                // the separate action button and Return explicitly connect.
                 if (click.click_count > 1) return .handled;
                 // Child action buttons have already handled their own click.
                 // Stop the row's connect callback when that click bubbles.
@@ -592,7 +596,7 @@ pub const GroupRow = struct {
         const root = try ui.box(cx, S.groupCard(), .{});
         root.meta.ownership.meta.test_id = "sidebar.group.card";
         const self = try scope.createState(GroupRow, .{ .cx = cx, .root = root, .header = undefined, .members = undefined, .reference = data.reference, .bridge = bridge, .collapsed = data.collapsed, .chevron = undefined, .menu = undefined, .count = data.count });
-        const header = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = try scope.createText(data.name, .{}), .base_style = S.group(), .hover_style = ui.BoxStyle{ .background = T.current().hover }, .on_click = cx.on(GroupRow, self, GroupRow.toggle), .on_event = groupEvent, .event_context = @as(?*anyopaque, self) }).mount(scope, cx);
+        const header = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = try scope.createText(data.name, .{}), .base_style = S.group(), .hover_style = ui.BoxStyle{ .background = T.states().hover }, .on_click = cx.on(GroupRow, self, GroupRow.toggle), .on_event = groupEvent, .event_context = @as(?*anyopaque, self) }).mount(scope, cx);
         header.meta.ownership.meta.test_id = "sidebar.group";
         setFocusRing(header);
         self.header = header;
@@ -646,7 +650,7 @@ pub const GroupRow = struct {
             item_style.text_color = if (action == .delete_empty) T.current().danger_ink else T.current().fg_1;
             item_style.font_size = 11.5;
             item_style.font_weight = 400;
-            const button = try ui.widgets.Button(.{ .label = label, .icon_asset = ui.icons.get(icon_name), .icon_size = @as(f32, 14), .icon_tint = if (action == .delete_empty) T.current().danger_ink else T.current().fg_2, .variant = .ghost, .a11y_label = label, .disabled = !enabled, .base_style = item_style, .hover_style = ui.BoxStyle{ .background = T.current().hover }, .on_click = cx.on(GroupControl, control, GroupControl.run) }).mount(menu.scope, cx);
+            const button = try ui.widgets.Button(.{ .label = label, .icon_asset = ui.icons.get(icon_name), .icon_size = @as(f32, 14), .icon_tint = if (action == .delete_empty) T.current().danger_ink else T.current().fg_2, .variant = .ghost, .a11y_label = label, .disabled = !enabled, .base_style = item_style, .hover_style = ui.BoxStyle{ .background = T.states().hover }, .on_click = cx.on(GroupControl, control, GroupControl.run) }).mount(menu.scope, cx);
             if (button.behavior.interaction.a11y) |*a11y| a11y.role = .menuitem;
             try menu.content.appendChild(cx.allocator, button);
         }

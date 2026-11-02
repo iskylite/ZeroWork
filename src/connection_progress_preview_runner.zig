@@ -15,6 +15,7 @@ const Fixture = struct {
     result: *ui.Node,
     attempt: u64 = 1,
     failed: bool = false,
+    handshake: bool = false,
     releasing: bool = false,
     cancelled: bool = false,
     route: bool = false,
@@ -62,6 +63,13 @@ const Fixture = struct {
         const current: usize = if (self.route) 1 else 0;
         for (0..current) |hop| journal.record(.{ .attempt = self.attempt, .timestamp_ns = 0, .hop = hop, .hop_count = hops.len, .host = hops[hop].host, .port = 22, .phase = .ready, .status = .succeeded });
         for ([_]P.progress.Phase{ .transport, .handshake, .host_key, .authentication }) |phase| journal.record(.{ .attempt = self.attempt, .timestamp_ns = @as(i128, @intCast(journal.count)) * 100 * std.time.ns_per_ms, .hop = current, .hop_count = hops.len, .host = hops[current].host, .port = 22, .phase = phase, .status = if (self.failed and phase == .authentication) .failed else .succeeded, .failure = if (self.failed and phase == .authentication) error.AuthenticationFailed else null });
+        if (self.handshake and self.failed) {
+            journal.begin(self.attempt);
+            journal.record(.{ .attempt = self.attempt, .hop = 0, .hop_count = 1, .host = hops[0].host, .port = 22, .timestamp_ms = 1793600000000, .timestamp_ns = 0, .phase = .transport, .status = .started });
+            journal.record(.{ .attempt = self.attempt, .hop = 0, .hop_count = 1, .host = hops[0].host, .port = 22, .timestamp_ms = 1793600000002, .timestamp_ns = 2 * std.time.ns_per_ms, .phase = .transport, .status = .succeeded });
+            journal.record(.{ .attempt = self.attempt, .hop = 0, .hop_count = 1, .host = hops[0].host, .port = 22, .timestamp_ms = 1793600000003, .timestamp_ns = 3 * std.time.ns_per_ms, .phase = .handshake, .status = .started });
+            journal.record(.{ .attempt = self.attempt, .hop = 0, .hop_count = 1, .host = hops[0].host, .port = 22, .timestamp_ms = 1793600000004, .timestamp_ns = 4 * std.time.ns_per_ms, .phase = .handshake, .status = .failed, .failure = error.SshHandshakeDisconnected, .diagnostic = "handshake transport host=10.2.209.201:22 hop=0 rc=-13 peer=10.2.209.201:22 local_port=55120 flags=4 identification_bytes=22 identification_hash=ab12 identification_complete=1\nhandshake failed host=10.2.209.201:22 hop=0 rc=-13 libssh2_code=-13 fd=12 recv_code=0 recv_errno=0 received_bytes=22 send_code=24 send_errno=0 sent_bytes=24 message=Failed getting banner" });
+        }
         if (!self.failed) journal.record(.{ .attempt = self.attempt, .timestamp_ns = 520 * std.time.ns_per_ms, .hop = current, .hop_count = hops.len, .host = hops[current].host, .port = 22, .phase = .shell, .status = .started });
         var ledger = try ssh.ResourceLedger.init(key, hops.len);
         for (0..hops.len) |hop| _ = ledger.record(key, hop, .session, if (self.releasing) .releasing else if (self.failed or self.cancelled) .released else .owned);
@@ -76,7 +84,7 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
     const result = try ui.text(cx, "", .{ .font_size = 12, .color = theme.current().fg_2 });
     result.meta.ownership.meta.test_id = "fixture.result";
     try root.appendChild(cx.allocator, result);
-    const self = try scope.createState(Fixture, .{ .cx = cx, .result = result, .route = !std.mem.eql(u8, scene, "direct") and !std.mem.eql(u8, scene, "long"), .long = std.mem.eql(u8, scene, "long"), .failed = std.mem.eql(u8, scene, "failed") or std.mem.eql(u8, scene, "releasing"), .releasing = std.mem.eql(u8, scene, "releasing") });
+    const self = try scope.createState(Fixture, .{ .cx = cx, .result = result, .route = !std.mem.eql(u8, scene, "direct") and !std.mem.eql(u8, scene, "long") and !std.mem.eql(u8, scene, "handshake"), .long = std.mem.eql(u8, scene, "long"), .handshake = std.mem.eql(u8, scene, "handshake"), .failed = std.mem.eql(u8, scene, "handshake") or std.mem.eql(u8, scene, "failed") or std.mem.eql(u8, scene, "releasing"), .releasing = std.mem.eql(u8, scene, "releasing") });
     self.view = try P.View.mount(cx, scope, .{ .context = self, .cancel = Fixture.cancel, .retry = Fixture.retry, .close = Fixture.close, .copy_logs = Fixture.copy });
     try cx.addAfterLayoutHook(self, Fixture.frame);
     return root;

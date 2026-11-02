@@ -70,6 +70,7 @@ pub const Wizard = struct {
     authentication_area: *ui.Node = undefined,
     protocol_icon: ?*ui.Node = null,
     protocol_picker: ?*ui.Node = null,
+    protocol_select: ?ui.widgets.SelectResult = null,
     painted_colors: ?S.theme.Colors = null,
     open: ?*ui.Signal(bool) = null,
     locked: ?*ui.Signal(bool) = null,
@@ -137,7 +138,7 @@ pub const Wizard = struct {
         self.title = try ui.text(cx, "新建连接", S.text(13, 700, false));
         self.title.?.meta.ownership.meta.test_id = "wizard.title";
         try header.appendChild(self.alloc, self.title.?);
-        try header.appendChild(self.alloc, try ui.spacer(cx));
+
         var count: usize = 0;
         for (self.plugin_registry.manifests()) |manifest| if (manifest.connection != null) {
             count += 1;
@@ -153,6 +154,9 @@ pub const Wizard = struct {
         }
         if (self.plugin_registry.find(self.protocol_id) == null and count != 0) self.protocol_id = self.protocol_options[0].value;
         self.sig_protocol.?.set(if (count == 0) null else self.protocol_id);
+        const protocol = try self.mountHeaderProtocol(cx, scope);
+        try header.appendChild(self.alloc, protocol);
+        try header.appendChild(self.alloc, try ui.spacer(cx));
         const close = try ui.widgets.Button(.{ .variant = .ghost, .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 14), .icon_tint = S.theme.current().fg_2, .base_style = .{ .width = .{ .px = 28 }, .height = .{ .px = 28 }, .padding = .{}, .background = ui.Color.TRANSPARENT, .corner_radius = 7 }, .a11y_label = "关闭向导", .on_click = cx.on(Wizard, self, cancel) }).mount(scope, cx);
         close.meta.ownership.meta.test_id = "wizard.close";
         try header.appendChild(self.alloc, close);
@@ -194,7 +198,6 @@ pub const Wizard = struct {
         self.plugin_slot = null;
     }
     fn destroyEditorNodes(self: *Wizard) void {
-        self.protocol_picker = null;
         if (self.plugin_slot) |slot| while (slot.children.items.len != 0) {
             const child = slot.children.items[slot.children.items.len - 1];
             slot.removeChild(child);
@@ -248,7 +251,7 @@ pub const Wizard = struct {
         if (self.probes == null) if (self.probe_host) |host| {
             self.probes = try host.bindParent(self.draft_id, self.draft_revision);
         };
-        self.plugin_editor = try mount_editor(connection.editor_factory.context, .{ .cx = self.cx, .scope = scope, .slot = self.plugin_slot.?, .protocol_id = manifest.id, .protocol_picker = .{ .context = self, .mount = mountProtocolPicker }, .initial = initial, .draft_revision = self.draft_revision, .events = .{ .context = self, .changed = editorChanged, .submit = editorSubmit, .submit_with_secret = editorSubmitWithSecret, .dismiss = editorDismiss, .cancelled = editorCancelled }, .editor_host = self.editor_host, .editor_id = self.draft_id, .credentials = self.credentials, .probes = self.probes, .connection_configs = self.connection_configs });
+        self.plugin_editor = try mount_editor(connection.editor_factory.context, .{ .cx = self.cx, .scope = scope, .slot = self.plugin_slot.?, .protocol_id = manifest.id, .initial = initial, .draft_revision = self.draft_revision, .events = .{ .context = self, .changed = editorChanged, .submit = editorSubmit, .submit_with_secret = editorSubmitWithSecret, .dismiss = editorDismiss, .cancelled = editorCancelled }, .editor_host = self.editor_host, .editor_id = self.draft_id, .credentials = self.credentials, .probes = self.probes, .connection_configs = self.connection_configs });
         try scope.onCleanup(Wizard, self, releasePluginScope);
         if (self.on_editor_mounted) |hook| try hook(self.editor_mounted_context orelse return error.EditorHookUnavailable, self.plugin_editor.?);
         if (self.plugin_error) |node| node.setDisplay(.none);
@@ -343,58 +346,44 @@ pub const Wizard = struct {
         }
         self.cx.requestRedraw();
     }
-    fn mountProtocolPicker(raw: *anyopaque, cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
-        const self: *Wizard = @ptrCast(@alignCast(raw));
-        const picker = try ui.box(cx, .{ .width = .fill(), .height = .{ .px = 41 }, .direction = .row, .align_items = .center, .padding = ui.Padding.all(5), .gap = 6, .background = S.theme.current().well, .border = .{ .radius = 9 }, .flex_shrink = 0 }, .{});
-        picker.meta.ownership.meta.test_id = "wizard.protocol";
-        self.protocol_picker = picker;
-        for (self.protocol_options, 0..) |option, index| {
-            const click = try scope.createState(ProtocolClick, .{ .wizard = self, .index = index });
-            const button = try ui.widgets.Button(.{ .label = option.label, .variant = .ghost, .disabled = self.locked.?, .on_click = cx.on(ProtocolClick, click, ProtocolClick.activate), .base_style = @as(@FieldType(ui.widgets.ControlShellConfig, "style"), .{ .width = .fill(), .flex = 1, .height = .{ .px = 31 }, .padding = .{}, .corner_radius = 7, .font_size = 11, .font_weight = 400, .text_color = S.theme.current().fg_1, .background = if (std.mem.eql(u8, option.value, self.protocol_id)) S.theme.popupSelection() else ui.Color.TRANSPARENT, .border_width = 0 }) }).mount(scope, cx);
-            button.meta.ownership.meta.test_id = option.test_id;
-            if (button.behavior.interaction.a11y) |*access| {
-                access.selected = std.mem.eql(u8, option.value, self.protocol_id);
-                access.pressed = access.selected;
-            }
-            try picker.appendChild(self.alloc, button);
-        }
-        return picker;
+    fn mountHeaderProtocol(self: *Wizard, cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
+        const select = try ui.widgets.Select(.{ .options = self.protocol_options, .value = self.sig_protocol.?, .width = 152, .leading_icon = ui.icons.terminal, .disabled = self.locked.?, .on_change = cx.on(Wizard, self, protocolChanged) }).mount(scope, cx);
+        self.protocol_select = select;
+        self.protocol_picker = select.trigger;
+        select.trigger.meta.ownership.meta.test_id = "wizard.protocol";
+        select.wrapper.setStyleInline(self.alloc, .{ .width = .{ .px = 152 }, .height = .{ .px = 30 }, .margin = .{ .left = 14 }, .flex_shrink = 0 });
+        select.chrome.setStyleInline(self.alloc, .{ .padding = ui.Padding.all(5), .gap = 0, .border = .{ .radius = 10, .width = 0 } });
+        select.panel.setStyleInline(self.alloc, .{ .gap = 0 });
+        return select.wrapper;
     }
-    const ProtocolClick = struct {
-        wizard: *Wizard,
-        index: usize,
-        fn activate(self: *ProtocolClick) void {
-            const wizard = self.wizard;
-            const selected = wizard.protocol_options[self.index].value;
-            if (std.mem.eql(u8, selected, wizard.protocol_id)) return;
-            // The picker belongs to the current provider scope. Replacing it
-            // here would destroy the node/context whose handler is executing.
-            wizard.queued_protocol = selected;
-            wizard.cx.requestRedraw();
-        }
-    };
+    fn protocolChanged(self: *Wizard, value: ?[]const u8) void {
+        const selected = value orelse return;
+        if (std.mem.eql(u8, selected, self.protocol_id)) return;
+        // Dispose the provider only after the Select callback has returned.
+        for (self.protocol_options) |option| if (std.mem.eql(u8, option.value, selected)) {
+            self.queued_protocol = option.value;
+            self.cx.requestRedraw();
+            return;
+        };
+    }
     fn refreshAppearance(self: *Wizard) void {
         const colors = S.theme.current();
         self.painted_colors = colors;
         if (self.modal) |node| node.setStyleInline(self.alloc, .{ .background = colors.overlay });
         if (self.title) |node| node.setTextColor(colors.fg_1);
-        if (self.protocol_picker) |picker| {
-            picker.setBackground(S.theme.popupInset());
-            for (picker.children.items, 0..) |button, index| {
-                if (index >= self.protocol_options.len) break;
-                const chosen = std.mem.eql(u8, self.protocol_options[index].value, self.protocol_id);
-                button.setStyleInline(self.alloc, .{ .background = if (chosen) S.theme.popupSelection() else ui.Color.TRANSPARENT });
-                paintPickerText(button, colors.fg_1);
-            }
+        if (self.protocol_select) |select| {
+            var style = S.input();
+            style.height = .{ .px = 30 };
+            style.font_size = 12;
+            select.trigger.setStyleInline(self.alloc, style);
+            const manifest = self.plugin_registry.find(self.protocol_id);
+            const asset = if (manifest) |value| @import("session_icon.zig").asset(value.icons.protocol) else ui.icons.terminal;
+            if (select.leading_icon) |icon| if (asset.icon_id) |id| if (asset.pickRep(14)) |rep| icon.setIcon(.{ .icon_id = id, .rep = rep, .tint = colors.fg_2 });
         }
         if (self.protocol_icon) |node| {
             const asset = if (self.presentation_warning) ui.icons.circle_alert else ui.icons.plug;
             if (asset.icon_id) |id| if (asset.pickRep(18)) |rep| node.setIcon(.{ .icon_id = id, .rep = rep, .tint = if (self.presentation_warning) colors.warn_ink else colors.accent });
         }
-    }
-    fn paintPickerText(node: *ui.Node, color: ui.Color) void {
-        if (node.getText() != null) node.setTextColor(color);
-        for (node.children.items) |child| paintPickerText(child, color);
     }
     pub fn show(self: *Wizard) void {
         self.refreshAppearance();

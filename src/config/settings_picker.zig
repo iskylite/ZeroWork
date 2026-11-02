@@ -55,6 +55,8 @@ pub fn mount(cx: *ui.Cx, scope: *ui.Scope, overlay_parent: *ui.Node, anchor: *ui
     self.* = .{ .cx = cx, .scope = scope, .controller = controller, .key = key, .callbacks = callbacks, .anchor_id = anchor.id, .parent_id = overlay_parent.id, .root = undefined, .body = undefined, .error_label = undefined };
     try scope.onCleanup(Picker, self, Picker.cleanup);
     self.root = try ui.box(cx, .{ .position = .absolute, .inset = .{ .left = .{ .px = 8 }, .top = .{ .px = 8 } }, .width = .{ .px = 220 }, .direction = .column, .gap = 4, .padding = .{ .left = 8, .right = 8, .top = 8, .bottom = 8 }, .background = theme.current().overlay, .glass = theme.overlayGlass(), .border = .{ .width = 0, .color = theme.current().border, .radius = 8 }, .shadow = .{ .blur = 20, .offset_y = 8, .color = theme.current().shadow }, .z_index = 100 }, .{});
+    @import("../ui/floating_input.zig").protect(cx, self.root);
+    cx.dispatcher.cancelScrollGesture();
     self.body = try ui.widgets.ScrollArea(.{ .width = 204 }).mount(scope, cx);
     try self.root.appendChild(cx.allocator, self.body.container);
     self.body.container.style.height = .{ .fit = .{} };

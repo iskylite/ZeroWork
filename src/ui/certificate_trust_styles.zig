@@ -21,8 +21,7 @@ pub fn value(mono: bool) ui.TextStyle {
 }
 pub fn notice(changed: bool) ui.BoxStyle {
     var result = shared.well();
-    const color = if (changed) shared.theme.current().danger else shared.theme.current().warn;
-    result.background = color.withAlpha(23);
+    result.background = if (changed) shared.theme.states().feedback_danger else shared.theme.states().feedback_warn;
     result.padding = ui.Padding.all(12);
     return result;
 }

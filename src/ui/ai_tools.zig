@@ -64,6 +64,7 @@ const ControllerTask = struct {
 };
 pub const Bridge = struct {
     allocator: std.mem.Allocator,
+    output_store: ?*@import("../ai/batch_output.zig").Store = null,
     events: ?*@import("../ai/step_events.zig").Mailbox = null,
     children: std.ArrayList(*Child) = .empty,
     captured_scope: ?scope.Scope = null,
@@ -136,6 +137,11 @@ pub const Bridge = struct {
     pub fn configureHost(self: *Bridge, binding: HostBinding) !void {
         if (self.captured_scope != null or self.host_exchange != null) return error.ToolCleanupPending;
         try binding.context.validate();
+        if (self.output_store == null) {
+            const store = try self.allocator.create(@import("../ai/batch_output.zig").Store);
+            store.* = @import("../ai/batch_output.zig").Store.init(self.allocator);
+            self.output_store = store;
+        }
         self.host_binding = binding;
         if (self.queries_only) self.host_binding.?.contributions = &@import("../ai/host_queries.zig").contributions;
     }
@@ -272,6 +278,7 @@ pub const Bridge = struct {
         defer definitions.deinit(self.allocator);
         var members: std.ArrayList(tools.Member) = .empty;
         defer members.deinit(self.allocator);
+        var has_terminal_source = false;
         for (captured.memberIds()) |id| {
             if (self.queries_only) break;
             const owner = for (app.workspace.tabs.items) |tab| {
@@ -279,6 +286,10 @@ pub const Bridge = struct {
             } else return error.StaleSession;
             const manifest = app.sessions.manifestFor(owner) orelse return error.AdapterNotConnected;
             if (!manifest.integration.ai) continue;
+            for (manifest.tools) |binding| if (std.mem.eql(u8, binding.definition_id, "read_terminal")) {
+                has_terminal_source = true;
+                break;
+            };
             // Metadata authority is independent of terminal service readiness.
             // A failed/opening session remains in the real captured scope but
             // contributes no executable target until its services are ready.
@@ -309,7 +320,7 @@ pub const Bridge = struct {
                     },
                     else => return err,
                 };
-                child.invocation_context = .{ .host = adapter.vtable.interface(adapter.context), .captured_scope = captured, .policy_revision = self.policy_revision };
+                child.invocation_context = .{ .host = adapter.vtable.interface(adapter.context), .captured_scope = captured, .policy_revision = self.policy_revision, .output_context = if (self.output_store != null and self.host_binding != null) .{ .store = self.output_store.?, .conversation_id = self.host_binding.?.context.conversation_id, .owner = owner } else null };
                 child.member.context = &child.invocation_context;
             }
             for (manifest.tool_definitions) |definition| {
@@ -322,6 +333,19 @@ pub const Bridge = struct {
                 if (!found) try definitions.append(self.allocator, definition);
             }
             try members.append(self.allocator, child.member);
+        }
+        if (self.host_binding) |*binding| {
+            // Host terminal tools follow the same protocol capability as the
+            // plugin catalog. File-only and video-only sources have no PTY.
+            // Use the declared capability rather than readiness, so supported
+            // terminals retain history/observation while opening or failed.
+            const a = self.capture_arena.allocator();
+            var contributions: std.ArrayList(host_tools.Contribution) = .empty;
+            for (binding.contributions) |contribution| {
+                if (!has_terminal_source and (@import("../ai/host_terminal_queries.zig").supports(contribution.definition.id) or @import("../ai/host_execution.zig").supports(contribution.definition.id) or @import("../ai/batch_output.zig").supports(contribution.definition.id))) continue;
+                try contributions.append(a, contribution);
+            }
+            binding.contributions = try contributions.toOwnedSlice(a);
         }
         self.table = if (self.host_binding) |binding| try tools.RequestTable.initWithHost(self.allocator, captured, definitions.items, members.items, binding.context, binding.contributions) else try tools.RequestTable.init(self.allocator, captured, definitions.items, members.items);
         self.wire = try tools.providerDefinitions(&self.table.?, self.table.?.arena.allocator());
@@ -401,6 +425,7 @@ pub const Bridge = struct {
         self.shared_history = next.shared_history;
         self.host_binding = next.host_binding;
         next.host_binding = null;
+        for (self.children.items) |child| child.invocation_context.output_context = if (self.output_store != null and self.host_binding != null) .{ .store = self.output_store.?, .conversation_id = self.host_binding.?.context.conversation_id, .owner = child.owner } else null;
         self.queries_only = next.queries_only;
         self.pending_binding = null;
         self.mutex.unlock();
@@ -450,6 +475,28 @@ pub const Bridge = struct {
     }
     pub fn queryHost(self: *Bridge, invocation: host_tools.Invocation, allocator: std.mem.Allocator, cancel: ?*provider.CancelToken) !host_tools.Result {
         return self.exchangeHost(invocation, allocator, cancel);
+    }
+    pub fn readBatchOutput(self: *Bridge, app: *Application.ApplicationHost, invocation: host_tools.Invocation, a: std.mem.Allocator) !host_tools.Result {
+        const batch = @import("../ai/batch_output.zig");
+        const parsed = try batch.parse(a, invocation.arguments);
+        defer parsed.deinit();
+        const store = self.output_store orelse return error.OutputExpired;
+        const source = try store.source(invocation.context.conversation_id, parsed.value.output_ref);
+        _ = try (self.captured_scope orelse return error.ScopeChanged).validate(&.{@backingInt(source.session_id)});
+        const child = for (self.children.items) |item| {
+            if (item.owner.eql(source)) break item;
+        } else return error.StaleReference;
+        const manifest = app.sessions.manifestFor(source) orelse return error.StaleReference;
+        if (!manifest.integration.ai or app.sessions.queryService(source, .exec) != .available) return error.CapabilityUnavailable;
+        const allowed = for (child.member.bindings) |binding| {
+            if (std.mem.eql(u8, binding.definition_id, "run_command")) break true;
+        } else false;
+        if (!allowed) return error.PermissionDenied;
+        const body = try store.read(invocation.context.conversation_id, parsed.value, a);
+        errdefer a.free(body);
+        const blocks = try a.alloc(host_tools.Block, 1);
+        blocks[0] = .{ .structured = body };
+        return .{ .status = .succeeded, .blocks = blocks, .receipt = .{ .conversation_id = invocation.context.conversation_id, .task_id = invocation.context.task_id, .operation_id = invocation.operation_id, .binding_revision = invocation.context.binding_revision } };
     }
     /// A busy lock or a live mailbox cannot prove Task resource settlement.
     pub fn quiescent(self: *Bridge) ?bool {
@@ -1044,6 +1091,10 @@ pub const Bridge = struct {
         self.children.deinit(self.allocator);
         self.retired.deinit(self.allocator);
         self.owned_history.deinit();
+        if (self.output_store) |store| {
+            store.deinit();
+            self.allocator.destroy(store);
+        }
         self.validation_arena.deinit();
         self.capture_arena.deinit();
         self.* = undefined;

@@ -6,6 +6,7 @@
 const std = @import("std");
 const ui = @import("ui");
 const S = @import("../../ui/wizard_styles.zig");
+const Stepper = @import("../../ui/connection_stepper.zig");
 const hosts_mod = @import("../../config/hosts.zig");
 const identity = @import("../../host/identity.zig");
 pub const TestProgress = @import("../../ui/wizard_test_progress.zig");
@@ -758,44 +759,20 @@ pub const RemoteEditor = struct {
         try modal.body.appendChild(self.alloc, header);
         const body = try ui.box(cx, S.body(), .{});
         self.body = body;
-        var stepper_style = S.row(46);
-        stepper_style.padding = ui.Padding.all(5);
-        stepper_style.background = S.theme.current().well;
-        stepper_style.border = .{ .radius = 9 };
-        const stepper = try ui.box(cx, stepper_style, .{});
-        stepper.meta.ownership.meta.test_id = "wizard.steps";
+        const stepper = try Stepper.row(cx);
         self.stepper = stepper;
-        const labels = [_][]const u8{ "连接与认证", "连接路径", "核对与测试" };
         for (0..3) |i| {
             const ctx = try self.alloc.create(StepAction);
             ctx.* = .{ .wizard = self, .step = @fromBackingInt(@intCast(i)) };
             try scope.onCleanup(StepAction, ctx, StepAction.cleanup);
             self.step_disabled[i] = try scope.createSignal(bool, i != 0);
             self.step_styles[i] = try scope.createSignal(ui.BoxStyle, S.step(i == 0));
-            const button = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = labels[i], .base_style = self.step_styles[i].?, .disabled = self.step_disabled[i].?, .on_click = cx.on(StepAction, ctx, StepAction.click) }).mount(scope, cx);
-            for (button.children.items) |child| child.setDisplay(.none);
-            button.meta.ownership.meta.test_id = ([_][]const u8{ "wizard.step.identity", "wizard.step.route", "wizard.step.review" })[i];
-            self.step_buttons[i] = button;
-            const number = try ui.box(cx, S.number(i == 0), .{});
-            self.step_numbers[i] = number;
-            const digit = try ui.text(cx, ([_][]const u8{ "1", "2", "3" })[i], S.stepNumber());
-            digit.setStyleInline(self.alloc, .{ .width = .{ .px = 8 }, .height = .{ .px = 18 }, .flex_shrink = 0 });
-            self.step_digits[i] = digit;
-            try number.appendChild(self.alloc, digit);
-            const check = try ui.iconTint(cx, ui.icons.check, S.theme.current().ok, S.icon(13));
-            check.meta.ownership.meta.test_id = ([_][]const u8{ "wizard.step.identity.check", "wizard.step.route.check", "wizard.step.review.check" })[i];
-            self.step_checks[i] = check;
-            try number.appendChild(self.alloc, check);
-            check.setDisplay(.none);
-            try button.appendChild(self.alloc, number);
-            const copy = try ui.box(cx, S.stepCopy(), .{});
-            self.step_titles[i] = try ui.text(cx, labels[i], S.stepTitle(i == 0));
-            try copy.appendChild(self.alloc, self.step_titles[i].?);
-            self.step_details[i] = try ui.text(cx, if (i == 0) "当前步骤" else "待完成", S.text(9.5, 400, false));
-            self.step_details[i].?.setDisplay(.none);
-            try copy.appendChild(self.alloc, self.step_details[i].?);
-            try button.appendChild(self.alloc, copy);
-            try stepper.appendChild(self.alloc, button);
+            const entry = try Stepper.append(cx, scope, stepper, i, ([_][]const u8{ "wizard.step.identity", "wizard.step.route", "wizard.step.review" })[i], self.step_disabled[i].?, self.step_styles[i].?, cx.on(StepAction, ctx, StepAction.click));
+            self.step_buttons[i] = entry.button;
+            self.step_numbers[i] = entry.badge;
+            self.step_digits[i] = entry.digit;
+            self.step_checks[i] = entry.check;
+            self.step_titles[i] = entry.title;
         }
         try body.appendChild(self.alloc, stepper);
         self.step1_view = try mountIdentity(self);
@@ -1010,7 +987,7 @@ pub const RemoteEditor = struct {
                     const header_height: f32 = if (compact and self.embedded) 48 else 52;
                     const footer_height: f32 = if (compact) 54 else 62;
                     const gap: f32 = if (compact) 12 else 14;
-                    return @min(S.max_height, header_height + 46 + gap + content_height + footer_height);
+                    return @min(S.max_height, header_height + 60 + gap + content_height + footer_height);
                 }
             }
         }
@@ -1486,7 +1463,11 @@ pub const RemoteEditor = struct {
     }
 
     pub fn isVisible(self: *const RemoteEditor) bool {
-        return if (self.root) |node| node.style.display != .none else false;
+        var current: ?*ui.Node = self.root orelse return false;
+        while (current) |node| : (current = node.parent) {
+            if (node.style.display == .none) return false;
+        }
+        return true;
     }
 
     pub fn setTestProgress(self: *RemoteEditor, generation: u64, draft_id: u64, revision: u64, text: []const u8) bool {
@@ -1768,20 +1749,8 @@ pub const RemoteEditor = struct {
                     break;
                 }
             };
-            const style = S.step(current);
-            self.step_styles[i].?.set(style);
-            // Keep the public inline layer in sync with the state; an initial
-            // current-step override must not pin step one after navigation.
-            node.setStyleInline(self.alloc, style);
-            node.setOpacity(1);
-            self.step_numbers[i].?.setStyleInline(self.alloc, S.number(current));
-            self.step_digits[i].?.setDisplay(if (invalid) .none else .flex);
-            self.step_digits[i].?.setTextColor(if (current) S.theme.current().accent_ink else S.theme.current().fg_2);
-            self.step_checks[i].?.setDisplay(if (invalid) .flex else .none);
-            paintIcon(self.step_checks[i].?, if (invalid) ui.icons.circle_alert else ui.icons.check, 13, if (invalid) S.theme.current().danger_ink else S.theme.current().ok);
-            if (invalid) self.step_numbers[i].?.setBackground(S.theme.current().well);
-            self.step_titles[i].?.setTextColor(S.stepTitle(current).color);
-            self.step_details[i].?.setTextColor(S.theme.current().fg_2);
+            self.step_styles[i].?.set(S.step(current));
+            Stepper.paint(self.cx, .{ .button = node, .badge = self.step_numbers[i].?, .digit = self.step_digits[i].?, .check = self.step_checks[i].?, .title = self.step_titles[i].? }, current, i < @backingInt(self.step), invalid);
         };
     }
 
@@ -1806,7 +1775,6 @@ pub const RemoteEditor = struct {
         for (self.step_disabled, 0..) |slot, i| if (slot) |signal| {
             const allowed = i == 0 or (i <= @backingInt(self.furthest_step) and (if (i == 1) self.validIdentityDraft() else self.validDraft()));
             signal.set(self.isLocked() or !allowed);
-            self.step_details[i].?.setTextContent(self.alloc, if (i == @backingInt(self.step)) "当前步骤" else if (allowed) "可返回修改" else "待完成") catch {};
         };
         if (self.next1_disabled) |v| v.set(self.isLocked() or !self.validIdentityDraft());
         if (self.next2_disabled) |v| v.set(self.isLocked() or !self.validDraft());
@@ -4030,4 +3998,22 @@ test "host scrollback inherits global until explicitly edited and clearing resto
     defer writer.deinit();
     try @import("../../config/hosts.zig").Registry.formatOne(host, &writer.writer);
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "scrollback =") == null);
+}
+
+test "hidden maintenance RemoteEditor respects hidden ancestors and resumes on reopen" {
+    const cx = try ui.Cx.init(std.testing.allocator, std.testing.io);
+    defer cx.deinit();
+    const parent = try ui.box(cx, .{}, .{});
+    cx.root = parent;
+    const child = try ui.box(cx, .{}, .{});
+    try parent.appendChild(cx.allocator, child);
+    var editor: RemoteEditor = undefined;
+    editor.root = child;
+    try std.testing.expect(editor.isVisible());
+    parent.setDisplay(.none);
+    try std.testing.expect(!editor.isVisible());
+    parent.setDisplay(.flex);
+    try std.testing.expect(editor.isVisible());
+    child.setDisplay(.none);
+    try std.testing.expect(!editor.isVisible());
 }

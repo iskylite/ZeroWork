@@ -282,9 +282,9 @@ test "connection progress view copies only owned real diagnostics and rejects st
     try std.testing.expect(std.mem.indexOf(u8, f.copied.?, "尝试 1") != null);
     try std.testing.expect(std.mem.indexOf(u8, f.copied.?, "尝试 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, f.copied.?, "db.example") != null);
-    try std.testing.expectEqualStrings("已复制阶段日志", f.view.log_help.getText().?.content);
+    try std.testing.expectEqualStrings("已复制连接日志", f.view.log_help.getText().?.content);
     try f.show(source);
-    try std.testing.expectEqualStrings("已复制阶段日志", f.view.log_help.getText().?.content);
+    try std.testing.expectEqualStrings("已复制连接日志", f.view.log_help.getText().?.content);
     f.copy_error = true;
     f.view.copyLogs();
     try std.testing.expectEqualStrings("复制失败，请重试", f.view.log_help.getText().?.content);
@@ -444,8 +444,11 @@ test "connection progress view log follow pauses on scroll new rows stay pending
     const choose = f.view.slots[1].node.behavior.events.on_click.?;
     choose.callback(choose.context);
     try std.testing.expectEqual(@as(?usize, 0), f.view.filter);
-    try std.testing.expect(std.mem.indexOf(u8, f.view.logs_text.getText().?.content, "b1.example") != null);
-    try std.testing.expect(std.mem.indexOf(u8, f.view.logs_text.getText().?.content, "db.example") == null);
+    try std.testing.expect(f.view.log_row_count != 0);
+    for (f.view.log_rows[0..f.view.log_row_count]) |row| {
+        try std.testing.expect(std.mem.indexOf(u8, row.text.getText().?.content, "b1.example") != null);
+        try std.testing.expect(std.mem.indexOf(u8, row.text.getText().?.content, "db.example") == null);
+    }
     choose.callback(choose.context);
     try std.testing.expect(f.view.filter == null);
     f.cx.setViewport(860, 480);
@@ -502,4 +505,77 @@ test "SFTP progress keeps failure code and permits retry only after actual clean
     try std.testing.expectEqual(@as(usize, 1), f.copies);
     f.view.retry();
     try std.testing.expectEqual(@as(usize, 1), f.retries);
+}
+
+test "connection progress native diagnostics are owned, filtered, copied and dismissed with their attempt" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    var raw = "handshake failed rc=-13 libssh2_code=-13 message=Failed getting banner".*;
+    f.journal.record(.{ .attempt = 1, .hop = 1, .hop_count = route.len, .host = route[1].host, .port = 22, .phase = .handshake, .status = .failed, .failure = error.SshHandshakeDisconnected, .diagnostic = &raw });
+    var source = f.snapshot(&route);
+    source.state = .failed;
+    source.cleanup = .released;
+    try f.show(source);
+    @memset(&raw, 'x');
+    f.view.toggleLogs();
+    const row = &f.view.log_rows[0];
+    try std.testing.expect(row.node.behavior.events.on_click == null);
+    row.node.behavior.events.on_hover.?.invoke();
+    const expected = "尝试 1 · 第 2 跳 · SSH 握手\n时间未知 - handshake failed rc=-13 libssh2_code=-13 message=Failed getting banner - —\n";
+    try std.testing.expectEqualStrings(expected, f.view.diagnostic_text.getText().?.content);
+    try std.testing.expect(f.view.diagnostic_open.peek());
+    f.view.copyLogs();
+    try std.testing.expect(std.mem.indexOf(u8, f.copied.?, "libssh2_code=-13") != null);
+    // A different hop must never show this failure's diagnostic bubble.
+    f.view.slots[3].node.behavior.events.on_click.?.invoke();
+    try std.testing.expectEqual(@as(usize, 0), f.view.log_row_count);
+    try std.testing.expect(!f.view.diagnostic_open.peek());
+    f.view.slots[2].node.behavior.events.on_click.?.invoke();
+    f.view.log_rows[0].node.behavior.events.on_hover.?.invoke();
+    try std.testing.expectEqualStrings(expected, f.view.diagnostic_text.getText().?.content);
+    f.view.log_rows[0].node.behavior.events.on_leave.?.invoke();
+    try std.testing.expect(!f.view.diagnostic_open.peek());
+    f.view.log_rows[0].node.behavior.events.on_hover.?.invoke();
+    f.view.hide();
+    try std.testing.expect(!f.view.diagnostic_open.peek());
+    f.journal.begin(2);
+    source = f.snapshot(&route);
+    source.key.attempt_id = 2;
+    source.key.operation_id += 1;
+    try f.show(source);
+    try std.testing.expectEqual(@as(usize, 0), f.view.log_row_count);
+}
+
+test "connection progress hover shows only the original diagnostic for that failed history row" {
+    var f: Fixture = undefined;
+    try f.init();
+    defer f.deinit();
+    f.record(0, 1, .handshake, .failed);
+    var first: P.LogRecord = .{ .key = key, .entry = f.journal.snapshot().entries[0] };
+    first.entry.diagnostic.format("{s}", .{"first attempt native error"});
+    var next = key;
+    next.attempt_id = 2;
+    next.operation_id += 1;
+    f.journal.begin(2);
+    f.record(0, 1, .handshake, .failed);
+    var second: P.LogRecord = .{ .key = next, .entry = f.journal.snapshot().entries[0] };
+    second.entry.diagnostic.format("{s}", .{"second attempt native error"});
+    const records = [_]P.LogRecord{ first, second };
+    var source = f.snapshot(&direct);
+    source.key = next;
+    source.logs = &records;
+    try f.show(source);
+    f.view.toggleLogs();
+    f.view.log_rows[0].node.behavior.events.on_hover.?.invoke();
+    try std.testing.expect(std.mem.indexOf(u8, f.view.diagnostic_text.getText().?.content, "first attempt native error") != null);
+    f.view.log_rows[1].node.behavior.events.on_hover.?.invoke();
+    try std.testing.expect(std.mem.indexOf(u8, f.view.diagnostic_text.getText().?.content, "second attempt native error") != null);
+    f.view.log_rows[0].node.behavior.events.on_leave.?.invoke();
+    try std.testing.expect(f.view.diagnostic_open.peek());
+    // An unchanged snapshot must preserve the hovered row and its pending bubble.
+    try f.show(source);
+    try std.testing.expect(f.view.diagnostic_open.peek());
+    f.view.toggleLogs();
+    try std.testing.expect(!f.view.diagnostic_open.peek());
 }

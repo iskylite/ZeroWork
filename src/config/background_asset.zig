@@ -14,7 +14,9 @@ pub const Background = struct {
     transparency: f32 = 0,
 
     pub fn alpha(self: Background) f32 {
-        return 1 - self.transparency / 100;
+        // The global control reveals the image through the interface, rather
+        // than making the image itself disappear as transparency increases.
+        return self.transparency / 100;
     }
 };
 pub const Materials = struct {

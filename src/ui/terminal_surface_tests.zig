@@ -306,7 +306,9 @@ test "terminal surface binds real owned VT projection and preserves over sixty r
     const surface = view.terminal_surface.?;
     try std.testing.expectEqual(@as(usize, 70), surface.rows.items.len);
     const glyph = surface.rows.items[0].glyphs.items[0].node;
-    try std.testing.expectEqual(@as(f32, 96), glyph.globalRect().x);
+    const stamp = surface.rows.items[0].time.?;
+    try std.testing.expectApproxEqAbs(@as(f32, 20), stamp.globalRect().x, 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 12), glyph.globalRect().x - stamp.globalRect().x - stamp.globalRect().w, 0.001);
     try std.testing.expectEqual(@as(f32, 18), glyph.globalRect().y);
     try std.testing.expectEqual(@as(u8, 0), glyph.getText().?.color.r);
     try std.testing.expectEqualStrings("界", surface.rows.items[0].glyphs.items[1].node.getText().?.content);
@@ -1055,7 +1057,7 @@ test "terminal surface selection remains original VT text and waits for applied 
     _ = cx.render();
     try std.testing.expect(!view.hasSelection());
     const surface = view.terminal_surface.?;
-    const x = surface.root.globalRect().x + 20 + 76;
+    const x = surface.root.globalRect().x + 20 + surface.bodyX();
     const y = surface.root.globalRect().y + 18 + surface.options.row_height * 0.5;
     cx.handleMouseDownEx(x, y, .left, .{});
     cx.handleMouseMoveEx(x + 5 * view.cell_width, y, .{});

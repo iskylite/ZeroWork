@@ -21,7 +21,7 @@ pub fn classify(action: menus.Action, allowed: bool) Effect {
         .delete_host => .confirm_required,
         .reconnect => .reconnect,
         .close_session => .close_session,
-        .rename_tab, .open_theme, .close_others => .none,
+        .join_session_group, .rename_tab, .open_theme, .close_others => .none,
         .clone_session => .open_tab,
         .view_jump_chain => .none,
         .export_session => .exported,

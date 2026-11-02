@@ -1,8 +1,8 @@
 # 图形、KVM 与后续协议 · V3 交互稿
 
-## V0.3.2人工KVM实施基准
+## 当前 KVM 实施基准
 
-本版测量、参数、selector→原生映射、状态与截图以 [implementation-spec.md](implementation-spec.md) 为准。 BMC 创建/编辑采用 [单页表单](editor.html)，名称、认证、路径与显示偏好在同一滚动正文中，固定五个底部动作；旧 `../connection/index.html?protocol=kvm` 三步稿不再作为 BMC 页面流程基准。 单页最终标准/最小窗口截图使用 `/tmp/zerowork-v032-kvm-reference/single-editor-*`，包含修正重复内距后的346px最小窗口字段与8跳末项。使用现有本地HTML/CSS和共享组件，不新增设计服务；实际依赖为vendor/zenit与Zig0.17。
+BMC 创建/编辑采用[三步向导](editor.html)，与 SSH/SFTP 共用标题协议下拉框和圆点步骤指引。第一步填写连接与认证信息，第二步设置路径及高级选项，第三步核对与测试；显示比例、只读模式及所有原有测试/保存行为保留。步骤、尺寸、selector→原生映射和验证入口见 [implementation-spec.md](implementation-spec.md#bmc-三步创建编辑基准2026-11-02)。此前单页记录不再作为创建/编辑基准。使用本地可编辑 HTML/CSS 和项目实际 vendor/zenit / Zig0.17，不新增设计服务。
 
 本轮补齐首次/过期/变化证书、已保存未连接、认证失败、取消、中断旧帧、结束、管理与视频独立状态、partial禁写、Power/Boot未知结果仅查询，以及20项只读BootOrder。工具栏左侧保留当前连接名称标题，长名称省略，右侧五个工具入口位置保持；稳定释放组合为 **⌃⌥Esc**，远端Esc仍可由按键菜单发送。外部场景选择器提供本地夹具入口，所有数据与操作仍为模拟。
 

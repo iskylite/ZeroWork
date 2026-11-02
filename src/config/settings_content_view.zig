@@ -5,9 +5,10 @@ const config = @import("config.zig");
 const Controller = @import("settings_controller.zig").Controller;
 const values = @import("settings_values.zig");
 const schema = @import("settings_schema.zig");
+const pages = @import("settings_pages.zig");
 const design = @import("../ui/design_tokens.zig");
 pub const styles = @import("settings_styles.zig");
-pub const Action = enum { reset_defaults, revert, save, import_theme, export_logs, clear_logs, clear_all, open_config_dir, credential_help };
+pub const Action = enum { reset_defaults, revert, save, import_theme, export_logs, clear_logs, clear_all, open_config_dir, credential_help, check_updates, open_update_release };
 pub const ActionState = struct { enabled: bool = true, reason: ?[]const u8 = null };
 pub const Key = struct { section: []const u8, key: []const u8 };
 pub const Hooks = struct {
@@ -27,7 +28,7 @@ pub const Hooks = struct {
     authorization_feedback: ?*const fn (*anyopaque) ?[]const u8 = null,
 };
 const Row = struct { label: []const u8, section: []const u8, key: []const u8 };
-pub const modal_heights: [8]f32 = @splat(styles.geometry.panel_height);
+pub const modal_heights: [9]f32 = @splat(styles.geometry.panel_height);
 
 /// Keep a settings card inside the usable viewport.  The 32px inset is the
 /// same boundary used by the host when constraining the modal during resize.
@@ -251,7 +252,7 @@ fn mountBody(cx: *ui.Cx, binding: *Binding) !*ui.Node {
     const results = try ui.boxStyled(cx, styles.sectionColumn, .{});
     results.meta.ownership.meta.test_id = "settings.search.results";
     var found_results = false;
-    for (0..8) |index| {
+    for (0..pages.pages.len) |index| {
         const page = try mountCategory(cx, binding, index);
         const empty = page.children.items.len == 1 and page.children.items[0].getText() != null and std.mem.eql(u8, page.children.items[0].getText().?.content, "没有匹配的设置");
         if (empty) page.setDisplay(.none) else found_results = true;
@@ -262,9 +263,8 @@ fn mountBody(cx: *ui.Cx, binding: *Binding) !*ui.Node {
 }
 fn mountCategory(cx: *ui.Cx, binding: *Binding, index: usize) !*ui.Node {
     const query = binding.controller.search_query;
-    const names = [_][]const u8{ "外观与主题", "快捷键", "SSH 与网络", "文件传输", "AI 辅助", "协议插件", "通知", "数据与日志" };
     const folds = binding.controller.folded_sections;
-    if (query.len != 0 and matches(query, names[index])) {
+    if (query.len != 0 and matches(query, pages.pages[index].name)) {
         binding.controller.search_query = "";
         binding.controller.folded_sections = 0;
     }
@@ -280,7 +280,8 @@ fn mountCategory(cx: *ui.Cx, binding: *Binding, index: usize) !*ui.Node {
         4 => @import("settings_parts/settings_ai.zig").mountContent(cx, binding),
         5 => @import("settings_parts/settings_plugins.zig").mountContent(cx, binding),
         6 => @import("settings_parts/settings_notify.zig").mountContent(cx, binding),
-        else => @import("settings_parts/settings_data.zig").mountContent(cx, binding),
+        7 => @import("settings_parts/settings_data.zig").mountContent(cx, binding),
+        else => @import("settings_parts/settings_updates.zig").mountContent(cx, binding),
     };
 }
 
@@ -569,12 +570,11 @@ pub const Binding = struct {
                 const disabled = args.bound.save_disabled.get();
                 const hovered = args.hovered.get();
                 const pressed = args.pressed.get();
-                const theme = styles.theme.current();
-                const foreground = styles.theme.actionForeground(theme.action_accent);
-                const pole = if (ui.Color.eql(foreground, ui.Color.WHITE)) ui.Color.BLACK else ui.Color.WHITE;
-                const amount: f32 = if (disabled) 0 else if (pressed and hovered) 0.18 else if (hovered) 0.09 else 0;
-                const from = ui.Color.lerp(theme.action_accent, pole, amount);
-                const to = ui.Color.lerp(theme.action_accent_2, pole, amount);
+                const state_colors = styles.theme.states();
+                const down = !disabled and pressed and hovered;
+                const hot = !disabled and hovered;
+                const from = if (down) state_colors.primary_pressed else if (hot) state_colors.primary_hover else state_colors.primary;
+                const to = if (down) state_colors.primary_pressed_to else if (hot) state_colors.primary_hover_to else state_colors.primary_to;
                 args.node.setStyleInline(args.bound.cx.allocator, .{ .background = from, .gradient = .{ .from = from, .to = to, .direction = .diagonal }, .opacity = if (disabled) @as(f32, 0.4) else @as(f32, 1) });
             }
         }.run);

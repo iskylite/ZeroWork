@@ -322,6 +322,8 @@ pub const OwnedTransport = struct {
             self.mutex.unlock();
             // Only this worker frees relays/session; callers merely enqueue
             // state changes. Poll outside the mailbox lock, bounded to 2 ms.
+            // This is an idle/readiness bound, not a delay per relay batch:
+            // productive siblings drain immediately, yielding every 16 rounds.
             if (c.zw_ssh_relay_wait_many(&relays, count, if (session) |s| s.socket_fd else -1, if (session) |s| s.handle else null, 2) != 0) {
                 productive_rounds += 1;
                 if (productive_rounds == 16) {

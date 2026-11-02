@@ -4,9 +4,12 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 SIGNING_IDENTITY=$(python3 scripts/macos_signing.py identity)
+python3 scripts/update_manifest.py verify-key
 VERSION=$(python3 -c 'import pathlib,re; print(re.search(r"\.version\s*=\s*\"([^\"]+)\"", pathlib.Path("build.zig.zon").read_text()).group(1))')
 OUT="${1:-$ROOT/dist}"
 DMG="$OUT/ZeroWork-$VERSION-arm64.dmg"
+ZIP="$OUT/ZeroWork-$VERSION-arm64.zip"
+[ ! -e "$ZIP" ] || { echo "Refusing to overwrite $ZIP" >&2; exit 1; }
 [ ! -e "$DMG" ] || { echo "Refusing to overwrite $DMG" >&2; exit 1; }
 STAGING=$(mktemp -d "${TMPDIR:-/tmp}/zerowork-package.XXXXXX")
 trap 'rm -rf "$STAGING"' EXIT HUP INT TERM
@@ -17,7 +20,8 @@ if [ ! -s vendor/libssh2/src/.libs/libssh2.a ] || [ ! -s vendor/mbedtls/library/
   sh scripts/build_ssh_deps.sh
 fi
 zig build -j2 -Doptimize=ReleaseFast --prefix "$STAGING/build" --summary all
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$OUT"
+mkdir -p "$APP/Contents/Helpers" "$APP/Contents/MacOS" "$APP/Contents/Resources" "$OUT"
+cp "$STAGING/build/bin/ZeroWorkUpdater" "$APP/Contents/Helpers/ZeroWorkUpdater"
 cp "$STAGING/build/bin/zerowork" "$APP/Contents/MacOS/ZeroWork"
 cp "$STAGING/build/bin/zw_ipc.so" "$APP/Contents/MacOS/zw_ipc.so"
 cp "$STAGING/build/bin/zw_execution.so" "$APP/Contents/MacOS/zw_execution.so"
@@ -33,6 +37,7 @@ cp docs/UI_V3/assets/fonts/FiraCode-OFL.txt "$APP/Contents/Resources/FiraCode-OF
 cp docs/UI_V3/assets/fonts/SourceCodePro-OFL.txt "$APP/Contents/Resources/SourceCodePro-OFL.txt"
 xcrun strip -S "$APP/Contents/MacOS/ZeroWork" "$APP/Contents/MacOS/zw_ipc.so" "$APP/Contents/MacOS/zw_execution.so" "$APP/Contents/MacOS/zw_secret_consume.so" "$APP/Contents/MacOS/zw_execution_guard"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/ZeroWork"
+python3 scripts/verify_release_environment.py "$APP/Contents/Helpers/ZeroWorkUpdater"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_ipc.so"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_execution.so"
 python3 scripts/verify_release_environment.py "$APP/Contents/MacOS/zw_secret_consume.so"
@@ -52,8 +57,13 @@ for marker in [b'fixture_probe',b'fixture_uprobe',b'/zerowork/windows']:
     if marker in binary: raise SystemExit('Refusing to package a fixture or Harness build')
 PY
 # Always resolve a persistent identity before the build; never fall back to ad-hoc.
-codesign --force --deep --sign "$SIGNING_IDENTITY" --identifier com.zerowork.app "$APP"
+codesign --force --sign "$SIGNING_IDENTITY" --identifier com.zerowork.updater "$APP/Contents/Helpers/ZeroWorkUpdater"
+for binary in "$APP"/Contents/MacOS/zw_*; do
+  codesign --force --sign "$SIGNING_IDENTITY" "$binary"
+done
+codesign --force --sign "$SIGNING_IDENTITY" --identifier com.zerowork.app "$APP"
 codesign --verify --deep --strict "$APP"
+codesign --verify --strict -R '=identifier "com.zerowork.updater"' "$APP/Contents/Helpers/ZeroWorkUpdater"
 python3 scripts/build_ssh_bootstrap.py --output "$APP/Contents/Resources/ssh-bootstrap/v1" --verify-only
 SIGNING_NOTICE="应用已使用固定代码签名证书签名；本打包流程未执行 Apple 公证。"
 ln -s /Applications "$STAGING/image/Applications"
@@ -78,4 +88,15 @@ TXT
 hdiutil create -volname "ZeroWork $VERSION" -srcfolder "$STAGING/image" -format UDZO "$DMG"
 hdiutil verify "$DMG"
 (cd "$OUT" && shasum -a 256 "ZeroWork-$VERSION-arm64.dmg" > "ZeroWork-$VERSION-arm64.dmg.sha256")
-echo "Created $DMG"
+# Keep exactly the app at ZIP root; do not include the DMG image symlinks/docs.
+ditto -c -k --keepParent --norsrc --noextattr "$APP" "$ZIP"
+(cd "$OUT" && shasum -a 256 "ZeroWork-$VERSION-arm64.zip" > "ZeroWork-$VERSION-arm64.zip.sha256")
+case "$VERSION" in
+  *-*) echo "Prerelease ZIP created; stable update feed is intentionally not generated" ;;
+  *) if [ -n "${UPDATE_RELEASE_NOTES:-}" ]; then
+       python3 scripts/update_manifest.py manifest "$ZIP" --version "$VERSION" --notes "$UPDATE_RELEASE_NOTES"
+     else
+       python3 scripts/update_manifest.py manifest "$ZIP" --version "$VERSION"
+     fi ;;
+esac
+echo "Created $DMG and $ZIP"

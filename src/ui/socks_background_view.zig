@@ -31,7 +31,7 @@ pub const View = struct {
 
     pub fn mount(cx: *ui.Cx, scope: *ui.Scope, hooks: Hooks) !*View {
         const tint = try scope.createSignal(?ui.Color, S.theme.current().fg_2);
-        const hover = try scope.createSignal(?ui.BoxStyle, .{ .background = S.theme.current().hover });
+        const hover = try scope.createSignal(?ui.BoxStyle, .{ .background = S.theme.states().hover });
         const count_style = try scope.createSignal(ui.BoxStyle, S.count());
         const count_text = try scope.createText("", .{});
         const self = try scope.createState(View, .{ .cx = cx, .hooks = hooks, .popover = undefined, .header = undefined, .list = undefined, .remote_entry = undefined, .local_entry = undefined, .count_text = count_text, .tint = tint, .hover = hover, .count_style = count_style, .colors = S.theme.current() });

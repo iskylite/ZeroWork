@@ -134,6 +134,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_transfer_picker.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/app_icon.m"), .flags = &.{"-fobjc-arc"} });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_app_menu.m"), .flags = &.{"-fobjc-arc"} });
+    exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/macos_menu_bar.m"), .flags = if (test_mode) &.{ "-fobjc-arc", "-DZW_MENU_BAR_TEST=1" } else &.{"-fobjc-arc"} });
     exe.root_module.addAnonymousImport("app_icon_assets", .{ .root_source_file = b.path("assets/macos/icons.zig") });
     exe.root_module.addAnonymousImport("ui_font_assets", .{ .root_source_file = b.path("docs/UI_V3/assets/fonts/native.zig") });
     exe.root_module.addCSourceFile(.{ .file = b.path("src/platform/ui_fonts.m"), .flags = &.{} });
@@ -146,6 +147,43 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
     exe.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
 
+    exe.root_module.addCSourceFiles(.{ .files = &.{ "src/update/native_shared.m", "src/update/native_runtime.m" }, .flags = if (test_mode) &.{ "-fobjc-arc", "-Wno-deprecated-declarations", "-DZW_UPDATE_TESTING=1" } else &.{ "-fobjc-arc", "-Wno-deprecated-declarations" } });
+    exe.root_module.linkFramework("Security", .{});
+    exe.root_module.linkSystemLibrary("archive", .{});
+    const updater = b.addExecutable(.{ .name = "ZeroWorkUpdater", .root_module = b.createModule(.{ .root_source_file = b.path("src/update/helper_main.zig"), .target = target, .optimize = optimize }) });
+    updater.root_module.addCSourceFiles(.{ .files = &.{ "src/update/native_shared.m", "src/update/native_installer.m" }, .flags = if (test_mode) &.{ "-fobjc-arc", "-Wno-deprecated-declarations", "-DZW_UPDATE_TESTING=1" } else &.{ "-fobjc-arc", "-Wno-deprecated-declarations" } });
+    updater.root_module.link_libc = true;
+    updater.root_module.linkFramework("AppKit", .{});
+    updater.root_module.linkFramework("Foundation", .{});
+    updater.root_module.linkFramework("Security", .{});
+    updater.root_module.linkSystemLibrary("archive", .{});
+    updater.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+    updater.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
+    updater.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+    const update_tests = b.addTest(.{ .filters = &.{ "update ", "settings page map" }, .root_module = b.createModule(.{ .root_source_file = b.path("src/update_tests.zig"), .target = target, .optimize = optimize }) });
+    update_tests.root_module.addImport("ui",zenit_dep.module("ui"));
+    update_tests.root_module.addImport("icon_ir",zenit_dep.module("icon_ir"));
+    update_tests.root_module.addImport("generated_ssh_channel",ssh_channel_translate.createModule());
+    update_tests.root_module.addImport("generated_ssh_session",ssh_session_translate.createModule());
+    update_tests.root_module.addImport("generated_ghostty_vt",ghostty_translate.createModule());
+    b.step("test-update","Run updater state and config contracts").dependOn(&b.addRunArtifact(update_tests).step);
+    const update_tools = b.step("build-update-tools", "Build isolated updater tools");
+    update_tools.dependOn(&b.addInstallArtifact(updater, .{}).step);
+    if (test_mode) {
+        const fixture = b.addExecutable(.{ .name = "update-fixture", .root_module = b.createModule(.{ .root_source_file = b.path("src/update/fixture_main.zig"), .target = target, .optimize = optimize }) });
+        fixture.root_module.addCSourceFiles(.{ .files = &.{ "src/update/native_shared.m", "src/update/native_runtime.m", "src/update/native_fixture.m" }, .flags = &.{ "-fobjc-arc", "-Wno-deprecated-declarations", "-DZW_UPDATE_TESTING=1" } });
+        fixture.root_module.link_libc = true;
+        fixture.root_module.linkFramework("AppKit", .{});
+        fixture.root_module.linkFramework("Foundation", .{});
+        fixture.root_module.linkFramework("Security", .{});
+        fixture.root_module.linkSystemLibrary("archive", .{});
+        fixture.root_module.addSystemFrameworkPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks" });
+        fixture.root_module.addSystemIncludePath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/include" });
+        fixture.root_module.addLibraryPath(.{ .cwd_relative = "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/usr/lib" });
+        update_tools.dependOn(&b.addInstallArtifact(fixture, .{}).step);
+        b.installArtifact(fixture);
+    }
+    b.installArtifact(updater);
     b.installArtifact(exe);
     // The local ZSH edit bridge is loaded only by this process's private
     // bootstrap, from beside the executable in both CLI and app bundles.

@@ -34,12 +34,12 @@ recipe Tone {
   variant kind = secondary {
     primary {
       background: button-primary-bg; color: button-primary-fg; font-weight: 600; border: 0 transparent;
-      :hover { background: mix(button-primary-bg, #000000, 0.35); }
-      :active { background: mix(button-primary-bg, #ffffff, 0.1); }
+      :hover { background: button-primary-hover; }
+      :active { background: button-primary-pressed; }
       :disabled { background: bg-secondary; color: fg-tertiary; }
     }
     secondary {
-      background: bg-primary; color: fg-primary; font-weight: 500; border: 1 border;
+      background: button-secondary-bg; color: button-secondary-fg; font-weight: 500; border: 1 border;
       :hover { background: bg-hover; border-color: border-strong; }
       :active { background: bg-active; }
       :disabled { opacity: 0.5; }
@@ -51,9 +51,9 @@ recipe Tone {
       :disabled { opacity: 0.5; }
     }
     danger {
-      background: danger; color: status-fg; font-weight: 600;
-      :hover { background: danger-hover; }
-      :active { background: mix(danger-hover, #000000, 0.1); }
+      background: button-danger-bg; color: button-danger-fg; font-weight: 600;
+      :hover { background: button-danger-hover; }
+      :active { background: button-danger-pressed; }
       :disabled { opacity: 0.5; }
     }
     link {

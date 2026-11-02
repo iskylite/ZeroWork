@@ -1197,9 +1197,9 @@ const Row = struct {
         const selected = contains(p.selected_keys, self.key);
         self.checked.set(selected);
         const hovering = self.pane.view.drop_side == self.pane.side and std.mem.eql(u8, self.pane.view.drop_path[0..self.pane.view.drop_path_len], self.key);
-        self.style.set(S.fileRow(self.pane.column_width, selected or hovering, sameOptional(p.focused_key, self.key)));
+        self.style.set(S.fileRow(self.pane.column_width, selected, sameOptional(p.focused_key, self.key)));
         // Paint the selected content above the Button hover/press surface.
-        self.columns.setBackground(if (selected or hovering or sameOptional(p.focused_key, self.key)) S.theme.popupSelection() else ui.Color.TRANSPARENT);
+        self.columns.setBackground(if (hovering) S.theme.states().drop_target else if (selected) S.theme.states().selected else if (sameOptional(p.focused_key, self.key)) S.theme.states().focus else ui.Color.TRANSPARENT);
         self.columns.setStyleInline(self.pane.view.cx.allocator, .{ .width = .{ .px = self.pane.column_width } });
         self.name_cell.setStyleInline(self.pane.view.cx.allocator, .{ .width = .{ .px = self.pane.name_width } });
         if (self.columns.children.items.len >= 4) {

@@ -108,6 +108,72 @@ fn result(mailbox: *Mailbox) !ro.OwnedResult {
     }
     return error.ResultTimeout;
 }
+
+test "pagination shared readonly native file seek and directory continuation" {
+    var fixture = try Fixture.environment();
+    var library = try ssh.Library.init();
+    defer library.deinit();
+    const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(2501), .generation = 3 };
+    const worker = try Worker.init(a, &library, .{ .host = "127.0.0.1", .port = fixture.port, .user = "fixture", .auth = .{ .password = "shared-fixture" }, .operation_key = .{ .owner = .{ .session = owner }, .operation_id = 2601, .attempt_id = 1 }, .host_key_observer = .{ .ctx = &fixture, .callback = Fixture.trust }, .rows = 40, .cols = 160 }, .{ .auto_shell_integration = false, .keepalive_sec = 0, .auto_reconnect = false, .connect_timeout_ms = 3000 });
+    const thread = try WorkerThread.start(a, worker);
+    const transfer_binding: transfer.ServiceHandle = .{ .resource_owner = .{ .session = owner }, .origin_session = owner, .kind = .transfer, .binding_id = 2702, .binding_generation = 1 };
+    const shared = try worker.transferService(transfer_binding);
+    const provider = try worker.readonlyProvider();
+    const endpoint: ro.EndpointRef = .{ .binding_id = 2701, .binding_generation = 1, .resource_owner = .{ .session = owner }, .origin_session = owner };
+    const mailbox = try provider.attach(provider.context, endpoint, .{ .owner = .{ .session = owner }, .operation_id = 2602 });
+    defer {
+        mailbox.requestClose();
+        const deadline = clock.monotonicNs() + 5 * std.time.ns_per_s;
+        while (mailbox.closeReceipt() != .released and clock.monotonicNs() < deadline) pause();
+        mailbox.deinit() catch @panic("mailbox cleanup pending");
+        shared.requestClose();
+        while (shared.closeReceipt() != .released and clock.monotonicNs() < deadline and !thread.hasFailed()) pause();
+        shared.routingReleased(transfer_binding) catch {};
+        thread.stopAndJoin();
+        while (worker.releaseConnection() == .awaiting and clock.monotonicNs() < deadline) pause();
+        if (worker.releaseConnection() != .released) @panic("parent cleanup pending");
+        thread.deinit();
+    }
+    var ready = try result(mailbox);
+    defer ready.deinit();
+    try std.testing.expect(ready.value.body == .ready);
+    var key: ro.OperationKey = .{ .owner = .{ .session = owner }, .operation_id = 3000 };
+    var offset: u64 = 0;
+    var version: ?u64 = null;
+    while (offset < 70000) {
+        key.operation_id += 1;
+        try mailbox.submit(key, .{ .endpoint = endpoint, .request_id = key.operation_id, .path = "/large", .action = .{ .read_text = .{ .offset = offset, .expected_version = version, .max_bytes = 4096 } } });
+        var chunk = try result(mailbox);
+        defer chunk.deinit();
+        try std.testing.expect(chunk.value.body == .text);
+        const text = chunk.value.body.text;
+        try std.testing.expectEqual(offset, text.offset);
+        try std.testing.expect(text.text.len > 0);
+        for (text.text) |byte| try std.testing.expectEqual(@as(u8, 'A'), byte);
+        version = text.source_version;
+        offset += text.text.len;
+    }
+    try std.testing.expectEqual(@as(u64, 70000), offset);
+    version = null;
+    for ([_]u64{ 0, 4096, 4099 }) |start| {
+        key.operation_id += 1;
+        try mailbox.submit(key, .{ .endpoint = endpoint, .request_id = key.operation_id, .path = "/many", .action = .{ .list = .{ .paged = true, .max_entries = 3, .offset = start, .expected_version = version } } });
+        var chunk = try result(mailbox);
+        defer chunk.deinit();
+        if (chunk.value.body != .page) std.debug.print("directory offset={d} body={any}\n", .{ start, chunk.value.body });
+        try std.testing.expect(chunk.value.body == .page);
+        const page = chunk.value.body.page;
+        try std.testing.expectEqual(start, page.offset);
+        try std.testing.expectEqual(@as(usize, 3), page.entries.len);
+        for (page.entries, 0..) |entry, index| {
+            var name: [32]u8 = undefined;
+            try std.testing.expectEqualStrings(try std.fmt.bufPrint(&name, "entry {d:0>4}", .{start + index}), entry.raw_name);
+        }
+        version = page.source_version;
+        try std.testing.expectEqual(@as(?u64, start + 3), page.next_offset);
+    }
+    std.debug.print("SHARED_PAGINATION file_bytes=70000 directory_offset=4099 cleanup=owned\n", .{});
+}
 test "shared readonly native actual bytes list cancellation and parent FIN" {
     var fixture = try Fixture.environment();
     var library = try ssh.Library.init();

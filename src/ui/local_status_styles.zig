@@ -29,7 +29,7 @@ pub fn metricContent() ui.BoxStyle {
     return .{ .width = .fill(), .height = .fill(), .flex = 1, .min_width = 0, .direction = .row, .align_items = .center, .gap = gap };
 }
 pub fn hover() ButtonStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub fn buttonLayout(style: ButtonStyle) ButtonStyle {
     var result = style;

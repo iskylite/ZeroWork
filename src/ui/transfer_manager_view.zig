@@ -441,6 +441,7 @@ pub const Panel = struct {
         const window = !tray;
         const native_window = options.presentation == .window;
         p.root = try ui.box(cx, if (tray) S.sessionTray() else S.panel(true), .{});
+        @import("floating_input.zig").protect(cx, p.root);
         p.root.meta.ownership.meta.test_id = "transfer.manager";
         if (!native_window and !tray) p.root.setStyleInline(cx.allocator, .{ .position = .absolute, .inset = .{ .top = .{ .px = 46 }, .right = .{ .px = 14 } }, .z_index = 50 });
         p.root.setDisplay(.none);
@@ -920,7 +921,7 @@ pub const Panel = struct {
             track.meta.ownership.meta.test_id = "transfer.task.progress";
             try row.appendChild(cx.allocator, track);
             const fraction: f64 = if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
-            try track.appendChild(cx.allocator, try ui.box(cx, S.fill(@floatCast(fraction), color), .{}));
+            try track.appendChild(cx.allocator, try ui.box(cx, S.fill(@floatCast(fraction), progressColor(task_.phase)), .{}));
         }
         const tip = try ui.widgets.Tooltip(.{ .text = "", .open_delay_ms = @as(f32, 450), .position = .bottom_end, .offset = 8, .width = @as(f32, 420), .wrap = .word }).mount(scope, cx);
         const hover = try scope.createState(DetailHover, .{ .cx = cx, .close = tip.wrapper.behavior.events.on_leave, .show = tip.wrapper.behavior.events.on_hover });
@@ -1242,6 +1243,7 @@ pub const Panel = struct {
         self.invalidate();
     }
     pub fn show(self: *Panel) void {
+        if (self.root.style.display == .none) self.cx.dispatcher.cancelScrollGesture();
         self.tray_requested_show = true;
         self.root.setDisplay(if (self.options.presentation == .session_tray and self.visible.items.len == 0) .none else .flex);
         self.cx.requestRedraw();
@@ -1508,6 +1510,16 @@ fn countColor(index: usize) ui.Color {
         3 => c.danger_ink,
         4 => c.ok_ink,
         else => c.fg_2,
+    };
+}
+fn progressColor(phase: Phase) ui.Color {
+    const s = S.theme.states();
+    return switch (category(phase)) {
+        .active => s.range_fill,
+        .paused => s.progress_warn,
+        .failed => s.progress_danger,
+        .ended => if (phase == .succeeded or phase == .skipped) s.progress_ok else s.range_disabled,
+        else => s.range_disabled,
     };
 }
 fn phaseColor(phase: Phase) ui.Color {

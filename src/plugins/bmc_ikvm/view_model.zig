@@ -260,6 +260,12 @@ pub const ProgressProjection = struct {
     cancelled: bool = false,
 
     pub fn observe(self: *ProgressProjection, snapshot: console.progress.Snapshot) void {
+        inline for (@typeInfo(console.progress.Stage).@"enum".field_names) |field| {
+            const stage = @field(console.progress.Stage, field);
+            if (snapshot.completed_stage_ms[@intCast(@backingInt(stage))] != null) {
+                if (progressGroup(stage)) |group| self.seen |= groupBit(group);
+            }
+        }
         for (snapshot.events[0..@min(snapshot.event_count, snapshot.events.len)]) |event| {
             if (event.stage == .cancelled) self.cancelled = true;
             const code_name = @tagName(event.code);
@@ -302,6 +308,23 @@ pub fn progressGroup(stage: console.progress.Stage) ?ProgressGroup {
         .oem_session, .video_tls_handshake, .waiting_video_certificate, .websocket_upgrade, .rfb_negotiation, .awaiting_first_frame, .streaming => .video,
         .idle, .cleanup, .released, .cancelled, .failed => null,
     };
+}
+
+/// Sum protocol-stage visits for a displayed step, including human waits.
+/// Completed timings survive event-ring eviction; cleanup and streaming do not
+/// increase a finished connection step.
+pub fn progressGroupDuration(snapshot: console.progress.Snapshot, group: ProgressGroup) ?u64 {
+    if (snapshot.revision == 0) return null;
+    var duration: ?u64 = null;
+    inline for (@typeInfo(console.progress.Stage).@"enum".field_names) |field| {
+        const stage = @field(console.progress.Stage, field);
+        if (stage != .streaming and progressGroup(stage) == group) {
+            const completed = snapshot.completed_stage_ms[@intCast(@backingInt(stage))];
+            if (completed) |ms| duration = (duration orelse 0) +| ms;
+            if (snapshot.stage == stage) duration = (duration orelse 0) +| snapshot.stage_elapsed_ms;
+        }
+    }
+    return duration;
 }
 
 pub fn progressGroupLabel(group: ProgressGroup) []const u8 {

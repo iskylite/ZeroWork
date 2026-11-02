@@ -139,3 +139,10 @@ playwright-report/
 !/vendor/libghostty-vt/src/font/res/OFL.txt
 !/vendor/libghostty-vt/src/font/res/MIT.txt
 !/vendor/libghostty-vt/src/font/res/BSD-2-Clause.txt
+
+# Required menu-bar design assets referenced by the editable reference pages.
+!/docs/UI_V3/menu-bar/assets/badge-0.png
+!/docs/UI_V3/menu-bar/assets/badge-1.png
+!/docs/UI_V3/menu-bar/assets/badge-12.png
+!/docs/UI_V3/menu-bar/assets/badge-123.png
+!/docs/UI_V3/menu-bar/assets/design-preview.png

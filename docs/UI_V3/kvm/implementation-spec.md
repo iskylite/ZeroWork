@@ -101,59 +101,25 @@ Primary文字白；阴影 `0 3px 10px primary@.35`（Light/Sauber为.32），另
 - 既有AI三点边条在compact下与控制入口左侧相交约28px。已向主任务报告；本工作项未改AI设计、未新增其能力。
 - 本地证书和BootOrder均为明确的脱敏夹具；浏览器全屏为原型状态，原生全屏/逐字形fallback/真实帧/实机写入由主任务验证。
 
-## 历史三步连接稿（BMC 已停止使用）
+## BMC 三步创建/编辑基准（2026-11-02）
 
-以下仅保留此前控件尺寸测量来源。旧 `../connection/index.html?protocol=kvm` 的三步流程不再用于 BMC 创建/编辑，不能与本版原生 BMC 单页做整页对比。其默认直连草稿截图为：`/tmp/zerowork-v032-kvm-reference/editor-dark-1440x900-kvm-create.jpg`、`editor-dark-860x480-kvm-create.jpg`，浏览器同为1488×1040/DPR1/zoom1，均截App内容区。
+当前可编辑基准为 [`editor.html`](editor.html)，样式和控制器为 `editor.css` / `editor.js`。本次用户确认以三步替代此前的 BMC 单页表单。SSH/SFTP 与 BMC 共用 `../connection/wizard-shell.js`、`wizard-shell.css` 的标题协议 Select 和圆点步骤指引；原生对应 `src/ui/wizard.zig` 的注册表 Select 与 `src/ui/connection_stepper.zig`。业务编辑、校验、凭据、测试和保存仍由各协议 provider 负责。
 
-标准modal相对App(340,154.75)，760×590.5；body padding0/40/20/24，内宽696，grid340+340/gap12px16px，field55.5、label11/16.5、input34/r8，footer62/padding14/24。最小modal(50,40)，760×400；head48/padding12/18，body240/padding0/34/12/18（scrollHeight409），内宽708，grid346+346/gap不变，field/input高度不变；footer54/padding10/18。详细compact计算值为同目录 `editor-compact-metrics.json`。本工作项没有修改连接页源码。
-
-
-## BMC 单页创建/编辑基准
-
-当前页面为 [`editor.html`](editor.html)，样式与控制器分别为 `editor.css`、`editor.js`。业务依据当前设计§3.2/3.3及主任务明确选择：同一页组织，不强制各协议采用相同步数。本页没有 `.step-nav` / `[data-step-panel]`；公共协议选择器、通用Input/Select/Radio/Checkbox及主题沿用现有连接组件几何，不复制SSH三步流程。SSH子编辑直接挂载既有 `../connection/index.html?protocol=ssh&embed=1`，不重画SSH表单。
-
-字段顺序为：名称/分组 → BMC地址/HTTPS端口 → 用户名/固定密码认证 → 密码/默认保存 → 直连或SSH路径 → 路径预览 → 可折叠显示偏好 → 当前草稿反馈。默认名称、地址、用户名和密码为空，分组未分组、端口443、保存密码开启、direct、fit、只读请求关闭。BMC密码与SSH认证独立。
-
-固定底部为取消、测试连接、临时连接、仅保存、保存并连接。测试/临时允许名称为空，只以endpoint投影当次显示名，临时Envelope.id=0，不回写名称输入、不创建资产；保存两动作要求显式名称。测试只覆盖SSH/TLS、管理认证/发现，不创建视频会话或发送输入。输入与route变化使旧测试失效；取消测试只结束本次测试并保留草稿。编辑已保存连接提示下次新建连接生效。
-
-原型仅产生本地意图回执，不实际写资产或凭据、不开网络连接。回执位于App外，只有非秘密配置；密码不进入回执/URL/存储。`save_password=true`表达默认意图，真实秘密存储交宿主。SSH子编辑返回只引用新asset_id，不继承子SSH自身route；取消保留BMC非秘密草稿，旧draft_revision的子结果不得重挂。
-
-| 区域 | 单页约束 / selector |
+| 步骤 | 内容及动作 |
 | --- | --- |
-| 面板 | `.bmc-editor-modal` W760/r14；标准direct H590.5，SSH路径+94、高级展开+67.5，上限710；compact H400；以App区域居中 |
-| 固定头/尾 | `.modal-head` H52/padding14px20px；footer H62/padding14px24px/gap8；compact分别48/54，padding12px18px / 10px18px |
-| 正文 | `.modal-body` 唯一主scroll owner、grow/min-height0；`.bmc-form-content` column gap12，padding0 40 20 24；compact padding0 34 12 18；不裁固定五动作 |
-| 信息字段 | `.fields` 两列/gap12px16px；label11/16.5、gap5，input/select H34/r8；密码填满剩余宽，保存密码66×34、gap16 |
-| 访问方式 | `.access-choice` 两卡H61/gap16，直连隐藏路径编辑；预览始终显示本机→各跳→BMC，不显示或引用活跃会话 |
-| SSH路径 | `#route-search`筛选已保存SSH资产；`#route-list .route-hop` H51/padding8px10px/gap8，22px序号、34pxSelect及28px调序/删除；最多8、不重复、末项键盘/滚动可达 |
-| 显示偏好 | `#advanced-options` 同页折叠区；fit/100%逻辑原尺寸与只读请求独立于SSH配置 |
-| 原生映射 | DOM `data-testid` 与 `bmc.editor.*` 一致；信息字段→ui.widgets.Input/Select/RadioGroup/Checkbox，路径行→公共Select及Button，正文→ScrollArea；底部动作交editor controller/宿主，不自行建Session |
+| 连接与认证 | 名称/分组、BMC 地址/HTTPS 端口、用户名、固定密码认证、密码/保存密码。底部取消、下一步；临时连接需要允许名称为空，因此此处只校验端点和用户名。 |
+| 连接路径 | 直连或有序 SSH 跳板、添加/调序/删除、新建 SSH 子编辑、路径预览；高级选项保留显示比例（适应窗口 / 原始比例 100%）和以只读模式进入。底部上一步、下一步。 |
+| 核对与测试 | 名称、端点、账户、认证状态、高级项摘要与路径，提供返回编辑入口。管理测试和日志由原有控制器处理。底部上一步、临时连接、仅保存、保存并连接。 |
 
-可复现URL参数为 `?fixture=blank|direct|routed|eight|edit&size=compact&theme=dark|light|sauber`。外部夹具不属于产品画布；正常控制器仍是同一个editor.js。共享JS没有独立可导入的路径业务renderer，因此本页复用现有route class/Select adapter、几何与SSH子编辑入口，未修改shared/connection源。
+标题旁使用 152×30 的协议 Select，菜单在触发框左缘、下方 4px 锚定，空间不足时按公共组件避让。步骤项按内容宽度排列；两条线填充剩余间距，线两端各留 20px，并与圆点垂直居中。已完成步骤显示勾号，未到达步骤禁用；返回修改保留同一份草稿。
 
-单页的最终DOM实测与点击由同工作项主线程浏览器协同完成；HTML负责人已读取JSON并查看最终三张截图。环境为IAB、viewport1488×1040、DPR1、zoom1、fonts loaded。原始只读脚本为 `/tmp/zerowork-v032-kvm-reference/single-editor-measure.js`，结果为同目录 `single-editor-standard.json` / `single-editor-compact.json`，两档 `noSteps=true`。
+面板宽 760/r14，BMC 标准高 590、最小窗口高 400，上限 710；header 52/48、步骤区 60、footer 62/54 均不收缩。正文是唯一主滚动区；标准内距 top14/左右24/bottom20，小窗 top12/左右18/bottom12。字段两列、列间距16、label11/16.5、input/select34/r8，按钮34/r8；主操作使用主题渐变。步骤、字段和操作区沿用共享主题语义，不增加外框与装饰分区线。
 
-| 最终实测 | 标准App1440×900 | 最小App860×480 |
-| --- | --- | --- |
-| 面板相对App | (340,154.75),760×590.5 | (50,40),760×400 |
-| header / footer | 52 / 62 | 48 / 54 |
-| scroll viewport | bounds760×476.5，clientHeight477，scrollHeight634 | 760×298，scrollHeight626 |
-| 外层 `.modal-body` | padding0 | padding0（已修旧compact规则的重复内距） |
-| `.bmc-form-content` | W760，padding0/40/20/24，gap12 | W760，padding0/34/12/18，gap12 |
-| 信息字段 | 内宽696，340+340，gap16；input340×34 | 内宽708，346+346，gap16；input346×34 |
-| 首字段相对App | x364 | x68 |
-| 密码输入 | 填满整行扣除66px checkbox与gap16 | 626×34 |
-| 固定footer相对App | y683.25,H62 | y386,H54，始终在App内 |
+默认名称、地址、用户名和密码为空，未分组、443、保存密码开启、direct、fit、只读关闭。密码不进入摘要、JSON、URL或日志；BMC 与跳板凭据独立。测试与临时连接允许名称为空，runtime Envelope.id=0，不创建资产或回写名称；仅保存/保存并连接仍要求名称。测试只验证 SSH 路径、TLS、管理登录与资源发现，不创建视频会话或发送输入；打开控制台后才验证视频。修改草稿使旧测试失效，取消、迟到结果、凭据回滚与 SSH 子编辑所有权沿用原实现。
 
-本轮实际点击验证：临时连接免名称（name输入仍空、asset_id=0、display_name=endpoint）；仅保存对空名称标invalid；第2跳上移后preview变为gateway→bastion；8跳数量准确且添加禁用；高级选项展开；waiting管理测试→取消测试→草稿保留。8跳夹具使用正文End后，末行、禁用添加与固定footer均可见。新页的JS语法、HTML唯一ID、本地CSS/JS引用、无步骤导航与限定目录diff检查均通过。SSH iframe保存返回分支未列入本次HTML点击覆盖；不把原生子编辑验证当作HTML接线已经运行的证据。
+HTML 参数：`?fixture=blank|direct|routed|eight|edit&size=compact&theme=dark|light|sauber&step=0|1|2&advanced=1`。原型只生成本地意图回执，不实际写入资产、凭据或建立网络连接。SSH 子编辑复用现有连接 HTML，返回时只引用新 asset_id，不继承子 SSH 的路由。
 
-最终截图绝对路径如下，均已查看。历史 `editor-dark-*` 是已停止使用的三步稿，不能混入当前单页对比：
-
-- `/tmp/zerowork-v032-kvm-reference/single-editor-dark-1440x900.jpg`
-- `/tmp/zerowork-v032-kvm-reference/single-editor-dark-860x480.jpg`
-- `/tmp/zerowork-v032-kvm-reference/single-editor-dark-860x480-route.jpg`（8跳+End，末项与固定footer可见）
-
-已知平台细差：HTML公共协议picker高40.5，原生公共控件整数41，后续字段可有0.5px取整差；保留公共控件与本地HTML实际值，不为截图一致改写业务布局。静态服务PID34802由本工作项收尾关闭；没有修改shared、connection或原工作树，没有提交Git。
+验证入口为 `e2e/connection_wizard_three_step_native.ts`、现有 wizard UI tests 与 BMC editor tests。原生使用当前项目 `vendor/zenit` / Zig0.17；测试通过不代表实机 BMC 连通性或真实键盘/IME 已验证。旧单页测量和 `/tmp` 截图已不再作为本编辑器的当前几何契约。
 
 ## 定制BMC的只读资源关联状态
 
@@ -205,7 +171,7 @@ HTML `?state=connecting&phase=public_script` 为明确的本地阶段夹具，�
 
 连接日志使用760宽公共Modal，并在事件滚动区上方固定显示完整路径与28高列标题。单行路径38.7高、底距12；新版三列的小窗原生Modal760×409.2，header48、footer54、路径708×38.7、日志井底708×200。复用SSH连接日志的10.5px/16px等宽排版与12px正文内距，记录按时间戳86px、消息grow、耗时76px三列组织，列间gap12；每行按内容增高，padding6px0，无边线。长路径增加高度时，事件视口按可用窗口高度缩短，仍保留关闭按钮。首次打开/关闭重开默认显示最新事件；已在末尾时新事件继续跟随，手动阅读旧记录时保留当前位置。HTML `&log=full` 是显式32条本地模拟夹具，阶段选择更新日志但不制造未来首帧完成。实际 UI 滚动验证：小窗日志 scrollHeight618、viewport200，初开/重开scrollTop418.5；手动上滚到218.5后切换阶段仍为218.5，重新滚到末尾后更新继续停末尾。此记录验证HTML交互，不替代原生32条日志滚动与实机诊断验收。
 
-测试连接的反馈从滚动正文移到footer上方的固定行，替代本文件早期单页测量中的正文高度：标准scroll高442.5、小窗264；panel760×590.5/400及footer62/54保持。反馈行最小34高，padding4/24或4/18、gap12；文字11/17，日志按钮82×26。日志在反馈区，不添加第六个footer动作。原生使用560×384的保留式Modal和200高ScrollArea；最多32条枚举/数字记录，失败/取消后保留，换attempt清空，修改草稿标记旧草稿，迟到结果不成为当前事实，关闭表单释放。HTML标准/小窗与取消保留已点击验证，证据为 `probe-progress-*` 和 `probe-log-*`；原生结果另列验收记录。
+三步编辑器的测试反馈位于第三步footer上方固定行；panel760×590/400、步骤区60及footer62/54保持，正文按剩余空间滚动。反馈行最小34高，padding4/24或4/18、gap12；文字11/17，日志按钮82×26。日志在反馈区，不添加第六个footer动作。原生使用560×384的保留式Modal和200高ScrollArea；最多32条枚举/数字记录，失败/取消后保留，换attempt清空，修改草稿标记旧草稿，迟到结果不成为当前事实，关闭表单释放。HTML标准/小窗与取消保留已点击验证，证据为 `probe-progress-*` 和 `probe-log-*`；原生结果另列验收记录。
 
 ## 标准管理生产链与本轮验收
 
@@ -289,8 +255,9 @@ HTML新增等价内层`.kvm-content-surface`，避免公共theme对`.graphic-con
 
 - HTML 已通过浏览器实测：视口 1210×785 CSS px、DPR 2，紧凑 App 860×480；浮层 94.984×46 CSS px，距视频顶部/右侧各12，padding 6×10，gap 2，r7，11px/16px Menlo/monospace；主/次文字 #f3f4f6/#c6cad1，背景 rgba(18,20,24,.78)。截图 `/tmp/zerowork-mouse-latency-20261101/fps-html-reference.png`。
 - 每个 KVM 视图默认启用；“显示 → 显示 FPS”使用原生 Switch，可随时关闭。浮层绝对定位，不改变视频缩放、滚动及输入几何，鼠标穿透；未取得视频时隐藏。
-- “显示”按成功窗口提交中的新 generation/revision 去重，窗口空重绘不计数；代表提交呈现频率，不声称物理屏幕扫描 FPS。“解码”使用 Controller 的完整 CPU 帧发布累计值；不把 socket 读取次数当帧数。
-- 最近1秒计数采用100ms桶，每500ms刷新文案；首秒为“—”，无新帧后归零。菜单附最近10秒已完成帧间隔最大值和距上一显示帧时间；无新帧不直接判定卡顿。重连/新代重置统计。
+- “显示”按成功窗口提交中的新 generation/revision 去重，窗口空重绘不计数；代表提交呈现频率，不声称物理屏幕扫描 FPS。“解码”使用 Controller 的完整 CPU 帧成功发布累计值；因 lease 占用跳过发布的已解码更新不计入，内容未改变的成功发布仍可计入。它不是所有收到的 FBU 数，也不把 socket 读取次数当帧数。
+- 最近1秒计数采用100ms桶，每500ms刷新文案，是近似滚动值；严格性能对照使用累计发布次数差/实际经过秒数。首秒为“—”，无新帧后归零。菜单附最近10秒已完成帧间隔最大值和距上一显示帧时间；无新帧不直接判定卡顿。重连/新代重置统计。
+- 传输调度、App 本地 64 KiB 缓冲、背压处理及实测归因边界见 [BMC iKVM 设计 §6.5](../../DESIGN/V0.3_BMC_IKVM.md#65-视频吞吐与-fps-优化设计)。厂商 Web 的原始帧计数标签须先统一时间口径再比较。
 
 ## 2026-11-02 临时连接保存与已保存配置编辑
 
@@ -299,3 +266,23 @@ HTML新增等价内层`.kvm-content-surface`，避免公共theme对`.graphic-con
 - 沿用现有菜单、连接表单及 HTML 布局，无新增视觉样式。隔离完整 App 的原生窗口已验证临时保存、空密码草稿、左栏新增与已保存配置编辑；保存前后 session handle、generation、tab 和 create operation 保持一致。1440×900 逻辑尺寸、2 倍像素截图及回执位于 `/tmp/zerowork-kvm-integration-20261102/sidebar-native/`。本地合成端点验证不代表真实 BMC 连通性验收。
 - 同一入口覆盖临时 SSH/SFTP：从原页签冻结的 `host_snapshot` 生成 Envelope，不读取当前选中的左栏资产；保留端点、认证方式、路由和连接选项，移除密码、私钥口令、TOTP 及对应运行时引用，“保存密码”默认关闭。仅保存沿用现有资产事务，不创建会话或改写原临时会话归属；本地终端无远程配置保存入口。SSH/SFTP 冻结快照与无凭据 Envelope 的定向回归通过；当前快速连接只创建临时 SSH，SFTP 的临时来源覆盖由直接快照回归验证。
 - 补齐后的完整 App 后台原生回归验证了临时 SSH 保存、已保存 SSH 页签编辑、临时 iKVM 保存回归与本地菜单排除；仅保存前后 session/generation/create operation 及 SSH 页签节点均保持一致，正常退出码为 0。1440×900、2 倍像素截图与回执位于 `/tmp/zerowork-live-fps-20261102/all-temp-save-native/`，全部连接尝试仅访问本次隔离回环端口，无真实远端操作。
+
+
+## KVM 内部对齐与连接状态入口
+
+本节替代前述44pt工具栏、视频独立四角圆角及独立断开按钮的布局约定。
+
+- 外框占满公共内容槽。标题栏高48，padding上下12、左右13，按钮高24；标题与左栏标题行的几何中心均距外框顶部24。主机名前复用monitor图标18×18，与名称间隔8；名称可收缩并省略。
+- 视频外围padding0，填满标题栏下方区域。视频卡片、滚动viewport和远端帧不再各自使用四角圆角，统一由r11外框合成裁切。HTML壳间距与原生保持5pt。
+- 连接状态入口位于主机名与五个工具入口之间，采用“图标＋文字”：宽82、高24、图标14、间隔4、左右padding8；标准字体12px，紧凑字体11px。固定宽度避免状态或hover文字切换时移动相邻工具。
+- 默认显示已连接、连接中、连接失败或已断开，分别使用circle-check、loader-circle、circle-x或unplug。可操作时，hover或键盘聚焦切换为断开连接；连接过程中显示取消连接。状态详情保留在无障碍名称中。
+- 点击先打开440pt宽的确认Modal，显示当前主机名和操作说明。返回、Esc、关闭均保留连接；确认后重新检查当前owner的可操作性，调用现有cancel并去重。连接过程中使用“取消连接？”确认文案。没有可取消的连接或正在清理时不提交操作，状态保持可读。
+
+下表为默认238pt侧栏、底部状态栏可见时的逻辑尺寸：
+
+| 相对App的区域 | 1440×900 | 860×480 |
+| --- | --- | --- |
+| 左栏 | (5,46),238×818 | (5,46),238×398 |
+| KVM外框 | (248,46),1187×818 | (248,46),607×398 |
+| 标题栏 | (248,46),1187×48 | (248,46),607×48 |
+| 视频viewport | (248,94),1187×770 | (248,94),607×350 |

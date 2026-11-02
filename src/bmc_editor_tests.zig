@@ -321,12 +321,16 @@ test "BMC editor native actions defer submission and rollback failed saves while
     try view.draft.?.setPassword("editor-sensitive");
     try facade.setDraftRevision(view.draft.?.revision);
     frames(cx);
+    click(cx, find(cx.root.?, "bmc.editor.next").?);
+    frames(cx);
     click(cx, find(cx.root.?, "bmc.editor.access.ssh").?);
     frames(cx);
     try std.testing.expect(find(cx.root.?, "bmc.editor.access.ssh.selected").?.isDisplayedInTree());
     click(cx, find(cx.root.?, "bmc.editor.access.direct").?);
     frames(cx);
     try std.testing.expect(!find(cx.root.?, "bmc.editor.access.ssh.selected").?.isDisplayedInTree());
+    click(cx, find(cx.root.?, "bmc.editor.next").?);
+    frames(cx);
     const save = find(cx.root.?, "bmc.editor.save").?;
     try std.testing.expect(save.isDisplayedInTree());
     driver.fail_save = true;
@@ -336,7 +340,7 @@ test "BMC editor native actions defer submission and rollback failed saves while
     try std.testing.expectEqual(@as(usize, 1), driver.submissions);
     try std.testing.expectEqual(@as(usize, 0), memory.values.count());
     try std.testing.expectEqualStrings("editor-sensitive", view.draft.?.password);
-    try std.testing.expect(find(cx.root.?, "bmc.editor.access.direct.selected").?.isDisplayedInTree());
+    try std.testing.expect(!view.draft.?.routed);
     try std.testing.expectEqualStrings("fixture.invalid", view.draft.?.host);
     driver.fail_save = false;
     click(cx, find(cx.root.?, "bmc.editor.temporary").?);
@@ -345,6 +349,8 @@ test "BMC editor native actions defer submission and rollback failed saves while
     try std.testing.expectEqual(@as(usize, 0), memory.values.count());
     try std.testing.expectEqual(@as(usize, 0), view.draft.?.password.len);
     try std.testing.expectEqualStrings("Fixture BMC", view.draft.?.name);
+    click(cx, find(cx.root.?, "wizard.step.identity").?);
+    frames(cx);
     click(cx, find(cx.root.?, "bmc.editor.cancel").?);
     frames(cx);
     try std.testing.expectEqual(@as(usize, 1), driver.cancelled);
@@ -457,7 +463,13 @@ test "BMC editor native probe feedback stays visible and log updates preserve ca
     const root_before = view.root;
     const message_before = view.message;
     const footer = find(cx.root.?, "bmc.editor.footer").?;
-    try std.testing.expectEqual(@as(usize, 6), footer.children.items.len); // five actions and spacer
+    click(cx, find(cx.root.?, "bmc.editor.next").?);
+    frames(cx);
+    click(cx, find(cx.root.?, "bmc.editor.next").?);
+    frames(cx);
+    try std.testing.expectEqual(@as(usize, 7), footer.children.items.len); // retained per-step actions and spacer
+    ui.widgets.scrollIntoView(view.scroll.?.state, view.scroll.?.content, find(cx.root.?, "bmc.editor.probe").?, .nearest);
+    frames(cx);
     click(cx, find(cx.root.?, "bmc.editor.probe").?);
     try std.testing.expectEqual(@as(u64, 0), fixture.begins);
     frames(cx);
@@ -503,6 +515,8 @@ test "BMC editor native probe feedback stays visible and log updates preserve ca
     frames(cx);
     try std.testing.expectEqual(@as(u64, 2), view.probe_log.attempt);
     try std.testing.expect(std.mem.indexOf(u8, view.log_entries.?.getText().?.content, "已取消") == null);
+    click(cx, find(cx.root.?, "wizard.step.identity").?);
+    frames(cx);
     cx.setFocus(view.inputs[1].?.input_container);
     cx.handleTextInput("-changed");
     frames(cx);
@@ -519,6 +533,12 @@ test "BMC editor native probe feedback stays visible and log updates preserve ca
     try std.testing.expect(view.probe_log.complete and view.probe_log.outcome == null);
     try std.testing.expect(std.mem.indexOf(u8, view.log_status.?.getText().?.content, "旧草稿") != null);
     try std.testing.expect(std.mem.indexOf(u8, view.message.?.getText().?.content, "成功") == null);
+    click(cx, find(cx.root.?, "bmc.editor.next").?);
+    frames(cx);
+    click(cx, find(cx.root.?, "bmc.editor.next").?);
+    frames(cx);
+    ui.widgets.scrollIntoView(view.scroll.?.state, view.scroll.?.content, find(cx.root.?, "bmc.editor.probe").?, .nearest);
+    frames(cx);
     click(cx, find(cx.root.?, "bmc.editor.probe").?);
     frames(cx);
     try std.testing.expectEqual(@as(u64, 3), view.probe_log.attempt);

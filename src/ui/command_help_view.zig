@@ -21,6 +21,7 @@ pub fn mountCard(cx: *ui.Cx) !*ui.Node {
         }
     }.style, .{});
 
+    @import("floating_input.zig").protect(cx, card);
     // 头部（ch：padding 13 18，高 ~46，字 13·600 + 右注 10 fg3）
     const ch = try ui.box(cx, .{
         .width = .fill(),

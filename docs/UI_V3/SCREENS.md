@@ -1,5 +1,9 @@
 # V3 功能页与状态效果图
 
+## 0.3 macOS 菜单栏与会话活动
+
+[效果图](menu-bar/assets/design-preview.png) · [可编辑效果总览](menu-bar/effects.html) · [可交互原型](menu-bar/index.html) · [0.3 设计](../DESIGN/V0.3_MENU_BAR_ACTIVITY.md)。包含无角标、1/12/99+、右键活动会话、左键显示及前台清零。原生角标直接导出，菜单为目标效果，含已原生接入并验证的 Tab 图标、状态与排序；不冒充实机菜单验收。
+
 ## 0.2.6 AI 执行与会话管理 PATCH（设计稿）
 
 [可编辑交互入口](ai-session-execution/index.html) · [状态索引](ai-session-execution/README.md) · [详细设计](../DESIGN/V0.2.6_AI_SESSION_EXECUTION.md)。覆盖全局设置与 composer 模式、批处理/交互式命令卡、单会话建组后的真实工具步骤、PTY 控制权、清理及只读历史。效果稿使用本地确定性数据，非真实 SSH/模型执行；原生验收状态以详细设计中的门槛为准。
@@ -16,7 +20,7 @@
 | 功能页 / 状态 | 可点击入口 | 原型 / 契约 |
 | --- | --- | --- |
 | 本地 ZSH | [默认窗口](workspace/index.html?mode=local) | [工作区说明](workspace/README.md) |
-| SSH 与会话组 | [SSH](workspace/index.html?mode=ssh)、[组](workspace/index.html?mode=group) | [命令流](workspace/index.html?mode=group) |
+| SSH 与混合会话组 | [SSH](workspace/index.html?mode=ssh)、[上 SFTP／下本地与 SSH](workspace/index.html?mode=group) | [v0.3 已落地布局与分隔线](workspace/session-group-spec.md) |
 | SFTP 文件双栏 | [文件页](workspace/index.html?mode=sftp) | [双卡片深色](workspace/index.html?mode=sftp&size=compact) · [浅色](workspace/index.html?mode=sftp&size=compact&theme=light) |
 | 完整底栏浮卡 | 各工作区底栏的连接状态、广播、链路、转发、文件传输 | [交互契约](workspace/README.md) |
 | AI 顶部浮窗 | [AI](workspace/index.html?mode=ai)、顶部三点 / ⌘J / @ai | [浮窗效果](workspace/index.html?mode=ai) |

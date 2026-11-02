@@ -26,7 +26,7 @@ pub const icon = common.icon;
 pub const text = common.text;
 pub const button = common.button;
 pub fn hover() ui.BoxStyle {
-    return .{ .background = theme.current().hover };
+    return .{ .background = theme.states().hover };
 }
 pub const close = common.close;
 pub const footer = common.footer;

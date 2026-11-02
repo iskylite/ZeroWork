@@ -107,7 +107,7 @@ pub const Command = struct {
                     destination.appendSliceAssumeCapacity(buffer[0..keep]);
                     if (keep < count) {
                         self.truncated = true;
-                        self.cancelled = true;
+                        if (self.limits.cancel_on_capture_limit) self.cancelled = true;
                     }
                 },
                 .would_block => return,

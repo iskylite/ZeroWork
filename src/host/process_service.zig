@@ -7,7 +7,7 @@ const operations = @import("operation.zig");
 const terminal = @import("terminal_service.zig");
 pub const ProcessExit = union(enum) { exited: u8, signal: u8 };
 pub const Foreground = extern struct { pid: c_int, process_group: c_int, session_id: c_int, name: [64]u8 };
-pub const ExecLimits = struct { capture_bytes: u32 = 64 * 1024, timeout_ms: u32 = 30_000 };
+pub const ExecLimits = struct { capture_bytes: u32 = 64 * 1024, timeout_ms: u32 = 30_000, cancel_on_capture_limit: bool = true };
 pub const RecordingOptions = struct { io: std.Io, log: @import("../config/config.zig").Log = .{}, directory: ?[]const u8 = null };
 pub const ProcessSnapshot = struct {
     owner: identity.SessionHandle,

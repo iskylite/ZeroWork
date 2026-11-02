@@ -141,7 +141,53 @@ pub fn main(init: std.process.Init) !void {
     try assert(trust.called == 1 and trust.key.?.eql(host.state(logical.directory).?.open_key));
     const context: capture.Context = .{ .scope = .{ .owner = .{ .session = @backingInt(accepted.handle.session_id) }, .members = .{ .ids = .{@backingInt(accepted.handle.session_id)} ++ @as([15]u64, @splat(0)), .len = 1 } }, .source = .{ .session = accepted.handle, .revision = 17, .bindings = logical } };
 
-    if (std.mem.eql(u8, mode, "bounds")) {
+    if (std.mem.eql(u8, mode, "pagination")) {
+        var offset: u64 = 0;
+        var version: ?u64 = null;
+        var pages: usize = 0;
+        while (true) {
+            var result = try read(init.gpa, &host, context, "/large", .{ .read = .{ .max_bytes = 4096, .offset = offset, .expected_version = version } });
+            defer result.release();
+            try assert(result.value().?.body == .text);
+            const text = result.value().?.body.text;
+            try assert(text.offset == offset and text.bytes.len > 0);
+            for (text.bytes) |byte| try assert(byte == 'A');
+            if (version) |expected| try assert(expected == text.source_version);
+            version = text.source_version;
+            offset += text.bytes.len;
+            pages += 1;
+            if (!text.truncated) break;
+        }
+        try assert(offset == 70000 and pages > 1);
+        var stale = try read(init.gpa, &host, context, "/large", .{ .read = .{ .offset = 4096, .expected_version = version.? ^ 1 } });
+        defer stale.release();
+        try assert(stale.value().?.body == .failure and stale.value().?.body.failure == .remote and stale.value().?.body.failure.remote == .source_changed);
+        var utf8 = try read(init.gpa, &host, context, "/utf8", .{ .read = .{ .max_bytes = 4 } });
+        defer utf8.release();
+        try assert(utf8.value().?.body == .text and std.mem.eql(u8, utf8.value().?.body.text.bytes, "你"));
+        var utf8_tail = try read(init.gpa, &host, context, "/utf8", .{ .read = .{ .max_bytes = 4, .offset = 3, .expected_version = utf8.value().?.body.text.source_version } });
+        defer utf8_tail.release();
+        try assert(utf8_tail.value().?.body == .text and std.mem.eql(u8, utf8_tail.value().?.body.text.bytes, "好"));
+        offset = 0;
+        version = null;
+        var entries: usize = 0;
+        while (true) {
+            var result = try read(init.gpa, &host, context, "/", .{ .list = .{ .paged = true, .max_entries = 8, .offset = offset, .expected_version = version } });
+            defer result.release();
+            try assert(result.value().?.body == .listing);
+            const listing = result.value().?.body.listing;
+            try assert(listing.offset == offset and listing.entries.len > 0);
+            for (listing.entries, 0..) |entry, index| {
+                var name: [32]u8 = undefined;
+                try assert(std.mem.eql(u8, entry.raw_name, try std.fmt.bufPrint(&name, "entry {d:0>2}", .{entries + index})));
+            }
+            entries += listing.entries.len;
+            version = listing.source_version;
+            offset = listing.next_offset orelse break;
+        }
+        try assert(entries == 21);
+        std.debug.print("PAGINATION file_bytes=70000 file_pages={d} directory_entries=21 utf8=exact stale=rejected\n", .{pages});
+    } else if (std.mem.eql(u8, mode, "bounds")) {
         var listing = try read(init.gpa, &host, context, "/", .{ .list = .{ .max_entries = 8 } });
         try assert(listing.value().?.body == .listing and listing.value().?.body.listing.truncated and listing.value().?.body.listing.entries.len == 8);
         try assert(std.mem.eql(u8, listing.value().?.metadata.actual_path.?, "/"));

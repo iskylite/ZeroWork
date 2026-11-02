@@ -59,6 +59,7 @@ pub const View = struct {
         self.deny.meta.ownership.meta.test_id = "ai.inventory_grant.deny";
         try actions.appendChild(cx.allocator, self.deny);
         self.allow_once = try ui.widgets.Button(.{ .variant = .primary, .label = "仅此一次", .a11y_label = "仅本次调用允许查看其他会话", .base_style = self.primary_style, .disabled = self.disabled, .on_click = cx.on(View, self, allowOnce) }).mount(scope, cx);
+        try theme.stylePrimary(cx, scope, self.allow_once, self.disabled);
         self.allow_once.meta.ownership.meta.test_id = "ai.inventory_grant.allow_once";
         try actions.appendChild(cx.allocator, self.allow_once);
         self.allow_conversation = try ui.widgets.Button(.{ .variant = .secondary, .label = "持续允许", .a11y_label = "当前对话持续允许查看其他会话，可撤销", .base_style = try theme.paintSignal(@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.button, .{false}), .disabled = self.disabled, .hover_style = try theme.paintSignal(?@FieldType(ui.widgets.ControlShellConfig, "style"), cx, scope, S.hover, .{}), .on_click = cx.on(View, self, allowConversation) }).mount(scope, cx);
@@ -110,9 +111,9 @@ pub const View = struct {
     }
     fn refreshActionPaint(self: *View) void {
         self.primary_style.set(S.button(!self.disabled.peek()));
-        const paint = S.primaryPaint(!self.disabled.peek());
+        var paint = S.primaryPaint(!self.disabled.peek());
+        paint.gradient = null; // Theme state binding owns both gradient endpoints.
         self.allow_once.setStyleInline(self.cx.allocator, paint);
-        self.allow_once.setStyle(self.cx.allocator, .gradient, paint.gradient);
     }
     fn cancelPress(self: *View) void {
         if (self.cx.pressed_node) |pressed| if (pressed == self.root or pressed.isDescendantOf(self.root)) self.cx.cancelPointerInteractions(.explicit);

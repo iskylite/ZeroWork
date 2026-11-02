@@ -45,15 +45,15 @@ body[data-theme=light] .kvm-connection-progress{--kvm-progress-fill:#fff;--kvm-p
 body[data-theme=sauber] .kvm-connection-progress{--kvm-progress-fill:#f3ffef;--kvm-progress-shadow:rgba(0,0,0,.16);--kvm-progress-secondary:#354f40;--kvm-progress-accent:#1345f6;--kvm-progress-active:rgba(19,69,246,.0784313725)}
 /* The native card has a fixed header/action region from the first (revision-zero) frame. */
 #video .waiting.kvm-connection-progress{width:520px;height:441px;max-width:calc(100% - 32px);max-height:calc(100% - 24px);min-height:0;display:flex;flex-direction:column;gap:12px;padding:20px;text-align:left;background:color-mix(in srgb,var(--kvm-progress-fill) var(--overlay-alpha,96.0784%),transparent);border-radius:12px;border:0;outline:none;box-shadow:0 16px 48px var(--kvm-progress-shadow);backdrop-filter:blur(max(24px,var(--overlay-blur,12px)));-webkit-backdrop-filter:blur(max(24px,var(--overlay-blur,12px)));overflow:hidden;flex-shrink:0}
-.kvm-progress-header{height:74px;display:flex;flex-direction:column;gap:6px;flex-shrink:0;min-width:0}
+.kvm-progress-header{height:26px;display:flex;flex-direction:column;gap:6px;flex-shrink:0;min-width:0}
 .kvm-progress-header h2{height:26px;margin:0;font-size:18px;line-height:26px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0}
-.kvm-connection-progress .kvm-progress-timing{height:18px;margin:0;display:flex;align-items:center;gap:6px;color:var(--kvm-progress-secondary);font-size:12px;line-height:18px;white-space:nowrap;flex-shrink:0}
-.kvm-progress-number{width:64px;flex:0 0 64px;font:12px/18px Menlo,monospace;font-variant-numeric:tabular-nums;text-align:right}
+.kvm-connection-progress .kvm-progress-timing{height:18px;margin:0;display:flex;align-items:center;gap:6px;color:var(--kvm-progress-secondary);font:11px/16.5px Inter,system-ui,sans-serif;white-space:nowrap;flex-shrink:0}
+.kvm-progress-number{width:64px;flex:0 0 64px;font:11px/16.5px Menlo,monospace;font-variant-numeric:tabular-nums;text-align:right}
 .kvm-connection-progress .kvm-progress-notice{height:18px;min-height:18px;flex-shrink:0;margin:0;color:var(--kvm-progress-secondary);font-size:11px;line-height:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .kvm-connection-progress .kvm-progress-notice.error{color:var(--danger)}
 .kvm-progress-body{min-height:0;overflow:auto;overscroll-behavior:contain;flex:1 1 0;display:flex;flex-direction:column;gap:12px}
 .kvm-progress-steps{height:auto;flex:0 0 auto;margin:0;gap:8px}
-.kvm-connection-progress .kvm-progress-step{height:30px;flex-shrink:0;display:grid;grid-template-columns:16px minmax(0,1fr) 55px 12px;gap:8px;align-items:center;padding:6px 0;font-size:12px;line-height:18px;background:transparent;border-radius:8px}
+.kvm-connection-progress .kvm-progress-step{height:auto;min-height:34px;flex-shrink:0;display:grid;grid-template-columns:16px minmax(0,1fr) 76px 55px 12px;gap:8px;align-items:center;padding:8px 10px;font-size:12px;line-height:18px;background:transparent;border-radius:8px}
 .kvm-connection-progress .kvm-progress-step.done{color:var(--fg)}.kvm-progress-step.current{color:var(--kvm-progress-accent);background:var(--kvm-progress-active)}.kvm-progress-step.current small{color:var(--kvm-progress-accent)}.kvm-progress-step.failed{color:var(--danger)}.kvm-progress-step.stopped{color:var(--warn-ink)}
 .kvm-progress-step small{font-size:11px;line-height:18px;color:var(--kvm-progress-secondary);text-align:right}
 .kvm-progress-route{margin:0;white-space:normal;overflow-wrap:anywhere;flex-shrink:0}
@@ -82,14 +82,14 @@ body[data-theme=sauber] .kvm-connection-progress{--kvm-progress-fill:#f3ffef;--k
 .kvm-log-route{margin:0 0 12px}
 
 /* Match the shared native shell, then let the KVM card fill its content slot. */
-#app{padding:5px;gap:8px}.layout{gap:8px}#sidebar{width:238px;min-width:238px}
+#app{padding:5px;gap:5px}.layout{gap:5px}#sidebar{width:238px;min-width:238px}
 #content{border:0;border-radius:11px;overflow:hidden;padding:0}
 .kvm-content-surface{flex:1;min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--surface-1);border:0;border-radius:11px;overflow:hidden;padding:0}
-/* Video has no surrounding inset; both its viewport and frame retain r11. */
+/* One outer card owns clipping; toolbar and video share its bounds. */
 .kvm-video-workspace{flex:1;min-width:0;min-height:0;display:flex;padding:0}
-.kvm-video-card{flex:1;min-width:0;min-height:0;display:flex;padding:0;background:#000;border:0;border-radius:11px;overflow:hidden}
-.kvm-video-card>.video{min-width:0;border:0;border-radius:11px;padding:0}
-#video .screen.kvm-reference-video{padding:0;border-radius:11px;overflow:hidden}
+.kvm-video-card{flex:1;min-width:0;min-height:0;display:flex;padding:0;background:#000;border:0;border-radius:0;overflow:hidden}
+.kvm-video-card>.video{min-width:0;border:0;border-radius:0;padding:0}
+#video .screen.kvm-reference-video{padding:0;border-radius:0;overflow:hidden}
 
 /* SSH diagnostic typography, with independent clock/message/duration cells. */
 .kvm-log-columns,.kvm-log-row{display:grid;grid-template-columns:86px minmax(0,1fr) 76px;gap:12px;min-width:0;font:10.5px/16px Menlo,monospace}
@@ -107,3 +107,45 @@ body[data-theme=sauber] .kvm-connection-progress{--kvm-progress-fill:#f3ffef;--k
 /* Default-on KVM performance HUD; pointer input continues to the video. */
 .kvm-fps{position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:2px;padding:6px 10px;background:rgba(18,20,24,.78);color:#f3f4f6;border-radius:7px;font:500 11px/16px ui-monospace,Menlo,monospace;pointer-events:none;z-index:2;white-space:nowrap}
 .kvm-fps small{font:400 11px/16px ui-monospace,Menlo,monospace;color:#c6cad1}.kvm-fps[hidden]{display:none}
+
+.kvm-progress-notice[hidden]{display:none!important}
+
+/* Existing shell: keep connection/RTT, route and theme; no transfer or terminal facts. */
+body.compact .kvm-tools button{width:58px;min-width:58px;font-size:11px}
+.statusbar #input-status[hidden]{display:none}
+
+.kvm-progress-route-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0}
+.kvm-progress-duration{font:11px/18px Menlo,monospace;white-space:nowrap;text-align:right}
+.kvm-progress-actions .button{background:var(--popup-action);color:var(--fg)}
+
+.kvm-progress-route-heading .kvm-progress-timing{font:11px/16.5px Inter,system-ui,sans-serif}
+.kvm-progress-route-heading .kvm-progress-number{font-size:11px;line-height:16.5px}
+
+/* One state indicator becomes the disconnect action on hover or keyboard focus. */
+.console-head>.kvm-connection-indicator{width:82px;height:24px;min-height:24px;flex-shrink:0;display:flex;align-items:center;justify-content:center;gap:4px;padding:0 8px;font-size:12px;font-weight:500;white-space:nowrap;border-radius:12px;background:transparent;color:var(--muted)}
+.kvm-connection-indicator svg{width:14px;height:14px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.kvm-connection-indicator[data-state="online"]{color:var(--good)}
+.kvm-connection-indicator[data-state="failed"]{color:var(--danger)}
+.kvm-connection-indicator[data-state="connecting"]{color:var(--accent)}
+.kvm-connection-indicator .kvm-disconnect-icon,.kvm-connection-indicator .kvm-disconnect-label{display:none}
+.kvm-connection-indicator:not(:disabled):is(:hover,:focus-visible){background:var(--hover);color:var(--danger)}
+.kvm-connection-indicator:not(:disabled):is(:hover,:focus-visible) :is(.kvm-state-icon,.kvm-state-label){display:none}
+.kvm-connection-indicator:not(:disabled):is(:hover,:focus-visible) :is(.kvm-disconnect-icon,.kvm-disconnect-label){display:block}
+.kvm-connection-indicator:disabled{opacity:1;cursor:default}
+
+/* Route summary uses the same duration/status columns as every step. */
+.kvm-progress-route-heading{padding-right:20px}
+.kvm-progress-route-heading .kvm-progress-timing{gap:8px}
+.kvm-progress-route-heading .kvm-progress-number{width:76px;flex:0 0 76px;font:11px/18px Menlo,monospace;text-align:right}
+.kvm-progress-overall-state{width:55px;flex:0 0 55px;font:11px/18px Inter,system-ui,sans-serif;text-align:right}
+.kvm-progress-overall-state.failed{color:var(--danger-ink,var(--danger))}
+
+/* Shared native header geometry and hostname identity. */
+.kvm-content-surface>.console-head{height:48px;min-height:48px;padding:12px 13px;gap:6px;background:transparent}
+.kvm-connection-identity{flex:1;min-width:0;display:flex;align-items:center;gap:8px}
+.kvm-connection-identity>.identity-icon{width:18px;height:18px;flex-shrink:0;stroke-width:2}
+.kvm-connection-identity>.kvm-title,body.compact .kvm-connection-identity>.kvm-title{flex:1;min-width:0;max-width:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+body.compact .console-head>.kvm-connection-indicator{font-size:11px}
+
+.kvm-connection-indicator :is(.kvm-state-label,.kvm-disconnect-label){color:var(--fg)}

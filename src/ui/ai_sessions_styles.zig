@@ -18,10 +18,10 @@ pub fn heading() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 24 }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 8, .right = 8 } };
 }
 pub fn rowBackground(active: bool, hovered: bool) ui.BoxStyle {
-    return .{ .background = if (hovered) T.current().hover else if (active) T.current().accent.withAlpha(24) else ui.Color.TRANSPARENT, .corner_radius = 7 };
+    return .{ .background = if (active) (if (hovered) T.states().selected_hover else T.states().selected) else if (hovered) T.states().hover else ui.Color.TRANSPARENT, .corner_radius = 7 };
 }
 pub fn actionHover(danger: bool) ui.BoxStyle {
-    return .{ .background = if (danger) T.current().danger.withAlpha(20) else T.current().hover, .corner_radius = 5 };
+    return .{ .background = if (danger) T.current().danger.withAlpha(20) else T.states().hover, .corner_radius = 5 };
 }
 pub fn row() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .px = 30 }, .direction = .row, .align_items = .center, .gap = 6, .padding = .{ .left = 8, .right = 8 }, .flex_shrink = 0 };

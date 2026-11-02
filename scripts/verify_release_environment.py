@@ -11,7 +11,7 @@ data = binary.read_bytes()
 names = set(re.findall(rb"\b(?:ZEROWORK|ZENIT)_[A-Z][A-Z0-9_]{2,}\b", data))
 # Embedded Metal source uses this compile-time macro; it never reads an environment.
 shader_macros = {b"ZENIT_FRAMEBUFFER_FETCH"}
-for name in (b"OPENAI_API_KEY", b"ANTHROPIC_API_KEY", b"ZW_EDIT_FD", b"ZW_EDIT_PARENT"):
+for name in (b"zw_update_test_seed_verified", b"ZW_UPDATE_TEST_PREPARE_HOLD", b"ZW_UPDATE_HEADLESS", b"ZW_UPDATE_CRASH_AT_STAGE", b"ZW_UPDATE_FIXTURE_MODE", b"OPENAI_API_KEY", b"ANTHROPIC_API_KEY", b"ZW_EDIT_FD", b"ZW_EDIT_PARENT"):
     if name in data:
         names.add(name)
 forbidden = sorted(name.decode() for name in names - shader_macros)

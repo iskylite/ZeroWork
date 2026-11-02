@@ -125,6 +125,18 @@ const HopSlot = struct {
         self.view.refreshLogs() catch {};
     }
 };
+const LogRow = struct {
+    view: *View,
+    record: LogRecord,
+    node: *ui.Node,
+    text: *ui.Node,
+    fn hover(self: *LogRow) void {
+        self.view.showDiagnostic(self) catch {};
+    }
+    fn leave(self: *LogRow) void {
+        if (self.view.diagnostic_row == self) self.view.closeLogTip();
+    }
+};
 const Marker = struct { key: OperationKey, sequence: u64 };
 const ActionSkin = struct {
     base: *ui.Signal(ui.BoxStyle),
@@ -194,7 +206,14 @@ pub const View = struct {
     authentication_area: *ui.Node,
     logs_scroll: ui.widgets.ScrollAreaResult,
     logs_disclosure: *@import("layout_motion.zig").Disclosure = undefined,
-    logs_text: *ui.Node,
+    log_rows: [progress.Journal.capacity]LogRow = undefined,
+    log_row_count: usize = 0,
+    log_rows_hash: ?u64 = null,
+    diagnostic_row: ?*LogRow = null,
+    diagnostic_open: *ui.Signal(bool) = undefined,
+    diagnostic_panel: *ui.Node = undefined,
+    diagnostic_text: *ui.Node = undefined,
+    diagnostic_title: *ui.Node = undefined,
     toggle_label: *ui.Node,
     log_help: *ui.Node,
     jump_button: *ui.Node,
@@ -247,7 +266,6 @@ pub const View = struct {
             .resource_text = undefined,
             .authentication_area = undefined,
             .logs_scroll = undefined,
-            .logs_text = undefined,
             .toggle_label = undefined,
             .log_help = undefined,
             .jump_button = undefined,
@@ -357,6 +375,24 @@ pub const View = struct {
         self.jump_label = try ui.text(cx, "回到底部", S.text(11, 400, false));
         try self.jump_button.appendChild(cx.allocator, self.jump_label);
         try log_controls.appendChild(cx.allocator, self.jump_button);
+        self.diagnostic_open = try scope.createSignal(bool, false);
+        const diagnostic = try ui.widgets.Popover(.{ .trigger = .manual, .open = self.diagnostic_open, .anchor = .{ .virtual = .{ .ctx = self, .getRect = diagnosticAnchor } }, .open_delay_ms = 350, .position = .bottom_start, .width = 520, .max_width = 520, .max_height = 260, .constrain_width_to_viewport = true, .shift_main_axis = true, .offset = .{ .static = 6 }, .enter_transition = .none, .exit_transition = .none }).mount(scope, cx);
+        diagnostic.wrapper.setStyleInline(cx.allocator, .{ .position = .absolute, .width = .{ .px = 0 }, .height = .{ .px = 0 } });
+        try modal.body.appendChild(cx.allocator, diagnostic.wrapper);
+        self.diagnostic_panel = diagnostic.content;
+        diagnostic.content.setStyleInline(cx.allocator, S.diagnosticPanel());
+        diagnostic.content.meta.ownership.meta.test_id = "connection.progress.logs.raw-popover";
+        self.diagnostic_title = try self.appendLabel(diagnostic.content, "原始 SSH 日志", S.text(12, 600, false));
+        const raw_scroll = try ui.widgets.ScrollArea(.{ .direction = .vertical, .rubber_band_y = false }).mount(diagnostic.scope, cx);
+        raw_scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 200 }, .flex_shrink = 0 });
+        raw_scroll.content.setStyleInline(cx.allocator, S.stack());
+        var raw_style = S.paragraph(11, 400);
+        raw_style.use_monospace_font = true;
+        raw_style.selectable = true;
+        raw_style.color = S.theme.current().fg_1;
+        self.diagnostic_text = try self.appendLabel(raw_scroll.content, "", raw_style);
+        self.diagnostic_text.meta.ownership.meta.test_id = "connection.progress.logs.raw-text";
+        try diagnostic.content.appendChild(cx.allocator, raw_scroll.container);
         self.copy_host = try ui.box(cx, S.copyButton(), .{});
         try log_controls.appendChild(cx.allocator, self.copy_host);
         try content.appendChild(cx.allocator, log_controls);
@@ -365,12 +401,6 @@ pub const View = struct {
 
         self.logs_scroll.container.meta.ownership.meta.test_id = "connection.progress.logs";
         self.logs_scroll.content.setStyleInline(cx.allocator, S.logContent());
-        var log_style = S.text(10.5, 400, false);
-        log_style.line_height = 16.0 / 10.5;
-        log_style.use_monospace_font = true;
-        log_style.wrap = .word;
-        log_style.text_overflow = .clip;
-        self.logs_text = try self.appendLabel(self.logs_scroll.content, "", log_style);
         self.logs_disclosure = try @import("layout_motion.zig").Disclosure.mount(cx, scope, self.logs_scroll.container, false);
         try content.appendChild(cx.allocator, self.logs_disclosure.root);
         self.footer = try ui.box(cx, S.footer(self.compact), .{});
@@ -402,6 +432,8 @@ pub const View = struct {
         errdefer if (!transferred) copy.deinit();
         self.observeUserScroll();
         if (!same) {
+            self.closeLogTip();
+            self.log_rows_hash = null;
             self.cancel_requested = false;
             self.retry_requested = false;
             self.copy_result = null;
@@ -420,12 +452,16 @@ pub const View = struct {
         self.visible = !snapshot.attached;
         try self.refresh();
         self.open.set(!snapshot.attached);
-        if (snapshot.attached) self.authentication_area.setDisplay(.none);
+        if (snapshot.attached) {
+            self.closeLogTip();
+            self.authentication_area.setDisplay(.none);
+        }
         self.cx.requestRedraw();
     }
     pub fn hide(self: *View) void {
         if (!self.visible and !self.open.peek() and self.authentication_area.style.display == .none) return;
         self.visible = false;
+        self.closeLogTip();
         self.identity_tip_open.set(false);
         for (self.slots[0..self.slot_count]) |slot| slot.tip_open.set(false);
         self.open.set(false);
@@ -461,7 +497,10 @@ pub const View = struct {
         self.jump_button.setStyleInline(self.cx.allocator, S.button(154, 28, false));
         self.jump_label.setTextColor(c.fg_2);
         self.logs_scroll.container.setStyleInline(self.cx.allocator, S.logs());
-        self.logs_text.setTextColor(c.fg_1);
+        for (self.log_rows[0..self.log_row_count]) |row| row.text.setTextColor(c.fg_1);
+        self.diagnostic_panel.setStyleInline(self.cx.allocator, S.diagnosticPanel());
+        self.diagnostic_title.setTextColor(c.fg_1);
+        self.diagnostic_text.setTextColor(c.fg_1);
         if (self.copy_icon) |node| _ = node.setTint(c.fg_2);
         if (self.close_icon) |node| _ = node.setTint(c.fg_2);
         for (self.slots[0..self.slot_count]) |slot| {
@@ -498,6 +537,7 @@ pub const View = struct {
     pub fn toggleLogs(self: *View) void {
         if (!self.visible) return;
         self.logs_expanded = !self.logs_expanded;
+        if (!self.logs_expanded) self.closeLogTip();
         self.logs_disclosure.setExpanded(self.logs_expanded);
         self.toggle_label.setTextContent(self.cx.allocator, if (self.logs_expanded) "收起连接日志" else "查看连接日志") catch {};
         self.toggle_button.behavior.interaction.a11y.?.expanded = self.logs_expanded;
@@ -851,14 +891,10 @@ pub const View = struct {
         try self.resource_text.setTextContent(self.cx.allocator, text.writer.buffered());
     }
     fn refreshLogs(self: *View) !void {
-        var text = std.Io.Writer.Allocating.init(self.cx.allocator);
-        defer text.deinit();
-        try self.writeDisplayLogs(&text.writer);
-        try self.logs_text.setTextContent(self.cx.allocator, if (text.writer.buffered().len != 0) text.writer.buffered() else "暂无当前节点的阶段日志");
-        try @import("log_typography.zig").apply(self.cx, self.logs_text);
+        try self.refreshLogRows();
         self.copy_disabled.set(self.logCount() == 0);
         if (self.copy_result) |success| {
-            try self.log_help.setTextContent(self.cx.allocator, if (success) "已复制阶段日志" else "复制失败，请重试");
+            try self.log_help.setTextContent(self.cx.allocator, if (success) "已复制连接日志" else "复制失败，请重试");
             self.log_help.setTextColor(if (success) S.theme.current().ok_ink else S.theme.current().danger_ink);
             return;
         }
@@ -868,51 +904,75 @@ pub const View = struct {
         const drop_count = @max(self.source.?.value.dropped, self.source.?.value.journal.dropped);
         if (drop_count != 0) try self.log_help.setTextContent(self.cx.allocator, try std.fmt.bufPrint(&label, "已省略 {d} 条旧日志", .{drop_count}));
     }
-    fn writeDisplayLogs(self: *View, writer: *std.Io.Writer) !void {
-        const count = self.logCount();
-        for (0..count) |index| {
+    fn closeLogTip(self: *View) void {
+        self.diagnostic_open.set(false);
+        self.diagnostic_row = null;
+    }
+    fn diagnosticAnchor(raw: *anyopaque) ui.widgets.popover.AnchorRect {
+        const self: *View = @ptrCast(@alignCast(raw));
+        const row = self.diagnostic_row orelse return .{ .x = 0, .y = 0, .w = 0, .h = 0 };
+        const rect = row.node.globalRect();
+        return .{ .x = rect.x, .y = rect.y, .w = rect.w, .h = rect.h };
+    }
+    fn showDiagnostic(self: *View, row: *LogRow) !void {
+        if (!self.visible or !self.logs_expanded or row.record.entry.status != .failed or row.record.entry.diagnostic.len == 0) return;
+        var text = std.Io.Writer.Allocating.init(self.cx.allocator);
+        defer text.deinit();
+        try text.writer.print("尝试 {d} · 第 {d} 跳 · {s}\n", .{ row.record.key.attempt_id.?, row.record.entry.hop + 1, phaseName(row.record.entry.phase) });
+        try row.record.entry.writeDiagnostic(&text.writer);
+        try self.diagnostic_text.setTextContent(self.cx.allocator, text.writer.buffered());
+        self.diagnostic_row = row;
+        self.diagnostic_open.set(true);
+        self.cx.requestRedraw();
+    }
+    fn refreshLogRows(self: *View) !void {
+        var all = std.Io.Writer.Allocating.init(self.cx.allocator);
+        defer all.deinit();
+        try self.writeLogRecords(&all.writer, true);
+        const hash = std.hash.Wyhash.hash(0, all.writer.buffered());
+        if (self.log_rows_hash == hash) return;
+        self.closeLogTip();
+        self.clearNodes(self.logs_scroll.content);
+        self.log_row_count = 0;
+        var style = S.text(10.5, 400, false);
+        style.line_height = 16.0 / 10.5;
+        style.use_monospace_font = true;
+        style.wrap = .word;
+        style.text_overflow = .clip;
+        for (0..self.logCount()) |index| {
             const record = self.logAt(index);
             if (self.filter) |hop| if (record.entry.hop != hop) continue;
-            var start = record.entry.timestamp_ns;
-            for (0..index) |before| {
-                const earlier = self.logAt(before);
-                if (earlier.key.eql(record.key)) {
-                    start = earlier.entry.timestamp_ns;
-                    break;
-                }
+            var line = std.Io.Writer.Allocating.init(self.cx.allocator);
+            defer line.deinit();
+            try writeLogRecord(&line.writer, record, false);
+            const row = &self.log_rows[self.log_row_count];
+            const node = try ui.box(self.cx, S.logRow(), .{});
+            const label = try self.appendLabel(node, std.mem.trimEnd(u8, line.writer.buffered(), "\n"), style);
+            try @import("log_typography.zig").apply(self.cx, label);
+            row.* = .{ .view = self, .record = record, .node = node, .text = label };
+            self.log_row_count += 1;
+            const has_diagnostic = record.entry.status == .failed and record.entry.diagnostic.len != 0;
+            node.meta.ownership.meta.test_id = if (has_diagnostic) "connection.progress.logs.failure" else "connection.progress.logs.row";
+            if (has_diagnostic) {
+                node.behavior.events.on_hover = self.cx.on(LogRow, row, LogRow.hover);
+                node.behavior.events.on_leave = self.cx.on(LogRow, row, LogRow.leave);
             }
-            const ms = @divTrunc(@max(0, record.entry.timestamp_ns - start), std.time.ns_per_ms);
-            try writer.print("+{d}.{d:0>3}s  {s} · {s}\n         {s}:{d} · 第 {d} 跳 · 尝试 {d} · #{d}\n", .{ @divTrunc(ms, 1000), @mod(ms, 1000), phaseName(record.entry.phase), switch (record.entry.status) {
-                .started => "进行中",
-                .succeeded => "完成",
-                .failed => failureText(record.entry.failure),
-                .cancelled => "已取消",
-            }, record.entry.hostSlice(), record.entry.port, record.entry.hop + 1, record.key.attempt_id.?, record.entry.sequence });
+            try self.logs_scroll.content.appendChild(self.cx.allocator, node);
         }
+        if (self.log_row_count == 0) _ = try self.appendLabel(self.logs_scroll.content, "暂无当前节点的阶段日志", style);
+        self.log_rows_hash = hash;
     }
     fn writeLogs(self: *View, writer: *std.Io.Writer) !void {
         const source = self.source.?.value;
         if (source.failure) |fault| try writer.print("失败原因：{s}\n", .{fault.reason});
         if (source.file_session) try writer.print("SFTP：{s}\n", .{source.activity});
-        const count = self.logCount();
-        for (0..count) |index| {
+        try self.writeLogRecords(writer, true);
+    }
+    fn writeLogRecords(self: *View, writer: *std.Io.Writer, include_raw: bool) !void {
+        for (0..self.logCount()) |index| {
             const record = self.logAt(index);
             if (self.filter) |hop| if (record.entry.hop != hop) continue;
-            var start = record.entry.timestamp_ns;
-            for (0..index) |before| {
-                const candidate = self.logAt(before);
-                if (candidate.key.eql(record.key)) {
-                    start = candidate.entry.timestamp_ns;
-                    break;
-                }
-            }
-            const milliseconds = @divTrunc(@max(0, record.entry.timestamp_ns - start), std.time.ns_per_ms);
-            try writer.print("+{d}.{d:0>3}s [尝试 {d} · #{d}] 第 {d} 跳 {s}:{d} | {s} | {s}\n", .{ @divTrunc(milliseconds, 1000), @mod(milliseconds, 1000), record.key.attempt_id.?, record.entry.sequence, record.entry.hop + 1, record.entry.hostSlice(), record.entry.port, phaseName(record.entry.phase), switch (record.entry.status) {
-                .started => "进行中",
-                .succeeded => "完成",
-                .failed => failureText(record.entry.failure),
-                .cancelled => "已取消",
-            } });
+            try writeLogRecord(writer, record, include_raw);
         }
     }
     fn logCount(self: *const View) usize {
@@ -946,6 +1006,7 @@ pub const View = struct {
     fn observeUserScroll(self: *View) void {
         const state = self.logs_scroll.state;
         if (@abs(state.scroll_y - self.last_scroll_y) < 0.5) return;
+        self.closeLogTip();
         self.following = state.scroll_y >= state.maxScrollY() - 1;
         if (self.following) self.new_logs = 0;
         self.last_scroll_y = state.scroll_y;
@@ -1005,11 +1066,15 @@ pub const View = struct {
     }
     fn currentFailure(self: *const View) ?Failure {
         const source = &self.source.?.value;
-        if (source.failure) |fault| return fault;
+        if (source.failure) |fault| {
+            var result = fault;
+            result.reason = inlineFailureText(fault.reason, if (source.journal.failure) |entry| entry.diagnostic.len != 0 else false);
+            return result;
+        }
         if (source.state == .retrying or source.state == .cancelled) return null;
         const fault = source.journal.failure orelse return null;
         if (fault.status != .failed) return null;
-        return .{ .hop = fault.hop, .phase = fault.phase, .reason = failureText(fault.failure) };
+        return .{ .hop = fault.hop, .phase = fault.phase, .reason = inlineFailureText(failureText(fault.failure), fault.diagnostic.len != 0) };
     }
     fn canDismiss(self: *const View) bool {
         const source = if (self.source) |*source| &source.value else return false;
@@ -1023,7 +1088,7 @@ pub const View = struct {
     }
     fn copyFeedback(self: *View, success: bool) void {
         self.copy_result = success;
-        self.log_help.setTextContent(self.cx.allocator, if (success) "已复制阶段日志" else "复制失败，请重试") catch {};
+        self.log_help.setTextContent(self.cx.allocator, if (success) "已复制连接日志" else "复制失败，请重试") catch {};
         self.log_help.setTextColor(if (success) S.theme.current().ok_ink else S.theme.current().danger_ink);
         self.cx.requestRedraw();
     }
@@ -1084,19 +1149,29 @@ pub const View = struct {
     }
 };
 
+fn writeLogRecord(writer: *std.Io.Writer, record: LogRecord, include_raw: bool) !void {
+    try record.entry.writeLine(writer, "{s} · {s} · {s}:{d} · 第 {d} 跳 · 尝试 {d} · #{d}", .{ phaseName(record.entry.phase), switch (record.entry.status) {
+        .started => "进行中",
+        .succeeded => "完成",
+        .failed => inlineFailureText(failureText(record.entry.failure), record.entry.diagnostic.len != 0),
+        .cancelled => "已取消",
+    }, record.entry.hostSlice(), record.entry.port, record.entry.hop + 1, record.key.attempt_id.?, record.entry.sequence });
+    if (include_raw) try record.entry.writeDiagnostic(writer);
+}
+
 fn validate(snapshot: Snapshot) !void {
     const attempt = snapshot.key.attempt_id orelse return error.InvalidProgressIdentity;
     if (attempt == 0 or snapshot.key.operation_id == 0 or snapshot.journal.attempt != attempt) return error.InvalidProgressIdentity;
     if (snapshot.hops.len == 0 or snapshot.hops.len > S.max_hops or snapshot.journal.count > progress.Journal.capacity or snapshot.logs.len > progress.Journal.capacity) return error.InvalidProgressSnapshot;
-    for (snapshot.journal.entries[0..snapshot.journal.count]) |entry| if (entry.hop >= snapshot.hops.len or entry.hop_count != snapshot.hops.len) return error.InvalidProgressSnapshot;
-    if (snapshot.journal.failure) |entry| if (entry.hop >= snapshot.hops.len or entry.hop_count != snapshot.hops.len) return error.InvalidProgressSnapshot;
+    for (snapshot.journal.entries[0..snapshot.journal.count]) |entry| if (entry.hop >= snapshot.hops.len or entry.hop_count != snapshot.hops.len or entry.diagnostic.len > entry.diagnostic.bytes.len) return error.InvalidProgressSnapshot;
+    if (snapshot.journal.failure) |entry| if (entry.hop >= snapshot.hops.len or entry.hop_count != snapshot.hops.len or entry.diagnostic.len > entry.diagnostic.bytes.len) return error.InvalidProgressSnapshot;
     if (snapshot.failure) |fault| if (fault.hop) |hop| if (hop >= snapshot.hops.len) return error.InvalidProgressSnapshot;
     if (snapshot.resources) |resources| {
         const key = resources.key orelse return error.InvalidResourceOwner;
         if (!key.eql(snapshot.key) or resources.hop_count != snapshot.hops.len) return error.InvalidResourceOwner;
     }
     for (snapshot.logs) |record| {
-        if (!sameLogicalOwner(record.key, snapshot.key) or record.key.attempt_id == null or record.entry.hop >= record.entry.hop_count or record.entry.hop_count > S.max_hops) return error.InvalidLogOwner;
+        if (!sameLogicalOwner(record.key, snapshot.key) or record.key.attempt_id == null or record.entry.hop >= record.entry.hop_count or record.entry.hop_count > S.max_hops or record.entry.diagnostic.len > record.entry.diagnostic.bytes.len) return error.InvalidLogOwner;
         if (older(snapshot.key, record.key)) return error.InvalidLogOwner;
     }
     if (snapshot.attached and snapshot.key.owner != .session) return error.InvalidAttachmentOwner;
@@ -1129,6 +1204,10 @@ fn cleanupText(cleanup: operations.Cleanup) []const u8 {
         .released => "本次链路资源已释放",
         .unknown => "本次链路资源释放待核实",
     };
+}
+pub fn inlineFailureText(reason: []const u8, has_diagnostic: bool) []const u8 {
+    const suffix = "（详情见应用日志）";
+    return if (has_diagnostic and std.mem.endsWith(u8, reason, suffix)) reason[0 .. reason.len - suffix.len] else reason;
 }
 pub fn failureText(err: ?anyerror) []const u8 {
     return if (err) |failure| switch (failure) {

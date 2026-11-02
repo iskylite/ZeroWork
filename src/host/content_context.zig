@@ -240,6 +240,7 @@ pub const Context = struct {
     /// once per physical or automation event. It prevents duplicate dispatch.
     /// host_consumed covers top-layer challenge/popover/reserved shortcuts.
     pub fn route(self: *Context, lease: Lease, event_sequence: u64, input: Input, host_consumed: bool) !bool {
+        try @import("../update/admission.zig").require();
         if (host_consumed) return false;
         if (self.closed or self.transfer_state == .pending or !self.focused or !self.authorized or !self.matches(lease)) return error.StaleInputLease;
         if (lease.kind == .human_focus and !self.content_focused) return error.ContentNotFocused;

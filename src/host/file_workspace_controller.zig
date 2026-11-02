@@ -302,6 +302,7 @@ pub const Controller = struct {
     /// Submit one literal child name against the original card stamp. No UI
     /// focus lookup, transfer intent or navigation into the created directory.
     pub fn mkdir(self: *Controller, envelope: View.Envelope, name: []const u8) !operations.OperationKey {
+        try @import("../update/admission.zig").require();
         try self.validateEnvelope(envelope);
         try @import("directory_name.zig").validate(name);
         const side = envelope.side;
@@ -403,6 +404,7 @@ pub const Controller = struct {
     }
 
     pub fn handle(self: *Controller, envelope: View.Envelope) !void {
+        try @import("../update/admission.zig").require();
         try self.validateEnvelope(envelope);
         const pane = &self.panes[index(envelope.side)];
         const directory = &pane.directory.?;

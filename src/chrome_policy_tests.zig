@@ -25,7 +25,7 @@ test "chromeless controls keep keyboard focus visible with fill and restore on b
             _ = cx.render();
         }
         try std.testing.expect(button.style.outline() == null);
-        try std.testing.expectEqual(cx.tokens.tokens.color.bg_active, button.getBackground());
+        try std.testing.expectEqual(cx.tokens.tokens.color.bg_focus, button.getBackground());
         try std.testing.expect(cx.isFocused(button));
         cx.clearFocus();
         for (0..20) |_| {
@@ -78,7 +78,8 @@ test "chromeless primary and danger focus preserve a readable solid action backg
             }
             const active = button.getBackground();
             try std.testing.expectEqual(@as(u8, 255), active.a);
-            try std.testing.expectEqual(ui.Color.lerp(resting, ui.Color.BLACK, 0.12), active);
+            try std.testing.expectEqual(if (variant == .primary) cx.tokens.tokens.color.button_primary_hover else cx.tokens.tokens.color.button_danger_hover, active);
+            try std.testing.expect(!ui.Color.eql(resting, active));
             try std.testing.expect(button.style.outline() == null);
             cx.clearFocus();
             for (0..20) |_| {
@@ -113,7 +114,7 @@ test "chromeless input never restores a frame on hover focus typing or invalid s
         const container = state.input_container_node.?;
         try std.testing.expectEqual(@as(u8, 0), container.style.border.color.a);
         try std.testing.expect(state.focused);
-        try std.testing.expectEqual(cx.tokens.tokens.color.bg_active, container.getBackground());
+        try std.testing.expectEqual(cx.tokens.tokens.color.bg_focus, container.getBackground());
         if (state.focus_ring_host) |host| try std.testing.expect(host.style.outline() == null);
         cx.clearFocus();
         _ = cx.render();
@@ -141,7 +142,7 @@ test "chromeless grouped input keeps the actual field filled without creating an
     try std.testing.expect(result.state.grouped_attached);
     try std.testing.expect(result.state.focus_ring_host.?.style.outline() == null);
     try std.testing.expect(result.input_container.style.outline() == null);
-    try std.testing.expectEqual(cx.tokens.tokens.color.bg_active, result.input_container.getBackground());
+    try std.testing.expectEqual(cx.tokens.tokens.color.bg_focus, result.input_container.getBackground());
     cx.clearFocus();
 }
 
@@ -199,7 +200,7 @@ test "chromeless textarea uses its visible field for focus and keeps errors disa
         try std.testing.expect(result.input.behavior.interaction.a11y.?.invalid);
         cx.setFocus(result.input);
         _ = cx.render();
-        try std.testing.expectEqual(cx.tokens.tokens.color.bg_active, result.input.getBackground());
+        try std.testing.expectEqual(cx.tokens.tokens.color.bg_focus, result.input.getBackground());
         try std.testing.expect(result.input.style.outline() == null);
         try std.testing.expect(result.state.focus_ring_host.?.style.outline() == null);
         cx.clearFocus();

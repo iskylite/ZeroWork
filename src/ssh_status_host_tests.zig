@@ -440,3 +440,26 @@ test "SSH status theme name follows committed display name and fits long names" 
     f.settle();
     try std.testing.expectApproxEqAbs(short_width, controls.theme_button.globalRect().w, 0.1);
 }
+
+test "SSH status host reuses original graphical bar and trims terminal and transfer entries" {
+    var fixture: Fixture = undefined;
+    try fixture.init();
+    defer fixture.deinit();
+    const source = try snapshot(key, "db");
+    try fixture.update(source, false);
+    const controls = fixture.bar.controls;
+    const count = controls.bar.children.items.len;
+    try fixture.host.updateGraphical(.{ .state = .online, .label = "视频在线" });
+    fixture.settle();
+    try std.testing.expectEqual(count, controls.bar.children.items.len);
+    try std.testing.expectEqualStrings("已连接", controls.identity_label.getText().?.content);
+    try std.testing.expectEqualStrings("—", controls.rtt_label.getText().?.content);
+    for ([_]*ui.Node{ controls.rtt_label, controls.chain_button, controls.theme_button }) |node| try std.testing.expectEqual(.flex, node.style.display);
+    for ([_]*ui.Node{ controls.encoding_button, controls.grid_button, controls.socks_button, controls.progress_slot }) |node| try std.testing.expectEqual(.none, node.style.display);
+    try fixture.host.updateGraphical(.{ .state = .ended, .label = "已断开" });
+    try std.testing.expectEqualStrings("已断开", controls.identity_label.getText().?.content);
+    try fixture.update(source, false);
+    try std.testing.expectEqual(.flex, controls.chain_button.style.display);
+    try std.testing.expectEqual(.flex, controls.progress_slot.style.display);
+    try std.testing.expectEqualStrings("已连接", controls.identity_label.getText().?.content);
+}

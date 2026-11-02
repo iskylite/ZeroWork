@@ -108,6 +108,54 @@ test "AI conversation renders Markdown tables and live thought disclosure at nat
     _ = cx.render();
     try std.testing.expect(card.globalRect().h < 70);
 }
+test "AI conversation table rows contain wrapped inline code at narrow widths" {
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    const scope = try ui.Scope.init(a, null, cx.owner);
+    defer scope.dispose();
+    cx.setViewport(600, 1200);
+    const root = try ui.box(cx, .{ .width = .{ .px = 572 }, .height = .fill(), .direction = .column }, .{});
+    cx.root = root;
+    const message = try @import("ui/ai_message_view.zig").mountWithWidth(cx, scope,
+        "| 文件 | 看起来是什么 |\n| --- | --- |\n" ++
+        "| `clusconf-4.5.2-11.20260915+git9751ee03.x86_64.rpm`、`clusconf.yaml` | 集群配置工具及其配置 |\n" ++
+        "| `clusbench-4.5.1-1120.x86_64.rpm`、`clusbench.yaml` | 集群基准测试包及其配置 |\n" ++
+        "| `cluskit-0.6.2-1...run`、`cluskit-0.6.2-3...run` | 两个版本的 cluskit 安装脚本 |\n\n后续正文", 572);
+    try root.appendChild(a, message);
+    for ([_]f32{ 572, 400, 240, 572 }) |width| {
+        root.setStyleInline(a, .{ .width = .{ .px = width } });
+        for (0..3) |_| {
+            cx.advanceFrameClock();
+            cx.layout();
+            _ = cx.render();
+        }
+        const table = find(root, "ai.message.table").?;
+        const content = table.children.items[0];
+        for (content.children.items) |row| {
+            for (row.children.items) |cell| {
+                const bounds = cell.globalRect();
+                const markdown = cell.children.items[0];
+                for (markdown.children.items) |paragraph| {
+                    const rect = paragraph.globalRect();
+                    const layout = paragraph.getLayoutOutput().artifacts.text_layout.?;
+                    try std.testing.expect(rect.y + layout.total_height <= bounds.y + bounds.h - 6 + 0.1);
+                }
+            }
+        }
+        try std.testing.expectApproxEqAbs(content.globalRect().h, table.globalRect().h, 0.1);
+        const following = message.children.items[message.children.items.len - 1];
+        try std.testing.expect(following.globalRect().y >= table.globalRect().y + table.globalRect().h);
+        if (width == 240) {
+            const bounds = table.globalRect();
+            const before = content.globalRect().x;
+            cx.handleScroll(.{ .x = bounds.x + 20, .y = bounds.y + 20, .dx = -80, .dy = 0 });
+            cx.layout();
+            _ = cx.render();
+            try std.testing.expect(content.globalRect().x < before);
+        }
+    }
+}
+
 const ThinkingFixture = struct {
     cx: *ui.Cx,
     scope: *ui.Scope,
@@ -304,7 +352,7 @@ test "AI conversation lifecycle row formats elapsed time and actual token usage 
     turn.input_tokens = 2400;
     turn.output_tokens = 160;
     try std.testing.expectEqual(@as(u64, 1820000), Status.elapsedMs(&turn, 9999999, 9999999));
-    try std.testing.expectEqualStrings("Token 2560", try Status.usageLabel(&buffer, &turn));
+    try std.testing.expectEqualStrings("Token 2.6K", try Status.usageLabel(&buffer, &turn));
     const cx = try ui.Cx.init(a, std.testing.io);
     defer cx.deinit();
     const scope = try ui.Scope.init(a, null, cx.owner);

@@ -114,6 +114,8 @@ pub const Snapshot = struct {
     stage: Stage = .idle,
     elapsed_ms: u64 = 0,
     stage_elapsed_ms: u64 = 0,
+    /// Accumulated completed visits per stage, independent of the event ring.
+    completed_stage_ms: [@typeInfo(Stage).@"enum".field_names.len]?u64 = @splat(null),
     started_unix_ms: ?i64 = null,
     waiting_for_user: bool = false,
     route_hops: u8 = 0,
@@ -233,6 +235,8 @@ pub const Tracker = struct {
     }
     fn transition(self: *Tracker, stage: Stage, current: u64) void {
         if (self.value.stage == stage) return;
+        const index: usize = @intCast(@backingInt(self.value.stage));
+        self.value.completed_stage_ms[index] = (self.value.completed_stage_ms[index] orelse 0) +| (current -| self.stage_started_ms);
         self.value.stage = stage;
         self.stage_started_ms = current;
         self.append(.{ .at_ms = current -| self.started_ms, .stage = stage });

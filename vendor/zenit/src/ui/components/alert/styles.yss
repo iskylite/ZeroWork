@@ -3,8 +3,8 @@
 //! View in alert.yix; AlertVariant is public API defined in mod.zig.
 const ui = @import("../../ui.zig");
 
-mixin tone(c) {
-  root { background: mix(c, bg-primary, 0.78); border-color: mix(c, bg-primary, 0.35); }
+mixin tone(c, bg) {
+  root { background: bg; border-color: mix(c, bg-primary, 0.35); }
   accent { background: c; }
 }
 
@@ -15,10 +15,10 @@ recipe Alert slots(root, accent) {
     accent { width: 3; height: 24; corner-radius: 2; align-self: stretch; }
   }
   variant kind = info {
-    info    { tone(info); }
-    success { tone(success); }
-    warning { tone(warning); }
-    error   { tone(danger); }
+    info    { tone(info, info-subtle); }
+    success { tone(success, success-subtle); }
+    warning { tone(warning, warning-subtle); }
+    error   { tone(danger, danger-subtle); }
   }
   flag titled { root { align-items: start; } } else { root { align-items: center; } }
 }

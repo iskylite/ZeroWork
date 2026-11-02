@@ -375,9 +375,14 @@ pub const Options = struct {
     }
 
     pub fn report(self: Options, phase: ConnectionProgress.Phase, status: ConnectionProgress.Status, failure: ?anyerror) void {
+        self.reportDiagnostic(phase, status, failure, "");
+    }
+
+    fn reportDiagnostic(self: Options, phase: ConnectionProgress.Phase, status: ConnectionProgress.Status, failure: ?anyerror, diagnostic: []const u8) void {
         if (self.progress_observer) |observer| observer.callback(observer.context, .{
             .attempt = self.attempt_id,
             .timestamp_ns = @import("../../platform/realtime.zig").monotonicNs(),
+            .timestamp_ms = @import("../../platform/realtime.zig").milliseconds(undefined),
             .hop = self.hop_index,
             .hop_count = self.hop_count,
             .host = self.host,
@@ -385,6 +390,7 @@ pub const Options = struct {
             .phase = phase,
             .status = status,
             .failure = failure,
+            .diagnostic = diagnostic,
         });
     }
 };
@@ -677,6 +683,10 @@ pub const SftpReadonlyHandle = struct {
         const rc = c.zw_libssh2_sftp_read(self.file.handle, bytes.ptr, bytes.len);
         if (rc < 0) return self.session.sftpReadonlyError(rc);
         return @intCast(rc);
+    }
+    pub fn seek(self: *SftpReadonlyHandle, offset: u64) !void {
+        if (self.file.consumed != null) return error.SftpHandleClosed;
+        c.zw_libssh2_sftp_seek(self.file.handle, offset);
     }
     /// Bootstrap uploads use this same IO-owner handle and exact EAGAIN retry.
     pub fn writePrivate(self: *SftpReadonlyHandle, bytes: []const u8) !usize {
@@ -1011,13 +1021,14 @@ pub const Session = struct {
         options.network_deadline_ms = supplied.network_deadline_ms orelse &deadline;
         var phase: ConnectionProgress.Phase = .handshake;
         options.report(phase, .started, null);
-        return connectOverFdWithPhase(library, options, fd, &phase) catch |err| {
-            options.report(phase, if (err == error.Cancelled) .cancelled else .failed, err);
+        var diagnostic: ConnectionProgress.Diagnostic = .{};
+        return connectOverFdWithPhase(library, options, fd, &phase, &diagnostic) catch |err| {
+            options.reportDiagnostic(phase, if (err == error.Cancelled) .cancelled else .failed, err, diagnostic.slice());
             return err;
         };
     }
 
-    fn connectOverFdWithPhase(library: *const Library, options: Options, fd: c_int, phase: *ConnectionProgress.Phase) !Session {
+    fn connectOverFdWithPhase(library: *const Library, options: Options, fd: c_int, phase: *ConnectionProgress.Phase, raw_diagnostic: *ConnectionProgress.Diagnostic) !Session {
         if (fd < 0) return error.InvalidTransport;
         var self: Session = .{ .state = .connecting, .resource_ledger = options.resource_ledger, .resource_key = options.operation_key, .resource_hop = options.hop_index, .source_owner = options.source_owner, .connection_details = options.connection_details };
         self.socket_fd = fd;
@@ -1062,6 +1073,11 @@ pub const Session = struct {
                 options.host,                                                                                    options.port,                    options.hop_index,                   handshake_rc,                   native_code,                     self.socket_fd,
                 transport_diagnostic.recv_code,                                                                  transport_diagnostic.recv_errno, transport_diagnostic.received_bytes, transport_diagnostic.send_code, transport_diagnostic.send_errno, transport_diagnostic.sent_bytes,
                 diagnostic.logMessage(&message_buffer, if (message.len > 0) message else "(no libssh2 detail)"),
+            });
+            raw_diagnostic.format("handshake transport host={s}:{d} hop={d} rc={d} peer={s}:{d} local_port={d} flags={d} identification_bytes={d} identification_hash={x} identification_complete={d}\nhandshake failed host={s}:{d} hop={d} rc={d} libssh2_code={d} fd={d} recv_code={d} recv_errno={d} received_bytes={d} send_code={d} send_errno={d} sent_bytes={d} message={s}", .{
+                options.host,                    options.port,                                                                                    options.hop_index, handshake_rc, std.mem.sliceTo(&transport_diagnostic.peer_address, 0), transport_diagnostic.peer_port, transport_diagnostic.local_port, transport_diagnostic.socket_flags, transport_diagnostic.identification_bytes, transport_diagnostic.identification_hash, transport_diagnostic.identification_complete,
+                options.host,                    options.port,                                                                                    options.hop_index, handshake_rc, native_code,                                            self.socket_fd,                 transport_diagnostic.recv_code,  transport_diagnostic.recv_errno,   transport_diagnostic.received_bytes,       transport_diagnostic.send_code,           transport_diagnostic.send_errno,
+                transport_diagnostic.sent_bytes, diagnostic.logMessage(&message_buffer, if (message.len > 0) message else "(no libssh2 detail)"),
             });
             try checkDriveResult(handshake_rc);
             return diagnostic.fromCode(handshake_rc);
