@@ -48,7 +48,7 @@ if match is None or (match[2] is not None and int(match[2])>255):
     raise SystemExit('Unsupported package version; expected X.Y.Z or X.Y.Z-rc1..rc255')
 short_version=match[1]
 build_version=short_version+('fc'+match[2] if match[2] is not None else '')
-info={'CFBundleExecutable':'ZeroWork','CFBundleIdentifier':'com.zerowork.app','CFBundleName':'ZeroWork','CFBundleIconFile':'AppIcon','CFBundlePackageType':'APPL','CFBundleShortVersionString':short_version,'CFBundleVersion':build_version,'ZeroWorkReleaseVersion':version,'LSMinimumSystemVersion':'14.0','LSArchitecturePriority':['arm64']}
+info={'CFBundleExecutable':'ZeroWork','CFBundleIdentifier':'com.zerowork.app','CFBundleName':'ZeroWork','CFBundleIconFile':'AppIcon','CFBundlePackageType':'APPL','CFBundleShortVersionString':short_version,'CFBundleVersion':build_version,'ZeroWorkReleaseVersion':version,'LSMinimumSystemVersion':'13.0','LSArchitecturePriority':['arm64']}
 with (app/'Contents/Info.plist').open('wb') as f: plistlib.dump(info,f)
 binary=(app/'Contents/MacOS/ZeroWork').read_bytes()
 for marker in [b'fixture_probe',b'fixture_uprobe',b'/zerowork/windows']:
@@ -66,7 +66,7 @@ python3 scripts/build_ssh_bootstrap.py --output "$APP/Contents/Resources/ssh-boo
 SIGNING_NOTICE="应用已使用固定代码签名证书签名；本打包流程未执行 Apple 公证。"
 ln -s /Applications "$STAGING/image/Applications"
 cat > "$STAGING/image/安装说明.txt" <<TXT
-ZeroWork $VERSION · Apple Silicon · macOS 14 或更新版本
+ZeroWork $VERSION · Apple Silicon · macOS 13 或更新版本
 
 将 ZeroWork.app 拖入 Applications，即可安装。
 

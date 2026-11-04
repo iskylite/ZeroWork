@@ -40,7 +40,7 @@ def manifest(args):
         if any(not x.filename.startswith('ZeroWork.app/') or '..' in pathlib.PurePosixPath(x.filename).parts for x in z.infolist()): raise SystemExit('ZIP must contain only ZeroWork.app')
     notes = pathlib.Path(args.notes).read_text() if args.notes else 'ZeroWork ' + args.version
     if len(notes.encode()) > 16384: raise SystemExit('Release notes exceed 16 KiB')
-    payload = encode({'schema':1, 'version':args.version, 'minimum_os':'14.0', 'arch':'arm64', 'url':f'https://github.com/iskylite/ZeroWork/releases/download/v{args.version}/{archive.name}', 'bytes':archive.stat().st_size, 'expanded_bytes':expanded, 'sha256':hashlib.file_digest(archive.open('rb'), 'sha256').hexdigest(), 'notes':notes, 'release_url':f'https://github.com/iskylite/ZeroWork/releases/tag/v{args.version}'})
+    payload = encode({'schema':1, 'version':args.version, 'minimum_os':'13.0', 'arch':'arm64', 'url':f'https://github.com/iskylite/ZeroWork/releases/download/v{args.version}/{archive.name}', 'bytes':archive.stat().st_size, 'expanded_bytes':expanded, 'sha256':hashlib.file_digest(archive.open('rb'), 'sha256').hexdigest(), 'notes':notes, 'release_url':f'https://github.com/iskylite/ZeroWork/releases/tag/v{args.version}'})
     envelope = {'key_id':trust['key_id'], 'payload_base64':base64.b64encode(payload).decode(), 'signature_base64':base64.b64encode(key.sign(payload)).decode()}
     out = pathlib.Path(args.output or archive.parent/'update.json')
     if out.exists(): raise SystemExit('Refusing to overwrite '+str(out))

@@ -49,7 +49,7 @@ plist = {
     'CFBundleName': name,
     'CFBundleIconFile': 'AppIcon',
     'CFBundlePackageType': 'APPL',
-    'LSMinimumSystemVersion': '14.0',
+    'LSMinimumSystemVersion': '13.0',
     'NSLocalNetworkUsageDescription': 'ZeroWork 需要连接局域网中的 SSH 主机以建立终端和文件传输会话。',
 }
 if data_dir:

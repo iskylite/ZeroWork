@@ -16,7 +16,7 @@ AI approval, execution-mode and scope decisions wait until the user decides or c
 
 Dynamic plugin tool history currently retains at most 128 records per application process, counted per target session. At capacity, new operations are rejected before approval or dispatch; quit normally and restart the app to continue. Records are not evicted automatically, preserving unknown outcomes and operations whose resources have not been released.
 
-- Zig 0.17.0 project baseline (managed with local zvm), locked to arm64 macOS 14+
+- Zig 0.17.0 project baseline (managed with local zvm), locked to arm64 macOS 13+
 - P0 configuration model and strict subset TOML loader
 - Atomic configuration replacement with owner-only (0600) permissions
 - Sauber renderer tokens, including overlay/AI state colors
@@ -33,7 +33,9 @@ Before committing, run `./scripts/verify_source_gate.sh`. It verifies the tracke
 
 ## Build
 
-The target platform is **Apple Silicon running macOS 14 or later**, using **Zig 0.17.0**. Install Xcode Command Line Tools and confirm that `xcrun --find clang` and `zig version` work. Run all commands below from the repository root.
+The target platform is **Apple Silicon running macOS 13 or later**, using **Zig 0.17.0**. Install Xcode Command Line Tools and confirm that `xcrun --find clang` and `zig version` work. Run all commands below from the repository root.
+
+This branch lowers the deployment target to macOS 13 for compatibility testing; runtime compatibility still needs verification on macOS 13.
 
 ### Local build and direct execution
 

@@ -48,7 +48,7 @@ def build(output: pathlib.Path, only: str | None = None) -> None:
     if version != "0.17.0":
         raise SystemExit(f"BootstrapV1 requires repository Zig 0.17.0, got {version}")
     targets = {
-        "darwin-aarch64": ("arm64-apple-macos14.0", None),
+        "darwin-aarch64": ("arm64-apple-macos13.0", None),
         "linux-x86_64": ("x86_64-linux-musl", "x86_64-linux-gnu.2.28"),
         "linux-aarch64": ("aarch64-linux-musl", "aarch64-linux-gnu.2.28"),
     }

@@ -1,6 +1,6 @@
 # 开发与验证手册
 
-目标为 Apple Silicon、macOS 14+、Zig 0.17.0。原生界面使用仓库固定的 Zenit 依赖；设计基准位于 `docs/DESIGN`、`docs/SPEC` 和可编辑的 `docs/UI_V3`。
+目标为 Apple Silicon、macOS 13+、Zig 0.17.0。原生界面使用仓库固定的 Zenit 依赖；设计基准位于 `docs/DESIGN`、`docs/SPEC` 和可编辑的 `docs/UI_V3`。
 
 ## 构建与测试
 

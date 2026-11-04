@@ -125,7 +125,7 @@ pub fn mountContent(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
         labels.setStyleInline(cx.allocator, .{ .gap = 4, .flex = 1 });
         try detail.appendChild(cx.allocator, labels);
         live.title = try ink(cx, labels, "检查是否有可用的新版本", 13, 20, 650, "fg_1");
-        _ = try ink(cx, labels, "Apple Silicon · macOS 14 或更新版本", 11, 18, 400, "fg_2");
+        _ = try ink(cx, labels, "Apple Silicon · macOS 13 或更新版本", 11, 18, 400, "fg_2");
         const primary_style = try theme.paintSignal(controls.S.ButtonStyle, cx, bound.scope, S.primaryButton, .{});
         const button = try ui.widgets.Button(.{ .label = live.action_label, .variant = .primary, .disabled = live.disabled, .on_click = cx.on(Click, click, Click.run), .base_style = primary_style }).mount(bound.scope, cx);
         button.meta.ownership.meta.test_id = "settings.updates.open";
