@@ -105,7 +105,7 @@ pub const Prepared = struct {
         return self.context.eql(context) and self.operation.eql(operation) and self.source.eql(source) and self.plan.owner.eql(owner) and self.plan.task_id.eql(context.task_id);
     }
     pub fn subject(self: *const Prepared, a: std.mem.Allocator) !approvals.Subject {
-        return .{ .kind = .lifecycle, .target = "SSH BootstrapV1：本次临时 helper 部署", .detail = try self.detail(a), .impact = "明确允许通过现有 SFTP 仅写入所列任务目录与三个已校验资源，再启动本次新 owned PTY。运行结束删除精确资源；清理无法确认时保留 cleanup_pending 回执。此授权不执行用户命令，不修改用户启动配置。" };
+        return .{ .kind = .lifecycle, .target = "SSH 临时执行组件", .detail = try self.detail(a), .impact = "通过现有 SFTP 将所列的三个已校验文件写入本次任务目录，并在新工作终端中启动。运行结束后删除这些文件；无法确认删除时会标记为待清理。本次授权不执行用户命令，不修改用户启动配置。" };
     }
     /// The grant is derived from the broker's exact live approved subject, never
     /// from a caller-supplied bool or a prior creation/route approval.
@@ -119,7 +119,7 @@ pub const Prepared = struct {
         try self.plan.validate(self.plan.owner, now_ms);
     }
     pub fn detail(self: *const Prepared, a: std.mem.Allocator) ![]const u8 {
-        return std.fmt.allocPrint(a, "临时部署 BootstrapV1 到本次新工作终端。\n目标={s}\nCID={s}\nTask={s}\nOperation={s}\n来源 SID={d}, generation={d}\n新目标 SID={d}, generation={d}\n平台={s}; shell={s} 5.9\n任务独享目录={s} (0700)\nmanifest SHA-256={s}\nbootstrap SHA-256={s} (0700)\nzw_execution.so SHA-256={s} (0600)\nexecution.zsh SHA-256={s} (0600)\nPlan SHA-256={s}", .{ self.target[0..self.target_len], std.fmt.bytesToHex(self.context.conversation_id.bytes, .lower), std.fmt.bytesToHex(self.context.task_id.bytes, .lower), std.fmt.bytesToHex(self.operation.bytes, .lower), @backingInt(self.source.session_id), self.source.generation, @backingInt(self.plan.owner.session_id), self.plan.owner.generation, self.package.platform, if (self.plan.shell_path == .bin) "/bin/zsh" else "/usr/bin/zsh", self.plan.directory, std.fmt.bytesToHex(self.package.manifest_hash, .lower), std.fmt.bytesToHex(self.package.hashes[0], .lower), std.fmt.bytesToHex(self.package.hashes[1], .lower), std.fmt.bytesToHex(self.package.hashes[2], .lower), std.fmt.bytesToHex(self.plan.hash(), .lower) });
+        return std.fmt.allocPrint(a, "将 SSH 临时执行组件部署到本次新工作终端。\n目标={s}\nCID={s}\nTask={s}\nOperation={s}\n来源 SID={d}, generation={d}\n新目标 SID={d}, generation={d}\n平台={s}; shell={s} 5.9\n任务独享目录={s} (0700)\nmanifest SHA-256={s}\nbootstrap SHA-256={s} (0700)\nzw_execution.so SHA-256={s} (0600)\nexecution.zsh SHA-256={s} (0600)\nPlan SHA-256={s}", .{ self.target[0..self.target_len], std.fmt.bytesToHex(self.context.conversation_id.bytes, .lower), std.fmt.bytesToHex(self.context.task_id.bytes, .lower), std.fmt.bytesToHex(self.operation.bytes, .lower), @backingInt(self.source.session_id), self.source.generation, @backingInt(self.plan.owner.session_id), self.plan.owner.generation, self.package.platform, if (self.plan.shell_path == .bin) "/bin/zsh" else "/usr/bin/zsh", self.plan.directory, std.fmt.bytesToHex(self.package.manifest_hash, .lower), std.fmt.bytesToHex(self.package.hashes[0], .lower), std.fmt.bytesToHex(self.package.hashes[1], .lower), std.fmt.bytesToHex(self.package.hashes[2], .lower), std.fmt.bytesToHex(self.plan.hash(), .lower) });
     }
 };
 

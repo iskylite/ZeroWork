@@ -152,7 +152,7 @@ pub const Availability = enum {
     available,
     adapter_not_connected,
     pub fn reason(self: Availability) ?[]const u8 {
-        return if (self == .available) null else "运行适配器尚未接入";
+        return if (self == .available) null else "插件运行服务尚未就绪";
     }
 };
 pub const BuiltinSnapshot = struct { descriptor: PluginDescriptor, availability: Availability, ready_services: Services };

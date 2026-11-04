@@ -107,13 +107,15 @@
   function mountCenter(root,{onLocate=()=>{}}={}) {
     let filter='pending',open=false,returnFocus=null;
     root.classList.add('zw-notification-root');
-    root.innerHTML='<section class="zw-notification-center" role="dialog" aria-label="重要提醒" hidden><header><strong>提醒</strong><button type="button" data-center-close aria-label="关闭提醒列表">×</button></header><nav><button type="button" data-center-filter="pending">待处理</button><button type="button" data-center-filter="recent">最近提醒</button></nav><div class="zw-notification-list"></div><footer><span>只保留重要提醒，完整记录在原模块</span><button type="button" data-center-clear>清除已结束</button></footer></section>';
+    root.innerHTML='<section class="zw-notification-center" role="dialog" aria-label="重要提醒" hidden><header><strong>提醒</strong><button type="button" data-center-close aria-label="关闭提醒列表">×</button></header><nav><button type="button" data-center-filter="pending">待处理</button><button type="button" data-center-filter="recent">最近提醒</button></nav><div class="zw-notification-list"></div><footer hidden><button type="button" data-center-clear hidden>清除已结束</button></footer></section>';
     const panel=root.querySelector('section'),list=root.querySelector('.zw-notification-list');
     function render(state=snapshot()) {
       const pending=state.items.filter(r=>r.pending),items=filter==='pending'?pending:state.items;
       root.querySelector('[data-center-filter="pending"]').textContent='待处理'+(pending.length?' '+pending.length:'');
       root.querySelectorAll('[data-center-filter]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.centerFilter===filter)));
-      root.querySelector('[data-center-clear]').disabled=!state.items.some(r=>!r.pending);
+      const canClear=state.items.some(r=>!r.pending);
+      root.querySelector('[data-center-clear]').hidden=!canClear;
+      root.querySelector('footer').hidden=!canClear;
       list.innerHTML=items.length?items.map(item=>`<article class="zw-notification-record" data-notification-id="${escape(item.id)}"><div><span class="zw-notification-state ${item.pending?'pending':''}">${item.pending?'待处理':'已结束'}</span><strong>${escape(item.title)}</strong></div><div class="zw-notification-summary"><p title="${escape(item.sources.join('、'))}">${escape(item.sources.join('、'))}</p><button type="button" data-center-locate="${escape(item.id)}">查看来源</button>${item.detail?'<button type="button" data-center-expand aria-label="展开提醒详情" aria-expanded="false">⌄</button>':''}</div>${item.detail?`<div class="zw-notification-detail" hidden><p>${escape(item.detail)}</p></div>`:''}</article>`).join(''):`<p class="zw-notification-empty">${filter==='pending'?'当前没有待处理提醒':'暂无重要提醒'}</p>`;
     }
     root.addEventListener('click',e=>{

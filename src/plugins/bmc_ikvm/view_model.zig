@@ -155,7 +155,7 @@ pub fn reasonLabel(reason: services.Reason) []const u8 {
         .permission_denied => "当前会话或设备权限不允许此操作。",
         .stale_binding => "会话已变化，请重新打开管理工具。",
         .stale_capability, .stale_baseline, .conflict => "设备状态或能力已变化，请重新审查草稿。",
-        .mapping_unverified => "管理目标或读取证据尚未核实，仅供查看。",
+        .mapping_unverified => "尚未确认管理目标或系统信息的来源，仅供查看。",
         .secondary_auth_unknown => "二次认证要求尚未核实，暂不能执行。",
         .secondary_auth_required => "设备要求二次认证，当前未取得本次操作的验证材料。",
         .unsupported, .invalid_request => "设备不支持当前操作或设置。",

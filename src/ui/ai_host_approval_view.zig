@@ -308,7 +308,7 @@ pub const View = struct {
         };
         self.route_selected = route;
         for (self.route_buttons, 0..) |signal, index| signal.set(R.button(index == @backingInt(route)));
-        self.feedback.setTextContent(self.cx.allocator, if (route == .new_terminal) "以卡片列明的实际会话为来源新建工作终端；创建步骤另行精确确认。只批准这一条命令。" else "只批准上述完整命令、实际目标及所选运行方式；派发前复验权限。") catch {};
+        self.feedback.setTextContent(self.cx.allocator, if (route == .new_terminal) "以卡片所列会话为来源新建工作终端，创建前会单独确认。本次只批准这一条命令。" else "只批准上述完整命令、实际目标及所选运行方式；派发前复验权限。") catch {};
         self.cx.requestRedraw();
     }
     fn chooseBatch(self: *View) void {

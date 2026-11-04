@@ -1106,7 +1106,7 @@ fn aidsSection(cx: *ui.Cx, bound: *binding.Binding) !*ui.Node {
     const section = try card(cx, bound, "终端与工作区", "辅助显示、回滚缓冲与侧栏", ui.icons.terminal, 3, "settings.appearance.aids");
     for ([_]struct { label: []const u8, key: binding.Key, help: ?[]const u8 }{
         .{ .label = "时间戳侧栏", .key = .{ .section = "ui", .key = "timestamp_gutter" }, .help = "显示输出时间，不包含在复制的终端内容中。" },
-        .{ .label = "命令信息", .key = .{ .section = "ui", .key = "command_info" }, .help = "在命令首行右缘显示 AI、返回码和运行时间；hover 命令时隐藏，不进入复制内容。仅本地终端和 SSH，主机高级选项可覆盖。" },
+        .{ .label = "命令信息", .key = .{ .section = "ui", .key = "command_info" }, .help = "在命令首行右缘显示 AI、返回码和运行时间；鼠标悬停在命令上时隐藏，不会包含在复制的内容中。仅本地终端和 SSH，主机高级选项可覆盖。" },
         .{ .label = "应用命令补全", .key = .{ .section = "completion", .key = "enabled" }, .help = null },
         .{ .label = "输入行相对高亮", .key = .{ .section = "ui", .key = "input_line_highlight" }, .help = null },
         .{ .label = "默认隐藏侧栏", .key = .{ .section = "ui", .key = "sidebar_collapsed" }, .help = "保存侧栏显示偏好；⌘B 随时显示或隐藏。" },

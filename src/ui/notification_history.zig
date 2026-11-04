@@ -47,6 +47,7 @@ pub const View = struct {
     scroll: ui.widgets.ScrollAreaResult,
     failure: *ui.Node,
     clear_button: *ui.Node,
+    footer: *ui.Node = undefined,
     close_button: *ui.Node = undefined,
     count: *ui.Node = undefined,
     expanded_fact: ?u64 = null,
@@ -100,6 +101,7 @@ pub const View = struct {
         try heading.appendChild(cx.allocator, try ui.spacer(cx));
         self.clear_button = try ui.widgets.Button(.{ .label = "清除已结束", .variant = .ghost, .size = .xs, .on_click = cx.on(View, self, clear) }).mount(self.scope, cx);
         self.clear_button.meta.ownership.meta.test_id = "notifications.history.clear";
+        self.clear_button.setDisplay(.none);
 
         const close = try ui.widgets.Button(.{ .icon_only = true, .icon_asset = ui.icons.x, .icon_size = @as(f32, 12), .variant = .ghost, .size = .xs, .a11y_label = "关闭通知列表", .on_click = cx.on(View, self, hide) }).mount(self.scope, cx);
         self.close_button = close;
@@ -118,12 +120,11 @@ pub const View = struct {
         self.scroll.container.setStyleInline(cx.allocator, .{ .width = .fill(), .height = .{ .px = 320 }, .flex_shrink = 0 });
         self.scroll.content.setStyleInline(cx.allocator, S.column());
         try self.root.appendChild(cx.allocator, self.scroll.container);
-        const policy = try ui.text(cx, "只保留重要提醒，完整记录在原模块", .{ .font_size = 10.5, .line_height = 16.0 / 10.5, .color = theme.current().fg_2, .selectable = false });
-        policy.setStyleInline(cx.allocator, .{ .flex = 1, .min_width = 0 });
-        const policy_row = try ui.box(cx, S.policy(), .{});
-        try policy_row.appendChild(cx.allocator, policy);
-        try policy_row.appendChild(cx.allocator, self.clear_button);
-        try self.root.appendChild(cx.allocator, policy_row);
+        self.footer = try ui.box(cx, S.footer(), .{});
+        self.footer.meta.ownership.meta.test_id = "notifications.history.footer";
+        self.footer.setDisplay(.none);
+        try self.footer.appendChild(cx.allocator, self.clear_button);
+        try self.root.appendChild(cx.allocator, self.footer);
         self.failure = try ui.text(cx, "该操作已不可用，请回到会话查看。", S.text(true));
         self.failure.setTextColor(theme.current().warn_ink);
         self.failure.setDisplay(.none);
@@ -181,6 +182,7 @@ pub const View = struct {
         const total = self.host.coordinator.historyCount(false);
         const pending = self.host.coordinator.historyCount(true);
         self.clear_button.setDisplay(if (total > pending) .flex else .none);
+        self.footer.setDisplay(if (total > pending) .flex else .none);
         self.pending_button.setBackground(if (self.pending_only) theme.popupSelection() else ui.Color.TRANSPARENT);
         self.recent_button.setBackground(if (!self.pending_only) theme.popupSelection() else ui.Color.TRANSPARENT);
         var count_buffer: [16]u8 = undefined;

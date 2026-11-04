@@ -488,7 +488,7 @@ test "BMC view management target and response diagnostics keep distinct mounted 
     const renderer = try views.mount(null, .{ .cx = cx, .scope = scope, .slot = cx.root.?, .owner = owner, .connection = .{ .protocol_id = "bmc_ikvm", .name = "Synthetic", .payload = "{}" }, .frame_sink = &sink, .service_access = access.SessionServiceAccess{ .context = &fixture, .owner = owner, .lookup_fn = Fixture.lookup } });
     defer renderer.vtable.unmount(renderer.context);
     const view: *views.View = @ptrCast(@alignCast(renderer.context));
-    const warning = "管理目标或读取证据尚未核实，仅供查看";
+    const warning = "尚未确认管理目标或系统信息的来源，仅供查看";
     view.tool_nodes[3].?.behavior.events.on_click.?.invoke();
     for (0..8) |_| {
         cx.frame_count += 1;

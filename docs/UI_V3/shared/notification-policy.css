@@ -17,8 +17,8 @@
 .zw-notification-record p{margin:0;color:var(--muted);font-size:11px;line-height:18px;overflow-wrap:anywhere}
 .zw-notification-record summary{cursor:pointer;color:var(--muted);font-size:11px}
 .zw-notification-record>button{align-self:flex-end;color:var(--accent-ink,var(--accent));font-size:11px}
-.zw-notification-center>footer{display:flex;align-items:center;gap:8px;justify-content:space-between;padding:8px 12px;color:var(--muted);font-size:10px;flex:none;background:var(--well)}
-.zw-notification-center>footer span{flex:1;min-width:0}
+.zw-notification-center>footer{display:flex;align-items:center;gap:8px;justify-content:flex-end;padding:8px 12px;color:var(--muted);font-size:10px;flex:none;background:var(--well)}
+.zw-notification-center>footer[hidden]{display:none}
 .zw-notification-empty{padding:28px 12px;text-align:center;color:var(--muted);font-size:11px}
 .zw-global-notifications{position:relative;display:inline-flex!important;align-items:center;justify-content:center;width:28px!important;min-width:28px!important;height:28px!important;padding:0!important;border:0!important;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer}
 .zw-global-notifications svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.7}

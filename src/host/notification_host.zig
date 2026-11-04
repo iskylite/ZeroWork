@@ -698,7 +698,7 @@ pub const Host = struct {
                     }
                     if (!activated) self.feedbackFor(null, "该通知所属内容已不可用");
                 },
-                .queue_failure => self.feedbackFor(null, "部分系统通知回执读取失败"),
+                .queue_failure => self.feedbackFor(null, "部分系统通知的处理结果读取失败"),
             }
             if (self.driver.settings) |value| self.coordinator.reportAuthorization(value.authorization);
         }

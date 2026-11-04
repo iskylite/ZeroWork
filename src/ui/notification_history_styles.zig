@@ -26,8 +26,8 @@ pub fn expand() ui.BoxStyle {
 pub fn column() ui.BoxStyle {
     return .{ .width = .fill(), .height = .{ .fit = .{} }, .direction = .column, .padding = .{ .left = 8, .right = 8, .bottom = 8 }, .gap = 6, .flex_shrink = 0 };
 }
-pub fn policy() ui.BoxStyle {
-    return .{ .width = .fill(), .height = .{ .px = 40 }, .direction = .row, .align_items = .center, .gap = 8, .background = theme.popupAction(), .corner_radii = .{ .each = .{ 0, 0, 10, 10 } }, .padding = .{ .top = 8, .bottom = 8, .left = 16, .right = 16 }, .flex_shrink = 0 };
+pub fn footer() ui.BoxStyle {
+    return .{ .width = .fill(), .height = .{ .px = 40 }, .direction = .row, .align_items = .center, .justify = .end, .gap = 8, .background = theme.popupAction(), .corner_radii = .{ .each = .{ 0, 0, 10, 10 } }, .padding = .{ .top = 8, .bottom = 8, .left = 16, .right = 16 }, .flex_shrink = 0 };
 }
 
 pub fn empty() ui.BoxStyle {

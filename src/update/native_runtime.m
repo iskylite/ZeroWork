@@ -116,7 +116,7 @@ static ZWUpdateFetch *fetch;
     pthread_mutex_lock(&statusLock);if(status.generation==self.generation){status.received=self.received;status.expected=cap;}pthread_mutex_unlock(&statusLock);
 }
 - (void)URLSession:(NSURLSession *)session task:(NSURLSessionTask *)task didCompleteWithError:(NSError *)error {
-    if(self.fd>=0){if(fsync(self.fd))self.failure=@"下载持久化失败";close(self.fd);self.fd=-1;}
+    if(self.fd>=0){if(fsync(self.fd))self.failure=@"下载文件保存失败";close(self.fd);self.fd=-1;}
     @try{
         if(!Current(self.generation))return;
         if(error || self.failure)ZWFail(self.failure?:@"无法连接 GitHub，请稍后重试");
@@ -184,7 +184,7 @@ void zw_update_tick(void){
         NSDictionary *r=ZWRead([Transaction() stringByAppendingPathComponent:@"record.json"]);NSString *stage=r[@"stage"],*decision=r[@"decision"];
         if([stage isEqual:@"aborted_before_replace"])Publish(11,@"应用退出超时，尚未替换应用；旧的退出授权已撤销");
         else if([decision isEqual:@"cancelled"])Publish(9,@"安装程序已确认取消；不会在应用退出后安装");
-        else if([decision isEqual:@"committed"])Publish(8,@"安装提交已持久化，正在退出应用…");
+        else if([decision isEqual:@"committed"])Publish(8,@"已确认开始安装，正在退出应用…");
         else if([stage isEqual:@"prepared"])Publish(7,@"安装程序已准备完成，等待提交");
         else if([stage isEqual:@"prepare_failed"])Publish(10,r[@"error"]?:@"安装准备失败");
         else if(!ZWAlive([r[@"helper_pid"] intValue],[r[@"helper_birth"] unsignedLongLongValue]) && !decisionSent && NSDate.date.timeIntervalSince1970-prepareStarted>15)Publish(10,@"安装辅助程序已退出，尚未提交安装");

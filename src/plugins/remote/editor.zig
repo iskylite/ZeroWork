@@ -3083,7 +3083,7 @@ fn mountIdentity(w: *RemoteEditor) !*ui.Node {
     w.command_info_row = info_row;
     const info_field = try ui.box(cx, S.field(null), .{});
     info_field.meta.ownership.meta.test_id = "wizard.command_info.field";
-    try info_field.appendChild(w.alloc, try helpLabel(w, "命令信息", "在命令首行右缘显示 AI、返回码与运行时间；hover 命令时隐藏，不影响复制。保存后立即更新已打开的此主机终端。", "wizard.command_info.help"));
+    try info_field.appendChild(w.alloc, try helpLabel(w, "命令信息", "在命令首行右缘显示 AI、返回码与运行时间；鼠标悬停在命令上时隐藏，不影响复制。保存后立即更新已打开的此主机终端。", "wizard.command_info.help"));
     const info_options = [_]ui.widgets.SelectOption{
         .{ .value = "inherit", .label = "继承全局设置", .test_id = "wizard.command_info.inherit" },
         .{ .value = "on", .label = "显示", .test_id = "wizard.command_info.on" },

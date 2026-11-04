@@ -162,7 +162,7 @@ pub const descriptors = [_]Descriptor{
     .{ .id = .open_command_help, .action_id = "command.help", .label = "应用指令帮助" },
     .{ .id = .open_saved_connection, .action_id = "connection.open_saved", .label = "连接已保存主机", .rule = .{ .capabilities = &.{.session_factory} } },
     .{ .id = .create_temporary_ssh_session, .action_id = "session.create_temporary_ssh", .label = "创建临时 SSH 会话", .rule = .{ .capabilities = &.{.session_factory} } },
-    .{ .id = .create_local_session, .action_id = "session.create_local", .label = "创建本地会话", .rule = .{ .capabilities = &.{.session_factory} }, .unsupported_reason = "本地会话适配器尚未接入" },
+    .{ .id = .create_local_session, .action_id = "session.create_local", .label = "创建本地会话", .rule = .{ .capabilities = &.{.session_factory} }, .unsupported_reason = "当前无法创建本地会话" },
     .{ .id = .request_close_window, .action_id = "window.request_close", .label = "关闭工作区窗口" },
 };
 
@@ -279,7 +279,7 @@ pub fn evaluate(id: ActionId, context: Context) ?Unavailable {
     const item = descriptor(id);
     const rule = item.rule;
     if (context.capability_snapshot) |snapshot| {
-        if (context.capability_owner) |owner| if (!owner.eql(snapshot.owner)) return .{ .cause = .lifecycle_blocked, .reason = "会话能力所属对象已变化" };
+        if (context.capability_owner) |owner| if (!owner.eql(snapshot.owner)) return .{ .cause = .lifecycle_blocked, .reason = "目标会话已变化，请重新选择" };
         if (context.observed_capability_revision) |revision| if (revision != snapshot.revision) return .{ .cause = .lifecycle_blocked, .reason = "会话能力已变化，请重新执行" };
         const projected = project(id, snapshot);
         if (!projected.visible) return .{ .cause = .unsupported, .reason = projected.reason };
@@ -290,7 +290,7 @@ pub fn evaluate(id: ActionId, context: Context) ?Unavailable {
         .app, .tab => {},
         .terminal => if (!context.terminal_owner) return .{ .cause = .context_unavailable, .reason = "此动作需要终端会话" },
         .text_input => if (context.input == .none) return .{ .cause = .context_unavailable, .reason = "当前没有可处理文本的编辑器或终端" },
-        .trusted_prompt => if (!context.terminal_owner or context.input != .trusted_prompt) return .{ .cause = .context_unavailable, .reason = "候选仅在可信提示符编辑状态可用" },
+        .trusted_prompt => if (!context.terminal_owner or context.input != .trusted_prompt) return .{ .cause = .context_unavailable, .reason = "请在 Shell 提示符下使用命令补全" },
     }
     for (rule.capabilities) |capability| {
         if (context.capability_snapshot != null and serviceCapability(capability)) continue;
@@ -304,9 +304,9 @@ pub fn evaluate(id: ActionId, context: Context) ?Unavailable {
     if (rule.needs_group and !context.in_group) return .{ .cause = .group_required, .reason = "当前终端尚未加入组" };
     if (rule.needs_other_tabs and !context.has_other_tabs) return .{ .cause = .no_other_tabs, .reason = "没有其他可关闭的页签" };
     if (rule.needs_writable and !context.writable) return .{ .cause = .read_only, .reason = "当前输入目标不可写" };
-    if (!context.lifecycle_allows) return .{ .cause = .lifecycle_blocked, .reason = "当前生命周期暂不允许此动作" };
+    if (!context.lifecycle_allows) return .{ .cause = .lifecycle_blocked, .reason = "当前会话状态不允许此操作" };
     if (!context.permission_granted) return .{ .cause = .permission_denied, .reason = "当前权限不允许此动作" };
-    if (!context.handler_ready) return .{ .cause = .handler_not_ready, .reason = "此动作的处理器尚未接入" };
+    if (!context.handler_ready) return .{ .cause = .handler_not_ready, .reason = "此操作当前不可用" };
     return null;
 }
 

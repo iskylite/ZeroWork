@@ -24,7 +24,7 @@ NSDictionary *ZWRead(NSString *path) {
 void ZWSyncDirectory(NSString *path) {
     int fd = open(path.fileSystemRepresentation, O_RDONLY|O_DIRECTORY|O_NOFOLLOW);
     if (fd < 0) ZWFail(@"无法打开更新目录");
-    int result = fsync(fd); close(fd); if (result) ZWFail(@"更新目录持久化失败");
+    int result = fsync(fd); close(fd); if (result) ZWFail(@"更新目录保存失败");
 }
 void ZWWrite(NSString *path, id json) {
     NSData *data = JSON(json);
@@ -34,7 +34,7 @@ void ZWWrite(NSString *path, id json) {
     const uint8_t *bytes = data.bytes; size_t left = data.length;
     while (left) { ssize_t n = write(fd, bytes, left); if (n <= 0) { close(fd); unlink(temp.fileSystemRepresentation); ZWFail(@"更新记录写入失败"); } bytes += n; left -= n; }
     int result = fsync(fd); close(fd);
-    if (result || rename(temp.fileSystemRepresentation, path.fileSystemRepresentation)) { unlink(temp.fileSystemRepresentation); ZWFail(@"更新记录无法持久化"); }
+    if (result || rename(temp.fileSystemRepresentation, path.fileSystemRepresentation)) { unlink(temp.fileSystemRepresentation); ZWFail(@"更新记录保存失败"); }
     ZWSyncDirectory(path.stringByDeletingLastPathComponent);
 }
 void ZWPrivateDirectory(NSString *path) {

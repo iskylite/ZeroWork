@@ -21,6 +21,10 @@ const report:any={status:'running',binary,sha256:createHash('sha256').update(awa
 async function capture(name:string){await h.waitFor(async()=>{const n=(await h.query('notifications.history')).find(shown);return n&&(n.effective_opacity??1)===1&&(n.scale_x??1)===1&&(n.scale_y??1)===1?n:null},10000);await h.sleep(100);await writeFile(join(out,name+'.json'),JSON.stringify({history:await h.query('notifications.history'),presenter:await h.query('notifications.presenter')},null,2));assert((await h.screenshot(join(out,name+'.png'))).ok);}
 try{
  await h.waitForServerReady();assert.equal(Number(JSON.parse(await readFile(join(rpc,'owner.json'),'utf8')).pid),app.pid);
+ await click('toolbar.notifications');await visible('notifications.history.empty');
+ await absent('notifications.history.clear');await absent('notifications.history.footer');
+ assert(!text(await visible('notifications.history')).includes('只保留重要提醒'));
+ await capture('empty');await click('notifications.history.close');
  for(const theme of ['dark','light','sauber']){
   await click('fixture.theme.'+theme);await h.resizeWindow(1440,900);
   await click('fixture.error');await absent('notifications.toast.0');await absent('notifications.unread');
@@ -31,7 +35,7 @@ try{
   assert.equal((await h.query('notifications.history.record')).filter(shown).length,2);
   assert((await h.query('notifications.history.summary')).filter(shown).some((n:any)=>text(n).includes('3 个来源')));
   for(const row of (await h.query('notifications.history.record')).filter(shown))assert.equal(row.rect.h,68);
-  await absent('notifications.history.clear');await capture(theme+'-standard');
+  await absent('notifications.history.clear');await absent('notifications.history.footer');await capture(theme+'-standard');
   const summary=(await h.query('notifications.history.summary')).filter(shown).find((n:any)=>text(n).includes('3 个来源'));
   const expand=(await h.query('notifications.history.expand')).filter(shown).find((n:any)=>Math.abs(n.rect.y-summary.rect.y)<24);
   assert(expand,'shared incident has an expansion control');await h.clickAt(expand.rect.x+expand.rect.w/2,expand.rect.y+expand.rect.h/2);
@@ -50,9 +54,11 @@ try{
   await click('toolbar.notifications');await visible('notifications.history.empty');assert.equal(text(await visible('notifications.history.count')),'0');
   await click('notifications.history.recent');await visible('notifications.history.record');
   assert.equal((await h.query('notifications.history.record')).filter(shown).length,2);
+  await visible('notifications.history.clear');await visible('notifications.history.footer');
   await capture(theme+'-resolved');await click('notifications.history.clear');await visible('notifications.history.empty');
+  await absent('notifications.history.clear');await absent('notifications.history.footer');
   await click('notifications.history.pending');await click('notifications.history.close');await absent('notifications.unread');
-  report.cases.push({theme,status:'passed',checks:['ordinary errors stay local','one banner','three shared sources form one incident','two pending incidents','dismiss and view preserve pending','clear excludes pending','source recovery updates in place','recent filter and clear resolved','68px rows and bounded minimum window']});
+  report.cases.push({theme,status:'passed',checks:['ordinary errors stay local','one banner','three shared sources form one incident','two pending incidents','dismiss and view preserve pending','empty and pending-only histories hide the clear button and footer','resolved history shows clear; clearing hides the footer again','source recovery updates in place','recent filter and clear resolved','68px rows and bounded minimum window']});
  }
  report.status='passed';
 }catch(e){report.status='failed';report.error=stage+': '+String(e);await h.screenshot(join(out,'failure.png')).catch(()=>{});await writeFile(join(out,'failure-tree.json'),JSON.stringify(await h.tree(),null,2)).catch(()=>{});process.exitCode=1;}

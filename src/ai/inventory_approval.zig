@@ -111,7 +111,7 @@ pub const Broker = struct {
         }
         self.sequence = std.math.add(u64, self.sequence, 1) catch return error.InventorySequenceExhausted;
         const ticket: Ticket = .{ .context = invocation.context, .selection = selection, .sequence = self.sequence, .policy_revision = policy_revision, .operation_id = invocation.operation_id, .turn_id = invocation.turn_id, .canonical_arguments_hash = invocation.canonical_arguments_hash, .tool = try Fixed(provider.max_tool_name_bytes).init(invocation.tool_id), .call = try Fixed(provider.max_tool_call_id_bytes).init(invocation.call_id) };
-        self.entry = .{ .snapshot = .{ .ticket = ticket, .target = try Fixed(512).init("工作区中打开的会话与会话组"), .detail = try Fixed(1024).init("AI需要查看已打开会话和会话组的名称、连接状态与分组。不会读取终端内容或执行命令。") }, .decision = if (continuous) .allow_conversation else null };
+        self.entry = .{ .snapshot = .{ .ticket = ticket, .target = try Fixed(512).init("工作区中打开的会话与会话组"), .detail = try Fixed(1024).init("AI 需要查看已打开会话和会话组的名称、连接状态与分组。不会读取终端内容或执行命令。") }, .decision = if (continuous) .allow_conversation else null };
         if (!continuous) {
             self.seen[self.seen_len] = key;
             self.seen_contexts[self.seen_len] = invocation.context;

@@ -442,16 +442,16 @@ fn lifecycleSubject(invocation: host.Invocation, authorized: Authorized, buffer:
         .open_session => blk: {
             const policy = invocation.arguments.object.get("connection_policy").?.string;
             const connection = if (std.mem.eql(u8, policy, "prefer_reuse")) "先复用来源连接；不可复用时明确允许建立新连接" else if (std.mem.eql(u8, policy, "reuse_only")) "仅复用来源连接并新开 shell；不可复用则停止，不新建连接" else "始终新建独立工作终端，不复用原连接";
-            break :blk std.fmt.bufPrint(buffer, "{s}。不执行用户命令。{s}冻结保留方式：{s}。", .{ connection, if (authorized.bootstrap_required) "将先只读探测平台/zsh，再另行审批本次临时 helper 的精确目录与资源 hash。" else "默认启用终端集成；SSH 如需命令事件，仅在原 shell 内初始化文本钩子，不上传运行文件。", retention }) catch "创建独立工作会话；不执行用户命令。";
+            break :blk std.fmt.bufPrint(buffer, "{s}。不执行用户命令。{s}本次会话的保留方式：{s}。", .{ connection, if (authorized.bootstrap_required) "将先只读检查远端系统和 zsh，再单独确认临时执行组件的目录、文件和校验值。" else "默认启用终端集成；SSH 如需命令事件，仅在原 shell 内初始化文本钩子，不上传运行文件。", retention }) catch "创建独立工作会话；不执行用户命令。";
         },
-        .create_group => "创建真实终端组，原会话加入；同一 AI 对话、历史和草稿迁移到该组。",
-        .close_session => "明确关闭本次精确会话及其进程/连接；真实关闭会在工具结果受理后再次核查影响。",
-        .set_session_retention => std.fmt.bufPrint(buffer, "将本任务创建的精确会话保留方式改为：{s}；旧的自动关闭计划同时撤销。", .{retention}) catch "修改本任务工作会话的保留方式。",
-        .add_group_member => "仅添加本次精确成员关系；不会连接、执行命令或取得其他会话内容权限。",
-        .remove_group_member => "仅移除本次精确成员关系，不关闭该会话；组身份与当前 AI 对话保留。",
+        .create_group => "创建终端组并加入原会话；当前 AI 对话、历史和草稿将移到该组。",
+        .close_session => "关闭所列会话及其进程或连接；实际关闭前会再次核查影响。",
+        .set_session_retention => std.fmt.bufPrint(buffer, "将本任务所列会话的保留方式改为：{s}；旧的自动关闭计划同时撤销。", .{retention}) catch "修改本任务工作会话的保留方式。",
+        .add_group_member => "仅将所列会话加入此组；不会建立连接、执行命令或授权读取其他会话内容。",
+        .remove_group_member => "仅将所列会话移出此组，不关闭会话；会话组与当前 AI 对话保留。",
         .rename_group => "修改当前组的显示名称；组身份、成员及执行授权保持原来的边界。",
-        .reconnect_session => "明确建立新的连接代次；旧会话引用和旧执行不会复活，不重放命令。",
-        .disconnect_session => "断开本次精确会话的连接并保留历史，不自动重连。",
+        .reconnect_session => "重新建立所列会话的连接；先前的执行不会恢复，也不会重新发送命令。",
+        .disconnect_session => "断开所列会话的连接并保留历史，不自动重连。",
         .wait_session_ready => "只读等待本任务已创建会话的状态，不创建或重连。",
     };
     return .{ .kind = .lifecycle, .target = invocation.tool_id, .detail = invocation.arguments_json, .impact = impact };

@@ -971,7 +971,7 @@ pub const SessionHost = struct {
         var includes_reserved = true;
         for (entry.bindings.items) |binding| includes_reserved = includes_reserved and services.has(binding.kind);
         if (!advertised.contains(services) or !services.contains(sourceSpec(entry).requiredServices()) or !includes_reserved or (purpose_kind == .socks_background and !backgroundServices().contains(services))) {
-            _ = try self.failed(handle, key, .{ .domain = .plugin, .code = "invalid_ready_services", .cleanup = .releasing, .safe_message = "适配器返回的服务与注册信息不符" });
+            _ = try self.failed(handle, key, .{ .domain = .plugin, .code = "invalid_ready_services", .cleanup = .releasing, .safe_message = "插件提供的服务与声明不符" });
             const adapter = self.factory(entry);
             try self.applyCreateCleanup(entry, adapter.vtable.cancel(adapter.context, key));
             return error.InvalidReadyServices;
@@ -1168,7 +1168,7 @@ pub const SessionHost = struct {
         if (!(self.manifest(entry).legacy_registration orelse return .unsupported).services.has(kind)) return .unsupported;
         if (entry.state != .ready and entry.state != .attached) return .{ .temporarily_unavailable = "会话尚未就绪或正在关闭" };
         for (entry.bindings.items) |binding| if (binding.kind == kind) return .{ .available = binding };
-        return .{ .temporarily_unavailable = "当前适配器未提供此服务" };
+        return .{ .temporarily_unavailable = "当前插件不支持此功能" };
     }
 
     pub fn bindingIsLive(self: *SessionHost, binding: ServiceHandle) bool {

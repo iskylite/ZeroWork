@@ -7192,7 +7192,7 @@ const SettingsHost = struct {
     /// Rechecked at dispatch across every process-owned window and resource domain.
     fn dataCleanupBlocked(self: *SettingsHost) ?[]const u8 {
         if (self.hasActiveCleanupSessions()) return "请先结束所有窗口的活动会话与后台连接";
-        const process = process_windows orelse return "应用生命周期尚未就绪";
+        const process = process_windows orelse return "应用尚未准备好，请稍后重试";
         if (process.data_cleanup_owner) |owner| if (owner != self) return "另一窗口正在清除应用数据";
         if (process.pending.items.len != 0) return "请等待新窗口创建完成";
         if (process.domain.tasks) |tasks| {

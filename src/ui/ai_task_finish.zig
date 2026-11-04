@@ -853,7 +853,7 @@ pub const View = struct {
             if (index > 0) try list.writer.writeAll("\n");
             try list.writer.print("{s} · {s}", .{ resource.label(), if (resource.state == .closed) @as([]const u8, "已关闭，记录保留") else if (resource.ownership == .handed_to_user) "已交给用户" else if (resource.state == .closing) "正在关闭" else if (resource.state == .cleanup_pending or resource.state == .failed_cleanup_pending) "关闭结果待核实" else switch (resource.idle) {
                 .confirmed => "已确认空闲",
-                .active => "仍有活动引用",
+                .active => "仍在使用中",
                 .unknown => "空闲状态尚未确认",
             } });
         }
@@ -862,7 +862,7 @@ pub const View = struct {
                 if (i != 0) try list.writer.writeAll("\n");
                 try list.writer.print("{s} · session-{d} · AI 输入", .{ target.label(), @backingInt(target.handle.session_id) });
             }
-            if (snapshot.targets.len == 0) try list.writer.writeAll(if (snapshot.feedback != null) "原执行仍可只读，终端保持打开" else "执行与输入授权尚未结算");
+            if (snapshot.targets.len == 0) try list.writer.writeAll(if (snapshot.feedback != null) "仍可查看原命令的执行状态，终端保持打开" else "正在确认命令执行和输入控制状态");
         }
         try self.resources.setTextContent(self.cx.allocator, list.writer.buffered());
         self.resources_viewport.setStyle(self.cx.allocator, .height, .{ .px = @floatFromInt(@as(usize, @min(@max(@as(usize, 1), snapshot.resources.len), 5)) * 16) });

@@ -679,7 +679,7 @@ pub const Bridge = struct {
                 if (command_value != .string) return error.InvalidToolArguments;
                 const binding = self.host_binding orelse return error.InvalidHostAuthority;
                 route_invocation = .{ .context = binding.context, .authority = .execution_control, .operation_id = invocation.operation_id, .turn_id = invocation.turn_id, .call_id = invocation.call_id, .tool_id = "run_command", .arguments = invocation.parsed.json.value, .arguments_json = invocation.arguments, .arguments_hash = invocation.parsed.arguments_hash, .canonical_arguments_hash = try @import("../ai/canonical_arguments.zig").digest(allocator, invocation.parsed.json.value) };
-                route_subject = .{ .kind = .terminal_command, .target = try std.fmt.bufPrint(&route_label, "会话 #{d} · generation {d}", .{ @backingInt(target.session_id), target.generation }), .detail = command_value.string, .impact = "仅执行上述完整命令。新工作终端将以此会话为来源，创建步骤需精确确认；保留按本次任务策略。" };
+                route_subject = .{ .kind = .terminal_command, .target = try std.fmt.bufPrint(&route_label, "会话 #{d} · generation {d}", .{ @backingInt(target.session_id), target.generation }), .detail = command_value.string, .impact = "仅执行上述完整命令。新工作终端将以此会话为来源，创建前会单独确认；会话按本次任务的设置保留。" };
                 if (try self.prepareHostRoute(route_invocation, &route_subject, target, .batch, allocator)) |changed| return try dynamicRouteResult(invocation, target, changed, allocator);
                 if (self.execution_mode == .ask or route_subject.route.?.choice.route == .batch and self.route_broker.?.execution_route.resolve(binding.context, target, command_value.string, .batch).trusted) {
                     const permit = try self.requestHostRoute(route_invocation, route_subject, allocator, cancel);

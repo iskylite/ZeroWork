@@ -212,7 +212,7 @@ pub fn Host(comptime Process: type) type {
                 self.coordinator.cancel();
                 self.phase = .cancel_pending;
                 client.zw_update_command(5);
-                self.note("正在等待安装程序的持久化取消回执…");
+                self.note("正在等待安装程序确认取消…");
                 return;
             }
             if (self.status.state == 3 or self.status.state == 4) client.zw_update_command(3);
@@ -282,7 +282,7 @@ pub fn Host(comptime Process: type) type {
             admission.set(false);
         }
         pub fn notifyCloseBlocked(self: *Self) void {
-            self.note("请先在更新窗口取消更新，收到取消回执后即可关闭应用。");
+            self.note("请先在更新窗口取消更新，待安装程序确认后即可关闭应用。");
             client.zw_update_open();
         }
         pub fn tick(self: *Self) !void {
@@ -445,9 +445,9 @@ pub fn Host(comptime Process: type) type {
                     p.warning = self.phase == .blocked;
                 },
                 .handoff => {
-                    p.title = if (self.commit_sent) "正在确认安装提交" else "正在准备安装";
+                    p.title = if (self.commit_sent) "正在确认安装状态" else "正在准备安装";
                     p.description = "工作区快照已保存，全部工作已结束。";
-                    p.summary = if (self.commit_sent) "安装程序已就绪，正在确认是否进入安装阶段。\n收到提交回执前，应用不会退出。" else "等待安装程序准备就绪\n此时尚未授权替换应用，仍可取消更新。";
+                    p.summary = if (self.commit_sent) "安装程序已就绪，正在确认是否进入安装阶段。\n安装程序确认开始安装后，应用才会退出。" else "等待安装程序准备就绪\n此时尚未授权替换应用，仍可取消更新。";
                     p.message = "取消需要安装程序确认，已结束的工作不会恢复。";
                     p.primary = "";
                     p.cancel = "取消更新";
@@ -456,8 +456,8 @@ pub fn Host(comptime Process: type) type {
                 .cancel_pending => {
                     p.title = "正在确认取消更新";
                     p.description = "已发送取消请求，正在等待安装程序确认。";
-                    p.summary = "确认取消后，应用将继续运行。\n如果安装提交已生效，将显示安装进度。";
-                    p.message = "收到回执前，不会显示“更新已取消”。";
+                    p.summary = "确认取消后，应用将继续运行。\n如果安装已经开始，将显示安装进度。";
+                    p.message = "请等待确认取消或开始安装的结果。";
                     p.primary = "";
                     p.cancel = "";
                     p.cancellable = false;

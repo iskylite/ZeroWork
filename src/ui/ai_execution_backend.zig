@@ -702,7 +702,7 @@ fn decimal(text: []const u8) !u64 {
 }
 fn describe(_: host.Context, _: Boundary) !ApprovalEvidence {
     var result: ApprovalEvidence = .{};
-    const text = try std.fmt.bufPrint(&result.bytes, "将在此终端执行上方命令。执行期间由 AI 控制输入；你可随时接管，当前命令会继续运行，需要中断时请按 Ctrl+C。输出保存为同一终端的观测区间，可能含其他来源，也可能缺少结束界标之后的后台输出；输出归属另行标明。此批准仅适用于本次命令。", .{});
+    const text = try std.fmt.bufPrint(&result.bytes, "将在此终端执行上方命令。执行期间由 AI 控制输入；你可随时接管，当前命令会继续运行，需要中断时请按 Ctrl+C。记录覆盖命令运行期间的终端输出，可能混入其他程序的输出，也可能不包含命令结束后的后台输出；输出来源的确认情况会单独显示。此批准仅适用于本次命令。", .{});
     result.len = text.len;
     return result;
 }

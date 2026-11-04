@@ -372,7 +372,7 @@ pub const EditorView = struct {
             error.GroupNotFound => "资产分组已不存在，请重新选择",
             error.ProbeInProgress => "上次测试仍在释放资源，请稍后再试",
             error.EditorCredentialsUnavailable => "安全凭据服务尚未就绪，请稍后重试",
-            error.EditorSecretSubmitUnavailable => "安全保存入口尚未就绪，请稍后重试",
+            error.EditorSecretSubmitUnavailable => "凭据保存服务尚未就绪，请稍后重试",
             error.CredentialDenied, error.CredentialLocked => "密码存储访问被拒绝，草稿已保留",
             error.CredentialStorageFailure => "密码保存失败，草稿已保留",
             else => "操作未完成，配置草稿已保留",
@@ -430,7 +430,7 @@ pub const EditorView = struct {
         var probe_snapshot = facade.snapshot(token, self.mount.cx.allocator) catch {
             self.probe_log.unavailable();
             self.refreshProbeLog();
-            self.feedback(if (self.probe_log.stale) "正在等待上次测试释放状态；此记录仅供参考" else "正在等待管理测试状态，配置草稿已保留");
+            self.feedback(if (self.probe_log.stale) "正在等待上次测试结束；此记录仅供参考" else "正在等待管理测试状态，配置草稿已保留");
             self.mount.cx.scheduleRedrawAfterNs(100 * std.time.ns_per_ms);
             return;
         };
