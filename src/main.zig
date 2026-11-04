@@ -10347,6 +10347,10 @@ const QuickConnectHost = struct {
         const index = self.workspace.registry.indexOf(owner.id) orelse return error.AssetNotFound;
         try self.workspace.newSession(index);
     }
+    fn local(raw: *anyopaque) !void {
+        const self: *QuickConnectHost = @ptrCast(@alignCast(raw));
+        try self.workspace.newLocalSession(null);
+    }
     fn temporary(raw: *anyopaque, target: quick_connect_mod.ParsedTarget) !void {
         const self: *QuickConnectHost = @ptrCast(@alignCast(raw));
         const name = try std.fmt.allocPrint(self.allocator, "{s}:{d}", .{ target.host, target.port });
@@ -10834,7 +10838,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     try ai_panel.appendChild(cx.allocator, ai_card_box);
 
     // Frozen V3 settings: centered shell, independently scrolling navigation and content.
-    const settings_panel = try ui.box(cx, .{
+    const settings_panel = try ui.boxStyled(cx, shell_styles.settingsBackdrop, ui.BoxStyle{
         .position = .absolute,
         .inset = .{ .top = .{ .px = 0 }, .right = .{ .px = 0 }, .bottom = .{ .px = 0 }, .left = .{ .px = 0 } },
         .width = .fill(),
@@ -10845,8 +10849,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
         .direction = .column,
         .align_items = .center,
         .justify = .center,
-        .background = ui.Color.BLACK.withAlpha(102),
-    }, .{});
+    });
     settings_panel.meta.ownership.meta.test_id = "settings.overlay";
     settings_panel.setDisplay(.none);
     const settings_card = try ui.boxStyled(cx, shell_styles.settingsPanel, .{});
@@ -11054,7 +11057,7 @@ fn mountUI(cx: *ui.Cx, scope: *ui.Scope) anyerror!*ui.Node {
     const quick_host = try cx.allocator.create(QuickConnectHost);
     quick_host.* = .{ .allocator = cx.allocator, .cx = cx, .workspace = workspace };
     try scope.onCleanup(QuickConnectHost, quick_host, QuickConnectHost.cleanup);
-    quick_host.view = try @import("ui/quick_connect_view.zig").View.mount(cx, scope, .{ .context = quick_host, .saved = QuickConnectHost.saved, .temporary = QuickConnectHost.temporary, .new_profile = QuickConnectHost.newProfile, .closed = QuickConnectHost.closed });
+    quick_host.view = try @import("ui/quick_connect_view.zig").View.mount(cx, scope, .{ .context = quick_host, .saved = QuickConnectHost.saved, .local = QuickConnectHost.local, .temporary = QuickConnectHost.temporary, .new_profile = QuickConnectHost.newProfile, .closed = QuickConnectHost.closed });
     const quick_panel = quick_host.view.root;
     try quick_host.refreshAssets();
 
@@ -11988,6 +11991,7 @@ const TransferHost = struct {
         mode: transfer_panel_mod.Data.Mode,
         source: [:0]u8,
         started: u64,
+        requested_frame: u64,
     };
 
     extern fn zw_pick_upload_files(initial: [*:0]const u8, context: *anyopaque, receive: *const fn (*anyopaque, [*:0]const u8) callconv(.c) c_int) c_int;
@@ -12063,6 +12067,7 @@ const TransferHost = struct {
             .mode = mode,
             .source = try self.allocator.dupeSentinel(u8, source orelse "", 0),
             .started = wallClockMsTransfer(),
+            .requested_frame = self.cx.frame_count,
         };
         errdefer self.allocator.free(request.source);
         try self.validatePicker(request);
@@ -12116,6 +12121,12 @@ const TransferHost = struct {
 
     fn pollCommandPicker(self: *TransferHost) void {
         const request = self.command_picker orelse return;
+        // The native modal blocks Metal presentation. Let a full frame paint
+        // the dismissed command palette before entering AppKit's modal loop.
+        if (self.cx.frame_count <= request.requested_frame +| 1) {
+            self.cx.scheduleRedrawAfterNs(16 * std.time.ns_per_ms);
+            return;
+        }
         self.validatePicker(request) catch |err| {
             self.command_picker = null;
             defer self.allocator.free(request.source);

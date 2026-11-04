@@ -2831,6 +2831,7 @@ pub const TerminalViewNode = struct {
     }
 
     fn executeLocalCommand(self: *TerminalViewNode) void {
+        self.closeCommandPalette();
         self.active_command_record = null;
         const parsed = builtin_commands.parse(self.local_editor.text.items);
         switch (parsed) {
@@ -7161,6 +7162,9 @@ test "builtin command SSH surface works without prompt markers and preserves she
     cx.handleTextInput("s");
     try std.testing.expectEqualStrings("@ts", view.local_input_node.getText().?.content);
     cx.handleKeyDown(.@"return", .{});
+    try std.testing.expect(!view.palette.isOpen());
+    try std.testing.expect(!view.palette_cache.placed);
+    try std.testing.expect(view.palette_panel.style.display == .none);
     try std.testing.expect(view.local_state.timestamp_gutter);
     try std.testing.expect(!view.local_input_cache.placed);
     cx.handleTextInput("@ts off");
@@ -7955,7 +7959,7 @@ test "terminal command annotations preserve grid copy hover wrapped rows and dis
     const row_index = value.screen_row.? - surface.snapshot.?.projection.scrollback.viewport_offset;
     const row = &surface.rows.items[row_index];
     try std.testing.expect(row.command_info != null);
-    try std.testing.expectEqual(app_theme.popupInset(), row.command_info.?.getBackground());
+    try std.testing.expectEqual(app_theme.current().surface_2.withAlpha(255), row.command_info.?.getBackground());
     try std.testing.expectEqualStrings("AI", row.command_ai.?.getText().?.content);
     try std.testing.expectEqualStrings("CommandAiTag", row.command_ai.?.meta.ownership.meta.component_name.?);
     try std.testing.expect(row.command_ai.?.style.height.px <= surface.options.row_height);
@@ -7965,7 +7969,7 @@ test "terminal command annotations preserve grid copy hover wrapped rows and dis
     try std.testing.expectEqual(@as(f32, 0), row.command_ai.?.style.padding.left);
     try std.testing.expectEqual(@as(f32, 0), row.command_ai.?.style.padding.right);
     try std.testing.expectEqual(ui.Color.TRANSPARENT, row.command_ai.?.getBackground());
-    try std.testing.expectEqual(app_theme.popupInset(), row.command_info.?.getBackground());
+    try std.testing.expectEqual(app_theme.current().surface_2.withAlpha(255), row.command_info.?.getBackground());
     try std.testing.expectEqualStrings("EXIT 7", row.command_code.?.getText().?.content);
     try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "AI") == null);
     try std.testing.expect(std.mem.indexOf(u8, surface.document.items, "×") == null);
@@ -8082,7 +8086,7 @@ test "terminal command archive restores first row annotations and locates its re
     try std.testing.expect(view.locateCommand(1));
     var seen = false;
     for (view.history_command_info) |maybe| if (maybe) |node| {
-        try std.testing.expectEqual(app_theme.popupInset(), node.getBackground());
+        try std.testing.expectEqual(app_theme.current().surface_2.withAlpha(255), node.getBackground());
         const tag = node.children.items[0];
         if (tag.style.display == .none) continue;
         try std.testing.expectEqualStrings("CommandAiTag", tag.meta.ownership.meta.component_name.?);

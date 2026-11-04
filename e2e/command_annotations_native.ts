@@ -39,6 +39,15 @@ try{
  await submit('false');await h.waitFor(async()=>(await h.query('terminal.command.metadata.code')).filter((n:any)=>shown(n)&&text(n).includes('1')).length>=2||null,15000);
  await submit('false');await h.waitFor(async()=>(await h.query('terminal.command.metadata.code')).filter((n:any)=>shown(n)&&text(n).includes('1')).length>=3||null,15000);
  await dismissHint();
+ const metadataBeforeClick=(await h.query('terminal.command.metadata')).filter(shown).length;
+ const emptyPoint={x:surface.rect.x+80,y:surface.rect.y+surface.rect.h-30};
+ await h.mouseDown(emptyPoint.x,emptyPoint.y);await h.sleep(250);
+ assert.equal((await h.query('terminal.command.metadata')).filter(shown).length,metadataBeforeClick,'holding a focus click on an empty row must preserve other command tags');
+ await capture('empty-row-mouse-down');
+ await h.mouseUp(emptyPoint.x,emptyPoint.y);await h.sleep(150);
+ assert.equal((await h.query('terminal.command.metadata')).filter(shown).length,metadataBeforeClick,'releasing an empty-row click must preserve other command tags');
+ await capture('empty-row-click');await h.mouseMove(10,10);
+ report.checks.push('Pressing, holding and releasing a focus click on an empty terminal row preserves all existing command metadata tags');
  const button=await visible('local.status.command-history');await h.mouseMove(button.rect.x+button.rect.w/2,button.rect.y+button.rect.h/2);await visible('terminal.command-history');
  await h.waitFor(async()=>(await h.query('terminal.command-history.record')).filter(shown).length>=3||null,10000);
  const commands=(await h.query('terminal.command-history.command')).filter(shown).map(text);assert(commands.filter((s:string)=>s==='false').length>=2);report.checks.push('Repeated human command executions remain separate native cards with real completion metadata');

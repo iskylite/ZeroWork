@@ -161,7 +161,10 @@ pub fn layerBackground(level: usize) ui.Color {
 pub fn settingsCard() ui.Color {
     const c = current();
     const opacity = @as(f32, @floatFromInt(layerAlpha(2))) / 255;
-    return ui.Color.lerp(c.overlay.withAlpha(255), c.fg_2.withAlpha(255), @min(1, 0.12 / opacity)).withAlpha(c.surface_2.a);
+    // Light cards need only a quiet tonal difference. Compensating their tint
+    // for transparency mixes almost half the dark ink into the surface.
+    const strength = if (currentName() == .dark) @min(1, 0.12 / opacity) else 0.12;
+    return ui.Color.lerp(c.overlay.withAlpha(255), c.fg_2.withAlpha(255), strength).withAlpha(c.surface_2.a);
 }
 /// Keep retained surface paint in sync with the same publication as widget tokens.
 /// Only overlay surfaces filter the backdrop; foreground opacity is untouched.

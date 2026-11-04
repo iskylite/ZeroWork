@@ -55,3 +55,5 @@ body.before .secondary{background:var(--surface_2);color:var(--fg_2)}
 }
 
 .v3-hover{position:absolute;z-index:120;max-width:320px;padding:8px 10px;border-radius:7px;background:var(--overlay);color:var(--fg_1);font-size:11px;line-height:16px;white-space:pre-wrap;pointer-events:none}.v3-hover[hidden]{display:none}
+
+.rows{max-height:144px;overflow-y:auto}

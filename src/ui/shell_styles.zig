@@ -72,6 +72,10 @@ pub fn status(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
     return .{ .shadow = cardShadow(), .inset_shadow = cardHighlight(), .width = .fill(), .height = .{ .px = status_height }, .flex_shrink = 0, .direction = .row, .align_items = .center, .gap = 8, .padding = .{ .left = 10, .right = 10 }, .background = c.surface_1, .border = .{ .width = 0, .color = c.border, .radius = card_radius } };
 }
+pub fn settingsBackdrop(_: *const ui.ThemeTokens) ui.BoxStyle {
+    const color = if (theme.currentName() == .dark) ui.Color.BLACK else theme.baseColors().overlay;
+    return .{ .background = color.withAlpha(102) };
+}
 pub fn settingsPanel(_: *const ui.ThemeTokens) ui.BoxStyle {
     const c = theme.current();
     return .{ .width = .{ .px = @import("v3_geometry.zig").settings_width }, .height = .{ .px = @import("v3_geometry.zig").settings_height }, .direction = .column, .gap = 0, .padding = .{}, .background = c.overlay, .border = .{ .width = 0, .color = c.border, .radius = 14 }, .shadow = .{ .blur = 32, .offset_y = 24, .color = c.shadow }, .hit_behavior = .@"opaque", .hit_roles = .{ .pointer = true, .scroll = true } };

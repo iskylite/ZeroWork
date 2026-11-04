@@ -114,7 +114,7 @@ fn mount(cx: *ui.Cx, scope: *ui.Scope) !*ui.Node {
         .status_detail = if (i == 4) "连接中断" else if (i == 5) "MD5 一致" else "",
         .total_bytes = if (i == 0) 128 * 1048576 else if (i == 1) 7969178 else if (i == 3) 2150 else if (i == 4) 256 * 1048576 else if (i == 5) 164 else if (i == 6) 48 else 4915,
         .done_bytes = if (i == 0) 85878374 else if (i == 1) 2516582 else if (i == 3) 1024 else if (i == 4) 10 * 1048576 else if (i == 5) 164 else if (i == 6) 48 else 0,
-        .speed_bps = if (i == 0) 8598323 else if (i == 1) 3774873 else 0,
+        .speed_bps = if (i == 0) 820 * 1024 else if (i == 1) 3774873 else 0,
     };
     if (presentation == .session_popover or presentation == .session_tray) panel.selected_scope = .{ .session = owner };
     try panel.update(.{ .revision = 1, .rows = &tasks, .scope_label = if (presentation == .session_popover or presentation == .session_tray) "K8s-Node01 #101" else "全部会话", .scope = if (presentation == .session_popover or presentation == .session_tray) .{ .session = owner } else .all, .choices = &.{ .{ .label = "全部会话", .scope = .all }, .{ .label = "K8s-Node01 #101", .scope = .{ .session = owner } }, .{ .label = "K8s-Node02 #102", .scope = .{ .session = second } }, .{ .label = "DB-Master #201", .scope = .{ .session = .{ .session_id = @fromBackingInt(201), .generation = 1 } } }, .{ .label = "无任务会话", .scope = .{ .session = .{ .session_id = @fromBackingInt(202), .generation = 1 } } } } });

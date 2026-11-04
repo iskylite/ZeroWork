@@ -87,8 +87,9 @@
  function syncLayers(){
   if(treeDirty){surfaces=[...document.querySelectorAll(surfaceSelector)];treeDirty=false;metrics.sceneQueries++;if(resizeObserver){const next=new Set([root,...surfaces,...root.querySelectorAll?.(canvasSelector)||[]]);for(const n of observed)if(!next.has(n)){resizeObserver.unobserve(n);observed.delete(n);}for(const n of next)if(!observed.has(n)){resizeObserver.observe(n);observed.add(n);}}}
   const rects=new Map(),styles=new Map(),palette=getComputedStyle(document.body),underlays=frameUnderlays();
-  // Match native settingsCard(): preserve visible tint after the L2 alpha is applied.
-  const overlay=materialRGB(palette,'--overlay-base'),ink=materialRGB(palette,'--fg-2'),strength=Math.min(1,.12/layerAlpha(2,effective.transparency/100));
+  // Match native settingsCard(): light surfaces keep a quiet, uncompensated tint.
+  const overlay=materialRGB(palette,'--overlay-base'),ink=materialRGB(palette,'--fg-2'),app=materialRGB(palette,'--bg-app');
+  const dark=app[0]*299+app[1]*587+app[2]*114<128000,strength=dark?Math.min(1,.12/layerAlpha(2,effective.transparency/100)):.12;
   const settingsBase='#'+overlay.map((v,i)=>Math.trunc(v+(ink[i]-v)*strength).toString(16).padStart(2,'0')).join('');
   // Measure all surfaces before writing a single style, including clip ancestors.
   const records=surfaces.filter(n=>n.isConnected!==false).map(surface=>{

@@ -23,6 +23,7 @@ pub const Callbacks = struct {
     saved: *const fn (*anyopaque, identity.AssetOwner) anyerror!void,
     temporary: *const fn (*anyopaque, parser.ParsedTarget) anyerror!void,
     new_profile: *const fn (*anyopaque, ?parser.ParsedTarget, []const u8) anyerror!void,
+    local: ?*const fn (*anyopaque) anyerror!void = null,
     closed: ?*const fn (*anyopaque) void = null,
 };
 const Owned = struct {
@@ -91,6 +92,8 @@ pub const View = struct {
     matches: std.ArrayList(usize) = .empty,
     row_scope: ?*ui.Scope = null,
     selected: ?identity.AssetOwner = null,
+    local_matches: bool = false,
+    local_selected: bool = false,
     focus_return: ?u32 = null,
     generation: u64 = 0,
     mode: Mode = .saved,
@@ -126,7 +129,7 @@ pub const View = struct {
         try header.appendChild(cx.allocator, close_hint.wrapper);
         self.body = try ui.box(cx, S.body(), .{});
         try self.chrome.appendChild(cx.allocator, self.body);
-        self.input = try ui.widgets.Input(.{ .value = query, .placeholder = "搜索主机或输入 SSH 目标", .embedded = true, .leading_icon_asset = ui.icons.search, .on_change = cx.on(View, self, queryChanged), .on_submit = cx.on(View, self, inputSubmit) }).mountResult(popup.scope, cx);
+        self.input = try ui.widgets.Input(.{ .value = query, .placeholder = "搜索本地终端、主机或输入 SSH 目标", .embedded = true, .leading_icon_asset = ui.icons.search, .on_change = cx.on(View, self, queryChanged), .on_submit = cx.on(View, self, inputSubmit) }).mountResult(popup.scope, cx);
         tune(cx, &self.input, 40, 14);
         self.input.node.meta.ownership.meta.test_id = "quick.query";
         const query_row = try ui.box(cx, S.queryRow(), .{});
@@ -241,6 +244,7 @@ pub const View = struct {
         if (self.cx.focused_node) |node| self.focus_return = node.id;
         self.query.set("");
         self.selected = null;
+        self.local_selected = false;
         self.submitted = false;
         self.last_problem = null;
         self.failure.setDisplay(.none);
@@ -269,6 +273,7 @@ pub const View = struct {
     }
     fn queryChanged(self: *View, _: []const u8) void {
         self.selected = null;
+        self.local_selected = false;
         self.last_problem = null;
         self.failure.setDisplay(.none);
         self.invalidate();
@@ -294,16 +299,17 @@ pub const View = struct {
         switch (key) {
             .escape => self.hide(),
             .up, .down => {
-                if (self.dirty or self.mode != .saved or self.matches.items.len == 0) return .stop;
-                var current: ?usize = null;
+                if (self.dirty or self.mode != .saved or self.resultCount() == 0) return .stop;
+                var current: ?usize = if (self.local_selected) 0 else null;
                 for (self.matches.items, 0..) |index, rank| if (self.selected != null and std.meta.eql(self.source.?.assets[index].owner, self.selected.?)) {
-                    current = rank;
+                    current = rank + @intFromBool(self.local_matches);
                     break;
                 };
                 const rank = if (current) |rank|
-                    if (key == .down) (rank + 1) % self.matches.items.len else (rank + self.matches.items.len - 1) % self.matches.items.len
-                else if (key == .down) 0 else self.matches.items.len - 1;
-                self.selected = self.source.?.assets[self.matches.items[rank]].owner;
+                    if (key == .down) (rank + 1) % self.resultCount() else (rank + self.resultCount() - 1) % self.resultCount()
+                else if (key == .down) 0 else self.resultCount() - 1;
+                self.local_selected = self.local_matches and rank == 0;
+                self.selected = if (self.local_selected) null else self.source.?.assets[self.matches.items[rank - @intFromBool(self.local_matches)]].owner;
                 self.invalidate();
             },
             .@"return" => if (!self.dirty) self.activate(),
@@ -313,7 +319,7 @@ pub const View = struct {
     }
     fn activate(self: *View) void {
         if (!self.isOpen() or self.submitted or self.dirty or self.composing()) return;
-        if (self.mode == .invalid or (self.mode == .saved and self.selected == null)) return;
+        if (self.mode == .invalid or (self.mode == .saved and self.selected == null and !self.local_selected)) return;
         self.submit() catch |err| {
             self.fail(err);
             return;
@@ -322,10 +328,10 @@ pub const View = struct {
         self.dismiss(false);
     }
     fn primaryClicked(self: *View) void {
-        if (self.mode == .saved and self.matches.items.len == 0) self.saveProfile() else self.activate();
+        if (self.mode == .saved and self.resultCount() == 0) self.saveProfile() else self.activate();
     }
     fn secondaryClicked(self: *View) void {
-        if (self.mode == .saved and self.matches.items.len == 0) self.hide() else self.saveProfile();
+        if (self.mode == .saved and self.resultCount() == 0) self.hide() else self.saveProfile();
     }
     fn clearSearch(self: *View) void {
         self.setQuery("");
@@ -333,6 +339,7 @@ pub const View = struct {
     }
     fn submit(self: *View) !void {
         if (self.mode == .saved) {
+            if (self.local_selected and self.local_matches) return self.callbacks.local.?(self.callbacks.context);
             const owner = self.selected orelse return error.NoSavedSelection;
             for (self.matches.items) |index| if (std.meta.eql(self.source.?.assets[index].owner, owner)) return self.callbacks.saved(self.callbacks.context, owner);
             return error.StaleAsset;
@@ -369,6 +376,9 @@ pub const View = struct {
         const query = self.query.peek();
         const temporary = std.mem.startsWith(u8, query, "ssh ") or std.mem.indexOfScalar(u8, query, '@') != null;
         self.mode = if (temporary) if (parser.parseQuickTarget(query) != null) .temporary else .invalid else .saved;
+        self.local_matches = self.callbacks.local != null and self.mode == .saved and
+            (contains("本地终端", query) or contains("local terminal zsh macOS", query));
+        if (!self.local_matches) self.local_selected = false;
         self.temporary_area.setDisplay(if (self.mode == .saved) .none else .flex);
         if (self.mode == .saved) {
             if (self.source) |source| for (source.assets, 0..) |asset, index| if (matchesAsset(asset, query)) try self.matches.append(self.cx.allocator, index);
@@ -377,16 +387,17 @@ pub const View = struct {
                 found = true;
                 break;
             };
-            if (!found) self.selected = if (query.len > 0 and self.matches.items.len > 0) self.source.?.assets[self.matches.items[0]].owner else null;
+            if (!found) self.selected = if (!self.local_selected and query.len > 0 and !self.local_matches and self.matches.items.len > 0) self.source.?.assets[self.matches.items[0]].owner else null;
+            if (query.len > 0 and self.local_matches and self.selected == null) self.local_selected = true;
             try self.title.setTextContent(self.cx.allocator, "快速连接");
-            const caption = try std.fmt.allocPrint(self.cx.allocator, "已保存的主机 · {d} 个结果", .{self.matches.items.len});
+            const caption = try std.fmt.allocPrint(self.cx.allocator, "{s} · {d} 个结果", .{ if (self.callbacks.local != null) @as([]const u8, "可用连接") else "已保存的主机", self.resultCount() });
             defer self.cx.allocator.free(caption);
             try self.result_label.setTextContent(self.cx.allocator, caption);
             try self.hint.setTextContent(self.cx.allocator, "↑↓ 选择 · Enter 连接");
-            self.primary_hint.set("连接所选主机（Enter）");
-            self.primary_label.set("连接所选主机");
+            self.primary_hint.set(if (self.local_selected) "打开本地终端（Enter）" else "连接所选主机（Enter）");
+            self.primary_label.set(if (self.local_selected) "打开本地终端" else "连接所选主机");
             self.secondary_label.set("新建主机配置");
-            self.disabled.set(self.selected == null);
+            self.disabled.set(self.selected == null and !self.local_selected);
             try self.rebuildRows();
         } else {
             const parts = splitTarget(query);
@@ -406,7 +417,7 @@ pub const View = struct {
             self.secondary_label.set(if (invalid) "修改输入" else "保存为主机配置");
             self.disabled.set(invalid);
         }
-        const no_match = self.mode == .saved and self.matches.items.len == 0;
+        const no_match = self.mode == .saved and self.resultCount() == 0;
         self.primary_hint_enabled.set(!no_match);
         const searching = std.mem.trim(u8, query, " \t\r\n").len > 0;
         self.empty_icon.setDisplay(if (searching) .none else .flex);
@@ -437,6 +448,15 @@ pub const View = struct {
         self.dirty = false;
         self.chrome.markLayoutDirty();
     }
+    fn resultCount(self: *const View) usize {
+        return self.matches.items.len + @intFromBool(self.local_matches);
+    }
+    fn localClicked(self: *View) void {
+        if (!self.isOpen() or self.dirty or !self.local_matches) return;
+        self.local_selected = true;
+        self.selected = null;
+        self.activate();
+    }
     fn rebuildRows(self: *View) !void {
         const restore_input = if (self.cx.focused_node) |node| find(self.scroll.content, node.id) != null else false;
         for (self.scroll.content.children.items) |node| self.cx.invalidateReferencesTo(node);
@@ -449,7 +469,21 @@ pub const View = struct {
         }
         const scope = try self.scope.childScope();
         self.row_scope = scope;
-        if (self.matches.items.len == 0) {
+        if (self.local_matches) {
+            const node = try ui.widgets.Button(.{ .variant = .ghost, .a11y_label = "本地终端", .base_style = S.row(self.local_selected), .hover_style = ui.BoxStyle{ .background = if (self.local_selected) S.selectedFill() else S.theme.popupAction() }, .on_click = self.cx.on(View, self, localClicked) }).mount(scope, self.cx);
+            node.meta.ownership.meta.test_id = "quick.local";
+            try self.scroll.content.appendChild(self.cx.allocator, node);
+            const content = try ui.box(self.cx, S.rowContent(), .{});
+            try node.appendChild(self.cx.allocator, content);
+            try content.appendChild(self.cx.allocator, try ui.iconTint(self.cx, ui.icons.terminal, S.theme.current().fg_2, .{ .width = .{ .px = 20 }, .height = .{ .px = 20 }, .flex_shrink = 0 }));
+            const labels = try ui.box(self.cx, .{ .width = .fill(), .height = .{ .px = 34 }, .flex = 1, .direction = .column, .min_width = 0 }, .{});
+            try content.appendChild(self.cx.allocator, labels);
+            const name = try label(self.cx, labels, "本地终端", 13, 600, false);
+            name.setStyleInline(self.cx.allocator, S.line(18));
+            const detail = try label(self.cx, labels, "本机 · zsh", 11, 400, true);
+            detail.setStyleInline(self.cx.allocator, S.line(16));
+        }
+        if (self.resultCount() == 0) {
             const empty = try label(self.cx, self.scroll.content, "无匹配主机", 12, 400, true);
             empty.setStyleInline(self.cx.allocator, S.line(28));
         }
@@ -496,11 +530,12 @@ pub const View = struct {
                 route.setStyleInline(self.cx.allocator, .{ .width = .{ .px = 28 }, .height = .{ .px = 16 }, .flex_shrink = 0 });
             }
         }
-        const count = @max(@as(usize, 1), @min(@as(usize, 3), self.matches.items.len));
+        const count = @max(@as(usize, 1), @min(@as(usize, 3), self.resultCount()));
         const height = @as(f32, @floatFromInt(count)) * S.row_height + @as(f32, @floatFromInt(count - 1)) * S.row_gap;
         self.scroll.container.setStyleInline(self.cx.allocator, .{ .height = .{ .px = height } });
+        if (self.local_selected) ui.widgets.setScrollY(self.scroll.state, self.scroll.content, 0);
         if (self.selected) |owner| for (self.matches.items, 0..) |index, rank| if (std.meta.eql(owner, self.source.?.assets[index].owner)) {
-            const top = @as(f32, @floatFromInt(rank)) * (S.row_height + S.row_gap);
+            const top = @as(f32, @floatFromInt(rank + @intFromBool(self.local_matches))) * (S.row_height + S.row_gap);
             var scroll_y = self.scroll.state.scroll_y;
             if (top < scroll_y) scroll_y = top;
             if (top + S.row_height > scroll_y + height) scroll_y = top + S.row_height - height;
@@ -580,6 +615,7 @@ const Row = struct {
     fn select(self: *Row) void {
         if (!self.view.isOpen() or self.view.dirty or self.view.generation != self.generation) return;
         for (self.view.matches.items) |index| if (std.meta.eql(self.owner, self.view.source.?.assets[index].owner)) {
+            self.view.local_selected = false;
             self.view.selected = self.owner;
             self.view.activate();
             return;

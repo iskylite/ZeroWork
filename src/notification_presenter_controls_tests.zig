@@ -569,6 +569,9 @@ test "notification history background blur follows material changes without repl
             _ = cx.render();
         }
         try std.testing.expectEqual(@max(12, blur), view.root.style.backdrop_blur());
+        // Popover positioning must retain the panel's rounded child clip;
+        // material compensation patches otherwise paint square corners.
+        try std.testing.expect(view.root.style.overflow_hidden);
         try std.testing.expectEqual(root_id, view.root.id);
         try std.testing.expectEqual(theme.current().overlay, view.root.getBackground());
         try std.testing.expectEqual(theme.current().fg_1, view.root.children.items[0].children.items[1].getText().?.color);

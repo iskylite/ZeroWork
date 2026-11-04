@@ -15,6 +15,44 @@ const a = std.testing.allocator;
 pub const owner: identity.SessionHandle = .{ .session_id = @fromBackingInt(701), .generation = 3 };
 pub const binding: host.ServiceHandle = .{ .resource_owner = .{ .session = owner }, .origin_session = owner, .kind = .terminal, .binding_id = 1, .binding_generation = 1 };
 
+test "terminal metadata survives focus clicks on empty rows" {
+    var transport: FakeTransport = undefined;
+    try transport.init(6, 28);
+    defer transport.deinit();
+    try transport.controller.feedOutput(owner, 1, "\x1b]133;A\x07$ \x1b]133;B\x07true\r\n\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07false\r\n\x1b]133;C\x07\x1b]133;D;1\x07\x1b]133;A\x07$ \x1b]133;B\x07", 100);
+    const cx = try ui.Cx.init(a, std.testing.io);
+    defer cx.deinit();
+    cx.setViewport(700, 300);
+    var view = try View.mount(cx);
+    cx.root = view.root;
+    defer view.releaseBuffers(cx);
+    try view.bindTerminalService(transport.service());
+    cx.layout();
+    _ = try view.refreshTerminalService(owner, false);
+    cx.layout();
+    const surface = view.terminal_surface.?;
+    const first = surface.rows.items[0].command_info.?;
+    const second = surface.rows.items[1].command_info.?;
+    const bounds = surface.viewport.globalRect();
+    const x = bounds.x + surface.bodyX() + 5;
+    const empty_y = bounds.y + surface.presentationY(5) + surface.options.row_height * 0.5;
+    cx.handleMouseDownEx(x, empty_y, .left, .{});
+    try std.testing.expect(surface.dragging and surface.selection == null);
+    _ = try view.refreshTerminalService(owner, false);
+    try std.testing.expectEqual(.flex, first.style.display);
+    try std.testing.expectEqual(.flex, second.style.display);
+    cx.handleMouseUpEx(x, empty_y, .left, .{});
+    _ = try view.refreshTerminalService(owner, false);
+    try std.testing.expect(!surface.dragging and surface.selection == null);
+    try std.testing.expectEqual(.flex, first.style.display);
+    try std.testing.expectEqual(.flex, second.style.display);
+    // Hover still hides only the corresponding command's metadata.
+    cx.handleMouseMoveEx(x, bounds.y + surface.options.row_height * 0.5, .{});
+    _ = try view.refreshTerminalService(owner, false);
+    try std.testing.expectEqual(.none, first.style.display);
+    try std.testing.expectEqual(.flex, second.style.display);
+}
+
 test "idle terminal surface settles interaction dirtiness after a filled viewport is cleared" {
     var transport: FakeTransport = undefined;
     try transport.init(4, 16);

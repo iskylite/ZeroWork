@@ -82,12 +82,12 @@ test "transfer projection global popover stays in current Cx hides without nativ
     try std.testing.expectEqual(h.cx, p.cx);
     try std.testing.expectEqual(h.root, p.root.parent.?);
     try std.testing.expectApproxEqAbs(@as(f32, 640), bounds.w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 272), bounds.h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 240), bounds.h, 0.01);
     try std.testing.expectApproxEqAbs(trigger.y + trigger.h + 8, bounds.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 12), 1440 - bounds.x - bounds.w, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 90), p.list.container.globalRect().y - bounds.y, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 128), p.list.container.globalRect().h, 0.01);
-    try std.testing.expect(p.foot.style.display != .none);
+    try std.testing.expect(p.foot.style.display == .none);
     try std.testing.expect(text(p.head, "传输任务") != null);
     try std.testing.expect(text(p.head, "本会话传输") == null);
     try std.testing.expect(p.scope_row.style.display == .none);
@@ -333,7 +333,7 @@ test "transfer projection exact window and session geometry uses actual widgets"
     pop.show();
     h.frames();
     try std.testing.expectApproxEqAbs(@as(f32, 560), pop.root.globalRect().w, 0.01);
-    try std.testing.expectApproxEqAbs(@as(f32, 228), pop.root.globalRect().h, 0.01);
+    try std.testing.expectApproxEqAbs(@as(f32, 196), pop.root.globalRect().h, 0.01);
     try std.testing.expectApproxEqAbs(@as(f32, 84), pop.list.container.globalRect().h, 0.01);
     try std.testing.expect(id(pop.root, "transfer.window.minimize") == null);
 }
@@ -1682,4 +1682,25 @@ test "transfer projection event popover reanchors after live row replacement" {
     try p.update(.{ .revision = 3, .rows = &.{} });
     h.frames();
     try std.testing.expect(!events.open.peek());
+}
+
+test "transfer projection speed switches units below one MiB" {
+    var capture: Capture = .{};
+    const h = try H.init(1000, 700);
+    defer h.deinit();
+    const p = try h.panel(&capture, .global_popover);
+    p.show();
+    for ([_]struct { speed: u64, expected: []const u8 }{
+        .{ .speed = 820 * 1024, .expected = "820.0 KiB/s" },
+        .{ .speed = 1024 * 1024 - 1, .expected = "1024.0 KiB/s" },
+        .{ .speed = 1024 * 1024, .expected = "1.0 MiB/s" },
+    }, 1..) |case, revision| {
+        var task = row(1, 101, .running);
+        task.speed_bps = case.speed;
+        try p.update(.{ .revision = revision, .rows = &.{task} });
+        h.frames();
+        const rate = id(p.root, "transfer.task.rate").?;
+        try std.testing.expectEqualStrings(case.expected, rate.getText().?.content);
+        try std.testing.expect(p.foot.style.display == .none);
+    }
 }

@@ -12,6 +12,7 @@ const assets = [_]V.SavedAsset{
     .{ .owner = .{ .id = @fromBackingInt(105), .revision = 2 }, .name = "Files", .host = "10.200.4.30", .user = "deploy", .protocol = .sftp },
 };
 const Probe = struct {
+    local_count: usize = 0,
     saved_count: usize = 0,
     temporary_count: usize = 0,
     profile_count: usize = 0,
@@ -26,6 +27,10 @@ const Probe = struct {
     profile_query: [256]u8 = @splat(0),
     profile_query_len: usize = 0,
     profile_has_target: bool = false,
+    fn local(raw: *anyopaque) !void {
+        const self: *Probe = @ptrCast(@alignCast(raw));
+        self.local_count += 1;
+    }
     fn saved(raw: *anyopaque, owner: identity.AssetOwner) !void {
         const self: *Probe = @ptrCast(@alignCast(raw));
         self.saved_count += 1;
@@ -385,4 +390,43 @@ test "quick connect initial empty state distinguishes absent saved hosts from fa
     try std.testing.expectEqualStrings("未找到匹配的主机", h.view.empty_title.getText().?.content);
     try std.testing.expect(h.view.clear.style.display == .flex);
     try std.testing.expectEqual(@as(usize, 0), probe.saved_count + probe.temporary_count);
+}
+
+test "quick connect native local search keyboard click and empty registry" {
+    var probe: Probe = .{};
+    const h = try H.init(&probe);
+    defer h.deinit();
+    h.view.callbacks.local = Probe.local;
+    try h.view.show();
+    h.frames();
+    try std.testing.expect(h.view.local_matches);
+    h.key(.down);
+    try std.testing.expect(h.view.local_selected);
+    h.key(.down);
+    try std.testing.expect(!h.view.local_selected);
+    try std.testing.expectEqual(owner_a, h.view.selected.?);
+    h.key(.up);
+    try std.testing.expect(h.view.local_selected);
+    h.key(.@"return");
+    try std.testing.expectEqual(@as(usize, 1), probe.local_count);
+    try std.testing.expectEqual(@as(usize, 0), probe.saved_count);
+    try std.testing.expect(!h.view.isOpen());
+    for ([_][]const u8{ "本地", "local", "zsh" }) |query| {
+        try h.view.show();
+        h.frames();
+        h.query(query);
+        try std.testing.expect(h.view.local_selected);
+        try std.testing.expectEqualStrings("打开本地终端", h.view.primary_label.peek());
+        h.key(.@"return");
+        try std.testing.expect(!h.view.isOpen());
+    }
+    try h.view.update(2, &.{});
+    try h.view.show();
+    h.frames();
+    try std.testing.expect(h.view.local_matches);
+    try std.testing.expect(h.view.empty_area.style.display == .none);
+    h.click(h.view.scroll.content.children.items[0]);
+    h.frames();
+    try std.testing.expectEqual(@as(usize, 5), probe.local_count);
+    try std.testing.expect(!h.view.isOpen());
 }

@@ -879,7 +879,7 @@ pub const Surface = struct {
     fn updateCommandHover(self: *Surface) void {
         const hovered = self.hoveredCommand();
         for (self.rows.items) |row| if (row.command_info) |node| {
-            const visible = self.command_info_visible and row.command_id != null and self.selection == null and !self.dragging and (hovered == null or hovered.? != row.command_id.?);
+            const visible = self.command_info_visible and row.command_id != null and self.selection == null and (hovered == null or hovered.? != row.command_id.?);
             node.setDisplay(if (visible) .flex else .none);
         };
     }

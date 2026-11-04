@@ -5,6 +5,7 @@ const ui = @import("ui");
 const backend = @import("../transfer/manager.zig");
 const identity = @import("../host/identity.zig");
 const S = @import("transfer_styles.zig");
+const formatSpeed = @import("status_transfer_view.zig").formatSpeed;
 
 pub const Action = enum { pause, resume_transfer, cancel, retry, promote, reveal, resolve_conflict };
 pub const Callbacks = struct {
@@ -712,8 +713,9 @@ pub const Panel = struct {
         self.footer_rate.setDisplay(if (has_tasks) .flex else .none);
         try self.footer_label.setTextContent(self.cx.allocator, scope_label);
         self.footer_label.setDisplay(.none);
-        self.foot.setDisplay(if (has_tasks and self.options.presentation != .session_tray) .flex else .none);
-        try self.format(self.footer_rate, "{d} 进行中 · {d:.1} MiB/s · {d} 等待", .{ self.counts.active, @as(f64, @floatFromInt(self.counts.speed_bps)) / 1048576, self.counts.waiting });
+        self.foot.setDisplay(if (has_tasks and self.options.presentation == .window) .flex else .none);
+        var speed_buffer: [40]u8 = undefined;
+        try self.format(self.footer_rate, "{d} 进行中 · {s} · {d} 等待", .{ self.counts.active, formatSpeed(&speed_buffer, self.counts.speed_bps), self.counts.waiting });
         self.search_node.setDisplay(if (self.search_visible) .flex else .none);
         self.filters_node.setDisplay(if (self.filter_visible) .flex else .none);
         self.batch_row.setDisplay(if (self.batch_visible) .flex else .none);
@@ -845,7 +847,7 @@ pub const Panel = struct {
             }
         }
         var buffer: [96]u8 = undefined;
-        const description = if (task_.phase == .running) try std.fmt.bufPrint(&buffer, "{d:.1} MiB/s", .{@as(f64, @floatFromInt(task_.speed_bps)) / 1048576}) else if (task_.status_detail.len > 0) task_.status_detail else switch (task_.phase) {
+        const description = if (task_.phase == .running) formatSpeed(&buffer, task_.speed_bps) else if (task_.status_detail.len > 0) task_.status_detail else switch (task_.phase) {
             .queued => "等待连接",
             .paused => if (task_.can_resume) "等待继续" else "数据已保留",
             else => "",
@@ -1434,7 +1436,7 @@ pub const Panel = struct {
         const max_height = @max(@as(f32, 1), @min(bounds.h - 24, @as(f32, 578)));
         const failure_height: f32 = if (p.failure.style.display != .none) @max(@as(f32, 24), p.failure.globalRect().h) else 0;
         const notice_height: f32 = if (p.notice.parent.?.style.display != .none) @max(@as(f32, 36), p.notice.parent.?.globalRect().h) else 0;
-        const chrome: f32 = (if (global) @as(f32, 188) else 144) + (if (p.batch_visible) @as(f32, 28) else 0);
+        const chrome: f32 = (if (global) @as(f32, 156) else 112) + (if (p.batch_visible) @as(f32, 28) else 0);
         const presentation_cap: f32 = if (global) 578 else 420;
         const height = @min(chrome + list_height + failure_height + notice_height, @min(presentation_cap, max_height));
         var top: f32 = 46;
@@ -1469,7 +1471,10 @@ fn v3RateLabel(task_: Task, buffer: *[96]u8, total_buffer: *[40]u8) []const u8 {
     if (task_.status_detail.len > 0 and !v3HasError(task_)) return task_.status_detail;
     if (task_.phase == .paused) return if (task_.can_resume) "等待继续" else "数据已保留";
     const fraction: f64 = if (task_.total_bytes) |total| if (total > 0) @min(@as(f64, 1), @as(f64, @floatFromInt(task_.done_bytes)) / @as(f64, @floatFromInt(total))) else 0 else 0;
-    if (task_.phase == .running) return std.fmt.bufPrint(buffer, "{d:.0}% · {d:.1} MiB/s", .{ fraction * 100, @as(f64, @floatFromInt(task_.speed_bps)) / 1048576 }) catch "大小待确认";
+    if (task_.phase == .running) {
+        var speed_buffer: [40]u8 = undefined;
+        return std.fmt.bufPrint(buffer, "{d:.0}% · {s}", .{ fraction * 100, formatSpeed(&speed_buffer, task_.speed_bps) }) catch "大小待确认";
+    }
     const total = if (task_.total_bytes) |bytes| byteLabel(total_buffer, bytes) catch "大小待确认" else "大小待确认";
     return std.fmt.bufPrint(buffer, "{d:.0}% · {s}", .{ fraction * 100, total }) catch "大小待确认";
 }
